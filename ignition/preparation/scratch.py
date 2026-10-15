@@ -8,6 +8,29 @@ from weakref import finalize
 import torch
 
 
+def scratch_views(backing, shapes):
+    """Partition scratch into disjoint tensors with independent storage descriptors.
+
+    Compilers can track each partition independently. Operations using the
+    unpartitioned backing must execute separately from operations using these views.
+    """
+    if backing.ndim != 1 or not backing.is_contiguous() or backing.storage_offset():
+        raise ValueError("scratch partitions require a contiguous one-dimensional backing")
+    offset, views = 0, []
+    for shape in shapes:
+        shape = tuple(shape)
+        if not shape or any(type(n) is not int or n <= 0 for n in shape):
+            raise ValueError("scratch partition dimensions must be positive integers")
+        offset = (offset + 255) // 256 * 256
+        end = offset + prod(shape) * backing.element_size()
+        if end > backing.nbytes:
+            raise ValueError("scratch partitions exceed their backing")
+        storage = backing.untyped_storage()[offset:end]
+        views.append(torch.empty(0, dtype=backing.dtype, device=backing.device).set_(storage, 0, shape))
+        offset = end
+    return tuple(views)
+
+
 class ScratchArena:
     """Grow during preparation, then retain one address for graph capture.
 

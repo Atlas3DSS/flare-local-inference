@@ -260,7 +260,8 @@ impl Bootstrap {
                 chat_template: asset("chat_template")?,
             },
             defaults,
-        )?;
+        )?
+        .with_template_encoding(frontend_settings.template_encoding);
         if frontend_settings
             .image
             .as_ref()

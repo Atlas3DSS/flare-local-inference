@@ -135,6 +135,7 @@ fn checkpoint_template_tokenization_requests_and_instruction_prefix_match_transf
             let mut output =
                 flare_helios::output::OutputPipeline::new(flare_helios::output::OutputConfig {
                     syntax: support::contract("glm53").frontend,
+                    control_tokens: vec![],
                     content: flare_helios::output::tagged::OutputConfig {
                         structured: false,
                         reasoning: false,

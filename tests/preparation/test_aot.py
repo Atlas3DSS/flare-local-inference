@@ -173,6 +173,26 @@ def test_generated_kernels_rebind_without_compilation(tmp_path, monkeypatch):
         torch.cuda.synchronize()
         torch.testing.assert_close(fresh.output, fresh.source.sin() * fresh.source)
 
+        backend = restored._artifacts.compiled_fn
+        entry = backend.artifact.inner_fn.compiled_fn.serialize()
+        assert not entry.compiled_fw.result._triton_bundle.kernel_artifacts
+        saved = tmp_path / "rebound.bin"
+        restored.save_compiled_function(str(saved))
+        with monkeypatch.context() as loading:
+            loading.setattr(torch, "compile", unexpected)
+            loading.setattr(triton, "compile", unexpected)
+            loading.setenv("TRITON_CACHE_DIR", str(tmp_path / "reloaded-triton"))
+            with bind_device("cuda:1"), saved.open("rb") as file:
+                reloaded = torch.compiler.load_compiled_function(file)
+            assert list((tmp_path / "reloaded-triton").rglob("*.cubin"))
+            fresh.source.normal_()
+            reloaded(fresh)
+            torch.testing.assert_close(fresh.output, fresh.source.sin() * fresh.source)
+            source = fresh.source
+            fresh.source = source[:2048]
+            assert not reloaded.guard_check(fresh)
+            fresh.source = source
+
 
 @torch.no_grad()
 def test_compile_before_materializing_storage(tmp_path, monkeypatch):

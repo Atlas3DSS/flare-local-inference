@@ -1,4 +1,4 @@
-"""Paired RoPE with YaRN frequencies for compressed latent attention."""
+"""Rotary embeddings with explicit output storage and prepared CUDA kernels."""
 
 import math
 
@@ -56,6 +56,27 @@ class PreparedRotaryAngles:
             tensor, self.positions, self.frequencies, tensor.stride(0),
             tensor.stride(1) if tensor.ndim == 3 else 0, tensor.shape[-1] - 64,
             -1 if inverse else 1, self.values, True)
+
+
+@torch.library.custom_op("flare::cached_rotary", mutates_args=("q_out", "k_out"))
+def apply_cached_rotary(q: torch.Tensor, k: torch.Tensor, cache: torch.Tensor,
+                       positions: torch.Tensor, q_out: torch.Tensor, k_out: torch.Tensor,
+                       interleave: bool) -> None:
+    from flashinfer.rope import get_rope_module
+
+    get_rope_module().apply_rope_pos_ids_cos_sin_cache(q, k, q_out, k_out, cache, positions, interleave)
+
+
+@apply_cached_rotary.register_fake
+def _fake_cached_rotary(q, k, cache, positions, q_out, k_out, interleave):
+    pass
+
+
+def prepare_cached_rotary(session):
+    from flashinfer.rope import get_rope_module
+    from ignition.preparation.tuning import register_finalizer
+
+    register_finalizer(session, get_rope_module)
 
 
 class CompressedRotary:

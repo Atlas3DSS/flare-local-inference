@@ -64,17 +64,20 @@ class StateStorage:
     memory_capacity: torch.Tensor
 
     @classmethod
-    def allocate(cls, layout, slots, device, *, storage=None, maximum_slots=None):
+    def allocate(cls, layout, slots, device, *, storage=None, maximum_slots=None, backed_slots=None):
         if type(slots) is not int or slots < 2:
             raise ValueError("state storage requires null and live slots")
+        backed_slots = slots if backed_slots is None else backed_slots
+        if type(backed_slots) is not int or not 2 <= backed_slots <= slots or (backed_slots != slots and storage is None):
+            raise ValueError("partial state backing requires dynamic storage and two through all declared slots")
         if maximum_slots is None and storage is not None:
             maximum_slots = torch.cuda.mem_get_info(device)[1] // layout.row_bytes
         if maximum_slots is not None and (type(maximum_slots) is not int or maximum_slots < slots):
             raise ValueError("state virtual extent must cover prepared slots")
         backing = (torch.zeros((slots, layout.row_bytes), dtype=torch.uint8, device=device) if storage is None else
             storage.device_allocate("continuations", (slots, layout.row_bytes), torch.uint8, group="STATE_ROWS",
-                                    maximum=maximum_slots))
-        return cls(backing, layout, torch.tensor([slots, 0], dtype=torch.int64, device=device))
+                                    maximum=maximum_slots, units=backed_slots))
+        return cls(backing, layout, torch.tensor([backed_slots, 0], dtype=torch.int64, device=device))
 
     def region(self, name):
         region = self.layout.region(name)

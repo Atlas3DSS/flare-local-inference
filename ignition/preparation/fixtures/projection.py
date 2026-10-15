@@ -1,6 +1,6 @@
 """Finite strided operands shared by a projection's serial tuning candidates."""
 
-from functools import partial
+from contextlib import nullcontext
 
 import torch
 
@@ -21,5 +21,9 @@ class Inputs:
         self.source.copy_(self.seed)
 
 
-def input_factory(source, output):
-    return candidate_inputs(partial(Inputs, source, output))
+def input_factory(source, output, *, storage=None):
+    def allocate():
+        with (nullcontext() if storage is None else storage.transient()):
+            return Inputs(source, output)
+
+    return candidate_inputs(allocate)

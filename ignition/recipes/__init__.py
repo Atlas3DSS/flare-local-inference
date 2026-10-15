@@ -22,12 +22,15 @@ def recipes() -> tuple[Recipe, ...]:
     from .qwen38.recipe import RECIPE as qwen38
     from .qwen38_dense.recipe import RECIPE as qwen38_dense
     from .mimo_v2.recipe import RECIPE as mimo_v2
+    from .kimi3.recipe import RECIPE as kimi3
 
-    return qwen38, qwen38_dense, glm53, deepseek41, deepseek4, mimo_v2
+    return qwen38, qwen38_dense, glm53, deepseek41, deepseek4, mimo_v2, kimi3
 
 
 def snapshot_directory(hub_cache: Path, checkpoint: Checkpoint) -> Path:
-    """Where a Hugging Face cache holds a checkpoint's revision."""
+    """Resolve a checkpoint's local source or pinned hub-cache directory."""
+    if Path(checkpoint.repository).is_absolute():
+        return Path(checkpoint.repository)
     return (Path(hub_cache) / f"models--{checkpoint.repository.replace('/', '--')}"
             / "snapshots" / checkpoint.revision)
 
@@ -186,6 +189,10 @@ def resolve(model: str, hub_cache: Path | None = None) -> ResolvedModel:
         for recipe in recipes():
             for checkpoint in recipe.checkpoints:
                 if checkpoint.alias == model:
+                    if Path(checkpoint.repository).is_absolute():
+                        if not Path(checkpoint.repository).is_dir():
+                            raise UsageError(f"checkpoint directory is unavailable: {checkpoint.repository}")
+                        return resolve(checkpoint.repository, hub_cache)
                     return ResolvedModel(recipe, checkpoint)
         raise _unsupported(f"unknown model {model!r}")
     for recipe in recipes():

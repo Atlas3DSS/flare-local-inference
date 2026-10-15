@@ -21,7 +21,7 @@ const BASE: u64 = 0x80000000000;
 #[cfg(target_os = "windows")]
 const BASE: u64 = 0x40000000000;
 const EXTENT: usize = 1 << 40;
-const HOST_BASE: u64 = 0xc0000000000;
+const HOST_BASE: u64 = 0x200000000000;
 struct Arena {
     driver: Driver,
     device: i32,
@@ -172,6 +172,12 @@ extern "C" fn flare_package_allocate(
     };
     match allocate() {
         Ok(address) => address as *mut c_void,
+        // PyTorch may release cached segments and retry a physical allocation.
+        Err(Error::Execution(ExecutionError::Driver(error)))
+            if error.operation == "cuMemCreate" && error.code == 2 =>
+        {
+            null_mut()
+        }
         Err(error) => {
             failure(error);
             null_mut()

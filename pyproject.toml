@@ -15,14 +15,14 @@ dependencies = []
 ignition = "ignition.__main__:main"
 
 [project.optional-dependencies]
-test = ["pytest>=9,<10"]
+test = ["pytest>=9,<10", "tiktoken>=0.12,<1"]
 api-test = ["pytest>=9,<10", "openai>=2,<3", "anthropic>=0.70,<1"]
 prepare = [
     "cryptography>=46,<52",
     "torch==2.13.0+cu130",
     "torchvision==0.28.0+cu130",
     "transformers[torch,vision,chat_template] @ git+https://github.com/huggingface/transformers.git@4cc2aa84301c9aa210b5513dab9fefae03981f6e",
-    "flashinfer-python[b12x] @ git+https://github.com/local-inference-lab/flashinfer.git@3a568dc19fedcdf389665f751ff797a4238e97bc",
+    "flashinfer-python[b12x] @ git+https://github.com/local-inference-lab/flashinfer.git@main",
     "cuda-python==13.3.1",
     "safetensors==0.8.0",
     "tokenizers==0.23.2",
@@ -50,6 +50,7 @@ include = ["ignition*"]
 [tool.setuptools.package-data]
 "ignition.recipes.deepseek41" = ["assets/*"]
 "ignition.recipes.deepseek4" = ["assets/*"]
+"ignition.recipes.kimi3" = ["assets/*"]
 
 [tool.pytest.ini_options]
 addopts = "--import-mode=importlib"

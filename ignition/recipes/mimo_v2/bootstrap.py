@@ -46,8 +46,9 @@ from .decoder import PreparedDecoder, Scratch
 from .dflash import SpeculativePreparation
 from .model import DecoderEnvironment
 from .pool import PAGE_TOKENS, ContinuationPool, continuation_layout, page_bytes
-from .vision import PATCH_CAPACITIES, PreparedVision, VisionInputs, VisionScratch
-from .vision_state import PrefillVisionInputs, PreparedVisionGeneration, VisionState
+from .vision import FEATURES, HIDDEN, PATCH_CAPACITIES, PreparedVision, VisionInputs, VisionScratch
+from .vision_state import PreparedVisionGeneration
+from ignition.components.vision_state import PrefillVisionInputs, VisionState
 from .weights import ModelWeights
 
 
@@ -206,7 +207,8 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         )
         vision_inputs = VisionInputs.allocate(device)
         vision_prefill = PrefillVisionInputs.allocate(config.prefill_chunk_size, device)
-        vision_state = VisionState(weights.config.text, inputs, vision_prefill, requests)
+        vision_state = VisionState(inputs, vision_prefill, requests, image_token=weights.config.text["image_token_id"],
+                                   features=FEATURES, hidden=HIDDEN)
         vision_storage = VisionScratch.allocate(PATCH_CAPACITIES[-1], shard, device)
         environment = DecoderEnvironment.load(snapshot, vision_state)
         buffers = dict(

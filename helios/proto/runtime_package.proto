@@ -227,22 +227,26 @@ enum ToolParserKind {
   QWEN_CODER = 1;
   GLM_ARGUMENT_TAGS = 2;
   DSML = 3;
+  XTML = 4;
 }
 enum ReasoningParserKind {
   REASONING_PARSER_UNSPECIFIED = 0;
   THINK_TAGS = 1;
+  XTML_THINK = 2;
 }
 enum ImagePreparationKind {
   IMAGE_PREPARATION_UNSPECIFIED = 0;
   QWEN_IMAGE_PREPARATION = 1;
   MIMO_IMAGE_PREPARATION = 2;
   DEEPSEEK_IMAGE_PREPARATION = 3;
+  MOONVIT_IMAGE_PREPARATION = 4;
 }
 enum ImageLayoutKind {
   IMAGE_LAYOUT_UNSPECIFIED = 0;
   QWEN_IMAGE_LAYOUT = 1;
   MIMO_IMAGE_LAYOUT = 2;
   DEEPSEEK_IMAGE_LAYOUT = 3;
+  MOONVIT_IMAGE_LAYOUT = 4;
 }
 message ToolParser {
   ToolParserKind kind = 1;
@@ -308,6 +312,11 @@ message FrontendSettings {
   TokenizerSettings tokenizer = 1;
   ImageSettings image = 2;
   repeated uint32 eos_token_ids = 3;
+  TemplateEncoding template_encoding = 4;
+}
+enum TemplateEncoding {
+  TEMPLATE_TEXT = 0;
+  TEMPLATE_TOKEN_SEGMENTS = 1;
 }
 message TokenizerSettings {
   optional string bos_token = 1;
@@ -325,6 +334,7 @@ message ImageSettings {
     QwenImageSettings qwen = 1;
     MimoImageSettings mimo = 2;
     Empty deepseek4 = 3;
+    Empty moonvit = 4;
   }
 }
 message QwenImageSettings {

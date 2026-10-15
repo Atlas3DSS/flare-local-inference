@@ -17,7 +17,7 @@ HUB = Path.home() / ".cache/huggingface/hub"
 def test_declarations_import_without_model_dependencies():
     result = subprocess.run(
         [sys.executable, "-c", "import sys; from ignition.recipes import aliases; from ignition import planning;"
-         " import ignition.cli.preparation; assert aliases() == ('qwen3.8-flash', 'qwen3.8-27b', 'glm-5.3-flash', 'deepseek-v4.1-flash', 'deepseek-v4-flash', 'mimo-v2.6-pro-mopd');"
+         " import ignition.cli.preparation; assert aliases() == ('qwen3.8-flash', 'qwen3.8-27b', 'glm-5.3-flash', 'deepseek-v4.1-flash', 'deepseek-v4-flash', 'mimo-v2.6-pro-mopd', 'kimi-k3-mxfp4-csf');"
          " assert not {'torch', 'transformers', 'flare_heliopause'} & set(sys.modules)"],
         cwd=ROOT, check=False, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
@@ -175,7 +175,19 @@ def test_declared_ranges_are_consistent():
         assert recipe.context % recipe.page_tokens == 0
         assert recipe.tensor_parallel and all(type(world) is int and world > 0 for world in recipe.tensor_parallel)
         for checkpoint in recipe.checkpoints:
-            assert len(checkpoint.revision) == 40
+            assert checkpoint.revision == "local" if Path(checkpoint.repository).is_absolute() else len(checkpoint.revision) == 40
             assert 0 <= checkpoint.draft_bytes <= checkpoint.device_bytes
             # A draft model may have its own checkpoint index.
             assert checkpoint.device_bytes - checkpoint.draft_bytes + checkpoint.mapped_host_bytes <= checkpoint.stored_bytes
+
+
+def test_local_checkpoint_alias_uses_actual_directory(tmp_path, monkeypatch):
+    from dataclasses import replace
+    import ignition.recipes as catalog
+    recipe = next(r for r in recipes() if r.name == "kimi3")
+    checkpoint = replace(recipe.checkpoints[0], repository=str(tmp_path))
+    monkeypatch.setattr(catalog, 'recipes', lambda: (replace(recipe, checkpoints=(checkpoint,)),))
+    (tmp_path / 'config.json').write_text(json.dumps({'architectures': [checkpoint.architecture]}))
+    model = resolve(checkpoint.alias)
+    assert model.directory == tmp_path and model.snapshot(HUB) == tmp_path
+    assert model.checkpoint.repository == str(tmp_path)

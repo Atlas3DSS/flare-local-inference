@@ -56,10 +56,10 @@ The JPEG decoder builds its bundled libjpeg-turbo source. Preparation requires
 the CUDA toolkit, including `nvcc` and CUPTI; configure `[paths] cuda` when it
 is not supplied by the Python environment.
 
-The preparation dependency pins a Git revision from `local-inference-lab/flashinfer`
-in `pyproject.toml`; `uv.lock` records the resolved commit. To change it, update
-that revision and run `uv lock --upgrade-package flashinfer-python`, then sync
-the environment. For local FlashInfer development, install the sibling
+The preparation dependency tracks the `main` branch of `local-inference-lab/flashinfer`
+in `pyproject.toml`; `uv.lock` records the resolved commit. To refresh it, run
+`uv lock --upgrade-package flashinfer-python`, then sync the environment.
+For local FlashInfer development, install the sibling
 checkout explicitly with `uv pip install --python .venv/bin/python --no-deps -e ../flashinfer`;
 `uv sync --locked --extra prepare --extra test` restores the Git dependency.
 Inspect that checkout and its local changes before modifying it. After changing
@@ -200,6 +200,32 @@ token and seven proposals. Helios uses the shared speculative execution contract
 draft modeling and state updates are captured by Ignition. The vision encoder
 publishes compact image features for causal text prefill. Loading with
 `--mtp-draft-tokens 0` selects ordinary execution without draft-state updates.
+
+Kimi K3 uses the local `/data/models/Kimi-K3-MXFP4-CSF` checkpoint. The
+`kimi-k3-mxfp4-csf` alias prepares text generation, reasoning, XTML tool calls,
+and up to four images per request on sixteen GPUs. It preserves MXFP4 experts
+with compressed scales, BF16 projections, and FP32 KDA recurrent state.
+Its 93-layer decoder combines KDA, unrotated latent attention, attention
+residuals, and latent SiTU experts. There is no learned draft model.
+
+```sh
+.venv/bin/python -m ignition export /data/models/Kimi-K3-MXFP4-CSF --gpus 0-15 \
+  --max-concurrency 4 --prefill-chunk-size 4096 \
+  --output /data/flare-runtime/kimi-k3-mxfp4-csf-tp16-c4.safetensors --verbose
+
+./flare/target/release/flare run \
+  /data/flare-runtime/kimi-k3-mxfp4-csf-tp16-c4.safetensors \
+  --gpus 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15 --bind 127.0.0.1:8001
+```
+
+MLA latent records occupy 128-token pages. Continuation rows preserve KDA
+convolution and recurrent state, partial latent pages, and the normalized
+last hidden state. The MoonViT encoder accepts a combined 65,536 image patches
+per request and publishes hidden-column-sharded features for causal text
+prefill. XTML encoding distinguishes protocol tokens from literal marker text.
+Serving defaults follow the model card's agentic sampling recommendation:
+temperature 1, top-p 1, no top-k filter, and neutral penalties. Reasoning is
+enabled with `max` effort by default; request settings override these defaults.
 
 Both Ignition commands accept `--config PATH`; the default configuration is
 `~/.config/flare/config.toml`. Storage locations are configured with

@@ -164,6 +164,8 @@ pub(super) fn orient(image: RgbImage, orientation: u16) -> RgbImage {
         (image.width, image.height)
     };
     let mut pixels = vec![0; image.pixels.len()];
+    let mut cmyk = image.cmyk.as_ref().map(|v| vec![0; v.len()]);
+    let mut alpha = image.alpha.as_ref().map(|a| vec![0; a.len()]);
     for y in 0..image.height {
         for x in 0..image.width {
             let (dx, dy) = match orientation {
@@ -179,11 +181,21 @@ pub(super) fn orient(image: RgbImage, orientation: u16) -> RgbImage {
             let src = (y * image.width + x) * 3;
             let dst = (dy * width + dx) * 3;
             pixels[dst..dst + 3].copy_from_slice(&image.pixels[src..src + 3]);
+            if let (Some(out), Some(source)) = (&mut cmyk, &image.cmyk) {
+                out[dst / 3 * 4..dst / 3 * 4 + 4]
+                    .copy_from_slice(&source[src / 3 * 4..src / 3 * 4 + 4]);
+            }
+            if let (Some(out), Some(source)) = (&mut alpha, &image.alpha) {
+                out[dst / 3] = source[src / 3];
+            }
         }
     }
     RgbImage {
         width,
         height,
         pixels,
+        alpha,
+        cmyk,
+        nearest_resize: image.nearest_resize,
     }
 }

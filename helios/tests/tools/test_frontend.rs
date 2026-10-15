@@ -35,7 +35,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             chat_template: asset("chat_template.jinja")?,
         },
         Map::new(),
-    )?;
+    )?
+    .with_template_encoding(serde_json::from_value(
+        fixture
+            .get("template_encoding")
+            .cloned()
+            .unwrap_or(Value::from(0)),
+    )?);
     let mut counts = Map::new();
     for section in ["cases", "encode_cases", "decode_cases"] {
         let cases = fixture[section]
@@ -130,7 +136,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             .as_object()
             .unwrap()
             .clone(),
-    )?;
+    )?
+    .with_template_encoding(serde_json::from_value(
+        fixture
+            .get("template_encoding")
+            .cloned()
+            .unwrap_or(Value::from(0)),
+    )?);
     for (fixture_name, overrides) in [
         ("thinking_disabled", serde_json::json!({})),
         (

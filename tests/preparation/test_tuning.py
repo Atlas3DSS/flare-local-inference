@@ -1114,6 +1114,43 @@ def test_operator_benchmark_owners_release_after_trial_close(backend, operator):
 GIB = 1 << 30
 
 
+def test_projection_candidates_share_private_strided_operands(backend):
+    from ignition.preparation.fixtures.bf16_gemv import benchmark_call
+    from ignition.preparation.fixtures.projection import input_factory
+
+    allocations = []
+
+    @contextmanager
+    def transient():
+        allocations.append("enter")
+        yield
+        allocations.append("exit")
+
+    session = make_session(device=0, checkpoint="projection-fixtures",
+                           benchmark_storage=SimpleNamespace(transient=transient))
+    session._tune_status = "tuning"
+    source = torch.zeros(5, 64, dtype=torch.bfloat16)[:, :32]
+    output = torch.zeros(5, 48, dtype=torch.float32)[:, :16]
+    weight = torch.ones(16, 32, dtype=torch.bfloat16)
+    state = SimpleNamespace(run=lambda x, w, out, bias: out.copy_(x.float() @ w.float().T))
+    acquire = input_factory(source, output, storage=session.benchmark_storage)
+    first, second = (benchmark_call(state, inputs=acquire, weight=weight, bias=None) for _ in range(2))
+    assert allocations == ["enter", "exit"]
+    assert first.owners[0] is second.owners[0]
+    inputs = first.owners[0]
+    assert inputs.source.stride() == source.stride() and inputs.output.stride() == output.stride()
+    first.produce()
+    first.invoke()
+    expected = first.output.clone()
+    inputs.source.fill_(float("nan"))
+    inputs.output.fill_(float("nan"))
+    second.produce()
+    second.invoke()
+    torch.testing.assert_close(second.output, expected, rtol=0, atol=0)
+    assert not source.count_nonzero() and not output.count_nonzero()
+    session.close()
+
+
 @pytest.mark.parametrize(("free_gib", "race_bytes", "workers"), [
     # One compiler process runs even without room for one: compiling in the tuning
     # process would keep its programs through serving.

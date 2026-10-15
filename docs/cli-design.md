@@ -525,8 +525,10 @@ the status and elapsed time. `--verbose` adds each phase's detail lines.
 
 ## 8. Model resolution
 
-A recipe declares each qualified checkpoint as an alias, a repository id, a
-pinned revision, and an architecture. `MODEL` resolves in this order:
+A recipe declares each qualified checkpoint as an alias, a source, a revision,
+and an architecture. Hub sources use repository IDs and pinned revisions;
+local sources use absolute checkpoint directories and the revision `local`.
+`MODEL` resolves in this order:
 
 1. An existing directory is a checkpoint directory.
 2. A string containing `/` is a Hugging Face repository id, optionally
@@ -545,7 +547,9 @@ error listing the supported aliases; a repository the hub cannot provide is a
 fetch error.
 
 The hub cache follows the Hugging Face hub library's convention unless
-`[paths].hub_cache` is set. An alias downloads its pinned revision.
+`[paths].hub_cache` is set. A hub alias downloads its pinned revision. A local
+alias resolves its directory directly and fails if it is absent.
+`kimi-k3-mxfp4-csf` names `/data/models/Kimi-K3-MXFP4-CSF`.
 
 ## 9. Recipe obligations
 

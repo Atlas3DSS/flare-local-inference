@@ -1,0 +1,99 @@
+use crate::{
+    Result,
+    cache::ConditioningEvent,
+    frontend::{
+        Frontend, RenderedPrompt,
+        images::{ImageProcessor, RgbImage},
+    },
+    model::{PreparedInput, PromptData},
+};
+
+pub(crate) fn prepare_input(
+    frontend: &Frontend,
+    processor: Option<&ImageProcessor>,
+    rendered: &RenderedPrompt,
+    images: Vec<RgbImage>,
+) -> Result<PreparedInput> {
+    let placeholder = frontend.encode("<|media_pad|>", false)?;
+    let [placeholder] = placeholder.as_slice() else {
+        return Err("media placeholder must encode one token".into());
+    };
+    if rendered
+        .token_ids
+        .iter()
+        .filter(|id| *id == placeholder)
+        .count()
+        != images.len()
+    {
+        return Err("MoonViT image placeholders do not match input images".into());
+    }
+    let processed = if images.is_empty() {
+        None
+    } else {
+        Some(
+            processor
+                .ok_or("image processing is unavailable")?
+                .process(&images)?,
+        )
+    };
+    let mut tokens = Vec::new();
+    let mut data = PromptData::default();
+    let mut conditioning = Vec::new();
+    let (mut image, mut offset) = (0, 0);
+    for token in &rendered.token_ids {
+        if token != placeholder {
+            tokens.push(*token);
+            data.vision_token_indices.push(-1);
+            continue;
+        }
+        let source = &images[image];
+        let count = processed.as_ref().unwrap().geometry[image].tokens;
+        let prefix = frontend.encode(
+            &format!(
+                "<|media_begin|>image {}x{}<|media_content|>",
+                source.width(),
+                source.height()
+            ),
+            false,
+        )?;
+        tokens.extend(&prefix);
+        data.vision_token_indices
+            .extend(std::iter::repeat_n(-1, prefix.len()));
+        use sha2::{Digest, Sha256};
+        let mut hash = Sha256::new();
+        hash.update(b"flare-moonvit-image-v1\0");
+        hash.update((source.width() as u64).to_le_bytes());
+        hash.update((source.height() as u64).to_le_bytes());
+        hash.update(source.pixels());
+        hash.update([
+            u8::from(source.nearest_resize),
+            u8::from(source.alpha.is_some()),
+            u8::from(source.cmyk.is_some()),
+        ]);
+        if let Some(alpha) = &source.alpha {
+            hash.update(alpha);
+        }
+        if let Some(cmyk) = &source.cmyk {
+            hash.update(cmyk);
+        }
+        conditioning.push(ConditioningEvent {
+            position: tokens.len() as u64,
+            identity: hash.finalize().into(),
+        });
+        tokens.extend(std::iter::repeat_n(*placeholder, count));
+        data.vision_token_indices
+            .extend((offset..offset + count).map(|i| i as i32));
+        let suffix = frontend.encode("<|media_end|>", false)?;
+        data.vision_token_indices
+            .extend(std::iter::repeat_n(-1, suffix.len()));
+        tokens.extend(suffix);
+        offset += count;
+        image += 1;
+    }
+    Ok(PreparedInput {
+        tokens,
+        data,
+        conditioning,
+        images: processed,
+    })
+}

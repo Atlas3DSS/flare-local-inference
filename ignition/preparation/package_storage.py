@@ -29,7 +29,7 @@ class PackageStorage:
     # Above 2-6 TiB on Linux, where PyTorch's mimalloc CPU allocator places its 1 GiB arenas;
     # a peer rank allocates CPU tensors before it reserves these ranges.
     DEVICE_BASE = 0x40000000000 if os.name == "nt" else 0x80000000000
-    HOST_BASE = 0xc0000000000
+    HOST_BASE = 0x200000000000
     RESERVATION_BYTES = 1 << 40
     # Keep library-owned device storage above the ranges occupied by Linux and WDDM contexts.
     EXTERNAL_FLOOR = 0x4000000000
@@ -188,6 +188,12 @@ class PackageStorage:
             torch.cuda.empty_cache()
             # Returned segments may reopen low addresses that later library allocations would take.
             self.seal_low_window()
+
+    def scratch_pool(self):
+        """Own zero-initialized scratch whose physical backing can be released during compilation."""
+        pool = ScratchPool(self)
+        self._preparation_pools.add(pool.pool.id)
+        return pool
 
     def unused_ranges(self):
         """Exclude free blocks and allocator padding from retained preparation pools."""
@@ -373,6 +379,57 @@ class WindowsHostRegion:
             self.cuda.call("cuMemUnmap", C.c_uint64(self.address), C.c_size_t(self.extent))
             self.cuda.call("cuMemAddressFree", C.c_uint64(self.address), C.c_size_t(self.extent))
             self.closed = True
+
+
+class ScratchPool:
+    """Keep scratch addresses and tensor aliases while compiler workers use only their metadata.
+
+    All tensors allocated in this pool must be disposable scratch. No GPU work
+    may access them between release_backing and materialize. Materialization
+    restores zeroed storage before warmup, capture, or export.
+    """
+
+    def __init__(self, storage):
+        import torch
+
+        self.storage = storage
+        self.pool = torch.cuda.MemPool(storage._allocator.allocator())
+        self.unbacked = []
+
+    def __enter__(self):
+        import torch
+
+        self.scope = torch.cuda.use_mem_pool(self.pool, device=self.storage.device)
+        self.scope.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        self.scope.__exit__(*exc)
+
+    def release_backing(self):
+        """Discard scratch contents after all GPU users have completed."""
+        import torch
+
+        if self.unbacked:
+            raise RuntimeError("scratch backing is already released")
+        torch.cuda.synchronize(self.storage.device)
+        mappings = self.storage.mappings
+        try:
+            for segment in self.pool.snapshot(include_traces=False):
+                address = segment["address"]
+                size = mappings[address].nbytes
+                self.storage.cuda.call("cuMemUnmap", C.c_uint64(address), C.c_size_t(size))
+                self.unbacked.append((address, size))
+        except BaseException:
+            self.materialize()
+            raise
+
+    def materialize(self):
+        """Restore the scratch pool's physical storage at its original addresses."""
+        while self.unbacked:
+            address, size = self.unbacked[-1]
+            DeviceRegion(self.storage.cuda, address, size, self.storage.device)
+            self.unbacked.pop()
 
 
 class DeviceRegion:

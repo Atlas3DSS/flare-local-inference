@@ -245,6 +245,7 @@ impl<D: ToolDialect> ModelOutput for TaggedOutput<D> {
             tool: (!config.tools.is_empty()).then_some((D::OPEN, D::CLOSE)),
             function: D::FUNCTION,
             tool_ends_reasoning: D::TOOL_ENDS_REASONING,
+            response: None,
         })
     }
     fn push(&mut self, input: Input<'_>) -> Result<Vec<Event>> {

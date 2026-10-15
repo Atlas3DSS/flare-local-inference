@@ -109,8 +109,42 @@ pub struct TokenList {
 pub struct FrontendSettings {
     pub tokenizer: TokenizerSettings,
     pub eos_token_ids: Vec<u32>,
+    #[serde(default)]
+    pub template_encoding: TemplateEncoding,
     #[cfg(feature = "images")]
     pub image: Option<images::ImageSettings>,
+}
+
+#[derive(Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "i32", into = "i32")]
+pub enum TemplateEncoding {
+    #[default]
+    Text = 0,
+    TokenSegments = 1,
+}
+
+impl From<TemplateEncoding> for i32 {
+    fn from(value: TemplateEncoding) -> Self {
+        value as i32
+    }
+}
+
+impl TryFrom<i32> for TemplateEncoding {
+    type Error = &'static str;
+    fn try_from(value: i32) -> std::result::Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::Text),
+            1 => Ok(Self::TokenSegments),
+            _ => Err("unsupported chat template encoding"),
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TokenSegment {
+    text: String,
+    allow_special: bool,
 }
 
 pub struct RenderedPrompt {
@@ -120,6 +154,7 @@ pub struct RenderedPrompt {
 
 pub struct Frontend {
     tokenizer: Tokenizer,
+    ordinary_tokenizer: Option<Tokenizer>,
     environment: Environment<'static>,
     template_source: String,
     bos_token_id: Option<u32>,
@@ -129,6 +164,17 @@ pub struct Frontend {
 }
 
 impl Frontend {
+    pub fn with_template_encoding(mut self, encoding: TemplateEncoding) -> Self {
+        self.ordinary_tokenizer = match encoding {
+            TemplateEncoding::Text => None,
+            TemplateEncoding::TokenSegments => {
+                let mut tokenizer = self.tokenizer.clone();
+                tokenizer.with_added_vocabulary(tokenizers::AddedVocabulary::new());
+                Some(tokenizer)
+            }
+        };
+        self
+    }
     pub fn bos_token_id(&self) -> Option<u32> {
         self.bos_token_id
     }
@@ -311,6 +357,7 @@ impl Frontend {
             effort_levels: Default::default(),
             inline_system_messages: Default::default(),
             tokenizer,
+            ordinary_tokenizer: None,
             environment,
             template_source,
             defaults,
@@ -394,7 +441,7 @@ impl Frontend {
             .map(|field| self.mark_continuation(&mut messages, &field))
             .transpose()?;
         context.insert("messages".into(), Json::Array(messages));
-        let mut text = self
+        let rendered = self
             .environment
             .get_template("chat")
             .map_err(|error| {
@@ -413,6 +460,23 @@ impl Frontend {
                     error,
                 )))
             })?;
+        let mut segments: Vec<TokenSegment> = if self.ordinary_tokenizer.is_some() {
+            serde_json::from_str(&rendered).map_err(|error| {
+                Error::frontend(FrontendError::Template(Failure::caused_by(
+                    "chat template must render an array of text and allow_special segments",
+                    error,
+                )))
+            })?
+        } else {
+            vec![TokenSegment {
+                text: rendered,
+                allow_special: true,
+            }]
+        };
+        let mut text: String = segments
+            .iter()
+            .map(|segment| segment.text.as_str())
+            .collect();
         if let Some(final_text) = final_text {
             let marker = "CONTINUE_FINAL_MESSAGE_TAG";
             let index = text.rfind(marker).filter(|_| text.contains(final_text.trim())).ok_or_else(|| Error::frontend(FrontendError::Input(Failure::new("continue_final_message is set but the final message does not appear in the chat after applying the chat template!"))))?;
@@ -422,7 +486,29 @@ impl Frontend {
                 text.truncate(text.trim_end().len());
             }
         }
-        let token_ids = self.encode(&text, false)?;
+        let mut remaining = text.len();
+        let mut token_ids = Vec::new();
+        for segment in &mut segments {
+            segment.text.truncate(remaining.min(segment.text.len()));
+            remaining -= segment.text.len();
+            let tokenizer = if segment.allow_special {
+                &self.tokenizer
+            } else {
+                self.ordinary_tokenizer.as_ref().unwrap_or(&self.tokenizer)
+            };
+            let encoding = tokenizer
+                .encode(segment.text.as_str(), false)
+                .map_err(|error| {
+                    Error::frontend(FrontendError::Tokenizer(Failure::boxed(
+                        error.to_string(),
+                        error,
+                    )))
+                })?;
+            token_ids.extend_from_slice(encoding.get_ids());
+            if remaining == 0 {
+                break;
+            }
+        }
         Ok(RenderedPrompt { text, token_ids })
     }
 
@@ -562,6 +648,7 @@ mod tests {
             .add_template_owned("chat", source.clone())
             .unwrap();
         Frontend {
+            ordinary_tokenizer: None,
             tokenizer: Tokenizer::new(tokenizers::models::bpe::BPE::default()),
             environment,
             template_source: source,
@@ -669,6 +756,7 @@ mod tests {
                 .add_template_owned("chat", source.clone())
                 .unwrap();
             let frontend = Frontend {
+                ordinary_tokenizer: None,
                 tokenizer: Tokenizer::new(tokenizers::models::bpe::BPE::default()),
                 environment,
                 template_source: source,
@@ -736,6 +824,7 @@ mod tests {
             bos_token_id: None,
             effort_levels: Default::default(),
             inline_system_messages: Default::default(),
+            ordinary_tokenizer: None,
             tokenizer: Tokenizer::new(tokenizers::models::bpe::BPE::default()),
             environment,
             template_source: "{{ raise_exception() }}".to_owned(),

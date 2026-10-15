@@ -6,6 +6,7 @@ mod deepseek4;
 #[cfg(feature = "server")]
 pub(crate) mod layouts;
 mod mimo;
+mod moonvit;
 mod orientation;
 pub(crate) mod packing;
 mod patches;
@@ -47,6 +48,9 @@ pub struct RgbImage {
     width: usize,
     height: usize,
     pixels: Vec<u8>,
+    alpha: Option<Vec<u8>>,
+    cmyk: Option<Vec<u8>>,
+    nearest_resize: bool,
 }
 
 impl RgbImage {
@@ -64,6 +68,9 @@ impl RgbImage {
             width,
             height,
             pixels,
+            alpha: None,
+            cmyk: None,
+            nearest_resize: false,
         })
     }
 
@@ -117,6 +124,7 @@ pub enum ImageSettings {
     Qwen(QwenImageSettings),
     Mimo(MimoImageSettings),
     Deepseek4 {},
+    Moonvit {},
 }
 
 impl ImageSettings {
@@ -126,6 +134,7 @@ impl ImageSettings {
             Self::Qwen(_) => ImagePreparationKind::Qwen,
             Self::Mimo(_) => ImagePreparationKind::Mimo,
             Self::Deepseek4 {} => ImagePreparationKind::Deepseek,
+            Self::Moonvit {} => ImagePreparationKind::Moonvit,
         }
     }
 }
@@ -153,6 +162,7 @@ enum Profile {
     Qwen(qwen::QwenProcessor),
     MiMo(patches::PatchProcessor),
     DeepSeek4,
+    Moonvit,
 }
 
 impl ImageProcessor {
@@ -173,6 +183,7 @@ impl ImageProcessor {
         }
         let profile = match settings {
             ImageSettings::Deepseek4 {} => Profile::DeepSeek4,
+            ImageSettings::Moonvit {} => Profile::Moonvit,
             ImageSettings::Mimo(settings) => Profile::MiMo(mimo::load(&settings, limits)?),
             ImageSettings::Qwen(settings) => {
                 Profile::Qwen(qwen::QwenProcessor::load(&settings, limits)?)
@@ -189,8 +200,8 @@ impl ImageProcessor {
         self.limits.max_encoded_bytes
     }
 
-    /// Decodes PNG to RGB8 and applies EXIF orientation before resizing.
-    /// Alpha is discarded; animated PNG and 16-bit samples are rejected.
+    /// Decodes PNG with the prepared profile’s alpha and orientation semantics.
+    /// Animated PNG and 16-bit samples are rejected.
     pub fn decode_png(&self, bytes: &[u8]) -> Result<RgbImage> {
         if bytes.len() > self.limits.max_encoded_bytes {
             return Err(Error::frontend(FrontendError::Input(Failure::new(
@@ -215,6 +226,9 @@ impl ImageProcessor {
                 "PNG requires non-animated, at most 8-bit samples",
             ))));
         }
+        let retain_alpha = info.color_type != png::ColorType::Rgb;
+        let nearest =
+            info.color_type == png::ColorType::Indexed || info.bit_depth == png::BitDepth::One;
         let size = reader.output_buffer_size().ok_or_else(|| {
             Error::frontend(FrontendError::ImageDecode(Failure::new(
                 "PNG decoded extent overflow",
@@ -233,15 +247,26 @@ impl ImageProcessor {
                 e,
             )))
         })?;
-        let orientation = reader
-            .info()
-            .exif_metadata
-            .as_deref()
-            .map(orientation::exif_orientation)
-            .transpose()?
-            .unwrap_or(1);
+        let orientation = if matches!(self.profile, Profile::Moonvit) {
+            1
+        } else {
+            reader
+                .info()
+                .exif_metadata
+                .as_deref()
+                .map(orientation::exif_orientation)
+                .transpose()?
+                .unwrap_or(1)
+        };
         let mut rgb = Vec::with_capacity(output.width as usize * output.height as usize * 3);
+        let mut alpha = Vec::new();
         for pixel in decoded[..output.buffer_size()].chunks_exact(output.color_type.samples()) {
+            if matches!(
+                output.color_type,
+                png::ColorType::Rgba | png::ColorType::GrayscaleAlpha
+            ) {
+                alpha.push(pixel[pixel.len() - 1]);
+            }
             match output.color_type {
                 png::ColorType::Rgb | png::ColorType::Rgba => rgb.extend_from_slice(&pixel[..3]),
                 png::ColorType::Grayscale | png::ColorType::GrayscaleAlpha => {
@@ -254,10 +279,12 @@ impl ImageProcessor {
                 }
             }
         }
-        Ok(orientation::orient(
-            RgbImage::new(output.width as usize, output.height as usize, rgb)?,
-            orientation,
-        ))
+        let mut image = RgbImage::new(output.width as usize, output.height as usize, rgb)?;
+        if matches!(self.profile, Profile::Moonvit) {
+            image.alpha = (retain_alpha && !alpha.is_empty()).then_some(alpha);
+            image.nearest_resize = nearest;
+        }
+        Ok(orientation::orient(image, orientation))
     }
 
     /// Decodes JPEG with accurate IDCT and smooth chroma upsampling, then applies EXIF.
@@ -268,7 +295,11 @@ impl ImageProcessor {
                 "encoded image exceeds the configured byte limit",
             ))));
         }
-        let orientation = orientation::jpeg_orientation(bytes)?;
+        let orientation = if matches!(self.profile, Profile::Moonvit) {
+            1
+        } else {
+            orientation::jpeg_orientation(bytes)?
+        };
         let error = |e| {
             Error::frontend(FrontendError::ImageDecode(Failure::caused_by(
                 format!("invalid JPEG: {e}"),
@@ -313,6 +344,8 @@ impl ImageProcessor {
         decoder
             .decompress(bytes, decoded.as_deref_mut())
             .map_err(error)?;
+        let retained_cmyk = (cmyk && matches!(self.profile, Profile::Moonvit))
+            .then(|| decoded.pixels.iter().map(|value| 255 - value).collect());
         let rgb = if cmyk {
             // JPEG CMYK samples are inverted; this matches Pillow's CMYK-to-RGB conversion.
             decoded
@@ -327,10 +360,9 @@ impl ImageProcessor {
         } else {
             decoded.pixels
         };
-        Ok(orientation::orient(
-            RgbImage::new(header.width, header.height, rgb)?,
-            orientation,
-        ))
+        let mut image = RgbImage::new(header.width, header.height, rgb)?;
+        image.cmyk = retained_cmyk;
+        Ok(orientation::orient(image, orientation))
     }
 
     pub fn geometry(&self, width: usize, height: usize) -> Result<ImageGeometry> {
@@ -338,6 +370,7 @@ impl ImageProcessor {
             Profile::Qwen(profile) => profile.patches.geometry(width, height),
             Profile::MiMo(profile) => profile.geometry(width, height),
             Profile::DeepSeek4 => deepseek4::geometry(self.limits, width, height),
+            Profile::Moonvit => moonvit::geometry(self.limits, width, height),
         }
     }
     pub fn resized_rgb(&self, image: &RgbImage) -> Result<(ImageGeometry, Vec<u8>)> {
@@ -345,6 +378,7 @@ impl ImageProcessor {
             Profile::Qwen(profile) => profile.patches.resized_rgb(image),
             Profile::MiMo(profile) => profile.resized_rgb(image),
             Profile::DeepSeek4 => deepseek4::resized_rgb(self.limits, image),
+            Profile::Moonvit => moonvit::resized_rgb(self.limits, image),
         }
     }
     pub fn process(&self, images: &[RgbImage]) -> Result<ProcessedImages> {
@@ -352,6 +386,7 @@ impl ImageProcessor {
             Profile::Qwen(profile) => profile.process(images),
             Profile::MiMo(profile) => profile.process(images),
             Profile::DeepSeek4 => deepseek4::process(self.limits, images),
+            Profile::Moonvit => moonvit::process(self.limits, images),
         }
     }
     pub fn expand_prompt(
@@ -364,6 +399,7 @@ impl ImageProcessor {
             Profile::Qwen(profile) => profile.expand_prompt(frontend, text, images),
             Profile::DeepSeek4 => Err("DeepSeek image spans require its model contract".into()),
             Profile::MiMo(_) => Err("MiMo image expansion requires its model contract".into()),
+            Profile::Moonvit => Err("MoonViT image expansion requires its model contract".into()),
         }
     }
 }

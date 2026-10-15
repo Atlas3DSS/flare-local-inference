@@ -7,8 +7,9 @@ import operator
 import os
 import pickle
 import tempfile
+import zlib
 from concurrent.futures import FIRST_COMPLETED, wait
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,10 +26,30 @@ from torch.utils._pytree import tree_flatten, tree_unflatten, treespec_dumps, tr
 from .compilation import (DEFAULT_CACHE_ROOT, _INVOCATIONS, _OPTIONS, _Invocation, _artifact_kernel_table,
                           _byte_storage, _lower_storage, _compiler_recursion)
 from .device_binding import bind_device, relocate_inductor, restore_device, restore_prepared_device
+from .host_memory import release_unused
 
 _GUARD_LOCK = RLock()
 _GUARD_TENSOR_MODE = ContextVar("flare_guard_tensor_mode", default=None)
 _DEFERRED_BINDINGS = ContextVar("flare_deferred_bindings", default=False)
+
+
+def _load_inductor(data, original):
+    from torch._functorch._aot_autograd.aot_autograd_result import deserialize_bundled_cache_entry
+    from torch._inductor.standalone_compile import AOTCompiledArtifact
+
+    entry, kernels, constants = pickle.loads(data)
+    if kernels or constants:
+        raise ValueError("compiled native launches must use runtime kernel bindings")
+    relocate_inductor(entry, original)
+    serialized = zlib.compress(pickle.dumps((entry, kernels, constants)), level=1)
+    compiled = deserialize_bundled_cache_entry(entry)
+    # Loading materializes bundled files in Triton's cache. Keep the portable copy compressed;
+    # live kernel owners retain their binaries, launchers, and argument metadata independently.
+    for result in (entry, compiled.serialize()):
+        graph = result.compiled_fw.result
+        if graph._triton_bundle is not None:
+            graph._triton_bundle.kernel_artifacts.clear()
+    return AOTCompiledArtifact(compiled), serialized
 
 
 class BindingMismatch(ValueError):
@@ -213,6 +234,7 @@ class StorageBackend(SerializableCallable):
             self.artifact = standalone_compile(module, examples, dynamic_shapes='from_example_inputs',
                 fake_mode=detect_fake_mode(examples), options={'config_patches': _OPTIONS},
                 aot=True, donate_graph_module=True)
+        self._serialized_artifact = None
         self._bound = None
 
     def __call__(self, *args):
@@ -234,7 +256,8 @@ class StorageBackend(SerializableCallable):
         from torch._dynamo.aot_compile_types import _serialize_triton_kernel
 
         with _artifact_kernel_table():
-            artifact = fn.artifact.serialize()
+            artifact = (fn.artifact.serialize() if fn._serialized_artifact is None
+                        else zlib.decompress(fn._serialized_artifact))
         calls = []
         for call in fn.invocations:
             target = call.target
@@ -258,7 +281,6 @@ class StorageBackend(SerializableCallable):
 
     @classmethod
     def deserialize_compile_artifacts(cls, data):
-        from torch._inductor.standalone_compile import AOTCompiledArtifact
         from torch._dynamo.aot_compile_types import _deserialize_triton_kernel
 
         fn = cls.__new__(cls)
@@ -266,7 +288,7 @@ class StorageBackend(SerializableCallable):
         devices = {item[4] for item in fn.signature if isinstance(item, tuple) and item[4].type == "cuda"}
         if len(devices) != 1:
             raise ValueError("compiled forwards require exactly one CUDA device")
-        artifact = relocate_inductor(artifact, devices.pop())
+        original_device = devices.pop()
         fn.signature = tuple((*item[:4], restore_device(item[4].type, item[4].index), item[5])
                              if isinstance(item, tuple) else item for item in fn.signature)
         fn.invocations = []
@@ -287,7 +309,7 @@ class StorageBackend(SerializableCallable):
                 target = getattr(getattr(getattr(torch.ops, namespace), opname), overload)
             fn.invocations.append(_Invocation(target, leaves, tree, operands, integers))
         with _artifact_kernel_table():
-            fn.artifact = AOTCompiledArtifact.deserialize(artifact)
+            fn.artifact, fn._serialized_artifact = _load_inductor(artifact, original_device)
         fn._bound = None
         return fn
 
@@ -445,19 +467,21 @@ class ForwardCache:
             if lock is not None:
                 lock.release()
 
-    def prepare_many(self, functions, signatures, *, progress=None, coordinator=None, materialize=None):
+    def prepare_many(self, functions, signatures, *, progress=None, coordinator=None, materialize=None,
+                     warmup=nullcontext):
         """Trace and compile in workers, then bind and warm on the owning rank."""
         # Compiler workers own parallel compilation; artifact binding needs no second worker pool.
         with self._publication_lock(coordinator), torch._inductor.config.patch(compile_threads=1):
             return self._prepare_many(functions, signatures, progress=progress,
-                                      coordinator=coordinator, materialize=materialize)
+                                      coordinator=coordinator, materialize=materialize, warmup=warmup)
 
-    def _prepare_many(self, functions, signatures, *, progress, coordinator, materialize):
+    def _prepare_many(self, functions, signatures, *, progress, coordinator, materialize, warmup):
         from ignition.progress import phase
         from .compile_pool import CompilePool
 
         if coordinator is not None:
-            return self._prepare_ranks(functions, signatures, coordinator, progress=progress, materialize=materialize)
+            return self._prepare_ranks(functions, signatures, coordinator, progress=progress,
+                                       materialize=materialize, warmup=warmup)
         compiled, paths, pending = {}, {}, []
         with phase(progress, "Compile model forwards", total=len(functions)) as stage, CompilePool(self.device, headroom_bytes=self.headroom_bytes) as compiler:
             def finish():
@@ -470,7 +494,8 @@ class ForwardCache:
                             if not bound.cache_hit:
                                 bound = self._load(bound.owner, path, required=True)
                                 bound.cache_hit = False
-                            bound()
+                            with warmup():
+                                bound()
                             compiled[name] = bound
                         else:
                             paths[name] = path
@@ -493,11 +518,12 @@ class ForwardCache:
                 for name, forward in functions.items():
                     with _guard_code_cache(self.root / 'guards'):
                         compiled[name] = self._load(forward, paths[name], required=True)
-                    compiled[name]()
+                    with warmup():
+                        compiled[name]()
                     stage.update(advance=1)
         return compiled
 
-    def _prepare_ranks(self, functions, signatures, coordinator, *, progress, materialize):
+    def _prepare_ranks(self, functions, signatures, coordinator, *, progress, materialize, warmup):
         """Compile the catalog for a rank group, then bind and warm it on every rank.
 
         Compiled forwards serve every rank, so the catalog compiles once: each forward variant a
@@ -581,13 +607,15 @@ class ForwardCache:
             raise RuntimeError(f"compiled forward binding failed: {errors}")
         with phase(progress, "Warm compiled forwards", total=len(functions)) as stage:
             for name in functions:
-                selected[name]()
+                with warmup():
+                    selected[name]()
                 stage.update(advance=1)
         return selected
 
     def _load(self, forward, path, *, required=False):
         with bind_device(self.device), path.open('rb') as file:
             artifact = torch.compiler.load_compiled_function(file)
+        release_unused()
         if artifact.guard_check(forward):
             return BoundForward(artifact, forward, True)
         if required:

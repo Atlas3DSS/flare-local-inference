@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
 from functools import cached_property
+from math import prod
 import json
 import sys
 from time import monotonic
@@ -471,6 +472,7 @@ class DirectWeightLoader:
         self, prefixes, *, hidden_size, intermediate_size, scale_scratch,
         intermediate_range=None, swiglu_limit=None,
         projection_names=("gate_proj", "up_proj", "down_proj"), scale_name="weight_scale",
+        weight_name="weight", activation="silu",
     ):
         """Keep lossless MXFP4 scales compressed and expand into shared native scratch.
 
@@ -493,7 +495,7 @@ class DirectWeightLoader:
             raise ValueError("MXFP4-CSF experts require two caller-owned scale buffers")
         for scratch, shape in zip(scale_scratch, shapes, strict=True):
             if (scratch.device != torch.device(self.device) or scratch.dtype != torch.uint8
-                    or tuple(scratch.shape) != shape or not scratch.is_contiguous()):
+                    or scratch.numel() < prod(shape) or not scratch.is_contiguous()):
                 raise ValueError("MXFP4-CSF scale scratch shape, dtype, device, or layout mismatch")
         gate, up, down = projection_names
         w13 = torch.empty((count, 2 * local, hidden_size // 2), dtype=torch.uint8, device=self.device)
@@ -504,7 +506,7 @@ class DirectWeightLoader:
                 (up, w13[index, local:], intermediate_size, hidden_size),
                 (down, w2[index], hidden_size, intermediate_size),
             ):
-                source = self._sources[f"{prefix}.{projection}.weight"]
+                source = self._sources[f"{prefix}.{projection}.{weight_name}"]
                 if source.dtype == torch.int8:
                     source = source.view(torch.uint8)
                 if source.dtype != torch.uint8 or source.shape != (rows, columns // 2):
@@ -522,7 +524,7 @@ class DirectWeightLoader:
         self._session.flush()
         plan = moe.plan_weights(
             source=moe.PackedSource(format="fp4_e8m0_k32", w13_layout="w31"),
-            activation=moe.ActivationSpec(mode="a8", nonlinearity="silu", io_dtype=torch.bfloat16,
+            activation=moe.ActivationSpec(mode="a8", nonlinearity=activation, io_dtype=torch.bfloat16,
                                           swiglu_limit=swiglu_limit),
             geometry=moe.MoEGeometry(num_experts=count, hidden_size=hidden_size, intermediate_size=local))
         return moe.prepare_weights(plan=plan, weights=moe.Mxfp4CsfWeights(

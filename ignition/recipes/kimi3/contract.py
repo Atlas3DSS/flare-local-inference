@@ -1,0 +1,33 @@
+"""XTML frontend, KDA continuations, and paged latent attention bindings."""
+
+from ignition.preparation import contract as c
+from ignition.preparation import runtime_package_pb2 as p
+
+from .config import PAGE_TOKENS
+from .vision import PATCH_CAPACITIES, FEATURES
+
+VISION = dict(features_per_request=FEATURES, max_images=4, patches_per_feature=4, patch_capacities=list(PATCH_CAPACITIES))
+
+
+FRONTEND = c.frontend(tools=p.XTML,
+    image_tokens=dict(feature_token=163605, span=None),
+    image_preparation=p.MOONVIT_IMAGE_PREPARATION, image_layout=p.MOONVIT_IMAGE_LAYOUT,
+    assistant_marker='<|open|>message role="assistant"<|sep|>',
+    message_end_markers=["<|close|>message<|sep|>", "<|end_of_msg|>"],
+    prefix_boundary=c.prefix_boundary(["system", "developer"], append_role="user", minimum_messages=0,
+        required_start='<|open|>message role="system"', required_marker="<|end_of_msg|>"))
+FRONTEND["reasoning"] = dict(kind=p.XTML_THINK, open="<|open|>think<|sep|>", close="<|close|>think<|sep|>",
+                             wrapping_newlines=0, terminal_markers=[])
+
+
+def prepare(signatures, buffers, pool, *, vocabulary):
+    inputs = {kind: c.text_inputs(kind) for kind in {s.kind for s in signatures.values()} if kind != "vision"}
+    inputs["vision"] = c.vision_inputs({field for s in signatures.values() if s.kind == "vision" for field in s.inputs})
+    continuation = c.state_view("state_pool", pool.layout.row_bytes)
+    pending = c.state_view("request_pending_token", 8)
+    regions = [c.history_region(buffers, f"cache.{name}", tensor, p.PAGED_LATENT)
+               for name, tensor in pool.pages.items()]
+    return c.model_contract(vocabulary=vocabulary, page_tokens=PAGE_TOKENS,
+        page_tables=[dict(buffer="page_tables", page_offset=0)],
+        regions=[dict(kind=p.CONTINUATION_STATE, storage=continuation, tokens_per_record=1, window_tokens=0), *regions],
+        graphs=c.graph_contracts(signatures, inputs, continuation=continuation, pending=pending), vision=VISION, frontend=FRONTEND)
