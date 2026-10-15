@@ -1,4 +1,4 @@
-"""Lossless DS4.1 expert loading and compressed-scale replay with shared scratch."""
+"""Lossless DeepSeek expert loading and compressed-scale replay with shared scratch."""
 
 import os
 from pathlib import Path
@@ -10,7 +10,7 @@ from safetensors import safe_open
 
 from ignition.components.weights import DirectWeightLoader
 from ignition.preparation.checkpoint import inspect_indexed_checkpoint
-from ignition.recipes.deepseek41.recipe import RECIPE
+from ignition.recipes import resolve
 
 pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
                                reason="requires an explicitly assigned CUDA device")
@@ -26,26 +26,30 @@ def expanded_scale(read, name, rows, columns):
     return torch.from_numpy(result)
 
 
-@pytest.fixture(scope="module")
-def experts():
+@pytest.fixture(scope="module", params=[("deepseek-v4-flash", 4096, 2048, 2),
+                                       ("deepseek-v4-flash", 4096, 2048, 4),
+                                       ("deepseek-v4.1-flash", 5120, 2304, 4)])
+def experts(request):
     from b12x.moe import fused_moe as moe
 
-    checkpoint = RECIPE.checkpoints[0]
+    alias, h, full, world = request.param
+    checkpoint = resolve(alias).checkpoint
     root = Path.home() / ".cache/huggingface/hub" / ("models--" + checkpoint.repository.replace("/", "--")) / "snapshots" / checkpoint.revision
     if not root.is_dir():
-        pytest.skip("lossless DS4.1 CSF checkpoint is unavailable")
+        pytest.skip(f"{alias} lossless CSF checkpoint is unavailable")
     manifest = inspect_indexed_checkpoint(root)
-    e, h, n = 2, 5120, 576
-    buffers = (torch.empty((e, h // 32, 2 * n), dtype=torch.uint8, device="cuda:0"),
-               torch.empty((e, n // 32, h), dtype=torch.uint8, device="cuda:0"))
+    e, n = 2, full // world
+    first, last = n, 2 * n
+    shared = {}
     owners = []
     for layer in (0, 1):
         prefixes = [f"layers.{layer}.ffn.experts.{i}" for i in range(e)]
         with DirectWeightLoader(manifest, "cuda:0", prefixes=tuple(p + "." for p in prefixes)) as loader:
-            compressed = loader.load_mxfp4_csf_experts(prefixes, hidden_size=h, intermediate_size=2304,
-                intermediate_range=(576, 1152), scale_scratch=buffers,
-                projection_names=("w1", "w3", "w2"), scale_name="scale", swiglu_limit=10.)
+            compressed = loader.load_mxfp4_experts(prefixes, hidden_size=h, intermediate_size=full,
+                intermediate_range=(first, last), scale_scratch=shared,
+                projection_names=("w3", "w1", "w2"), scale_name="scale", swiglu_limit=10.)
             assert loader._session.torch_copy_bytes == 0
+        buffers = shared[(e, h, n)]
         assert compressed.has_csf_blocks
         assert compressed._impl.w1_blockscale.data_ptr() == buffers[0].data_ptr()
         assert compressed._impl.w2_blockscale.data_ptr() == buffers[1].data_ptr()
@@ -54,10 +58,10 @@ def experts():
             path = root / manifest.tensors[prefix + ".w1.weight"].shard
             with safe_open(path, framework="pt", device="cpu") as reader:
                 read = reader.get_tensor
-                w13.append(torch.cat([read(prefix + f".{p}.weight")[576:1152].view(torch.uint8) for p in ("w1", "w3")]))
-                w2.append(read(prefix + ".w2.weight")[:, 288:576].view(torch.uint8))
-                s13.append(torch.cat([expanded_scale(read, prefix + f".{p}.scale", 2304, h // 32)[576:1152] for p in ("w1", "w3")]))
-                s2.append(expanded_scale(read, prefix + ".w2.scale", h, 72)[:, 18:36])
+                w13.append(torch.cat([read(prefix + f".{p}.weight")[first:last].view(torch.uint8) for p in ("w1", "w3")]))
+                w2.append(read(prefix + ".w2.weight")[:, first // 2:last // 2].view(torch.uint8))
+                s13.append(torch.cat([expanded_scale(read, prefix + f".{p}.scale", full, h // 32)[first:last] for p in ("w1", "w3")]))
+                s2.append(expanded_scale(read, prefix + ".w2.scale", h, full // 32)[:, first // 32:last // 32])
         one = torch.ones(e, device="cuda:0")
         ordinary_plan = moe.plan_weights(source=compressed.plan.source, activation=compressed.plan.activation,
                                          geometry=compressed.plan.geometry)
@@ -68,7 +72,7 @@ def experts():
         for name in ("w1_fp4", "w2_fp4", "w1_blockscale", "w2_blockscale"):
             assert torch.equal(getattr(compressed._impl, name), getattr(ordinary._impl, name)), name
         owners.append((compressed, ordinary))
-    return owners, buffers
+    return owners, buffers, h
 
 
 @pytest.mark.parametrize("tokens", [1, 32, 256, 4096])
@@ -76,11 +80,12 @@ def experts():
 @torch.no_grad()
 def test_csf_experts_match_expanded_scales_with_poisoned_shared_scratch(experts, tokens, compiled):
     from b12x.preparation import PreparationSession
+    from b12x.moe import fused_moe as moe
     from ignition.components.moe import PreparedRoutedExperts
 
-    owners, buffers = experts
+    owners, buffers, hidden = experts
     torch.manual_seed(754 + tokens)
-    x = torch.randn((tokens, 5120), dtype=torch.bfloat16, device="cuda:0") * .1
+    x = torch.randn((tokens, hidden), dtype=torch.bfloat16, device="cuda:0") * .1
     ids = (torch.arange(tokens, device="cuda:0") % 2).to(torch.int32)[:, None]
     weights = torch.ones((tokens, 1), dtype=torch.float32, device="cuda:0")
     graphs = []
@@ -89,8 +94,10 @@ def test_csf_experts_match_expanded_scales_with_poisoned_shared_scratch(experts,
             pair = []
             for owner in layer:
                 out = torch.empty_like(x)
+                # Atomic output accumulation can vary even between two expanded-scale calls.
+                # Deterministic reduction makes exact equality a valid storage-format oracle.
                 operation = PreparedRoutedExperts(x, owner, ids, weights, out, session=session,
-                                                  name=f"expert-{len(graphs)}-{len(pair)}")
+                    name=f"expert-{len(graphs)}-{len(pair)}", routing=moe.RoutingSpec(deterministic_output=True))
                 call = operation
                 if compiled:
                     from ignition.preparation.compilation import compile_forward

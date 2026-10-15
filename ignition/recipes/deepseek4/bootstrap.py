@@ -126,6 +126,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
     torch.cuda.set_device(device)
     with phase(progress, "Inspect checkpoint"):
         manifest = inspect_indexed_checkpoint(snapshot)
+    metadata_path = manifest.metadata_path
     transient = contextlib.ExitStack()
     transient.enter_context(package_storage.transient())
     weights = ModelWeights.load(manifest, device, shard=shard, progress=progress, dspark=config.dspark)
@@ -177,7 +178,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         identity = hashlib.sha256(
             json.dumps(
                 {
-                    "config": json.loads((snapshot / "config.json").read_text()),
+                    "config": json.loads((metadata_path / "config.json").read_text()),
                     "headers": [s.header_sha256 for s in manifest.shards],
                     "world_size": shard.world_size,
                     "contract": "deepseek4.graph-inputs.v1",
@@ -449,7 +450,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
     assets = {
         role: {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
         for role, path in (
-            ("tokenizer", snapshot / "tokenizer.json"),
+            ("tokenizer", metadata_path / "tokenizer.json"),
             ("chat_template", frontend / "chat_template.jinja"),
         )
     }
@@ -463,7 +464,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         "state_rows": state_rows,
         "snapshots": snapshots,
         "page_tokens": PAGE_TOKENS,
-        "frontend": prepare_frontend(snapshot, eos_token_ids=[1], image_profile="deepseek4",
+        "frontend": prepare_frontend(metadata_path, eos_token_ids=[1], image_profile="deepseek4",
             preprocessor=frontend / "preprocessor_config.json"),
         "sampling_defaults": RECIPE.sampling_defaults.as_dict(),
         "assets": assets,

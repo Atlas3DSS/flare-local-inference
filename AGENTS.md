@@ -56,10 +56,10 @@ The JPEG decoder builds its bundled libjpeg-turbo source. Preparation requires
 the CUDA toolkit, including `nvcc` and CUPTI; configure `[paths] cuda` when it
 is not supplied by the Python environment.
 
-The preparation dependency targets `main` in `local-inference-lab/flashinfer`;
-`uv.lock` records the resolved commit. Run
-`uv lock --upgrade-package flashinfer-python` to advance it to the branch tip,
-then sync the environment. For local FlashInfer development, install the sibling
+The preparation dependency pins a Git revision from `local-inference-lab/flashinfer`
+in `pyproject.toml`; `uv.lock` records the resolved commit. To change it, update
+that revision and run `uv lock --upgrade-package flashinfer-python`, then sync
+the environment. For local FlashInfer development, install the sibling
 checkout explicitly with `uv pip install --python .venv/bin/python --no-deps -e ../flashinfer`;
 `uv sync --locked --extra prepare --extra test` restores the Git dependency.
 Inspect that checkout and its local changes before modifying it. After changing
@@ -151,7 +151,7 @@ The three preceding tokens live in continuation state, including reused prefixes
 DSpark proposals, target verification, and accepted-state commit use the shared
 native speculative contract; Helios contains no DSpark model implementation.
 
-DeepSeek V4 Flash uses `deepseek-ai/DeepSeek-V4-Flash-Vision-Exp`, including its
+DeepSeek V4 Flash uses `local-inference-lab/DeepSeek-V4-Flash-Vision-Exp-lossless-CSF`, including its
 vision encoder and checkpoint-integrated DSpark model. The `deepseek-v4-flash`
 alias prepares five draft tokens by default, with adaptive verification. It
 accepts up to four images per request and has no offloaded embedding tables.

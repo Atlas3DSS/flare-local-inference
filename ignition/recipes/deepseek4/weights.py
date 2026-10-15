@@ -69,7 +69,7 @@ class ModelWeights:
 
     @classmethod
     def load(cls, manifest, device, *, shard, progress=None, dspark=True):
-        config = ModelConfig.load(manifest.snapshot)
+        config = ModelConfig.load(manifest.metadata_path)
         before = torch.cuda.memory_allocated(device)
         with DeepSeekWeightLoader(manifest, device, shard=shard, progress=progress, dspark=dspark) as loader:
             embedding, norm = loader.load_tensors(("embed.weight", "norm.weight"))
@@ -99,7 +99,9 @@ class ModelWeights:
 class DeepSeekWeightLoader(BlockFP8WeightLoader):
     def __init__(self, manifest, device, *, shard, progress=None, prefixes=None, dspark=True):
         super().__init__(manifest, device, progress=progress, prefixes=prefixes)
-        self.config, self.shard, self.dspark = ModelConfig.load(manifest.snapshot), shard, dspark
+        self.config, self.shard, self.dspark = ModelConfig.load(manifest.metadata_path), shard, dspark
+        # Routed layers run serially; their overlapping dense shared experts use different scales.
+        self._expert_scale_scratch = {}
 
     def _selected_names(self):
         return {name for name in super()._selected_names() if self.dspark or not name.startswith("mtp.")}
@@ -161,12 +163,11 @@ class DeepSeekWeightLoader(BlockFP8WeightLoader):
         attention = self.load_attention(layer, draft=draft)
         ffn = prefix + ".ffn"
         interval = shard.partition(text["moe_intermediate_size"], alignment=128)
-        experts = self.load_fp4_experts(
+        experts = self.load_mxfp4_experts(
             [f"{ffn}.experts.{i}" for i in range(text["n_routed_experts"])],
             hidden_size=text["hidden_size"],
             intermediate_size=text["moe_intermediate_size"],
-            format="mxfp4",
-            activation_mode="a8",
+            scale_scratch=self._expert_scale_scratch,
             intermediate_range=interval,
             swiglu_limit=text["swiglu_limit"],
             projection_names=("w3", "w1", "w2"),

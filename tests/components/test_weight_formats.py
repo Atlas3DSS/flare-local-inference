@@ -15,6 +15,29 @@ def config(layers):
                                     "quantized_layers": layers}}
 
 
+def test_mxfp4_storage_selection_preserves_projection_order_and_shared_scale_lifetime(monkeypatch):
+    names = [f"layer{layer}.expert{expert}" for layer in (0, 1) for expert in (0, 1)]
+    compressed = {f"{name}.{projection}.scale" for name in names for projection in ("w1", "w3", "w2")}
+    loader = DirectWeightLoader(SimpleNamespace(compressed_scales=compressed), "cpu")
+    loader._session = object()
+    monkeypatch.setattr(loader, "load_mxfp4_csf_experts", lambda prefixes, **kwargs: kwargs)
+    monkeypatch.setattr(loader, "load_fp4_experts", lambda prefixes, **kwargs: kwargs)
+    scratch = {}
+    options = dict(hidden_size=128, intermediate_size=64, intermediate_range=(32, 64),
+                   scale_scratch=scratch, projection_names=("w3", "w1", "w2"), scale_name="scale")
+    first = loader.load_mxfp4_experts(names[:2], **options)
+    second = loader.load_mxfp4_experts(names[2:], **options)
+    assert first["projection_names"] == ("w1", "w3", "w2")
+    assert first["scale_scratch"] is second["scale_scratch"]
+    assert [tuple(tensor.shape) for tensor in first["scale_scratch"]] == [(2, 4, 64), (2, 1, 128)]
+    ordinary = loader.load_mxfp4_experts(["draft.expert0"], **options)
+    assert ordinary["projection_names"] == ("w3", "w1", "w2")
+    assert ordinary["format"] == "mxfp4" and ordinary["activation_mode"] == "a8"
+    assert "scale_scratch" not in ordinary and len(scratch) == 1
+    with pytest.raises(ValueError, match="complete MXFP4 scale encoding"):
+        loader.load_mxfp4_experts([names[0], "draft.expert0"], **options)
+
+
 @pytest.mark.parametrize("loader_type", [DirectWeightLoader, QwenWeightLoader])
 @pytest.mark.parametrize("algo,group,selected", [("MXFP8", 32, "mxfp8"), ("MXFP4", 32, "mxfp4"), ("NVFP4", 16, "nvfp4"),
                                                 ("W4A16_NVFP4", 16, "nvfp4")])

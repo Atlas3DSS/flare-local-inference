@@ -106,7 +106,7 @@ class PreparedRoutedExperts:
 
     def __init__(self, source, experts, ids, weights, output, *, session: PreparationSession, name: str,
                  workspace: ScratchArena | torch.Tensor | None = None, router_weight=None, router_plan=None,
-                 correction_bias=None, a4_prefill=False):
+                 correction_bias=None, a4_prefill=False, routing=None):
         # A16 experts prepared with A4 capability run large prefill calls with quantized activations.
         precision = {"a4_prefill": True} if a4_prefill else {}
         self.source = source
@@ -120,7 +120,7 @@ class PreparedRoutedExperts:
             experts=experts,
             capacity=fused_moe.ExecutionCapacity(
                 max_tokens=source.shape[0], top_k=ids.shape[1], route_num_experts=0),
-            scale_expansion=self.scale_plan, invocation=invocation,
+            scale_expansion=self.scale_plan, invocation=invocation, routing=routing,
         )
 
         def prepare_call(state):

@@ -80,24 +80,10 @@ class DeepSeekWeightLoader(BlockFP8WeightLoader):
 
     def load_experts(self, prefixes, interval):
         text = self.config.text
-        compressed = getattr(self.manifest, "compressed_scales", frozenset())
-        encoded = [f"{prefix}.{projection}.scale" in compressed
-                   for prefix in prefixes for projection in ("w1", "w3", "w2")]
-        geometry = dict(hidden_size=text["hidden_size"], intermediate_size=text["moe_intermediate_size"],
-                        intermediate_range=interval, swiglu_limit=text["swiglu_limit"], scale_name="scale")
-        if not any(encoded):
-            return self.load_fp4_experts(prefixes, **geometry, format="mxfp4", activation_mode="a8",
-                                         projection_names=("w3", "w1", "w2"))
-        if not all(encoded):
-            raise ValueError("each routed expert group must use one complete MXFP4 scale encoding")
-        count, hidden, local = len(prefixes), text["hidden_size"], interval[1] - interval[0]
-        key = count, hidden, local
-        if key not in self._expert_scale_scratch:
-            # Routed layers execute serially; their dense shared branches do not use these scales.
-            self._expert_scale_scratch[key] = tuple(torch.empty(shape, dtype=torch.uint8, device=self.device)
-                for shape in ((count, hidden // 32, 2 * local), (count, local // 32, hidden)))
-        return self.load_mxfp4_csf_experts(prefixes, **geometry,
-            scale_scratch=self._expert_scale_scratch[key], projection_names=("w1", "w3", "w2"))
+        return self.load_mxfp4_experts(prefixes, hidden_size=text["hidden_size"],
+            intermediate_size=text["moe_intermediate_size"], intermediate_range=interval,
+            swiglu_limit=text["swiglu_limit"], scale_name="scale", projection_names=("w3", "w1", "w2"),
+            scale_scratch=self._expert_scale_scratch)
 
     def _selected_names(self):
         return {name for name in super()._selected_names()

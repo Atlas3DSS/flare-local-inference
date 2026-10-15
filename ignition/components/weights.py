@@ -431,6 +431,42 @@ class DirectWeightLoader:
             w13_block_scales=swizzle_block_scale(s13) if format == "nvfp4" else s13,
             w2_block_scales=swizzle_block_scale(s2) if format == "nvfp4" else s2, **gains))
 
+    def load_mxfp4_experts(
+        self, prefixes, *, hidden_size, intermediate_size, scale_scratch,
+        intermediate_range=None, swiglu_limit=None,
+        projection_names=("up_proj", "gate_proj", "down_proj"), scale_name="weight_scale",
+    ):
+        """Select native or compressed MXFP4 storage from the checkpoint inventory.
+
+        ``scale_scratch`` is a caller-owned dictionary keyed by expert geometry.
+        Sharing it between calls requires serialized routed-expert execution;
+        overlapping expert branches must provide separate dictionaries.
+        """
+        import torch
+
+        self._require_open()
+        prefixes = tuple(prefixes)
+        compressed = getattr(self.manifest, "compressed_scales", frozenset())
+        encoded = [f"{prefix}.{projection}.{scale_name}" in compressed
+                   for prefix in prefixes for projection in projection_names]
+        geometry = dict(hidden_size=hidden_size, intermediate_size=intermediate_size,
+                        intermediate_range=intermediate_range, swiglu_limit=swiglu_limit,
+                        scale_name=scale_name)
+        if not any(encoded):
+            return self.load_fp4_experts(prefixes, **geometry, format="mxfp4", activation_mode="a8",
+                                         projection_names=projection_names)
+        if not all(encoded):
+            raise ValueError("each routed expert group must use one complete MXFP4 scale encoding")
+        first, last = _aligned_range(intermediate_range, intermediate_size, 32)
+        local, count = last - first, len(prefixes)
+        key = count, hidden_size, local
+        if key not in scale_scratch:
+            scale_scratch[key] = tuple(torch.empty(shape, dtype=torch.uint8, device=self.device)
+                for shape in ((count, hidden_size // 32, 2 * local), (count, local // 32, hidden_size)))
+        up, gate, down = projection_names
+        return self.load_mxfp4_csf_experts(prefixes, **geometry,
+            scale_scratch=scale_scratch[key], projection_names=(gate, up, down))
+
     def load_mxfp4_csf_experts(
         self, prefixes, *, hidden_size, intermediate_size, scale_scratch,
         intermediate_range=None, swiglu_limit=None,

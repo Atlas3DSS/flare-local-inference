@@ -168,9 +168,10 @@ changes require preparation again but no Rust rebuild. Validate the chosen
 configuration through an exported package before publishing native-serving
 performance results.
 
-The `deepseek-v4.1-flash` alias selects the lossless MXFP4-CSF checkpoint from
-`local-inference-lab/DeepSeek-V4.1-Flash-lossless-CSF`. Its compressed routed-expert
-scales remain in GPU memory. Serialized layers reuse one pair of scale buffers;
+The `deepseek-v4-flash` and `deepseek-v4.1-flash` aliases select the lossless
+MXFP4-CSF checkpoints from `local-inference-lab/DeepSeek-V4-Flash-Vision-Exp-lossless-CSF`
+and `local-inference-lab/DeepSeek-V4.1-Flash-lossless-CSF`, respectively. Compressed
+routed-expert scales remain in GPU memory. Serialized layers reuse one pair of scale buffers;
 b12x prepares the scales needed by its selected MoE kernel before execution.
 Kernel autotuning remains enabled across the supported execution plans.
 
