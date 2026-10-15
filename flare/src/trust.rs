@@ -1,11 +1,15 @@
 //! Publisher-specific acceptance and the persistent signing-key trust store.
 
+#[cfg(unix)]
+use std::fs::OpenOptions;
+#[cfg(unix)]
+use std::os::{fd::AsRawFd, unix::fs::OpenOptionsExt};
+
 use flare_helios::runtime_package::{AuthorizedPackage, Publisher, VerifiedPackage};
 use serde::{Deserialize, Serialize};
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io::{self, BufRead, IsTerminal, Read, Write},
-    os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
     path::{Path, PathBuf},
 };
 
@@ -60,24 +64,29 @@ fn store_path(given: Option<&Path>) -> Result<PathBuf> {
     if let Some(path) = given {
         return Ok(path.to_owned());
     }
-    let mut storage = vec![0u8; 65536];
-    let mut record = std::mem::MaybeUninit::<libc::passwd>::uninit();
-    let mut result = std::ptr::null_mut();
-    // The passwd entry is copied before its backing buffer is released.
-    let status = unsafe {
-        libc::getpwuid_r(
-            libc::getuid(),
-            record.as_mut_ptr(),
-            storage.as_mut_ptr().cast(),
-            storage.len(),
-            &mut result,
-        )
-    };
-    if status != 0 || result.is_null() {
-        return Err("cannot resolve home directory; specify --trust-store".into());
+    #[cfg(windows)]
+    return Ok(crate::windows::trust_path()?);
+    #[cfg(unix)]
+    {
+        let mut storage = vec![0u8; 65536];
+        let mut record = std::mem::MaybeUninit::<libc::passwd>::uninit();
+        let mut result = std::ptr::null_mut();
+        // The passwd entry is copied before its backing buffer is released.
+        let status = unsafe {
+            libc::getpwuid_r(
+                libc::getuid(),
+                record.as_mut_ptr(),
+                storage.as_mut_ptr().cast(),
+                storage.len(),
+                &mut result,
+            )
+        };
+        if status != 0 || result.is_null() {
+            return Err("cannot resolve home directory; specify --trust-store".into());
+        }
+        let home = unsafe { std::ffi::CStr::from_ptr((*result).pw_dir) }.to_str()?;
+        Ok(Path::new(home).join(".config/flare/trust.toml"))
     }
-    let home = unsafe { std::ffi::CStr::from_ptr((*result).pw_dir) }.to_str()?;
-    Ok(Path::new(home).join(".config/flare/trust.toml"))
 }
 fn load(path: &Path) -> Result<Store> {
     let bytes = match fs::read_to_string(path) {
@@ -111,6 +120,9 @@ fn modify(path: &Path, update: impl FnOnce(&mut Store)) -> Result<()> {
     fs::create_dir_all(parent)?;
     let mut lock_name = path.as_os_str().to_owned();
     lock_name.push(".lock");
+    #[cfg(windows)]
+    let lock = crate::windows::private_file(Path::new(&lock_name), false)?;
+    #[cfg(unix)]
     let lock = OpenOptions::new()
         .read(true)
         .write(true)
@@ -119,14 +131,20 @@ fn modify(path: &Path, update: impl FnOnce(&mut Store)) -> Result<()> {
         .mode(0o600)
         .open(PathBuf::from(lock_name))?;
     // The lock serializes read/modify/rename across concurrent startup processes.
+    #[cfg(unix)]
     if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
         return Err(io::Error::last_os_error().into());
     }
+    #[cfg(windows)]
+    crate::windows::lock(&lock)?;
     let mut store = load(path)?;
     update(&mut store);
     let mut temporary = path.as_os_str().to_owned();
     temporary.push(format!(".{}.tmp", std::process::id()));
     let temporary = PathBuf::from(temporary);
+    #[cfg(windows)]
+    let mut output = crate::windows::private_file(&temporary, true)?;
+    #[cfg(unix)]
     let mut output = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -135,8 +153,14 @@ fn modify(path: &Path, update: impl FnOnce(&mut Store)) -> Result<()> {
     let result = (|| -> Result<()> {
         output.write_all(toml::to_string(&store)?.as_bytes())?;
         output.sync_all()?;
-        fs::rename(&temporary, path)?;
-        File::open(parent)?.sync_all()?;
+        drop(output);
+        #[cfg(unix)]
+        {
+            fs::rename(&temporary, path)?;
+            File::open(parent)?.sync_all()?;
+        }
+        #[cfg(windows)]
+        crate::windows::replace(&temporary, path)?;
         Ok(())
     })();
     if result.is_err() {
@@ -255,13 +279,18 @@ fn signing_info(package: &VerifiedPackage, fingerprint: &str, verify_weights: bo
     if !io::stderr().is_terminal() {
         return format!("Signing key acceptance\n{}", lines.join("\n"));
     }
-    let mut size: libc::winsize = unsafe { std::mem::zeroed() };
-    // SAFETY: ioctl writes terminal dimensions into a valid winsize.
-    unsafe { libc::ioctl(libc::STDERR_FILENO, libc::TIOCGWINSZ, &mut size) };
-    let columns = if size.ws_col == 0 {
-        80
-    } else {
-        usize::from(size.ws_col)
+    #[cfg(windows)]
+    let columns = crate::windows::terminal_columns();
+    #[cfg(unix)]
+    let columns = {
+        let mut size: libc::winsize = unsafe { std::mem::zeroed() };
+        // SAFETY: ioctl writes terminal dimensions into a valid winsize.
+        unsafe { libc::ioctl(libc::STDERR_FILENO, libc::TIOCGWINSZ, &mut size) };
+        if size.ws_col == 0 {
+            80
+        } else {
+            usize::from(size.ws_col)
+        }
     };
     if columns < 28 {
         return format!("Signing key acceptance\n{}", lines.join("\n"));
@@ -351,5 +380,35 @@ mod tests {
         assert!(acceptance_line(&b"local-inference-lab"[..]).is_err());
         assert!(acceptance_line([vec![b'x'; 256], vec![b'\n']].concat().as_slice()).is_err());
         assert!(acceptance_line(&b""[..]).is_err());
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn concurrent_updates_preserve_entries_and_replace_existing_files() {
+        let directory =
+            std::env::temp_dir().join(format!("flare-trust-用户-{}", std::process::id()));
+        let path = directory.join("trust.toml");
+        std::thread::scope(|scope| {
+            for index in 0..8 {
+                let path = &path;
+                scope.spawn(move || {
+                    modify(path, |store| {
+                        store.trusted.push(Entry {
+                            fingerprint: format!("{index:064x}"),
+                            namespace: "test-publisher".into(),
+                        })
+                    })
+                    .unwrap()
+                });
+            }
+        });
+        assert_eq!(load(&path).unwrap().trusted.len(), 8);
+        modify(&path, |store| store.trusted.clear()).unwrap();
+        assert!(load(&path).unwrap().trusted.is_empty());
+        fs::remove_dir_all(directory).unwrap();
     }
 }

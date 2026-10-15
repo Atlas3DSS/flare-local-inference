@@ -145,6 +145,14 @@ class ModuleImage:
     cubin: bytes
 
 
+def cupti_library(library=None):
+    if library is None:
+        from cuda.pathfinder import load_nvidia_dynamic_lib
+
+        library = load_nvidia_dynamic_lib("cupti").abs_path
+    return C.CDLL(library)
+
+
 class ModuleImages:
     """Copy module images while their callback-owned storage is valid.
 
@@ -156,8 +164,8 @@ class ModuleImages:
     # Recorders active in this process; tensor-parallel peers record exactly when their root does.
     active = 0
 
-    def __init__(self, library="libcupti.so"):
-        self._library = C.CDLL(library)
+    def __init__(self, library=None):
+        self._library = cupti_library(library)
         self._subscriber = C.c_void_p()
         self._callback = C.CFUNCTYPE(None, C.c_void_p, C.c_int, C.c_uint, C.c_void_p)(self._record)
         self.images = []

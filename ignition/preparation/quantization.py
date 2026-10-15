@@ -20,6 +20,8 @@ def linear_format(layers, prefix):
     if not isinstance(entry, Mapping):
         raise ValueError(f"{prefix}: missing quantized_layers declaration")
     algo = entry.get("quant_algo")
+    if algo == "FP8" and entry.get("group_size") is None and entry.get("weight_scale_encoding") is None:
+        return "tensor_fp8"
     group = {"MXFP8": 32, "MXFP4": 32, "NVFP4": 16, "W4A16_NVFP4": 16}.get(algo)
     if group is None or entry.get("group_size") != group:
         raise ValueError(f"{prefix}: unsupported linear quantization {entry!r}")
@@ -32,6 +34,8 @@ def projection_group_format(layers, prefixes):
     if not prefixes:
         raise ValueError("projection group must be nonempty")
     formats = [linear_format(layers, prefix) for prefix in prefixes]
+    if "tensor_fp8" in formats and len(prefixes) > 1:
+        raise ValueError("tensor-FP8 projections retain separate checkpoint activation and weight scales")
     if "nvfp4" in formats and len(prefixes) > 1:
         names = ", ".join(prefixes)
         raise ValueError(f"cannot fuse NVFP4 projections ({names}); only MoE expert w1/w3 fusion is supported")

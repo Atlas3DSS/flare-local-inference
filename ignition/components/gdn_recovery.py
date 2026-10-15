@@ -1,4 +1,4 @@
-"""Speculative Qwen GDN verification that records corrections instead of per-token checkpoints.
+"""Gated DeltaNet verification with per-token correction records.
 
 b12x's decode persists one FP32 recurrent checkpoint (heads x 128 x 128) per
 verified token so that any accepted prefix can be resumed. Verification here

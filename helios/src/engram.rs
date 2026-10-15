@@ -1,5 +1,6 @@
 //! Host- or graph-produced n-gram requests and asynchronous compact-row delivery.
 
+#[cfg(unix)]
 mod prepared;
 mod reader;
 use crate::{
@@ -7,10 +8,10 @@ use crate::{
     cuda::{PinnedHost, Stream},
     execution::{ExecutionManifest, GraphKind, Upload},
 };
+#[cfg(unix)]
 pub use prepared::{PlaneSource, PreparedTables, TableSource};
 pub(crate) use reader::Plane;
 use std::{
-    path::Path,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
@@ -126,7 +127,7 @@ pub(crate) struct Shared {
 impl Shared {
     pub fn new(
         index: Index,
-        path: &Path,
+        file: &std::fs::File,
         ranks: usize,
         max_tokens: usize,
         context: usize,
@@ -137,7 +138,7 @@ impl Shared {
         let readers = index
             .tables
             .iter()
-            .map(|table| reader::Reader::open(path, &table.planes, storage == Storage::Ram))
+            .map(|table| reader::Reader::from_file(file, &table.planes, storage == Storage::Ram))
             .collect::<Result<Vec<_>>>()?;
         Self::with_readers(index, readers, ranks, max_tokens, context, device)
     }

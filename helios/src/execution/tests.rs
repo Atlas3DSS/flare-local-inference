@@ -4,7 +4,7 @@ use super::*;
 fn tensor_parallel_capacity_rejects_more_than_sixteen_ranks() {
     let pairs: Vec<_> = (0..16)
         .map(|_| {
-            let (local, peer) = std::os::unix::net::UnixStream::pair().unwrap();
+            let (local, peer) = crate::execution::rank_stream::test_pair().unwrap();
             (RankStream::from(local), peer)
         })
         .collect();

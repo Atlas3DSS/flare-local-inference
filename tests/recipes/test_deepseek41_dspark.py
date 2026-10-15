@@ -65,7 +65,8 @@ def test_single_token_verification_packs_page_tables_across_inactive_rows():
     assert torch.equal(metadata.page_table, pages)
 
 
-def test_decode_page_tables_follow_packed_tokens_across_inactive_rows():
+@pytest.mark.parametrize("device_pending", [False, True])
+def test_decode_page_tables_follow_packed_tokens_across_inactive_rows(device_pending):
     from types import SimpleNamespace
     from ignition.components.paged_batch import BatchInputs, PreparedBatch
 
@@ -81,12 +82,13 @@ def test_decode_page_tables_follow_packed_tokens_across_inactive_rows():
         error_code=torch.zeros(4, dtype=torch.int32))
     batch.metadata = Metadata.allocate(4, 4, 8, "cpu")
     batch.token_state = SimpleNamespace(gather=lambda: None, active=torch.tensor([1, 0, 1, 0]),
-        positions=torch.tensor([127, 80, 200, 4]))
-    batch.shard = SimpleNamespace(world_size=1)
+        positions=torch.tensor([127, 80, 200, 4]), pending_tokens=torch.tensor([20, 21, 22, 23]))
+    batch.device_pending = device_pending
+    batch.shard = SimpleNamespace(world_size=1 if device_pending else 4)
     batch.rows, batch.tokens, batch.mode = 4, 4, "decode"
     batch.present = torch.ones(4, dtype=torch.bool)
     batch.token_offsets = torch.arange(4)
-    batch.begin(torch.tensor([[0, 0, 0, 0, 1, 1, 1, 1]]))
-    assert batch.metadata.token_ids.tolist() == [10, 12, 0, 0]
+    batch.begin(torch.tensor([[0, 0, 0, 0] + [batch.shard.world_size] * 4]))
+    assert batch.metadata.token_ids.tolist() == ([20, 22, 0, 0] if device_pending else [10, 12, 0, 0])
     assert batch.metadata.positions.tolist() == [127, 200, -1, -1]
     assert torch.equal(batch.metadata.token_page_table[:2], inputs.page_tables[[3, 0]])

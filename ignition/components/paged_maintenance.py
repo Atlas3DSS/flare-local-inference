@@ -51,7 +51,7 @@ class PreparedMaintenance:
             records,
             frame,
             sequence,
-            world_size=runtime.world_size,
+            world_size=1 if runtime is None else runtime.world_size,
             capacity=capacity,
             admission_buffers=admission_buffers,
         )

@@ -4,10 +4,10 @@ from dataclasses import dataclass, fields, replace
 
 import torch
 
+from ignition.components.gated_delta import GDNScratch
 from ignition.components.recurrent import DeltaMetadata
 
 from .attention import QSAMetadata
-from .gdn import GDNScratch
 from .ple import PLEMetadata, PLEScratch
 
 

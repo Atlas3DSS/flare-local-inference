@@ -13,7 +13,7 @@ import triton.language as tl
 
 from ignition.components.state import StateLayout, StateStorage
 
-from .gdn import GDNState
+from ignition.components.gated_delta import GDNState
 
 GDN_LAYERS = tuple(layer for layer in range(48) if layer % 4 != 3)
 QSA_LAYERS = tuple(range(3, 48, 4))

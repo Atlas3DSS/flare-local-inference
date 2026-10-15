@@ -1,12 +1,15 @@
 //! Preparation-only registration of shared RAM tables for native graph execution.
 
-use crate::engram::{Binding, PlaneSource, PreparedTables, TableSource};
-use pyo3::{
-    exceptions::{PyKeyError, PyRuntimeError, PyValueError},
-    prelude::*,
-};
+use crate::engram::Binding;
+#[cfg(unix)]
+use crate::engram::{PlaneSource, PreparedTables, TableSource};
+#[cfg(unix)]
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use pyo3::{exceptions::PyKeyError, prelude::*};
+#[cfg(unix)]
 use std::{collections::HashMap, path::PathBuf};
 
+#[cfg(unix)]
 fn sources(value: &Bound<'_, PyAny>) -> PyResult<(usize, Vec<TableSource>)> {
     let vocabulary = value.get_item("vocabulary")?.extract()?;
     let mut tables = Vec::new();
@@ -42,6 +45,7 @@ fn sources(value: &Bound<'_, PyAny>) -> PyResult<(usize, Vec<TableSource>)> {
 
 #[pyclass(name = "EmbeddingTables", module = "flare_heliopause")]
 pub(crate) struct NativeEmbeddingTables {
+    #[cfg(unix)]
     tables: PreparedTables,
 }
 
@@ -54,28 +58,41 @@ impl NativeEmbeddingTables {
         catalog: &Bound<'_, PyAny>,
         descriptors: Option<Vec<i32>>,
     ) -> PyResult<Self> {
-        let (vocabulary, sources) = sources(catalog)?;
-        let tables = py
-            .detach(|| match descriptors {
-                Some(descriptors) => {
-                    PreparedTables::from_shared(vocabulary, &sources, &descriptors)
-                }
-                None => PreparedTables::load(vocabulary, &sources),
-            })
-            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
-        Ok(Self { tables })
+        #[cfg(unix)]
+        {
+            let (vocabulary, sources) = sources(catalog)?;
+            let tables = py
+                .detach(|| match descriptors {
+                    Some(descriptors) => {
+                        PreparedTables::from_shared(vocabulary, &sources, &descriptors)
+                    }
+                    None => PreparedTables::load(vocabulary, &sources),
+                })
+                .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+            Ok(Self { tables })
+        }
+        #[cfg(windows)]
+        {
+            let _ = (py, catalog, descriptors);
+            Err(pyo3::exceptions::PyNotImplementedError::new_err(
+                "shared RAM table handoff for ignition serve requires Linux; load an exported package for native RAM serving",
+            ))
+        }
     }
 
+    #[cfg(unix)]
     #[getter]
     fn descriptors(&self) -> Vec<i32> {
         self.tables.descriptors()
     }
 
+    #[cfg(unix)]
     #[getter]
     fn nbytes(&self) -> usize {
         self.tables.nbytes()
     }
 
+    #[cfg(unix)]
     fn bind(
         &self,
         py: Python<'_>,

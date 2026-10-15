@@ -37,7 +37,7 @@ impl Asset {
         }
         let bytes = (|| -> std::io::Result<Vec<u8>> {
             if let Some((offset, size)) = self.range {
-                use std::os::unix::fs::FileExt;
+                use crate::os::FileReadAt;
                 let file = fs::File::open(&self.path)?;
                 if offset
                     .checked_add(size as u64)

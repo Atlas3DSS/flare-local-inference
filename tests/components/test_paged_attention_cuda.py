@@ -15,21 +15,24 @@ pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
 
 
 @pytest.mark.parametrize("mode,tokens", [("decode", 4), ("prefill", 64), ("prefill", 4096)])
-def test_gqa_strided_pages_and_sinks(mode, tokens):
+@pytest.mark.parametrize("dimension,value_dimension,heads", [(192, 128, 16), (256, 256, 6)])
+def test_gqa_strided_pages_and_sinks(mode, tokens, dimension, value_dimension, heads):
     device = torch.device("cuda", 0)
     rows = tokens if mode == "decode" else 1
     pages = max(2, (tokens + 127) // 128)
-    backing = torch.randn((pages, 49152), device=device, dtype=torch.bfloat16) * .1
-    key = backing[:, :24576].view(pages, 128, 1, 192)
-    value = backing[:, 24576:40960].view(pages, 128, 1, 128)
+    key_size, value_size = 128 * dimension, 128 * value_dimension
+    padding = 16384 if dimension == 256 else 8192
+    backing = torch.randn((pages, key_size + value_size + padding), device=device, dtype=torch.bfloat16) * .1
+    key = backing[:, :key_size].view(pages, 128, 1, dimension)
+    value = backing[:, key_size:key_size + value_size].view(pages, 128, 1, value_dimension)
     if mode == "prefill":
         key, value = key.contiguous(), value.contiguous()
-    query = torch.randn((tokens, 16, 192), device=device, dtype=torch.bfloat16) * .1
-    output = torch.empty((tokens, 16, 128), device=device, dtype=torch.bfloat16)
+    query = torch.randn((tokens, heads, dimension), device=device, dtype=torch.bfloat16) * .1
+    output = torch.empty((tokens, heads, value_dimension), device=device, dtype=torch.bfloat16)
     table = torch.arange(pages, device=device, dtype=torch.int32)[None].repeat(rows, 1)
     lengths = torch.full((rows,), max(128, tokens), device=device, dtype=torch.int32)
     cu = torch.arange(rows + 1, device=device, dtype=torch.int32) * (tokens // rows)
-    sink = torch.linspace(-1, 1, 16, device=device)
+    sink = torch.linspace(-1, 1, heads, device=device)
     with RecordedPreparationSession(device=device, checkpoint="paged-gqa",
             workload_schema="paged-gqa", numerical_policy="default") as session:
         arena = ScratchArena(device)
@@ -59,7 +62,7 @@ def test_gqa_strided_pages_and_sinks(mode, tokens):
                 first, last = max(0, position - 127), position + 1
                 k = key.flatten(0, 1)[first:last, 0].float()
                 v = value.flatten(0, 1)[first:last, 0].float()
-                logits = query[token].float() @ k.T / (192 ** .5)
+                logits = query[token].float() @ k.T / (dimension ** .5)
                 probabilities = torch.cat((logits, sink[:, None]), 1).softmax(1)[:, :-1]
                 expected = probabilities @ v
                 torch.testing.assert_close(output[token].float(), expected, atol=.002, rtol=.02)

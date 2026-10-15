@@ -1,4 +1,4 @@
-"""Device discovery with discrete VRAM and Linux shared system memory."""
+"""Device discovery with discrete VRAM and integrated GPU memory budgets."""
 
 import sys
 from types import ModuleType, SimpleNamespace
@@ -14,6 +14,7 @@ GIB = 1 << 30
 
 @pytest.fixture
 def devices(monkeypatch):
+    monkeypatch.setattr(planning, "os", SimpleNamespace(name="posix"))
     class NotSupportedError(Exception):
         pass
 
@@ -71,7 +72,7 @@ def test_integrated_discovery_uses_available_dram_without_swap(devices, monkeypa
     nvml, _, calls = devices
     unsupported(nvml, monkeypatch)
     def meminfo(path):
-        assert str(path) == "/proc/meminfo"
+        assert path.as_posix() == "/proc/meminfo"
         return f"MemFree: 1024 kB\nMemAvailable: {available * (GIB // 1024)} kB\nSwapFree: 999999999 kB\n"
     monkeypatch.setattr(planning.Path, "read_text", meminfo)
     gpu, = planning.discover_gpus()
@@ -95,3 +96,30 @@ def test_integrated_discovery_requires_available_memory(devices, monkeypatch):
     with pytest.raises(CapacityError, match="MemAvailable is required"):
         planning.discover_gpus()
     assert calls[-1] == "shutdown"
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_windows_integrated_budget_includes_shared_memory_and_releases_context(devices, monkeypatch, failure):
+    _, driver, calls = devices
+    monkeypatch.setattr(planning, "os", SimpleNamespace(name="nt"))
+    driver.cuDevicePrimaryCtxRetain = lambda device: (calls.append(("retain", device)) or 0, 123)
+    driver.cuCtxPushCurrent = lambda context: (calls.append(("push", context)) or 0,)
+    driver.cuCtxPopCurrent = lambda: (calls.append("pop") or 0, 123)
+    driver.cuDevicePrimaryCtxRelease = lambda device: (calls.append(("release", device)) or 0,)
+    driver.cuMemGetInfo = lambda: (1 if failure else 0, 105 * GIB, 110 * GIB)
+    if failure:
+        with pytest.raises(CapacityError, match="cannot query integrated GPU memory"):
+            planning.discover_gpus()
+    else:
+        gpu, = planning.discover_gpus()
+        assert (gpu.total_bytes, gpu.free_bytes) == (110 * GIB, 105 * GIB)
+    assert calls == ["init", "driver_init", ("retain", 7), ("push", 123), "pop", ("release", 7), "shutdown"]
+
+
+def test_windows_discrete_gpu_uses_nvml_without_creating_context(devices, monkeypatch):
+    _, driver, calls = devices
+    monkeypatch.setattr(planning, "os", SimpleNamespace(name="nt"))
+    driver.cuDeviceGetAttribute = lambda attribute, device: (0, 0)
+    gpu, = planning.discover_gpus()
+    assert (gpu.total_bytes, gpu.free_bytes) == (96 * GIB, 80 * GIB)
+    assert calls == ["init", "driver_init", "shutdown"]

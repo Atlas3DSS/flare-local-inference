@@ -300,7 +300,7 @@ def test_actual_checkpoint_gdn_and_ple_convolution_use_shared_strided_slots():
 
     from ignition.components.recurrent import DeltaMetadata, prepare_sequence_binding
     from ignition.preparation.graphs import PreparedGraphBundle
-    from ignition.recipes.qwen38.gdn import GDNScratch, PreparedGDN
+    from ignition.components.gated_delta import GDNScratch, PreparedGDN
     from ignition.recipes.qwen38.ple import PLE_LAYER_PREFIX
     from ignition.recipes.qwen38.weights import QwenWeightLoader
     from tests.recipes import test_qwen38_gdn as canonical

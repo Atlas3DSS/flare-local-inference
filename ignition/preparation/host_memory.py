@@ -18,8 +18,10 @@ COMPILED_FORWARD_BYTES = 80 << 20
 
 
 def release_unused():
-    """Return freed preparation objects and glibc arenas to the OS."""
+    """Collect preparation objects and release unused glibc arenas on Linux."""
     gc.collect()
+    if os.name == "nt":
+        return
     trim = ctypes.CDLL(None).malloc_trim
     trim.argtypes = (ctypes.c_size_t,)
     trim.restype = ctypes.c_int
@@ -27,6 +29,18 @@ def release_unused():
 
 
 def available_bytes():
+    if os.name == "nt":
+        class MemoryStatus(ctypes.Structure):
+            _fields_ = [("length", ctypes.c_uint32), ("load", ctypes.c_uint32)] + [
+                (name, ctypes.c_uint64) for name in (
+                    "total_physical", "available_physical", "total_page_file",
+                    "available_page_file", "total_virtual", "available_virtual", "extended_virtual")]
+
+        status = MemoryStatus(length=ctypes.sizeof(MemoryStatus))
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        if not kernel.GlobalMemoryStatusEx(ctypes.byref(status)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return status.available_physical
     for line in Path("/proc/meminfo").read_text().splitlines():
         if line.startswith("MemAvailable:"):
             return int(line.split()[1]) * 1024
@@ -38,7 +52,7 @@ def device_memory_info(device):
     import torch
 
     free, total = torch.cuda.mem_get_info(device)
-    if torch.cuda.get_device_properties(device).is_integrated:
+    if os.name != "nt" and torch.cuda.get_device_properties(device).is_integrated:
         free = min(total, available_bytes())
     return free, total
 
@@ -83,6 +97,8 @@ def tuning_limits(device, workers, *, pools=1, headroom_bytes=0, race_budget=Non
             race = min(race, race_budget)
         return worker_limit(workers, pools=pools) if workers else 0, race
     available = device_memory_info(device)[0]
+    if os.name == "nt":
+        available = min(available, available_bytes())
     headroom = max(_HEADROOM_BYTES, headroom_bytes)
     usable = (available - headroom) // pools - _TUNING_GROWTH_BYTES
     if usable <= 0:
@@ -100,6 +116,9 @@ def release_page_cache(paths) -> None:
     An integrated GPU's free memory excludes reclaimable page cache, so checkpoint pages
     read while loading weights would otherwise count against tuning, graphs and KV pages.
     """
+    # Windows checkpoint reads bypass the filesystem cache.
+    if os.name == "nt":
+        return
     for path in paths:
         with open(path, "rb") as file:
             os.posix_fadvise(file.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)

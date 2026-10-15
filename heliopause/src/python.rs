@@ -1,5 +1,7 @@
+#[cfg(target_os = "linux")]
 use std::os::fd::BorrowedFd;
 use std::sync::Mutex;
+#[cfg(any(target_os = "linux", feature = "qualification"))]
 use std::time::Duration;
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -345,6 +347,7 @@ impl PreparedGraphExecutor {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn rank_socket(fd: i32) -> PyResult<crate::execution::RankStream> {
     if fd < 0 {
         return Err(PyValueError::new_err(
@@ -358,6 +361,13 @@ fn rank_socket(fd: i32) -> PyResult<crate::execution::RankStream> {
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
     crate::execution::RankStream::from_socket(socket)
         .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+#[cfg(target_os = "windows")]
+fn rank_socket(_fd: i32) -> PyResult<crate::execution::RankStream> {
+    Err(PyRuntimeError::new_err(
+        "tensor-parallel preparation requires Linux rank sockets",
+    ))
 }
 
 #[pyfunction]
@@ -400,11 +410,13 @@ fn serve_tensor_parallel_rank(
 }
 
 /// Monitor owned child ranks in Rust; unexpected peer exit terminates this process.
+#[cfg(target_os = "linux")]
 #[pyclass(name = "RankSupervisor", module = "flare_heliopause")]
 struct NativeRankSupervisor {
     supervisor: Mutex<crate::processes::RankSupervisor>,
 }
 
+#[cfg(target_os = "linux")]
 #[pymethods]
 impl NativeRankSupervisor {
     #[new]
@@ -444,6 +456,7 @@ impl NativeRankSupervisor {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[pyfunction]
 fn bind_parent_lifetime(parent_pid: i32) -> PyResult<()> {
     if parent_pid <= 0 {
@@ -500,12 +513,14 @@ fn flare_heliopause(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<crate::embedding_tables::NativeEmbeddingTables>()?;
     module.add_class::<crate::embedding_tables::NativeEmbeddingBinding>()?;
     module.add_class::<ExecutionCompletion>()?;
+    #[cfg(target_os = "linux")]
     module.add_class::<NativeRankSupervisor>()?;
     module.add_class::<NativeCliSignals>()?;
     #[cfg(all(feature = "server", feature = "qualification"))]
     module.add_class::<NativeServer>()?;
     module.add_function(wrap_pyfunction!(current_context, module)?)?;
     module.add_function(wrap_pyfunction!(serve_tensor_parallel_rank, module)?)?;
+    #[cfg(target_os = "linux")]
     module.add_function(wrap_pyfunction!(bind_parent_lifetime, module)?)?;
     Ok(())
 }
