@@ -352,7 +352,7 @@ def test_environment_selects_gpus_by_uuid_and_places_caches(monkeypatch, tmp_pat
 
     monkeypatch.setenv("HOME", str(tmp_path))
     for name in ("CUDA_VISIBLE_DEVICES", "CUDA_HOME", "B12X_COMPILE_CACHE_DIR", "TRITON_CACHE_DIR",
-                 "TORCHINDUCTOR_CACHE_DIR", "HF_HUB_CACHE"):
+                 "TORCHINDUCTOR_CACHE_DIR", "HF_HUB_CACHE", "FLASHINFER_WORKSPACE_BASE"):
         monkeypatch.setenv(name, "previous")
     path = tmp_path / "config.toml"
     path.write_text(f'[paths]\ncuda = "{tmp_path}/cuda"\nkernel_cache = "{tmp_path}/kernels"\n')
@@ -361,11 +361,39 @@ def test_environment_selects_gpus_by_uuid_and_places_caches(monkeypatch, tmp_pat
     environment.apply(Configuration.load(path), gpus)
     assert os.environ["CUDA_VISIBLE_DEVICES"] == "GPU-b,GPU-a"
     assert os.environ["B12X_COMPILE_CACHE_DIR"] == f"{tmp_path}/kernels/b12x"
+    assert Path(os.environ["FLASHINFER_WORKSPACE_BASE"]).is_relative_to(tmp_path / "kernels" / "flashinfer")
     assert os.environ["TRITON_CACHE_DIR"] == f"{tmp_path}/kernels/triton"
     assert os.environ["TORCHINDUCTOR_CACHE_DIR"] == f"{tmp_path}/kernels/inductor"
     assert os.environ["HF_HUB_CACHE"] == f"{tmp_path}/.cache/huggingface/hub"
     assert os.environ["CUDA_HOME"] == f"{tmp_path}/cuda"
     assert environment.toolkit(None) is None or (environment.toolkit(None) / "bin/nvcc").is_file()
+
+
+def test_flashinfer_workspaces_separate_checkouts_without_importing_them(monkeypatch, tmp_path):
+    import importlib
+
+    monkeypatch.delitem(sys.modules, "flashinfer", raising=False)
+    roots = [tmp_path / name for name in ("source_a", "source_b")]
+    for root in roots:
+        package = root / "flashinfer"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text('raise AssertionError("preparation imported too early")\n')
+    monkeypatch.syspath_prepend(str(roots[0]))
+    first = environment.flashinfer_workspace(tmp_path / "kernels")
+    assert first == environment.flashinfer_workspace(tmp_path / "kernels")
+    assert "flashinfer" not in sys.modules
+
+    monkeypatch.syspath_prepend(str(roots[1]))
+    importlib.invalidate_caches()
+    second = environment.flashinfer_workspace(tmp_path / "kernels")
+    assert second != first
+    assert second.parent == first.parent == tmp_path / "kernels" / "flashinfer"
+    assert "flashinfer" not in sys.modules
+
+    alias = tmp_path / "source_alias"
+    alias.symlink_to(roots[1], target_is_directory=True)
+    monkeypatch.syspath_prepend(str(alias))
+    assert environment.flashinfer_workspace(tmp_path / "kernels") == second
 
 
 def test_tensor_parallel_run_preserves_rank_selection_in_native_launch(host):

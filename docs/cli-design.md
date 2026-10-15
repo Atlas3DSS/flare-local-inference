@@ -471,6 +471,15 @@ keyed by checkpoint revision, recipe version, GPU, and settings. A second
 `--max-concurrency`, `--gpus`, or the speculation flags can add graph shapes
 and incur partial tuning.
 
+FlashInfer's JIT build files also live under `paths.kernel_cache` (default
+`~/.cache/flare/kernels`), in a separate directory for each resolved FlashInfer
+installation. Editable checkouts can therefore compile independently even when
+they share a package version and GPU architecture. The first use of an installation
+can compile its sampling kernels; later launches reuse that installation's files.
+Set `kernel_cache = "/data/flare-kernels"` in the configuration's `[paths]` table
+to move preparation caches together. Keep the default unless another storage
+location is needed.
+
 `run` prints checkpoint resolution, selected GPUs, preparation settings, and
 each phase's counts and elapsed time. The phases include weight loading,
 `Prepare embedding tables`, kernel tuning, forward compilation, KV allocation,
