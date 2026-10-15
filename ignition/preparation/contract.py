@@ -22,7 +22,7 @@ def text_inputs(kind):
     if kind != "resume":
         values += [b("page_tables", p.PAGE_TABLE, p.REQUEST_ROW),
                    b("draft_page_tables", p.PAGE_TABLE, p.REQUEST_ROW)]
-    if kind in ("prefill", "decode", "speculative", "mixed", "resume"):
+    if kind in ("prefill", "decode", "speculative", "proposal", "verification", "mixed", "resume"):
         values += [b("sampling_grammar_mask", p.GRAMMAR_MASK, p.REQUEST_ROW)]
         if kind != "resume":
             values += [b("sample_enabled", p.SAMPLE_ENABLED), b("query_lengths", p.QUERY_LENGTH)]
@@ -32,7 +32,7 @@ def text_inputs(kind):
                    b("vision_token_indices", p.IMAGE_FEATURE_INDEX, p.PACKED_TOKEN),
                    b("vision_left", p.IMAGE_LEFT_CONTEXT, p.PACKED_TOKEN),
                    b("vision_right", p.IMAGE_RIGHT_CONTEXT, p.PACKED_TOKEN)]
-    if kind in ("decode", "speculative"):
+    if kind in ("decode", "speculative", "proposal", "verification"):
         values += [b("token_ids", p.PENDING_TOKEN)]
     if kind == "mixed":
         values += [b("prefill_row", p.PREFILL_ROW, p.SCALAR)]
@@ -68,15 +68,15 @@ def graph_contracts(signatures, inputs, *, continuation, pending, cursor=None, r
         kind = signature.kind
         selected = inputs[kind]
         values = [selected[field] for field in signature.inputs if field in selected]
-        states = [] if kind == "vision" else [dict(view=continuation, access=p.READ_WRITE)]
-        reads_pending = kind in ("decode", "speculative", "mixed") and not any(
+        states = [] if kind == "vision" else [dict(view=continuation, access=p.READ if kind == "proposal" else p.READ_WRITE)]
+        reads_pending = kind in ("decode", "speculative", "proposal", "verification", "mixed") and not any(
             v["source"] in (p.PENDING_TOKEN, p.PROMPT_AND_PENDING_TOKEN) for v in values)
         if pending is not None and kind not in ("snapshot", "vision"):
-            states.append(dict(view=pending, access=p.WRITE if kind in ("init", "restore") else p.READ_WRITE))
+            states.append(dict(view=pending, access=p.WRITE if kind in ("init", "restore") else p.READ if kind == "proposal" else p.READ_WRITE))
         result.append(dict(graph=name, kind=p.GraphOperation.Value(kind.upper()), inputs=values, state=states,
-            state_rows_per_request=signature.token_capacity if rows is None and kind == "speculative" else (rows or 1),
-            draft_cursor=cursor if signature.speculation_enabled and kind in ("speculative", "mixed") else None,
-            embedding_tables=list(embedding_tables) if kind in ("prefill", "decode", "speculative", "mixed") else [],
+            state_rows_per_request=signature.token_capacity if rows is None and kind in ("speculative", "proposal", "verification") else (rows or 1),
+            draft_cursor=cursor if signature.speculation_enabled and kind in ("speculative", "verification", "mixed") else None,
+            embedding_tables=list(embedding_tables) if kind in ("prefill", "decode", "speculative", "verification", "mixed") else [],
             pending_token=pending if reads_pending else None))
     return result
 

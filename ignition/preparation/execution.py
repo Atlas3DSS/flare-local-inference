@@ -23,7 +23,7 @@ class GraphSignature:
     prefill_capacity: int = 0
 
     def __post_init__(self):
-        if self.kind not in ("init", "restore", "snapshot", "prefill", "decode", "resume", "vision", "speculative", "mixed"):
+        if self.kind not in ("init", "restore", "snapshot", "prefill", "decode", "resume", "vision", "speculative", "mixed", "proposal", "verification"):
             raise ValueError("unknown prepared graph operation")
         if self.sampling_mode != "general":
             raise ValueError("graphs use the general stochastic sampling path")
@@ -35,7 +35,7 @@ class GraphSignature:
             raise ValueError("ordinary decode graphs require disabled speculation")
         if any(type(value) is not int or value <= 0 for value in (self.batch_capacity, self.token_capacity)):
             raise ValueError("graph capacities must be positive integers")
-        if self.kind == "speculative" and (
+        if self.kind in ("speculative", "proposal", "verification") and (
                 self.batch_capacity not in BATCH_CAPACITIES or not 1 <= self.token_capacity <= 8):
             raise ValueError("speculative graphs require power-of-two batch capacities through 64 and width 1 through 8")
         if type(self.prefill_capacity) is not int or self.prefill_capacity < 0:
@@ -111,7 +111,7 @@ class PreparedExecution(PreparedGraphBundle):
                 offsets[name] = (cursor, nbytes)
                 cursor += nbytes
         graphs = []
-        speculative = any(signature.kind == "speculative" for signature in self.signatures.values())
+        speculative = any(signature.kind in ("speculative", "proposal", "verification") for signature in self.signatures.values())
         for (name, _), handle in zip(self.graphs.items(), handles, strict=True):
             signature = self.signatures[name]
             if not all_variants and signature.speculation_enabled not in (None, speculative):

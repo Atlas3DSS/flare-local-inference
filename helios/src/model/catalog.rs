@@ -22,6 +22,34 @@ fn validate_inner(config: &ModelConfig, manifest: &ExecutionManifest) -> Result<
     config.contract.validate(manifest)?;
     config.sampling_defaults.validate()?;
     config.limits.validate_prefill()?;
+    crate::scheduler::split::causal_prefix(&[], config.proposal_confidence_threshold)?;
+    let proposals: Vec<_> = manifest
+        .graphs
+        .iter()
+        .filter(|g| g.kind == GraphKind::Proposal)
+        .collect();
+    let split = !proposals.is_empty();
+    if split {
+        if proposals.len() != 1
+            || config.limits.max_active != 1
+            || config.limits.request_capacity() != 1
+            || config.history_drafts
+            || config.speculative_proposal_source != speculation::ProposalSource::Mtp
+            || config.speculative_widths != (1..=proposals[0].token_capacity).collect::<Vec<_>>()
+            || manifest
+                .graphs
+                .iter()
+                .any(|g| matches!(g.kind, GraphKind::Speculative | GraphKind::Mixed))
+        {
+            return Err("retained proposal catalogs require one lane, every verification prefix, and no combined speculative graphs".into());
+        }
+    } else if manifest
+        .graphs
+        .iter()
+        .any(|g| g.kind == GraphKind::Verification)
+    {
+        return Err("verification graphs require a retained proposal graph".into());
+    }
     let page_tokens = crate::model::scheduler_capabilities(config).page_tokens;
     if config.model_id.is_empty()
         || config.limits.max_active == 0
@@ -138,13 +166,35 @@ fn validate_inner(config: &ModelConfig, manifest: &ExecutionManifest) -> Result<
             SamplingMode::General,
         )?;
     }
+    if split {
+        for &width in &config.speculative_widths {
+            if config
+                .speculative_fixed_width
+                .is_none_or(|fixed| fixed == width)
+            {
+                select(
+                    config,
+                    manifest,
+                    GraphKind::Verification,
+                    1,
+                    width,
+                    0,
+                    SamplingMode::General,
+                )?;
+            }
+        }
+    }
     if !config.speculative_widths.is_empty() {
         for batch in batches(config) {
-            if !manifest
-                .graphs
-                .iter()
-                .any(|graph| graph.kind == GraphKind::Speculative && graph.batch_capacity == batch)
-            {
+            if !manifest.graphs.iter().any(|graph| {
+                graph.kind
+                    == if split {
+                        GraphKind::Verification
+                    } else {
+                        GraphKind::Speculative
+                    }
+                    && graph.batch_capacity == batch
+            }) {
                 return Err(
                     format!("prepared model lacks speculative graphs for batch {batch}").into(),
                 );
@@ -199,7 +249,10 @@ pub fn select(
             GraphKind::Vision => {
                 batch == 1 && config.contract.vision.patch_capacities.contains(&tokens)
             }
-            GraphKind::Speculative => speculative_shape(config, batch, tokens),
+            GraphKind::Speculative | GraphKind::Verification => {
+                speculative_shape(config, batch, tokens)
+            }
+            GraphKind::Proposal => batch == 1 && config.speculative_widths.last() == Some(&tokens),
             _ => tokens == 1,
         };
     if !declared || (kind != GraphKind::Mixed && prefill != 0) {

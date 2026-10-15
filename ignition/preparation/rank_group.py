@@ -118,6 +118,19 @@ class PreparedRankGroup:
         self._started = self._closed = False
 
     def start_server(self, *, bind="127.0.0.1:8000", template_defaults=None, options=None):
+        return self._start_native(lambda: self.model.start_server(bind=bind,
+            template_defaults=template_defaults, peers=self.connections, options=options))
+
+    def start_executor(self):
+        """Attach shared RAM tables and hand every rank to the diagnostic native executor."""
+        def start():
+            executor = self.model.start_executor(peers=self.connections)
+            self.model.runtime = executor
+            return executor
+
+        return self._start_native(start)
+
+    def _start_native(self, start):
         if self._started or self._closed:
             raise RuntimeError("prepared rank group has already been consumed or closed")
         try:
@@ -139,8 +152,7 @@ class PreparedRankGroup:
                 control.send("serve")
                 control.close()
             self._started = True
-            server = self.model.start_server(bind=bind, template_defaults=template_defaults, peers=self.connections,
-                                             options=options)
+            server = start()
             for connection in self.connections:
                 connection.close()
             return server

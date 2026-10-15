@@ -56,7 +56,7 @@ pub(super) struct Metrics {
     pub completed: AtomicU64,
     pub cancelled: AtomicU64,
     pub failed: AtomicU64,
-    launches: [AtomicU64; 9],
+    launches: [AtomicU64; 11],
     sampling_launches: [AtomicU64; 5],
     speculative: [[RoundMetrics; 8]; 7],
     draft_sources: [[[AtomicU64; 2]; 2]; 7],
@@ -160,13 +160,15 @@ impl Metrics {
             GraphKind::Snapshot => 6,
             GraphKind::Speculative => 7,
             GraphKind::Mixed => 8,
+            GraphKind::Proposal => 9,
+            GraphKind::Verification => 10,
         };
         self.launches[index].fetch_add(1, Ordering::Relaxed);
         let sampling_index = match kind {
             GraphKind::Prefill => 0,
             GraphKind::Decode => 1,
             GraphKind::Resume => 2,
-            GraphKind::Speculative => 3,
+            GraphKind::Speculative | GraphKind::Verification => 3,
             GraphKind::Mixed => 4,
             _ => return,
         };
@@ -536,6 +538,8 @@ impl Metrics {
             "snapshot",
             "speculative",
             "mixed",
+            "proposal",
+            "verification",
         ]
         .into_iter()
         .zip(&self.launches)
@@ -767,7 +771,7 @@ mod tests {
             text.lines()
                 .filter(|line| line.starts_with("flare_graph_launches_total{"))
                 .count(),
-            9
+            11
         );
     }
 }

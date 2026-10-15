@@ -34,16 +34,18 @@ class DSparkWeights:
     norm: torch.Tensor
     markov_embedding: torch.Tensor
     markov_head: torch.Tensor
+    confidence_head: torch.Tensor | None = None
 
     @classmethod
-    def load(cls, loader):
+    def load(cls, loader, *, confidence=False):
         config, shard = loader.config.draft, loader.shard
         last = f"mtp.{config.layers - 1}"
         return cls(tuple(loader.load_layer(i, draft=True) for i in range(config.layers)),
             loader.load_linear("mtp.0.main_proj"), loader.load_tensor("mtp.0.main_norm.weight"),
             loader.load_tensor(last + ".norm.weight"), loader.load_tensor(last + ".markov_head.embed.weight"),
             loader.load_tensor(last + ".markov_head.head.weight",
-                extent=slice(*shard.partition(129280, alignment=64))))
+                extent=slice(*shard.partition(129280, alignment=64))),
+            loader.load_tensor(last + ".confidence_head.proj.weight") if confidence else None)
 
 
 @dataclass(frozen=True)
@@ -58,14 +60,14 @@ class ModelWeights:
     allocated_bytes: int
 
     @classmethod
-    def load(cls, manifest, device, *, shard, progress=None, dspark=False):
+    def load(cls, manifest, device, *, shard, progress=None, dspark=False, confidence=False):
         config = ModelConfig.load(manifest.metadata_path)
         before = torch.cuda.memory_allocated(device)
         with DeepSeekWeightLoader(manifest, device, shard=shard, progress=progress, dspark=dspark) as loader:
             embedding, norm = loader.load_tensors(("embed.weight", "norm.weight"))
             head = loader.load_tensor("head.weight", extent=slice(*shard.partition(129280, alignment=64)))
             layers = tuple(loader.load_layer(i) for i in range(config.layers))
-            draft = DSparkWeights.load(loader) if dspark else None
+            draft = DSparkWeights.load(loader, confidence=confidence) if dspark else None
         return cls(config, shard, embedding, norm, head, layers, draft,
                    torch.cuda.memory_allocated(device) - before)
 

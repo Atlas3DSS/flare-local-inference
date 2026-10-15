@@ -198,6 +198,24 @@ for final native performance validation: development ranks run in separate
 processes with separate delivery staging, while the native CLI shares staging
 between its rank threads.
 
+For DS4.1 research with separate draft preparation and prefix verification, run
+the qualification launcher from the repository root:
+
+```sh
+.venv/bin/python -m qualify.deepseek41_native_split \
+  --gpus 0,1,2,3 --mode split --max-concurrency 1 \
+  --headroom-mib 4096 --threshold 0.15 \
+  --output /tmp/ds41-split --bind 127.0.0.1:8001
+```
+
+This mode prepares seven drafts, then Helios selects a causal prefix from their
+confidence before verification. `--threshold` defaults to `0.15`; keep that value
+for comparison, or pass another value in `(0, 1]` to study prefix selection.
+`--mode baseline` uses complete speculative rounds. Both modes keep Engram tables
+in shared RAM. Split execution supports one active request and cannot be exported
+as a runtime package. Ordinary `ignition serve`, `export`, and `run` continue to
+use complete speculative rounds, including at higher concurrency.
+
 ### 3.2 Native serving flags
 
 `flare run PACKAGE` loads an exported file without the Ignition configuration

@@ -59,6 +59,7 @@ fn checkpoint_template_tokenization_requests_and_instruction_prefix_match_transf
         max_new_tokens: 128,
         speculative_widths: vec![],
         speculative_fixed_width: None,
+        proposal_confidence_threshold: 0.15,
         history_drafts: false,
         speculative_proposal_source: Default::default(),
     };

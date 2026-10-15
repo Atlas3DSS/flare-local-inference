@@ -31,15 +31,21 @@ def prepare_sampling_scratch(batch, width, vocab, device):
 
 
 class PreparedParallelDraftRound:
-    """Prepare a complete speculative round with caller-owned serialized storage."""
+    """Prepare verification and optionally its draft generator.
+
+    A verification-only round receives retained drafts from PreparedDraftVerification;
+    it allocates no draft decoder, Markov projection, or proposal samplers.
+    """
 
     @staticmethod
     def storage_layout(batch, width, vocab):
         return dict(probabilities=((batch, width - 1, vocab), torch.float32),
                     logits=((batch, 1, vocab), torch.float32))
 
-    def __init__(self, owner, batch, width, name, *, sampling_scratch=None, round_storage=None):
+    def __init__(self, owner, batch, width, name, *, generate_proposals=True, sampling_scratch=None,
+                 round_storage=None):
         self.owner, self.batch, self.width = owner, batch, width
+        self.generate_proposals = generate_proposals
         self.sampling_scratch = {} if sampling_scratch is None else sampling_scratch
         o, b, w = owner, batch, width
         device, blocks = o.pool.backing.device, o.inputs.page_tables.shape[1]
@@ -89,7 +95,7 @@ class PreparedParallelDraftRound:
         self.draft_metadata = Metadata.allocate(b * block, b, 1, device, samples=b * block)
         self.draft = (
             None
-            if w == 1
+            if w == 1 or not generate_proposals
             else o.forwards.draft(
                 o.weights,
                 o.draft_scratch.rows(b * block, b * block),
@@ -107,7 +113,7 @@ class PreparedParallelDraftRound:
         self.markov_token = torch.zeros(b, dtype=torch.int64, device=device)
         self.markov = (
             None
-            if w == 1 or o.forwards.markov is None
+            if self.draft is None or o.forwards.markov is None
             else o.forwards.markov(
                 o.weights,
                 self.markov_token,
@@ -123,9 +129,11 @@ class PreparedParallelDraftRound:
         self.drafts = torch.zeros((b, w - 1), dtype=torch.int64, device=device)
         from ignition.preparation.scratch import bind_scratch
 
-        retained = bind_scratch(self.storage_layout(b, w, o.requests.vocab_size),
-                                device=device, workspace=round_storage)
-        self.logits, self.probabilities = retained["logits"], retained["probabilities"]
+        layout = self.storage_layout(b, w, o.requests.vocab_size)
+        if not generate_proposals:
+            del layout["logits"]
+        retained = bind_scratch(layout, device=device, workspace=round_storage)
+        self.logits, self.probabilities = retained.get("logits"), retained["probabilities"]
         for tensor in retained.values():
             tensor.zero_()
         self.valid = torch.zeros((b, w - 1), dtype=torch.bool, device=device)
@@ -154,7 +162,7 @@ class PreparedParallelDraftRound:
                 sampled=self.sampled,
                 workspace=self.sampling_scratch.get("proposal"),
             )
-            for i in range(w - 1)
+            for i in range(w - 1 if self.generate_proposals else 0)
         )
         target.prepare()
         for proposal in proposals:
@@ -167,8 +175,8 @@ class PreparedParallelDraftRound:
             rng=o.rng,
             draft_valid=self.valid,
             target_valid=target.valid,
-            workspace=self.sampling_scratch.get("verify"),
             token_limits=o.inputs.query_lengths[:b],
+            workspace=self.sampling_scratch.get("verify"),
         )
         verify.prepare()
         commit = PreparedSpeculativeCommit(
@@ -188,6 +196,12 @@ class PreparedParallelDraftRound:
         self.operations = target, proposals, verify, commit
 
     def __call__(self):
+        self.propose()
+        self.verify()
+
+    def propose(self, advance_rng=True, observer=None):
+        if not self.generate_proposals:
+            raise RuntimeError("verification-only preparation cannot generate proposals")
         o, b, w = self.owner, self.batch, self.width
         target, proposals, verify, commit = self.operations
         self.validator.begin(self.validation(self.validator.validate()))
@@ -221,24 +235,44 @@ class PreparedParallelDraftRound:
                 )
                 if self.markov is not None:
                     self.logits[:, 0].add_(self.markov())
+                if observer is not None:
+                    observer.record_embedding(i, self.markov.embedding)
                 self.offset.copy_(self.base_offset + 4 * i)
                 proposal()
                 self.drafts[:, i].copy_(self.sampled)
                 self.probabilities[:, i].copy_(proposal.probabilities[:, 0])
                 self.valid[:, i].copy_(proposal.valid[:, 0] & self.active & (i < limits - 1))
                 self.markov_token.copy_(self.sampled)
-            slot_ids = torch.arange(o.requests.capacity, device=slots.device)
-            matches = self.active[None, :] & (slots[None, :] == slot_ids[:, None])
-            base = torch.where(matches, self.base_offset[None, :], 0).sum(1)
-            o.offset.copy_(torch.where(matches.any(1), base + 4 * (w - 1), o.offset))
-            o.generation.copy_(torch.where(matches.any(1), o.requests.generation, o.generation))
+            if advance_rng:
+                self.commit_draft_rng()
         self.candidates[:, 1:].copy_(self.drafts)
+
+    def commit_draft_rng(self, drafts=None):
+        o, b, w = self.owner, self.batch, self.width
+        drafts = w - 1 if drafts is None else drafts
+        slots = o.inputs.row_slot_ids[:b].long()
+        slot_ids = torch.arange(o.requests.capacity, device=slots.device)
+        matches = self.active[None, :] & (slots[None, :] == slot_ids[:, None])
+        base = torch.where(matches, self.base_offset[None, :], 0).sum(1)
+        o.offset.copy_(torch.where(matches.any(1), base + 4 * drafts, o.offset))
+        o.generation.copy_(torch.where(matches.any(1), o.requests.generation, o.generation))
+
+    def verify(self, proposal_valid=None):
+        o, b, w = self.owner, self.batch, self.width
+        target, _, verify, commit = self.operations
+        slots = o.inputs.row_slot_ids[:b].long()
+        safe = slots.clamp(0, o.requests.capacity - 1)
+        active = self.active if proposal_valid is None else self.active & proposal_valid
+        limits = torch.where(active, o.inputs.query_lengths[:b], 0)
+        states = o.inputs.request_state_rows[safe, 0]
         self.metadata.set(
             self.before, limits, states, o.inputs.page_tables[safe], self.candidates, o.inputs.live_rows
         )
         self.decoder()
         target()
         verify()
+        if proposal_valid is not None:
+            verify.output.valid.logical_and_(proposal_valid)
         commit()
         counts = commit.emitted_count
         if w > 1:

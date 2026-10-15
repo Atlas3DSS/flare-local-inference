@@ -15,6 +15,16 @@ from ignition.preparation.runtime_package import (
 )
 
 
+@pytest.mark.parametrize("kind", ["proposal", "verification"])
+def test_split_diagnostic_graphs_cannot_export_before_cuda(kind):
+    from types import SimpleNamespace
+    from ignition.preparation.runtime_package import export_model
+
+    prepared = SimpleNamespace(signatures={"diagnostic": SimpleNamespace(kind=kind)})
+    with pytest.raises(ValueError, match="diagnostic-only"):
+        export_model(prepared, None, None, None, options={})
+
+
 def package(*, allocations=None, arguments=None):
     return RuntimePackage(
         allocations=[Allocation("weight", 0x1000, 256)] if allocations is None else allocations,
@@ -133,7 +143,8 @@ def test_peer_export_keeps_shared_frontend_only_on_rank_zero(tmp_path, monkeypat
         assets[name] = {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
     graph = SimpleNamespace(raw_cuda_graph=lambda: 1, raw_cuda_graph_exec=lambda: 1)
     address = 0x100000000000
-    prepared = SimpleNamespace(_consumed=False, export_zero_ranges=[(address, 4096)], graphs={"decode": graph},
+    prepared = SimpleNamespace(_consumed=False, signatures={"decode": SimpleNamespace(kind="decode")},
+        export_zero_ranges=[(address, 4096)], graphs={"decode": graph},
         buffers={}, export_events={}, package_data=None,
         server_config={"model_id": "fixture", "assets": assets,
                        "sampling_defaults": SamplingDefaults(temperature=1., top_p=.95, top_k=-1).as_dict(),

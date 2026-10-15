@@ -363,7 +363,7 @@ mod tests {
                     }
                     execution.graphs.push(wire::ExecutionGraph {
                         name: format!("{kind}{batch}-{}", if enabled { "mtp" } else { "no-mtp" }),
-                        kind: kind.into(),
+                        kind: kind.try_into().unwrap(),
                         sampling_mode: "general".into(),
                         estimated_duration_ns: 1000,
                         batch_capacity: batch,

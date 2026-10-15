@@ -26,6 +26,7 @@ pub(super) fn config() -> ModelConfig {
         max_new_tokens: 256,
         speculative_widths: Vec::new(),
         speculative_fixed_width: None,
+        proposal_confidence_threshold: 0.15,
         history_drafts: true,
         speculative_proposal_source: Default::default(),
     }
@@ -1187,4 +1188,74 @@ fn vision_upload_fixture_retains_second_image_feature_offset() {
             (image as i32).to_le_bytes()
         );
     }
+}
+
+#[test]
+fn retained_proposal_catalog_requires_all_prefixes_and_one_lane_before_execution() {
+    let mut config = config();
+    config.limits.max_active = 1;
+    config.limits.request_slots = 1;
+    config.history_drafts = false;
+    config.speculative_widths = (1..=8).collect();
+    config
+        .contract
+        .graphs
+        .retain(|g| g.graph.split('-').nth(1) == Some("1"));
+    let mut manifest = manifest(&config);
+    let mut proposal = manifest
+        .graphs
+        .iter()
+        .find(|g| g.kind == GraphKind::Speculative && g.token_capacity == 8)
+        .unwrap()
+        .clone();
+    let mut semantics = config.contract.graph(&proposal.name).unwrap().clone();
+    proposal.name = "Proposal-1-8".into();
+    proposal.kind = GraphKind::Proposal;
+    semantics.graph = proposal.name.clone();
+    semantics.kind = GraphOperation::Proposal;
+    semantics.draft_cursor = None;
+    for state in &mut semantics.state {
+        state.access = StateAccessKind::Read;
+    }
+    for graph in &mut manifest.graphs {
+        if graph.kind == GraphKind::Speculative {
+            graph.kind = GraphKind::Verification;
+        }
+    }
+    for graph in &mut config.contract.graphs {
+        if graph.kind == GraphOperation::Speculative {
+            graph.kind = GraphOperation::Verification;
+        }
+    }
+    manifest.graphs.push(proposal);
+    config.contract.graphs.push(semantics);
+    for (index, graph) in manifest.graphs.iter_mut().enumerate() {
+        graph.handle = index + 1;
+    }
+    let address = manifest
+        .buffers
+        .iter()
+        .map(|b| b.address + b.nbytes)
+        .max()
+        .unwrap()
+        .next_multiple_of(4096);
+    manifest.buffers.push(crate::execution::BufferDescriptor {
+        name: "proposal_confidence".into(),
+        address,
+        nbytes: 28,
+        dtype: crate::execution::Dtype::Float32,
+        shape: vec![1, 7],
+        strides: vec![7, 1],
+    });
+    catalog::validate(&config, &manifest).unwrap();
+    let mut missing = manifest.clone();
+    missing
+        .graphs
+        .retain(|g| g.kind != GraphKind::Verification || g.token_capacity != 3);
+    assert!(catalog::validate(&config, &missing).is_err());
+    let mut multiple = config.clone();
+    multiple.limits.max_active = 2;
+    assert!(catalog::validate(&multiple, &manifest).is_err());
+    config.proposal_confidence_threshold = f64::NAN;
+    assert!(catalog::validate(&config, &manifest).is_err());
 }

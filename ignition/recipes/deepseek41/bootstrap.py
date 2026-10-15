@@ -52,6 +52,8 @@ class PreparationConfig:
     prefill_chunk_size: int = 4096
     max_active: int = 4
     minimum_pages: int = 8
+    # An explicit cache capacity makes memory comparisons independent of automatic sizing.
+    kv_pages: int | None = None
     snapshot_budget_bytes: int = 4 << 30
     headroom_bytes: int = 4 << 30
     compile_decoder: bool = True
@@ -62,8 +64,16 @@ class PreparationConfig:
     speculative_fixed_width: int | None = None
     # Run single-row decode's shared expert on an auxiliary stream; without overlap it runs serially.
     stream_overlap: bool = True
+    # Separate proposal and verification graphs for native confidence-prefix scheduling.
+    split_speculation: bool = False
+    # Additional combined graphs for exact qualification; omit when measuring service memory.
+    speculation_reference_graphs: bool = False
 
     def __post_init__(self):
+        if self.speculation_reference_graphs and not self.split_speculation:
+            raise ValueError("speculation reference graphs require split speculation")
+        if self.split_speculation and (not self.dspark or self.max_active != 1 or self.draft_tokens != 7):
+            raise ValueError("split speculation qualification requires C1 and seven DSpark drafts")
         if type(self.stream_overlap) is not bool:
             raise TypeError("stream_overlap must be a boolean")
         if len(self.devices) != 4 or len(set(self.devices)) != 4 or any(d < 0 for d in self.devices):
@@ -78,6 +88,8 @@ class PreparationConfig:
             raise ValueError("fixed verification width must belong to the prepared widths")
         if self.minimum_pages <= 0 or self.snapshot_budget_bytes <= 0 or self.headroom_bytes < 0:
             raise ValueError("page and snapshot budgets must be positive and headroom nonnegative")
+        if self.kv_pages is not None and (type(self.kv_pages) is not int or self.kv_pages < self.minimum_pages):
+            raise ValueError("kv_pages must cover the minimum page capacity")
 
     @property
     def request_capacity(self):
@@ -119,7 +131,8 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
     metadata_path = manifest.metadata_path
     transient = contextlib.ExitStack()
     transient.enter_context(package_storage.transient())
-    weights = ModelWeights.load(manifest, device, shard=shard, progress=progress, dspark=config.dspark)
+    weights = ModelWeights.load(manifest, device, shard=shard, progress=progress, dspark=config.dspark,
+                                confidence=config.split_speculation)
     release_unused()
     if progress is not None:
         progress(f"Resident model tensors: {weights.allocated_bytes / (1 << 30):.3f} GiB per rank")
@@ -224,22 +237,58 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                     forward = PreparedGeneration(decoder, batch, records, frame, sequence, runtime=collective,
                         coordinator=coordinator, session=session, name=name + ".generation", workspace=arena, context_factory=_CONTEXT)
                     add(name, forward, mode, rows, capacity if mode == "prefill" else 1, forward_inputs, enabled=enabled)
+        split = None
         if speculation is not None:
             from ignition.components.parallel_draft import PreparedParallelDraftRound, prepare_sampling_scratch
+
             from ignition.preparation.scratch import bind_scratch
 
             sampling_scratch = prepare_sampling_scratch(slots, max(config.speculative_widths), requests.vocab_size, device)
-            # Each complete round consumes its proposals before another graph can reuse their storage.
-            round_storage = bind_scratch(
+            # A combined round consumes its proposals before another graph may reuse this storage.
+            # Split proposals retain their own storage across the separate verification operation.
+            round_storage = (None if config.split_speculation else bind_scratch(
                 PreparedParallelDraftRound.storage_layout(slots, max(config.speculative_widths), requests.vocab_size),
-                device=device)
+                device=device))
 
             for batch, width in config.speculative_shapes:
                 name = f"speculative{batch}x{width}"
                 forward = PreparedParallelDraftRound(speculation, batch, width, name,
-                    sampling_scratch=sampling_scratch, round_storage=round_storage)
+                    generate_proposals=not config.split_speculation or config.speculation_reference_graphs
+                        or width == config.draft_tokens + 1,
+                    sampling_scratch=None if config.speculation_reference_graphs else sampling_scratch,
+                    round_storage=round_storage)
                 forward.prepare()
-                add(name, forward, "speculative", batch, width, forward_inputs, enabled=True)
+                if not config.split_speculation or config.speculation_reference_graphs:
+                    add(name, forward, "speculative", batch, width, forward_inputs, enabled=True)
+                else:
+                    forwards[name] = forward
+            if config.split_speculation:
+                from ignition.components.split_draft import (
+                    PreparedCombinedDraftRound, PreparedDraftProposal, PreparedDraftVerification)
+
+                confidence = package_storage.host_allocate("proposal_confidence", (1, 7), torch.float32)
+                buffers["proposal_confidence"] = confidence.device_view
+                split = PreparedDraftProposal(forwards["speculative1x8"], confidence.device_view)
+                # Retained values are explicit persistent storage across graph boundaries.
+                for name, tensor in split.buffers().items():
+                    buffers[name] = tensor
+                add("proposal1x8", split, "proposal", 1, 8, forward_inputs, enabled=True)
+                # Larger captures first let smaller variants reuse the graph pool's blocks.
+                for width in reversed(config.speculative_widths):
+                    target = forwards[f"speculative1x{width}"]
+                    reference = PreparedDraftVerification(split, target) if config.speculation_reference_graphs else None
+                    if config.speculation_reference_graphs:
+                        target = PreparedParallelDraftRound(speculation, 1, width, f"verification1x{width}",
+                            generate_proposals=False, sampling_scratch=sampling_scratch)
+                        target.prepare()
+                    verification = PreparedDraftVerification(split, target)
+                    add(f"verification1x{width}", verification, "verification", 1, width, forward_inputs, enabled=True)
+                    if config.speculation_reference_graphs:
+                        add(f"combined1x{width}", PreparedCombinedDraftRound(split, reference),
+                            "speculative", 1, width, forward_inputs, enabled=True)
+                if not config.speculation_reference_graphs:
+                    for width in config.speculative_widths:
+                        del forwards[f"speculative1x{width}"]
         row_inputs = ("request_state_rows", "row_slot_ids", "row_generations", "live_rows")
         for enabled in modes:
             suffix = "-no-mtp" if config.dspark and not enabled else ""
@@ -269,6 +318,10 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         progress=progress, label="Measure graph memory")
     available = minimum_across_ranks(torch.cuda.mem_get_info(device)[0] - config.headroom_bytes - (64 << 20), group)
     pages = available // bytes_per_page
+    if config.kv_pages is not None:
+        if config.kv_pages > pages:
+            raise MemoryError("explicit KV page capacity exceeds the available preparation budget")
+        pages = config.kv_pages
     if pages < config.minimum_pages:
         raise MemoryError("prepared catalog leaves insufficient memory for requested KV capacity")
 
@@ -284,7 +337,8 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
     graphs, compiled = capture_forwards(forwards, signatures, session=session, device=device, stream=stream,
         pool=graph_pool, collective=collective, coordinator=coordinator, compile_decoder=config.compile_decoder,
         progress=progress, cache_root=config.kernel_cache, retain_graphs=config.retain_graphs,
-        materialize=materialize_cache)
+        materialize=materialize_cache,
+        compile_kinds=("prefill", "decode", "resume", "speculative", "proposal", "verification"))
     session.freeze()
     pool.clear_for_preparation()
     torch.cuda.synchronize(device)
@@ -303,7 +357,9 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         "pages": pages, "state_rows": state_rows, "snapshots": snapshots, "page_tokens": PAGE_TOKENS,
         "frontend": prepare_frontend(metadata_path, eos_token_ids=[1]),
         "sampling_defaults": RECIPE.sampling_defaults.as_dict(), "assets": assets,
-        "model_contract": prepare_contract(signatures, buffers, pool, page_tokens=PAGE_TOKENS, draft_lag=0 if config.dspark else None, rows=None, embedding_tables=range(len(tables.sources)))}
+        "model_contract": prepare_contract(signatures, buffers, pool,
+            page_tokens=PAGE_TOKENS, draft_lag=0 if config.dspark else None, rows=None,
+            embedding_tables=range(len(tables.sources)))}
     memory = {"rank": rank, "world_size": shard.world_size, "device": config.devices[rank],
         "catalog_operand_bytes": catalog_bytes,
         "weights_bytes": weights.allocated_bytes, "mapped_host_bytes": 0,
@@ -316,6 +372,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         "free_device_bytes": free, "total_device_bytes": total, "headroom_bytes": config.headroom_bytes,
         "allocated_bytes": torch.cuda.memory_allocated(device), "reserved_bytes": torch.cuda.memory_reserved(device),
         "tuning": tuning, "compiled_decoder": config.compile_decoder}
+    memory["split_speculation"] = config.split_speculation
     if config.dspark:
         server_config.update(speculative_widths=config.speculative_widths,
             speculative_fixed_width=config.speculative_fixed_width)
@@ -326,7 +383,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
     for forward in forwards.values():
         if hasattr(forward, "completion") and hasattr(forward.completion, "scratch_tensors"):
             disposable.append(forward.completion.scratch_tensors)
-    return PreparedModel(device=config.devices[rank], graphs=graphs, buffers=buffers, signatures=signatures,
+    model = PreparedModel(device=config.devices[rank], graphs=graphs, buffers=buffers, signatures=signatures,
         max_active=config.max_active, session=session, server_config=server_config, memory_report=memory,
         export_zero_ranges=storage_ranges(disposable), export_events=tables.events(),
         embedding_catalog=tables.resident_catalog(),
@@ -335,3 +392,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
             prefill_storage, decoder_storage, scratch, metadata, compiled, stream, graph_pool, session,
             collective, prefill_collective, vocabulary_collective, markov_collective, coordinator, speculation),
         close_resources=tuple(c for c in (markov_collective, prefill_collective, vocabulary_collective, collective) if c is not None))
+    if split is not None:
+        model.proposal_confidence = confidence.host_view
+        model.proposal_state = split
+    return model

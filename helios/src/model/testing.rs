@@ -179,7 +179,7 @@ pub fn metadata() -> PreparedContract {
                 }
                 graphs.push(GraphContract {
                     graph: format!("{kind:?}-{batch}-{width}"),
-                    kind: kind.into(),
+                    kind: kind.try_into().unwrap(),
                     inputs,
                     state: vec![
                         StateAccess {

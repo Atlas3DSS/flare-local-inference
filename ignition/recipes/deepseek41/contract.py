@@ -27,6 +27,10 @@ def prepare(signatures, buffers, pool, *, page_tokens, draft_lag, rows=1, embedd
     pending = c.state_view("request_pending_token", 8)
     graphs = c.graph_contracts(signatures, inputs, continuation=continuation, pending=pending,
         cursor=cursor, rows=rows, embedding_tables=embedding_tables)
+    for graph in graphs:
+        if graph["kind"] in (p.PROPOSAL, p.VERIFICATION):
+            graph["state"].extend(dict(view=c.state_view(name, tensor.numel() * tensor.element_size()),
+                access=p.READ_WRITE) for name, tensor in buffers.items() if name.startswith("proposal_"))
     return c.model_contract(vocabulary=VOCABULARY, input_vocabulary=INPUT_VOCABULARY,
         page_tokens=page_tokens, page_tables=[dict(buffer="page_tables", page_offset=0),
             *([dict(buffer="draft_page_tables", page_offset=1)] if "draft_page_tables" in buffers else [])],

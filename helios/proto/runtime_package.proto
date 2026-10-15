@@ -207,6 +207,8 @@ enum GraphOperation {
   VISION = 7;
   SPECULATIVE = 8;
   MIXED = 9;
+  PROPOSAL = 10;
+  VERIFICATION = 11;
 }
 message GraphContract {
   string graph = 1;
