@@ -28,7 +28,8 @@ has all three), and nvcc to build the noise kernel. No model, checkpoint or serv
 
 On each of four DGX Sparks (GB10, 48 SMs), 30 s per arm: unfenced, 0 of 100,000 quiet replays and
 3.5-3.7% of about 61,000 replays under noise, whole 64x128 tiles wrong in both GEMMs; fenced, 0 of
-about 61,000 under noise.
+about 61,000 under noise. On an RTX PRO 4000 Blackwell (SM120, 70 SMs), 30 s per arm: unfenced, 0 of
+100,000 quiet and 1,177 of 100,000 (1.2%) under noise; fenced, 0 of 100,000 under noise.
 """
 
 from __future__ import annotations
