@@ -33,7 +33,7 @@ class PreparedRingCommit:
     The complete backing tensor exposes mutations to forward compilation.
     """
 
-    def __init__(self, backing, offsets, rows, starts, *, token_capacity, window_tokens, record_bytes):
+    def __init__(self, backing, offsets, rows, starts, *, token_capacity, window_tokens, record_bytes, staging=None):
         if (backing.device.type != "cuda" or backing.dtype != torch.uint8 or backing.ndim != 2
                 or backing.stride(1) != 1 or backing.stride(0) < backing.shape[1]
                 or rows.ndim != 1 or rows.numel() == 0 or starts.shape != rows.shape
@@ -51,8 +51,12 @@ class PreparedRingCommit:
         self.backing, self.rows, self.starts = backing, rows, starts
         self.offsets = torch.tensor(offsets, dtype=torch.int64, device=backing.device)
         record_numeric_tensor(self.offsets)
-        self.staging = torch.zeros((len(offsets), rows.numel(), (window_tokens + token_capacity) * record_bytes),
-                                   dtype=torch.uint8, device=backing.device)
+        from ignition.preparation.scratch import bind_scratch
+
+        shape = (len(offsets), rows.numel(), (window_tokens + token_capacity) * record_bytes)
+        self.staging = bind_scratch({"staging": (shape, torch.uint8)}, device=backing.device,
+            workspace=None if staging is None else {"staging": staging})["staging"]
+        self.staging.zero_()
         self.window_tokens, self.record_bytes = window_tokens, record_bytes
         self.grid = (min(token_capacity, window_tokens), rows.numel(), len(offsets))
 

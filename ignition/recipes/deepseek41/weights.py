@@ -59,7 +59,7 @@ class ModelWeights:
 
     @classmethod
     def load(cls, manifest, device, *, shard, progress=None, dspark=False):
-        config = ModelConfig.load(manifest.snapshot)
+        config = ModelConfig.load(manifest.metadata_path)
         before = torch.cuda.memory_allocated(device)
         with DeepSeekWeightLoader(manifest, device, shard=shard, progress=progress, dspark=dspark) as loader:
             embedding, norm = loader.load_tensors(("embed.weight", "norm.weight"))
@@ -74,8 +74,30 @@ class DeepSeekWeightLoader(BlockFP8WeightLoader):
     def __init__(self, manifest, device, *, shard, progress=None, prefixes=None, dspark=False):
         self.dspark = dspark
         super().__init__(manifest, device, progress=progress, prefixes=prefixes)
-        self.config = ModelConfig.load(manifest.snapshot)
+        self.config = ModelConfig.load(manifest.metadata_path)
         self.shard = shard
+        self._expert_scale_scratch = {}
+
+    def load_experts(self, prefixes, interval):
+        text = self.config.text
+        compressed = getattr(self.manifest, "compressed_scales", frozenset())
+        encoded = [f"{prefix}.{projection}.scale" in compressed
+                   for prefix in prefixes for projection in ("w1", "w3", "w2")]
+        geometry = dict(hidden_size=text["hidden_size"], intermediate_size=text["moe_intermediate_size"],
+                        intermediate_range=interval, swiglu_limit=text["swiglu_limit"], scale_name="scale")
+        if not any(encoded):
+            return self.load_fp4_experts(prefixes, **geometry, format="mxfp4", activation_mode="a8",
+                                         projection_names=("w3", "w1", "w2"))
+        if not all(encoded):
+            raise ValueError("each routed expert group must use one complete MXFP4 scale encoding")
+        count, hidden, local = len(prefixes), text["hidden_size"], interval[1] - interval[0]
+        key = count, hidden, local
+        if key not in self._expert_scale_scratch:
+            # Routed layers execute serially; their dense shared branches do not use these scales.
+            self._expert_scale_scratch[key] = tuple(torch.empty(shape, dtype=torch.uint8, device=self.device)
+                for shape in ((count, hidden // 32, 2 * local), (count, local // 32, hidden)))
+        return self.load_mxfp4_csf_experts(prefixes, **geometry,
+            scale_scratch=self._expert_scale_scratch[key], projection_names=("w1", "w3", "w2"))
 
     def _selected_names(self):
         return {name for name in super()._selected_names()
@@ -115,11 +137,9 @@ class DeepSeekWeightLoader(BlockFP8WeightLoader):
             result["index_weights"] = self.load_tensor(attn + ".indexer.weights_proj.weight")
         ffn = prefix + ".ffn"
         interval = shard.partition(text["moe_intermediate_size"], alignment=32)
-        experts = self.load_fp4_experts(
+        experts = self.load_experts(
             [f"{ffn}.experts.{i}" for i in range(self.config.draft.experts if draft else text["n_routed_experts"])],
-            hidden_size=5120, intermediate_size=2304, format="mxfp4", activation_mode="a8",
-            intermediate_range=interval, swiglu_limit=text["swiglu_limit"],
-            projection_names=("w3", "w1", "w2"), scale_name="scale")
+            interval)
         shared = MLPWeights(self.load_linear_group((ffn + ".shared_experts.w1", ffn + ".shared_experts.w3"),
             row_ranges=(interval, interval)), self.load_linear(ffn + ".shared_experts.w2", columns=interval))
         routed = ExpertWeights(self.load_tensor(ffn + ".gate.weight"),

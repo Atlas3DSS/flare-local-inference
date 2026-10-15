@@ -32,6 +32,21 @@ def snapshot_directory(hub_cache: Path, checkpoint: Checkpoint) -> Path:
             / "snapshots" / checkpoint.revision)
 
 
+def _csf_container(snapshot: Path):
+    path = snapshot / "manifest.json"
+    if not path.is_file():
+        return None
+    value = json.loads(path.read_text())
+    return value if isinstance(value, dict) and value.get("schema") == "lil-mxfp4-csf-checkpoint/1" else None
+
+
+def _csf_stored_bytes(container, snapshot):
+    stored = container.get("compressed_weight_file_bytes")
+    if type(stored) is not int or stored <= 0:
+        raise UsageError(f"{snapshot} has an invalid compressed checkpoint size: {stored!r}")
+    return stored
+
+
 @dataclass(frozen=True)
 class ResolvedModel:
     """A recipe, the checkpoint it serves, and that checkpoint's local directory when the user named one."""
@@ -63,6 +78,10 @@ class ResolvedModel:
         """Check index metadata; recipes validate tensor storage and geometry."""
         snapshot = self.snapshot(hub_cache)
         try:
+            container = _csf_container(snapshot)
+            if container is not None:
+                _csf_stored_bytes(container, snapshot)
+                return
             index = json.loads((snapshot / "model.safetensors.index.json").read_text())
         except FileNotFoundError:
             return
@@ -76,6 +95,11 @@ class ResolvedModel:
         """Report whether the index and every tensor file it names are present."""
         snapshot = self.snapshot(hub_cache)
         try:
+            if _csf_container(snapshot) is not None:
+                from ignition.preparation.checkpoint import inspect_indexed_checkpoint
+
+                inspect_indexed_checkpoint(snapshot)
+                return True
             index = json.loads((snapshot / "model.safetensors.index.json").read_text())
             return all((snapshot / shard).is_file() for shard in set(index["weight_map"].values()))
         except (OSError, ValueError, KeyError, AttributeError, TypeError):
@@ -145,11 +169,17 @@ def resolve(model: str, hub_cache: Path | None = None) -> ResolvedModel:
     directory = Path(model).expanduser()
     if directory.is_dir():
         directory = directory.resolve()
-        recipe, qualified = _supporting(directory / "config.json", str(directory))
+        try:
+            container = _csf_container(directory)
+        except (OSError, ValueError) as error:
+            raise UsageError(f"{directory} has an unreadable checkpoint manifest: {error}") from error
+        metadata = directory if container is None else directory / "metadata"
+        recipe, qualified = _supporting(metadata / "config.json", str(directory))
         # The directory's path identifies its measurements on this host.
         revision = hashlib.sha256(str(directory).encode()).hexdigest()[:40]
         index = directory / "model.safetensors.index.json"
-        stored = _stored_bytes(index, str(directory)) if index.exists() else qualified.stored_bytes
+        stored = (_csf_stored_bytes(container, directory) if container is not None else
+                  _stored_bytes(index, str(directory)) if index.exists() else qualified.stored_bytes)
         return ResolvedModel(recipe, _replacement(qualified, str(directory), revision, stored), directory)
     repository, _, revision = model.partition("@")
     if "/" not in repository:

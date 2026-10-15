@@ -21,7 +21,7 @@ def config(layers):
 def test_checkpoint_selects_single_projection_format(tmp_path, monkeypatch, loader_type, algo, group, selected):
     prefix = "model.language_model.layers.0.linear_attn.out_proj"
     (tmp_path / "config.json").write_text(json.dumps(config({prefix: {"quant_algo": algo, "group_size": group}})))
-    loader = loader_type(SimpleNamespace(snapshot=tmp_path), "cuda:0")
+    loader = loader_type(SimpleNamespace(snapshot=tmp_path, metadata_path=tmp_path), "cuda:0")
     loader._session = object()
     monkeypatch.setattr(loader, "load_linear_group", lambda prefixes, **kwargs: (projection_group_format(loader.quantization, prefixes), kwargs))
     result, slices = loader.load_linear(prefix, rows=(0, 32), columns=(16, 144))
@@ -35,7 +35,7 @@ def test_nvfp4_fusion_rejected_before_tensor_access(tmp_path, formats):
     layers = {name: {"quant_algo": algo, "group_size": 32 if algo == "MXFP8" else 16}
               for name, algo in zip(("q", "k"), formats)}
     (tmp_path / "config.json").write_text(json.dumps(config(layers)))
-    loader = DirectWeightLoader(SimpleNamespace(snapshot=tmp_path), "cuda:0")
+    loader = DirectWeightLoader(SimpleNamespace(snapshot=tmp_path, metadata_path=tmp_path), "cuda:0")
     loader._session = object()
     with pytest.raises(ValueError, match="cannot fuse NVFP4.*only MoE expert w1/w3"):
         loader.load_linear_group(("q", "k"))
@@ -99,7 +99,7 @@ def test_mtp_experts_use_declared_format_and_mtp_scales(tmp_path, monkeypatch, a
 
     prefix = "mtp.layers.0.mlp.experts"
     (tmp_path / "config.json").write_text(json.dumps(config({prefix: {"quant_algo": algo, "group_size": group}})))
-    loader = MTPWeightLoader(SimpleNamespace(snapshot=tmp_path), "cpu", shard=TensorParallelShard(1, 2))
+    loader = MTPWeightLoader(SimpleNamespace(snapshot=tmp_path, metadata_path=tmp_path), "cpu", shard=TensorParallelShard(1, 2))
     loader._session = object()
     loader._sources = {f"{prefix}.{expert}.{proj}.{suffix}": torch.tensor(value)
         for expert, value in ((7, .5), (4, .25))

@@ -14,9 +14,33 @@ from .speculation import (
 from .state import save_hidden
 
 
+def prepare_sampling_scratch(batch, width, vocab, device):
+    """Share sequential shapes while keeping target probabilities live through verification.
+
+    Proposal probabilities must be copied to retained storage before the next
+    proposal position. Target filtering and verification have separate workspaces
+    because verification still reads the filtered target distribution.
+    """
+    from ignition.preparation.scratch import bind_scratch
+
+    return {
+        "proposal": bind_scratch(PreparedDraftDistribution.scratch_layout(batch, 1, vocab), device=device),
+        "target": bind_scratch(PreparedSpeculativeDistributions.scratch_layout(batch, width, vocab), device=device),
+        "verify": bind_scratch(PreparedStochasticVerification.scratch_layout(batch, width, vocab), device=device),
+    }
+
+
 class PreparedParallelDraftRound:
-    def __init__(self, owner, batch, width, name):
+    """Prepare a complete speculative round with caller-owned serialized storage."""
+
+    @staticmethod
+    def storage_layout(batch, width, vocab):
+        return dict(probabilities=((batch, width - 1, vocab), torch.float32),
+                    logits=((batch, 1, vocab), torch.float32))
+
+    def __init__(self, owner, batch, width, name, *, sampling_scratch=None, round_storage=None):
         self.owner, self.batch, self.width = owner, batch, width
+        self.sampling_scratch = {} if sampling_scratch is None else sampling_scratch
         o, b, w = owner, batch, width
         device, blocks = o.pool.backing.device, o.inputs.page_tables.shape[1]
         self.rows = torch.arange(b, device=device)
@@ -97,10 +121,13 @@ class PreparedParallelDraftRound:
         self.active = torch.zeros(b, dtype=torch.bool, device=device)
         self.candidates = torch.zeros((b, w), dtype=torch.int64, device=device)
         self.drafts = torch.zeros((b, w - 1), dtype=torch.int64, device=device)
-        self.logits = torch.zeros((b, 1, o.requests.vocab_size), dtype=torch.float32, device=device)
-        self.probabilities = torch.zeros(
-            (b, w - 1, o.requests.vocab_size), dtype=torch.float32, device=device
-        )
+        from ignition.preparation.scratch import bind_scratch
+
+        retained = bind_scratch(self.storage_layout(b, w, o.requests.vocab_size),
+                                device=device, workspace=round_storage)
+        self.logits, self.probabilities = retained["logits"], retained["probabilities"]
+        for tensor in retained.values():
+            tensor.zero_()
         self.valid = torch.zeros((b, w - 1), dtype=torch.bool, device=device)
         self.seed, self.offset, self.base_offset, self.sampled = (
             torch.zeros_like(self.before) for _ in range(4)
@@ -113,7 +140,8 @@ class PreparedParallelDraftRound:
         o, b, w = self.owner, self.batch, self.width
         args = (o.requests, o.inputs.row_slot_ids[:b], o.inputs.row_generations[:b], o.inputs.live_rows)
         target = PreparedSpeculativeDistributions(
-            self.decoder.scratch.logits.view(b, w, -1), *args, self.drafts
+            self.decoder.scratch.logits.view(b, w, -1), *args, self.drafts,
+            workspace=self.sampling_scratch.get("target")
         )
         proposals = tuple(
             PreparedDraftDistribution(
@@ -124,6 +152,7 @@ class PreparedParallelDraftRound:
                 seed=self.seed,
                 offset=self.offset,
                 sampled=self.sampled,
+                workspace=self.sampling_scratch.get("proposal"),
             )
             for i in range(w - 1)
         )
@@ -138,6 +167,7 @@ class PreparedParallelDraftRound:
             rng=o.rng,
             draft_valid=self.valid,
             target_valid=target.valid,
+            workspace=self.sampling_scratch.get("verify"),
             token_limits=o.inputs.query_lengths[:b],
         )
         verify.prepare()

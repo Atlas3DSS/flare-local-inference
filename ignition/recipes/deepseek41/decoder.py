@@ -16,7 +16,7 @@ from ignition.components.vocabulary import PreparedVocabularyProjection
 
 from .attention import AttentionScratch, PreparedAttention, PreparedGlobalKV, Rotary, normalize
 from .decoder_prefill import PreparedDecoderSuffix
-from .engram import PreparedEngram, PreparedTableRequests
+from .engram import EngramScratch, PreparedEngram, PreparedTableRequests
 
 
 @dataclass(frozen=True)
@@ -24,6 +24,7 @@ class Scratch:
     embedding: torch.Tensor
     residual: torch.Tensor
     engram_residual: torch.Tensor
+    engram: EngramScratch
     pre_mix: torch.Tensor
     attn_mix: torch.Tensor
     attention_hc: MHCScratch
@@ -54,7 +55,7 @@ class Scratch:
     def allocate(cls, tokens, samples, world, device, *, experts=384, top_k=6):
         def zeros(*shape, dtype=torch.bfloat16):
             return torch.zeros(shape, dtype=dtype, device=device)
-        return cls(zeros(tokens, 5120), zeros(tokens, 4, 5120), zeros(tokens, 4, 5120),
+        return cls(zeros(tokens, 5120), zeros(tokens, 4, 5120), zeros(tokens, 4, 5120), EngramScratch.allocate(tokens, device),
             zeros(tokens, 4, dtype=torch.float32), zeros(tokens, 4, dtype=torch.float32),
             MHCScratch.allocate(tokens, 5120, device), MHCScratch.allocate(tokens, 5120, device),
             AttentionScratch.allocate(tokens, world, device), zeros(tokens, 5120),
@@ -109,7 +110,7 @@ class PreparedLayer:
         if weights.engram is not None:
             self.engram = PreparedEngram(index, weights.engram, tables, s.residual, s.engram_residual,
                 metadata, pool,
-                session=session, name=name + ".engram", workspace=workspace)
+                scratch=s.engram, session=session, name=name + ".engram", workspace=workspace)
         source = s.engram_residual if self.engram is not None else s.residual
         options = dict(rms_eps=text["rms_norm_eps"], norm_eps=text["rms_norm_eps"], hc_eps=text["hc_eps"],
                        sinkhorn_iters=text["hc_sinkhorn_iters"])
@@ -178,7 +179,8 @@ class PreparedLayer:
 
 class PreparedDecoder:
     def __init__(self, weights, tables, scratch, metadata, pool, *, mode, runtime,
-                 vocabulary_runtime, coordinator, session, name, workspace):
+                 vocabulary_runtime, coordinator, session, name, workspace,
+                 window_staging=None, suffix_scratch=None):
         self.weights, self.scratch, self.metadata, self.pool = weights, scratch, metadata, pool
         self.mode = mode
         self.table_requests = PreparedTableRequests(tables, metadata, pool, session=session, name=name + ".table_requests")
@@ -190,8 +192,9 @@ class PreparedDecoder:
                 raise ValueError("decoder suffix replay requires Engram and compressed KV sources before its boundary")
             self.packing = PreparedDecoderSuffix(metadata)
         self.output_metadata = metadata if self.packing is None else self.packing.metadata
-        self.output_scratch = scratch if self.packing is None else Scratch.allocate(
-            128, scratch.hidden.shape[0], weights.shard.world_size, scratch.embedding.device)
+        self.output_scratch = scratch if self.packing is None else (
+            suffix_scratch if suffix_scratch is not None else Scratch.allocate(
+                128, scratch.hidden.shape[0], weights.shard.world_size, scratch.embedding.device))
         self.aux_layers = () if weights.draft is None else weights.config.draft.target_layers
         if self.packing is not None and any(layer <= decoder_start for layer in self.aux_layers):
             raise ValueError("bounded decoder feedback requires draft target layers after its global-KV boundary")
@@ -206,7 +209,7 @@ class PreparedDecoder:
                 [pool.layout.region(f"layer{index}.window").offset for index in range(len(weights.layers))],
                 metadata.state_rows, metadata.starts,
                 token_capacity=metadata.token_ids.numel() // metadata.starts.numel(),
-                window_tokens=128, record_bytes=528)
+                window_tokens=128, record_bytes=528, staging=window_staging)
         self.layers, carry = [], False
         for index, layer in enumerate(weights.layers):
             boundary = replay_start = None

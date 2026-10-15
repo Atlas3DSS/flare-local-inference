@@ -116,10 +116,13 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
     torch.cuda.set_device(device)
     with phase(progress, "Inspect checkpoint"):
         manifest = inspect_indexed_checkpoint(snapshot)
+    metadata_path = manifest.metadata_path
     transient = contextlib.ExitStack()
     transient.enter_context(package_storage.transient())
     weights = ModelWeights.load(manifest, device, shard=shard, progress=progress, dspark=config.dspark)
     release_unused()
+    if progress is not None:
+        progress(f"Resident model tensors: {weights.allocated_bytes / (1 << 30):.3f} GiB per rank")
     sequence = torch.zeros(1, dtype=torch.int64, device=device)
     tables = Tables.prepare(manifest, weights.config, tokens=max(config.prefill_chunk_size, config.decode_tokens),
         device=device, sequence=sequence, host_allocator=package_storage.host_allocate, progress=progress)
@@ -152,7 +155,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
             max_rows=config.decode_tokens, columns=129280, ipc=ipc)
         markov_collective = (create_all_gather_runtime(group, device,
             max_rows=slots, columns=2 * 129280, ipc=ipc) if config.dspark else None)
-        identity = hashlib.sha256(json.dumps({"config": json.loads((snapshot / "config.json").read_text()),
+        identity = hashlib.sha256(json.dumps({"config": json.loads((metadata_path / "config.json").read_text()),
             "headers": [s.header_sha256 for s in manifest.shards], "world_size": shard.world_size,
             "contract": "deepseek41.graph-inputs.v1"}, sort_keys=True).encode()).hexdigest()
         session = RecordedPreparationSession(device=device, checkpoint=identity,
@@ -164,6 +167,10 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         session.register_scratch(arena)
         prefill_storage = Scratch.allocate(config.prefill_chunk_size, 1, shard.world_size, device)
         decoder_storage = Scratch.allocate(config.decode_tokens, config.decode_tokens, shard.world_size, device)
+        suffix_storage = Scratch.allocate(128, 1, shard.world_size, device)
+        window_staging = (torch.empty((len(weights.layers), slots, (128 + max(config.speculative_widths)) * 528),
+                                     dtype=torch.uint8, device=device) if config.dspark else None)
+        decoder_factory = partial(PreparedDecoder, window_staging=window_staging, suffix_scratch=suffix_storage)
         buffers = dict(inputs.buffers(), **tables.buffers(), **commands.buffers(), **{
             name: getattr(admission, name) for name in admission.__dataclass_fields__},
             state_pool=pool.backing, memory_capacity=pool.memory_capacity,
@@ -179,16 +186,22 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                 session=session, workspace=arena,
                 runtime=collective, vocabulary_runtime=vocabulary_collective,
                 markov_runtime=markov_collective, coordinator=coordinator,
-                forwards=DSparkForwards(PreparedDecoder,Scratch,_CONTEXT,PreparedDraft,PreparedMarkov))
+                forwards=DSparkForwards(decoder_factory,Scratch,_CONTEXT,PreparedDraft,PreparedMarkov))
 
     del manifest
     modes = (True, False) if config.dspark else (False,)
     count = (len(modes) * (len(config.prefill_capacities) + 4 * len(config.batch_capacities))
              + len(config.speculative_shapes) + len(config.batch_capacities))
+    catalog_bytes = {}
+    catalog_previous = torch.cuda.memory_allocated(device)
     with phase(progress, "Construct graph catalog", total=count) as stage:
         def add(name, forward, kind, rows, tokens, fields, *, enabled=None):
+            nonlocal catalog_previous
             forwards[name] = forward
             signatures[name] = GraphSignature(kind, rows, tokens, tuple(fields), speculation_enabled=enabled)
+            allocated = torch.cuda.memory_allocated(device)
+            catalog_bytes[kind] = catalog_bytes.get(kind, 0) + allocated - catalog_previous
+            catalog_previous = allocated
             stage.update(advance=1)
 
         forward_inputs = (*inputs.buffers(), "sampling_grammar_mask")
@@ -203,7 +216,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                     metadata[name] = Metadata.allocate(capacity, rows, blocks, device)
                     storage = prefill_storage if mode == "prefill" else decoder_storage
                     scratch[name] = storage.rows(capacity, rows)
-                    decoder = PreparedDecoder(mode_weights, tables, scratch[name], metadata[name], pool,
+                    decoder = decoder_factory(mode_weights, tables, scratch[name], metadata[name], pool,
                         mode=mode, runtime=prefill_collective if mode == "prefill" and capacity >= 128 else collective,
                         vocabulary_runtime=vocabulary_collective,
                         coordinator=coordinator, session=session, name=name, workspace=arena)
@@ -212,11 +225,19 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                         coordinator=coordinator, session=session, name=name + ".generation", workspace=arena, context_factory=_CONTEXT)
                     add(name, forward, mode, rows, capacity if mode == "prefill" else 1, forward_inputs, enabled=enabled)
         if speculation is not None:
-            from ignition.components.parallel_draft import PreparedParallelDraftRound
+            from ignition.components.parallel_draft import PreparedParallelDraftRound, prepare_sampling_scratch
+            from ignition.preparation.scratch import bind_scratch
+
+            sampling_scratch = prepare_sampling_scratch(slots, max(config.speculative_widths), requests.vocab_size, device)
+            # Each complete round consumes its proposals before another graph can reuse their storage.
+            round_storage = bind_scratch(
+                PreparedParallelDraftRound.storage_layout(slots, max(config.speculative_widths), requests.vocab_size),
+                device=device)
 
             for batch, width in config.speculative_shapes:
                 name = f"speculative{batch}x{width}"
-                forward = PreparedParallelDraftRound(speculation, batch, width, name)
+                forward = PreparedParallelDraftRound(speculation, batch, width, name,
+                    sampling_scratch=sampling_scratch, round_storage=round_storage)
                 forward.prepare()
                 add(name, forward, "speculative", batch, width, forward_inputs, enabled=True)
         row_inputs = ("request_state_rows", "row_slot_ids", "row_generations", "live_rows")
@@ -239,6 +260,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
     if progress is not None:
         progress(f"before tuning: {torch.cuda.memory_allocated(device) >> 20} MiB allocated, "
                  f"{torch.cuda.mem_get_info(device)[0] >> 20} MiB free")
+        progress(f"Graph operand allocation by operation: {catalog_bytes}")
     with phase(progress, "Prepare and tune kernels") as stage, transient:
         tuning = session.tune(show_progress=progress is not None and rank == 0, console=stage.console)
     stream, graph_pool = torch.cuda.Stream(device=device), package_storage.graph_pool.id
@@ -273,16 +295,17 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
     free, total = torch.cuda.mem_get_info(device)
     frontend = Path(__file__).parent / "assets"
     assets = {role: {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
-        for role, path in (("tokenizer", snapshot / "tokenizer.json"),
+        for role, path in (("tokenizer", metadata_path / "tokenizer.json"),
             ("chat_template", frontend / "chat_template.jinja"))}
     buffers["request_pending_token"] = requests.pending_token
     server_config = {"identity": identity, "model_id": snapshot.name,
         "max_sequence_tokens": config.context, "prefill_chunk_size": config.prefill_chunk_size,
         "pages": pages, "state_rows": state_rows, "snapshots": snapshots, "page_tokens": PAGE_TOKENS,
-        "frontend": prepare_frontend(snapshot, eos_token_ids=[1]),
+        "frontend": prepare_frontend(metadata_path, eos_token_ids=[1]),
         "sampling_defaults": RECIPE.sampling_defaults.as_dict(), "assets": assets,
         "model_contract": prepare_contract(signatures, buffers, pool, page_tokens=PAGE_TOKENS, draft_lag=0 if config.dspark else None, rows=None, embedding_tables=range(len(tables.sources)))}
     memory = {"rank": rank, "world_size": shard.world_size, "device": config.devices[rank],
+        "catalog_operand_bytes": catalog_bytes,
         "weights_bytes": weights.allocated_bytes, "mapped_host_bytes": 0,
         "offloaded_bytes": sum(source.nbytes for pair in tables.sources.values() for source in pair),
         "continuation_bytes": pool.backing.nbytes, "state_rows": state_rows,

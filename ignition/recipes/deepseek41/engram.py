@@ -28,7 +28,7 @@ class Tables:
     def prepare(cls, manifest, config, *, tokens, device, sequence, host_allocator, progress=None):
         from transformers import PreTrainedTokenizerFast
 
-        tokenizer = PreTrainedTokenizerFast(tokenizer_file=str(manifest.snapshot / "tokenizer.json"))
+        tokenizer = PreTrainedTokenizerFast(tokenizer_file=str(manifest.metadata_path / "tokenizer.json"))
         token_map, size = engram.build_compressed_token_map(tokenizer)
         text = config.text
         if size != text["engram_compressed_vocab_size"]:
@@ -131,13 +131,31 @@ class PreparedTableRequests:
         save_hidden(history, self.pool.region("engram_history"), m.state_rows, counts > 0)
 
 
+@dataclass(frozen=True)
+class EngramScratch:
+    """Intermediate lookup and projection storage for serialized Engram layers."""
+
+    mask: torch.Tensor
+    gathered: torch.Tensor
+    projected: torch.Tensor
+
+    @classmethod
+    def allocate(cls, tokens, device):
+        return cls(torch.zeros(tokens, dtype=torch.bool, device=device),
+                   torch.zeros((tokens, 6144), dtype=torch.bfloat16, device=device),
+                   torch.zeros((tokens, 25600), dtype=torch.bfloat16, device=device))
+
+
 class PreparedEngram:
-    def __init__(self, layer, weights, tables, source, output, metadata, pool, *, session, name, workspace):
+    def __init__(self, layer, weights, tables, source, output, metadata, pool, *, scratch, session, name, workspace):
         self.source, self.output, self.metadata, self.pool = source, output, metadata, pool
         tokens, device = metadata.token_ids.numel(), source.device
-        self.mask = torch.zeros(tokens, dtype=torch.bool, device=device)
-        self.gathered = torch.zeros((tokens, 6144), dtype=torch.bfloat16, device=device)
-        self.projected = torch.zeros((tokens, 25600), dtype=torch.bfloat16, device=device)
+        self.mask, self.gathered, self.projected = scratch.mask, scratch.gathered, scratch.projected
+        for tensor, shape, dtype in ((self.mask, (tokens,), torch.bool),
+                (self.gathered, (tokens, 6144), torch.bfloat16),
+                (self.projected, (tokens, 25600), torch.bfloat16)):
+            if tensor.shape != shape or tensor.dtype != dtype or tensor.device != device or not tensor.is_contiguous():
+                raise ValueError("Engram scratch must match the contiguous lookup and projection geometry")
         self.lookup = PreparedEngramLookup(tables.inputs[layer], self.gathered, metadata.live_counts[:1],
             layer=layer, token_map=tables.token_map, geometry=tables.geometry,
             session=session, name=name + ".lookup")

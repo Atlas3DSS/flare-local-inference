@@ -35,11 +35,13 @@ def test_compiled_ring_commits_share_state_and_preserve_producer_consumer_lifeti
             vectors.append(view)
         rows, starts, counts = vectors
     operations, sources, functions, graphs = {}, {}, {}, {}
+    staging = torch.empty((regions, batch, (window + width) * record), dtype=torch.uint8, device=device)
     worker = None
     try:
         for capacity in (max(1, width // 2), width):
             operation = PreparedRingCommit(backing, offsets, rows, starts, token_capacity=capacity,
-                                           window_tokens=window, record_bytes=record)
+                                           window_tokens=window, record_bytes=record, staging=staging)
+            assert operation.staging.data_ptr() == staging.data_ptr()
             source = torch.randint(0, 256, operation.staging.shape, dtype=torch.uint8, device=device)
 
             def forward(operation=operation, source=source):

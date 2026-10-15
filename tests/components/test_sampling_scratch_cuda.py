@@ -19,26 +19,28 @@ pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
 
 
 @pytest.mark.parametrize("compiled", [False, True])
-def test_native_shared_sampling_survives_shape_switches_and_sequential_proposals(compiled):
+@pytest.mark.parametrize("vocab,batch_limit", [(10000, 4), (129280, 4), (129280, 32)])
+def test_native_shared_sampling_survives_shape_switches_and_sequential_proposals(compiled, vocab, batch_limit):
     assert os.environ.get("CUDA_VISIBLE_DEVICES")
-    vocab = 10000
-    state = DeviceRequestState.allocate("cuda:0", vocab_size=vocab, capacity=4)
-    for slot in range(4):
+    width_limit = 8 if vocab == 129280 else 6
+    state = DeviceRequestState.allocate("cuda:0", vocab_size=vocab, capacity=batch_limit)
+    for slot in range(batch_limit):
         state.admit(slot, RequestAdmission(generation=7, seed=93 + slot,
-            max_new_tokens=100, temperature=.8, top_k=20, top_p=.9,
+            max_new_tokens=100, temperature=1. if vocab == 129280 else .8,
+            top_k=0 if vocab == 129280 else 20, top_p=.95 if vocab == 129280 else .9,
             repetition_penalty=1.1, presence_penalty=.2, eos_token_ids=()), [1, 2])
     state.status[1] = 0
-    slots = torch.tensor([3, 0, 2, 1], dtype=torch.int32, device="cuda:0")
-    epochs = torch.tensor([7, 7, 99, 7], dtype=torch.int64, device="cuda:0")
-    live = torch.tensor([4], dtype=torch.int32, device="cuda:0")
+    slots = torch.tensor([3, 0, 2, 1, *range(4, batch_limit)], dtype=torch.int32, device="cuda:0")
+    epochs = torch.tensor([7, 7, 99, 7, *([7] * (batch_limit - 4))], dtype=torch.int64, device="cuda:0")
+    live = torch.tensor([batch_limit], dtype=torch.int32, device="cuda:0")
     workspaces = dict(
-        proposal=bind_scratch(PreparedDraftDistribution.scratch_layout(4, 1, vocab), device="cuda:0"),
-        target=bind_scratch(PreparedSpeculativeDistributions.scratch_layout(4, 6, vocab), device="cuda:0"),
-        verify=bind_scratch(PreparedStochasticVerification.scratch_layout(4, 6, vocab), device="cuda:0"))
-    shared_drafts = torch.empty(4 * 5 * vocab, device="cuda:0")
+        proposal=bind_scratch(PreparedDraftDistribution.scratch_layout(batch_limit, 1, vocab), device="cuda:0"),
+        target=bind_scratch(PreparedSpeculativeDistributions.scratch_layout(batch_limit, width_limit, vocab), device="cuda:0"),
+        verify=bind_scratch(PreparedStochasticVerification.scratch_layout(batch_limit, width_limit, vocab), device="cuda:0"))
+    shared_drafts = torch.empty(batch_limit * (width_limit - 1) * vocab, device="cuda:0")
     owners, graphs = [], {}
     generator = torch.Generator().manual_seed(17)
-    for batch, width in ((4, 6), (1, 1), (2, 3)):
+    for batch, width in ((batch_limit, width_limit), (1, 1), (batch_limit // 2, 3), (1, width_limit)):
         logits = torch.randn((batch, width, vocab), generator=generator).cuda()
         proposal_logits = torch.randn((batch, 1, vocab), generator=generator).cuda()
         for shared in (False, True):
@@ -57,7 +59,7 @@ def test_native_shared_sampling_survives_shape_switches_and_sequential_proposals
                 workspace=workspaces["target"] if shared else None)
             target.prepare()
             verify = PreparedStochasticVerification(probabilities, ids, target.probabilities, state,
-                slots[:batch], epochs[:batch], live, rng=SpeculativeRngState.allocate("cuda:0", capacity=4),
+                slots[:batch], epochs[:batch], live, rng=SpeculativeRngState.allocate("cuda:0", capacity=batch_limit),
                 draft_valid=valid, target_valid=target.valid,
                 workspace=workspaces["verify"] if shared else None)
             verify.prepare()
@@ -86,7 +88,7 @@ def test_native_shared_sampling_survives_shape_switches_and_sequential_proposals
     bundle = PreparedGraphBundle(device=0, graphs=graphs, buffers={}, resources=(owners, state, workspaces))
     worker = bundle.start_worker()
     try:
-        for pair in (0, 1, 0, 2, 1, 2, 0):
+        for pair in (0, 3, 1, 0, 2, 1, 2, 3, 0):
             results = []
             for shared in (False, True):
                 index = pair * 2 + int(shared)
