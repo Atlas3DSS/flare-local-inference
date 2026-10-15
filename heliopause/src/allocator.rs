@@ -14,8 +14,10 @@ fn invalid(message: impl Into<String>) -> Error {
     Error::execution(ExecutionError::Manifest, message)
 }
 
+// PyTorch's CPU allocator is mimalloc, which places its 1 GiB arenas at random addresses
+// in 2-6 TiB; a peer rank allocates CPU tensors before reserving these ranges.
 #[cfg(target_os = "linux")]
-const BASE: u64 = 0x20000000000;
+const BASE: u64 = 0x80000000000;
 #[cfg(target_os = "windows")]
 const BASE: u64 = 0x40000000000;
 const EXTENT: usize = 1 << 40;
