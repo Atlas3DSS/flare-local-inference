@@ -1,6 +1,7 @@
 """The `ignition` preparation command line and development package launcher."""
 
 import argparse
+import re
 from pathlib import Path
 
 from ignition.errors import FlareError
@@ -41,6 +42,21 @@ def _parser() -> argparse.ArgumentParser:
                          help="remembered execution trust passed to Flare (default: ~/.config/flare/trust.toml)")
     running.add_argument("--verify-weights", action="store_true",
                          help="verify stored allocation and table contents when Flare loads the package")
+    from .config import parse_memory_limit
+
+    def memory_limit(value):
+        try:
+            return parse_memory_limit(value)
+        except FlareError as error:
+            raise argparse.ArgumentTypeError(str(error)) from error
+
+    # argparse normally recognizes only negative numbers as values. Signed sizes are values
+    # too, so `--memory-limit -30G` accepts the same syntax as `--memory-limit=-30G`.
+    running._negative_number_matcher = re.compile(r"^-\d+(?:\.\d+)?(?:[KMGT](?:iB|B)?)?$", re.IGNORECASE)
+    running.add_argument("--kv-cache-limit", choices=("concurrency", "context", "memory"), default="memory",
+                         help="limit shared KV storage by context times concurrency, one context, or available memory (default: memory)")
+    running.add_argument("--memory-limit", type=memory_limit, metavar="LIMIT",
+                         help="per-GPU serving memory: occupied size (30G), free reserve (-30G), or total fraction (0.8)")
     serving = command("serve", serve.serve, "prepare in this process and serve over HTTP, with peer ranks on other hosts")
     for listening in (running, serving):
         listening.add_argument("--host", metavar="ADDR", help="listening address (default: server.host, else 127.0.0.1)")

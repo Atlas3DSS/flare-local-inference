@@ -5,6 +5,7 @@ resolved setting carries the source that supplied it.
 """
 
 import re
+import math
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,6 +43,24 @@ def parse_size(text: str, what: str = "memory size") -> int:
     if match is None:
         raise UsageError(f'{what} {text!r} must be a number with an optional K, M, G, or T suffix, such as "16G"')
     return int(float(match[1]) * (1 << 10 * " KMGT".index((match[2] or " ").upper())))
+
+
+def parse_memory_limit(text: str) -> str:
+    """Validate a native serving limit without importing preparation dependencies."""
+    value = text.strip()
+    number = value.removeprefix("-").strip()
+    size = _SIZE.fullmatch(number)
+    if size and size[2] and size[1].isascii():
+        amount = float(size[1]) * (1 << 10 * " KMGT".index(size[2].upper()))
+        valid = math.isfinite(amount) and 1 <= amount < 1 << 64
+    else:
+        valid = False
+        if not value.startswith("-") and re.fullmatch(r"(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)", value):
+            valid = 0 < float(value) <= 1
+    if not valid:
+        raise UsageError("memory limit must be a positive size (30G), a reserve (-30G),"
+                         " or a fraction greater than zero and at most one (0.8)")
+    return value
 
 
 @dataclass(frozen=True)

@@ -4,7 +4,7 @@ use clap::{Args, Parser, Subcommand, builder::PossibleValuesParser, builder::Typ
 use flare_helios::{
     engram::Storage,
     offload::{PrefixCacheOffload, Transport, parse_size},
-    runtime_package::LoadOptions,
+    runtime_package::{KvCacheLimit, LoadOptions, MemoryLimit},
 };
 
 #[derive(Debug, Parser)]
@@ -141,6 +141,31 @@ pub struct Run {
         help_heading = "Serving options")]
     pub gpus: Vec<i32>,
 
+    /// Limit KV capacity by available memory, one context, or context times concurrency.
+    #[arg(
+        long,
+        default_value = "memory",
+        value_name = "MODE",
+        help_heading = "Serving options",
+        value_parser = PossibleValuesParser::new(["concurrency", "context", "memory"])
+            .map(|value| match value.as_str() {
+                "concurrency" => KvCacheLimit::Concurrency,
+                "context" => KvCacheLimit::Context,
+                _ => KvCacheLimit::Memory,
+            })
+    )]
+    pub kv_cache_limit: KvCacheLimit,
+
+    /// Per-GPU serving memory: occupied size (30G), free reserve (-30G), or total fraction (0.8).
+    /// Omitted: package serving reserve.
+    #[arg(
+        long,
+        allow_hyphen_values = true,
+        value_name = "LIMIT",
+        help_heading = "Serving options"
+    )]
+    pub memory_limit: Option<MemoryLimit>,
+
     /// Peer hosts of a multi-host package, ranks 1 onward, each running `flare agent`. Flare sends
     /// the package and itself to hosts that lack them, starts their ranks with these serving
     /// options, and serves as rank zero.
@@ -228,6 +253,12 @@ impl Run {
     /// graphs and capacities on every host.
     pub fn rank_options(&self) -> Vec<String> {
         let mut options = Vec::new();
+        if self.kv_cache_limit != KvCacheLimit::Memory {
+            options.extend(["--kv-cache-limit".into(), self.kv_cache_limit.to_string()]);
+        }
+        if let Some(limit) = self.memory_limit {
+            options.push(format!("--memory-limit={limit}"));
+        }
         if self.verify_weights {
             options.push("--verify-weights".into());
         }
@@ -265,6 +296,8 @@ impl Run {
 
     pub fn load_options(&self) -> LoadOptions {
         LoadOptions {
+            kv_cache_limit: self.kv_cache_limit,
+            memory_limit: self.memory_limit,
             embedding_table_storage: self.embedding_table_storage,
             embedding_table_cache_bytes: self.embedding_table_cache_size,
             max_concurrency: self.max_concurrency.map(NonZeroUsize::get),
@@ -308,6 +341,8 @@ mod tests {
         assert_eq!(options.embedding_table_storage, None);
         assert_eq!(options.embedding_table_cache_bytes, 0);
         assert_eq!(options.max_concurrency, None);
+        assert_eq!(options.kv_cache_limit, KvCacheLimit::Memory);
+        assert_eq!(options.memory_limit, None);
         assert_eq!(options.mtp_draft_tokens, None);
         assert_eq!(options.adaptive_verification, None);
         assert_eq!(options.prefix_cache, PrefixCacheOffload::default());
@@ -392,6 +427,53 @@ mod tests {
         assert_eq!(
             args.rank_options(),
             ["--embedding-table-cache-size", "1073741824"]
+        );
+    }
+
+    #[test]
+    fn memory_limits_accept_signed_values_and_reach_every_rank() {
+        for value in ["30g", "-30g", "0.8"] {
+            for flags in [
+                vec!["--memory-limit".to_owned(), value.to_owned()],
+                vec![format!("--memory-limit={value}")],
+            ] {
+                let mut arguments = vec![
+                    "flare",
+                    "run",
+                    "model.safetensors",
+                    "--kv-cache-limit",
+                    "context",
+                ];
+                arguments.extend(flags.iter().map(String::as_str));
+                let args = run(&arguments);
+                assert_eq!(args.load_options().kv_cache_limit, KvCacheLimit::Context);
+                assert_eq!(
+                    args.load_options().memory_limit,
+                    Some(value.parse().unwrap())
+                );
+                let forwarded = args.rank_options();
+                let mut peer = vec!["flare", "run", "model.safetensors"];
+                peer.extend(forwarded.iter().map(String::as_str));
+                let peer = run(&peer).load_options();
+                assert_eq!(peer.memory_limit, args.load_options().memory_limit);
+                assert_eq!(peer.kv_cache_limit, KvCacheLimit::Context);
+            }
+        }
+        for value in ["0", "-0.8", "2", "NaN", "1e-1", "-0G"] {
+            assert!(
+                Cli::try_parse_from(["flare", "run", "model.safetensors", "--memory-limit", value])
+                    .is_err()
+            );
+        }
+        assert!(
+            Cli::try_parse_from([
+                "flare",
+                "run",
+                "model.safetensors",
+                "--kv-cache-limit",
+                "unknown"
+            ])
+            .is_err()
         );
     }
 }

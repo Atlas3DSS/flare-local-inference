@@ -328,6 +328,16 @@ the declared continuation extent from `preparation_state_rows` and
 full virtual extents in the package. Helios
 sizes its caches after uploading the selected graphs, keeping a separate 64 MiB
 driver margin.
+At package load time, `flare run --kv-cache-limit context` bounds the shared
+KV pool by one prepared context; `concurrency` uses one context per selected
+active request, and the default `memory` fills the available budget. Runtime
+`--memory-limit` accepts an occupied size (`30G`), free reserve (`-30G`), or
+fraction of total device memory (`0.8`). It replaces the exported serving
+reserve and includes model resources as well as caches. `ignition run` forwards
+both flags without selecting a different prepared package. See
+[runtime memory limits](cli-design.md#runtime-memory-limits) for rounding,
+minimum capacities, and integrated-memory accounting. Preparation retains its
+own existing memory policy.
 Ignition captures power-of-two
 batch capacities through the concurrency limit
 and width one at every bucket. Wider speculative and verification shapes require

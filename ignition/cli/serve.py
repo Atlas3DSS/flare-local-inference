@@ -106,6 +106,10 @@ def run(args) -> int:
     environment.apply(configuration, plan.gpus)
     command = [str(runtime), "run", str(package), "--gpus", ",".join(str(rank) for rank in range(plan.world_size)), "--bind", bind]
     command += configuration.prefix_cache_flags()
+    if args.kv_cache_limit != "memory":
+        command += ["--kv-cache-limit", args.kv_cache_limit]
+    if args.memory_limit is not None:
+        command += [f"--memory-limit={args.memory_limit}"]
     for path in args.publisher_keys:
         command += ["--publisher-keys", str(path)]
     if publisher.development:

@@ -153,6 +153,19 @@ def test_run_exports_then_replaces_python_with_flare_and_reuses_the_package(host
     assert host["exports"] == 1
 
 
+def test_runtime_memory_flags_are_forwarded_without_preparing_another_package(host):
+    assert run("qwen3.8-flash") == 0
+    original = host["exec"][2]
+    assert not any(flag.startswith(("--memory-limit", "--kv-cache-limit")) for flag in host["exec"])
+    for limit, mode in [("30G", "concurrency"), ("-30G", "context"), ("0.8", "memory")]:
+        assert run("qwen3.8-flash", "--memory-limit", limit, "--kv-cache-limit", mode) == 0
+        assert host["exec"][2] == original and host["exports"] == 1
+        assert f"--memory-limit={limit}" in host["exec"]
+        if mode != "memory":
+            assert host["exec"][host["exec"].index("--kv-cache-limit") + 1] == mode
+        assert host["options"]["reserve_bytes"] == 0
+
+
 def test_diagnostic_serving_retains_storage_until_native_shutdown(host, monkeypatch):
     closed = []
 
