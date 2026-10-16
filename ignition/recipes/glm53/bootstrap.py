@@ -318,7 +318,7 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
             "contract": "glm5next.graph-inputs.v2"}, sort_keys=True).encode()).hexdigest()
         session = RecordedPreparationSession(device=device, checkpoint=identity, workload_schema="glm-text-stack-tp-v1",
             numerical_policy="default", coordinator=coordinator,
-            headroom_bytes=config.headroom_bytes)
+            headroom_bytes=config.headroom_bytes, benchmark_storage=package_storage)
         session.__enter__()
         register_benchmark_state(session, pool.decoder.layers[0].recurrent,
             storage=pool.backing, restore=pool.clear_for_preparation)
@@ -445,7 +445,7 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
     graph_pool = torch.cuda.graph_pool_handle() if package_storage is None else package_storage.graph_pool.id
     trials, _ = capture_forwards(forwards, signatures, session=session, device=device,
         stream=stream, pool=graph_pool, collective=collective, coordinator=coordinator,
-        compile_decoder=False, progress=progress, label="Measure graph memory")
+        compile_decoder=False, progress=progress, label="Measure graph memory", warmup_storage=package_storage)
     from ignition.preparation.host_memory import COMPILED_FORWARD_BYTES, device_memory_info
 
     # An integrated GPU's allocatable memory includes the reclaimable RAM CUDA's free memory excludes.
@@ -515,7 +515,7 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
     graphs, compiled = capture_forwards(forwards, signatures, session=session, device=device,
         stream=stream, pool=graph_pool, collective=collective, coordinator=coordinator,
         compile_decoder=config.compile_decoder, progress=progress, cache_root=config.kernel_cache,
-        retain_graphs=config.retain_graphs, materialize=materialize_cache)
+        retain_graphs=config.retain_graphs, materialize=materialize_cache, warmup_storage=package_storage)
     kv_bytes = pages * page_bytes
     if integrated:
         import resource

@@ -298,6 +298,8 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
     free, total = torch.cuda.mem_get_info(device)
     memory = dict(rank=rank, world_size=shard.world_size, device=config.devices[rank], weights_bytes=weights.allocated_bytes,
         mapped_host_bytes=0, offloaded_bytes=0, continuation_bytes=pool.backing.nbytes, state_rows=state_rows,
+        preparation_state_rows=int(pool.memory_capacity[0].item()),
+        preparation_state_bytes=int(pool.memory_capacity[0].item()) * layout.row_bytes,
         pages=pages, page_bytes=page_bytes(weights.config), page_tokens=PAGE_TOKENS,
         kv_bytes=pages * page_bytes(weights.config), operator_scratch_bytes=arena.nbytes, graphs=len(graphs),
         prefill_capacities=prefill_sizes, free_device_bytes=free, total_device_bytes=total,

@@ -83,7 +83,7 @@ def test_retired_loading_pools_release_staging_and_preserve_graph_reachability(m
     import torch
     from torch.multiprocessing.reductions import StorageWeakRef
     from ignition.preparation.reachability import Reachability
-    from ignition.preparation.runtime_package import Allocation, RuntimePackage
+    from ignition.preparation.runtime_package import Allocation, Kernel, RuntimePackage
 
     storage = mailbox_storage
     graph_pool = storage.graph_pool.id
@@ -91,7 +91,8 @@ def test_retired_loading_pools_release_staging_and_preserve_graph_reachability(m
     weights, retired = [], []
     for value in range(3):
         with storage.transient():
-            weights.append(torch.full((1 << 20,), value + 1., dtype=torch.float32, device="cuda"))
+            # Each weight occupies a complete segment, so staging can retire independently.
+            weights.append(torch.full((4 << 20,), value + 1., dtype=torch.float32, device="cuda"))
             staging = torch.empty(16 << 20, dtype=torch.uint8, device="cuda")
             retired.append(StorageWeakRef(staging.untyped_storage()))
             del staging
@@ -113,7 +114,8 @@ def test_retired_loading_pools_release_staging_and_preserve_graph_reachability(m
     mappings = storage.mappings
     allocations = tuple(Allocation(f"device-{i}", m.address, m.nbytes, preserve_address=True)
                         for i, m in enumerate(mappings.values()))
-    package = RuntimePackage(allocations=allocations, modules={}, kernels=())
+    package = RuntimePackage(allocations=allocations, modules={"fixture": b"\x7fELFfixture"},
+                             kernels=(Kernel(1, "fixture", ()),))
     description = package._graph(storage.cuda, "weight-copy", graph.raw_cuda_graph())
     traversal = Reachability(allocations, inactive=storage.unused_ranges())
     traversal.graph(description, ())

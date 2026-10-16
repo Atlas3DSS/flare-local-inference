@@ -146,13 +146,17 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         if snapshots < 1:
             raise ValueError("snapshot budget must hold a complete DeepSeek continuation")
         slots, blocks = config.request_capacity, config.context // PAGE_TOKENS
-        state_rows = snapshots + slots * (max(config.speculative_widths) if config.dspark else 1)
-        initial_pages = min(config.minimum_pages, 2 * slots)
+        execution_rows = slots * (max(config.speculative_widths) if config.dspark else 1)
+        state_rows = snapshots + execution_rows
+        pages = (config.prefill_chunk_size + PAGE_TOKENS - 1) // PAGE_TOKENS + 2 * slots
+        if config.kv_pages is not None:
+            pages = config.kv_pages
         bytes_per_page = page_bytes(weights.config)
         total_memory = minimum_across_ranks(torch.cuda.mem_get_info(device)[1], group)
-        pool = ContinuationPool.allocate(weights.config, state_rows + 1, initial_pages, device,
+        pool = ContinuationPool.allocate(weights.config, state_rows + 1, pages, device,
             storage=package_storage, maximum_pages=total_memory // bytes_per_page,
-            maximum_rows=total_memory // layout.row_bytes, dspark=config.dspark)
+            maximum_rows=total_memory // layout.row_bytes,
+            backed_slots=min(state_rows + 1, 1 + execution_rows + slots), dspark=config.dspark)
         requests = DeviceRequestState.allocate(device, vocab_size=129280, capacity=slots)
         inputs = BatchInputs.allocate(config.prefill_chunk_size, blocks, device, capacity=slots)
         admission = AdmissionBuffers.allocate(device, vocab_size=129280, capacity=slots)
@@ -174,7 +178,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
             "contract": "deepseek41.graph-inputs.v1"}, sort_keys=True).encode()).hexdigest()
         session = RecordedPreparationSession(device=device, checkpoint=identity,
             workload_schema="deepseek41-text", numerical_policy="default", coordinator=coordinator,
-            headroom_bytes=config.headroom_bytes)
+            headroom_bytes=config.headroom_bytes, benchmark_storage=package_storage)
         session.__enter__()
         session.register_benchmark_resource("continuations", pool, restore=pool.clear_for_preparation)
         arena = ScratchArena(device, overlap=config.stream_overlap)
@@ -322,31 +326,10 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
     with phase(progress, "Prepare and tune kernels") as stage, transient:
         tuning = session.tune(show_progress=progress is not None and rank == 0, console=stage.console)
     stream, graph_pool = torch.cuda.Stream(device=device), package_storage.graph_pool.id
-    trials, _ = capture_forwards(forwards, signatures, session=session, device=device, stream=stream,
-        pool=graph_pool, collective=collective, coordinator=coordinator, compile_decoder=False,
-        progress=progress, label="Measure graph memory")
-    available = minimum_across_ranks(torch.cuda.mem_get_info(device)[0] - config.headroom_bytes - (64 << 20), group)
-    pages = available // bytes_per_page
-    if config.kv_pages is not None:
-        if config.kv_pages > pages:
-            raise MemoryError("explicit KV page capacity exceeds the available preparation budget")
-        pages = config.kv_pages
-    if pages < config.minimum_pages:
-        raise MemoryError("prepared catalog leaves insufficient memory for requested KV capacity")
-
-    def materialize_cache():
-        with phase(progress, "Allocate KV cache") as stage:
-            package_storage.grow("KV_PAGES", pages)
-            pool.memory_capacity[1] = pages
-            stage.update(f"{pages * bytes_per_page / (1 << 30):.2f} GiB per GPU · {pages * PAGE_TOKENS:,} tokens")
-            for graph in trials.values():
-                graph.reset()
-            trials.clear()
-
     graphs, compiled = capture_forwards(forwards, signatures, session=session, device=device, stream=stream,
         pool=graph_pool, collective=collective, coordinator=coordinator, compile_decoder=config.compile_decoder,
         progress=progress, cache_root=config.kernel_cache, retain_graphs=config.retain_graphs,
-        materialize=materialize_cache,
+        materialize=pool.clear_for_preparation, warmup_storage=package_storage,
         compile_kinds=("prefill", "decode", "resume", "speculative", "proposal", "verification"))
     session.freeze()
     pool.clear_for_preparation()
@@ -377,6 +360,8 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         "weights_bytes": weights.allocated_bytes, "mapped_host_bytes": 0,
         "offloaded_bytes": sum(source.nbytes for pair in tables.sources.values() for source in pair),
         "continuation_bytes": pool.backing.nbytes, "state_rows": state_rows,
+        "preparation_state_rows": int(pool.memory_capacity[0].item()),
+        "preparation_state_bytes": int(pool.memory_capacity[0].item()) * layout.row_bytes,
         "pages": pages, "page_bytes": bytes_per_page, "page_tokens": PAGE_TOKENS,
         "kv_bytes": pages * bytes_per_page, "operator_scratch_bytes": arena.nbytes,
         "graphs": len(graphs), "prefill_capacities": config.prefill_capacities,

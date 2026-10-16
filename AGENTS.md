@@ -331,12 +331,27 @@ architectural boundary before committing the change.
   bind process-local kernel handles and caller-owned tensors at startup. Complete
   b12x preparation, tuning, binding refresh, and compiled warmup before capturing
   each serving graph. Retain compiled kernel owners until native replay has drained.
-- **Bound preparation KV backing by tuning and capture needs.** Describe the
-  full virtual shapes with CUDA tensor metadata while compiling. Pass a
+- **Bound preparation cache backing by tuning and capture needs.** Keep virtual
+  serving capacity separate from physical preparation backing. Back only the
+  KV pages touched by tuning and capture, plus the null row, simultaneously live
+  request/verification rows, and disjoint snapshot destinations. Do not physically
+  allocate the planned prefix-cache capacity or fill remaining VRAM with KV during
+  export; Helios sizes serving caches after graph upload. Check every fixture,
+  state-clear operation, and snapshot/restore path against the backed extent.
+  Describe the full virtual shapes with CUDA tensor metadata while compiling. Pass a
   `materialize` callback to `capture_forwards` to bind a bounded physical working
   set after compiler workers exit and before warmup and capture. Validate compiled
   guards against those tensors. Helios sizes the serving cache independently;
   temporary compiler contexts must not reduce its budget.
+- **Release preparation temporaries at phase boundaries.** Retire loading,
+  conversion, tuning, and warmup pools when their temporary owners are gone;
+  retain graph pools and captured addresses through export and replay. A live
+  tensor can pin otherwise unused space in a shared allocator segment; retiring
+  a pool cannot release a segment that still holds a weight. Account for
+  simultaneous scratch, cached allocator segments, physical cache backing,
+  and graph-executable/driver allocations. Report allocated and reserved tensor
+  bytes separately from device-free memory. Validate the complete requested graph
+  catalog near capacity; a smaller concurrency does not establish builder fit.
 - **Derive preparation memory policy from hardware.** Shared preparation code
   detects integrated GPUs and budgets compiler workers and tuning races against
   available system RAM. Recipes pass byte headroom, not hardware flags. Forward

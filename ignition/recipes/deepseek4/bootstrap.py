@@ -55,7 +55,6 @@ class PreparationConfig:
     context: int = 1048576
     prefill_chunk_size: int = 4096
     max_active: int = 4
-    minimum_pages: int = 8
     snapshot_budget_bytes: int = 4 << 30
     headroom_bytes: int = 4 << 30
     compile_decoder: bool = True
@@ -88,8 +87,8 @@ class PreparationConfig:
             and self.speculative_fixed_width not in self.speculative_widths
         ):
             raise ValueError("fixed verification width must belong to the prepared widths")
-        if self.minimum_pages <= 0 or self.snapshot_budget_bytes <= 0 or self.headroom_bytes < 0:
-            raise ValueError("page and snapshot budgets must be positive and headroom nonnegative")
+        if self.snapshot_budget_bytes <= 0 or self.headroom_bytes < 0:
+            raise ValueError("snapshot budget must be positive and headroom nonnegative")
 
     @property
     def request_capacity(self):
@@ -140,10 +139,9 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         if snapshots < 1:
             raise ValueError("snapshot budget must hold a complete DeepSeek continuation")
         slots, blocks = config.request_capacity, config.context // PAGE_TOKENS
-        state_rows = snapshots + slots * (max(config.speculative_widths) if config.dspark else 1)
-        initial_pages = max(
-            config.minimum_pages, (config.prefill_chunk_size + PAGE_TOKENS - 1) // PAGE_TOKENS, 2 * slots
-        )
+        execution_rows = slots * (max(config.speculative_widths) if config.dspark else 1)
+        state_rows = snapshots + execution_rows
+        initial_pages = (config.prefill_chunk_size + PAGE_TOKENS - 1) // PAGE_TOKENS + 2 * slots
         bytes_per_page = page_bytes(weights.config)
         total_memory = minimum_across_ranks(torch.cuda.mem_get_info(device)[1], group)
         pool = ContinuationPool.allocate(
@@ -154,6 +152,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
             storage=package_storage,
             maximum_pages=total_memory // bytes_per_page,
             maximum_rows=total_memory // layout.row_bytes,
+            backed_slots=min(state_rows + 1, 1 + execution_rows + slots),
             dspark=config.dspark,
         )
         requests = DeviceRequestState.allocate(device, vocab_size=129280, capacity=slots)
@@ -195,6 +194,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
             numerical_policy="default",
             coordinator=coordinator,
             headroom_bytes=config.headroom_bytes,
+            benchmark_storage=package_storage,
         )
         session.__enter__()
         session.register_benchmark_resource("continuations", pool, restore=pool.clear_for_preparation)
@@ -438,6 +438,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         cache_root=config.kernel_cache,
         retain_graphs=config.retain_graphs,
         materialize=materialize_cache,
+        warmup_storage=package_storage,
         compile_kinds=("prefill", "decode", "resume", "speculative", "vision"),
     )
     session.freeze()
@@ -480,6 +481,8 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         "mapped_host_bytes": 0,
         "offloaded_bytes": 0,
         "continuation_bytes": pool.backing.nbytes,
+        "preparation_state_rows": int(pool.memory_capacity[0].item()),
+        "preparation_state_bytes": int(pool.memory_capacity[0].item()) * layout.row_bytes,
         "state_rows": state_rows,
         "pages": pages,
         "page_bytes": bytes_per_page,

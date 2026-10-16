@@ -138,7 +138,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
     with phase(progress, "Allocate model state"):
         pool = ContinuationPool.for_model(weights.config, shard, state_rows + 1, pages, device, mtp=config.mtp,
             storage=package_storage, maximum_pages=total_memory // page_bytes(weights.config, shard),
-            maximum_rows=total_memory // layout.row_bytes)
+            maximum_rows=total_memory // layout.row_bytes, backed_slots=min(state_rows + 1, 1 + 2 * slots))
         vocabulary = weights.config.vocabulary
         requests = DeviceRequestState.allocate(device, vocab_size=vocabulary, capacity=slots)
         inputs = BatchInputs.allocate(tokens, blocks, device, capacity=slots)
@@ -297,6 +297,8 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
     memory = {"rank": rank, "world_size": shard.world_size, "device": config.devices[rank], "weights_bytes": weights.allocated_bytes,
         "expert_scale_compression": config.expert_scale_compression,
         "mapped_host_bytes": 0, "offloaded_bytes": 0, "continuation_bytes": pool.backing.nbytes, "state_rows": state_rows,
+        "preparation_state_rows": int(pool.memory_capacity[0].item()),
+        "preparation_state_bytes": int(pool.memory_capacity[0].item()) * layout.row_bytes,
         "pages": pages, "page_bytes": page_bytes(weights.config, shard), "page_tokens": PAGE_TOKENS,
         "kv_bytes": pages * page_bytes(weights.config, shard), "operator_scratch_bytes": arena.nbytes, "graphs": len(graphs),
         "prefill_capacities": prefills, "free_device_bytes": free, "total_device_bytes": total,

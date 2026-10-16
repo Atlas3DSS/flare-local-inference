@@ -40,7 +40,6 @@ class PreparationConfig:
     context: int = 262144
     prefill_chunk_size: int = 4096
     max_active: int = 4
-    minimum_pages: int = 8
     snapshot_budget_bytes: int = 4 << 30
     headroom_bytes: int = 4 << 30
     compile_decoder: bool = True
@@ -53,8 +52,8 @@ class PreparationConfig:
             raise ValueError("Qwen dense context must be 128-aligned in [128,262144]")
         if not 128 <= self.prefill_chunk_size <= self.context or self.prefill_chunk_size % 128:
             raise ValueError("Qwen dense prefill chunk must be 128-aligned and fit the context")
-        if self.minimum_pages <= 0 or self.snapshot_budget_bytes <= 0 or self.headroom_bytes < 0:
-            raise ValueError("page and snapshot budgets must be positive and headroom nonnegative")
+        if self.snapshot_budget_bytes <= 0 or self.headroom_bytes < 0:
+            raise ValueError("snapshot budget must be positive and headroom nonnegative")
 
 
 @torch.no_grad()
@@ -76,12 +75,12 @@ def prepare(snapshot, config, *, progress=None, package_storage):
         raise ValueError("snapshot budget must hold a complete Qwen dense continuation")
     slots, blocks = request_capacity(config.max_active), config.context // PAGE_TOKENS
     state_rows = slots + snapshots
-    pages = max(config.minimum_pages, config.prefill_chunk_size // PAGE_TOKENS, 2 * slots)
+    pages = config.prefill_chunk_size // PAGE_TOKENS + 2 * slots
     total_memory = torch.cuda.mem_get_info(device)[1]
     with phase(progress, "Allocate model state"):
         pool = ContinuationPool.for_model(weights.config, state_rows + 1, pages, device,
             storage=package_storage, maximum_pages=total_memory // page_bytes(weights.config),
-            maximum_rows=total_memory // layout.row_bytes)
+            maximum_rows=total_memory // layout.row_bytes, backed_slots=min(state_rows + 1, 1 + 2 * slots))
         vocabulary = weights.config.vocabulary
         requests = DeviceRequestState.allocate(device, vocab_size=vocabulary, capacity=slots)
         inputs = BatchInputs.allocate(max(config.prefill_chunk_size, slots), blocks, device, capacity=slots)
@@ -96,7 +95,7 @@ def prepare(snapshot, config, *, progress=None, package_storage):
             "contract": "qwen38-dense.graph-inputs.v1"}, sort_keys=True).encode()).hexdigest()
         session = RecordedPreparationSession(device=device, checkpoint=identity,
             workload_schema="qwen38-dense", numerical_policy="default", coordinator=coordinator,
-            headroom_bytes=config.headroom_bytes)
+            headroom_bytes=config.headroom_bytes, benchmark_storage=package_storage)
         session.__enter__()
         register_benchmark_state(session, pool.reserved_backing, storage=pool.reserved_backing,
                                  restore=pool.clear_for_preparation)
@@ -151,7 +150,7 @@ def prepare(snapshot, config, *, progress=None, package_storage):
     graphs, compiled = capture_forwards(forwards, signatures, session=session, device=device,
         stream=stream, pool=graph_pool, collective=None, coordinator=coordinator,
         compile_decoder=config.compile_decoder, progress=progress, cache_root=config.kernel_cache,
-        retain_graphs=config.retain_graphs, materialize=pool.clear_for_preparation,
+        retain_graphs=config.retain_graphs, materialize=pool.clear_for_preparation, warmup_storage=package_storage,
         compile_kinds=("prefill", "decode", "resume"))
     session.freeze()
     pool.clear_for_preparation()
@@ -175,6 +174,8 @@ def prepare(snapshot, config, *, progress=None, package_storage):
     free, total = torch.cuda.mem_get_info(device)
     memory = dict(rank=0, world_size=1, device=config.device, weights_bytes=weights.allocated_bytes,
         mapped_host_bytes=0, offloaded_bytes=0, continuation_bytes=pool.backing.nbytes, state_rows=state_rows,
+        preparation_state_rows=int(pool.memory_capacity[0].item()),
+        preparation_state_bytes=int(pool.memory_capacity[0].item()) * layout.row_bytes,
         pages=pages, page_bytes=page_bytes(weights.config), page_tokens=PAGE_TOKENS,
         kv_bytes=pages * page_bytes(weights.config), operator_scratch_bytes=arena.nbytes, graphs=len(graphs),
         prefill_capacities=prefill_sizes, free_device_bytes=free, total_device_bytes=total,

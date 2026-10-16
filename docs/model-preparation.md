@@ -309,11 +309,15 @@ Ignition commands accept `--config PATH`; the default configuration is
 `~/.config/flare/config.toml`. Storage locations are configured with
 `[paths] hub_cache`, `kernel_cache`, and `package_cache`; `[memory] reserve`
 leaves GPU memory available for other processes during preparation and serving.
-Ignition additionally keeps 1 GiB for warm-up and capture. Qwen preparation backs
-only a prefill chunk plus two KV pages per captured request row, unless an
+Ignition additionally budgets 1 GiB for warm-up and capture. Preparation KV backing
+covers a prefill chunk plus boundary pages per captured request row, unless an
 explicit preparation page count is supplied programmatically. Continuation
-storage backs a null row, live request rows, and disjoint snapshot destinations
-during preparation. Both retain their full virtual extents in the package. Helios
+backing covers the null row, live request and verification rows, and snapshot
+destinations used during preparation. Planned prefix-cache slots remain virtual;
+they do not require physical backing during export. The memory report separates
+the declared continuation extent from `preparation_state_rows` and
+`preparation_state_bytes` where those extents differ. Both caches retain their
+full virtual extents in the package. Helios
 sizes its caches after uploading the selected graphs, keeping a separate 64 MiB
 driver margin.
 Ignition captures power-of-two

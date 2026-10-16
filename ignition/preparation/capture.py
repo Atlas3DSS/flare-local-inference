@@ -50,9 +50,13 @@ def capture_forwards(functions, signatures, *, session, device, stream, pool,
             graph = torch.cuda.CUDAGraph(keep_graph=True) if retain_graphs else torch.cuda.CUDAGraph()
             communication = nullcontext() if collective is None else collective.capture(stream=stream)
             def memory_detail():
-                free, _ = torch.cuda.mem_get_info(device)
+                free, total = torch.cuda.mem_get_info(device)
+                allocated = torch.cuda.memory_allocated(device)
+                reserved = torch.cuda.memory_reserved(device)
                 return (f"{free / (1 << 20):.0f} MiB free, "
-                        f"{torch.cuda.memory_reserved(device) / (1 << 20):.0f} MiB reserved")
+                        f"{allocated / (1 << 20):.0f} MiB allocated, "
+                        f"{reserved / (1 << 20):.0f} MiB reserved, "
+                        f"{(total - free - reserved) / (1 << 20):.0f} MiB outside PyTorch")
 
             try:
                 if progress is not None:

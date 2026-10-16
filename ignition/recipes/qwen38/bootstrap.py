@@ -246,7 +246,7 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
     collectives = dict(runtime=collective, vocabulary_runtime=vocabulary_collective, coordinator=coordinator)
     session = preparation_session(device=device, checkpoint=REVISION, coordinator=coordinator,
         namespace={"config": manifest.metadata_sha256["config.json"], "headers": manifest.headers_sha256, "world_size": shard.world_size},
-        headroom_bytes=config.headroom_bytes)
+        headroom_bytes=config.headroom_bytes, benchmark_storage=package_storage)
     session.__enter__()
     graphs = {}
     try:
@@ -438,7 +438,8 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
             captured, compiled = capture_forwards(functions, signatures, session=session, device=device,
                 stream=stream, pool=graph_pool, compile_decoder=compile_decoder, materialize=materialize,
                 progress=progress, label=label, cache_root=config.kernel_cache,
-                collective=collective, coordinator=coordinator, retain_graphs=config.retain_graphs)
+                collective=collective, coordinator=coordinator, retain_graphs=config.retain_graphs,
+                warmup_storage=package_storage)
             graphs.update(captured)
             compiled_functions.clear()
             compiled_functions.update(compiled)
