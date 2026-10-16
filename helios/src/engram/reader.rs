@@ -1,14 +1,19 @@
 //! Bounded, direct-I/O row gathering into the same buffers used by resident tables.
 
+use super::{Stats, cache::RowCache};
 use crate::Result;
 #[cfg(unix)]
 use io_uring::{IoUring, opcode, types};
-use std::fs::File;
+use std::{
+    fs::File,
+    sync::{Arc, atomic::Ordering},
+    time::Instant,
+};
 
 #[cfg(unix)]
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, FromRawFd};
 
-#[cfg(test)]
+#[cfg(any(unix, test))]
 use std::path::Path;
 
 const BLOCK: usize = 4096;
@@ -51,19 +56,76 @@ impl Aligned {
     }
 }
 
-#[cfg(test)]
-fn open_file(path: &Path) -> Result<File> {
+#[cfg(any(unix, test))]
+pub(super) fn open_file(path: &Path) -> Result<File> {
     crate::os::direct_file(path, false).map_err(|e| format!("open Engram package: {e}").into())
 }
 
 pub(crate) struct Resident {
+    #[cfg(unix)]
+    storage: ResidentMapping,
+    #[cfg(windows)]
     storage: Aligned,
+    #[cfg(unix)]
+    file: File,
     skip: usize,
     nbytes: usize,
 }
 
+#[cfg(unix)]
+struct ResidentMapping {
+    address: usize,
+    nbytes: usize,
+}
+
+#[cfg(unix)]
+impl ResidentMapping {
+    fn new(file: &File, nbytes: usize, writable: bool) -> Result<Self> {
+        let protection = libc::PROT_READ | if writable { libc::PROT_WRITE } else { 0 };
+        let address = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                nbytes,
+                protection,
+                libc::MAP_SHARED,
+                file.as_raw_fd(),
+                0,
+            )
+        };
+        if address == libc::MAP_FAILED {
+            return Err(format!(
+                "map resident embedding table: {}",
+                std::io::Error::last_os_error()
+            )
+            .into());
+        }
+        let mapping = Self {
+            address: address as usize,
+            nbytes,
+        };
+        // The sealed read-only remap has its own page tables, even after loading
+        // populated the backing RAM. Prepare them before row delivery starts.
+        if !writable && unsafe { libc::madvise(address, nbytes, libc::MADV_POPULATE_READ) } != 0 {
+            let error = std::io::Error::last_os_error();
+            return Err(format!("populate resident embedding page tables: {error}").into());
+        }
+        Ok(mapping)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ResidentMapping {
+    fn drop(&mut self) {
+        unsafe { libc::munmap(self.address as *mut libc::c_void, self.nbytes) };
+    }
+}
+
+#[cfg(unix)]
+const RESIDENT_SEALS: i32 =
+    libc::F_SEAL_WRITE | libc::F_SEAL_GROW | libc::F_SEAL_SHRINK | libc::F_SEAL_SEAL;
+
 impl Resident {
-    fn load(file: &File, plane: Plane) -> Result<Self> {
+    pub(super) fn load(file: &File, plane: Plane) -> Result<Self> {
         let skip = (plane.offset % BLOCK as u64) as usize;
         let required = skip
             .checked_add(plane.nbytes)
@@ -73,12 +135,41 @@ impl Resident {
             .ok_or("resident Engram allocation exceeds host range")?
             / BLOCK
             * BLOCK;
-        let storage = Aligned::new(extent.max(BLOCK))?;
+        let extent = extent.max(BLOCK);
+        #[cfg(unix)]
+        let backing = {
+            let descriptor = unsafe {
+                libc::memfd_create(
+                    c"flare-embedding-table".as_ptr(),
+                    libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
+                )
+            };
+            if descriptor < 0 {
+                return Err(format!(
+                    "create resident embedding table: {}",
+                    std::io::Error::last_os_error()
+                )
+                .into());
+            }
+            // The descriptor is newly created and owned exclusively until published.
+            let backing = unsafe { File::from_raw_fd(descriptor) };
+            backing
+                .set_len(extent as u64)
+                .map_err(|e| format!("size resident embedding table: {e}"))?;
+            backing
+        };
+        #[cfg(unix)]
+        let storage = ResidentMapping::new(&backing, extent, true)?;
+        #[cfg(unix)]
+        let address = storage.address;
+        #[cfg(windows)]
+        let storage = Aligned::new(extent)?;
+        #[cfg(windows)]
+        let address = storage.0;
         let offset = plane.offset - skip as u64;
         std::thread::scope(|scope| -> Result<()> {
             let mut workers = Vec::new();
             for reader in 0..LOAD_READERS.min(extent.div_ceil(LOAD_CHUNK)) {
-                let address = storage.0;
                 workers.push(
                     std::thread::Builder::new()
                         .name(format!("helios-table-loader-{reader}"))
@@ -112,19 +203,73 @@ impl Resident {
             }
             Ok(())
         })?;
+        #[cfg(unix)]
+        {
+            drop(storage);
+            if unsafe { libc::fcntl(backing.as_raw_fd(), libc::F_ADD_SEALS, RESIDENT_SEALS) } < 0 {
+                return Err(format!(
+                    "seal resident embedding table: {}",
+                    std::io::Error::last_os_error()
+                )
+                .into());
+            }
+            Self::from_shared(backing, plane)
+        }
+        #[cfg(windows)]
+        {
+            Ok(Self {
+                storage,
+                skip,
+                nbytes: plane.nbytes,
+            })
+        }
+    }
+
+    #[cfg(unix)]
+    pub(super) fn from_shared(file: File, plane: Plane) -> Result<Self> {
+        let seals = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GET_SEALS) };
+        if seals < 0 || seals & RESIDENT_SEALS != RESIDENT_SEALS {
+            return Err("resident embedding table must have immutable size and contents".into());
+        }
+        let skip = (plane.offset % BLOCK as u64) as usize;
+        let required = skip
+            .checked_add(plane.nbytes)
+            .ok_or("resident embedding plane exceeds host range")?;
+        let extent = required
+            .checked_add(BLOCK - 1)
+            .ok_or("resident embedding plane exceeds host range")?
+            / BLOCK
+            * BLOCK;
+        let extent = extent.max(BLOCK);
+        if file
+            .metadata()
+            .map_err(|e| format!("inspect resident embedding table: {e}"))?
+            .len()
+            != extent as u64
+        {
+            return Err("shared resident embedding table extent differs from its plane".into());
+        }
         Ok(Self {
-            storage,
+            storage: ResidentMapping::new(&file, extent, false)?,
+            file,
             skip,
             nbytes: plane.nbytes,
         })
     }
 
+    #[cfg(unix)]
+    pub(super) fn descriptor(&self) -> i32 {
+        self.file.as_raw_fd()
+    }
+
     fn bytes(&self) -> &[u8] {
+        #[cfg(unix)]
+        let address = self.storage.address;
+        #[cfg(windows)]
+        let address = self.storage.0;
         // SAFETY: Every logical byte was initialized by successful reads, and
         // scoped readers joined before this immutable view becomes available.
-        unsafe {
-            std::slice::from_raw_parts((self.storage.0 + self.skip) as *const u8, self.nbytes)
-        }
+        unsafe { std::slice::from_raw_parts((address + self.skip) as *const u8, self.nbytes) }
     }
 }
 impl Drop for Aligned {
@@ -143,10 +288,11 @@ pub(crate) struct DiskReader {
     file: File,
     fragments: Vec<Fragment>,
     reads: Vec<Read>,
+    stats: Arc<Stats>,
 }
 
 impl DiskReader {
-    fn from_file(source: &File) -> Result<Self> {
+    fn from_file(source: &File, stats: Arc<Stats>) -> Result<Self> {
         let file = crate::os::direct_reopen(source)
             .map_err(|e| format!("open Engram direct reader: {e}"))?;
         let staging = Aligned::new(DEPTH * CHUNK)?;
@@ -175,6 +321,7 @@ impl DiskReader {
             file,
             fragments: Vec::new(),
             reads: Vec::new(),
+            stats,
         })
     }
 
@@ -240,6 +387,13 @@ impl DiskReader {
                 unsafe { self.ring.submission().push(&entry) }
                     .map_err(|_| "Engram submission queue full")?;
             }
+            self.stats
+                .disk_reads
+                .fetch_add(batch.len() as u64, Ordering::Relaxed);
+            self.stats.disk_bytes.fetch_add(
+                batch.iter().map(|read| read.nbytes as u64).sum(),
+                Ordering::Relaxed,
+            );
             let mut completed = 0;
             let mut failure = None;
             while completed < batch.len() {
@@ -296,6 +450,10 @@ impl DiskReader {
                     self.ring.cancel();
                     break;
                 }
+                self.stats.disk_reads.fetch_add(1, Ordering::Relaxed);
+                self.stats
+                    .disk_bytes
+                    .fetch_add(read.nbytes as u64, Ordering::Relaxed);
             }
             while self.ring.pending() != 0 {
                 match self.ring.wait() {
@@ -343,25 +501,217 @@ impl DiskReader {
     }
 }
 
-pub(crate) enum Reader {
+struct CachedReader {
+    disk: DiskReader,
+    cache: RowCache,
+    requests: Vec<(i64, usize)>,
+    miss_ids: Vec<i64>,
+    miss_groups: Vec<(usize, usize)>,
+    miss_output: Vec<u8>,
+    max_rows: usize,
+}
+
+impl CachedReader {
+    fn new(disk: DiskReader, planes: &[Plane; 2], budget: usize, max_rows: usize) -> Result<Self> {
+        if max_rows == 0 {
+            return Err("embedding row cache requires a nonzero gather capacity".into());
+        }
+        let row_bytes = planes.iter().map(|plane| plane.row_bytes).sum::<usize>();
+        let workspace = max_rows
+            .checked_mul(
+                size_of::<(i64, usize)>()
+                    + size_of::<i64>()
+                    + size_of::<(usize, usize)>()
+                    + row_bytes,
+            )
+            .and_then(|n| n.checked_add(size_of::<Self>()))
+            .ok_or("embedding row cache workspace size overflow")?;
+        let payload_budget = budget
+            .checked_sub(workspace)
+            .ok_or("embedding row cache budget cannot hold its bounded miss workspace")?;
+        fn allocated<T: Copy>(len: usize, value: T) -> Result<Vec<T>> {
+            let mut data = Vec::new();
+            data.try_reserve_exact(len)
+                .map_err(|e| format!("embedding row cache workspace: {e}"))?;
+            data.resize(len, value);
+            // Touch the entire workspace before KV sizing, including vectors
+            // whose length is cleared after allocation.
+            for index in (0..len).step_by((4096 / size_of::<T>()).max(1)) {
+                unsafe { data.as_mut_ptr().add(index).write_volatile(data[index]) };
+            }
+            Ok(data)
+        }
+        let mut requests = allocated(max_rows, (0i64, 0usize))?;
+        let mut miss_ids = allocated(max_rows, 0i64)?;
+        let mut miss_groups = allocated(max_rows, (0usize, 0usize))?;
+        requests.clear();
+        miss_ids.clear();
+        miss_groups.clear();
+        let miss_output = allocated(max_rows * row_bytes, 0u8)?;
+        let cache = RowCache::new(
+            payload_budget,
+            planes[0].nbytes / planes[0].row_bytes,
+            row_bytes,
+        )?;
+        let bytes = cache.bytes() + workspace;
+        disk.stats
+            .capacity_rows
+            .fetch_add(cache.capacity() as u64, Ordering::Relaxed);
+        disk.stats
+            .cache_bytes
+            .fetch_add(bytes as u64, Ordering::Relaxed);
+        Ok(Self {
+            disk,
+            cache,
+            requests,
+            miss_ids,
+            miss_groups,
+            miss_output,
+            max_rows,
+        })
+    }
+
+    fn gather(&mut self, planes: &[Plane; 2], ids: &[i64], output: &mut [u8]) -> Result<()> {
+        if ids.len() > self.max_rows {
+            return Err("embedding gather exceeds the row cache workspace capacity".into());
+        }
+        let [weights, scales] = planes.map(|plane| plane.row_bytes);
+        let scale_base = ids.len() * weights;
+        self.requests.clear();
+        self.miss_ids.clear();
+        self.miss_groups.clear();
+        for (row, &id) in ids.iter().enumerate() {
+            if id < 0 {
+                output[row * weights..(row + 1) * weights].fill(0);
+                output[scale_base + row * scales..scale_base + (row + 1) * scales].fill(0);
+            } else {
+                self.requests.push((id, row));
+            }
+        }
+        self.requests.sort_unstable_by_key(|&(id, _)| id);
+        let mut begin = 0;
+        let mut hits = 0;
+        while begin < self.requests.len() {
+            let id = self.requests[begin].0;
+            let end = begin + self.requests[begin..].partition_point(|&(next, _)| next == id);
+            if let Some(payload) = self.cache.get(id) {
+                hits += 1;
+                for &(_, row) in &self.requests[begin..end] {
+                    output[row * weights..(row + 1) * weights].copy_from_slice(&payload[..weights]);
+                    output[scale_base + row * scales..scale_base + (row + 1) * scales]
+                        .copy_from_slice(&payload[weights..]);
+                }
+            } else {
+                self.miss_ids.push(id);
+                self.miss_groups.push((begin, end));
+            }
+            begin = end;
+        }
+        self.disk.stats.hits.fetch_add(hits, Ordering::Relaxed);
+        self.disk
+            .stats
+            .misses
+            .fetch_add(self.miss_ids.len() as u64, Ordering::Relaxed);
+        if self.miss_ids.is_empty() {
+            return Ok(());
+        }
+        let count = self.miss_ids.len();
+        self.disk.gather(
+            planes,
+            &self.miss_ids,
+            &mut self.miss_output[..count * (weights + scales)],
+        )?;
+        for (index, (&id, &(begin, end))) in self.miss_ids.iter().zip(&self.miss_groups).enumerate()
+        {
+            let w = &self.miss_output[index * weights..(index + 1) * weights];
+            let s = &self.miss_output
+                [count * weights + index * scales..count * weights + (index + 1) * scales];
+            for &(_, row) in &self.requests[begin..end] {
+                output[row * weights..(row + 1) * weights].copy_from_slice(w);
+                output[scale_base + row * scales..scale_base + (row + 1) * scales]
+                    .copy_from_slice(s);
+            }
+            // Only complete successful disk gathers enter the immutable cache.
+            let inserted = self.cache.insert(id, w, s);
+            self.disk
+                .stats
+                .resident_rows
+                .fetch_add(u64::from(inserted.added), Ordering::Relaxed);
+            self.disk
+                .stats
+                .evictions
+                .fetch_add(u64::from(inserted.evicted), Ordering::Relaxed);
+        }
+        Ok(())
+    }
+}
+
+enum Data {
     Disk(DiskReader),
-    Ram([Resident; 2]),
+    Ram([Arc<Resident>; 2]),
+    Cached(Box<CachedReader>),
+}
+pub(crate) struct Reader {
+    data: Data,
+    stats: Arc<Stats>,
 }
 impl Reader {
     #[cfg(test)]
-    fn open(path: &Path, planes: &[Plane; 2], resident: bool) -> Result<Self> {
-        Self::from_file(&File::open(path).unwrap(), planes, resident)
+    fn open(
+        path: &Path,
+        planes: &[Plane; 2],
+        resident: bool,
+        cache_bytes: usize,
+        max_rows: usize,
+        stats: Arc<Stats>,
+    ) -> Result<Self> {
+        Self::from_file(
+            &File::open(path).unwrap(),
+            planes,
+            resident,
+            cache_bytes,
+            max_rows,
+            stats,
+        )
     }
-    pub fn from_file(source: &File, planes: &[Plane; 2], resident: bool) -> Result<Self> {
-        if resident {
+    pub fn from_file(
+        source: &File,
+        planes: &[Plane; 2],
+        resident: bool,
+        cache_bytes: usize,
+        max_rows: usize,
+        stats: Arc<Stats>,
+    ) -> Result<Self> {
+        if resident && cache_bytes != 0 {
+            return Err("embedding row cache requires disk table storage".into());
+        }
+        let data = if resident {
             let file = crate::os::direct_reopen(source)
                 .map_err(|e| format!("open resident Engram reader: {e}"))?;
-            Ok(Self::Ram([
-                Resident::load(&file, planes[0])?,
-                Resident::load(&file, planes[1])?,
-            ]))
+            Data::Ram([
+                Arc::new(Resident::load(&file, planes[0])?),
+                Arc::new(Resident::load(&file, planes[1])?),
+            ])
         } else {
-            Ok(Self::Disk(DiskReader::from_file(source)?))
+            let disk = DiskReader::from_file(source, stats.clone())?;
+            if cache_bytes != 0 {
+                Data::Cached(Box::new(CachedReader::new(
+                    disk,
+                    planes,
+                    cache_bytes,
+                    max_rows,
+                )?))
+            } else {
+                Data::Disk(disk)
+            }
+        };
+        Ok(Self { data, stats })
+    }
+    #[cfg(unix)]
+    pub(super) fn resident(data: [Arc<Resident>; 2], stats: Arc<Stats>) -> Self {
+        Self {
+            data: Data::Ram(data),
+            stats,
         }
     }
     pub fn gather(&mut self, planes: &[Plane; 2], ids: &[i64], output: &mut [u8]) -> Result<()> {
@@ -376,9 +726,11 @@ impl Reader {
                 return Err("Engram row exceeds its table".into());
             }
         }
-        match self {
-            Self::Disk(reader) => reader.gather(planes, ids, output),
-            Self::Ram(data) => {
+        let begin = Instant::now();
+        let result = match &mut self.data {
+            Data::Disk(reader) => reader.gather(planes, ids, output),
+            Data::Cached(reader) => reader.gather(planes, ids, output),
+            Data::Ram(data) => {
                 let mut base = 0;
                 for (plane, data) in planes.iter().zip(data) {
                     let data = data.bytes();
@@ -396,7 +748,13 @@ impl Reader {
                 }
                 Ok(())
             }
-        }
+        };
+        self.stats.gathers.fetch_add(1, Ordering::Relaxed);
+        self.stats.gather_ns.fetch_add(
+            begin.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+            Ordering::Relaxed,
+        );
+        result
     }
 }
 
@@ -404,6 +762,108 @@ impl Reader {
 mod tests {
     use super::*;
     use std::fs::OpenOptions;
+
+    #[test]
+    #[cfg(unix)]
+    fn shared_resident_rows_are_readable_without_first_access_page_faults() {
+        let path = std::env::temp_dir().join(format!(
+            "helios-engram-populated-{}.bin",
+            std::process::id()
+        ));
+        let rows = 65536;
+        let second = rows * 256;
+        let bytes: Vec<_> = (0..second + rows * 8)
+            .map(|i| (i * 19 + i / 7) as u8)
+            .collect();
+        std::fs::write(&path, &bytes).unwrap();
+        let planes = [
+            Plane {
+                offset: 0,
+                nbytes: second,
+                row_bytes: 256,
+            },
+            Plane {
+                offset: second as u64,
+                nbytes: rows * 8,
+                row_bytes: 8,
+            },
+        ];
+        let file = open_file(&path).unwrap();
+        let original = planes.map(|plane| Arc::new(Resident::load(&file, plane).unwrap()));
+        let shared = std::array::from_fn(|i| {
+            Arc::new(
+                Resident::from_shared(original[i].file.try_clone().unwrap(), planes[i]).unwrap(),
+            )
+        });
+        std::fs::remove_file(path).unwrap();
+        let ids: Vec<_> = (0..128).map(|i| ((i * 509 + 17) % rows) as i64).collect();
+        let mut output = vec![0; ids.len() * 264];
+        let mut expected = Vec::with_capacity(output.len());
+        for plane in &planes {
+            for &id in &ids {
+                let first = plane.offset as usize + id as usize * plane.row_bytes;
+                expected.extend_from_slice(&bytes[first..first + plane.row_bytes]);
+            }
+        }
+        for data in [original, shared] {
+            let mut reader = Reader::resident(data, Arc::default());
+            // Prime the copy code and output storage without touching the selected table pages.
+            reader.gather(&planes, &[0], &mut output[..264]).unwrap();
+            output.fill(0xA5);
+            let mut before = unsafe { std::mem::zeroed::<libc::rusage>() };
+            let mut after = unsafe { std::mem::zeroed::<libc::rusage>() };
+            assert_eq!(
+                unsafe { libc::getrusage(libc::RUSAGE_THREAD, &mut before) },
+                0
+            );
+            reader.gather(&planes, &ids, &mut output).unwrap();
+            assert_eq!(
+                unsafe { libc::getrusage(libc::RUSAGE_THREAD, &mut after) },
+                0
+            );
+            assert_eq!(
+                after.ru_minflt, before.ru_minflt,
+                "row gathering faulted resident pages"
+            );
+            assert_eq!(after.ru_majflt, before.ru_majflt);
+            assert_eq!(output, expected);
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn shared_resident_plane_outlives_source_and_loader_and_rejects_mutation() {
+        let path =
+            std::env::temp_dir().join(format!("helios-engram-shared-{}.bin", std::process::id()));
+        let bytes: Vec<_> = (0..12345).map(|i| (i * 19 + i / 7) as u8).collect();
+        std::fs::write(&path, &bytes).unwrap();
+        let plane = Plane {
+            offset: 97,
+            nbytes: 8192,
+            row_bytes: 128,
+        };
+        let original = Resident::load(&open_file(&path).unwrap(), plane).unwrap();
+        let peer = Resident::from_shared(original.file.try_clone().unwrap(), plane).unwrap();
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(
+            original.file.metadata().unwrap().ino(),
+            peer.file.metadata().unwrap().ino()
+        );
+        assert!(original.file.set_len(1).is_err());
+        let value = 255u8;
+        assert_eq!(
+            unsafe { libc::pwrite(original.descriptor(), (&value as *const u8).cast(), 1, 97) },
+            -1
+        );
+        let wrong = Plane {
+            nbytes: plane.nbytes + BLOCK,
+            ..plane
+        };
+        assert!(Resident::from_shared(original.file.try_clone().unwrap(), wrong).is_err());
+        std::fs::remove_file(path).unwrap();
+        drop(original);
+        assert_eq!(peer.bytes(), &bytes[97..97 + 8192]);
+    }
 
     #[test]
     fn resident_load_covers_parallel_chunks_and_rejects_truncated_planes() {
@@ -451,6 +911,74 @@ mod tests {
     }
 
     #[test]
+    fn warm_rows_avoid_disk_and_failed_misses_never_enter_the_cache() {
+        let path =
+            std::env::temp_dir().join(format!("helios-engram-cache-{}.bin", std::process::id()));
+        let rows = 128;
+        let first = 4093;
+        let second = first + rows * 80 + 7;
+        let bytes: Vec<u8> = (0..second + rows * 10)
+            .map(|i| (i * 13 + i / 257) as u8)
+            .collect();
+        std::fs::write(&path, &bytes).unwrap();
+        let planes = [
+            Plane {
+                offset: first as u64,
+                nbytes: rows * 80,
+                row_bytes: 80,
+            },
+            Plane {
+                offset: second as u64,
+                nbytes: rows * 10,
+                row_bytes: 10,
+            },
+        ];
+        let stats = Arc::new(Stats::default());
+        let mut reader = Reader::open(&path, &planes, false, 65536, 32, stats.clone()).unwrap();
+        assert!(stats.cache_bytes.load(Ordering::Relaxed) <= 65536);
+        fn check(reader: &mut Reader, planes: &[Plane; 2], bytes: &[u8], ids: &[i64]) {
+            let mut expected = Vec::new();
+            for plane in planes {
+                for &id in ids {
+                    if id < 0 {
+                        expected.extend(std::iter::repeat_n(0, plane.row_bytes));
+                    } else {
+                        let start = plane.offset as usize + id as usize * plane.row_bytes;
+                        expected.extend_from_slice(&bytes[start..start + plane.row_bytes]);
+                    }
+                }
+            }
+            let mut output = vec![0xa5; ids.len() * 90];
+            reader.gather(planes, ids, &mut output).unwrap();
+            assert_eq!(output, expected);
+        }
+        check(&mut reader, &planes, &bytes, &[2, 9, 2, -1, 17]);
+        assert_eq!(stats.misses.load(Ordering::Relaxed), 3);
+        assert_eq!(stats.resident_rows.load(Ordering::Relaxed), 3);
+        let reads = stats.disk_reads.load(Ordering::Relaxed);
+        assert!(reads > 0);
+        check(&mut reader, &planes, &bytes, &[17, 9, -1, 2, 17]);
+        assert_eq!(stats.hits.load(Ordering::Relaxed), 3);
+        assert_eq!(stats.disk_reads.load(Ordering::Relaxed), reads);
+        assert!(reader.gather(&planes, &[128], &mut [0; 90]).is_err());
+        assert!(reader.gather(&planes, &[-2], &mut [0; 90]).is_err());
+        assert!(reader.gather(&planes, &[2; 33], &mut [0; 33 * 90]).is_err());
+        OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(0)
+            .unwrap();
+        check(&mut reader, &planes, &bytes, &[9, 2]);
+        assert!(reader.gather(&planes, &[20], &mut [0; 90]).is_err());
+        assert_eq!(stats.resident_rows.load(Ordering::Relaxed), 3);
+        std::fs::write(&path, &bytes).unwrap();
+        check(&mut reader, &planes, &bytes, &[20]);
+        assert_eq!(stats.resident_rows.load(Ordering::Relaxed), 4);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn disk_and_ram_gather_identical_rows_across_unaligned_planes() {
         let path = std::env::temp_dir().join(format!("helios-engram-{}.bin", std::process::id()));
         let rows = 4097;
@@ -492,8 +1020,16 @@ mod tests {
                 }
             }
         }
-        for resident in [false, true] {
-            let mut reader = Reader::open(&path, &planes, resident).unwrap();
+        for (resident, cache_bytes) in [(false, 0), (true, 0), (false, 3 << 20)] {
+            let mut reader = Reader::open(
+                &path,
+                &planes,
+                resident,
+                cache_bytes,
+                ids.len(),
+                Arc::default(),
+            )
+            .unwrap();
             for _ in 0..3 {
                 let mut actual = vec![0xA5; expected.len()];
                 reader.gather(&planes, &ids, &mut actual).unwrap();
@@ -505,7 +1041,7 @@ mod tests {
                     .is_err()
             );
         }
-        let mut reader = Reader::open(&path, &planes, false).unwrap();
+        let mut reader = Reader::open(&path, &planes, false, 0, ids.len(), Arc::default()).unwrap();
         OpenOptions::new()
             .write(true)
             .open(&path)

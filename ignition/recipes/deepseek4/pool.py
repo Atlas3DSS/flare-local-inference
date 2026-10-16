@@ -7,8 +7,8 @@ import torch
 from ignition.components.paged_state import PagedStateStorage
 from ignition.components.state import StateLayout
 
-PAGE_TOKENS = 128
-INDEX_RECORD_BYTES = 68
+PAGE_TOKENS = 256
+INDEX_RECORD_BYTES = 132
 
 
 def latent_page_bytes(records):

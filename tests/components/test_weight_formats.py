@@ -15,13 +15,80 @@ def config(layers):
                                     "quantized_layers": layers}}
 
 
+@pytest.mark.parametrize("weight_name,activation,padded", [("weight", "silu", False),
+                                                        ("weight_packed", "situ", True)])
+@pytest.mark.parametrize("partition", [(0, 32), (32, 64)])
+def test_mxfp4_csf_loader_preserves_packed_partitions_and_activation(
+        monkeypatch, weight_name, activation, padded, partition):
+    import torch
+    from b12x.moe import fused_moe as moe
+
+    loader = DirectWeightLoader(SimpleNamespace(), "cpu")
+    loader._session = SimpleNamespace(flush=lambda: None)
+    prefixes = ("expert0", "expert1")
+    for expert, prefix in enumerate(prefixes):
+        for index, projection in enumerate(("w1", "w3", "w2")):
+            shape = (128, 32) if projection == "w2" else (64, 64)
+            loader._sources[f"{prefix}.{projection}.{weight_name}"] = (
+                torch.arange(4096).reshape(shape) + 7 * index + expert).to(torch.uint8)
+    monkeypatch.setattr(loader, "_copy", lambda destination, source: destination.copy_(source))
+    monkeypatch.setattr(loader, "_queue_csf_sources", lambda names, **selection: (names, selection))
+    monkeypatch.setattr(moe, "plan_weights", lambda **kwargs: SimpleNamespace(**kwargs))
+    monkeypatch.setattr(moe, "prepare_weights", lambda **kwargs: SimpleNamespace(**kwargs))
+    shapes = ((2, 256, 8), (2, 256, 8)) if padded else ((2, 4, 64), (2, 1, 128))
+    scratch = tuple(torch.empty(shape, dtype=torch.uint8) for shape in shapes)
+    options = dict(hidden_size=128, intermediate_size=64, intermediate_range=partition,
+                   projection_names=("w1", "w3", "w2"), weight_name=weight_name,
+                   activation=activation, scale_scratch=scratch)
+    prepared = loader.load_mxfp4_csf_experts(prefixes, **options)
+    assert prepared.plan.source.w13_layout.value == "w31"
+    assert prepared.plan.activation.nonlinearity == activation
+    first, last = partition
+    for index, prefix in enumerate(prefixes):
+        gate, up, down = (loader._sources[f"{prefix}.{projection}.{weight_name}"]
+                          for projection in ("w1", "w3", "w2"))
+        assert torch.equal(prepared.weights.w13[index], torch.cat((gate[first:last], up[first:last])))
+        assert torch.equal(prepared.weights.w2[index], down[:, first // 2:last // 2])
+    assert prepared.weights.w13_scales[0] == [f"{p}.{w}.weight_scale" for p in prefixes for w in ("w1", "w3")]
+    assert prepared.weights.w13_scales[1]["row_range"] == partition
+    assert prepared.weights.w2_scales[1]["column_range"] == (first // 32, last // 32)
+    assert prepared.weights.w13_scale_scratch is scratch[0]
+    assert prepared.weights.w2_scale_scratch is scratch[1]
+    options["scale_scratch"] = (torch.empty(1, dtype=torch.uint8), scratch[1])
+    with pytest.raises(ValueError, match="scale scratch"):
+        loader.load_mxfp4_csf_experts(prefixes, **options)
+
+
+def test_mxfp4_storage_selection_preserves_projection_order_and_shared_scale_lifetime(monkeypatch):
+    names = [f"layer{layer}.expert{expert}" for layer in (0, 1) for expert in (0, 1)]
+    compressed = {f"{name}.{projection}.scale" for name in names for projection in ("w1", "w3", "w2")}
+    loader = DirectWeightLoader(SimpleNamespace(compressed_scales=compressed), "cpu")
+    loader._session = object()
+    monkeypatch.setattr(loader, "load_mxfp4_csf_experts", lambda prefixes, **kwargs: kwargs)
+    monkeypatch.setattr(loader, "load_fp4_experts", lambda prefixes, **kwargs: kwargs)
+    scratch = {}
+    options = dict(hidden_size=128, intermediate_size=64, intermediate_range=(32, 64),
+                   scale_scratch=scratch, projection_names=("w3", "w1", "w2"), scale_name="scale")
+    first = loader.load_mxfp4_experts(names[:2], **options)
+    second = loader.load_mxfp4_experts(names[2:], **options)
+    assert first["projection_names"] == ("w1", "w3", "w2")
+    assert first["scale_scratch"] is second["scale_scratch"]
+    assert [tuple(tensor.shape) for tensor in first["scale_scratch"]] == [(2, 4, 64), (2, 1, 128)]
+    ordinary = loader.load_mxfp4_experts(["draft.expert0"], **options)
+    assert ordinary["projection_names"] == ("w3", "w1", "w2")
+    assert ordinary["format"] == "mxfp4" and ordinary["activation_mode"] == "a8"
+    assert "scale_scratch" not in ordinary and len(scratch) == 1
+    with pytest.raises(ValueError, match="complete MXFP4 scale encoding"):
+        loader.load_mxfp4_experts([names[0], "draft.expert0"], **options)
+
+
 @pytest.mark.parametrize("loader_type", [DirectWeightLoader, QwenWeightLoader])
 @pytest.mark.parametrize("algo,group,selected", [("MXFP8", 32, "mxfp8"), ("MXFP4", 32, "mxfp4"), ("NVFP4", 16, "nvfp4"),
                                                 ("W4A16_NVFP4", 16, "nvfp4")])
 def test_checkpoint_selects_single_projection_format(tmp_path, monkeypatch, loader_type, algo, group, selected):
     prefix = "model.language_model.layers.0.linear_attn.out_proj"
     (tmp_path / "config.json").write_text(json.dumps(config({prefix: {"quant_algo": algo, "group_size": group}})))
-    loader = loader_type(SimpleNamespace(snapshot=tmp_path), "cuda:0")
+    loader = loader_type(SimpleNamespace(snapshot=tmp_path, metadata_path=tmp_path), "cuda:0")
     loader._session = object()
     monkeypatch.setattr(loader, "load_linear_group", lambda prefixes, **kwargs: (projection_group_format(loader.quantization, prefixes), kwargs))
     result, slices = loader.load_linear(prefix, rows=(0, 32), columns=(16, 144))
@@ -35,7 +102,7 @@ def test_nvfp4_fusion_rejected_before_tensor_access(tmp_path, formats):
     layers = {name: {"quant_algo": algo, "group_size": 32 if algo == "MXFP8" else 16}
               for name, algo in zip(("q", "k"), formats)}
     (tmp_path / "config.json").write_text(json.dumps(config(layers)))
-    loader = DirectWeightLoader(SimpleNamespace(snapshot=tmp_path), "cuda:0")
+    loader = DirectWeightLoader(SimpleNamespace(snapshot=tmp_path, metadata_path=tmp_path), "cuda:0")
     loader._session = object()
     with pytest.raises(ValueError, match="cannot fuse NVFP4.*only MoE expert w1/w3"):
         loader.load_linear_group(("q", "k"))
@@ -99,7 +166,7 @@ def test_mtp_experts_use_declared_format_and_mtp_scales(tmp_path, monkeypatch, a
 
     prefix = "mtp.layers.0.mlp.experts"
     (tmp_path / "config.json").write_text(json.dumps(config({prefix: {"quant_algo": algo, "group_size": group}})))
-    loader = MTPWeightLoader(SimpleNamespace(snapshot=tmp_path), "cpu", shard=TensorParallelShard(1, 2))
+    loader = MTPWeightLoader(SimpleNamespace(snapshot=tmp_path, metadata_path=tmp_path), "cpu", shard=TensorParallelShard(1, 2))
     loader._session = object()
     loader._sources = {f"{prefix}.{expert}.{proj}.{suffix}": torch.tensor(value)
         for expert, value in ((7, .5), (4, .25))

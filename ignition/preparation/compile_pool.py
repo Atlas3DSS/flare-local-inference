@@ -56,7 +56,9 @@ class CompilePool:
             free = min(free, host_memory.available_bytes())
         capacity = (free - headroom_bytes) // _WORKER_DEVICE_BYTES
         if capacity < 1:
-            raise MemoryError("forward compilation requires memory for a CUDA worker beyond preparation headroom")
+            raise MemoryError("forward compilation requires memory for a CUDA worker beyond preparation headroom "
+                              f"({free >> 20} MiB free, {headroom_bytes >> 20} MiB headroom, "
+                              f"{_WORKER_DEVICE_BYTES >> 20} MiB per worker)")
         self.workers = worker_limit(min(8, budget, capacity), pools=pools, available=free if shared else None,
                                    device_bytes=_WORKER_DEVICE_BYTES if shared else 0,
                                    headroom_bytes=headroom_bytes if shared else 0)

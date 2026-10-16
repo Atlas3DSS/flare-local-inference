@@ -5,7 +5,7 @@ from time import monotonic
 
 import torch
 
-from ignition.progress import StartupProgress, phase
+from ignition.progress import phase
 
 from .aot import ForwardCache
 from .compilation import _defer_full_collection
@@ -15,6 +15,7 @@ from .compilation import _defer_full_collection
 def capture_forwards(functions, signatures, *, session, device, stream, pool,
                      collective=None, coordinator=None, compile_decoder=True, materialize=None,
                      progress=None, label="Prepare serving graphs", cache_root=None, retain_graphs=False,
+                     warmup_storage=None,
                      compile_kinds=("prefill", "decode", "resume", "speculative", "mixed")):
     """Retain compiled callables and capture with an optional b12x IPC runtime.
 
@@ -23,6 +24,7 @@ def capture_forwards(functions, signatures, *, session, device, stream, pool,
     serving replays variants serially and may choose them in any order.
     """
     graphs, compiled = {}, {}
+    warmup = nullcontext if warmup_storage is None else warmup_storage.transient
     if compile_decoder:
         cache = ForwardCache(namespace=session.namespace.to_dict(), device=device, root=cache_root,
                              headroom_bytes=getattr(session, "headroom_bytes", 0))
@@ -31,7 +33,7 @@ def capture_forwards(functions, signatures, *, session, device, stream, pool,
         stream.wait_stream(torch.cuda.current_stream(device))
         with torch.cuda.stream(stream):
             compiled = cache.prepare_many(forwards, signatures, progress=progress,
-                                          coordinator=coordinator, materialize=materialize)
+                                          coordinator=coordinator, materialize=materialize, warmup=warmup)
         stream.synchronize()
     elif materialize is not None:
         materialize()
@@ -39,7 +41,7 @@ def capture_forwards(functions, signatures, *, session, device, stream, pool,
         for name, function in functions.items():
             started = monotonic()
             stream.wait_stream(torch.cuda.current_stream(device))
-            with torch.cuda.stream(stream):
+            with warmup(), torch.cuda.stream(stream):
                 if name in compiled:
                     function = compiled[name]
                 else:
@@ -47,13 +49,26 @@ def capture_forwards(functions, signatures, *, session, device, stream, pool,
             stream.synchronize()
             graph = torch.cuda.CUDAGraph(keep_graph=True) if retain_graphs else torch.cuda.CUDAGraph()
             communication = nullcontext() if collective is None else collective.capture(stream=stream)
-            with communication, session.capture(), torch.cuda.graph(graph, pool=pool, stream=stream):
-                function()
-            if retain_graphs:
-                graph.instantiate()
+            def memory_detail():
+                free, _ = torch.cuda.mem_get_info(device)
+                return (f"{free / (1 << 20):.0f} MiB free, "
+                        f"{torch.cuda.memory_reserved(device) / (1 << 20):.0f} MiB reserved")
+
+            try:
+                if progress is not None:
+                    progress(f"capturing {name}: {memory_detail()}")
+                with communication, session.capture(), torch.cuda.graph(graph, pool=pool, stream=stream):
+                    function()
+                if retain_graphs:
+                    if progress is not None:
+                        progress(f"instantiating {name}: {memory_detail()}")
+                    graph.instantiate()
+            except Exception as error:
+                error.add_note(f"Graph {name!r} on {device}: {memory_detail()}")
+                raise
             graphs[name] = graph
             stage.update(advance=1)
-            if progress is not None and not isinstance(progress, StartupProgress):
+            if progress is not None:
                 cached = " (compiled cache hit)" if name in compiled and compiled[name].cache_hit else ""
                 progress(f"captured {name} in {monotonic() - started:.2f}s{cached}")
     torch.cuda.synchronize(device)

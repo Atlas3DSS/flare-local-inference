@@ -37,6 +37,18 @@ def _expected(config, values, label):
 
 
 def image_settings(config, model, profile):
+    if profile == "moonvit":
+        _expected(config["media_proc_cfg"], {"in_patch_limit": 65536, "patch_size": 14,
+            "image_mean": [0.5] * 3, "image_std": [0.5] * 3, "merge_kernel_size": 2,
+            "fixed_output_tokens": None, "patch_limit_on_one_side": 512,
+            "transparent_bg_fill_stage": "after_resize", "transparent_bg_config": {
+                "pattern": "chessboard", "chessboard_square_size": 8,
+                "chessboard_square_on_top_left": True, "chessboard_white_value": 255,
+                "chessboard_gray_value": 180}}, "MoonViT image processor")
+        _expected(model["vision_config"], {"patch_size": 14, "init_pos_emb_height": 64,
+            "init_pos_emb_width": 64, "pos_emb_interpolation_mode": "bilinear",
+            "merge_kernel_size": [2, 2]}, "MoonViT vision configuration")
+        return {"moonvit": {}}
     if profile == "deepseek4":
         _expected(config, {"image_processor_type": "DeepSeekV4ImageProcessor", "patch_size": 14,
             "merge_size": 3, "max_image_tokens": 384, "min_pixels": 147456,

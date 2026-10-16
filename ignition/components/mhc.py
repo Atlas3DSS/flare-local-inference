@@ -9,7 +9,8 @@ from b12x.preparation import PreparedCall
 
 from ignition.components import mhc_sm103, sm103
 from ignition.preparation.scratch import planned_scratch, prime_owners
-from ignition.preparation.tuning import declare, benchmark_resource, register_finalizer
+from ignition.preparation.tuning import declare, register_finalizer
+from ignition.preparation.fixtures.resources import candidate_inputs
 
 
 @dataclass(frozen=True)
@@ -39,10 +40,12 @@ class MHCScratch:
     def bind_args(self):
         return {"out": self.residual, "post": self.post, "comb": self.comb, "y": self.normalized}
 
-    def rows(self, tokens):
-        if type(tokens) is not int or not 0 < tokens <= self.residual.shape[0]:
+    def rows(self, tokens, *, start=0):
+        if (type(tokens) is not int or type(start) is not int or start < 0
+                or not 0 < tokens <= self.residual.shape[0] - start):
             raise ValueError("mHC rows exceed scratch capacity")
-        return MHCScratch(*(getattr(self, name)[:tokens] for name in self.__dataclass_fields__))
+        return MHCScratch(*(getattr(self, name)[start:start + tokens]
+                            for name in self.__dataclass_fields__))
 
 
 class _BenchmarkInputs:
@@ -82,11 +85,16 @@ class PreparedMHC:
     consumes the preceding branch output and its FP32 expansion/mixing weights.
     The output residual and normalized branch input retain BF16 storage; mixing
     coefficients and projection weights use FP32. Runtime calls use fixed shapes.
+    ``max_rows_per_call`` bounds the row working set of each sequential call;
+    b12x autotunes those shapes, and calls reuse the same temporary workspace.
     """
 
     def __init__(self, inputs, weights: MHCWeights, scratch: MHCScratch, *,
                  session, name, workspace, rms_eps, hc_eps, sinkhorn_iters, norm_eps,
-                 pre_mix=None, pre_out=None):
+                 pre_mix=None, pre_out=None, max_rows_per_call=None):
+        if max_rows_per_call is not None and (type(max_rows_per_call) is not int
+                                              or max_rows_per_call <= 0):
+            raise ValueError("mHC row capacity per call must be a positive integer")
         self.operation = "pre" if len(inputs) == 1 else "post_pre" if len(inputs) == 4 else None
         if self.operation is None:
             raise ValueError("mHC requires residual or branch/residual/post/comb inputs")
@@ -106,11 +114,24 @@ class PreparedMHC:
             raise ValueError("lagged mHC requires incoming and outgoing coefficient buffers")
         if pre_mix is not None:
             self.options.update(pre_mix=pre_mix)
-        self.composed = None
+        self.composed = self.row_calls = None
         if pre_mix is None and tokens > mhc_sm103.MIN_ROWS and sm103.is_sm103(residual.device):
             # SM103 prefill composes FlashInfer's mHC kernels; b12x's fused launches stay for decode.
             self.composed = mhc_sm103.ComposedMHC(self.operation, weights, scratch, rms_eps=rms_eps,
                 hc_eps=hc_eps, sinkhorn_iters=sinkhorn_iters, norm_eps=norm_eps)
+            return
+        if max_rows_per_call is not None and tokens > max_rows_per_call:
+            self.row_calls = []
+            for start in range(0, tokens, max_rows_per_call):
+                end = min(start + max_rows_per_call, tokens)
+                call = PreparedMHC(tuple(value[start:end] for value in inputs), weights,
+                    scratch.rows(end - start, start=start), session=session,
+                    name=f"{name}.rows{start}_{end}", workspace=workspace,
+                    rms_eps=rms_eps, hc_eps=hc_eps, sinkhorn_iters=sinkhorn_iters,
+                    norm_eps=norm_eps,
+                    pre_mix=None if pre_mix is None else pre_mix[start:end],
+                    pre_out=None if pre_out is None else pre_out[start:end])
+                self.row_calls.append((start, end, call))
             return
         self.plan = mhc.plan(mhc.Caps(device=residual.device, max_tokens=tokens, hidden_size=hidden),
             invocation={"operation": self.operation, "output_mode": "provided", "has_norm_weight": True,
@@ -133,9 +154,10 @@ class PreparedMHC:
                 output=tuple(buffers.bind_args().values()),
                 owners=(*prime_owners(workspace, storage, binding), fixture))
 
+        benchmark_inputs = candidate_inputs(lambda: _BenchmarkInputs(residual, self.operation, pre_mix is not None))
+
         def benchmark(state):
-            fixture = benchmark_resource(session, ("mhc", str(residual.device), tokens, hidden, self.operation, pre_mix is not None),
-                                         lambda: _BenchmarkInputs(residual, self.operation, pre_mix is not None))
+            fixture = benchmark_inputs()
             return call(state, fixture.inputs, fixture.scratch, fixture)
 
         declare(session, (self.plan.request(name=name, prepare_call=lambda state: call(state, inputs, scratch),
@@ -150,6 +172,10 @@ class PreparedMHC:
     def __call__(self, *inputs):
         if self.composed is not None:
             return self.composed(*inputs)
+        if self.row_calls is not None:
+            for start, end, call in self.row_calls:
+                call(*(value[start:end] for value in inputs))
+            return self.scratch.normalized
         entry = mhc.run_pre if self.operation == "pre" else mhc.run_post_pre
         entry(*inputs, self.weights.fn, self.weights.scale, self.weights.base,
               **self.options, binding=self.binding)

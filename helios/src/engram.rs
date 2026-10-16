@@ -1,13 +1,19 @@
 //! Host- or graph-produced n-gram requests and asynchronous compact-row delivery.
 
+mod cache;
+#[cfg(unix)]
+mod prepared;
 mod reader;
 use crate::{
     Error, Result,
     cuda::{Event, PinnedHost, Stream},
     execution::{ExecutionManifest, GraphKind, Upload},
 };
+#[cfg(unix)]
+pub use prepared::{PlaneSource, PreparedTables, TableSource};
 pub(crate) use reader::Plane;
 use std::{
+    fmt::Write,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
@@ -16,6 +22,93 @@ use std::{
     thread::{self, JoinHandle},
 };
 
+#[derive(Default)]
+pub(crate) struct Stats {
+    gathers: AtomicU64,
+    gather_ns: AtomicU64,
+    hits: AtomicU64,
+    misses: AtomicU64,
+    evictions: AtomicU64,
+    resident_rows: AtomicU64,
+    capacity_rows: AtomicU64,
+    cache_bytes: AtomicU64,
+    disk_reads: AtomicU64,
+    disk_bytes: AtomicU64,
+}
+
+impl Stats {
+    pub(crate) fn render(&self, text: &mut String) {
+        for (name, kind, help, counter) in [
+            (
+                "gathers_total",
+                "counter",
+                "Embedding row gathers, excluding the wait for GPU-produced IDs.",
+                &self.gathers,
+            ),
+            (
+                "gather_nanoseconds_total",
+                "counter",
+                "Wall time inside embedding row gathers.",
+                &self.gather_ns,
+            ),
+            (
+                "row_cache_hits_total",
+                "counter",
+                "Cached row hits; duplicate IDs within one gather count once.",
+                &self.hits,
+            ),
+            (
+                "row_cache_misses_total",
+                "counter",
+                "Cached row misses; duplicate IDs within one gather count once.",
+                &self.misses,
+            ),
+            (
+                "row_cache_evictions_total",
+                "counter",
+                "Resident rows replaced by other row IDs.",
+                &self.evictions,
+            ),
+            (
+                "row_cache_resident_rows",
+                "gauge",
+                "Rows held in the embedding row cache.",
+                &self.resident_rows,
+            ),
+            (
+                "row_cache_capacity_rows",
+                "gauge",
+                "Maximum rows held in the embedding row cache.",
+                &self.capacity_rows,
+            ),
+            (
+                "row_cache_bytes",
+                "gauge",
+                "Allocated embedding row payload, usage counters, index and bounded miss workspace bytes.",
+                &self.cache_bytes,
+            ),
+            (
+                "disk_reads_total",
+                "counter",
+                "Direct-I/O embedding read requests queued.",
+                &self.disk_reads,
+            ),
+            (
+                "disk_bytes_total",
+                "counter",
+                "Bytes requested by direct-I/O embedding reads.",
+                &self.disk_bytes,
+            ),
+        ] {
+            let _ = writeln!(
+                text,
+                "# HELP flare_engram_{name} {help}\n# TYPE flare_engram_{name} {kind}\nflare_engram_{name} {}",
+                counter.load(Ordering::Relaxed)
+            );
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Storage {
     #[default]
@@ -23,7 +116,7 @@ pub enum Storage {
     Ram,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct Table {
     pub(crate) planes: [Plane; 2],
     pub(crate) heads: usize,
@@ -34,7 +127,7 @@ pub(crate) struct Table {
     pub(crate) request: Option<String>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct Index {
     pub(crate) tables: Vec<Table>,
 }
@@ -119,6 +212,7 @@ pub(crate) struct Shared {
     layers: Vec<Layer>,
     ranks: usize,
     max_tokens: usize,
+    stats: Arc<Stats>,
 }
 impl Shared {
     pub fn new(
@@ -129,19 +223,66 @@ impl Shared {
         context: usize,
         device: i32,
         storage: Storage,
+        cache_bytes: u64,
     ) -> Result<Arc<Self>> {
-        let stream = Stream::open(context, device)?;
+        if storage == Storage::Ram && cache_bytes != 0 {
+            return Err("embedding row cache requires disk table storage".into());
+        }
         let index = Arc::new(index);
+        let stats = Arc::new(Stats::default());
+        let table_bytes: u128 = index
+            .tables
+            .iter()
+            .flat_map(|table| &table.planes)
+            .map(|plane| plane.nbytes as u128)
+            .sum();
+        let readers = index
+            .tables
+            .iter()
+            .map(|table| {
+                let bytes: u128 = table.planes.iter().map(|plane| plane.nbytes as u128).sum();
+                let budget = usize::try_from(cache_bytes as u128 * bytes / table_bytes)
+                    .map_err(|_| "embedding row cache exceeds host address range")?;
+                let rows = max_tokens
+                    .checked_mul(table.heads)
+                    .ok_or("embedding row capacity exceeds host range")?;
+                reader::Reader::from_file(
+                    file,
+                    &table.planes,
+                    storage == Storage::Ram,
+                    budget,
+                    rows,
+                    stats.clone(),
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Self::with_readers(index, readers, ranks, max_tokens, context, device, stats)
+    }
+
+    fn with_readers(
+        index: Arc<Index>,
+        readers: Vec<reader::Reader>,
+        ranks: usize,
+        max_tokens: usize,
+        context: usize,
+        device: i32,
+        stats: Arc<Stats>,
+    ) -> Result<Arc<Self>> {
+        if ranks == 0 || ranks > 16 || max_tokens == 0 || readers.len() != index.tables.len() {
+            return Err("invalid embedding delivery geometry".into());
+        }
+        let stream = Stream::open(context, device)?;
         let mut layers = Vec::new();
-        for table in &index.tables {
-            let mut reader =
-                reader::Reader::from_file(file, &table.planes, storage == Storage::Ram)?;
+        for (table, mut reader) in index.tables.iter().zip(readers) {
+            let staging_bytes = table
+                .planes
+                .iter()
+                .try_fold(0usize, |total, plane| total.checked_add(plane.row_bytes))
+                .and_then(|n| n.checked_mul(table.heads))
+                .and_then(|n| n.checked_mul(max_tokens))
+                .ok_or("embedding staging exceeds host range")?;
             let staging = Arc::new(Staging {
-                data: stream.mapped_host_buffer(
-                    max_tokens
-                        * table.heads
-                        * table.planes.iter().map(|p| p.row_bytes).sum::<usize>(),
-                )?,
+                data: stream.mapped_host_buffer(staging_bytes)?,
                 ready: stream.mapped_host_buffer(4)?,
                 error: Mutex::new(None),
             });
@@ -196,7 +337,16 @@ impl Shared {
             layers,
             ranks,
             max_tokens,
+            stats,
         }))
+    }
+
+    pub(crate) fn stats(&self) -> Arc<Stats> {
+        self.stats.clone()
+    }
+
+    pub(crate) fn cache_bytes(&self) -> u64 {
+        self.stats.cache_bytes.load(Ordering::Relaxed)
     }
     fn start(
         &self,
@@ -288,20 +438,22 @@ impl Transfers {
         for (i, table) in binding.shared.index.tables.iter().enumerate() {
             let stream = Stream::open(manifest.context, manifest.device)?;
             let flag = stream.mapped_address(&binding.shared.layers[i].staging.ready)?;
+            let request = table
+                .request
+                .as_ref()
+                .map(|name| {
+                    let buffer = manifest.buffer(name)?;
+                    let address = stream.host_address(buffer.address, buffer.nbytes)?;
+                    Ok::<_, Error>((address, address + buffer.nbytes - 8))
+                })
+                .transpose()?;
             layers.push(Transfer {
                 stream,
                 flag,
                 weights: manifest.buffer(&table.weights)?.address,
                 scales: manifest.buffer(&table.scales)?.address,
                 event: binding.events[i],
-                request: table
-                    .request
-                    .as_ref()
-                    .map(|name| {
-                        let buffer = manifest.buffer(name)?;
-                        Ok::<_, Error>((buffer.address, buffer.address + buffer.nbytes - 8))
-                    })
-                    .transpose()?,
+                request,
             });
         }
         Ok(Self { binding, layers })
@@ -390,6 +542,10 @@ impl Transfers {
 pub(crate) fn consumes(kind: GraphKind) -> bool {
     matches!(
         kind,
-        GraphKind::Prefill | GraphKind::Decode | GraphKind::Speculative | GraphKind::Mixed
+        GraphKind::Prefill
+            | GraphKind::Decode
+            | GraphKind::Speculative
+            | GraphKind::Verification
+            | GraphKind::Mixed
     )
 }

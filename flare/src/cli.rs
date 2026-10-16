@@ -135,6 +135,11 @@ pub struct Run {
             .map(|value| if value == "disk" { Storage::Disk } else { Storage::Ram }))]
     pub embedding_table_storage: Option<Storage>,
 
+    /// Per-host budget for a disk-backed embedding row cache, e.g. 1G; includes the
+    /// index, usage counters and miss workspace. Selects disk storage; 0 disables [default: 0].
+    #[arg(long, value_name = "SIZE", value_parser = parse_size, default_value = "0", help_heading = "Serving options")]
+    pub embedding_table_cache_size: u64,
+
     /// Maximum drafts per round; 0 disables speculation [default: package setting].
     #[arg(long, value_name = "N", help_heading = "Speculation options")]
     pub mtp_draft_tokens: Option<usize>,
@@ -205,12 +210,19 @@ impl Run {
                 .into(),
             ]);
         }
+        if self.embedding_table_cache_size != 0 {
+            options.extend([
+                "--embedding-table-cache-size".into(),
+                self.embedding_table_cache_size.to_string(),
+            ]);
+        }
         options
     }
 
     pub fn load_options(&self) -> LoadOptions {
         LoadOptions {
             embedding_table_storage: self.embedding_table_storage,
+            embedding_table_cache_bytes: self.embedding_table_cache_size,
             max_concurrency: self.max_concurrency.map(NonZeroUsize::get),
             mtp_draft_tokens: self.mtp_draft_tokens,
             adaptive_verification: if self.mtp_adaptive_verification {
@@ -250,6 +262,7 @@ mod tests {
         let options = args.load_options();
         assert_eq!(options.device_labels, Some(vec![0]));
         assert_eq!(options.embedding_table_storage, None);
+        assert_eq!(options.embedding_table_cache_bytes, 0);
         assert_eq!(options.max_concurrency, None);
         assert_eq!(options.mtp_draft_tokens, None);
         assert_eq!(options.adaptive_verification, None);
@@ -318,5 +331,23 @@ mod tests {
                 Some(expected)
             );
         }
+    }
+
+    #[test]
+    fn embedding_row_cache_accepts_a_binary_memory_budget() {
+        let args = run(&[
+            "flare",
+            "run",
+            "model.safetensors",
+            "--embedding-table-cache-size",
+            "1G",
+        ]);
+        let options = args.load_options();
+        assert_eq!(options.embedding_table_cache_bytes, 1 << 30);
+        assert_eq!(options.embedding_table_storage, None);
+        assert_eq!(
+            args.rank_options(),
+            ["--embedding-table-cache-size", "1073741824"]
+        );
     }
 }

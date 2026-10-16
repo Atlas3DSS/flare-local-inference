@@ -83,6 +83,8 @@ pub struct ModelConfig {
     pub max_new_tokens: u32,
     pub speculative_widths: Vec<usize>,
     pub speculative_fixed_width: Option<usize>,
+    /// Stop admitting a proposal prefix below this cumulative causal confidence.
+    pub proposal_confidence_threshold: f64,
     pub history_drafts: bool,
     pub speculative_proposal_source: crate::scheduler::speculation::ProposalSource,
 }
@@ -257,7 +259,7 @@ pub fn validate_completion(
                 || v.tokens
                     .iter()
                     .any(|id| *id >= config.contract.vocabulary as i64)
-                || (kind == GraphKind::Speculative
+                || (matches!(kind, GraphKind::Speculative | GraphKind::Verification)
                     && record.status != 3
                     && v.draft_cache_consumed
                         != contract.draft_cursor.as_ref().map_or(-1, |cursor| {

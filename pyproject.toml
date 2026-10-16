@@ -15,7 +15,7 @@ dependencies = []
 ignition = "ignition.__main__:main"
 
 [project.optional-dependencies]
-test = ["pytest>=9,<10"]
+test = ["pytest>=9,<10", "tiktoken>=0.12,<1"]
 api-test = ["pytest>=9,<10", "openai>=2,<3", "anthropic>=0.70,<1"]
 prepare = [
     "cryptography>=46,<52",
@@ -50,6 +50,7 @@ include = ["ignition*"]
 [tool.setuptools.package-data]
 "ignition.recipes.deepseek41" = ["assets/*"]
 "ignition.recipes.deepseek4" = ["assets/*"]
+"ignition.recipes.kimi3" = ["assets/*"]
 
 [tool.pytest.ini_options]
 addopts = "--import-mode=importlib"

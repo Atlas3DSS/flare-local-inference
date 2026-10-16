@@ -28,7 +28,7 @@ class Tables:
     def prepare(cls, manifest, config, *, tokens, device, sequence, host_allocator, progress=None):
         from transformers import PreTrainedTokenizerFast
 
-        tokenizer = PreTrainedTokenizerFast(tokenizer_file=str(manifest.snapshot / "tokenizer.json"))
+        tokenizer = PreTrainedTokenizerFast(tokenizer_file=str(manifest.metadata_path / "tokenizer.json"))
         token_map, size = engram.build_compressed_token_map(tokenizer)
         text = config.text
         if size != text["engram_compressed_vocab_size"]:
@@ -52,7 +52,7 @@ class Tables:
                 inputs[layer] = EngramInputs.allocate(tokens, device)
                 mailboxes[layer] = host_allocator(f"engram_{layer}_requests", (tokens * 24 + 1,), torch.int64)
                 mailboxes[layer].host_view.zero_()
-            stage.update(f"{sum(source.nbytes for pair in sources.values() for source in pair) / (1 << 30):.1f} GiB on disk")
+            stage.update(f"{sum(source.nbytes for pair in sources.values() for source in pair) / (1 << 30):.1f} GiB in checkpoint spans")
         return cls(geometry, tuple(token_map), sources, inputs, mailboxes, sequence)
 
     def buffers(self):
@@ -61,6 +61,17 @@ class Tables:
 
     def events(self):
         return {f"engram_{layer}_ready": inputs.ready.cuda_event for layer, inputs in self.inputs.items()}
+
+    def resident_catalog(self):
+        """Source spans and native bindings for shared RAM delivery without package export."""
+        return {"vocabulary": len(self.token_map), "tables": [
+            {"planes": [{"path": str(source.path), "offset": source.offset,
+                         "nbytes": source.nbytes, "row_bytes": row_bytes}
+                        for source, row_bytes in zip(self.sources[layer], (256, 8), strict=True)],
+             "heads": 24, "weights": f"engram_{layer}_weights", "scales": f"engram_{layer}_scales",
+             "hashes": f"engram_{layer}_hashes", "event": f"engram_{layer}_ready",
+             "request": f"engram_{layer}_requests"}
+            for layer in self.geometry.layer_ids]}
 
     def append(self, index, payload, cursor):
         from ignition.preparation.package_file import align
@@ -120,13 +131,31 @@ class PreparedTableRequests:
         save_hidden(history, self.pool.region("engram_history"), m.state_rows, counts > 0)
 
 
+@dataclass(frozen=True)
+class EngramScratch:
+    """Intermediate lookup and projection storage for serialized Engram layers."""
+
+    mask: torch.Tensor
+    gathered: torch.Tensor
+    projected: torch.Tensor
+
+    @classmethod
+    def allocate(cls, tokens, device):
+        return cls(torch.zeros(tokens, dtype=torch.bool, device=device),
+                   torch.zeros((tokens, 6144), dtype=torch.bfloat16, device=device),
+                   torch.zeros((tokens, 25600), dtype=torch.bfloat16, device=device))
+
+
 class PreparedEngram:
-    def __init__(self, layer, weights, tables, source, output, metadata, pool, *, session, name, workspace):
+    def __init__(self, layer, weights, tables, source, output, metadata, pool, *, scratch, session, name, workspace):
         self.source, self.output, self.metadata, self.pool = source, output, metadata, pool
         tokens, device = metadata.token_ids.numel(), source.device
-        self.mask = torch.zeros(tokens, dtype=torch.bool, device=device)
-        self.gathered = torch.zeros((tokens, 6144), dtype=torch.bfloat16, device=device)
-        self.projected = torch.zeros((tokens, 25600), dtype=torch.bfloat16, device=device)
+        self.mask, self.gathered, self.projected = scratch.mask, scratch.gathered, scratch.projected
+        for tensor, shape, dtype in ((self.mask, (tokens,), torch.bool),
+                (self.gathered, (tokens, 6144), torch.bfloat16),
+                (self.projected, (tokens, 25600), torch.bfloat16)):
+            if tensor.shape != shape or tensor.dtype != dtype or tensor.device != device or not tensor.is_contiguous():
+                raise ValueError("Engram scratch must match the contiguous lookup and projection geometry")
         self.lookup = PreparedEngramLookup(tables.inputs[layer], self.gathered, metadata.live_counts[:1],
             layer=layer, token_map=tables.token_map, geometry=tables.geometry,
             session=session, name=name + ".lookup")

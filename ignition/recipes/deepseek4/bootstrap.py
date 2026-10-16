@@ -70,13 +70,13 @@ class PreparationConfig:
         if type(self.stream_overlap) is not bool:
             raise TypeError("stream_overlap must be a boolean")
         if (
-            len(self.devices) != 4
+            len(self.devices) not in (2, 4)
             or len(set(self.devices)) != len(self.devices)
             or any(d < 0 for d in self.devices)
         ):
-            raise ValueError("DeepSeek V4 Flash Vision preparation requires four distinct GPUs")
+            raise ValueError("DeepSeek V4 Flash Vision preparation requires two or four distinct GPUs")
         if not PAGE_TOKENS <= self.context <= 1048576 or self.context % PAGE_TOKENS:
-            raise ValueError("DeepSeek context must be 128-aligned in [128,1048576]")
+            raise ValueError("DeepSeek context must be 256-aligned in [256,1048576]")
         if not 512 <= self.prefill_chunk_size <= self.context or self.prefill_chunk_size % 64:
             raise ValueError("prefill chunk size must be 64-aligned in [512,context] to hold an image span")
         request_capacity(self.max_active)
@@ -126,6 +126,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
     torch.cuda.set_device(device)
     with phase(progress, "Inspect checkpoint"):
         manifest = inspect_indexed_checkpoint(snapshot)
+    metadata_path = manifest.metadata_path
     transient = contextlib.ExitStack()
     transient.enter_context(package_storage.transient())
     weights = ModelWeights.load(manifest, device, shard=shard, progress=progress, dspark=config.dspark)
@@ -177,7 +178,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         identity = hashlib.sha256(
             json.dumps(
                 {
-                    "config": json.loads((snapshot / "config.json").read_text()),
+                    "config": json.loads((metadata_path / "config.json").read_text()),
                     "headers": [s.header_sha256 for s in manifest.shards],
                     "world_size": shard.world_size,
                     "contract": "deepseek4.graph-inputs.v1",
@@ -241,6 +242,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                 markov_runtime=markov_collective,
                 coordinator=coordinator,
                 forwards=FORWARDS,
+                page_tokens=PAGE_TOKENS,
             )
 
     del manifest
@@ -293,6 +295,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                         mode=mode,
                         shard=shard,
                         pool=pool,
+                        page_tokens=PAGE_TOKENS,
                         input_vocabulary=129285,
                         validate_prefill=vision_state.validate_prefill if mode == "prefill" else None,
                     )
@@ -390,6 +393,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                         capacity=capacity,
                         admission_buffers=admission,
                         draft_state=enabled,
+                        page_tokens=PAGE_TOKENS,
                     )
                     fields = (
                         row_inputs
@@ -446,7 +450,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
     assets = {
         role: {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
         for role, path in (
-            ("tokenizer", snapshot / "tokenizer.json"),
+            ("tokenizer", metadata_path / "tokenizer.json"),
             ("chat_template", frontend / "chat_template.jinja"),
         )
     }
@@ -460,7 +464,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         "state_rows": state_rows,
         "snapshots": snapshots,
         "page_tokens": PAGE_TOKENS,
-        "frontend": prepare_frontend(snapshot, eos_token_ids=[1], image_profile="deepseek4",
+        "frontend": prepare_frontend(metadata_path, eos_token_ids=[1], image_profile="deepseek4",
             preprocessor=frontend / "preprocessor_config.json"),
         "sampling_defaults": RECIPE.sampling_defaults.as_dict(),
         "assets": assets,

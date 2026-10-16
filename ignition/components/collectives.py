@@ -90,6 +90,14 @@ class PreparedAllReduce:
             def prepare(state):
                 return PreparedCall(run=lambda: state.run(source, out=output), output=output,
                                     owners=(runtime, source, output))
+        elif runtime.algorithm == "hierarchical":
+            from b12x.comm.pcie._owner_preparation import prepared_call
+
+            self.plan = runtime.plan(source, out=output)
+            group = runtime.for_stream().group
+
+            def prepare(state):
+                return prepared_call(state, inp=source, out=output)
         else:
             if (runtime.world_size < 2 or runtime.algorithm != "oneshot"
                     or not runtime.single_channel):

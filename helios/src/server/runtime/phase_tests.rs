@@ -82,6 +82,7 @@ impl Fixture {
                 max_new_tokens: 16,
                 speculative_widths: vec![],
                 speculative_fixed_width: None,
+                proposal_confidence_threshold: 0.15,
                 history_drafts: false,
                 speculative_proposal_source: Default::default(),
             },
@@ -235,6 +236,7 @@ fn completion(
         };
     }
     FrameCompletion {
+        proposal_confidence: None,
         fence: Fence(sequence),
         graph_index: 0,
         timing: Default::default(),
@@ -774,6 +776,7 @@ fn speculative_dashboard_counts_live_rounds_and_batched_forward_passes() {
                 .complete(
                     GraphKind::Speculative,
                     FrameCompletion {
+                        proposal_confidence: None,
                         records: invalid,
                         ..frame
                     }

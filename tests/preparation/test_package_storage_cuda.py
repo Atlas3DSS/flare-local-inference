@@ -24,7 +24,7 @@ def test_export_keeps_host_mailbox_and_omits_unused_library_storage(tmp_path):
     index, _ = read_index(output / "package")
     allocations = index.ranks[0].allocations
     host, = (allocation for allocation in allocations if allocation.memory == proto.MAPPED_HOST)
-    assert host.address == 0xc0000000000
+    assert host.address == PackageStorage.HOST_BASE
     assert all(allocation.address >= PackageStorage.EXTERNAL_FLOOR
                for allocation in allocations if allocation.memory == proto.DEVICE)
     assert all(not allocation.name.startswith("external-") for allocation in allocations)
@@ -51,6 +51,45 @@ with PackageStorage(device=0) as storage:
 """], check=True, timeout=60)
 
 
+@pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
+                    reason="requires an explicitly assigned CUDA device")
+def test_projection_fixture_pools_release_after_trial_owners(mailbox_storage):
+    import gc
+    import torch
+    from ignition.preparation.fixtures.projection import input_factory
+    from ignition.preparation.tuning import RecordedPreparationSession
+
+    torch.cuda.set_device(0)
+    storage = mailbox_storage
+    with RecordedPreparationSession(device=0, checkpoint="fixtures",
+            workload_schema="projection-fixtures", numerical_policy="default", benchmark_storage=storage) as session:
+        session._tune_status = "tuning"
+        source = torch.zeros((65536, 1024), dtype=torch.bfloat16, device="cuda:0")
+        output = torch.empty((65536, 4608), dtype=source.dtype, device=source.device)
+        baseline = torch.cuda.memory_allocated()
+        pools = storage._preparation_pools.copy()
+        acquire = input_factory(source, output, storage=session.benchmark_storage)
+        first = acquire()
+        second = acquire()
+        assert first is second
+        first.produce()
+        assert torch.equal(first.source, first.seed)
+        del first
+        gc.collect()
+        assert torch.cuda.memory_allocated() > baseline
+        assert second.source.data_ptr() != source.data_ptr()
+        second.produce()
+        del second
+        gc.collect()
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+        assert torch.cuda.memory_allocated() == baseline
+        fixture_pools = storage._preparation_pools - pools
+        retained = [segment for segment in torch.cuda.memory_snapshot()
+                    if tuple(segment["segment_pool_id"]) in fixture_pools]
+        assert not retained, [(segment["segment_pool_id"], segment["total_size"]) for segment in retained]
+
+
 @pytest.fixture(scope="module")
 def mailbox_storage():
     import torch
@@ -59,6 +98,170 @@ def mailbox_storage():
     torch.cuda.set_device(0)
     with PackageStorage(device=0) as storage:
         yield storage
+
+
+@pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
+                    reason="requires an explicitly assigned CUDA device")
+def test_scratch_backing_released_for_compilation_and_restored():
+    subprocess.run([sys.executable, "-c", """
+import torch
+from ignition.preparation.aot import aot_forward
+from ignition.preparation.package_storage import PackageStorage
+
+class Forward:
+    def __init__(self, source, scratch):
+        self.source, self.scratch = source, scratch
+        self.output = torch.empty_like(source)
+
+    def __call__(self):
+        self.scratch.copy_(self.source.square())
+        self.output.copy_(self.scratch + self.source)
+
+torch.cuda.set_device(0)
+with PackageStorage(device=0) as storage:
+    source = torch.randn(256, 256, device='cuda')
+    with storage.scratch_pool() as pool:
+        backing = torch.ones(256 << 20, dtype=torch.uint8, device='cuda')
+        scratch = backing[:source.nbytes].view(torch.float32).view_as(source)
+    forward = Forward(source, scratch)
+    addresses = backing.data_ptr(), scratch.data_ptr()
+    torch.cuda.synchronize()
+    before = torch.cuda.mem_get_info()[0]
+    pool.release_backing()
+    assert torch.cuda.mem_get_info()[0] >= before + backing.nbytes
+    try:
+        compiled = aot_forward(forward)
+    finally:
+        pool.materialize()
+    assert addresses == (backing.data_ptr(), scratch.data_ptr())
+    assert not backing.any()
+    compiled(forward)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        compiled(forward)
+    allocated = torch.cuda.memory_allocated()
+    for value in (3., 7., -2.):
+        source.fill_(value)
+        graph.replay()
+        torch.testing.assert_close(forward.output, torch.full_like(source, value * value + value))
+    torch.cuda.synchronize()
+    assert torch.cuda.memory_allocated() == allocated
+    assert storage.error is None
+    graph.reset()
+"""], check=True, timeout=120)
+
+
+@pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
+                    reason="requires an explicitly assigned CUDA device")
+def test_package_allocator_oom_allows_retry():
+    subprocess.run([sys.executable, "-c", """
+import ctypes as C
+import torch
+from ignition.preparation.package_storage import PackageStorage
+
+torch.cuda.set_device(0)
+with PackageStorage(device=0) as storage:
+    allocate = storage.library.flare_package_allocate
+    allocate.argtypes = [C.c_size_t, C.c_int, C.c_void_p]
+    allocate.restype = C.c_void_p
+    total = torch.cuda.mem_get_info()[1]
+    assert allocate(total + storage.granularity, 0, None) is None
+    assert storage.error is None
+    value = torch.full((1 << 20,), 37, dtype=torch.uint8, device='cuda')
+    assert torch.all(value == 37)
+    assert storage.error is None
+"""], check=True, timeout=60)
+
+
+@pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
+                    reason="requires an explicitly assigned CUDA device")
+def test_capture_releases_warmup_pools():
+    subprocess.run([sys.executable, "-c", """
+from contextlib import nullcontext
+import torch
+from ignition.preparation.capture import capture_forwards
+from ignition.preparation.package_storage import PackageStorage
+
+class Session:
+    def capture(self):
+        return nullcontext()
+
+torch.cuda.set_device(0)
+with PackageStorage(device=0) as storage:
+    source = torch.ones(32 << 20, dtype=torch.float32, device='cuda')
+    output = torch.empty(1, device='cuda')
+    def forward():
+        output.copy_(source.square().sum())
+    existing = storage._preparation_pools.copy()
+    graphs, _ = capture_forwards({'sum': forward}, {}, session=Session(), device=source.device,
+        stream=torch.cuda.Stream(), pool=storage.graph_pool.id, compile_decoder=False,
+        warmup_storage=storage)
+    warmup_pools = storage._preparation_pools - existing
+    assert warmup_pools
+    assert not [segment for segment in torch.cuda.memory_snapshot()
+                if tuple(segment['segment_pool_id']) in warmup_pools]
+    allocated = torch.cuda.memory_allocated()
+    source.fill_(2)
+    graphs['sum'].replay()
+    torch.cuda.synchronize()
+    assert output.item() == source.numel() * 4
+    assert torch.cuda.memory_allocated() == allocated
+    assert storage.error is None
+    graphs['sum'].reset()
+"""], check=True, timeout=60)
+
+
+class _WarmupForward:
+    def __init__(self, rows):
+        import torch
+
+        self.source = torch.randn(rows, 1024, device="cuda")
+        self.output = torch.empty_like(self.source)
+
+    def __call__(self):
+        self.output.copy_(self.source.square().sin())
+
+
+@pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
+                    reason="requires an explicitly assigned CUDA device")
+def test_compiled_variants_release_warmup_storage(tmp_path, mailbox_storage):
+    from contextlib import contextmanager
+    import torch
+    from ignition.preparation.aot import ForwardCache
+    from ignition.preparation.execution import GraphSignature
+
+    storage = mailbox_storage
+    functions = {"prefill4096": _WarmupForward(4096), "prefill1024": _WarmupForward(1024)}
+    signatures = {name: GraphSignature("prefill", 1, forward.source.shape[0])
+                  for name, forward in functions.items()}
+    warmed = []
+
+    @contextmanager
+    def warmup():
+        previous = storage._preparation_pools.copy()
+        with storage.transient():
+            yield
+        pools = storage._preparation_pools - previous
+        assert pools
+        assert not [segment for segment in torch.cuda.memory_snapshot()
+                    if tuple(segment["segment_pool_id"]) in pools]
+        warmed.append(pools)
+
+    cache = ForwardCache(namespace={"model": "warmup-storage"}, device="cuda:0", root=tmp_path)
+    compiled = cache.prepare_many(functions, signatures, materialize=lambda: None, warmup=warmup)
+    assert len(warmed) == len(functions)
+    graph = torch.cuda.CUDAGraph()
+    for name, forward in functions.items():
+        with torch.cuda.graph(graph, pool=storage.graph_pool.id):
+            compiled[name]()
+        allocated = torch.cuda.memory_allocated()
+        forward.source.normal_()
+        graph.replay()
+        torch.cuda.synchronize()
+        assert torch.cuda.memory_allocated() == allocated
+        torch.testing.assert_close(forward.output, forward.source.square().sin())
+        graph.reset()
+    assert storage.error is None
 
 
 @pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",

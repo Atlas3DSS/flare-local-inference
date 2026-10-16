@@ -5,7 +5,7 @@ from __future__ import annotations
 import gc
 from collections import Counter
 from collections.abc import Hashable
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import replace
 from threading import get_ident
 
@@ -34,7 +34,7 @@ class RecordedPreparationSession(PreparationSession):
 
     def __init__(self, *, device, checkpoint: str, workload_schema: str,
                  numerical_policy: str, search_limits=None, namespace=None, race_budget=None,
-                 coordinator=None, headroom_bytes=0):
+                 coordinator=None, headroom_bytes=0, benchmark_storage=None):
         if not isinstance(checkpoint, str) or not checkpoint:
             raise ValueError("tuning requires an exact checkpoint revision")
         if any(not isinstance(value, str) or not value for value in (workload_schema, numerical_policy)):
@@ -56,6 +56,7 @@ class RecordedPreparationSession(PreparationSession):
         self._finalizers = []
         self._scratch_arena = None
         self._benchmark_resources = {}
+        self.benchmark_storage = benchmark_storage
         self._benchmark_restorers = {}
         self._preparation_thread = get_ident()
         self._tune_status = "collecting"
@@ -154,7 +155,9 @@ class RecordedPreparationSession(PreparationSession):
             # fixture; keeping every completed shape's inputs can exhaust GPU memory.
             self._benchmark_resources = {key: value for key, value in self._benchmark_resources.items()
                                          if key in self._benchmark_restorers}
-            self._benchmark_resources[key] = factory()
+            # Retired pools release fixture segments once their final trial owner drops them.
+            with (nullcontext() if self.benchmark_storage is None else self.benchmark_storage.transient()):
+                self._benchmark_resources[key] = factory()
         return self._benchmark_resources[key]
 
     def register_benchmark_resource(self, key: Hashable, resource, *, restore):

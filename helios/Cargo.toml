@@ -115,3 +115,10 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage
 
 [target.'cfg(target_os = "linux")'.dependencies]
 io-uring = "0.7"
+
+[[bin]]
+name = "test_kimi3_images"
+path = "tests/tools/test_kimi3_images.rs"
+required-features = ["server", "test-tools"]
+test = false
+bench = false

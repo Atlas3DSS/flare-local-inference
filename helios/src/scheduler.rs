@@ -6,6 +6,7 @@ mod service;
 mod utility;
 pub use policy::{PolicyConfig, RequestAccounting};
 pub mod speculation;
+pub mod split;
 #[cfg(test)]
 mod valuation;
 
@@ -459,6 +460,7 @@ pub struct RequestScheduler {
     prefill_catalog: Vec<usize>,
     mixed_catalog: Vec<(usize, usize, usize)>,
     proposal_source: speculation::ProposalSource,
+    split: Option<split::SplitSpeculation>,
     costs: cost::ActionCosts,
     tickets: HashMap<PrefixKey, Ticket>,
     track_publications: bool,
@@ -527,6 +529,7 @@ impl RequestScheduler {
             prefill_catalog: prefill_capacities(limits.prefill_chunk_size).collect(),
             mixed_catalog: Vec::new(),
             proposal_source: speculation::ProposalSource::Mtp,
+            split: None,
             costs: cost::ActionCosts::default(),
             tickets: HashMap::new(),
             track_publications: false,
@@ -1468,6 +1471,19 @@ impl RequestScheduler {
         }
         let step = &plan.step;
         step.validate_mixed()?;
+        if step.kind == GraphKind::Verification {
+            let retained = step
+                .lanes
+                .first()
+                .and_then(|lane| self.request(lane.request).ok())
+                .and_then(|request| self.retained_proposal(request));
+            if !retained.is_some_and(|p| p.fence.0 + 1 == fence.0 && p.width == step.token_capacity)
+            {
+                return Err(
+                    "verification requires the immediately preceding retained proposal".into(),
+                );
+            }
+        }
         if fence <= self.submitted || fence.0 > i64::MAX as u64 {
             return Err("submission fences must increase within int64 range".into());
         }
@@ -1516,6 +1532,9 @@ impl RequestScheduler {
             }
         }
         self.submitted = fence;
+        if step.kind == GraphKind::Verification {
+            self.split.as_mut().unwrap().retained = None;
+        }
         let expected_finish_ns = self
             .now_ns
             .saturating_add(self.window_remaining().unwrap_or(0))
@@ -1565,7 +1584,11 @@ impl RequestScheduler {
             };
             if matches!(
                 kind,
-                GraphKind::Init | GraphKind::Restore | GraphKind::Snapshot | GraphKind::Vision
+                GraphKind::Init
+                    | GraphKind::Restore
+                    | GraphKind::Snapshot
+                    | GraphKind::Vision
+                    | GraphKind::Proposal
             ) {
                 let record = records[lane.request.slot as usize];
                 if !(1..=3).contains(&record.status)
@@ -1585,20 +1608,20 @@ impl RequestScheduler {
             }
             let record = records[lane.request.slot as usize];
             let emitted = record.generated_tokens - request.generated_tokens as i64;
-            let width = if kind == GraphKind::Speculative {
+            let width = if matches!(kind, GraphKind::Speculative | GraphKind::Verification) {
                 step.token_capacity as i64
             } else {
                 1
             };
             if let Some(vector) = record.vector {
                 if vector.emitted_count != emitted
-                    || (kind == GraphKind::Speculative
+                    || (matches!(kind, GraphKind::Speculative | GraphKind::Verification)
                         && (vector.verification_width != width
                             || record.consumed_tokens - request.consumed_tokens as i64 != emitted))
                 {
                     return Err("token vector does not match committed request progress".into());
                 }
-            } else if kind == GraphKind::Speculative {
+            } else if matches!(kind, GraphKind::Speculative | GraphKind::Verification) {
                 return Err("speculative completion requires ABI3 token vector".into());
             }
             if record.generation != lane.request.generation as i64
@@ -1610,12 +1633,15 @@ impl RequestScheduler {
                 || record.generated_tokens > request.generated_tokens as i64 + width
                 || record.generated_tokens > request.max_new_tokens as i64
                 || (record.status == 1
-                    && kind != GraphKind::Speculative
+                    && !matches!(kind, GraphKind::Speculative | GraphKind::Verification)
                     && record.consumed_tokens as u64 != lane.start_position + lane.tokens as u64)
                 || (record.status == 1
                     && matches!(
                         kind,
-                        GraphKind::Decode | GraphKind::Speculative | GraphKind::Resume
+                        GraphKind::Decode
+                            | GraphKind::Speculative
+                            | GraphKind::Verification
+                            | GraphKind::Resume
                     )
                     && record.generated_tokens == request.generated_tokens as i64)
                 || (record.status == 1
@@ -1647,13 +1673,19 @@ impl RequestScheduler {
             request.pending -= 1;
             if matches!(
                 kind,
-                GraphKind::Init | GraphKind::Restore | GraphKind::Snapshot | GraphKind::Vision
+                GraphKind::Init
+                    | GraphKind::Restore
+                    | GraphKind::Snapshot
+                    | GraphKind::Vision
+                    | GraphKind::Proposal
             ) {
                 let record = records[lane.request.slot as usize];
                 if record.status == 3 {
                     request.error_code = Some(record.error_code);
                     request.terminal_snapshot_ready = false;
                     request.phase = RequestPhase::Finishing;
+                } else if kind == GraphKind::Proposal {
+                    request.scheduled_consumed = request.consumed_tokens;
                 } else if kind == GraphKind::Snapshot {
                     if request.boundary_capture.is_some() {
                         boundaries.push(lane.request);
@@ -1678,7 +1710,9 @@ impl RequestScheduler {
             let record = records[lane.request.slot as usize];
             let finished =
                 record.status >= 2 || record.generated_tokens == request.max_new_tokens as i64;
-            if kind == GraphKind::Speculative && record.status != 3 {
+            if matches!(kind, GraphKind::Speculative | GraphKind::Verification)
+                && record.status != 3
+            {
                 let vector = record.vector.unwrap();
                 // ABI3 may count padded proposals in the physical capture. Only
                 // the lane's logical draft extent supplies acceptance observations.

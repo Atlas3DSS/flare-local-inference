@@ -269,7 +269,7 @@ def test_compiled_distributions_match_eager_with_changed_parameters(batch, width
     op.prepare()
     run = compile_forward(op)
     with captured(run, (*args, op, run), {"probabilities": op.probabilities}) as replay:
-        for top_k, top_p, min_p in ((0, 1., 0.), (20, .95, .1), (1, 1., .5)):
+        for top_k, top_p, min_p in ((0, 1., 0.), (0, .95, 0.), (20, .95, .1), (1, 1., .5)):
             state.top_k.fill_(top_k)
             state.parameters[:, 1] = top_p
             state.parameters[:, 2] = min_p

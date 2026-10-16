@@ -13,7 +13,7 @@ def _tensor(dtype, shape):
     return SimpleNamespace(dtype=f"torch.{dtype}", shape=shape, stride=lambda: tuple(strides))
 
 
-def _execution(**changes):
+def _execution(*, model_class=PreparedExecution, **changes):
     arguments = dict(device=0, graphs={"decode": object(), "prefill": object()},
         signatures={"decode": GraphSignature("decode", 1, 1, ("tokens",)),
                     "prefill": GraphSignature("prefill", 1, 16, ("tokens", "fresh"))},
@@ -21,7 +21,7 @@ def _execution(**changes):
                  "submission_sequence": _tensor("int64", (1,)),
                  "completion_records": _tensor("int64", (2, 4, 8)),
                  "tokens": _tensor("int64", (16,)), "fresh": _tensor("bool", (1,))})
-    return PreparedExecution(**(arguments | changes))
+    return model_class(**(arguments | changes))
 
 
 def test_manifest_offsets_are_stable_across_graphs(monkeypatch):
@@ -46,6 +46,47 @@ def test_manifest_offsets_are_stable_across_graphs(monkeypatch):
     assert all(binding["buffer_name"] != "completion_records" for graph in manifest["graphs"]
                for binding in graph["input_bindings"])
     assert manifest["buffers"][-1]["dtype"] == "bool"
+
+
+def test_resident_binding_is_retained_for_diagnostics_and_excluded_from_export(monkeypatch):
+    import flare_heliopause
+    from ignition.preparation.model import PreparedModel
+
+    catalog, binding, events = {"vocabulary": 32, "tables": []}, object(), {"ready": 123}
+    calls = []
+
+    class Resident:
+        def __init__(self, supplied, *, descriptors):
+            calls.append((supplied, descriptors))
+
+        def bind(self, manifest, supplied_events):
+            assert "engram" not in manifest
+            assert supplied_events == events
+            return binding
+
+    monkeypatch.setattr(flare_heliopause, "EmbeddingTables", Resident)
+    model = _execution(model_class=PreparedModel, server_config={}, memory_report={}, session=None,
+                       embedding_catalog=catalog, export_events=events)
+    spans = [(4096, 4), (8192, 8), (12288, 512), (16384, 128), (20480, 1)]
+    monkeypatch.setattr(model, "_validate_resources", lambda: (9, [11, 12], spans))
+    owner = model.prepare_embedding_tables(descriptors=[31, 32])
+    assert calls == [(catalog, [31, 32])]
+    assert model.embedding_tables is owner and model.manifest()["engram"] is binding
+    assert "engram" not in model.manifest(all_variants=True)
+    with pytest.raises(RuntimeError, match="existing attachment"):
+        model.prepare_embedding_tables()
+
+
+def test_resident_tables_reject_an_extension_without_table_registration_before_cuda(monkeypatch):
+    import flare_heliopause
+    from ignition.preparation.model import PreparedModel
+
+    monkeypatch.delattr(flare_heliopause, "EmbeddingTables", raising=False)
+    model = _execution(model_class=PreparedModel, server_config={}, memory_report={}, session=None,
+                       embedding_catalog={"vocabulary": 32, "tables": []})
+    with pytest.raises(RuntimeError, match="rebuilding the installed Heliopause extension"):
+        model.prepare_embedding_tables()
+    assert model.embedding_tables is None and not model.consumed
 
 
 def test_speculative_manifest_exports_vector_abi(monkeypatch):
@@ -78,6 +119,23 @@ def test_export_includes_ordinary_graphs_while_diagnostics_select_speculation(mo
     assert {g["name"]: g["speculation_enabled"] for g in exported} == {
         name: signature.speculation_enabled for name, signature in signatures.items()}
     assert [g["name"] for g in execution.manifest()["graphs"]] == ["prefill", "speculative"]
+
+
+@pytest.mark.parametrize("width", (None, 1, 4))
+def test_diagnostic_manifest_selects_fixed_width_without_discarding_export_graphs(monkeypatch, width):
+    from ignition.preparation.model import PreparedModel
+
+    signatures = {"prefill": GraphSignature("prefill", 1, 16)}
+    signatures.update({f"verify-{w}": GraphSignature("speculative", 1, w) for w in range(1, 5)})
+    model = _execution(model_class=PreparedModel, graphs=dict.fromkeys(signatures, object()),
+        signatures=signatures, server_config={"speculative_fixed_width": width}, memory_report={}, session=None)
+    spans = [(4096, 4), (8192, 8), (12288, 512), (16384, 128), (20480, 1)]
+    monkeypatch.setattr(model, "_validate_resources", lambda: (9, list(range(11, 16)), spans))
+    selected = model.manifest()["graphs"]
+    assert selected[0]["kind"] == "prefill"
+    assert [g["token_capacity"] for g in selected[1:]] == ([1, 2, 3, 4] if width is None else [width])
+    assert [g["token_capacity"] for g in model.manifest(all_variants=True)["graphs"][1:]] == [1, 2, 3, 4]
+    assert tuple(model.graphs) == tuple(signatures)
 
 
 @pytest.mark.parametrize("signature", [

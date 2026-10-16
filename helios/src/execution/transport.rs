@@ -149,6 +149,8 @@ pub struct FrameCompletion {
     pub graph_index: usize,
     pub timing: ExecutionTiming,
     pub records: CompletionRecords,
+    /// Root-rank confidence for a completed single-lane proposal; unused tail is zero.
+    pub proposal_confidence: Option<[f32; MAX_OUTPUT_TOKENS - 1]>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -174,6 +176,7 @@ struct Pending {
 struct Frame {
     input: PinnedHost,
     output: PinnedHost,
+    confidence: Option<PinnedHost>,
     produced: Event,
     started: Event,
     transferred: Event,
@@ -220,6 +223,12 @@ impl GraphExecutor {
             Ok(Frame {
                 input: model.host_buffer(manifest.input_frame_bytes)?,
                 output: model.host_buffer(manifest.completion_bytes())?,
+                confidence: manifest
+                    .graphs
+                    .iter()
+                    .any(|g| g.kind == GraphKind::Proposal)
+                    .then(|| model.host_buffer(manifest.buffer("proposal_confidence")?.nbytes))
+                    .transpose()?,
                 produced: model.event_with_timing(true)?,
                 started: model.event_with_timing(true)?,
                 transferred: copy.event()?,
@@ -314,7 +323,13 @@ impl GraphExecutor {
         let fence = self.next_fence()?;
         validate_uploads(&self.manifest, graph, uploads, &mut self.resolved_uploads)?;
         Ok(self
-            .can_submit(grammar || self.manifest.graphs[graph].kind == GraphKind::Speculative)
+            .can_submit(
+                grammar
+                    || matches!(
+                        self.manifest.graphs[graph].kind,
+                        GraphKind::Speculative | GraphKind::Proposal | GraphKind::Verification
+                    ),
+            )
             .then_some(fence))
     }
 
@@ -354,7 +369,10 @@ impl GraphExecutor {
                 Error::execution(ExecutionError::State, "graph index out of range")
             })?;
         let grammar_constrained = grammar_constrained
-            || graph.kind == GraphKind::Speculative
+            || matches!(
+                graph.kind,
+                GraphKind::Speculative | GraphKind::Proposal | GraphKind::Verification
+            )
             || resources.engram.is_some();
         let resolved = validate_uploads(
             &self.manifest,
@@ -434,6 +452,14 @@ impl GraphExecutor {
                     address,
                     self.manifest.completion_bytes(),
                 )?;
+                if graph.kind == GraphKind::Proposal {
+                    let confidence = self.manifest.buffer("proposal_confidence")?;
+                    resources.copy.download(
+                        frame.confidence.as_ref().unwrap(),
+                        confidence.address,
+                        confidence.nbytes,
+                    )?;
+                }
             }
             resources.copy.record(&frame.transferred)
         };
@@ -537,6 +563,20 @@ impl GraphExecutor {
                 queued: pending.queued,
             },
             records,
+            proposal_confidence: if self.manifest.graphs[pending.graph_index].kind
+                == GraphKind::Proposal
+            {
+                let mut confidence = [0.0; MAX_OUTPUT_TOKENS - 1];
+                for (value, bytes) in confidence
+                    .iter_mut()
+                    .zip(frame.confidence.as_ref().unwrap().bytes().chunks_exact(4))
+                {
+                    *value = f32::from_ne_bytes(bytes.try_into().unwrap());
+                }
+                Some(confidence)
+            } else {
+                None
+            },
         }))
     }
 

@@ -31,9 +31,9 @@ RECIPE = Recipe(
     name="deepseek41", prepare=prepare, usage=usage,
     # Recommended sampling: https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash#minimal-inference.
     sampling_defaults=SamplingDefaults(temperature=1., top_p=.95, top_k=-1),
-    checkpoints=(Checkpoint(alias="deepseek-v4.1-flash", repository="deepseek-ai/DeepSeek-V4.1-Flash",
-        revision="fb2764a5cf321eaa5070ca8f9e892818f477c16d", architecture="DeepseekV41ForCausalLM",
-        stored_bytes=510_286_023_000, device_bytes=306_557_453_640, draft_bytes=7_932_874_632),),
+    checkpoints=(Checkpoint(alias="deepseek-v4.1-flash", repository="local-inference-lab/DeepSeek-V4.1-Flash-lossless-CSF",
+        revision="9c60bcbf1670e06f154b5d61080e50c9b3b7b4a3", architecture="DeepseekV41ForCausalLM",
+        stored_bytes=495_629_051_096, device_bytes=291_883_853_264, draft_bytes=7_932_874_632),),
     context=1048576, page_tokens=128, concurrency=4, max_concurrency=64, prefill_chunk=4096,
     speculation=Speculation(draft_tokens=5), max_draft_tokens=7,
     # Single-row decode runs the shared expert on an auxiliary stream.

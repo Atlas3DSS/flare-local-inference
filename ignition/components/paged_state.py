@@ -14,14 +14,14 @@ class PagedStateStorage(StateStorage):
 
     @classmethod
     def allocate(
-        cls, layout, page_specs, slots, pages, device, *, storage=None, maximum_pages=None, maximum_rows=None
+        cls, layout, page_specs, slots, pages, device, *, storage=None, maximum_pages=None, maximum_rows=None, backed_slots=None
     ):
         if type(pages) is not int or pages <= 0:
             raise ValueError("cache requires positive logical page capacity")
         maximum = pages if storage is None else maximum_pages
         if type(maximum) is not int or maximum < pages:
             raise ValueError("virtual cache extent must cover prepared physical pages")
-        backing = StateStorage.allocate(layout, slots, device, storage=storage, maximum_slots=maximum_rows)
+        backing = StateStorage.allocate(layout, slots, device, storage=storage, maximum_slots=maximum_rows, backed_slots=backed_slots)
         regions = {}
         for name, shape in page_specs:
             regions[name] = (
@@ -63,7 +63,7 @@ class PagedStateStorage(StateStorage):
         return self.pages.items()
 
     def clear_for_preparation(self):
-        self.backing.zero_()
+        self.backing[:int(self.memory_capacity[0].item())].zero_()
         count = int(self.memory_capacity[1].item())
         for value in self.pages.values():
             value[:count].zero_()

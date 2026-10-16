@@ -9,6 +9,7 @@ from ignition.components.rms_norm import PreparedRMSNorm
 from ignition.components.rotary import CompressedRotary
 from ignition.components.vocabulary import PreparedVocabularyProjection
 
+from .attention import AttentionIndices
 from .decoder import PreparedDecoder, PreparedLayer, Scratch
 
 
@@ -37,6 +38,9 @@ class PreparedDraft:
             name=name + ".embedding",
         )
         rotary = CompressedRotary(weights.config, scratch.embedding.device)
+        self.indices = AttentionIndices(
+            metadata, mode="draft", tokens=metadata.token_ids.numel(), visible=None, buffers=scratch.buffers
+        )
         self.layers = tuple(
             PreparedLayer(
                 i,
@@ -54,6 +58,7 @@ class PreparedDraft:
                 workspace=workspace,
                 carry=i > 0,
                 defer_post=i + 1 < len(weights.draft.layers),
+                indices=self.indices,
             )
             for i, layer in enumerate(weights.draft.layers)
         )
@@ -89,6 +94,7 @@ class PreparedDraft:
     def __call__(self):
         s = self.scratch
         s.residual.copy_(self.embedding()[:, None, :])
+        self.indices()
         for layer in self.layers:
             layer()
         s.head_residual.copy_(s.residual[self.metadata.sample_indices])
@@ -99,7 +105,7 @@ class PreparedDraft:
 FORWARDS = DSparkForwards(
     PreparedDecoder,
     Scratch,
-    partial(PreparedContext, cache_format="deepseek_v4"),
+    partial(PreparedContext, cache_format="deepseek_v4", compact_prefill=True),
     PreparedDraft,
     PreparedMarkov,
 )

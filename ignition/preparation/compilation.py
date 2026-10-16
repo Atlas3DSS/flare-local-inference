@@ -83,20 +83,23 @@ def _fake_storage_call(reads, writes, handle, integers=None):
     pass
 
 
-@torch.library.custom_op('flare::materialize', mutates_args=())
-def _materialize(source: torch.Tensor) -> torch.Tensor:
+@torch.library.custom_op('flare::snapshot', mutates_args=())
+def _snapshot(source: torch.Tensor) -> torch.Tensor:
     return source.clone()
 
 
-@_materialize.register_fake
-def _fake_materialize(source):
+@_snapshot.register_fake
+def _fake_snapshot(source):
     return torch.empty_like(source)
 
 
-def _materialize_lowering(source):
-    # The storage pass gives this operation exclusive ownership of a fresh result.
-    source.realize()
-    return source
+def _snapshot_lowering(source):
+    from torch._inductor.lowering import clone
+
+    # A clone can have been folded into its source before custom lowering.
+    result = clone(source)
+    result.realize()
+    return result
 
 
 @torch.library.custom_op('flare::mean', mutates_args=())
@@ -129,6 +132,17 @@ def _native_layer_norm(source: torch.Tensor, shape: list[int], weight: torch.Ten
 @_native_layer_norm.register_fake
 def _fake_native_layer_norm(source, shape, weight, bias, eps):
     return torch.ops.aten.native_layer_norm.default(source, shape, weight, bias, eps)
+
+
+@torch.library.custom_op('flare::native_rms_norm', mutates_args=())
+def _native_rms_norm(source: torch.Tensor, shape: list[int], weight: torch.Tensor | None,
+                     eps: float | None) -> tuple[torch.Tensor, torch.Tensor]:
+    return torch.ops.aten._fused_rms_norm.default(source, shape, weight, eps)
+
+
+@_native_rms_norm.register_fake
+def _fake_native_rms_norm(source, shape, weight, eps):
+    return torch.ops.aten._fused_rms_norm.default(source, shape, weight, eps)
 
 
 def _byte_storage(tensor):
@@ -270,7 +284,7 @@ def compile_forward(fn, *, tracer=None):
     Their typed views are reconstructed inside each opaque invocation so
     Inductor can preserve mutations without cloning strided state regions.
     Pointwise tensor operations remain visible to ordinary Inductor compilation.
-    Mean reductions, FP32 sigmoid and LayerNorm retain ATen's rounding.
+    Mean reductions, FP32 sigmoid, LayerNorm and RMSNorm retain ATen's rounding.
     Compiled artifacts take persistent tensors as inputs and are cached without
     weight payloads or process-local kernel handles. Each callable retains its
     own prepared invocations, buffers, and forward owner.
@@ -290,7 +304,7 @@ def compile_forward(fn, *, tracer=None):
 def _lower_storage(module):
     from torch._inductor.lowering import register_lowering
 
-    register_lowering(torch.ops.flare.materialize.default)(_materialize_lowering)
+    register_lowering(torch.ops.flare.snapshot.default)(_snapshot_lowering)
     graph = module.graph
     # FP32 rounding differences can cross a BF16 rounding boundary.
     for node in graph.nodes:
@@ -301,6 +315,8 @@ def _lower_storage(module):
             node.target = torch.ops.flare.sigmoid.default
         elif node.op == 'call_function' and node.target is torch.ops.aten.native_layer_norm.default:
             node.target = torch.ops.flare.native_layer_norm.default
+        elif node.op == 'call_function' and node.target is torch.ops.aten._fused_rms_norm.default:
+            node.target = torch.ops.flare.native_rms_norm.default
     for node in reversed(list(graph.nodes)):
         if (node.op == 'call_function' and isinstance(node.target, torch._ops.OpOverload)
                 and node.target._schema.name in (
@@ -477,7 +493,7 @@ def _lower_storage(module):
         graph.erase_node(node)
     for node in materialize:
         with graph.inserting_after(node):
-            value = graph.call_function(torch.ops.flare.materialize.default, (node,))
+            value = graph.call_function(torch.ops.flare.snapshot.default, (node,))
             value.meta = node.meta.copy()
         node.replace_all_uses_with(value)
         value.args = (node,)

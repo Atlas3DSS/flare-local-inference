@@ -4,6 +4,7 @@ from b12x.preparation import PreparedCall
 from b12x.sequence import embedding
 
 from ignition.preparation.tuning import declare
+from .collectives import PreparedAllGather
 
 
 class PreparedEmbedding:
@@ -24,3 +25,16 @@ class PreparedEmbedding:
         if self.num_rows is not None:
             self.output.zero_()
         return embedding.run(self.weight, self.ids, plan=self.plan, **self.arguments)
+
+
+class PreparedShardedEmbedding:
+    """Gather column-sharded vocabulary rows through a prepared collective."""
+
+    def __init__(self, weight, ids, local_output, output, *, runtime, coordinator, session, name, num_rows=None):
+        self.lookup = PreparedEmbedding(weight, ids, local_output, session=session, name=name + ".lookup",
+                                        num_rows=num_rows)
+        self.gather = PreparedAllGather(local_output, output, runtime=runtime, coordinator=coordinator,
+                                        session=session, name=name + ".gather")
+
+    def __call__(self):
+        return self.gather(self.lookup())

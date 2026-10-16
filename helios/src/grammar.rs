@@ -20,6 +20,7 @@ pub struct OutputEnvelope {
     pub tool: Option<(&'static str, &'static str)>,
     pub function: Option<(&'static str, &'static str)>,
     pub tool_ends_reasoning: bool,
+    pub response: Option<(&'static str, &'static str)>,
 }
 
 struct CheckpointTokenizer {
@@ -184,10 +185,24 @@ impl GrammarCompiler {
         let Some(envelope) = envelope else {
             return self.compile(grammar);
         };
-        if envelope.reasoning_end.is_none() && envelope.tool.is_none() {
+        if envelope.reasoning_end.is_none()
+            && envelope.tool.is_none()
+            && envelope.response.is_none()
+        {
             return self.compile(grammar);
         }
         let mut rules = String::from("ws: /[ \\t\\r\\n]*/\n");
+        if let Some((open, close)) = envelope.response {
+            rules.push_str(&format!(
+                "wrapped_answer: {} @answer {}\nempty_answer: {} {}\n",
+                self.marker(open),
+                self.marker(close),
+                self.marker(open),
+                self.marker(close)
+            ));
+        } else {
+            rules.push_str("wrapped_answer: @answer\n");
+        }
         let branches = if let Some((open, close)) = envelope.tool {
             if let Some((function_open, function_close)) = envelope.function {
                 rules.push_str(&format!(
@@ -202,10 +217,16 @@ impl GrammarCompiler {
                 ));
                 rules.push_str(&self.region("tool_body", close));
             }
-            rules.push_str("tools_suffix: (ws tool)* (ws @answer)?\ntools: tool tools_suffix\n");
-            "(@answer | tools)"
+            rules.push_str(
+                "tools_suffix: (ws tool)* (ws wrapped_answer)?\ntools: tool tools_suffix\n",
+            );
+            if envelope.response.is_some() {
+                "(wrapped_answer (ws tool)* | empty_answer ws tools)"
+            } else {
+                "(wrapped_answer | tools)"
+            }
         } else {
-            "@answer"
+            "wrapped_answer"
         };
         if let Some(end) = envelope.reasoning_end {
             if let Some((open, _)) = envelope.tool.filter(|_| envelope.tool_ends_reasoning) {
@@ -230,6 +251,9 @@ impl GrammarCompiler {
     }
 
     fn marker(&self, text: &str) -> String {
+        if text.is_empty() {
+            return String::new();
+        }
         match self.factory.tok_env().tok_trie().get_special_token(text) {
             Some(id) => format!("<[{id}]>"),
             None => serde_json::to_string(text).unwrap(),
@@ -744,6 +768,7 @@ mod tests {
                 tool: Some(("<tool_call>", "</tool_call>")),
                 function: None,
                 tool_ends_reasoning: false,
+                response: None,
             };
             for (text, expected) in [
                 (r#"{"ok":true}"#, true),
@@ -779,6 +804,45 @@ mod tests {
     }
 
     #[test]
+    fn xtml_response_envelope_constrains_answers_and_allows_tool_calls() {
+        let compiler = GrammarCompiler::new(&byte_tokenizer(), 320, &[256, 257]).unwrap();
+        for reasoning in [false, true] {
+            let envelope = OutputEnvelope {
+                reasoning_end: reasoning.then_some("<|close|>think<|sep|><|open|>response<|sep|>"),
+                tool: Some(("<|open|>tools<|sep|>", "<|close|>tools<|sep|>")),
+                function: None,
+                tool_ends_reasoning: false,
+                response: Some(("", "<|close|>response<|sep|>")),
+            };
+            for (body, expected) in [
+                (r#"{"ok":true}<|close|>response<|sep|>"#, true),
+                (r#"{"ok":false}<|close|>response<|sep|>"#, false),
+                (
+                    "<|close|>response<|sep|><|open|>tools<|sep|>call<|close|>tools<|sep|>",
+                    true,
+                ),
+                ("<|open|>tools<|sep|>call<|close|>tools<|sep|>", false),
+                (r#"{"ok":true}"#, false),
+            ] {
+                let text = if reasoning {
+                    format!("Consider.{}{}", envelope.reasoning_end.unwrap(), body)
+                } else {
+                    body.into()
+                };
+                let mut grammar = compiler
+                    .compile_json_schema_in(&json!({"const":{"ok":true}}), Some(&envelope))
+                    .unwrap();
+                let accepted = text
+                    .bytes()
+                    .map(u32::from)
+                    .chain([256])
+                    .all(|token| grammar.advance(token).is_ok());
+                assert_eq!(accepted, expected, "{text}");
+            }
+        }
+    }
+
+    #[test]
     fn qwen_envelope_preserves_implicit_reasoning_and_function_boundaries() {
         let compiler = GrammarCompiler::new(&byte_tokenizer(), 320, &[256, 257]).unwrap();
         let envelope = OutputEnvelope {
@@ -786,6 +850,7 @@ mod tests {
             tool: Some(("<tool_call>", "</tool_call>")),
             function: Some(("<function=", "</function>")),
             tool_ends_reasoning: true,
+            response: None,
         };
         for (text, accepted) in [
             ("thought</think>{\"ok\":true}", true),
@@ -829,6 +894,7 @@ mod tests {
             tool: Some(("<tool_call>", "</tool_call>")),
             function: Some(("<function=", "</function>")),
             tool_ends_reasoning: true,
+            response: None,
         };
         let schema = json!({"const":7});
         let text = "thought<tool_call><function=f></function></tool_call>7";
@@ -862,6 +928,7 @@ mod tests {
                 tool: Some(("<tool_call>", "</tool_call>")),
                 function: Some(("<function=", "</function>")),
                 tool_ends_reasoning: true,
+                response: None,
             };
             for text in [
                 r#"{"literal":"<think>東京</think><tool_call>literal</tool_call>"}"#,

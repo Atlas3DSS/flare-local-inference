@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
 from functools import cached_property
+from math import prod
 import json
 import sys
 from time import monotonic
@@ -79,7 +80,7 @@ class DirectWeightLoader:
 
     @cached_property
     def quantization(self):
-        return quantized_layers(json.loads((self.manifest.snapshot / "config.json").read_text()))
+        return quantized_layers(json.loads((self.manifest.metadata_path / "config.json").read_text()))
 
     def load_linear(self, prefix, *, rows=None, columns=None):
         """Load one projection using its checkpoint quantization declaration."""
@@ -431,6 +432,105 @@ class DirectWeightLoader:
             w13_block_scales=swizzle_block_scale(s13) if format == "nvfp4" else s13,
             w2_block_scales=swizzle_block_scale(s2) if format == "nvfp4" else s2, **gains))
 
+    def load_mxfp4_experts(
+        self, prefixes, *, hidden_size, intermediate_size, scale_scratch,
+        intermediate_range=None, swiglu_limit=None,
+        projection_names=("up_proj", "gate_proj", "down_proj"), scale_name="weight_scale",
+    ):
+        """Select native or compressed MXFP4 storage from the checkpoint inventory.
+
+        ``scale_scratch`` is a caller-owned dictionary keyed by expert geometry.
+        Sharing it between calls requires serialized routed-expert execution;
+        overlapping expert branches must provide separate dictionaries.
+        """
+        import torch
+
+        self._require_open()
+        prefixes = tuple(prefixes)
+        compressed = getattr(self.manifest, "compressed_scales", frozenset())
+        encoded = [f"{prefix}.{projection}.{scale_name}" in compressed
+                   for prefix in prefixes for projection in projection_names]
+        geometry = dict(hidden_size=hidden_size, intermediate_size=intermediate_size,
+                        intermediate_range=intermediate_range, swiglu_limit=swiglu_limit,
+                        scale_name=scale_name)
+        if not any(encoded):
+            return self.load_fp4_experts(prefixes, **geometry, format="mxfp4", activation_mode="a8",
+                                         projection_names=projection_names)
+        if not all(encoded):
+            raise ValueError("each routed expert group must use one complete MXFP4 scale encoding")
+        first, last = _aligned_range(intermediate_range, intermediate_size, 32)
+        local, count = last - first, len(prefixes)
+        key = count, hidden_size, local
+        if key not in scale_scratch:
+            scale_scratch[key] = tuple(torch.empty(shape, dtype=torch.uint8, device=self.device)
+                for shape in ((count, hidden_size // 32, 2 * local), (count, local // 32, hidden_size)))
+        up, gate, down = projection_names
+        return self.load_mxfp4_csf_experts(prefixes, **geometry,
+            scale_scratch=scale_scratch[key], projection_names=(gate, up, down))
+
+    def load_mxfp4_csf_experts(
+        self, prefixes, *, hidden_size, intermediate_size, scale_scratch,
+        intermediate_range=None, swiglu_limit=None,
+        projection_names=("gate_proj", "up_proj", "down_proj"), scale_name="weight_scale",
+        weight_name="weight", activation="silu",
+    ):
+        """Keep lossless MXFP4 scales compressed and expand into shared native scratch.
+
+        Gate and up weights use b12x's w31 source order. The caller may share
+        scale scratch between serialized expert layers, retaining both buffers
+        until every captured graph using those layers has drained.
+        """
+        import torch
+        from b12x.moe import fused_moe as moe
+
+        self._require_open()
+        prefixes = tuple(prefixes)
+        if not prefixes or hidden_size <= 0 or hidden_size % 128:
+            raise ValueError("MXFP4-CSF experts require nonempty prefixes and 128-aligned hidden width")
+        first, last = _aligned_range(intermediate_range, intermediate_size, 32)
+        local, count = last - first, len(prefixes)
+        shapes = ((count, hidden_size // 32, 2 * local),
+                  (count, local // 32, hidden_size))
+        if len(scale_scratch) != 2:
+            raise ValueError("MXFP4-CSF experts require two caller-owned scale buffers")
+        for scratch, shape in zip(scale_scratch, shapes, strict=True):
+            if (scratch.device != torch.device(self.device) or scratch.dtype != torch.uint8
+                    or scratch.numel() < prod(shape) or not scratch.is_contiguous()):
+                raise ValueError("MXFP4-CSF scale scratch shape, dtype, device, or layout mismatch")
+        gate, up, down = projection_names
+        w13 = torch.empty((count, 2 * local, hidden_size // 2), dtype=torch.uint8, device=self.device)
+        w2 = torch.empty((count, hidden_size, local // 2), dtype=torch.uint8, device=self.device)
+        for index, prefix in enumerate(prefixes):
+            for projection, destination, rows, columns in (
+                (gate, w13[index, :local], intermediate_size, hidden_size),
+                (up, w13[index, local:], intermediate_size, hidden_size),
+                (down, w2[index], hidden_size, intermediate_size),
+            ):
+                source = self._sources[f"{prefix}.{projection}.{weight_name}"]
+                if source.dtype == torch.int8:
+                    source = source.view(torch.uint8)
+                if source.dtype != torch.uint8 or source.shape != (rows, columns // 2):
+                    raise ValueError(f"{prefix}.{projection}: packed MXFP4 weight geometry mismatch")
+                self._copy(destination, source[:, first // 2:last // 2]
+                           if projection == down else source[first:last])
+        scales13 = self._queue_csf_sources(
+            [f"{prefix}.{projection}.{scale_name}" for prefix in prefixes for projection in (gate, up)],
+            rows=intermediate_size, columns=hidden_size // 32, quantization="mxfp4",
+            join=2, row_range=(first, last))
+        scales2 = self._queue_csf_sources(
+            [f"{prefix}.{down}.{scale_name}" for prefix in prefixes],
+            rows=hidden_size, columns=intermediate_size // 32, quantization="mxfp4",
+            column_range=(first // 32, last // 32))
+        self._session.flush()
+        plan = moe.plan_weights(
+            source=moe.PackedSource(format="fp4_e8m0_k32", w13_layout="w31"),
+            activation=moe.ActivationSpec(mode="a8", nonlinearity=activation, io_dtype=torch.bfloat16,
+                                          swiglu_limit=swiglu_limit),
+            geometry=moe.MoEGeometry(num_experts=count, hidden_size=hidden_size, intermediate_size=local))
+        return moe.prepare_weights(plan=plan, weights=moe.Mxfp4CsfWeights(
+            w13=w13, w2=w2, w13_scales=scales13, w2_scales=scales2,
+            w13_scale_scratch=scale_scratch[0], w2_scale_scratch=scale_scratch[1]))
+
     def load_nvfp4_experts(
         self, prefixes, *, hidden_size, intermediate_size, scale_vectors,
         intermediate_range=None, scale_scratch=None, swiglu_limit=None, activation_mode="a4",
@@ -538,18 +638,29 @@ class DirectWeightLoader:
         return moe.prepare_weights(plan=plan, weights=moe.Nvfp4CsfWeights(
             packed=packed, w13_scales=scales13, w2_scales=scales2))
 
-    def _queue_csf_sources(self, prefixes, *, rows, columns, **selection):
+    def _queue_csf_sources(self, prefixes, *, rows, columns, quantization="nvfp4", **selection):
         from b12x.loader._csf_source import stage_csf_sources
         from ignition.preparation.tensor_metadata import record_numeric_tensor
 
         encoding = "csf_32x2_v1" if f"{prefixes[0]}.csf32_bases" in self._sources else "csf"
         suffixes = (tuple(f"csf32_{field}" for field in
                     ("bases", "codes", "page_bases", "offsets", "exceptions"))
-                    if encoding == "csf_32x2_v1" else ("nvfp4_csf_fixed", "nvfp4_csf_exceptions"))
+                    if encoding == "csf_32x2_v1" else (f"{quantization}_csf_fixed", f"{quantization}_csf_exceptions"))
+        components = [tuple(self._sources[f"{prefix}.{suffix}"] for suffix in suffixes) for prefix in prefixes]
+        copy = self._session
+        if encoding == "csf" and quantization == "mxfp4":
+            from types import SimpleNamespace
+
+            # Lossless MXFP4 checkpoints store each slab stream flat; this view changes only metadata.
+            components = [(fixed.reshape(rows // 16, 16 * (1 + (columns + 7) // 8)), exceptions)
+                          for fixed, exceptions in components]
+            # Direct transfers validate the original checkpoint geometry. Only the destination
+            # needs the slab shape; source byte streams remain whole, unmodified flat tensors.
+            copy = SimpleNamespace(concatenate=lambda destination, sources: self._session.concatenate(
+                destination, [source.reshape(-1) for source in sources]))
         result = stage_csf_sources(
-            [tuple(self._sources[f"{prefix}.{suffix}"] for suffix in suffixes) for prefix in prefixes],
-            rows=rows, columns=columns, quantization="nvfp4", device=self.device,
-            encoding=encoding, copy=self._session, **selection)
+            components, rows=rows, columns=columns, quantization=quantization, device=self.device,
+            encoding=encoding, copy=copy, **selection)
         for tensor in (*result.components, result.starts):
             record_numeric_tensor(tensor)
         return result

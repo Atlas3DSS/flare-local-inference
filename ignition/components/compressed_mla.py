@@ -8,7 +8,8 @@ from b12x.preparation.types import plan_from_handle
 
 from ignition.preparation.scratch import planned_scratch, prime_owners
 from ignition.preparation.tuning import declare, register_finalizer
-from ignition.preparation.fixtures.compressed_mla import benchmark_call
+from ignition.preparation.fixtures.compressed_mla import Inputs, benchmark_call
+from ignition.preparation.fixtures.resources import candidate_inputs
 
 
 @torch.library.custom_op("flare::compressed_cache_write", mutates_args=("cache",))
@@ -78,10 +79,10 @@ class PreparedCompressedMLA:
             return PreparedCall(run=lambda: state.run(binding, swa_k_cache=window, indexed_k_cache=indexed,
                 attn_sink=sink, sm_scale=self.scale, out=output), owners=prime_owners(workspace, scratch, binding))
 
+        benchmark_inputs = candidate_inputs(partial(Inputs, query, window, indexed, self.inputs,
+            cache_format, window_page_size, indexed_page_size))
         declare(session, (self.plan.request(name=name, prepare_call=prepare,
-            benchmark_call=partial(benchmark_call, query=query, window=window, indexed=indexed,
-                arguments=self.inputs, session=session, workspace=workspace, cache_format=cache_format,
-                window_page_size=window_page_size, indexed_page_size=indexed_page_size)),))
+            benchmark_call=partial(benchmark_call, inputs=benchmark_inputs, workspace=workspace)),))
         register_finalizer(session, self.rebind, workspace=workspace)
 
     def rebind(self):

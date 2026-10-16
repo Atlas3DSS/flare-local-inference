@@ -151,3 +151,9 @@ def test_cached_checkpoint_structural_metadata_extracts_without_model_weights(re
         assert index.frontend.image.WhichOneof("profile") == profiles[recipe.name]
     else:
         assert not index.frontend.HasField("image")
+
+
+def test_kimi3_agentic_sampling_defaults():
+    defaults = next(recipe for recipe in recipes() if recipe.name == 'kimi3').sampling_defaults
+    assert defaults.as_dict() == dict(seed=0, temperature=1., top_p=1., top_k=-1,
+        min_p=0., repetition_penalty=1., presence_penalty=0., frequency_penalty=0.)

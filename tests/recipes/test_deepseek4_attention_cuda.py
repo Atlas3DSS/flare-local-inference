@@ -7,11 +7,107 @@ import torch
 
 from ignition.components.paged_batch import Metadata
 from ignition.recipes.deepseek4.attention import rotate_index, transfer_window
-from ignition.recipes.deepseek4.pool import latent_page_bytes
+from ignition.recipes.deepseek4.pool import PAGE_TOKENS, latent_page_bytes
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("FLARE_RUN_CUDA_TESTS") != "1", reason="requires an assigned CUDA device"
 )
+
+
+@torch.no_grad()
+def test_compressed_indices_expand_both_c128_records_across_page_boundaries():
+    from ignition.preparation.scratch import GraphBufferPool
+    from ignition.recipes.deepseek4.attention import AttentionIndices
+
+    device = torch.device("cuda", 0)
+    metadata = Metadata.allocate(6, 1, 2, device)
+    metadata.page_table.copy_(torch.tensor([[3, 1]], device=device))
+    metadata.state_rows.fill_(1)
+    metadata.positions.copy_(torch.tensor([127, 128, 255, 256, 511, -1], device=device))
+    buffers = GraphBufferPool(device)
+    indices = AttentionIndices(metadata, mode="verify", tokens=6, visible=None, buffers=buffers.cursor())
+    c4, c128 = indices.compressed(4), indices.compressed(128)
+    dense = torch.empty((6, 4), dtype=torch.int32, device=device)
+    indices.dense_pages(dense)
+    indices()
+    assert c4.slots.tolist() == [223, 224, 255, 64, 127, -1]
+    assert c128.slots.tolist() == [6, 7, 7, 2, 3, -1]
+    assert c128.lengths.tolist() == [1, 1, 2, 2, 4, 0]
+    assert dense.tolist() == [[6, 7, 2, 3]] * 6
+
+
+@pytest.mark.parametrize("block,heads", ((1, 16), (3, 32), (5, 16), (5, 32)))
+@torch.no_grad()
+def test_draft_attention_modes_preserve_noncausal_visibility_and_request_isolation(block, heads):
+    from b12x.attention._shared.mla.compressed_reference import compressed_sparse_mla_reference
+    from b12x.preparation import PreparationSession
+
+    from ignition.components.compressed_mla import PreparedCompressedCacheWriter, PreparedCompressedMLA
+    from ignition.preparation.compilation import compile_forward
+    from ignition.preparation.scratch import GraphBufferPool
+    from ignition.recipes.deepseek4.attention import AttentionIndices
+
+    device = torch.device("cuda", torch.cuda.current_device())
+    torch.manual_seed(4150 + block + heads)
+    rows, span = 3, 128 + block
+    values = torch.randn((rows * span, 512), device=device, dtype=torch.bfloat16) * 0.2
+    backing = torch.full((rows, latent_page_bytes(span) + 64), 19, dtype=torch.uint8, device=device)
+    cache = backing[:, :latent_page_bytes(span)]
+    slots = torch.arange(rows * span, device=device)
+    query = torch.randn((rows * block, heads, 512), device=device, dtype=torch.bfloat16) * 0.2
+    sink = torch.randn(heads, device=device)
+    metadata = Metadata.allocate(rows * block, rows, 1, device)
+    metadata.starts.copy_(torch.tensor([256, 7, 0], device=device))
+    metadata.lengths.copy_(torch.tensor([block, block, 0], device=device))
+    metadata.requests.copy_(torch.arange(rows, device=device).repeat_interleave(block))
+    metadata.positions[:2 * block].copy_(
+        (metadata.starts[:2, None] + torch.arange(block, device=device)).flatten()
+    )
+    buffers = GraphBufferPool(device)
+    indices = AttentionIndices(metadata, mode="draft", tokens=rows * block, visible=None, buffers=buffers.cursor())
+    with PreparationSession(device=device, autotune=False, compile_workers=2) as session:
+        writer = PreparedCompressedCacheWriter(values, cache, slots, page_size=span, kind="swa",
+            cache_format="deepseek_v4", session=session, name="draft_write")
+        outputs = {mode: torch.empty_like(query) for mode in ("extend", "decode")}
+        attentions = [PreparedCompressedMLA(query, cache, indices.window_indices, indices.window_lengths,
+            sink, output, window_page_size=span, mode=mode, cache_format="deepseek_v4", session=session,
+            name=mode, workspace=None) for mode, output in outputs.items()]
+
+        def forward():
+            indices()
+            writer(values)
+            for attention in attentions:
+                attention()
+
+        compiled = compile_forward(forward)
+        compiled()
+        graph = torch.cuda.CUDAGraph()
+        with session.capture(), torch.cuda.graph(graph):
+            compiled()
+
+        def replay():
+            for output in outputs.values():
+                output.fill_(float("nan"))
+            graph.replay()
+            expected = compressed_sparse_mla_reference(query, cache, indices.window_indices,
+                indices.window_lengths, sm_scale=512**-0.5, attn_sink=sink, swa_page_size=span,
+                cache_format="deepseek_v4")
+            for output in outputs.values():
+                torch.testing.assert_close(output.float(), expected.float(), atol=0.012, rtol=0.08)
+            assert (backing[:, latent_page_bytes(span):] == 19).all()
+            return {mode: output.clone() for mode, output in outputs.items()}
+
+        before = replay()
+        values[128 + block - 1].add_(2)
+        after = replay()
+        for mode in outputs:
+            assert not torch.equal(before[mode][0], after[mode][0])
+            torch.testing.assert_close(before[mode][block:], after[mode][block:], atol=0, rtol=0)
+        values[span:2 * span].add_(3)
+        isolated = replay()
+        for mode in outputs:
+            torch.testing.assert_close(after[mode][:block], isolated[mode][:block], atol=0, rtol=0)
+        graph.reset()
 
 
 @pytest.mark.parametrize("size,accepted", ((1, 1), (6, 0), (6, 3), (129, 127), (4096, 4096)))
@@ -73,7 +169,7 @@ def test_footer_cache_attention_with_shuffled_pages_and_inactive_rows(ratio):
 
     device = torch.device("cuda", torch.cuda.current_device())
     torch.manual_seed(4100 + ratio)
-    records = 128 // ratio
+    records = PAGE_TOKENS // ratio
     window_values = torch.randn((128, 512), device=device, dtype=torch.bfloat16) * 0.2
     indexed_values = torch.randn((4 * records, 512), device=device, dtype=torch.bfloat16) * 0.2
     query = torch.randn((4, 16, 512), device=device, dtype=torch.bfloat16) * 0.2
@@ -163,9 +259,10 @@ def test_footer_cache_attention_with_shuffled_pages_and_inactive_rows(ratio):
 
 
 @pytest.mark.parametrize("layer", (2, 3))
+@pytest.mark.parametrize("overlap", (False, True))
 @torch.no_grad()
 def test_checkpoint_attention_alternates_prefill_decode_and_rejected_verification(
-    layer, tmp_path, monkeypatch
+    layer, overlap, tmp_path, monkeypatch
 ):
     from pathlib import Path
 
@@ -175,7 +272,7 @@ def test_checkpoint_attention_alternates_prefill_decode_and_rejected_verificatio
     from ignition.components.rotary import CompressedRotary as Rotary
     from ignition.preparation.checkpoint import inspect_indexed_checkpoint
     from ignition.preparation.compilation import compile_forward
-    from ignition.preparation.scratch import ScratchArena
+    from ignition.preparation.scratch import GraphBufferPool, ScratchArena
     from ignition.recipes.deepseek4.attention import AttentionScratch, PreparedAttention
     from ignition.recipes.deepseek4.config import REVISION
     from ignition.recipes.deepseek4.pool import ContinuationPool
@@ -197,7 +294,9 @@ def test_checkpoint_attention_alternates_prefill_decode_and_rejected_verificatio
     ) as loader:
         config, weights = loader.config, loader.load_attention(layer)
     pool = ContinuationPool.allocate(config, 3, 4, device)
-    arena, rotary = ScratchArena(device), Rotary(config, device)
+    arena, rotary = ScratchArena(device, overlap=overlap), Rotary(config, device)
+    # The three graphs share their private buffers, as serving graphs on one rank do.
+    buffers = GraphBufferPool(device)
     source = torch.randn((256, 4096), dtype=torch.bfloat16, device=device)
     variants = {}
     with PreparationSession(device=device, autotune=False, compile_workers=2) as session:
@@ -220,7 +319,11 @@ def test_checkpoint_attention_alternates_prefill_decode_and_rejected_verificatio
                 session=session,
                 name=mode,
                 workspace=arena,
+                buffers=buffers.cursor(),
             )
+            if not overlap:
+                assert attention.concurrent_compression is None
+                assert attention.concurrent_index is None
 
             def forward(attention=attention, inputs=inputs, mode=mode, counts=counts):
                 attention(inputs)
@@ -255,6 +358,10 @@ def test_checkpoint_attention_alternates_prefill_decode_and_rejected_verificatio
             m.live_counts.copy_(torch.tensor([size, 1], device=device))
             counts.fill_(accepted)
             arena.tensor.fill_(0x7F if row == 1 else 0x33)
+            # Every launch must rewrite its private buffers before reading them.
+            for chunks in buffers.chunks.values():
+                for chunk in chunks:
+                    chunk.view(torch.uint8).fill_(0x5A if row == 1 else 0xC3)
             graph.replay()
             return scratch.output[:size].clone()
 

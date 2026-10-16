@@ -59,6 +59,10 @@ pub enum GraphKind {
     Prefill,
     Decode,
     Speculative,
+    /// Retained draft preparation; consumes no target history.
+    Proposal,
+    /// Target verification of a retained proposal prefix.
+    Verification,
     Mixed,
     Resume,
     Vision,
@@ -68,7 +72,12 @@ impl GraphKind {
     pub fn samples(self) -> bool {
         matches!(
             self,
-            Self::Prefill | Self::Decode | Self::Speculative | Self::Mixed | Self::Resume
+            Self::Prefill
+                | Self::Decode
+                | Self::Speculative
+                | Self::Verification
+                | Self::Mixed
+                | Self::Resume
         )
     }
 }
@@ -102,6 +111,8 @@ impl TryFrom<&str> for GraphKind {
             "prefill" => Ok(Self::Prefill),
             "decode" => Ok(Self::Decode),
             "speculative" => Ok(Self::Speculative),
+            "proposal" => Ok(Self::Proposal),
+            "verification" => Ok(Self::Verification),
             "mixed" => Ok(Self::Mixed),
             "resume" => Ok(Self::Resume),
             "vision" => Ok(Self::Vision),
@@ -322,6 +333,19 @@ impl ExecutionManifest {
         let mut names = HashSet::new();
         let mut host_spans = HashMap::<&str, (usize, usize)>::new();
         for graph in &self.graphs {
+            if graph.kind == GraphKind::Proposal {
+                let confidence = self.buffer("proposal_confidence")?;
+                if self.max_active != 1
+                    || graph.batch_capacity != 1
+                    || graph.token_capacity < 2
+                    || confidence.dtype != Dtype::Float32
+                    || confidence.shape != [1, graph.token_capacity - 1]
+                {
+                    return Err(
+                        "proposal confidence requires one lane and one FP32 value per draft".into(),
+                    );
+                }
+            }
             if graph.name.is_empty() || !names.insert(&graph.name) {
                 return Err(Error::execution(
                     ExecutionError::Manifest,
@@ -342,7 +366,7 @@ impl ExecutionManifest {
                             .checked_add((graph.batch_capacity - 1) * graph.token_capacity)
                             .is_some()
                 }
-                GraphKind::Speculative => {
+                GraphKind::Speculative | GraphKind::Proposal | GraphKind::Verification => {
                     self.abi_version == SPECULATIVE_ABI_VERSION
                         && BATCH_CAPACITIES.contains(&graph.batch_capacity)
                         && graph.batch_capacity <= self.request_capacity()

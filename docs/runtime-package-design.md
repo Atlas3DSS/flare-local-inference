@@ -242,6 +242,29 @@ staging buffers. At 4,096 tokens, Qwen needs 5.625 MiB of row staging and a
 512 KiB request mailbox per rank. The two DeepSeek V4.1 tables need 49.5 MiB of
 pinned row staging. Direct-I/O buffers add 8 MiB per table in disk mode.
 
+`--embedding-table-cache-size SIZE` adds a bounded cache on each host above the
+disk reader. Each entry holds one immutable packed-weight row and its scale row.
+Four-way sets protect rows by approximate usage frequency, with recency breaking
+ties. A bounded four-counter estimate records each distinct requested ID per
+gather, including misses. Counters saturate at 255 and halve after ten times the
+counter-array length in observations, allowing workload changes to retire prior
+popularity. An incoming row with a lower score than every resident in its set
+is served without admission. Misses use the same coalesced direct-I/O reader and
+enter the cache only after a successful gather. The budget includes payload,
+index, usage counters and preallocated miss workspace, and is divided across
+tables in proportion to their stored bytes. A table reader owns its cache for
+the loaded package's lifetime; local tensor-parallel ranks share that reader.
+Each server start creates an empty row cache, populated by successful request
+gathers.
+
+The loader commits this storage before the existing KV/continuation capacity
+planner reads available memory. On GB10, the fixed host cache therefore reduces
+the physical memory available to those pools. Prefix-checkpoint pinning,
+publication, and retirement remain owned by the KV cache and scheduler. The
+Engram cache copies hits into the existing pinned staging buffers before GPU
+upload, so its entries require no GPU retirement fence. Staging reuse continues
+to wait for every rank's consumer completion.
+
 Before launching a graph, each rank queues a readiness-generation wait, row
 copies, and an event record on a copy stream per table. Reader threads publish
 the generation only after filling the host buffers. Each table requires two

@@ -91,11 +91,13 @@ pub(super) fn frontend_settings(value: wire::FrontendSettings) -> Result<serde_j
                     "image_mean": config.image_mean, "image_std": config.image_std,
                 }}),
                 Profile::Deepseek4(_) => serde_json::json!({"deepseek4": {}}),
+                Profile::Moonvit(_) => serde_json::json!({"moonvit": {}}),
             })
         })
         .transpose()?;
     Ok(
-        serde_json::json!({"tokenizer": tokenizer, "image": image, "eos_token_ids": value.eos_token_ids}),
+        serde_json::json!({"tokenizer": tokenizer, "image": image, "eos_token_ids": value.eos_token_ids,
+                          "template_encoding": value.template_encoding}),
     )
 }
 fn required<T>(value: Option<T>, name: &str) -> Result<T> {
@@ -306,6 +308,7 @@ mod tests {
     #[test]
     fn frontend_round_trip_keeps_eos_and_empty_special_token_list_distinct_from_absence() {
         let value = wire::FrontendSettings {
+            template_encoding: 0,
             tokenizer: Some(wire::TokenizerSettings {
                 bos_token: Some("<bos>".into()),
                 eos_token: Some("<eos>".into()),
@@ -341,6 +344,7 @@ mod tests {
     #[test]
     fn image_contract_contains_only_the_selected_profile() {
         let value = wire::FrontendSettings {
+            template_encoding: 0,
             tokenizer: Some(wire::TokenizerSettings::default()),
             eos_token_ids: vec![1],
             image: Some(wire::ImageSettings {

@@ -71,6 +71,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         max_new_tokens: 17,
         speculative_widths: Vec::new(),
         speculative_fixed_width: None,
+        proposal_confidence_threshold: 0.15,
         history_drafts: true,
         speculative_proposal_source: Default::default(),
     };

@@ -265,6 +265,54 @@ def _fake_fill_output(out, value):
 
 @pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1", reason="explicit CUDA assignment required")
 @torch.no_grad()
+def test_cloned_value_survives_scratch_overwrite():
+    storage = torch.empty((4, 64), dtype=torch.bfloat16, device="cuda")
+    view = storage.view(-1).view_as(storage)
+
+    def forward():
+        _fill_output(storage, 2.)
+        saved = view.clone()
+        _fill_output(storage, 3.)
+        return saved, storage
+
+    compiled = compile_forward(forward)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        saved, final = compiled()
+    for initial in (0., -5., 19.):
+        storage.fill_(initial)
+        allocations = torch.cuda.memory_stats()["allocation.all.allocated"]
+        graph.replay()
+        torch.cuda.synchronize()
+        assert torch.cuda.memory_stats()["allocation.all.allocated"] == allocations
+        torch.testing.assert_close(saved, torch.full_like(saved, 2.), atol=0, rtol=0)
+        torch.testing.assert_close(final, torch.full_like(final, 3.), atol=0, rtol=0)
+    graph.reset()
+
+
+@pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1", reason="explicit CUDA assignment required")
+@pytest.mark.parametrize("eps", [None, 1e-5])
+@torch.no_grad()
+def test_rms_norm_preserves_aten_rounding(eps):
+    generator = torch.Generator(device="cuda").manual_seed(41)
+    source = torch.randn((256, 1024), dtype=torch.bfloat16, device="cuda", generator=generator)
+    norm = torch.nn.RMSNorm(1024, eps=eps, dtype=torch.bfloat16, device="cuda").requires_grad_(False)
+    norm.weight.normal_(generator=generator)
+    compiled = compile_forward(lambda: norm(source))
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        actual = compiled()
+    for scale in (1., .01, 8.):
+        source.normal_(std=scale, generator=generator)
+        expected = norm(source)
+        graph.replay()
+        torch.cuda.synchronize()
+        torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+    graph.reset()
+
+
+@pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1", reason="explicit CUDA assignment required")
+@torch.no_grad()
 def test_compilation_cache_binds_each_invocation_and_buffer(tmp_path, monkeypatch):
     monkeypatch.setattr("ignition.preparation.compilation.DEFAULT_CACHE_ROOT", tmp_path / "compiled")
     monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", str(tmp_path))

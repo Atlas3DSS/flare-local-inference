@@ -113,6 +113,12 @@ class ModelConfig:
         return tuple(CacheSource(i, self.text["compress_ratios"][i])
                      for i in self.text["kv_source_layer_ids"])
 
+    @property
+    def decoder_start(self):
+        ratios = self.text["compress_ratios"]
+        return next((source.layer for source in self.sources if source.ratio == 1
+                     and any(ratio > 1 for ratio in ratios[:source.layer])), None)
+
     def source(self, layer):
         if not self.text["compress_ratios"][layer]:
             return None

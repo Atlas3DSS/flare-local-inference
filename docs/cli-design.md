@@ -139,6 +139,83 @@ not kernel selection, so its packages share tuned kernels with overlapped ones.
 
 Both Ignition commands accept `--config`.
 
+#### Development without package export
+
+For development, `ignition serve` prepares graphs and hands them directly to
+Helios in the same process. It requires a cached checkpoint and a Heliopause
+build with the `qualification` feature. Requests execute in Rust without Python
+callbacks. This command skips package export and reload; weight loading, kernel
+tuning, compilation of missing forwards, and graph capture still run.
+Diagnostics retain the bounded cache backing allocated during preparation.
+Use an exported package for long-context capacity tests; native package loading
+sizes the serving cache from the memory available after loading the model.
+
+Select idle serving GPUs explicitly. Tensor-parallel preparation distributes
+forward compilation across the ranks within their memory budgets. Compiler
+workers release their CUDA contexts before cache storage is materialized.
+Build the extension once, then start a TP2 DeepSeek V4 development server:
+
+```sh
+uv pip install --python .venv/bin/python --no-deps ./heliopause \
+  --config-settings 'build-args=--features=qualification'
+.venv/bin/ignition serve deepseek-v4-flash --gpus 0,1 \
+  --max-concurrency 1 --mtp-draft-tokens 3 --no-mtp-adaptive-verification \
+  --prefill-chunk-size 4096 --host 127.0.0.1 --port 8001 --verbose
+```
+
+Rebuild the extension after changing its Rust code. Python recipe and component
+changes require preparation again but no Rust rebuild. Validate the chosen
+configuration through an exported package before publishing native-serving
+performance results.
+
+The `deepseek-v4-flash` and `deepseek-v4.1-flash` aliases select the lossless
+MXFP4-CSF checkpoints from `local-inference-lab/DeepSeek-V4-Flash-Vision-Exp-lossless-CSF`
+and `local-inference-lab/DeepSeek-V4.1-Flash-lossless-CSF`, respectively. Compressed
+routed-expert scales remain in GPU memory. Serialized layers reuse one pair of scale buffers;
+b12x prepares the scales needed by its selected MoE kernel before execution.
+Kernel autotuning remains enabled across the supported execution plans.
+
+DeepSeek V4.1 development serving keeps its Engram tables in shared RAM. Allow
+about 189 GiB of host RAM for the tables, in addition to preparation and serving
+memory. One rank loads the checkpoint spans into immutable resident storage;
+the other ranks share those bytes. Requests gather rows from RAM without reading
+the checkpoint files or calling Python. Each rank owns its delivery staging and
+CUDA events. This development path supports ranks on one host and uses RAM only.
+
+With four serving GPUs, run:
+
+```sh
+.venv/bin/ignition serve deepseek-v4.1-flash --gpus 0,1,2,3 \
+  --max-concurrency 1 --mtp-draft-tokens 7 --prefill-chunk-size 4096 \
+  --host 0.0.0.0 --port 8001 --verbose
+```
+
+The command prepares and captures graphs, loads the RAM tables once, and starts
+Helios directly. It does not write or reload a runtime package. The extension
+build above is required once; model edits reuse cached kernel and forward
+artifacts where their prepared computation is unchanged. Use an exported package
+for final native performance validation: development ranks run in separate
+processes with separate delivery staging, while the native CLI shares staging
+between its rank threads.
+
+For DS4.1 research with separate draft preparation and prefix verification, run
+the qualification launcher from the repository root:
+
+```sh
+.venv/bin/python -m qualify.deepseek41_native_split \
+  --gpus 0,1,2,3 --mode split --max-concurrency 1 \
+  --headroom-mib 4096 --threshold 0.15 \
+  --output /tmp/ds41-split --bind 127.0.0.1:8001
+```
+
+This mode prepares seven drafts, then Helios selects a causal prefix from their
+confidence before verification. `--threshold` defaults to `0.15`; keep that value
+for comparison, or pass another value in `(0, 1]` to study prefix selection.
+`--mode baseline` uses complete speculative rounds. Both modes keep Engram tables
+in shared RAM. Split execution supports one active request and cannot be exported
+as a runtime package. Ordinary `ignition serve`, `export`, and `run` continue to
+use complete speculative rounds, including at higher concurrency.
+
 ### 3.2 Native serving flags
 
 `flare run PACKAGE` loads an exported file without the Ignition configuration
@@ -163,6 +240,14 @@ Help exits with status 0; usage errors go to stderr with status 2. Its options a
 | `--mtp-draft-tokens N` | Reduce the maximum draft count; zero selects ordinary execution without draft generation, absorption, or draft-state maintenance | Package default |
 | `--mtp-adaptive-verification` / `--no-mtp-adaptive-verification` | Adaptive or fixed selection among captured widths | Package default |
 | `--embedding-table-storage disk\|ram` | PLE and Engram table storage; both modes deliver compact GPU rows | `disk` |
+| `--embedding-table-cache-size SIZE` | Per-host budget for cached disk-backed PLE/Engram rows, including the index, usage counters and miss workspace; accepts sizes such as `1G` or `2GiB` | `0` (disabled) |
+
+An embedding row cache selects disk storage and cannot be combined with
+`--embedding-table-storage ram`. Each host shares its budget across embedding
+tables and local tensor-parallel ranks. The loader commits cache memory before
+sizing KV and continuation pools, so the cache uses part of the integrated GPU's
+existing memory budget. The cache remains fixed in size while serving and warms
+from requests each time the server starts.
 
 Selected concurrency and draft depth cannot exceed prepared capacity.
 Concurrency three requires the batch-four bucket. Fixed verification loads
@@ -422,6 +507,15 @@ keyed by checkpoint revision, recipe version, GPU, and settings. A second
 `--max-concurrency`, `--gpus`, or the speculation flags can add graph shapes
 and incur partial tuning.
 
+FlashInfer's JIT build files also live under `paths.kernel_cache` (default
+`~/.cache/flare/kernels`), in a separate directory for each resolved FlashInfer
+installation. Editable checkouts can therefore compile independently even when
+they share a package version and GPU architecture. The first use of an installation
+can compile its sampling kernels; later launches reuse that installation's files.
+Set `kernel_cache = "/data/flare-kernels"` in the configuration's `[paths]` table
+to move preparation caches together. Keep the default unless another storage
+location is needed.
+
 `run` prints checkpoint resolution, selected GPUs, preparation settings, and
 each phase's counts and elapsed time. The phases include weight loading,
 `Prepare embedding tables`, kernel tuning, forward compilation, KV allocation,
@@ -439,8 +533,10 @@ the status and elapsed time. `--verbose` adds each phase's detail lines.
 
 ## 8. Model resolution
 
-A recipe declares each qualified checkpoint as an alias, a repository id, a
-pinned revision, and an architecture. `MODEL` resolves in this order:
+A recipe declares each qualified checkpoint as an alias, a source, a revision,
+and an architecture. Hub sources use repository IDs and pinned revisions;
+local sources use absolute checkpoint directories and the revision `local`.
+`MODEL` resolves in this order:
 
 1. An existing directory is a checkpoint directory.
 2. A string containing `/` is a Hugging Face repository id, optionally
@@ -459,7 +555,9 @@ error listing the supported aliases; a repository the hub cannot provide is a
 fetch error.
 
 The hub cache follows the Hugging Face hub library's convention unless
-`[paths].hub_cache` is set. An alias downloads its pinned revision.
+`[paths].hub_cache` is set. A hub alias downloads its pinned revision. A local
+alias resolves its directory directly and fails if it is absent.
+`kimi-k3-mxfp4-csf` names `/data/models/Kimi-K3-MXFP4-CSF`.
 
 ## 9. Recipe obligations
 

@@ -74,7 +74,7 @@ def host(monkeypatch, tmp_path):
 
     class Scope:
         def __init__(self, **kwargs):
-            pass
+            self.host_regions = []
         def __enter__(self):
             return self
         def __exit__(self, *exception):
@@ -91,7 +91,8 @@ def host(monkeypatch, tmp_path):
 
     def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress, retain_graphs, package_storage):
         assert retain_graphs and isinstance(package_storage, Scope)
-        calls.update(snapshot=snapshot, plan=plan, compile_forwards=compile_forwards, kernel_cache=kernel_cache)
+        calls.update(snapshot=snapshot, plan=plan, compile_forwards=compile_forwards,
+                     kernel_cache=kernel_cache, storage=package_storage)
         behavior = dict(calls["behavior"])
         if "raises" in behavior:
             raise behavior["raises"]
@@ -149,6 +150,51 @@ def test_run_exports_then_replaces_python_with_flare_and_reuses_the_package(host
     assert host["prepared"].closed and host["prepared"].started is None
     assert run("qwen3.8-flash", "--no-compile") == 0
     assert host["exports"] == 1
+
+
+def test_diagnostic_serving_retains_storage_until_native_shutdown(host, monkeypatch):
+    closed = []
+
+    def serve_prepared(prepared, bind, options):
+        assert prepared is host["prepared"] and not prepared.closed
+        assert host["exports"] == 0
+
+        def close_region():
+            assert prepared.closed
+            closed.append(True)
+
+        host["storage"].host_regions.append(types.SimpleNamespace(close=close_region))
+        with prepared:
+            return 0
+
+    monkeypatch.setattr(serve, "_serve_prepared", serve_prepared)
+    assert main(["serve", "qwen3.8-flash", "--gpus", "0",
+                 "--port", str(free_port())]) == 0
+    assert host["exports"] == 0 and closed == [True]
+
+
+def test_diagnostic_startup_failure_retains_undrained_host_storage(host, monkeypatch):
+    from ignition.preparation.model import PreparedModel
+
+    original = RuntimeError("native startup retained resources")
+    original.resources_retained = True
+    released = []
+
+    def start_server(self, **options):
+        host["storage"].host_regions.append(types.SimpleNamespace(close=lambda: released.append(True)))
+        raise original
+
+    def close(self):
+        raise RuntimeError("native drain was not confirmed")
+
+    monkeypatch.setattr(Prepared, "memory_report", {}, raising=False)
+    monkeypatch.setattr(Prepared, "start_server", start_server)
+    monkeypatch.setattr(Prepared, "close", close, raising=False)
+    monkeypatch.setattr(Prepared, "__exit__", PreparedModel.__exit__)
+    with pytest.raises(RuntimeError, match="native startup retained resources") as caught:
+        main(["serve", "qwen3.8-flash", "--gpus", "0", "--port", str(free_port())])
+    assert caught.value is original and "native drain was not confirmed" in original.__notes__[0]
+    assert released == [] and not host["prepared"].closed
 
 
 def test_preparation_flags_select_distinct_packages(host):
@@ -306,7 +352,7 @@ def test_environment_selects_gpus_by_uuid_and_places_caches(monkeypatch, tmp_pat
 
     monkeypatch.setenv("HOME", str(tmp_path))
     for name in ("CUDA_VISIBLE_DEVICES", "CUDA_HOME", "B12X_COMPILE_CACHE_DIR", "TRITON_CACHE_DIR",
-                 "TORCHINDUCTOR_CACHE_DIR", "HF_HUB_CACHE"):
+                 "TORCHINDUCTOR_CACHE_DIR", "HF_HUB_CACHE", "FLASHINFER_WORKSPACE_BASE"):
         monkeypatch.setenv(name, "previous")
     path = tmp_path / "config.toml"
     path.write_text(f'[paths]\ncuda = "{tmp_path}/cuda"\nkernel_cache = "{tmp_path}/kernels"\n')
@@ -315,11 +361,39 @@ def test_environment_selects_gpus_by_uuid_and_places_caches(monkeypatch, tmp_pat
     environment.apply(Configuration.load(path), gpus)
     assert os.environ["CUDA_VISIBLE_DEVICES"] == "GPU-b,GPU-a"
     assert os.environ["B12X_COMPILE_CACHE_DIR"] == f"{tmp_path}/kernels/b12x"
+    assert Path(os.environ["FLASHINFER_WORKSPACE_BASE"]).is_relative_to(tmp_path / "kernels" / "flashinfer")
     assert os.environ["TRITON_CACHE_DIR"] == f"{tmp_path}/kernels/triton"
     assert os.environ["TORCHINDUCTOR_CACHE_DIR"] == f"{tmp_path}/kernels/inductor"
     assert os.environ["HF_HUB_CACHE"] == f"{tmp_path}/.cache/huggingface/hub"
     assert os.environ["CUDA_HOME"] == f"{tmp_path}/cuda"
     assert environment.toolkit(None) is None or (environment.toolkit(None) / "bin/nvcc").is_file()
+
+
+def test_flashinfer_workspaces_separate_checkouts_without_importing_them(monkeypatch, tmp_path):
+    import importlib
+
+    monkeypatch.delitem(sys.modules, "flashinfer", raising=False)
+    roots = [tmp_path / name for name in ("source_a", "source_b")]
+    for root in roots:
+        package = root / "flashinfer"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text('raise AssertionError("preparation imported too early")\n')
+    monkeypatch.syspath_prepend(str(roots[0]))
+    first = environment.flashinfer_workspace(tmp_path / "kernels")
+    assert first == environment.flashinfer_workspace(tmp_path / "kernels")
+    assert "flashinfer" not in sys.modules
+
+    monkeypatch.syspath_prepend(str(roots[1]))
+    importlib.invalidate_caches()
+    second = environment.flashinfer_workspace(tmp_path / "kernels")
+    assert second != first
+    assert second.parent == first.parent == tmp_path / "kernels" / "flashinfer"
+    assert "flashinfer" not in sys.modules
+
+    alias = tmp_path / "source_alias"
+    alias.symlink_to(roots[1], target_is_directory=True)
+    monkeypatch.syspath_prepend(str(alias))
+    assert environment.flashinfer_workspace(tmp_path / "kernels") == second
 
 
 def test_tensor_parallel_run_preserves_rank_selection_in_native_launch(host):

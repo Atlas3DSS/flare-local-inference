@@ -56,10 +56,10 @@ The JPEG decoder builds its bundled libjpeg-turbo source. Preparation requires
 the CUDA toolkit, including `nvcc` and CUPTI; configure `[paths] cuda` when it
 is not supplied by the Python environment.
 
-The preparation dependency targets `main` in `local-inference-lab/flashinfer`;
-`uv.lock` records the resolved commit. Run
-`uv lock --upgrade-package flashinfer-python` to advance it to the branch tip,
-then sync the environment. For local FlashInfer development, install the sibling
+The preparation dependency tracks the `main` branch of `local-inference-lab/flashinfer`
+in `pyproject.toml`; `uv.lock` records the resolved commit. To refresh it, run
+`uv lock --upgrade-package flashinfer-python`, then sync the environment.
+For local FlashInfer development, install the sibling
 checkout explicitly with `uv pip install --python .venv/bin/python --no-deps -e ../flashinfer`;
 `uv sync --locked --extra prepare --extra test` restores the Git dependency.
 Inspect that checkout and its local changes before modifying it. After changing
@@ -141,7 +141,7 @@ GPUs explicitly:
   --gpus 0,4,6,8 --bind 127.0.0.1:8001
 ```
 
-DeepSeek's logical cache pages cover 128 tokens across compressed latent and
+DeepSeek V4.1's logical cache pages cover 128 tokens across compressed latent and
 index regions with different byte sizes. Continuation rows retain sliding
 windows, pending compression state, partial pages, DSpark context windows, and the
 last hidden state. Both use runtime-sized virtual ranges; exported packages
@@ -151,11 +151,11 @@ The three preceding tokens live in continuation state, including reused prefixes
 DSpark proposals, target verification, and accepted-state commit use the shared
 native speculative contract; Helios contains no DSpark model implementation.
 
-DeepSeek V4 Flash uses `deepseek-ai/DeepSeek-V4-Flash-Vision-Exp`, including its
+DeepSeek V4 Flash uses `local-inference-lab/DeepSeek-V4-Flash-Vision-Exp-lossless-CSF`, including its
 vision encoder and checkpoint-integrated DSpark model. The `deepseek-v4-flash`
 alias prepares five draft tokens by default, with adaptive verification. It
 accepts up to four images per request and has no offloaded embedding tables.
-Use four available GPUs for preparation and serving:
+Use two or four available GPUs for preparation and serving:
 
 ```sh
 .venv/bin/python -m ignition export deepseek-v4-flash --gpus 3,4,5,6 \
@@ -167,14 +167,15 @@ Use four available GPUs for preparation and serving:
   --gpus 3,4,5,6 --bind 127.0.0.1:8001
 ```
 
-V4 uses 128-token logical pages containing 32 C4 latent records with a retrieval
-index, or one C128 latent record with dense history attention. Each latent page
+V4 uses 256-token logical pages containing 64 C4 latent records with an FP8
+retrieval index, or two C128 latent records with dense history attention. Each latent page
 stores FP8/BF16 payloads followed by its own scale footer. Continuation rows
 preserve the complete 128-token compression interval, C4 overlap, sliding
 windows, partial pages, and DSpark context. Only accepted tokens update the
 continuation state. Bidirectional image spans stay within one prefill chunk;
 the scheduler shortens a preceding text chunk when necessary. Image preprocessing,
 feature delivery, text execution, and output parsing all run natively in Helios.
+Packages with 128-token V4 pages are incompatible and must be re-exported.
 
 MiMo V2.6 Pro MOPD uses `XiaomiMiMo/MiMo-V2.6-Pro-MOPD` with checkpoint
 MXFP4 experts, block-FP8 dense projections, and BF16 draft and vision weights.
@@ -199,6 +200,32 @@ token and seven proposals. Helios uses the shared speculative execution contract
 draft modeling and state updates are captured by Ignition. The vision encoder
 publishes compact image features for causal text prefill. Loading with
 `--mtp-draft-tokens 0` selects ordinary execution without draft-state updates.
+
+Kimi K3 uses the local `/data/models/Kimi-K3-MXFP4-CSF` checkpoint. The
+`kimi-k3-mxfp4-csf` alias prepares text generation, reasoning, XTML tool calls,
+and up to four images per request on sixteen GPUs. It preserves MXFP4 experts
+with compressed scales, BF16 projections, and FP32 KDA recurrent state.
+Its 93-layer decoder combines KDA, unrotated latent attention, attention
+residuals, and latent SiTU experts. There is no learned draft model.
+
+```sh
+.venv/bin/python -m ignition export /data/models/Kimi-K3-MXFP4-CSF --gpus 0-15 \
+  --max-concurrency 4 --prefill-chunk-size 4096 \
+  --output /data/flare-runtime/kimi-k3-mxfp4-csf-tp16-c4.safetensors --verbose
+
+./flare/target/release/flare run \
+  /data/flare-runtime/kimi-k3-mxfp4-csf-tp16-c4.safetensors \
+  --gpus 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15 --bind 127.0.0.1:8001
+```
+
+MLA latent records occupy 128-token pages. Continuation rows preserve KDA
+convolution and recurrent state, partial latent pages, and the normalized
+last hidden state. The MoonViT encoder accepts a combined 65,536 image patches
+per request and publishes hidden-column-sharded features for causal text
+prefill. XTML encoding distinguishes protocol tokens from literal marker text.
+Serving defaults follow the model card's agentic sampling recommendation:
+temperature 1, top-p 1, no top-k filter, and neutral penalties. Reasoning is
+enabled with `max` effort by default; request settings override these defaults.
 
 Both Ignition commands accept `--config PATH`; the default configuration is
 `~/.config/flare/config.toml`. Storage locations are configured with
@@ -306,6 +333,11 @@ changing prepared kernels, capacities, or the package format.
 Use `.venv/bin/ignition export --help` and `.venv/bin/ignition run --help` for
 preparation flags. See [the runtime package design](docs/runtime-package-design.md)
 for resource ownership and [the CLI design](docs/cli-design.md) for configuration.
+
+For model development, `ignition serve` hands prepared graphs directly to Helios
+without exporting a package. It requires Heliopause's `qualification` Cargo
+feature. Select idle devices explicitly; see [the development launch example](docs/cli-design.md#development-without-package-export)
+for the extension build and serving commands.
 
 ## Preserve canonical model implementations where they fit
 

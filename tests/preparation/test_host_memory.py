@@ -63,6 +63,34 @@ def test_discrete_device_budget_is_independent_of_host_ram(monkeypatch):
 
 
 @pytest.mark.parametrize("pools", [1, 2, 4])
+@pytest.mark.parametrize("race_budget", [None, 1 << 20, 64 << 30])
+def test_discrete_tuning_keeps_device_headroom_without_dividing_vram_across_ranks(
+    monkeypatch, pools, race_budget
+):
+    import torch
+
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda device: SimpleNamespace(is_integrated=False))
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (4 << 30, 96 << 30))
+    monkeypatch.setattr(host_memory, "available_bytes", lambda: 72 << 30)
+    workers, race = host_memory.tuning_limits("cuda:0", 16, pools=pools,
+        headroom_bytes=1 << 30, race_budget=race_budget)
+    assert workers == min(16, 32 // pools)
+    assert 0 < race <= 512 << 20
+    assert 4 * race + (2 << 30) <= 4 << 30
+    if race_budget is not None:
+        assert race <= race_budget
+
+
+def test_discrete_small_workloads_keep_a_positive_race_budget_without_workers(monkeypatch):
+    import torch
+
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda device: SimpleNamespace(is_integrated=False))
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (768 << 20, 24 << 30))
+    monkeypatch.setattr(host_memory, "available_bytes", lambda: pytest.fail("no compiler pool needs host RAM"))
+    assert host_memory.tuning_limits("cuda:0", 0, headroom_bytes=1 << 30) == (0, 1)
+
+
+@pytest.mark.parametrize("pools", [1, 2, 4])
 @pytest.mark.parametrize("headroom", [0, 16 << 30])
 @pytest.mark.parametrize("race_budget", [None, 1 << 20, 64 << 30])
 def test_tuning_races_and_compilers_share_one_ram_budget(monkeypatch, pools, headroom, race_budget):

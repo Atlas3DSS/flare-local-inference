@@ -372,10 +372,24 @@ def serve(args) -> int:
     environment.apply(configuration, local)
     options = _server_options(configuration, model, plan)
     print(json.dumps({"plan": plan.to_dict()}), file=sys.stderr, flush=True)
-    prepared = model.recipe.prepare(
-        model.snapshot(hub_cache), plan, compile_forwards=not args.no_compile,
-        kernel_cache=configuration.directory("kernel_cache"), progress=progress,
-        **({} if rendezvous is None else {"ranks": rendezvous}))
+    preparation_options = {} if args.direct else {"retain_graphs": True}
+    storage = None
+    if rendezvous is None and not args.direct:
+        import torch
+        from ignition.preparation.package_storage import PackageStorage
+
+        torch.cuda.set_device(0)
+        storage = PackageStorage(world=plan.world_size)
+        preparation_options["package_storage"] = storage
+    elif rendezvous is not None:
+        preparation_options["ranks"] = rendezvous
+    from contextlib import nullcontext
+
+    with storage if storage is not None else nullcontext():
+        prepared = model.recipe.prepare(
+            model.snapshot(hub_cache), plan, compile_forwards=not args.no_compile,
+            kernel_cache=configuration.directory("kernel_cache"), progress=progress,
+            **preparation_options)
     if args.direct:
         from ignition.direct.server import serve_direct
 
@@ -383,6 +397,10 @@ def serve(args) -> int:
                             served_names=(*options["served_names"], options["model_id"]))
     else:
         code = _serve_prepared(prepared, bind, options)
+    # Native replay has drained before package-backed host mappings are released.
+    if storage is not None:
+        for region in storage.host_regions:
+            region.close()
     print("Stopped; every rank drained and released its resources.", flush=True)
     return code
 

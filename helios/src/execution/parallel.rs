@@ -212,6 +212,7 @@ impl TensorParallelExecutor {
                     return Err(invalid("rank completion size differs from its ABI"));
                 }
                 peer.completion = Some(FrameCompletion {
+                    proposal_confidence: None,
                     fence,
                     graph_index: graph,
                     timing,

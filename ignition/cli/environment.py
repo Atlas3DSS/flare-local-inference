@@ -5,6 +5,7 @@ imported or first used, so `apply` runs before any of them is imported. Rank
 and compiler processes inherit the result.
 """
 
+import hashlib
 import os
 from importlib import util
 from pathlib import Path
@@ -25,6 +26,18 @@ def toolkit(configured: Path | None) -> Path | None:
     return configured
 
 
+def flashinfer_workspace(kernel_cache: Path) -> Path:
+    """Separate JIT build directories for independently editable installations."""
+    package = util.find_spec("flashinfer")
+    root = kernel_cache / "flashinfer"
+    if package is None or package.origin is None:
+        return root
+    # FlashInfer keys build directories by version and GPU architecture. Distinct
+    # checkouts can share both while requiring different sources and compiler flags.
+    source = str(Path(package.origin).resolve()).encode()
+    return root / hashlib.sha256(source).hexdigest()[:16]
+
+
 def apply(configuration, gpus) -> None:
     """Select the plan's GPUs as process-local devices 0 through N-1 and place every cache."""
     kernel_cache = configuration.directory("kernel_cache")
@@ -32,6 +45,7 @@ def apply(configuration, gpus) -> None:
         "CUDA_VISIBLE_DEVICES": ",".join(gpu.uuid for gpu in gpus),
         "HF_HUB_CACHE": str(configuration.directory("hub_cache")),
         "B12X_COMPILE_CACHE_DIR": str(kernel_cache / "b12x"),
+        "FLASHINFER_WORKSPACE_BASE": str(flashinfer_workspace(kernel_cache)),
         "TRITON_CACHE_DIR": str(kernel_cache / "triton"),
         "TORCHINDUCTOR_CACHE_DIR": str(kernel_cache / "inductor"),
     })

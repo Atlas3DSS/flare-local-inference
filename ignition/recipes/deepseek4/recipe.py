@@ -12,9 +12,6 @@ from ignition.recipes.declaration import (
     Speculation,
 )
 
-from .config import MODEL_ID, REVISION
-
-
 def prepare(
     snapshot, plan, *, compile_forwards, kernel_cache, progress, retain_graphs=False, package_storage=None
 ):
@@ -61,16 +58,16 @@ RECIPE = Recipe(
     checkpoints=(
         Checkpoint(
             alias="deepseek-v4-flash",
-            repository=MODEL_ID,
-            revision=REVISION,
+            repository="local-inference-lab/DeepSeek-V4-Flash-Vision-Exp-lossless-CSF",
+            revision="45fd997626821b131a904b1ae2304bb673c9458d",
             architecture="DeepseekV4ForCausalLM",
-            stored_bytes=167_811_372_792,
-            device_bytes=167_811_372_792,
+            stored_bytes=160_372_641_076,
+            device_bytes=160_360_333_756,
             draft_bytes=10_862_841_372,
         ),
     ),
     context=1048576,
-    page_tokens=128,
+    page_tokens=256,
     concurrency=4,
     max_concurrency=64,
     prefill_chunk=4096,
@@ -80,6 +77,13 @@ RECIPE = Recipe(
     stream_overlap=True,
     max_images=4,
     image_bytes=32 << 20,
-    ranks=MappingProxyType({4: RankCosts(16_142_080, 467_904, 24 << 30)}),
-    plain_ranks=MappingProxyType({4: RankCosts(15_917_056, 467_904, 24 << 30)}),
+    # Continuation rows and latent pages are replicated, so their costs do not depend on the rank count.
+    ranks=MappingProxyType({
+        2: RankCosts(16_668_416, 998_208, 11 << 30),
+        4: RankCosts(16_668_416, 998_208, 24 << 30),
+    }),
+    plain_ranks=MappingProxyType({
+        2: RankCosts(16_443_392, 998_208, 12 << 30),
+        4: RankCosts(16_443_392, 998_208, 24 << 30),
+    }),
 )

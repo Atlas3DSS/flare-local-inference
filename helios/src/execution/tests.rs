@@ -375,6 +375,50 @@ fn abi3_requires_vector_storage_and_speculative_widths() {
 }
 
 #[test]
+fn split_graphs_require_single_lane_confidence_and_deliver_embeddings_only_to_verification() {
+    let mut m = manifest();
+    m.max_active = 1;
+    m.abi_version = SPECULATIVE_ABI_VERSION;
+    m.buffers[2].shape = vec![2, 1, 24];
+    m.buffers[2].strides = vec![24, 24, 1];
+    m.buffers[2].nbytes = 384;
+    m.graphs[0].batch_capacity = 1;
+    m.buffers.push(BufferDescriptor {
+        name: "proposal_confidence".into(),
+        address: 0x40000,
+        nbytes: 28,
+        dtype: Dtype::Float32,
+        shape: vec![1, 7],
+        strides: vec![7, 1],
+    });
+    for (name, kind, delivery) in [
+        ("proposal", GraphKind::Proposal, false),
+        ("verification", GraphKind::Verification, true),
+    ] {
+        assert_eq!(GraphKind::try_from(name).unwrap(), kind);
+        assert_eq!(crate::engram::consumes(kind), delivery);
+        assert!(crate::model::contract::GraphOperation::try_from(kind).is_ok());
+        m.graphs[0].kind = kind;
+        for width in 1..=8 {
+            m.graphs[0].token_capacity = width;
+            if kind == GraphKind::Proposal {
+                if width == 1 {
+                    assert!(m.validate().is_err());
+                    continue;
+                }
+                let confidence = m.buffers.last_mut().unwrap();
+                confidence.shape = vec![1, width - 1];
+                confidence.strides = vec![width - 1, 1];
+                confidence.nbytes = (width - 1) * 4;
+            }
+            assert!(m.validate().is_ok());
+        }
+        m.graphs[0].token_capacity = 9;
+        assert!(m.validate().is_err());
+    }
+}
+
+#[test]
 fn vector_parser_rejects_counts_tails_and_stale_epochs_without_cuda() {
     let mut vector = TokenVector {
         emitted_count: 3,

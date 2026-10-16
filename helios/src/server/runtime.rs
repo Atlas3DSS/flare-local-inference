@@ -255,10 +255,13 @@ impl ModelRuntime {
         let worker_config = config.clone();
         let finished = Arc::new((Mutex::new(false), Condvar::new()));
         let worker_finished = finished.clone();
-        let metrics = Arc::new(super::metrics::Metrics::new(
-            config.limits.pages,
-            config.contract.cache.page_tokens,
-        ));
+        let mut metrics =
+            super::metrics::Metrics::new(config.limits.pages, config.contract.cache.page_tokens);
+        metrics.engram = manifest
+            .engram
+            .as_ref()
+            .map(|binding| binding.shared.stats());
+        let metrics = Arc::new(metrics);
         metrics.scheduler_trace.configure(&manifest.graphs);
         let worker_metrics = metrics.clone();
         let thread = thread::Builder::new()
@@ -347,11 +350,28 @@ impl ModelRuntime {
                                 .graphs
                                 .iter()
                                 .filter(|graph| {
-                                    graph.kind == crate::execution::GraphKind::Speculative
+                                    matches!(
+                                        graph.kind,
+                                        GraphKind::Speculative | GraphKind::Verification
+                                    )
                                 })
                                 .map(|graph| (graph.batch_capacity, graph.token_capacity))
                                 .collect::<Vec<_>>(),
                         )
+                    })
+                    .and_then(|()| {
+                        if let Some(proposal) = executor
+                            .manifest()
+                            .graphs
+                            .iter()
+                            .find(|g| g.kind == GraphKind::Proposal)
+                        {
+                            scheduler.split_speculation(
+                                proposal.token_capacity,
+                                worker_config.proposal_confidence_threshold,
+                            )?;
+                        }
+                        Ok(())
                     })
                 {
                     let _ = ready_tx.send(Err(error.clone()));
@@ -640,6 +660,7 @@ struct Worker<'a> {
     /// the host-store fetch policy compares with transfer time.
     prefill_rate: f64,
     prefill_started: VecDeque<(crate::cache::Fence, std::time::Instant, u64)>,
+    proposal_timing: Option<(crate::cache::Fence, crate::execution::ExecutionTiming)>,
 }
 
 impl<'a> Worker<'a> {
@@ -669,6 +690,7 @@ impl<'a> Worker<'a> {
             inputs: None,
             prefill_rate: crate::offload::INITIAL_PREFILL_RATE,
             prefill_started: VecDeque::new(),
+            proposal_timing: None,
         }
     }
 
@@ -973,7 +995,10 @@ impl<'a> Worker<'a> {
         let mut draft_rounds = 0;
         if matches!(
             kind,
-            GraphKind::Prefill | GraphKind::Speculative | GraphKind::Mixed
+            GraphKind::Prefill
+                | GraphKind::Speculative
+                | GraphKind::Verification
+                | GraphKind::Mixed
         ) {
             let step = self.scheduler.submitted_step(completion.fence)?;
             for (row, lane) in step.lanes.iter().enumerate() {
@@ -1001,9 +1026,21 @@ impl<'a> Worker<'a> {
                 }
             }
         }
-        let generated =
+        let generated = if kind == GraphKind::Proposal {
+            let confidence = completion
+                .proposal_confidence
+                .as_ref()
+                .ok_or("proposal completion lacks confidence")?;
+            self.scheduler.complete_proposal(
+                completion.fence,
+                &completion.records,
+                completion.timing,
+                &confidence[..measured_step.token_capacity - 1],
+            )?
+        } else {
             self.scheduler
-                .complete(completion.fence, &completion.records, completion.timing)?;
+                .complete(completion.fence, &completion.records, completion.timing)?
+        };
         self.metrics
             .progress(prefill, generated.len(), accepted, draft_rounds);
         if prefill > 0 && self.store.is_some() {
@@ -1015,8 +1052,27 @@ impl<'a> Worker<'a> {
             &measured_step,
             completion.timing,
         );
-        if let Some(nanos) = completion.timing.gpu_ns[0].filter(|_| kind == GraphKind::Speculative)
-        {
+        if kind == GraphKind::Proposal {
+            self.proposal_timing = Some((completion.fence, completion.timing));
+        }
+        if matches!(kind, GraphKind::Speculative | GraphKind::Verification) {
+            let mut nanos = completion
+                .timing
+                .gpu_ns
+                .into_iter()
+                .flatten()
+                .max()
+                .unwrap_or(0);
+            if kind == GraphKind::Verification {
+                let (fence, proposal) = self
+                    .proposal_timing
+                    .take()
+                    .ok_or("verification lacks proposal timing")?;
+                if fence.0 + 1 != completion.fence.0 {
+                    return Err("verification timing does not follow its proposal".into());
+                }
+                nanos += proposal.gpu_ns.into_iter().flatten().max().unwrap_or(0);
+            }
             let step = &measured_step;
             self.metrics.speculative_completed(
                 step.batch_capacity,

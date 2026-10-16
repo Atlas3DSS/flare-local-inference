@@ -1,7 +1,6 @@
 """Bind single-device compiled forwards to a tensor-parallel rank's CUDA ordinal."""
 
 import ast
-import pickle
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import replace
@@ -78,15 +77,14 @@ def _device_source(source, original, target, kernel_keys=None):
     return data.decode()
 
 
-def relocate_inductor(data, original):
+def relocate_inductor(entry, original):
     target = _DEVICE.get()
     if target is None or target == original:
-        return data
+        return
     from torch._inductor.codecache import code_hash
     from torch._inductor.output_code import CompiledFxGraph
     from torch.utils._ordered_set import OrderedSet
 
-    entry, kernels, constants = pickle.loads(data)
     graph = entry.compiled_fw.result
     if entry.compiled_bw is not None or not isinstance(graph, CompiledFxGraph):
         raise ValueError("device binding requires a compiled inference forward")
@@ -108,4 +106,3 @@ def relocate_inductor(data, original):
         graph._triton_bundle = replace(bundle,
             kernel_artifacts=[replace(item, device=target.index) for item in bundle.kernel_artifacts],
             static_autotuners=autotuners)
-    return pickle.dumps((entry, kernels, constants))

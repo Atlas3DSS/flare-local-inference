@@ -8,6 +8,8 @@ pub mod chatml;
 mod pipeline;
 pub mod tagged;
 #[cfg(feature = "server")]
+mod xtml;
+#[cfg(feature = "server")]
 pub use pipeline::{OutputConfig, OutputPipeline};
 
 use crate::Result;

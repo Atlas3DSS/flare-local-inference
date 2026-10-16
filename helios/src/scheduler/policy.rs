@@ -148,6 +148,13 @@ impl RequestScheduler {
             RequestPhase::Prefill => GraphKind::Prefill,
             RequestPhase::Resume => GraphKind::Resume,
             RequestPhase::Decode if self.speculative_widths.is_empty() => GraphKind::Decode,
+            RequestPhase::Decode if self.split.is_some() => {
+                if self.retained_proposal(request).is_some() {
+                    GraphKind::Verification
+                } else {
+                    GraphKind::Proposal
+                }
+            }
             RequestPhase::Decode => GraphKind::Speculative,
             RequestPhase::Snapshot => GraphKind::Snapshot,
             _ => return None,
@@ -630,7 +637,9 @@ impl RequestScheduler {
         match kind {
             GraphKind::Prefill => self.prefill_work(r, capacity),
             GraphKind::Decode => 1,
-            GraphKind::Speculative => self.speculative_tokens(r, capacity),
+            GraphKind::Speculative | GraphKind::Proposal | GraphKind::Verification => {
+                self.speculative_tokens(r, capacity)
+            }
             _ => 0,
         }
     }
@@ -649,7 +658,10 @@ impl RequestScheduler {
                 tokens,
                 r.consumed_tokens + tokens as u64 == r.prompt_tokens as u64,
             ),
-            GraphKind::Decode | GraphKind::Speculative => value.decode(
+            GraphKind::Decode
+            | GraphKind::Speculative
+            | GraphKind::Proposal
+            | GraphKind::Verification => value.decode(
                 r.acceptance.expected_tokens(self.proposal_source, tokens),
                 duration_ns as f64 / 1e6,
             ),
@@ -764,6 +776,8 @@ impl RequestScheduler {
             GraphKind::Resume,
             GraphKind::Decode,
             GraphKind::Speculative,
+            GraphKind::Proposal,
+            GraphKind::Verification,
         ] {
             let mask = self
                 .slots
@@ -787,6 +801,14 @@ impl RequestScheduler {
             } else if kind == GraphKind::Vision {
                 for &capacity in &self.capabilities.vision.patch_capacities {
                     self.add_candidate(output, kind, 1, capacity, mask, values, age_price);
+                }
+            } else if kind == GraphKind::Proposal {
+                if let Some(split) = &self.split {
+                    self.add_candidate(output, kind, 1, split.width, mask, values, age_price);
+                }
+            } else if kind == GraphKind::Verification {
+                if let Some(retained) = self.split.as_ref().and_then(|s| s.retained) {
+                    self.add_candidate(output, kind, 1, retained.width, mask, values, age_price);
                 }
             } else {
                 for batch in crate::execution::BATCH_CAPACITIES

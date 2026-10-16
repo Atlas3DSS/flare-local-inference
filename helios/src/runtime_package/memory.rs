@@ -194,10 +194,17 @@ pub(super) fn capacities(
                 .is_ok_and(|n| n <= budget)
         })
     };
-    if !fits(execution, minimum_pages) {
-        return Err(invalid(
-            "available memory cannot hold execution state and minimum KV capacity",
-        ));
+    for (rank, (package, &budget)) in packages.iter().zip(available).enumerate() {
+        let required = bytes(package, 0, execution)?
+            .checked_add(bytes(package, 1, minimum_pages)?)
+            .ok_or_else(|| invalid("cache footprint overflow"))?;
+        if required > budget {
+            return Err(invalid(format!(
+                "available memory cannot hold execution state and minimum KV capacity: \
+                 rank {rank} needs {required} bytes for {execution} continuation rows and \
+                 {minimum_pages} KV pages, but only {budget} bytes are available"
+            )));
+        }
     }
     let (mut low, mut high) = (minimum_pages, maximum_pages);
     while low < high {

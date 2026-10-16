@@ -18,7 +18,7 @@ class PreparedModel(PreparedExecution):
     """
 
     def __init__(self, *, server_config, memory_report, session, close_resources=(), package_data=None,
-                 forwards=None, **kwargs):
+                 forwards=None, embedding_catalog=None, **kwargs):
         super().__init__(**kwargs)
         if forwards is not None and set(forwards) != set(self.graphs):
             raise ValueError("retained forwards must cover exactly the captured graphs")
@@ -27,12 +27,42 @@ class PreparedModel(PreparedExecution):
         self.session = session
         self.package_data = package_data
         self.forwards = None if forwards is None else MappingProxyType(dict(forwards))
+        self.embedding_catalog = embedding_catalog
+        self.embedding_tables = self._embedding_binding = None
         self._close_resources = tuple(close_resources)
         self._rank_drained = False
         self.runtime = None
         self.closed = False
         self._startup_undrained = False
         self._preparation_thread = get_ident()
+
+    def manifest(self, *, all_variants=False):
+        """Expose the serving width to diagnostics and the complete catalog to export."""
+        manifest = super().manifest(all_variants=all_variants)
+        fixed = self.server_config.get("speculative_fixed_width")
+        if fixed is not None and not all_variants:
+            manifest["graphs"] = [graph for graph in manifest["graphs"]
+                if graph["kind"] not in ("speculative", "verification") or graph["token_capacity"] == fixed]
+        if self._embedding_binding is not None and not all_variants:
+            manifest["engram"] = self._embedding_binding
+        return manifest
+
+    def prepare_embedding_tables(self, *, descriptors=None):
+        """Attach native RAM delivery before handoff; peers map the root's sealed backing."""
+        if self.embedding_catalog is None:
+            if descriptors is not None:
+                raise ValueError("shared embedding descriptors require a table catalog")
+            return None
+        if self._consumed or self.closed or self.embedding_tables is not None:
+            raise RuntimeError("embedding tables require an unconsumed model without an existing attachment")
+        import flare_heliopause
+
+        if not hasattr(flare_heliopause, "EmbeddingTables"):
+            raise RuntimeError("resident embedding tables require rebuilding the installed Heliopause extension")
+        tables = flare_heliopause.EmbeddingTables(self.embedding_catalog, descriptors=descriptors)
+        binding = tables.bind(self.manifest(), self.export_events)
+        self.embedding_tables, self._embedding_binding = tables, binding
+        return tables
 
     def start_server(self, *, bind: str = "127.0.0.1:8000", template_defaults=None, peers=None, options=None):
         """Start in-process HTTP diagnostics with a qualification build of heliopause."""
@@ -44,6 +74,10 @@ class PreparedModel(PreparedExecution):
         with self._handoff_lock:
             if self._consumed or self.closed:
                 raise RuntimeError("prepared model has already been consumed or closed")
+            if self.embedding_catalog is not None and self.embedding_tables is None:
+                if peers is not None:
+                    raise RuntimeError("tensor-parallel embedding tables must be shared before native handoff")
+                self.prepare_embedding_tables()
             config = {**self.server_config, **(options or {}), "bind": bind,
                       "template_defaults": {} if template_defaults is None else template_defaults}
             manifest = self.manifest()
@@ -100,6 +134,7 @@ class PreparedModel(PreparedExecution):
         self.session = None
         self._close_resources = ()
         self.runtime = None
+        self._embedding_binding = self.embedding_tables = None
         self.closed = True
         if shutdown_error is not None:
             raise shutdown_error

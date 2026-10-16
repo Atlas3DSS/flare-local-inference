@@ -105,6 +105,7 @@ def backend(monkeypatch):
 
     monkeypatch.setattr(PreparationSession, "close", close_session)
     monkeypatch.setattr(torch.cuda, "get_device_properties", lambda device: SimpleNamespace(is_integrated=False))
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (24 << 30, 32 << 30))
     monkeypatch.setattr(torch.cuda, "device", lambda device: nullcontext())
     monkeypatch.setattr(torch.cuda, "empty_cache", lambda: events.append(("empty_cache",)))
     return events, controls
@@ -1085,10 +1086,12 @@ def test_operator_benchmark_owners_release_after_trial_close(backend, operator):
                 arguments=dict(token_embedding=source, multi_state=source, output=output),
                 session=session, name="op", workspace=None, eps=1e-6)
         elif operator == "bf16_gemv":
-            call = bf16_gemv.benchmark_call(state, source=source, output=output,
+            from ignition.preparation.fixtures.projection import input_factory
+            call = bf16_gemv.benchmark_call(state, inputs=input_factory(source, output),
                 weight=torch.ones(32, 32, dtype=torch.bfloat16), bias=None)
         else:
-            call = blockscaled_gemm.benchmark_call(state, source=source, output=output,
+            from ignition.preparation.fixtures.projection import input_factory
+            call = blockscaled_gemm.benchmark_call(state, inputs=input_factory(source, output),
                 values=torch.ones(32, 32), scales=None, gain=None, bias=None,
                 weight=object(), selected_workspace=lambda _: None)
         if call.reset is not None:
@@ -1109,6 +1112,43 @@ def test_operator_benchmark_owners_release_after_trial_close(backend, operator):
 
 
 GIB = 1 << 30
+
+
+def test_projection_candidates_share_private_strided_operands(backend):
+    from ignition.preparation.fixtures.bf16_gemv import benchmark_call
+    from ignition.preparation.fixtures.projection import input_factory
+
+    allocations = []
+
+    @contextmanager
+    def transient():
+        allocations.append("enter")
+        yield
+        allocations.append("exit")
+
+    session = make_session(device=0, checkpoint="projection-fixtures",
+                           benchmark_storage=SimpleNamespace(transient=transient))
+    session._tune_status = "tuning"
+    source = torch.zeros(5, 64, dtype=torch.bfloat16)[:, :32]
+    output = torch.zeros(5, 48, dtype=torch.float32)[:, :16]
+    weight = torch.ones(16, 32, dtype=torch.bfloat16)
+    state = SimpleNamespace(run=lambda x, w, out, bias: out.copy_(x.float() @ w.float().T))
+    acquire = input_factory(source, output, storage=session.benchmark_storage)
+    first, second = (benchmark_call(state, inputs=acquire, weight=weight, bias=None) for _ in range(2))
+    assert allocations == ["enter", "exit"]
+    assert first.owners[0] is second.owners[0]
+    inputs = first.owners[0]
+    assert inputs.source.stride() == source.stride() and inputs.output.stride() == output.stride()
+    first.produce()
+    first.invoke()
+    expected = first.output.clone()
+    inputs.source.fill_(float("nan"))
+    inputs.output.fill_(float("nan"))
+    second.produce()
+    second.invoke()
+    torch.testing.assert_close(second.output, expected, rtol=0, atol=0)
+    assert not source.count_nonzero() and not output.count_nonzero()
+    session.close()
 
 
 @pytest.mark.parametrize(("free_gib", "race_bytes", "workers"), [
@@ -1142,11 +1182,12 @@ def test_integrated_tuning_fails_before_using_headroom(backend, monkeypatch):
 
 
 @pytest.mark.parametrize("race_budget", [None, GIB])
-def test_discrete_gpu_tuning_keeps_b12x_race_budget(backend, monkeypatch, race_budget):
+def test_discrete_gpu_tuning_bounds_races_without_reducing_compiler_pool(backend, monkeypatch, race_budget):
     events, _ = backend
-    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: pytest.fail("VRAM sizing belongs to b12x"))
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (12 * GIB, 32 * GIB))
     session = make_session(device=0, checkpoint="revision", headroom_bytes=6 * GIB, race_budget=race_budget)
     declare(session, (declaration("projection"),))
     report = session.tune()
-    assert session.race_budget == report["race_budget_bytes"] == race_budget
+    expected = 5 * GIB // 4 if race_budget is None else race_budget
+    assert session.race_budget == report["race_budget_bytes"] == expected
     assert [event for event in events if event[0] == "workers"] == [("workers", None)]

@@ -34,10 +34,10 @@ class DSparkWeights:
     norm: torch.Tensor
     markov_embedding: torch.Tensor
     markov_head: torch.Tensor
-    confidence: torch.Tensor
+    confidence_head: torch.Tensor | None = None
 
     @classmethod
-    def load(cls, loader):
+    def load(cls, loader, *, confidence=False):
         config, shard = loader.config.draft, loader.shard
         last = f"mtp.{config.layers - 1}"
         return cls(tuple(loader.load_layer(i, draft=True) for i in range(config.layers)),
@@ -45,7 +45,7 @@ class DSparkWeights:
             loader.load_tensor(last + ".norm.weight"), loader.load_tensor(last + ".markov_head.embed.weight"),
             loader.load_tensor(last + ".markov_head.head.weight",
                 extent=slice(*shard.partition(129280, alignment=64))),
-            loader.load_tensor(last + ".confidence_head.proj.weight"))
+            loader.load_tensor(last + ".confidence_head.proj.weight") if confidence else None)
 
 
 @dataclass(frozen=True)
@@ -60,14 +60,14 @@ class ModelWeights:
     allocated_bytes: int
 
     @classmethod
-    def load(cls, manifest, device, *, shard, progress=None, dspark=False):
-        config = ModelConfig.load(manifest.snapshot)
+    def load(cls, manifest, device, *, shard, progress=None, dspark=False, confidence=False):
+        config = ModelConfig.load(manifest.metadata_path)
         before = torch.cuda.memory_allocated(device)
         with DeepSeekWeightLoader(manifest, device, shard=shard, progress=progress, dspark=dspark) as loader:
             embedding, norm = loader.load_tensors(("embed.weight", "norm.weight"))
             head = loader.load_tensor("head.weight", extent=slice(*shard.partition(129280, alignment=64)))
             layers = tuple(loader.load_layer(i) for i in range(config.layers))
-            draft = DSparkWeights.load(loader) if dspark else None
+            draft = DSparkWeights.load(loader, confidence=confidence) if dspark else None
         return cls(config, shard, embedding, norm, head, layers, draft,
                    torch.cuda.memory_allocated(device) - before)
 
@@ -76,8 +76,16 @@ class DeepSeekWeightLoader(BlockFP8WeightLoader):
     def __init__(self, manifest, device, *, shard, progress=None, prefixes=None, dspark=False):
         self.dspark = dspark
         super().__init__(manifest, device, progress=progress, prefixes=prefixes)
-        self.config = ModelConfig.load(manifest.snapshot)
+        self.config = ModelConfig.load(manifest.metadata_path)
         self.shard = shard
+        self._expert_scale_scratch = {}
+
+    def load_experts(self, prefixes, interval):
+        text = self.config.text
+        return self.load_mxfp4_experts(prefixes, hidden_size=text["hidden_size"],
+            intermediate_size=text["moe_intermediate_size"], intermediate_range=interval,
+            swiglu_limit=text["swiglu_limit"], scale_name="scale", projection_names=("w3", "w1", "w2"),
+            scale_scratch=self._expert_scale_scratch)
 
     def _selected_names(self):
         return {name for name in super()._selected_names()
@@ -117,11 +125,9 @@ class DeepSeekWeightLoader(BlockFP8WeightLoader):
             result["index_weights"] = self.load_tensor(attn + ".indexer.weights_proj.weight")
         ffn = prefix + ".ffn"
         interval = shard.partition(text["moe_intermediate_size"], alignment=32)
-        experts = self.load_fp4_experts(
+        experts = self.load_experts(
             [f"{ffn}.experts.{i}" for i in range(self.config.draft.experts if draft else text["n_routed_experts"])],
-            hidden_size=5120, intermediate_size=2304, format="mxfp4", activation_mode="a8",
-            intermediate_range=interval, swiglu_limit=text["swiglu_limit"],
-            projection_names=("w3", "w1", "w2"), scale_name="scale")
+            interval)
         shared = MLPWeights(self.load_linear_group((ffn + ".shared_experts.w1", ffn + ".shared_experts.w3"),
             row_ranges=(interval, interval)), self.load_linear(ffn + ".shared_experts.w2", columns=interval))
         routed = ExpertWeights(self.load_tensor(ffn + ".gate.weight"),

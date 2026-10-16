@@ -13,6 +13,7 @@ use crate::{
 pub struct OutputConfig {
     pub syntax: FrontendContract,
     pub content: TaggedConfig,
+    pub control_tokens: Vec<(u32, String)>,
 }
 
 pub enum OutputPipeline {
@@ -21,6 +22,7 @@ pub enum OutputPipeline {
     ArgumentTags(TaggedOutput<super::argument_tags::ArgumentTags>),
     Dsml(TaggedOutput<super::dsml::Dsml<false>>),
     SpacedDsml(TaggedOutput<super::dsml::Dsml<true>>),
+    Xtml(super::xtml::XtmlOutput),
     Text(TaggedOutput<PlainText>),
 }
 
@@ -43,6 +45,7 @@ macro_rules! dispatch {
             OutputPipeline::ArgumentTags($parser) => $body,
             OutputPipeline::Dsml($parser) => $body,
             OutputPipeline::SpacedDsml($parser) => $body,
+            OutputPipeline::Xtml($parser) => $body,
             OutputPipeline::Text($parser) => $body,
         }
     };
@@ -72,6 +75,10 @@ impl OutputPipeline {
             Some((ToolParserKind::Dsml, _, _)) => {
                 Self::Dsml(TaggedOutput::new(config.content).with_reasoning(reasoning))
             }
+            Some((ToolParserKind::Xtml, _, _)) => Self::Xtml(super::xtml::XtmlOutput::new(
+                config.content,
+                config.control_tokens,
+            )),
             None => Self::Text(TaggedOutput::new(config.content).with_reasoning(reasoning)),
         }
     }
@@ -102,11 +109,23 @@ impl OutputPipeline {
             Some((ToolParserKind::Dsml, _, _)) => {
                 TaggedOutput::<super::dsml::Dsml<false>>::grammar_envelope(&config.content)
             }
+            Some((ToolParserKind::Xtml, _, _)) => Some(crate::grammar::OutputEnvelope {
+                reasoning_end: config
+                    .content
+                    .reasoning
+                    .then_some("<|close|>think<|sep|><|open|>response<|sep|>"),
+                tool: (!config.content.tools.is_empty())
+                    .then_some((super::xtml::TOOLS_OPEN, super::xtml::TOOLS_CLOSE)),
+                function: None,
+                tool_ends_reasoning: false,
+                response: Some(("", super::xtml::RESPONSE_CLOSE)),
+            }),
             None => Some(crate::grammar::OutputEnvelope {
                 reasoning_end: config.content.reasoning.then_some("</think>"),
                 tool: None,
                 function: None,
                 tool_ends_reasoning: false,
+                response: None,
             }),
         }?;
         envelope.tool_ends_reasoning = config.syntax.reasoning.as_ref().is_some_and(|r| {
@@ -156,6 +175,7 @@ mod tests {
     ) -> serde_json::Value {
         let mut parser = OutputPipeline::new(OutputConfig {
             syntax,
+            control_tokens: vec![],
             content: TaggedConfig {
                 structured,
                 reasoning: false,

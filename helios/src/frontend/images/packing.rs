@@ -17,17 +17,28 @@ pub(crate) fn tensor_layout(
         (ImageLayoutKind::Qwen | ImageLayoutKind::Mimo, "vision_pixel_values") => {
             (Float32, patches * 1536)
         }
-        (ImageLayoutKind::Deepseek, "vision_pixel_values") => (Float32, patches * 588),
+        (ImageLayoutKind::Deepseek | ImageLayoutKind::Moonvit, "vision_pixel_values") => {
+            (Float32, patches * 588)
+        }
         (_, "vision_position_ids") => (Int64, patches * 2),
         (_, "vision_cu_seqlens") => (Int32, 2),
         (_, "vision_num_patches" | "vision_feature_offset") => (Int32, 1),
-        (ImageLayoutKind::Mimo | ImageLayoutKind::Deepseek, "vision_num_features") => (Int32, 1),
-        (ImageLayoutKind::Qwen, "vision_interpolation_indices") => (Int64, patches * 4),
-        (ImageLayoutKind::Qwen, "vision_interpolation_weights") => (Float32, patches * 4),
+        (
+            ImageLayoutKind::Mimo | ImageLayoutKind::Deepseek | ImageLayoutKind::Moonvit,
+            "vision_num_features",
+        ) => (Int32, 1),
+        (ImageLayoutKind::Qwen | ImageLayoutKind::Moonvit, "vision_interpolation_indices") => {
+            (Int64, patches * 4)
+        }
+        (ImageLayoutKind::Qwen | ImageLayoutKind::Moonvit, "vision_interpolation_weights") => {
+            (Float32, patches * 4)
+        }
         (ImageLayoutKind::Mimo, "vision_column_indices" | "vision_row_indices") => {
             (Int32, patches / 4)
         }
-        (ImageLayoutKind::Deepseek, "vision_merge_indices") => (Int32, patches),
+        (ImageLayoutKind::Deepseek | ImageLayoutKind::Moonvit, "vision_merge_indices") => {
+            (Int32, patches)
+        }
         _ => return Err(format!("image layout has no tensor {name}").into()),
     };
     Ok(layout)
@@ -48,6 +59,7 @@ pub(crate) fn prepare(
         ImageLayoutKind::Qwen => qwen(config, handle, images, image),
         ImageLayoutKind::Mimo => mimo(config, handle, images, image),
         ImageLayoutKind::Deepseek => deepseek(config, handle, images, image),
+        ImageLayoutKind::Moonvit => moonvit(config, handle, images, image),
     }
 }
 
@@ -57,6 +69,11 @@ fn qwen(
     images: &ProcessedImages,
     image: usize,
 ) -> Result<UploadBatch> {
+    let pixel_width = if config.contract.frontend.image_layout == Some(ImageLayoutKind::Moonvit) {
+        588
+    } else {
+        1536
+    };
     let mut staging = UploadBatch::default();
     let geometry = images
         .geometry
@@ -88,7 +105,7 @@ fn qwen(
         0,
         images
             .pixel_values
-            .get(start * 1536..end * 1536)
+            .get(start * pixel_width..end * pixel_width)
             .ok_or("truncated vision pixels")?
             .iter()
             .copied()
@@ -281,5 +298,45 @@ fn deepseek(
     staging.i32("vision_num_patches", 0, [actual as i32]);
     staging.i32("vision_num_features", 0, [geometry.tokens as i32]);
     staging.i32("vision_feature_offset", 0, [(start / 9) as i32]);
+    Ok(staging)
+}
+
+fn moonvit(
+    config: &ModelConfig,
+    handle: RequestHandle,
+    images: &ProcessedImages,
+    image: usize,
+) -> Result<UploadBatch> {
+    let geometry = images
+        .geometry
+        .get(image)
+        .ok_or("missing scheduled image")?;
+    let h = usize::try_from(geometry.grid_thw[1]).map_err(|_| "invalid vision height")?;
+    let w = usize::try_from(geometry.grid_thw[2]).map_err(|_| "invalid vision width")?;
+    if h == 0
+        || w == 0
+        || h > 512
+        || w > 512
+        || h % 2 != 0
+        || w % 2 != 0
+        || geometry.grid_thw[0] != 1
+        || h.checked_mul(w) != Some(geometry.patches)
+        || geometry.tokens != geometry.patches / 4
+    {
+        return Err("invalid MoonViT vision grid".into());
+    }
+    let mut staging = qwen(config, handle, images, image)?;
+    let mut indices = Vec::with_capacity(geometry.patches);
+    for y in (0..h).step_by(2) {
+        for x in (0..w).step_by(2) {
+            for dy in 0..2 {
+                for dx in 0..2 {
+                    indices.push(((y + dy) * w + x + dx) as i32);
+                }
+            }
+        }
+    }
+    staging.i32("vision_merge_indices", 0, indices);
+    staging.i32("vision_num_features", 0, [geometry.tokens as i32]);
     Ok(staging)
 }

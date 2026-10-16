@@ -72,6 +72,11 @@ bounded completion queues. File offsets, lengths, and buffers retain the package
 and memory prefix caches retain their existing explicit storage selections.
 The open package handle prevents replacement or writes while it is loaded.
 
+The `ignition serve` development handoff for shared RAM embedding tables uses
+Linux file descriptors. On Windows, export a package and load it with
+`flare run --embedding-table-storage ram`; native resident-table serving uses
+the Windows reader and does not require this development handoff.
+
 ## Hardware compatibility
 
 Native ARM64 Flare serves `nvidia/Qwen3.8-27B-NVFP4` on an RTX Spark N1X

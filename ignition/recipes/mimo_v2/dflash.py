@@ -211,6 +211,9 @@ class DraftForwards:
 class SpeculativePreparation:
     def __init__(self, weights, canonical, pool, requests, inputs, scratch, *, records, frame, sequence,
                  session, workspace, runtime, vocabulary_runtime, context_runtime, coordinator):
+        from .pool import PAGE_TOKENS
+
+        self.page_tokens = PAGE_TOKENS
         self.weights, self.tables, self.pool = weights, canonical, pool
         self.requests, self.inputs, self.scratch = requests, inputs, scratch
         self.records, self.frame, self.sequence = records, frame, sequence

@@ -14,12 +14,14 @@ fn invalid(message: impl Into<String>) -> Error {
     Error::execution(ExecutionError::Manifest, message)
 }
 
+// PyTorch's CPU allocator is mimalloc, which places its 1 GiB arenas at random addresses
+// in 2-6 TiB; a peer rank allocates CPU tensors before reserving these ranges.
 #[cfg(target_os = "linux")]
-const BASE: u64 = 0x20000000000;
+const BASE: u64 = 0x80000000000;
 #[cfg(target_os = "windows")]
 const BASE: u64 = 0x40000000000;
 const EXTENT: usize = 1 << 40;
-const HOST_BASE: u64 = 0xc0000000000;
+const HOST_BASE: u64 = 0x200000000000;
 struct Arena {
     driver: Driver,
     device: i32,
@@ -170,6 +172,12 @@ extern "C" fn flare_package_allocate(
     };
     match allocate() {
         Ok(address) => address as *mut c_void,
+        // PyTorch may release cached segments and retry a physical allocation.
+        Err(Error::Execution(ExecutionError::Driver(error)))
+            if error.operation == "cuMemCreate" && error.code == 2 =>
+        {
+            null_mut()
+        }
         Err(error) => {
             failure(error);
             null_mut()

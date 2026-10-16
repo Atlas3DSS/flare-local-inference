@@ -147,6 +147,14 @@ impl Bootstrap {
             },
             eos_token_ids: frontend_settings.eos_token_ids,
             sampling_defaults,
+            proposal_confidence_threshold: object
+                .get("proposal_confidence_threshold")
+                .map(|v| {
+                    v.as_f64()
+                        .ok_or("proposal_confidence_threshold must be a number")
+                })
+                .transpose()?
+                .unwrap_or(0.15),
             speculative_fixed_width: object
                 .get("speculative_fixed_width")
                 .filter(|v| !v.is_null())
@@ -252,7 +260,8 @@ impl Bootstrap {
                 chat_template: asset("chat_template")?,
             },
             defaults,
-        )?;
+        )?
+        .with_template_encoding(frontend_settings.template_encoding);
         if frontend_settings
             .image
             .as_ref()

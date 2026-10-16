@@ -54,15 +54,17 @@ contract_enum!(ValueSource {
 });
 contract_enum!(InputIndexing { Scalar = 1, SubmissionRow = 2, RequestRow = 3, PackedToken = 4, ActiveRow = 5 });
 contract_enum!(StateAccessKind { Read = 1, Write = 2, ReadWrite = 3 });
-contract_enum!(ToolParserKind { QwenCoder = 1, GlmArgumentTags = 2, Dsml = 3 });
-contract_enum!(ReasoningParserKind { ThinkTags = 1 });
-contract_enum!(ImagePreparationKind { Qwen = 1, Mimo = 2, Deepseek = 3 });
-contract_enum!(ImageLayoutKind { Qwen = 1, Mimo = 2, Deepseek = 3 });
-contract_enum!(GraphOperation { Init = 1, Restore = 2, Snapshot = 3, Prefill = 4, Decode = 5, Resume = 6, Vision = 7, Speculative = 8, Mixed = 9 });
+contract_enum!(ToolParserKind { QwenCoder = 1, GlmArgumentTags = 2, Dsml = 3, Xtml = 4 });
+contract_enum!(ReasoningParserKind { ThinkTags = 1, XtmlThink = 2 });
+contract_enum!(ImagePreparationKind { Qwen = 1, Mimo = 2, Deepseek = 3, Moonvit = 4 });
+contract_enum!(ImageLayoutKind { Qwen = 1, Mimo = 2, Deepseek = 3, Moonvit = 4 });
+contract_enum!(GraphOperation { Init = 1, Restore = 2, Snapshot = 3, Prefill = 4, Decode = 5, Resume = 6, Vision = 7, Speculative = 8, Mixed = 9, Proposal = 10, Verification = 11 });
 
-impl From<GraphKind> for GraphOperation {
-    fn from(kind: GraphKind) -> Self {
-        match kind {
+impl TryFrom<GraphKind> for GraphOperation {
+    type Error = crate::Error;
+
+    fn try_from(kind: GraphKind) -> Result<Self> {
+        Ok(match kind {
             GraphKind::Init => Self::Init,
             GraphKind::Restore => Self::Restore,
             GraphKind::Snapshot => Self::Snapshot,
@@ -72,7 +74,9 @@ impl From<GraphKind> for GraphOperation {
             GraphKind::Vision => Self::Vision,
             GraphKind::Speculative => Self::Speculative,
             GraphKind::Mixed => Self::Mixed,
-        }
+            GraphKind::Proposal => Self::Proposal,
+            GraphKind::Verification => Self::Verification,
+        })
     }
 }
 
@@ -399,7 +403,7 @@ impl PreparedContract {
         }
         for descriptor in &manifest.graphs {
             let graph = self.graph(&descriptor.name)?;
-            if graph.kind != descriptor.kind.into() {
+            if graph.kind != descriptor.kind.try_into()? {
                 return Err("semantic graph operation differs from its execution catalog".into());
             }
             let mut destinations = std::collections::HashSet::new();
@@ -489,7 +493,11 @@ impl PreparedContract {
             }
             if matches!(
                 descriptor.kind,
-                GraphKind::Decode | GraphKind::Speculative | GraphKind::Mixed
+                GraphKind::Decode
+                    | GraphKind::Speculative
+                    | GraphKind::Proposal
+                    | GraphKind::Verification
+                    | GraphKind::Mixed
             ) && !graph.inputs.iter().any(|b| {
                 matches!(
                     b.source,
@@ -555,8 +563,19 @@ impl FrontendContract {
             }
         }
         if let Some(reasoning) = &self.reasoning {
-            if reasoning.open != "<think>"
-                || reasoning.close != "</think>"
+            let (open, close) = match reasoning.kind {
+                ReasoningParserKind::ThinkTags => ("<think>", "</think>"),
+                ReasoningParserKind::XtmlThink => ("<|open|>think<|sep|>", "<|close|>think<|sep|>"),
+            };
+            if reasoning.open != open
+                || reasoning.close != close
+                || (reasoning.kind == ReasoningParserKind::XtmlThink
+                    && (reasoning.wrapping_newlines != 0
+                        || !reasoning.terminal_markers.is_empty()
+                        || self
+                            .tools
+                            .as_ref()
+                            .is_none_or(|tool| tool.kind != ToolParserKind::Xtml)))
                 || reasoning.wrapping_newlines > 1
                 || reasoning
                     .terminal_markers

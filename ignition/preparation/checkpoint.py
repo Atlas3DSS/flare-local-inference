@@ -69,6 +69,10 @@ class IndexedCheckpoint:
     def index_path(self) -> Path:
         return self.snapshot / "model.safetensors.index.json"
 
+    @property
+    def metadata_path(self) -> Path:
+        return self.snapshot
+
 
 @dataclass(frozen=True, slots=True)
 class CheckpointManifest(IndexedCheckpoint):
@@ -323,6 +327,13 @@ def inspect_indexed_checkpoint(snapshot: str | Path) -> IndexedCheckpoint:
     The direct loader revalidates source file identity before moving payloads.
     """
     snapshot = Path(snapshot).expanduser().absolute()
+    container = snapshot / "manifest.json"
+    if container.is_file():
+        description = _parse_json(container.read_bytes(), "manifest.json")
+        if description.get("schema") == "lil-mxfp4-csf-checkpoint/1":
+            from .csf_checkpoint import inspect_mxfp4_csf
+
+            return inspect_mxfp4_csf(snapshot, description)
     index = _parse_json((snapshot / "model.safetensors.index.json").read_bytes(),
                         "model.safetensors.index.json")
     return _inspect_indexed_checkpoint(snapshot, index)

@@ -63,6 +63,7 @@ fn jpeg_and_oriented_png_use_actual_checkpoint_request_preparation() {
         max_new_tokens: 64,
         speculative_widths: vec![],
         speculative_fixed_width: None,
+        proposal_confidence_threshold: 0.15,
         history_drafts: false,
         speculative_proposal_source: Default::default(),
     };
