@@ -54,6 +54,18 @@ def test_header_inspection_never_reads_payload(tmp_path, monkeypatch):
     assert tensors["weight"].nbytes == 4
 
 
+def test_single_safetensors_checkpoint_without_index(tmp_path):
+    from ignition.preparation.checkpoint import inspect_indexed_checkpoint
+
+    path = tmp_path / "model.safetensors"
+    _write_header(path, {"weight": {"dtype": "F32", "shape": [1], "data_offsets": [0, 4]}})
+    checkpoint = inspect_indexed_checkpoint(tmp_path)
+    assert checkpoint.index_path is None
+    assert len(checkpoint.shards) == 1
+    assert checkpoint.tensors["weight"].shape == (1,)
+    assert checkpoint.tensors["weight"].nbytes == 4
+
+
 @pytest.mark.parametrize("dtype,shape,offsets", [
     ("F32", [2], [0, 4]),
     ("F32", [1], [0, 8]),

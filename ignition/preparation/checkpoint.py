@@ -66,8 +66,9 @@ class IndexedCheckpoint:
         return tuple(self.snapshot / shard.path for shard in self.shards)
 
     @property
-    def index_path(self) -> Path:
-        return self.snapshot / "model.safetensors.index.json"
+    def index_path(self) -> Path | None:
+        path = self.snapshot / "model.safetensors.index.json"
+        return path if path.is_file() else None
 
     @property
     def metadata_path(self) -> Path:
@@ -334,6 +335,9 @@ def inspect_indexed_checkpoint(snapshot: str | Path) -> IndexedCheckpoint:
             from .csf_checkpoint import inspect_mxfp4_csf
 
             return inspect_mxfp4_csf(snapshot, description)
+    if not (snapshot / "model.safetensors.index.json").exists() and (snapshot / "model.safetensors").is_file():
+        shard, tensors = _read_header(snapshot / "model.safetensors", "model.safetensors")
+        return IndexedCheckpoint(snapshot, MappingProxyType(tensors), (shard,))
     index = _parse_json((snapshot / "model.safetensors.index.json").read_bytes(),
                         "model.safetensors.index.json")
     return _inspect_indexed_checkpoint(snapshot, index)
