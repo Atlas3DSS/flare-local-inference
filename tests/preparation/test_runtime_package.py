@@ -10,7 +10,7 @@ import pytest
 
 from ignition.preparation.runtime_package import (
     Allocation, Argument, FileSource, Kernel, Reference, Relocation, RuntimePackage,
-    _external_allocations, _merge_ranges, _without_zero_ranges, _write_allocation,
+    _external_allocations, _merge_ranges, _trim_inactive_tail, _without_zero_ranges, _write_allocation,
     _KernelParams, _kernel_argument_data,
 )
 
@@ -391,3 +391,19 @@ def test_package_replays_without_python(tmp_path, fixture, binary, expected, exe
                                 cwd=root, text=True, capture_output=True, timeout=60)
         assert result.returncode == 0, result.stdout + result.stderr
     assert expected in result.stdout
+
+
+def test_only_allocator_inactive_tail_granules_are_trimmed():
+    allocation = Allocation("weights", 0x80000000000, 66 << 20, alignment=2 << 20, preserve_address=True)
+    end = allocation.address + allocation.nbytes
+    live = allocation.address + (51 << 20) + (128 << 10)
+    trimmed = _trim_inactive_tail(allocation, [(live, end - (2 << 20)), (end - (2 << 20), end)])
+    assert trimmed.address == allocation.address
+    assert trimmed.nbytes == 52 << 20
+    assert _trim_inactive_tail(allocation, [(live, end - 1)]) is allocation
+    assert _trim_inactive_tail(allocation, [(allocation.address, end)]) is allocation
+    assert _trim_inactive_tail(allocation, []) is allocation
+    # Disposable live scratch has no initializer, but still needs physical backing.
+    zero = _without_zero_ranges(allocation, [(allocation.address, allocation.nbytes)])
+    assert zero.initialize == "zero"
+    assert _trim_inactive_tail(zero, []).nbytes == allocation.nbytes

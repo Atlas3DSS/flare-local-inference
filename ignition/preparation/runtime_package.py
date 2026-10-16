@@ -155,6 +155,22 @@ def _merge_ranges(ranges):
     return tuple((start, end - start) for start, end in merged)
 
 
+def _trim_inactive_tail(allocation, inactive):
+    """Remove whole allocation granules beyond the last live preparation block."""
+    from .tensor_metadata import merge_ranges
+
+    end = allocation.address + allocation.nbytes
+    for start, stop in merge_ranges(inactive):
+        if start < end <= stop:
+            nbytes = max(0, start - allocation.address)
+            nbytes = (nbytes + allocation.alignment - 1) // allocation.alignment * allocation.alignment
+            # Fully inactive segments remain candidates for reachability pruning.
+            if 0 < nbytes < allocation.nbytes:
+                return replace(allocation, nbytes=nbytes)
+            break
+    return allocation
+
+
 def _without_zero_ranges(allocation, zero_ranges):
     """Exclude disposable bytes without losing neighboring data in a shared segment."""
     if allocation.initialize == "zero":
@@ -740,6 +756,12 @@ def export_model(prepared, images, storage, path, *, options, progress=None, pub
     allocations.extend(Allocation(f"host-{index}", region.address, region.extent, alignment=4096,
                                   preserve_address=True, memory="mapped_host")
                        for index, region in enumerate(storage.host_regions) if not region.closed)
+    peer_addresses = set() if storage.peer_storage is None else storage.peer_storage.owned.keys()
+    before_trim = sum(a.nbytes for a in allocations)
+    allocations = [(_trim_inactive_tail(a, inactive) if a.memory == "device" and a.address not in peer_addresses else a)
+                   for a in allocations]
+    if progress is not None:
+        progress(f"Trimmed {(before_trim - sum(a.nbytes for a in allocations)) / (1 << 20):.1f} MiB of inactive allocation tails")
     allocations = [_without_zero_ranges(allocation, zero_ranges) for allocation in allocations]
     allocations.extend(Allocation(region.name, region.address, region.extent, alignment=storage.granularity,
         initialize="zero", preserve_address=True, sizing={"capacity": region.group, "unit_bytes": region.unit_bytes,
@@ -803,7 +825,6 @@ def export_model(prepared, images, storage, path, *, options, progress=None, pub
             merged[-1] = (merged[-1][0], max(end, merged[-1][1]))
         else:
             merged.append((start, end))
-    peer_addresses = set() if storage.peer_storage is None else storage.peer_storage.owned.keys()
     # RoCE kernels take their region and counters as integer arguments, which reachability cannot follow.
     pinned = [transport[part]["address"] for transport in transports for part in ("region", "counters")]
     reachability = Reachability(allocations, numeric=numeric, inactive=inactive,
