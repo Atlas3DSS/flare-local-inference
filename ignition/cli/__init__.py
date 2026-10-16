@@ -72,7 +72,9 @@ def _parser() -> argparse.ArgumentParser:
     _preparation_arguments(serving)
     for spanning in (serving, exporting):
         hosts = spanning.add_argument_group("multi-host tensor parallelism")
-        hosts.add_argument("--ranks", type=int, default=1, choices=(1, 2, 4), metavar="N",
+        hosts.add_argument("--roce-ring", action="store_true",
+                           help="experimental ring in rank order, with bounded native neighbor relays")
+        hosts.add_argument("--ranks", type=int, default=1, choices=range(1, 17), metavar="N",
                            help="tensor-parallel ranks, one per host; this process is rank zero (default: 1);"
                                 " an export writes each host's own rank file at --output on that host")
         hosts.add_argument("--rendezvous", metavar="ADDR:PORT",
@@ -94,7 +96,7 @@ def _parser() -> argparse.ArgumentParser:
     joining = command("join", serve.join, "run a peer rank for rank zero's rendezvous on another host")
     joining.add_argument("rendezvous", metavar="ADDR:PORT", help="rank zero's rendezvous address")
     joining.add_argument("--rank", type=int, required=True, metavar="R", help="this host's rank, 1 through N-1")
-    joining.add_argument("--ranks", type=int, required=True, choices=(2, 4), metavar="N", help="tensor-parallel ranks")
+    joining.add_argument("--ranks", type=int, required=True, choices=range(2, 17), metavar="N", help="tensor-parallel ranks")
     joining.add_argument("--gpu", type=int, default=0, metavar="INDEX", help="this host's GPU (default: 0)")
     keys = command("keygen", publishing.keygen, "create an encrypted production signing key and public profile")
     keys.add_argument("--directory", required=True, type=Path, help="new private directory; must not exist")
@@ -117,6 +119,7 @@ def _preparation_arguments(running):
 
     running.usage = "%(prog)s [MODEL] " + ("--output FILE " if running.prog.endswith(" export") else "") + "[options]"
     running.epilog = recipe_help()
+    running.set_defaults(roce_ring=False)
     running.add_argument("--official-source", metavar="URL", help="published checkpoint repository URL")
     running.add_argument("model", nargs="?", metavar="MODEL",
                          help="recipe alias, repository id, or checkpoint directory (default: defaults.model)")

@@ -198,3 +198,22 @@ def test_ranks_report_whether_a_value_matches_every_rank(monkeypatch):
     monkeypatch.setattr(dist, "all_gather_object",
                         lambda states, value, **kwargs: states.__setitem__(slice(None), [value, "NVIDIA GB300"]))
     assert not owner.same_on_every_rank("NVIDIA GB10")
+
+
+@pytest.mark.parametrize("ring", [False, True])
+def test_roce_setup_preserves_routing_and_package_transport_owner(monkeypatch, ring):
+    import sys
+    from ignition.preparation.collectives import create_roce_runtime
+
+    class Runtime:
+        def __init__(self, *, ring=False, **options):
+            self.ring, self.options = ring, options
+
+    monkeypatch.setitem(sys.modules, "b12x.comm", SimpleNamespace(roce=SimpleNamespace(AllReduce=Runtime)))
+    storage = SimpleNamespace(transports=[])
+    runtime = create_roce_runtime(object(), "cuda:0", max_tokens=32, pipe_tokens=4096,
+                                  hidden_size=4096, gather_bytes=4096, ring=ring, package_storage=storage)
+    assert runtime.ring is ring and storage.transports == [runtime]
+    assert runtime.options["max_size"] == 2 << 20
+    assert runtime.options["pipe_bytes"] == 4096 * 4096 * 2
+    assert callable(runtime.options["region_allocator"])

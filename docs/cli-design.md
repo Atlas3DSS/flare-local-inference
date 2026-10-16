@@ -737,6 +737,17 @@ For the command line to stay this small, every recipe declares:
 Model-specific validation lives here, not in the entrypoint. A recipe that
 cannot honor the settings reports a capacity error in the section 6 form.
 
+### Experimental RoCE ring configuration
+
+`ignition export` and `ignition serve` accept `--roce-ring` with `--ranks N`;
+`flare run` accepts it with a multi-host package. Rank order defines the ring,
+including `--hosts` order when agents launch peers. The transport accepts 2..16
+ranks, while recipe validation retains each model's supported TP sizes. This
+option is recorded in the preparation plan, sent to preparation peers, and
+forwarded to serving peers. It changes native transport routing, not the
+captured collective operation contracts. See [rings](multi-host.md#experimental-rings)
+for setup, the transport test harness, and qualification limits.
+
 ## 10. Non-goals
 
 Topology files, model families, launch override blocks, per-host environment

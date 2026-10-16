@@ -171,3 +171,73 @@ Without an agent, start each peer's rank yourself with identical serving options
 - A collective that times out on a peer poisons every rank's transport. The
   frame is not published, and the ranks shut down rather than serve wrong
   results.
+
+## Experimental rings
+
+`--roce-ring` treats the ranks as the cycle `0,1,...,N-1,0`, for 2 through
+16 ranks. Rank zero is the launching host; `--hosts` supplies the remaining
+hosts in cable order. The package determines N. Model recipes still determine
+which tensor-parallel sizes they can prepare; this transport does not add new
+model sharding geometries. GLM and Qwen currently prepare multi-host TP2/TP4.
+
+Only neighbor queue pairs connect, even on a switch. Non-neighbor writes follow
+the shorter direction around the cycle; ties go toward increasing rank numbers.
+A native CPU proxy on each intermediate host forwards bounded 64 KiB RDMA
+packets. Each original sender has separate mailbox credit, and an acknowledgment
+returns only after the final NIC read, so forwarding preserves buffer lifetimes
+without a cyclic credit dependency. The proxy allocates about 2.01 MiB of
+registered host memory per rank at startup; this memory is not captured graph
+storage. One-shot, two-shot and variable-length transfers use the same relay.
+There is no Python callback or allocation in steady-state replay.
+
+This provides a functional ring path and lets a switched cluster exercise ring
+constraints. It does not implement SparkRing's ConnectX hardware hairpin
+forwarding, and its CPU overhead and switch bandwidth do not predict physical
+ring performance. The host network configuration is unchanged.
+
+The pinned FlashInfer preparation dependency provides the ring setup API and
+the two-shot send-buffer release synchronization. Preparation and Flare use
+proxy ABI 9; multi-host packages prepared with an earlier ABI must be re-exported.
+Install the locked preparation environment and build the native CLI on each host:
+
+```sh
+uv sync --locked --extra prepare --extra test
+cargo build --release --manifest-path flare/Cargo.toml
+```
+
+Use the same Flare revision and locked dependencies on every preparation and
+serving host.
+
+For the current switched lab, use `maxwell,ampere,faraday,hertz` as the cycle.
+Prepare a new TP4 package with `ignition export ... --ranks 4 --roce-ring
+--rendezvous ADDRESS:PORT`, and join ranks 1, 2 and 3 normally. The preparation
+plan and its serialized report record the option. Then, on maxwell:
+
+```sh
+./flare/target/release/flare run /data/flare-runtime/glm53-ring-tp4.safetensors \
+  --hosts ampere,faraday,hertz --gpus 0 --roce-ring --host 127.0.0.1 --port 8001
+```
+
+Rank zero forwards the option to every agent-started rank. Manually started
+peers must also pass it; mixed transport modes fail during connection-record
+exchange. The native serving option selects the fabric independently of the
+package's recorded model graphs. On a physical ring, the two neighbors of each
+host must have the expected direct RoCE subnets; no opposite-peer route,
+marker service or hairpin setup is needed for the software relay.
+
+FlashInfer's `tests/experimental/b12x/comm/validate_roce_ring_native.py`
+drives the real C proxy through its graph-visible region without creating a
+CUDA context. Launch N instances with `--rank R --world-size N --rendezvous
+maxwell:29783`. This checks every byte of mixed one-shot, two-shot and
+variable-length transfers, empty contributions, unequal shards and buffer reuse.
+Multiple logical ranks may share a physical Spark on the switched fabric;
+`--mesh` checks the ordinary transport and `--skew-rank R` delays one sender.
+The resulting counters identify connected peers and forwarded packets.
+
+On the four Sparks' switched fabric, the native proxy passes 120 mixed operations
+per rank in ring mode and 60 in ordinary mesh mode, each with a delayed sender.
+Every byte matches, and each ring rank connects to exactly two neighbors.
+Native and Python unit tests cover physical and switched endpoint plans through
+sixteen ranks. These are transport checks, not GPU graph or model-serving
+qualification. Physical cabling, model correctness, CUDA replay under relay
+faults, and performance remain to be qualified.

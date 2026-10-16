@@ -49,6 +49,7 @@ fn open(
     owner: &NativeModel,
     fabric: &flare_helios::execution::roce_fabric::Fabric,
     endpoints: &[Vec<u8>],
+    ring: bool,
 ) -> Result<RoceTransport, Failure> {
     use flare_helios::execution::roce_fabric;
 
@@ -59,7 +60,11 @@ fn open(
         .iter()
         .map(|bytes| roce_fabric::decode(bytes))
         .collect::<flare_helios::Result<Vec<_>>>()?;
-    let topology = fabric.topology(&endpoints, spec.rank)?;
+    let topology = if ring {
+        fabric.ring_topology(&endpoints, spec.rank)?
+    } else {
+        fabric.topology(&endpoints, spec.rank)?
+    };
     // SAFETY: The package restored the region at its recorded address; owner outlives the
     // transport, and no graph runs before every rank connected.
     Ok(unsafe { RoceTransport::open(spec, &topology)? })
@@ -68,8 +73,13 @@ fn open(
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 fn connected(transport: &RoceTransport) -> String {
     format!(
-        "{} rails per peer over {}",
+        "{} rails per {} over {}",
         transport.topology().rails,
+        if transport.topology().ring {
+            "neighbor (experimental CPU relay ring)"
+        } else {
+            "peer"
+        },
         transport.topology().hcas.join(",")
     )
 }
@@ -142,6 +152,7 @@ pub fn rank_zero(
     owner: &NativeModel,
     mut streams: Vec<RankStream>,
     progress: &StartupProgress,
+    ring: bool,
 ) -> Result<Joined<Vec<RankStream>>, Failure> {
     #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
     {
@@ -152,7 +163,7 @@ pub fn rank_zero(
         let fabric = roce_fabric::discover()?;
         let endpoints =
             rendezvous::share_records(&mut streams, roce_fabric::encode(&fabric.endpoints))?;
-        let mut transport = open(owner, &fabric, &endpoints)?;
+        let mut transport = open(owner, &fabric, &endpoints, ring)?;
         let records = rendezvous::share_records(&mut streams, transport.local_record()?)?;
         transport.connect(&records)?;
         rendezvous::await_connected(&mut streams)?;
@@ -164,7 +175,7 @@ pub fn rank_zero(
     }
     #[cfg(not(all(target_os = "linux", target_arch = "aarch64")))]
     {
-        let _ = (owner, streams, progress);
+        let _ = (owner, streams, progress, ring);
         Err("this flare build has no RoCE transport for multi-host packages".into())
     }
 }
@@ -175,6 +186,7 @@ pub fn peer(
     cluster: &ClusterRank,
     mut stream: RankStream,
     progress: &StartupProgress,
+    ring: bool,
 ) -> Result<Joined<RankStream>, Failure> {
     #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
     {
@@ -187,7 +199,7 @@ pub fn peer(
             &roce_fabric::encode(&fabric.endpoints),
             cluster.world,
         )?;
-        let mut transport = open(owner, &fabric, &endpoints)?;
+        let mut transport = open(owner, &fabric, &endpoints, ring)?;
         let records =
             rendezvous::exchange_record(&mut stream, &transport.local_record()?, cluster.world)?;
         transport.connect(&records)?;
@@ -200,7 +212,7 @@ pub fn peer(
     }
     #[cfg(not(all(target_os = "linux", target_arch = "aarch64")))]
     {
-        let _ = (owner, cluster, stream, progress);
+        let _ = (owner, cluster, stream, progress, ring);
         Err("this flare build has no RoCE transport for multi-host packages".into())
     }
 }

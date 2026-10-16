@@ -22,7 +22,7 @@ prepare = [
     "torch==2.13.0+cu130",
     "torchvision==0.28.0+cu130",
     "transformers[torch,vision,chat_template] @ git+https://github.com/huggingface/transformers.git@4cc2aa84301c9aa210b5513dab9fefae03981f6e",
-    "flashinfer-python[b12x] @ git+https://github.com/local-inference-lab/flashinfer.git@eb3de25a645eaf722a2871f42e4fc92d091c37fe",
+    "flashinfer-python[b12x] @ git+https://github.com/local-inference-lab/flashinfer.git@14ba7192457545a58c3eb1d6f3225c425380481d",
     "cuda-python==13.3.1",
     "safetensors==0.8.0",
     "tokenizers==0.23.2",

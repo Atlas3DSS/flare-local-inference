@@ -61,6 +61,7 @@ class PreparationConfig:
     devices: tuple[int, ...] | None = None
     # Each rank's host when ranks run on separate hosts; devices are then host-local ordinals.
     hosts: tuple[str, ...] | None = None
+    roce_ring: bool = False
     compile_decoder: bool = True
     retain_graphs: bool = False
     max_active: int = 4
@@ -82,6 +83,8 @@ class PreparationConfig:
     stream_overlap: bool = True
 
     def __post_init__(self):
+        if self.roce_ring and (self.hosts is None or not 2 <= len(self.hosts) <= 16):
+            raise ValueError("RoCE ring requires 2..16 ranks on separate hosts")
         if self.devices is not None and (
                 not isinstance(self.devices, tuple) or len(self.devices) not in (1, 2, 4)
                 or self.hosts is not None and (not isinstance(self.hosts, tuple) or len(self.hosts) != len(self.devices))
@@ -256,7 +259,7 @@ def _prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, t
         # one-shot, prefill chunks through the pipelined two-shot path.
         collective = vocabulary_collective = create_roce_runtime(group, device,
             max_tokens=max(config.request_capacity, sample_rows), pipe_tokens=config.token_capacity, hidden_size=2560,
-            gather_bytes=sample_rows * (248320 // shard.world_size) * 2, package_storage=package_storage)
+            gather_bytes=sample_rows * (248320 // shard.world_size) * 2, package_storage=package_storage, ring=config.roce_ring)
     elif group is not None:
         collective = create_all_reduce_runtime(group, device, max_tokens=config.token_capacity, hidden_size=2560, ipc=ipc)
         vocabulary_collective = create_all_gather_runtime(group, device, max_rows=sample_rows, columns=248320, ipc=ipc)

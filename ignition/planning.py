@@ -174,6 +174,7 @@ class Plan:
     stream_overlap: bool = True
     mixed_prefill: bool = False
     expert_scale_compression: str | None = None
+    roce_ring: bool = False
 
     @property
     def world_size(self) -> int:
@@ -267,7 +268,7 @@ class Plan:
             "gpus": [{"index": gpu.index, "name": gpu.name, "uuid": gpu.uuid, "free_bytes": gpu.free_bytes,
                       "total_bytes": gpu.total_bytes} for gpu in self.gpus],
             "tensor_parallel": self.world_size, "max_concurrency": self.concurrency,
-            "prefill_chunk": self.prefill_chunk, "context_parallel": self.context_parallel,
+            "prefill_chunk": self.prefill_chunk, "roce_ring": self.roce_ring, "context_parallel": self.context_parallel,
             "stream_overlap": self.stream_overlap,
             "mixed_prefill": self.mixed_prefill,
             "expert_scale_compression": self.expert_scale_compression,
@@ -294,7 +295,7 @@ class Plan:
 def fit(recipe: Recipe, checkpoint: Checkpoint, gpus: tuple[Gpu, ...], *, concurrency: int, reserve_bytes: int,
         speculation: Speculation | None, prefill_chunk: int | None = None,
         context_parallel: bool = True, stream_overlap: bool = True, cache_states: int | None = None,
-        mixed_prefill: bool = False, expert_scale_compression: str | None = None) -> Plan:
+        mixed_prefill: bool = False, expert_scale_compression: str | None = None, roce_ring: bool = False) -> Plan:
     """Size pages and the prefix cache to the supply; the result may not fit.
 
     Weights come from the checkpoint's stored tensors and graphs and scratch from
@@ -309,7 +310,7 @@ def fit(recipe: Recipe, checkpoint: Checkpoint, gpus: tuple[Gpu, ...], *, concur
                 recipe.weights_bytes(checkpoint, len(gpus), speculation, expert_scale_compression), costs.graph_bytes,
                 context_parallel=context_parallel and costs.page_tokens is not None,
                 stream_overlap=stream_overlap and recipe.stream_overlap, mixed_prefill=mixed_prefill,
-                expert_scale_compression=expert_scale_compression)
+                expert_scale_compression=expert_scale_compression, roce_ring=roce_ring)
     available = plan.supply_bytes - plan.fixed_bytes
     target = min(CACHE_STATES_PER_REQUEST * concurrency, max(1, available // costs.state_row_bytes))
     if cache_states is not None:
@@ -346,7 +347,7 @@ def plan(recipe: Recipe, checkpoint: Checkpoint, gpus: tuple[Gpu, ...], *, selec
          concurrency: int, reserve_bytes: int, speculation: Speculation | None,
          prefill_chunk: int | None = None, context_parallel: bool = True, stream_overlap: bool = True,
          cache_states: int | None = None, mixed_prefill: bool = False,
-         expert_scale_compression: str | None = None) -> Plan:
+         expert_scale_compression: str | None = None, roce_ring: bool = False) -> Plan:
     """Select GPUs and size the plan, or raise a capacity error that lists working settings.
 
     Without `selected`, the plan uses the smallest supported tensor-parallel size
@@ -387,7 +388,7 @@ def plan(recipe: Recipe, checkpoint: Checkpoint, gpus: tuple[Gpu, ...], *, selec
         return fit(recipe, checkpoint, group, concurrency=concurrency, reserve_bytes=reserve_bytes,
                    speculation=speculation, prefill_chunk=chunk, context_parallel=context_parallel,
                    stream_overlap=stream_overlap, cache_states=cache_states, mixed_prefill=mixed_prefill,
-                   expert_scale_compression=expert_scale_compression)
+                   expert_scale_compression=expert_scale_compression, roce_ring=roce_ring)
 
     def automatic(world_size, **settings):
         """Plan the first GPUs that each fit, else the GPUs with the most free memory."""

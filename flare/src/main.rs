@@ -110,6 +110,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .transpose()?;
     let options = args.load_options();
+    let roce_ring = args.roce_ring;
     #[cfg(unix)]
     let rank_options = args.rank_options();
     let devices = &args.gpus;
@@ -126,6 +127,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let publisher = package.publisher().clone();
     phase.finish("signatures");
     let authorized = trust::authorize(package, &args, &mut progress)?;
+    if roce_ring
+        && flare_helios::runtime_package::package_cluster(&authorized)
+            .is_none_or(|(world, _)| !(2..=16).contains(&world))
+    {
+        return Err("--roce-ring requires a multi-host package with 2..16 ranks".into());
+    }
     // Rank zero of a multi-host package starts its peers first, so every host loads in parallel.
     #[cfg(unix)]
     let mut rendezvous = args.rendezvous;
@@ -219,7 +226,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let cluster = match cluster {
         Some((cluster, cluster::Membership::Peer(stream), address)) => {
-            return serve_peer(owner, &cluster, stream, &address, progress);
+            return serve_peer(owner, &cluster, stream, &address, progress, roce_ring);
         }
         Some((cluster, cluster::Membership::Zero(streams), _)) => Some((cluster, streams)),
         None => None,
@@ -232,7 +239,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     config["api_key"] = key.unwrap_or_default().into();
     phase.finish(config["model_id"].as_str().unwrap_or_default());
-    serve(owner, config, progress, cluster)
+    serve(owner, config, progress, cluster, roce_ring)
 }
 
 /// Run a peer rank of a multi-host package: join rank zero and replay its coordinated steps until
@@ -243,9 +250,10 @@ fn serve_peer(
     stream: flare_helios::execution::RankStream,
     address: &str,
     mut progress: StartupProgress,
+    roce_ring: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut manifest = owner.manifests()?.remove(0);
-    let joined = cluster::peer(&owner, cluster, stream, &progress)?;
+    let joined = cluster::peer(&owner, cluster, stream, &progress, roce_ring)?;
     manifest.collectives = Some(cluster::health(&joined.transport));
     progress.finish_animation();
     eprintln!(
@@ -279,6 +287,7 @@ fn serve(
         flare_helios::runtime_package::ClusterRank,
         Vec<flare_helios::execution::RankStream>,
     )>,
+    roce_ring: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // SAFETY: This executable loads a trusted package and retains its resources
     // until the native server confirms every replay stream has drained.
@@ -288,7 +297,7 @@ fn serve(
     let mut transport = None;
     let peers = match cluster {
         Some((_, streams)) => {
-            let joined = cluster::rank_zero(&owner, streams, &progress)?;
+            let joined = cluster::rank_zero(&owner, streams, &progress, roce_ring)?;
             manifest.collectives = Some(cluster::health(&joined.transport));
             transport = Some(joined.transport);
             Some(flare_helios::execution::RankPeers::Processes(

@@ -194,6 +194,11 @@ pub struct Run {
     )]
     pub hosts: Vec<String>,
 
+    /// Experimental ring in rank order: only neighbor RoCE QPs connect;
+    /// native CPU relays forward non-neighbor traffic. Also emulates a ring on a switch.
+    #[arg(long, help_heading = "Multi-host options")]
+    pub roce_ring: bool,
+
     /// The cluster's shared agent token [default: ~/.config/flare/agent.token].
     #[arg(long, value_name = "PATH", help_heading = "Multi-host options")]
     pub agent_token_file: Option<PathBuf>,
@@ -287,6 +292,9 @@ impl Run {
         }
         if let Some(limit) = self.memory_limit {
             options.push(format!("--memory-limit={limit}"));
+        }
+        if self.roce_ring {
+            options.push("--roce-ring".into());
         }
         if self.verify_weights {
             options.push("--verify-weights".into());
@@ -423,6 +431,13 @@ mod tests {
                 transport: Some(Transport::Direct),
             }
         );
+    }
+
+    #[test]
+    fn ring_flag_is_forwarded_to_every_agent_started_rank() {
+        let args = run(&["flare", "run", "model.safetensors", "--roce-ring"]);
+        assert!(args.roce_ring);
+        assert_eq!(args.rank_options(), vec!["--roce-ring"]);
     }
 
     #[test]

@@ -40,13 +40,13 @@ def resolve_model(configuration: Configuration, name: str | None) -> ResolvedMod
 
 def derive(configuration: Configuration, model: ResolvedModel, host: Host, *, gpus: str | None,
            concurrency: Setting, speculation: Speculation | None, prefill_chunk: int | None = None,
-           context_parallel: bool = True, stream_overlap: bool = True,
+           context_parallel: bool = True, stream_overlap: bool = True, roce_ring: bool = False,
            mixed_prefill: bool = False, expert_scale_compression: str | None = None) -> planning.Plan:
     """Select GPUs and estimate memory for one checkpoint from the configuration and command-line intent."""
     return planning.plan(
         model.recipe, model.checkpoint, host.gpus, selected=None if gpus is None else planning.parse_gpus(gpus),
         concurrency=concurrency.value, reserve_bytes=configuration.reserve_bytes, speculation=speculation,
-        prefill_chunk=prefill_chunk, context_parallel=context_parallel, stream_overlap=stream_overlap,
+        prefill_chunk=prefill_chunk, context_parallel=context_parallel, stream_overlap=stream_overlap, roce_ring=roce_ring,
         mixed_prefill=mixed_prefill, expert_scale_compression=expert_scale_compression)
 
 
