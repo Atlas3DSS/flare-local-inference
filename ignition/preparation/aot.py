@@ -12,8 +12,10 @@ from concurrent.futures import FIRST_COMPLETED, wait
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from threading import RLock
+from types import MappingProxyType
 
 import torch
 from filelock import FileLock
@@ -182,8 +184,54 @@ class _Input:
         return value
 
 
+def _serialized_triton_launch(kernel, constants, arguments):
+    """Preserve one traced launch config without serializing an autotuner."""
+    from triton.runtime import JITFunction
+    from triton.runtime.autotuner import Autotuner, Config
+
+    if isinstance(kernel, JITFunction):
+        return kernel, dict(constants)
+    if type(kernel) is not Autotuner or len(kernel.configs) != 1 or not isinstance(kernel.fn, JITFunction):
+        raise ValueError("opaque Triton serialization requires a JIT function or one fixed launch config")
+    config = kernel.configs[0]
+    if (type(config) is not Config or config.pre_hook is not None
+            or kernel.user_defined_pre_hook or kernel.user_defined_post_hook
+            or kernel.reset_to_zero or kernel.restore_value
+            or kernel.early_config_prune is not None or kernel.perf_model is not None
+            or kernel._do_bench is not None or kernel.num_warmups is not None
+            or kernel.num_reps is not None or kernel.use_cuda_graph):
+        raise ValueError("opaque Triton serialization cannot discard autotuner hooks or tuning behavior")
+    options = config.all_kwargs()
+    conflicts = options.keys() & (constants.keys() | arguments.keys())
+    if conflicts:
+        raise ValueError("opaque Triton launch config conflicts with arguments: " + ", ".join(sorted(conflicts)))
+    return kernel.fn, {**constants, **options}
+
+
+def _deserialized_triton_launch(kernel_info):
+    """Resolve the raw JIT whose fixed options were serialized separately."""
+    from torch._dynamo.aot_compile_types import _deserialize_triton_kernel, _serialize_triton_kernel
+    from triton.runtime import JITFunction
+    from triton.runtime.autotuner import Autotuner, Heuristics
+
+    kernel = _deserialize_triton_kernel(kernel_info)
+    # Import restores the module global, including decorators removed from the
+    # traced launch. Reapplying them can tune again or duplicate fixed options.
+    seen = set()
+    while type(kernel) in (Autotuner, Heuristics):
+        if id(kernel) in seen:
+            raise ValueError("serialized fixed Triton launch has cyclic decorators")
+        seen.add(id(kernel))
+        kernel = kernel.fn
+    if not isinstance(kernel, JITFunction):
+        raise ValueError("serialized fixed Triton launch does not resolve to a JIT function")
+    if _serialize_triton_kernel(kernel) != kernel_info:
+        raise ValueError("serialized fixed Triton launch resolves to a different function")
+    return kernel
+
+
 class StorageBackend(SerializableCallable):
-    def __init__(self, module, examples):
+    def __init__(self, module, examples, *, options=None):
         from torch._guards import detect_fake_mode
         from torch._inductor import standalone_compile
 
@@ -232,7 +280,7 @@ class StorageBackend(SerializableCallable):
         module = torch.fx.GraphModule({}, graph)
         with _compiler_recursion(module):
             self.artifact = standalone_compile(module, examples, dynamic_shapes='from_example_inputs',
-                fake_mode=detect_fake_mode(examples), options={'config_patches': _OPTIONS},
+                fake_mode=detect_fake_mode(examples), options={'config_patches': dict(_OPTIONS if options is None else options)},
                 aot=True, donate_graph_module=True)
         self._serialized_artifact = None
         self._bound = None
@@ -272,6 +320,7 @@ class StorageBackend(SerializableCallable):
                 kwargs = dict(kwargs)
                 kernel = kernel_side_table.get_kernel(kwargs['kernel_idx'])
                 constants = kernel_side_table.get_constant_args(kwargs['constant_args_idx'])
+                kernel, constants = _serialized_triton_launch(kernel, constants, kwargs['kwargs'])
                 name = ('triton', _serialize_triton_kernel(kernel), constants)
                 kwargs['kernel_idx'] = kwargs['constant_args_idx'] = None
                 leaves, _ = tree_flatten((args, kwargs))
@@ -286,8 +335,6 @@ class StorageBackend(SerializableCallable):
 
     @classmethod
     def deserialize_compile_artifacts(cls, data):
-        from torch._dynamo.aot_compile_types import _deserialize_triton_kernel
-
         fn = cls.__new__(cls)
         artifact, fn.inputs, calls, fn.signature = pickle.loads(data)
         devices = {item[4] for item in fn.signature if isinstance(item, tuple) and item[4].type == "cuda"}
@@ -304,7 +351,7 @@ class StorageBackend(SerializableCallable):
                 target = torch.ops.higher_order.triton_kernel_wrapper_mutation
                 args, kwargs = tree_unflatten(leaves, tree)
                 kwargs = dict(kwargs)
-                kwargs['kernel_idx'] = kernel_side_table.add_kernel(_deserialize_triton_kernel(kernel))
+                kwargs['kernel_idx'] = kernel_side_table.add_kernel(_deserialized_triton_launch(kernel))
                 kwargs['constant_args_idx'] = kernel_side_table.add_constant_args(constants)
                 leaves, _ = tree_flatten((args, kwargs))
             else:
@@ -323,10 +370,11 @@ def _execute(forward):
     return forward()
 
 
-def aot_forward(forward):
+def aot_forward(forward, *, options=None):
+    options = dict(_OPTIONS if options is None else options)
     sources = r'.*\.(?:_?handle|stream_handle|launch_order|plans\[\d+\])$'
     with _guard_serialization(), torch.compiler.config.patch(unbacked_sources=sources):
-        return torch.compile(_execute, backend=StorageBackend, fullgraph=True,
+        return torch.compile(_execute, backend=partial(StorageBackend, options=options), fullgraph=True,
                              dynamic=False).aot_compile(((forward,), {}))
 
 
@@ -411,14 +459,15 @@ def _share_artifacts(owned, group, ranks):
 class ForwardCache:
     """Load complete compiled forwards before tracing the serving catalog."""
 
-    def __init__(self, *, namespace, device, root=None, headroom_bytes=0):
+    def __init__(self, *, namespace, device, root=None, headroom_bytes=0, options=None):
         import flashinfer
         from torch._inductor.codecache import torch_key
 
         self.device = torch.device(device)
         self.headroom_bytes = headroom_bytes
+        self.options = MappingProxyType(dict(_OPTIONS if options is None else options))
         properties = torch.cuda.get_device_properties(device)
-        options = {name: value for name, value in _OPTIONS.items() if name != 'compile_threads'}
+        options = {name: value for name, value in self.options.items() if name != 'compile_threads'}
         key = hashlib.sha256(pickle.dumps((namespace, options, torch_key(),
             properties.name, properties.major, properties.minor, properties.multi_processor_count)))
         for source in (Path(__file__).resolve().parents[1], Path(flashinfer.__file__).resolve().parent):
@@ -488,7 +537,7 @@ class ForwardCache:
             return self._prepare_ranks(functions, signatures, coordinator, progress=progress,
                                        materialize=materialize, warmup=warmup)
         compiled, paths, pending = {}, {}, []
-        with phase(progress, "Compile model forwards", total=len(functions)) as stage, CompilePool(self.device, headroom_bytes=self.headroom_bytes) as compiler:
+        with phase(progress, "Compile model forwards", total=len(functions)) as stage, CompilePool(self.device, headroom_bytes=self.headroom_bytes, options=self.options) as compiler:
             def finish():
                 name, bound, path = _completed(pending)
                 try:
@@ -554,7 +603,8 @@ class ForwardCache:
         try:
             pending, paths = [], {}
             with phase(progress, "Compile model forwards", total=len(work)) as stage, CompilePool(
-                    self.device, headroom_bytes=self.headroom_bytes, pools=coordinator.local_ranks) as compiler:
+                    self.device, headroom_bytes=self.headroom_bytes, pools=coordinator.local_ranks,
+                    options=self.options) as compiler:
                 def finish():
                     name, variant, bound, path = _completed(pending)
                     if bound.pending is not None:
@@ -622,7 +672,8 @@ class ForwardCache:
         return selected
 
     def _load(self, forward, path, *, required=False):
-        with bind_device(self.device), path.open('rb') as file:
+        with bind_device(self.device, freeze_tuning=self.options.get(
+                'triton.autotune_at_compile_time', False)), path.open('rb') as file:
             artifact = torch.compiler.load_compiled_function(file)
         release_unused()
         if artifact.guard_check(forward):
@@ -651,7 +702,7 @@ class ForwardCache:
         report("tracing and compiling forward")
         if compiler is not None:
             return BoundForward(None, forward, False, compiler.submit(forward, path)), path
-        return BoundForward(aot_forward(forward), forward, False), path
+        return BoundForward(aot_forward(forward, options=self.options), forward, False), path
 
     def _warm(self, bound, path, *, name, progress=None):
         def report(operation):
@@ -664,7 +715,7 @@ class ForwardCache:
                 bound()
             except BindingMismatch:
                 report("tracing and compiling forward")
-                bound = BoundForward(aot_forward(bound.owner), bound.owner, False)
+                bound = BoundForward(aot_forward(bound.owner, options=self.options), bound.owner, False)
             else:
                 return bound
         report("warming compiled forward")

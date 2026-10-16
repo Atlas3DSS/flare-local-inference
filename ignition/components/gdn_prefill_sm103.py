@@ -20,7 +20,7 @@ import triton.language as tl
 from b12x.preparation import PreparedCall
 from b12x.preparation.types import plan_from_handle, require_prepared
 
-from ignition.preparation.triton import launch_triton
+from ignition.preparation.triton import launch_triton, warmup_triton
 from ignition.preparation.tuning import declare, register_finalizer
 
 from .native_operator import native_contract, native_plan
@@ -162,9 +162,9 @@ class PreparedGdnPrefill:
         register_finalizer(session, finalize)
         self.zero_args = (state, metadata.fresh, metadata.final_state_indices, metadata.num_seqs, state.stride(0))
         self.zero_grid = (sequences, value_heads, 1)
-        self.zero_compiled = _zero_fresh_rows.fn.warmup(*self.zero_args, grid=self.zero_grid,
-                                                        num_warps=_ZERO_CONFIG.num_warps,
-                                                        num_stages=_ZERO_CONFIG.num_stages, BLOCK=_ZERO_BLOCK)
+        self.zero_compiled = warmup_triton(_zero_fresh_rows.fn, self.zero_args, self.zero_grid,
+                                           num_warps=_ZERO_CONFIG.num_warps,
+                                           num_stages=_ZERO_CONFIG.num_stages, BLOCK=_ZERO_BLOCK)
 
     def _run_chunked(self):
         self.chunked.run(self.q, self.k, self.v, self.g, self.beta, self.state, self.metadata.query_start_loc,

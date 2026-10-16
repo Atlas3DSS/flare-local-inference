@@ -512,9 +512,12 @@ class PreparedSampling:
         self._metadata = _compile(_sampling_metadata, self._metadata_args, (self._rows, 1, 1))
         self._sanitize = _compile(_sanitize_scores, self._sanitize_args, self._grid)
         self._normalize = _compile(_normalize_probs, self._normalize_args, self._grid)
-        self._min_p_kernel = _mask_min_p.warmup(self.probabilities, self.probabilities,
-            self.probability_maximum, self.packed_min_p, self.state.vocab_size, 1024,
-            grid=self._grid, num_warps=4, enable_fp_fusion=False)
+        from ignition.preparation.triton import warmup_triton
+
+        self._min_p_kernel = warmup_triton(_mask_min_p,
+            (self.probabilities, self.probabilities, self.probability_maximum,
+             self.packed_min_p, self.state.vocab_size, 1024), self._grid,
+            num_warps=4, enable_fp_fusion=False)
         # FlashInfer's public operators share these buffers on the model stream.
         self.scratch_tensors["flashinfer_top_k_row_states"] = self._flashinfer._get_cache_buf(
             f"top_k_mask_logits_row_states_{self.logits.device}", 1024 * 1024,

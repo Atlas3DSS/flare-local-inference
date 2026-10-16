@@ -8,14 +8,19 @@ from dataclasses import replace
 import torch
 
 _DEVICE = ContextVar("flare_compiled_device", default=None)
+_FREEZE_TUNING = ContextVar("flare_compiled_tuning_winners", default=False)
 
 
 @contextmanager
-def bind_device(device):
+def bind_device(device, *, freeze_tuning=False):
+    if type(freeze_tuning) is not bool:
+        raise TypeError("freeze_tuning must be a boolean")
     token = _DEVICE.set(torch.device(device))
+    tuning_token = _FREEZE_TUNING.set(freeze_tuning)
     try:
         yield
     finally:
+        _FREEZE_TUNING.reset(tuning_token)
         _DEVICE.reset(token)
 
 
@@ -77,9 +82,40 @@ def _device_source(source, original, target, kernel_keys=None):
     return data.decode()
 
 
+def _freeze_tuning_winners(bundle):
+    """Preserve completed compile-time selections while rebuilding launchers.
+
+    Torch rechecks a serialized static winner as a one-config cache entry and
+    can reopen occupancy search when it rebuilds launchers. Prepared forwards
+    retain the selected config; all search and optional refinement must finish
+    before serialization.
+    """
+    # Torch loads duplicate cache keys in list order. Only the final snapshot
+    # for each key is effective; preceding snapshots can predate autotuning.
+    entries = {entry.cache_key: entry for entry in bundle.static_autotuners}
+    for entry in entries.values():
+        kernel = entry.kernel
+        if len(kernel.compile_results) != 1 or not kernel.is_statically_launchable():
+            raise ValueError(f"compiled kernel {entry.kernel_name} has unresolved tuning candidates")
+        config = kernel.compile_results[0].config
+        metadata = kernel.inductor_meta
+        if (metadata.get("coordinate_descent_tuning", False)
+                and kernel._should_coordesc_tune
+                and not getattr(config, "found_by_coordesc", False)):
+            raise ValueError(f"compiled kernel {entry.kernel_name} has pending coordinate-descent tuning")
+        if (metadata.get("combo_tuning_groups")
+                and not getattr(config, "found_by_combo_autotune", False)):
+            raise ValueError(f"compiled kernel {entry.kernel_name} has pending combo tuning")
+        kernel.inductor_meta = {**metadata, "dynamic_scale_rblock": False}
+        kernel.__dict__.pop("_could_rblock_scale", None)
+    bundle.static_autotuners[:] = entries.values()
+
+
 def relocate_inductor(entry, original):
     target = _DEVICE.get()
-    if target is None or target == original:
+    relocate = target is not None and target != original
+    freeze_tuning = _FREEZE_TUNING.get()
+    if not relocate and not freeze_tuning:
         return
     from torch._inductor.codecache import code_hash
     from torch._inductor.output_code import CompiledFxGraph
@@ -90,6 +126,10 @@ def relocate_inductor(entry, original):
         raise ValueError("device binding requires a compiled inference forward")
     if graph.device_idxs != OrderedSet((original.index,)):
         raise ValueError("compiled forward must use one CUDA device")
+    if freeze_tuning and graph._triton_bundle is not None:
+        _freeze_tuning_winners(graph._triton_bundle)
+    if not relocate:
+        return
     kernel_keys = {}
     graph.source_code = _device_source(graph.source_code, original.index, target.index, kernel_keys)
     graph.cache_key = code_hash(graph.source_code)

@@ -31,7 +31,7 @@ import triton.language as tl
 from b12x.preparation import PreparedCall
 
 from ignition.preparation.scratch import ScratchArena
-from ignition.preparation.triton import launch_triton
+from ignition.preparation.triton import launch_triton, warmup_triton
 from ignition.preparation.tuning import declare, register_finalizer
 
 from .native_operator import native_contract, native_plan
@@ -290,7 +290,7 @@ class _GatheredCake(_CakeAttention):
                          session=session, name=name, workspace=workspace)
         self.gather_options = {"WIDTH": self.width, "DIM": _DIM, "RECORD_BYTES": _RECORD_BYTES, "BLOCK": _COPY_BLOCK}
         start, end = self.slices[0]
-        self.gather = _gather_records.fn.warmup(*self._gather_args(start, end), grid=self._gather_grid(start, end),
+        self.gather = warmup_triton(_gather_records.fn, self._gather_args(start, end), self._gather_grid(start, end),
             num_warps=_COPY_CONFIG.num_warps, num_stages=_COPY_CONFIG.num_stages, **self.gather_options)
 
     def slice_indices(self, start, end):
@@ -351,15 +351,15 @@ class Sm103SparseMLA:
         if self.splits > 1 and self.splits * rows > PARTIAL_ROWS:
             raise ValueError("split sparse MLA needs more partial rows than the shared buffer holds")
         self._bind_triton()
-        self.compiled = _sparse_mla.fn.warmup(*self.args, grid=self.grid, num_warps=_CONFIG.num_warps,
-                                              num_stages=_CONFIG.num_stages, **self.options)
+        self.compiled = warmup_triton(_sparse_mla.fn, self.args, self.grid, num_warps=_CONFIG.num_warps,
+                                      num_stages=_CONFIG.num_stages, **self.options)
         if self.splits > 1:
             self.merge_args = (self.partial, self.partial_lse, output, output.stride(0), output.stride(1))
             self.merge_options = {"HEADS": heads, "DIM": _DIM, "ROWS": rows, "SPLITS": self.splits}
             self.merge_grid = (rows, heads, 1)
-            self.merge = _merge_splits.fn.warmup(*self.merge_args, grid=self.merge_grid,
-                                                 num_warps=_MERGE_CONFIG.num_warps,
-                                                 num_stages=_MERGE_CONFIG.num_stages, **self.merge_options)
+            self.merge = warmup_triton(_merge_splits.fn, self.merge_args, self.merge_grid,
+                                       num_warps=_MERGE_CONFIG.num_warps,
+                                       num_stages=_MERGE_CONFIG.num_stages, **self.merge_options)
 
     def _bind_triton(self):
         q, s, o = self.query, self.selected, self.output
@@ -411,7 +411,7 @@ class Sm103PrefillSparseMLA(_CakeAttention):
         self.pull_options = {"DIM": _DIM, "RECORD_BYTES": _RECORD_BYTES, "PAGE_TOKENS": _PAGE_TOKENS,
                              "BLOCK": _COPY_BLOCK}
         self.pull_grid = (triton.cdiv(table.shape[0] * _PAGE_TOKENS, _COPY_BLOCK), 1, 1)
-        self.pull = _pull_context.fn.warmup(*self._pull_args(), grid=self.pull_grid,
+        self.pull = warmup_triton(_pull_context.fn, self._pull_args(), self.pull_grid,
             num_warps=_COPY_CONFIG.num_warps, num_stages=_COPY_CONFIG.num_stages, **self.pull_options)
 
     def slice_indices(self, start, end):

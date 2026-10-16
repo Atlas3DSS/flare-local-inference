@@ -6,6 +6,21 @@ import torch
 from torch.fx.experimental.proxy_tensor import get_proxy_mode
 
 
+def _launch_options(options):
+    """Match the one-Config launch produced by Torch's wrapped Triton call."""
+    from triton.runtime.autotuner import Config
+
+    # Ordinary constexpr and backend arguments precede the Config defaults,
+    # matching Torch's wrapped launch. maxnreg/ir_override remain ordinary kwargs.
+    fields = {"num_warps", "num_stages", "num_ctas"}
+    selected = {name: value for name, value in options.items() if name in fields}
+    if not selected:
+        return dict(options)
+    result = {name: value for name, value in options.items() if name not in fields}
+    result.update(Config({}, **selected).all_kwargs())
+    return result
+
+
 @dataclass
 class PreparedTriton:
     kernel: object
@@ -21,8 +36,14 @@ class PreparedTriton:
             self.compiled[self.grid](*self.args)
 
 
+def warmup_triton(kernel, args, grid, **options):
+    """Prepare the same raw specialization as the later wrapped launch."""
+    return kernel.warmup(*args, grid=grid, **_launch_options(options))
+
+
 def prepare_triton(kernel, args, grid, **options):
-    compiled = kernel.warmup(*args, grid=grid, **options)
+    compiled = warmup_triton(kernel, args, grid, **options)
+    # Torch's wrapped launch accepts caller options, not raw Config defaults.
     return PreparedTriton(kernel, compiled, args, grid, options)
 
 
