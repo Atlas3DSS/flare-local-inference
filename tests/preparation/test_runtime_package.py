@@ -467,6 +467,21 @@ def test_package_replays_without_python(tmp_path, fixture, binary, expected, exe
     assert expected in result.stdout
 
 
+@pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1", reason="requires explicit CUDA test opt-in")
+def test_cooperative_package_clamps_to_device_capacity(tmp_path):
+    assert os.environ.get("CUDA_VISIBLE_DEVICES"), "assign CUDA_VISIBLE_DEVICES before running GPU tests"
+    root = Path(__file__).resolve().parents[2]
+    subprocess.run([
+        sys.executable, str(root / "helios/tests/cooperative_package_fixture.py"), str(tmp_path),
+    ], check=True, cwd=root, timeout=120)
+    subprocess.run([
+        "cargo", "test", "--manifest-path", str(root / "helios/Cargo.toml"),
+        "--no-default-features", "--features", "runtime-package", "--lib",
+        "oversized_cooperative_grids_replay_at_device_capacity", "--", "--ignored",
+    ], check=True, cwd=root, timeout=180,
+        env={**os.environ, "FLARE_COOPERATIVE_TEST_PACKAGE": str(tmp_path)})
+
+
 def test_only_allocator_inactive_tail_granules_are_trimmed():
     allocation = Allocation("weights", 0x80000000000, 66 << 20, alignment=2 << 20, preserve_address=True)
     end = allocation.address + allocation.nbytes

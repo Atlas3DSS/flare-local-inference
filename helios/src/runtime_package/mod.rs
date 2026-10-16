@@ -2,6 +2,8 @@
 
 mod archive;
 mod cache_memory;
+#[cfg(test)]
+mod cooperative_tests;
 pub mod driver;
 mod engram;
 #[cfg(test)]
@@ -80,6 +82,7 @@ impl NativeResources {
     /// # Safety
     /// The package must be trusted. Its kernels and declared bindings must obey
     /// CUDA's memory and execution contracts, including any mapped host access.
+    /// Cooperative kernels must tolerate fewer worker CTAs in the grid's X dimension.
     /// This method makes the owner's context current on the calling thread.
     pub unsafe fn load(authorized: AuthorizedPackage, ordinal: i32) -> Result<Self> {
         let AuthorizedPackage { archive, mut index } = authorized;
@@ -583,7 +586,7 @@ impl NativeResources {
                                 .collect::<Result<Vec<_>>>()?;
                             let mut pointers: Vec<_> =
                                 storage.iter_mut().map(|a| a.as_mut_ptr().cast()).collect();
-                            let params = KernelParams {
+                            let mut params = KernelParams {
                                 function: self.functions[function],
                                 grid: *grid,
                                 block: *block,
@@ -605,14 +608,24 @@ impl NativeResources {
                                     value.as_mut_ptr().cast(),
                                     64,
                                 );
-                                driver.check(
-                                    "cuGraphKernelNodeSetAttribute",
-                                    (driver.graph_attribute)(
+                                let mut status = (driver.graph_attribute)(
+                                    result,
+                                    attribute.id,
+                                    value.as_ptr().cast(),
+                                );
+                                if attribute.id == 2 && value[0] as u32 != 0 && status == 720 {
+                                    self.clamp_cooperative_launch(&mut params)?;
+                                    driver.check(
+                                        "cuGraphKernelNodeSetParams_v2",
+                                        (driver.graph_kernel_params)(result, &params),
+                                    )?;
+                                    status = (driver.graph_attribute)(
                                         result,
                                         attribute.id,
                                         value.as_ptr().cast(),
-                                    ),
-                                )?;
+                                    );
+                                }
+                                driver.check("cuGraphKernelNodeSetAttribute", status)?;
                             }
                         }
                         Node::Memset {
@@ -740,6 +753,44 @@ impl NativeResources {
             self.functions.clear();
             driver.check("cuCtxSynchronize", (driver.context_sync)())?;
         }
+        Ok(())
+    }
+
+    unsafe fn clamp_cooperative_launch(&self, params: &mut KernelParams) -> Result<()> {
+        let threads = params
+            .block
+            .iter()
+            .try_fold(1i32, |n, &dim| n.checked_mul(i32::try_from(dim).ok()?))
+            .ok_or_else(|| invalid("cooperative kernel block size overflow"))?;
+        let (mut blocks_per_sm, mut sms) = (0, 0);
+        unsafe {
+            self.driver.check(
+                "cuOccupancyMaxActiveBlocksPerMultiprocessor",
+                (self.driver.occupancy)(
+                    &mut blocks_per_sm,
+                    params.function,
+                    threads,
+                    params.shared as usize,
+                ),
+            )?;
+            self.driver.check(
+                "cuDeviceGetAttribute",
+                (self.driver.device_attribute)(&mut sms, 16, self.device),
+            )?;
+        }
+        if blocks_per_sm <= 0 || sms <= 0 {
+            return Err(invalid("cooperative kernel has no resident CTA capacity"));
+        }
+        let capacity = blocks_per_sm as u64 * sms as u64;
+        // Y and Z retain the kernel's work partitioning; only the worker count shrinks.
+        let max_x = capacity / (u64::from(params.grid[1]) * u64::from(params.grid[2]));
+        if max_x == 0 {
+            return Err(invalid(format!(
+                "cooperative kernel grid {:?} cannot fit {capacity} resident CTAs by reducing X",
+                params.grid,
+            )));
+        }
+        params.grid[0] = u64::from(params.grid[0]).min(max_x) as u32;
         Ok(())
     }
 
