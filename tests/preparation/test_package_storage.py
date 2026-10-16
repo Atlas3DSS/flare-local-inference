@@ -67,12 +67,10 @@ def test_unused_bytes_include_live_block_padding_and_retired_pools(monkeypatch, 
 def test_linux_device_ranges_avoid_mimalloc_arena_hints():
     # mimalloc hints its aligned arena reservations into 2-6 TiB; PyTorch allocates CPU tensors there.
     hint_start, hint_end = 2 << 40, 6 << 40
-    host_end = PackageStorage.HOST_BASE
     for rank in range(16):
         start = PackageStorage.DEVICE_BASE + rank * PackageStorage.RESERVATION_BYTES
         end = start + PackageStorage.RESERVATION_BYTES
         assert end <= hint_start or start >= hint_end
-        assert end <= host_end
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows WDDM address layout")

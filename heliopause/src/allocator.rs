@@ -21,16 +21,23 @@ const BASE: u64 = 0x80000000000;
 #[cfg(target_os = "windows")]
 const BASE: u64 = 0x40000000000;
 const EXTENT: usize = 1 << 40;
-#[cfg(target_os = "linux")]
-const HOST_BASE: u64 = 0x200000000000;
-// WDDM on RTX Spark stalls on high host-address hints; keep its mapped storage at 12 TiB.
-#[cfg(target_os = "windows")]
+// Keep small Linux exports within the Windows WDDM address range as well.
 const HOST_BASE: u64 = 0xc0000000000;
+
+fn host_base(device_base: u64, world: u32) -> u64 {
+    if device_base + u64::from(world) * EXTENT as u64 <= HOST_BASE {
+        HOST_BASE
+    } else {
+        0x200000000000
+    }
+}
+
 struct Arena {
     driver: Driver,
     device: i32,
     granularity: usize,
     gpudirect: bool,
+    host_base: u64,
     free: Vec<(u64, usize)>,
     mappings: BTreeMap<u64, usize>,
 }
@@ -63,7 +70,12 @@ extern "C" fn flare_package_initialize(rank: u32, world: u32, device: i32) -> i3
         if world == 0 || rank >= world || device < 0 {
             return Err(invalid("invalid package rank or device"));
         }
-        if u64::from(world) * EXTENT as u64 > BASE.abs_diff(HOST_BASE) {
+        let host_base = if cfg!(target_os = "windows") {
+            HOST_BASE
+        } else {
+            host_base(BASE, world)
+        };
+        if u64::from(world) * EXTENT as u64 > BASE.abs_diff(host_base) {
             return Err(invalid(
                 "package host reservations would overlap device reservations",
             ));
@@ -103,6 +115,7 @@ extern "C" fn flare_package_initialize(rank: u32, world: u32, device: i32) -> i3
             device,
             granularity,
             gpudirect: gpudirect != 0,
+            host_base: host_base + u64::from(rank) * EXTENT as u64,
             free: vec![(BASE + u64::from(rank) * EXTENT as u64, EXTENT / 2)],
             mappings: BTreeMap::new(),
         });
@@ -235,7 +248,9 @@ extern "C" fn flare_package_snapshot() -> *mut c_char {
     let Some(a) = arena.as_ref() else {
         return null_mut();
     };
-    let value = serde_json::json!({"granularity": a.granularity, "mappings": a.mappings});
+    let value = serde_json::json!({
+        "granularity": a.granularity, "mappings": a.mappings, "host_base": a.host_base,
+    });
     CString::new(value.to_string()).unwrap().into_raw()
 }
 
@@ -255,4 +270,30 @@ extern "C" fn flare_package_error() -> *const c_char {
         .unwrap_or_else(|e| e.into_inner())
         .as_ref()
         .map_or(std::ptr::null(), |s| s.as_ptr())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn small_linux_exports_keep_every_host_range_within_windows_addresses() {
+        let device_base = 8 << 40;
+        for world in 1..=4 {
+            let host = host_base(device_base, world);
+            assert_eq!(host, 12 << 40);
+            assert!(device_base + u64::from(world) * EXTENT as u64 <= host);
+            assert!(host + u64::from(world) * EXTENT as u64 <= 16 << 40);
+        }
+    }
+
+    #[test]
+    fn larger_linux_exports_keep_host_ranges_clear_of_all_device_ranks() {
+        let device_base = 8 << 40;
+        for world in 5..=24 {
+            let host = host_base(device_base, world);
+            assert_eq!(host, 32 << 40);
+            assert!(device_base + u64::from(world) * EXTENT as u64 <= host);
+        }
+    }
 }

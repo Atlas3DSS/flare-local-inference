@@ -107,15 +107,20 @@ to satisfy the Windows driver's allocation granularity without changing recorded
 buffer addresses or graph parameters. This requires host-NUMA VMM support from
 the Windows driver and GPU.
 
-Ignition places rank-zero host storage at 12 TiB on Windows and 32 TiB on Linux,
-where the larger address range leaves room for sixteen device ranks.
+Ignition places rank-zero host storage at 12 TiB on Windows and on Linux when
+all device rank ranges fit below it (up to four Linux ranks). Larger Linux
+layouts use 32 TiB so their host and device ranges remain disjoint, including
+sixteen-rank preparation. Heliopause selects the base and reports each rank's
+host range to Ignition before allocation.
 The package format and mailbox release/acquire protocol are shared. Packages
 still require matching GPU architecture, available virtual addresses, and supported
 CUDA operations. On RTX Spark N1X with driver 617.42, requesting the 16 TiB host
 address used by earlier exports hangs inside `cuMemAddressReserve`; the 32 TiB
 address also stalls, even for a 2 MiB reservation.
-Packages using those host addresses need re-exporting before Windows use. The
-runtime does not relocate graph storage.
+Packages using those host addresses need re-exporting before Windows use. For
+a Linux TP1 package, rebuild Heliopause with the updated preparation code and
+export to a new filename; its host storage will use 12 TiB. Other Windows
+compatibility requirements still apply. The runtime does not relocate graph storage.
 
 Validate fixed device mappings and graph replay using the exported runtime
 fixtures on each target GPU. Packages with mapped host storage additionally

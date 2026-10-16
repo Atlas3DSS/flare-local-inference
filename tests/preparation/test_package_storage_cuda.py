@@ -97,6 +97,7 @@ def mailbox_storage():
 
     torch.cuda.set_device(0)
     with PackageStorage(device=0) as storage:
+        assert storage.HOST_BASE == storage._snapshot()["host_base"] == PackageStorage.HOST_BASE
         yield storage
 
 

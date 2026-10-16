@@ -29,8 +29,8 @@ class PackageStorage:
     # Above 2-6 TiB on Linux, where PyTorch's mimalloc CPU allocator places its 1 GiB arenas;
     # a peer rank allocates CPU tensors before it reserves these ranges.
     DEVICE_BASE = 0x40000000000 if os.name == "nt" else 0x80000000000
-    # WDDM on RTX Spark stalls on high host-address hints; Linux needs room for TP16.
-    HOST_BASE = 0xc0000000000 if os.name == "nt" else 0x200000000000
+    # The native allocator selects a higher base when the device ranks need this range.
+    HOST_BASE = 0xc0000000000
     RESERVATION_BYTES = 1 << 40
     # Keep library-owned device storage above the ranges occupied by Linux and WDDM contexts.
     EXTERNAL_FLOOR = 0x4000000000
@@ -43,7 +43,6 @@ class PackageStorage:
         self.rank, self.world, self.device = rank, world, device
         self.integrated = torch.cuda.get_device_properties(device).is_integrated
         self.DEVICE_BASE += rank * self.RESERVATION_BYTES
-        self.HOST_BASE += rank * self.RESERVATION_BYTES
         self.cuda = _Cuda()
         from flare_heliopause import flare_heliopause as native
 
@@ -53,13 +52,15 @@ class PackageStorage:
 
         self.numeric_storage = NumericStorage()
         self._device_cursor = self.DEVICE_BASE + self.RESERVATION_BYTES // 2
-        self._host_cursor = self.HOST_BASE
         self.library = C.CDLL(native.__file__)
         self.library.flare_package_error.restype = C.c_char_p
         self.library.flare_package_snapshot.restype = C.c_void_p
         if self.library.flare_package_initialize(rank, world, device):
             raise self.error or RuntimeError("cannot initialize native package allocator")
-        self.granularity = self._snapshot()["granularity"]
+        layout = self._snapshot()
+        self.granularity = layout["granularity"]
+        self.HOST_BASE = layout["host_base"]
+        self._host_cursor = self.HOST_BASE
         self.low_reservations = []
         # WDDM retains its low allocation pool; export rejects retained storage below the floor.
         if self.integrated and os.name != "nt":
