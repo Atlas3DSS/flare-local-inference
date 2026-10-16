@@ -285,7 +285,9 @@ per request and publishes hidden-column-sharded features for causal text
 prefill. XTML encoding distinguishes protocol tokens from literal marker text.
 Serving defaults follow the model card's agentic sampling recommendation:
 temperature 1, top-p 1, no top-k filter, and neutral penalties. Reasoning is
-enabled with `max` effort by default; request settings override these defaults.
+always enabled; requests to disable thinking are ignored without an error.
+Effort defaults to `max`; requests can select `low`, `high`, or `max` and
+override sampling defaults. Preserve assistant reasoning in conversation history.
 
 Both Ignition commands accept `--config PATH`; the default configuration is
 `~/.config/flare/config.toml`. Storage locations are configured with

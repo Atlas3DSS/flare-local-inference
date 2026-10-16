@@ -189,6 +189,9 @@ map into the same neutral levels. The frontend resolves those levels against the
 effort vocabulary accepted by the packaged template: for example Qwen uses
 `low/medium/xhigh`, while DeepSeek uses `low/high/max`. Explicit native
 `reasoning_effort` or `chat_template_kwargs` values pass through unchanged.
+Kimi K3 always uses thinking: its template ignores `enable_thinking=false` and
+`thinking=false` without an error, preserves assistant reasoning history, and
+accepts `low`, `high`, or `max` effort (default `max`).
 The generation output limit includes reasoning and tool syntax.
 
 Anthropic thinking blocks carry a deterministic `flare-thinking-v1:` marker

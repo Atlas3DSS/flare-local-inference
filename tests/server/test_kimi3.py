@@ -30,7 +30,7 @@ def service():
 
     def ask(content, **options):
         body = dict(model=model, messages=[dict(role="user", content=content)], temperature=1,
-                    seed=1234, max_tokens=128, enable_thinking=False)
+                    seed=1234, max_tokens=1024, enable_thinking=False, reasoning_effort="low")
         body.update(options)
         request = urllib.request.Request(url + "/v1/chat/completions", json.dumps(body).encode(),
                                          {"Content-Type": "application/json"})
@@ -80,16 +80,21 @@ def test_text_and_concurrent_requests(service):
         assert f"FLARE{index}128" in answer(result)
 
 
-def test_reasoning_is_separate(service):
+@pytest.mark.parametrize("options", [
+    {"enable_thinking": True},
+    {"enable_thinking": False},
+    {"chat_template_kwargs": {"thinking": False}},
+])
+def test_reasoning_is_separate(service, options):
     result = service("What is 17 times 23? Put only the integer in the final answer.",
-                     enable_thinking=True, reasoning_effort="low", max_tokens=1024)
+                     **options)
     assert result["choices"][0]["message"]["reasoning_content"].strip()
     assert answer(result) == "391"
 
 
 def test_streamed_reasoning_and_answer(service):
     events = service("What is 17 times 23? Put only the integer in the final answer.",
-        enable_thinking=True, reasoning_effort="low", max_tokens=1024,
+        enable_thinking=False,
         stream=True, stream_options=dict(include_usage=True))
     choices = [choice for event in events for choice in event["choices"]]
     reasoning = "".join(choice.get("delta", {}).get("reasoning_content") or "" for choice in choices)
@@ -107,6 +112,7 @@ def test_xtml_tool_call_and_result(service):
     prompt = "Use lookup_weather to get the weather in Paris."
     result = service(prompt, tools=tools, tool_choice="required")
     message = result["choices"][0]["message"]
+    assert message["reasoning_content"].strip()
     assert result["choices"][0]["finish_reason"] == "tool_calls"
     call, = message["tool_calls"]
     assert call["function"]["name"] == "lookup_weather"
@@ -154,6 +160,6 @@ def test_largest_image_graph(service):
 
 def test_decode_across_latent_page_boundaries(service):
     result = service("Count from 1 through 160 inclusive, separated by commas. Output only the numbers, "
-                     "with no omissions.", max_tokens=768)
+                     "with no omissions.", max_tokens=2048)
     assert result["usage"]["completion_tokens"] > 256
     assert [int(value) for value in re.findall(r"\d+", answer(result))] == list(range(1, 161))
