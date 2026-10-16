@@ -312,8 +312,8 @@ class PreparedDecoder:
             mixed = attn_hc.mix(s.residual, pre_normalized=index not in (0, 1))
             if index == 0 and self.stage_outputs:
                 self.stage_outputs["attn_mix"].copy_(mixed)
-                for field in ("normalized", "projected_down", "bottleneck", "gate_logits", "injection_logits"):
-                    self.stage_outputs[f"attn_{field}"].copy_(getattr(s.hyperconnection, field))
+                for field, value in attn_hc.trace_intermediates().items():
+                    self.stage_outputs[f"attn_{field}"].copy_(value)
             block = attention(mixed)
             if self.reductions:
                 block = self.reductions[index][0](block)
@@ -327,8 +327,8 @@ class PreparedDecoder:
             mixed = mlp_hc.mix(s.residual, pre_normalized=True)
             if index == 0 and self.stage_outputs:
                 self.stage_outputs["mlp_mix"].copy_(mixed)
-                for field in ("normalized", "projected_down", "bottleneck", "gate_logits", "injection_logits"):
-                    self.stage_outputs[f"mlp_{field}"].copy_(getattr(s.hyperconnection, field))
+                for field, value in mlp_hc.trace_intermediates().items():
+                    self.stage_outputs[f"mlp_{field}"].copy_(value)
             block = moe(mixed)
             if self.reductions:
                 block = self.reductions[index][1](block)

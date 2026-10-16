@@ -86,6 +86,43 @@ def test_stage_copies_preserve_return_identity_and_do_not_retain_mutable_view():
     assert owner.operation is original
 
 
+def test_hyperconnection_stage_trace_excludes_volatile_gate_workspace():
+    from types import SimpleNamespace
+
+    from ignition.recipes.qwen38.hyperconnection import (
+        HyperconnectionScratch,
+        PreparedHyperconnection,
+    )
+    from qualify.mtp import StageTrace
+
+    scratch = HyperconnectionScratch.allocate(2, torch.device('cpu'))
+    scratch.gate_workspace.fill_(float('nan'))
+    mixers = []
+    for index in range(3):
+        mixer = PreparedHyperconnection.__new__(PreparedHyperconnection)
+        mixer.scratch = scratch
+        mixer.injection = scratch.injection_logits if index < 2 else None
+        mixer.mix = lambda source: scratch.block_input
+        mixers.append(mixer)
+    op = SimpleNamespace(attn_hc=mixers[0], mlp_hc=mixers[1], final_mixer=mixers[2],
+                         feedback=lambda: None, attention=lambda: None, moe=lambda: None)
+    trace = StageTrace()
+    try:
+        trace.install_flare(op)
+        for mixer in mixers:
+            assert mixer.mix(scratch.normalized) is scratch.block_input
+        expected = {f'{prefix}_{field}' for prefix in ('attn', 'mlp', 'final')
+                    for field in ('normalized', 'projected_down', 'bottleneck', 'mix')}
+        expected.update(('attn_injection_logits', 'mlp_injection_logits'))
+        assert set(trace.buffers) == expected
+        assert all(torch.isfinite(value).all() for value in trace.buffers.values())
+        scratch.normalized.fill_(17)
+        assert not trace.buffers['attn_normalized'].count_nonzero()
+        assert scratch.gate_workspace.isnan().all()
+    finally:
+        trace.close()
+
+
 def test_stage_comparison_only_selects_declared_request_tail_and_records_missing_keys():
     from qualify.mtp import compare_output
     actual = {'residual': torch.zeros(2, 2), 'hidden': torch.zeros(2, 2), 'logits': torch.zeros(1, 12),

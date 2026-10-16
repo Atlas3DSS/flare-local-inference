@@ -75,10 +75,8 @@ class StageTrace:
             after=lambda args, kwargs, result: self.record('feedback', op.scratch.residual))
         for prefix, hc in (('attn', op.attn_hc), ('mlp', op.mlp_hc), ('final', op.final_mixer)):
             def mix(args, kwargs, result, prefix=prefix, hc=hc):
-                for field in ('normalized', 'projected_down', 'bottleneck', 'gate_logits'):
-                    self.record(f'{prefix}_{field}', getattr(hc.scratch, field))
-                if hc.injection is not None:
-                    self.record(f'{prefix}_injection_logits', hc.scratch.injection_logits)
+                for field, value in hc.trace_intermediates().items():
+                    self.record(f'{prefix}_{field}', value)
                 self.record(f'{prefix}_mix', result)
             self.wrap(hc, 'mix', after=mix)
             if hc.injection is not None:

@@ -579,7 +579,7 @@ preparation addresses, peer access, collective lifetime, and failure handling.
 | GDN recurrence | b12x GDN prefill and decode |
 | GDN causal convolution | b12x short convolution over raw projected QKV and explicit history |
 | Sparse attention and selector state | b12x QSA |
-| Hyperconnections | b12x hyperconnection primitives; BF16 low-rank projection GEMMs outside the operator |
+| Hyperconnections | b12x hyperconnection primitives and BF16 down projections; tuned up-projection, sigmoid, and stream-mean operator |
 | PLE lookup | b12x NVFP4 PLE embedding over compact GPU rows delivered by Helios; explicit n-gram history |
 | PLE mixing and convolution | b12x PLE operators |
 | Vision | Transformers block structure; b12x varlen attention, MXFP8 attention projections, weight-only NVFP4 MLPs through the block-scaled `w4a16` entry |
@@ -593,6 +593,15 @@ RMSNorm using FP32 gains, an in-place BF16 residual, and caller-owned normalized
 scratch. The PLE injection boundary requires a separate normalization. MTP
 fuses the attention-to-MLP boundary; its inactive-row mask precedes the final
 standalone normalization.
+
+The up-projection and stream gate are tuned as one operation at each prepared
+row capacity. b12x selects a fused kernel or an existing BF16 projection followed
+by gate reduction. Both preserve BF16 rounding after the projection, sigmoid,
+and product, with FP32 stream accumulation. Selection finishes before forward
+compilation and graph capture; Helios replays the selected CUDA work. Gate
+workspace is volatile scratch, so stage traces expose normalized inputs,
+bottlenecks, injection logits, and mixed outputs without requiring materialized
+gate logits.
 
 GDN combines QKV/Z and B/A weights into two MXFP8 projections. Sparse attention
 combines Q/K/V into one projection and keeps the indexer independent. MTP uses

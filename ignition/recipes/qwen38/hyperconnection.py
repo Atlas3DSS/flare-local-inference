@@ -9,6 +9,7 @@ import torch
 from b12x.norm import hyperconnection as hc
 from b12x.preparation import FrozenMapping, PreparationSession, PreparedCall
 
+from ignition.components.hyperconnection_gate import PreparedHyperconnectionGate
 from ignition.components.linear import UnquantizedProjection
 from ignition.preparation.fixtures import hyperconnection as hc_fixtures
 from ignition.preparation.tuning import declare, register_finalizer
@@ -34,10 +35,16 @@ def packed_down_projection(module: torch.nn.Module) -> torch.Tensor:
 
 @dataclass(frozen=True)
 class HyperconnectionScratch:
+    """Shared activations and transient storage for serialized mixers.
+
+    Gate workspace is not an observable intermediate: fused plans do not
+    materialize projection logits.
+    """
+
     normalized: torch.Tensor
     projected_down: torch.Tensor
     bottleneck: torch.Tensor
-    gate_logits: torch.Tensor
+    gate_workspace: torch.Tensor
     injection_logits: torch.Tensor
     block_input: torch.Tensor
     down_and_injection: torch.Tensor
@@ -46,10 +53,10 @@ class HyperconnectionScratch:
     def allocate(cls, tokens: int, device: torch.device) -> HyperconnectionScratch:
         if tokens <= 0:
             raise ValueError("hyperconnection token capacity must be positive")
-        normalized, projected, bottleneck, gate_logits, block_input = (
+        normalized, projected, bottleneck, gate_workspace, block_input = (
             torch.zeros((tokens, width), device=device, dtype=torch.bfloat16)
             for width in (10240, 336, 320, 10240, 2560))
-        return cls(normalized, projected[:, :320], bottleneck, gate_logits,
+        return cls(normalized, projected[:, :320], bottleneck, gate_workspace,
                    projected[:, 320:324], block_input, projected)
 
     def rows(self, tokens: int) -> HyperconnectionScratch:
@@ -70,7 +77,6 @@ class HyperconnectionScratch:
         return {
             "grouped_rmsnorm": (source, norm_gain, self.normalized),
             "scaled_silu": (self.projected_down, self.bottleneck),
-            "gate_mean": (self.normalized, self.gate_logits, self.block_input),
             "combine": (source, self.block_input, self.injection_logits, self.normalized),
         }
 
@@ -110,7 +116,6 @@ class PreparedHyperconnection:
         invocations = {
             "grouped_rmsnorm": {"eps": self.eps, "zero_centered": False, "weight_dtype": "float32"},
             "scaled_silu": {},
-            "gate_mean": {},
         }
         if module.block_inject_weight is not None:
             invocations["combine"] = {}
@@ -138,8 +143,9 @@ class PreparedHyperconnection:
         down_output = scratch.projected_down if self.injection is None else scratch.down_and_injection
         self.down = UnquantizedProjection(scratch.normalized, packed_down_projection(module),
             down_output, session=session, name=f"{name}.down")
-        self.up = UnquantizedProjection(scratch.bottleneck, module.input_mix_weight_up.weight,
-            scratch.gate_logits, session=session, name=f"{name}.up")
+        self.gate = PreparedHyperconnectionGate(scratch.bottleneck, module.input_mix_weight_up.weight,
+            scratch.normalized, scratch.block_input, scratch.gate_workspace,
+            session=session, name=f"{name}.gate")
 
     def prepare_combine_norm(self, following: PreparedHyperconnection, *,
                              priming_state: torch.Tensor, session: PreparationSession,
@@ -153,7 +159,7 @@ class PreparedHyperconnection:
             "eps": following.eps, "zero_centered": False, "weight_dtype": "float32",
             "output_mode": "provided"}))
         arguments = (priming_state, self.scratch.block_input, self.scratch.injection_logits,
-                     following.norm_gain, self.scratch.gate_logits, following.scratch.normalized)
+                     following.norm_gain, self.scratch.gate_workspace, following.scratch.normalized)
         kwargs = {"eps": following.eps}
         declare(session, (plan.request(name=name,
             prepare_call=lambda state: PreparedCall(run=lambda: state.launch(*arguments, **kwargs)),
@@ -167,9 +173,15 @@ class PreparedHyperconnection:
             binding=self.bindings["grouped_rmsnorm"])
         self.down(normalized)
         bottleneck = hc.run_scaled_silu(self.scratch.projected_down, binding=self.bindings["scaled_silu"])
-        gate_logits = self.up(bottleneck)
-        hc.run_gate_mean(normalized, gate_logits, binding=self.bindings["gate_mean"])
-        return self.scratch.block_input
+        return self.gate(bottleneck, normalized)
+
+    def trace_intermediates(self) -> dict[str, torch.Tensor]:
+        """Expose activations produced by every eligible gate implementation."""
+        values = {name: getattr(self.scratch, name)
+                  for name in ("normalized", "projected_down", "bottleneck")}
+        if self.injection is not None:
+            values["injection_logits"] = self.injection
+        return values
 
     def combine(self, residual: torch.Tensor, block_output: torch.Tensor) -> torch.Tensor:
         """Inject in FP32 and return a BF16 intermediate inside the captured graph."""
