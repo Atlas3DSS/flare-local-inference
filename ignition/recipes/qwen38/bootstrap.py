@@ -188,6 +188,24 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
 @torch.no_grad()
 def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, progress=None,
                   compile_decoder: bool = True, rank: int = 0, group=None, package_storage=None) -> PreparedModel:
+    transient = contextlib.ExitStack()
+    try:
+        prepared = _prepare_model(snapshot, config, progress=progress, compile_decoder=compile_decoder,
+            rank=rank, group=group, package_storage=package_storage, transient=transient)
+    except BaseException as error:
+        try:
+            transient.close()
+        except BaseException as cleanup_error:
+            error.add_note(f"transient allocation scope cleanup failed: {cleanup_error!r}")
+        raise
+    else:
+        transient.close()
+        return prepared
+
+
+def _prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, transient,
+                   progress=None, compile_decoder: bool = True, rank: int = 0,
+                   group=None, package_storage=None) -> PreparedModel:
     from transformers.models.qwen4_exp.modeling_qwen4_exp import Qwen4ExpVisionModel
 
     from .vision_state import (
@@ -211,7 +229,6 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
         manifest = inspect_qwen38_checkpoint(snapshot)
     # Loading, construction and tuning free most of what they allocate; a transient package pool returns
     # that memory to the device once tuning completes, before compiled forwards are bound.
-    transient = contextlib.ExitStack()
     if package_storage is not None:
         transient.enter_context(package_storage.transient())
     weights = ModelWeights.load(manifest, device, progress=progress, shard=shard)
