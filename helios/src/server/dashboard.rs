@@ -396,12 +396,12 @@ fn gibibytes(bytes: u64) -> String {
     format!("{:.1} GiB", bytes as f64 / (1u64 << 30) as f64)
 }
 
-fn kv_cache_lines(s: Snapshot) -> [Line<'static>; 2] {
+fn kv_cache_lines(s: Snapshot) -> [Line<'static>; 1] {
     [
-        Line::from(format!(
-            " KV PAGES {} cached / {} free / {} total",
-            s.cached_pages, s.free_pages, s.total_pages
-        )),
+        // Line::from(format!(
+        //     " KV PAGES {} cached / {} free / {} total",
+        //     s.cached_pages, s.free_pages, s.total_pages
+        // )),
         Line::from(format!(
             " KV TOKENS {} cached / {} free / {} total",
             s.cached_pages.saturating_mul(s.page_tokens),
@@ -454,7 +454,7 @@ fn render_overview(frame: &mut Frame, history: &History, area: Rect) {
         .acceptance
         .map_or_else(|| "—".into(), |v| format!("{v:.2}"));
     let depth = r.depth.map_or_else(|| "—".into(), |v| format!("{v:.2}"));
-    let [kv_pages, kv_tokens] = kv_cache_lines(s);
+    let [kv_tokens] = kv_cache_lines(s);
     if area.width < 64 || area.height < 22 {
         frame.render_widget(
             Paragraph::new(vec![
@@ -464,7 +464,6 @@ fn render_overview(frame: &mut Frame, history: &History, area: Rect) {
                 Line::from(format!(" Acceptance   {acceptance} drafts/round")),
                 Line::from(format!(" Verify depth {depth} drafts/step")),
                 Line::from(format!(" Active {}  Queued {}", s.active, s.pending)),
-                kv_pages,
                 kv_tokens,
                 Line::from(" Enlarge terminal for history plots.")
                     .style(Style::default().fg(MUTED)),
@@ -476,7 +475,7 @@ fn render_overview(frame: &mut Frame, history: &History, area: Rect) {
     let rows = Layout::vertical([
         Constraint::Min(8),
         Constraint::Min(8),
-        Constraint::Length(5),
+        Constraint::Length(4),
     ])
     .split(area);
     let top =
@@ -525,7 +524,6 @@ fn render_overview(frame: &mut Frame, history: &History, area: Rect) {
                 s.prefill_tokens, s.generated_tokens, s.reused_tokens
             ))
             .style(Style::default().fg(MUTED)),
-            kv_pages,
             kv_tokens,
             Line::from(format!(
                 " HOST CACHE {} hits   {} reused   {} in memory / {} on disk   {} out / {} in",
@@ -775,8 +773,8 @@ mod tests {
                 .collect();
             assert!(!content.contains("NaN"));
             assert!(!content.contains("inf"));
+            assert!(!content.contains("KV PAGES"));
             if width >= 80 {
-                assert!(content.contains("KV PAGES 3 cached / 20 free / 100 total"));
                 assert!(content.contains("KV TOKENS 384 cached / 2560 free / 12800 total"));
             }
             if width >= 80 && height >= 22 {
