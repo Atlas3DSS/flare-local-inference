@@ -15,19 +15,30 @@ class PreparedVocabularyProjection:
     """
 
     def __init__(self, source, weight, local_output, output, *, runtime, session,
-                 coordinator, name, activation_mode="a16"):
+                 coordinator, name, activation_mode="a16", buffers=None):
         if isinstance(weight, torch.Tensor):
             self.projection = UnquantizedProjection(source, weight, local_output,
                 session=session, name=f"{name}.projection")
         else:
             self.projection = QuantizedProjection(source, weight, local_output,
                 session=session, name=f"{name}.projection", activation_mode=activation_mode)
-        self.gather = PreparedAllGather(local_output, output, runtime=runtime,
+        world = 1 if runtime is None else runtime.world_size
+        columns = local_output.shape[1] * world
+        if columns < output.shape[1]:
+            raise ValueError("vocabulary shards must cover every output token")
+        self.gathered = output if columns == output.shape[1] else (
+            torch.empty((output.shape[0], columns), dtype=output.dtype, device=output.device) if buffers is None
+            else buffers.zeros((output.shape[0], columns), output.dtype))
+        self.gather = PreparedAllGather(local_output, self.gathered, runtime=runtime,
             session=session, coordinator=coordinator, name=f"{name}.gather")
         self.output = output
+        self.padded = columns != output.shape[1]
 
     def __call__(self, source):
-        return self.gather(self.projection(source))
+        gathered = self.gather(self.projection(source))
+        if self.padded:
+            self.output.copy_(gathered[:, :self.output.shape[1]])
+        return self.output
 
 
 _E2M1_BOUNDS = (0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0)

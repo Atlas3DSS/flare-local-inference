@@ -241,8 +241,13 @@ class StorageBackend(SerializableCallable):
         identity = tuple((id(value), value.untyped_storage()._cdata, value.storage_offset())
                          if isinstance(value, torch.Tensor) else value for value in args)
         if self._bound is None or identity != self._bound[0]:
-            if _signature(args) != self.signature:
-                raise BindingMismatch('compiled forward input shapes, layouts, or storage aliases changed')
+            signature = _signature(args)
+            if signature != self.signature:
+                differences = [(index, expected, actual) for index, (expected, actual)
+                               in enumerate(zip(self.signature, signature)) if expected != actual]
+                raise BindingMismatch('compiled forward input shapes, layouts, or storage aliases changed: '
+                    f'{len(self.signature)} expected inputs, {len(signature)} supplied; '
+                    f'first differences (index, expected, actual): {differences[:4]}')
             self._bound = identity, [item.bind(args) for item in self.inputs]
         token = _INVOCATIONS.set(self.invocations)
         try:
@@ -607,8 +612,12 @@ class ForwardCache:
             raise RuntimeError(f"compiled forward binding failed: {errors}")
         with phase(progress, "Warm compiled forwards", total=len(functions)) as stage:
             for name in functions:
-                with warmup():
-                    selected[name]()
+                try:
+                    with warmup():
+                        selected[name]()
+                except Exception as error:
+                    error.add_note(f"Warming compiled forward {name!r}")
+                    raise
                 stage.update(advance=1)
         return selected
 

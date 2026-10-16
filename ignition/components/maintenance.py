@@ -90,7 +90,7 @@ class PreparedMaintenance:
     """
 
     def __init__(self, mode, requests, transfer, slots, epochs, count, records, frame, sequence, *,
-                 world_size, capacity=4, admission_buffers=None):
+                 world_size, capacity=4, admission_buffers=None, buffers=None):
         if mode not in ("init", "restore", "snapshot") or (type(world_size) is not int or world_size < 1) or capacity not in BATCH_CAPACITIES or capacity > requests.capacity:
             raise ValueError("maintenance requires a supported transition, rank count, and row capacity")
         self.slots = requests.capacity
@@ -101,8 +101,10 @@ class PreparedMaintenance:
             _check_tensor(value, shape, dtype, device, name)
         fields = _completion_fields(records, device, self.slots)
         self.transfer, self.requests, self.admission = transfer, requests, None
-        self.validation_input = torch.zeros((1, max(8, 2 * self.slots)), dtype=torch.bfloat16, device=device)
-        self.validation_sum = torch.zeros_like(self.validation_input)
+        def zeros(shape, dtype):
+            return torch.zeros(shape, dtype=dtype, device=device) if buffers is None else buffers.zeros(shape, dtype)
+        self.validation_input = zeros((1, max(8, 2 * self.slots)), torch.bfloat16)
+        self.validation_sum = zeros(self.validation_input.shape, torch.bfloat16)
         if mode != "snapshot":
             if admission_buffers is None:
                 raise ValueError("reset and restore require request admission buffers")

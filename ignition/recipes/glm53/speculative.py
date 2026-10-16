@@ -1,8 +1,5 @@
 """Captured GLM proposals, packed target verification and accepted state commits."""
 
-import itertools
-import weakref
-
 import torch
 import triton
 import triton.language as tl
@@ -16,8 +13,7 @@ from ignition.components.speculation import (
     PreparedStochasticVerification, SpeculativeRngState,
 )
 from ignition.components.state import gather_rows, save_hidden
-from ignition.preparation.scratch import planned_scratch
-from ignition.preparation.tuning import register_finalizer
+from ignition.components.kda_speculation import PreparedKDAReplay as PreparedRecordedKDAReplay
 
 from .batch import PreparedBatch
 from .dcp import ContextShards
@@ -62,78 +58,30 @@ def convolution_regions(pool):
             *convolution[0].shape)
 
 
-@torch.library.custom_op("flare::glm_kda_commit", mutates_args=("backing",))
-def _kda_commit(backing: torch.Tensor, reads: list[torch.Tensor], handle: int) -> None:
-    from b12x.sequence import gdn_decode
-
-    gdn_decode.run_kda_commit(_COMMITS[handle].binding, lower_bound=-5.0)
-
-
-@_kda_commit.register_fake
-def _fake_kda_commit(backing, reads, handle) -> None:
-    pass
-
-
-_COMMITS = weakref.WeakValueDictionary()
-_COMMIT_HANDLES = itertools.count()
-
-
 class PreparedKDACommit:
-    """Replay each request's accepted verification records into its live KDA rows, for every layer.
-
-    Without a b12x recording plan (SM103), a Triton launch replays the records.
-    """
+    """Commit accepted KDA records to every live recurrent row."""
 
     def __init__(self, pool, records, plan, state_indices, num_seqs, *, session, workspace):
         layers = delta_layers(pool)
         if tuple(layers) != records.layers:
             raise ValueError("KDA commit requires records for every KDA layer")
-        device, batch = pool.backing.device, state_indices.shape[0]
         states = [pool.decoder.layers[i].recurrent for i in layers]
-        self.pool, self.plan, self.workspace = pool, plan, workspace
-        self.sources = state_indices
-        self.lengths = torch.zeros(batch, dtype=torch.int32, device=device)
-        self.replay = None
+        self.plan = plan
         if plan is None:
             from .kda_recovery import PreparedKDAReplay
 
+            self.lengths = torch.zeros(state_indices.shape[0], dtype=torch.int32, device=pool.backing.device)
             self.replay = PreparedKDAReplay(pool.backing, states, records, state_indices, self.lengths, num_seqs)
-            return
-        self.finals = torch.zeros(batch, dtype=torch.int32, device=device)
-        # Slot zero is the null row: no boundary checkpoint is exported.
-        self.boundaries = torch.zeros(batch, dtype=torch.int32, device=device)
-        self.boundary_lengths = torch.zeros(batch, dtype=torch.int32, device=device)
-        def table(values):
-            return torch.tensor(values, dtype=torch.int64, device=device)
-        corrections, records_kg = records.corrections, records.keys_and_gates
-        self.tables = dict(
-            state_base_addrs=table([s.data_ptr() for s in states]),
-            state_block_strides=table([s.stride(0) for s in states]),
-            correction_cache_base_addrs=table([corrections[i].data_ptr() for i in range(len(layers))]),
-            correction_cache_block_strides=table([corrections.stride(1)] * len(layers)),
-            kg_cache_base_addrs=table([records_kg[i].data_ptr() for i in range(len(layers))]),
-            kg_cache_block_strides=table([records_kg.stride(1)] * len(layers)),
-            A_log=records.A_log, dt_bias=records.dt_bias)
-        self.reads = [corrections, records_kg, self.sources, self.lengths, self.finals]
-        self.handle = next(_COMMIT_HANDLES)
-        _COMMITS[self.handle] = self
-        register_finalizer(session, self.bind, workspace=workspace)
-
-    def bind(self):
-        from b12x.sequence import gdn_decode
-
-        self.binding = gdn_decode.bind_kda_commit(self.plan,
-            scratch=planned_scratch(self.plan.scratch_specs(), self.workspace), **self.tables,
-            state_indices=self.sources, commit_lens=self.lengths, final_state_indices=self.finals,
-            boundary_state_indices=self.boundaries, boundary_recovery_lens=self.boundary_lengths)
+        else:
+            self.replay = PreparedRecordedKDAReplay(pool.backing, states, records, plan, state_indices,
+                session=session, workspace=workspace)
 
     def __call__(self, counts):
-        self.lengths.copy_(counts)
-        if self.replay is not None:
+        if self.plan is None:
+            self.lengths.copy_(counts)
             self.replay()
-            return
-        self.finals.copy_(self.sources)
-        _kda_commit(self.pool.backing, self.reads, self.handle)
+        else:
+            self.replay(counts)
 
 
 class SpeculativePreparation:

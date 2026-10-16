@@ -15,7 +15,7 @@ class PreparedResumeState:
     flags across ranks before gather(), using the same world size as preparation.
     """
 
-    def __init__(self, requests, saved_hidden, slots, epochs, count, *, world_size, state_rows):
+    def __init__(self, requests, saved_hidden, slots, epochs, count, *, world_size, state_rows, buffers=None):
         self.state_rows = state_rows
         self.capacity = requests.capacity
         rows, device = slots.numel(), requests.generation.device
@@ -32,10 +32,12 @@ class PreparedResumeState:
         self.requests, self.saved_hidden = requests, saved_hidden
         self.slots, self.epochs, self.count, self.world_size = slots, epochs, count, world_size
         self.row_ids, self.slot_ids = torch.arange(rows, device=device), torch.arange(self.capacity, device=device)
-        self.validation_input = torch.zeros((1, max(8, 2 * self.capacity)), dtype=torch.bfloat16, device=device)
-        self.validation_sum = torch.zeros_like(self.validation_input)
-        self.present = torch.zeros(self.capacity, dtype=torch.bool, device=device)
-        self.hidden = torch.zeros((rows, saved_hidden.shape[1]), dtype=torch.bfloat16, device=device)
+        def zeros(shape, dtype=torch.bfloat16):
+            return torch.zeros(shape, dtype=dtype, device=device) if buffers is None else buffers.zeros(shape, dtype)
+        self.validation_input = zeros((1, max(8, 2 * self.capacity)))
+        self.validation_sum = zeros(self.validation_input.shape)
+        self.present = zeros((self.capacity,), torch.bool)
+        self.hidden = zeros((rows, saved_hidden.shape[1]))
 
     def validate(self):
         r, slots = self.requests, self.slots.long()

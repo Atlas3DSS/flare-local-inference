@@ -1,0 +1,107 @@
+use crate::{
+    Result,
+    cache::ConditioningEvent,
+    frontend::{
+        Frontend, RenderedPrompt,
+        images::{ImageProcessor, RgbImage},
+    },
+    model::{PreparedInput, PromptData},
+};
+
+pub(crate) fn prepare_input(
+    frontend: &Frontend,
+    processor: Option<&ImageProcessor>,
+    rendered: &RenderedPrompt,
+    images: Vec<RgbImage>,
+) -> Result<PreparedInput> {
+    let ids = frontend.encode("<im_patch>", false)?;
+    let [image_token] = ids.as_slice() else {
+        return Err("image placeholder must encode one token".into());
+    };
+    if rendered
+        .token_ids
+        .iter()
+        .filter(|id| *id == image_token)
+        .count()
+        != images.len()
+    {
+        return Err("Step image placeholders do not match input images".into());
+    }
+    let processed = if images.is_empty() {
+        None
+    } else {
+        Some(
+            processor
+                .ok_or("image processing is unavailable")?
+                .process(&images)?,
+        )
+    };
+    let (mut tokens, mut data, mut conditioning) = (vec![], PromptData::default(), vec![]);
+    let (mut image, mut offset) = (0, 0);
+    let markers = [
+        "<patch_start>",
+        "<patch_end>",
+        "<patch_newline>",
+        "<im_start>",
+        "<im_end>",
+    ]
+    .map(|text| frontend.encode(text, false))
+    .into_iter()
+    .collect::<Result<Vec<_>>>()?;
+    for token in &rendered.token_ids {
+        if token != image_token {
+            tokens.push(*token);
+            data.vision_token_indices.push(-1);
+            continue;
+        }
+        let source = &images[image];
+        let g = &processed.as_ref().unwrap().geometry[image];
+        use sha2::{Digest, Sha256};
+        let mut hash = Sha256::new();
+        hash.update(b"flare-step-image-v1\0");
+        hash.update((source.width() as u64).to_le_bytes());
+        hash.update((source.height() as u64).to_le_bytes());
+        hash.update(source.pixels());
+        conditioning.push(ConditioningEvent {
+            position: tokens.len() as u64,
+            identity: hash.finalize().into(),
+        });
+        // Every crop has 81 features; the global view follows all crop rows.
+        for row in 0..g.grid_thw[1] {
+            for _ in 0..g.grid_thw[2] {
+                tokens.extend(&markers[0]);
+                data.vision_token_indices
+                    .extend(std::iter::repeat_n(-1, markers[0].len()));
+                tokens.extend(std::iter::repeat_n(*image_token, 81));
+                data.vision_token_indices
+                    .extend((offset..offset + 81).map(|i| i as i32));
+                offset += 81;
+                data.vision_token_indices
+                    .extend(std::iter::repeat_n(-1, markers[1].len()));
+                tokens.extend(&markers[1]);
+            }
+            if row + 1 < g.grid_thw[1] {
+                tokens.extend(&markers[2]);
+                data.vision_token_indices
+                    .extend(std::iter::repeat_n(-1, markers[2].len()));
+            }
+        }
+        tokens.extend(&markers[3]);
+        data.vision_token_indices
+            .extend(std::iter::repeat_n(-1, markers[3].len()));
+        tokens.extend(std::iter::repeat_n(*image_token, 169));
+        data.vision_token_indices
+            .extend((offset..offset + 169).map(|i| i as i32));
+        offset += 169;
+        tokens.extend(&markers[4]);
+        data.vision_token_indices
+            .extend(std::iter::repeat_n(-1, markers[4].len()));
+        image += 1;
+    }
+    Ok(PreparedInput {
+        tokens,
+        data,
+        conditioning,
+        images: processed,
+    })
+}

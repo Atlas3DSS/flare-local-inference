@@ -14,7 +14,7 @@ pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_TP_CUDA_TESTS") != "1"
 
 
 @torch.no_grad()
-def _rank(rank, world, rendezvous):
+def _rank(rank, world, rendezvous, vocab):
     from ignition.components.vocabulary import PreparedVocabularyProjection
     from ignition.preparation.collectives import (
         CollectivePreparation,
@@ -30,16 +30,18 @@ def _rank(rank, world, rendezvous):
                             timeout=timedelta(minutes=2))
     group = dist.group.WORLD
     coordinator = CollectivePreparation(group)
-    vocab, hidden, capacity = 154880, 256, 4
-    width = vocab // world
+    hidden, capacity = 256, 4
+    width = (vocab + world * 64 - 1) // (world * 64) * 64
     torch.manual_seed(42)
     full_weight = torch.randn(vocab, hidden, dtype=torch.bfloat16, device=device) * .0625
-    weight = full_weight[rank * width:(rank + 1) * width].clone()
+    weight = torch.zeros(width, hidden, dtype=torch.bfloat16, device=device)
+    valid_columns = min(width, vocab - rank * width)
+    weight[:valid_columns].copy_(full_weight[rank * width:rank * width + valid_columns])
     seed = torch.randn(capacity, hidden, dtype=torch.bfloat16, device=device) * .125
     source = seed.clone()
     local = torch.empty(capacity, width, dtype=torch.bfloat16, device=device)
     output = torch.empty(capacity, vocab, dtype=torch.bfloat16, device=device)
-    runtime = create_all_gather_runtime(group, device, max_rows=capacity, columns=vocab)
+    runtime = create_all_gather_runtime(group, device, max_rows=capacity, columns=width * world)
     graphs, heads, compiled = {}, {}, {}
     control = {"frame_index": torch.zeros(1, dtype=torch.int32, device=device),
                "submission_sequence": torch.zeros(1, dtype=torch.int64, device=device),
@@ -90,8 +92,8 @@ def _rank(rank, world, rendezvous):
                             "segment.all.allocated", "segment.all.freed"):
                     assert before[key] == after[key]
                 torch.testing.assert_close(output[:rows], expected, rtol=.016, atol=.002)
-                torch.testing.assert_close(output[:rows, rank * width:(rank + 1) * width],
-                                           local[:rows], rtol=0, atol=0)
+                torch.testing.assert_close(output[:rows, rank * width:rank * width + valid_columns],
+                                           local[:rows, :valid_columns], rtol=0, atol=0)
                 if rows < capacity:
                     assert output[rows:].isnan().all()
                 dist.barrier(group=group)
@@ -109,8 +111,9 @@ def _rank(rank, world, rendezvous):
 
 
 @pytest.mark.parametrize("world", [2, 4])
-def test_sharded_vocabulary_native_replay(world, tmp_path):
+@pytest.mark.parametrize("vocab", [154880, 128896])
+def test_sharded_vocabulary_native_replay(world, vocab, tmp_path):
     assert os.environ.get("CUDA_VISIBLE_DEVICES")
     if torch.cuda.device_count() < world:
         pytest.skip(f"requires {world} assigned CUDA devices")
-    mp.spawn(_rank, args=(world, (tmp_path / "rendezvous").as_uri()), nprocs=world, join=True)
+    mp.spawn(_rank, args=(world, (tmp_path / "rendezvous").as_uri(), vocab), nprocs=world, join=True)

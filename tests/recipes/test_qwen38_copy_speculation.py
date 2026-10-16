@@ -178,8 +178,17 @@ def test_copy_round_constructs_no_draft_module_and_commits_only_verified_prefix(
         operator.library_scratch = ()
         operator._prepared = True
 
+    def normalize_one_hot(operator, probabilities, params):
+        assert params[:, 2].eq(0).all()
+        assert ((probabilities == 0) | (probabilities == 1)).all()
+        assert probabilities.sum(-1).eq(1).all()
+        operator.output.copy_(probabilities)
+        return operator.output
+
     monkeypatch.setattr("ignition.components.speculation.filter_probabilities",
                         lambda scores, *args: torch.softmax(scores, -1))
+    monkeypatch.setattr("ignition.components.probability_normalization.PreparedProbabilityNormalization.__call__",
+                        normalize_one_hot)
     monkeypatch.setattr("ignition.components.speculation.verify_chain", OneHotLibrary.chain_speculative_sampling)
     monkeypatch.setattr(module.PreparedSpeculativeDistributions, "prepare", prepare_cpu)
     monkeypatch.setattr(module.PreparedStochasticVerification, "prepare", prepare_cpu)

@@ -122,3 +122,10 @@ path = "tests/tools/test_kimi3_images.rs"
 required-features = ["server", "test-tools"]
 test = false
 bench = false
+
+[[bin]]
+name = "test_step_images"
+path = "tests/tools/test_step_images.rs"
+required-features = ["server", "test-tools"]
+test = false
+bench = false

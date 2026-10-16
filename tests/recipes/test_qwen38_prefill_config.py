@@ -52,10 +52,12 @@ def test_capture_covers_every_runtime_reduction(concurrency, maximum):
     widths = tuple(range(1, maximum + 1))
     config = PreparationConfig(max_active=concurrency, mtp=True, speculative_widths=widths)
     assert set(config.speculative_shapes) == {
-        (batch, width) for batch in batch_capacities(concurrency) for width in widths}
+        (batch, width) for batch in batch_capacities(concurrency) for width in widths
+        if width == 1 or batch * width <= max(batch_capacities(concurrency)[-1], maximum)}
     for active in range(1, concurrency + 1):
         for width in widths:
-            assert all((batch, width) in config.speculative_shapes for batch in batch_capacities(active))
+            assert all((batch, width) in config.speculative_shapes for batch in batch_capacities(active)
+                       if width == 1 or batch * width <= max(batch_capacities(concurrency)[-1], maximum))
 
 
 def test_copy_only_uses_the_verification_catalog_without_mtp_proposals():
@@ -71,7 +73,7 @@ def test_fixed_serving_default_does_not_remove_capture_variants(drafts):
 
     config = PreparationConfig(mtp=True, speculative_widths=tuple(range(1, 9)),
                                speculative_fixed_width=drafts + 1)
-    assert config.speculative_shapes == tuple((b, w) for b in (1, 2, 4) for w in range(8, 0, -1))
+    assert config.speculative_shapes == tuple((b, w) for b in (1, 2, 4) for w in range(8, 0, -1) if w == 1 or b * w <= 8)
     for batch, width in config.speculative_shapes:
         GraphSignature("speculative", batch, width)
 

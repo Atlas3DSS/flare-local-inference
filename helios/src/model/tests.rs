@@ -26,7 +26,7 @@ pub(super) fn config() -> ModelConfig {
         max_new_tokens: 256,
         speculative_widths: Vec::new(),
         speculative_fixed_width: None,
-        proposal_confidence_threshold: 0.15,
+        speculative_token_capacity: 512,
         history_drafts: true,
         speculative_proposal_source: Default::default(),
     }
@@ -1191,7 +1191,7 @@ fn vision_upload_fixture_retains_second_image_feature_offset() {
 }
 
 #[test]
-fn retained_proposal_catalog_requires_all_prefixes_and_one_lane_before_execution() {
+fn retained_proposal_catalog_requires_prefix_coverage_and_proposal_free_decode() {
     let mut config = config();
     config.limits.max_active = 1;
     config.limits.request_slots = 1;
@@ -1217,6 +1217,10 @@ fn retained_proposal_catalog_requires_all_prefixes_and_one_lane_before_execution
     for state in &mut semantics.state {
         state.access = StateAccessKind::Read;
     }
+    let mut decode = manifest.graphs.iter().find(|g| g.kind == GraphKind::Speculative && g.token_capacity == 1).unwrap().clone();
+    let mut decode_contract = config.contract.graph(&decode.name).unwrap().clone();
+    decode.name = "Speculative-free-1".into();
+    decode_contract.graph = decode.name.clone();
     for graph in &mut manifest.graphs {
         if graph.kind == GraphKind::Speculative {
             graph.kind = GraphKind::Verification;
@@ -1227,6 +1231,8 @@ fn retained_proposal_catalog_requires_all_prefixes_and_one_lane_before_execution
             graph.kind = GraphOperation::Verification;
         }
     }
+    manifest.graphs.push(decode);
+    config.contract.graphs.push(decode_contract);
     manifest.graphs.push(proposal);
     config.contract.graphs.push(semantics);
     for (index, graph) in manifest.graphs.iter_mut().enumerate() {
@@ -1256,6 +1262,6 @@ fn retained_proposal_catalog_requires_all_prefixes_and_one_lane_before_execution
     let mut multiple = config.clone();
     multiple.limits.max_active = 2;
     assert!(catalog::validate(&multiple, &manifest).is_err());
-    config.proposal_confidence_threshold = f64::NAN;
+    config.speculative_token_capacity = 0;
     assert!(catalog::validate(&config, &manifest).is_err());
 }

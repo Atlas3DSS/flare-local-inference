@@ -17,7 +17,7 @@ from ignition.preparation.collectives import (
     create_all_reduce_runtime,
     create_roce_runtime,
 )
-from ignition.components.capacity import batch_capacities, request_capacity
+from ignition.components.capacity import speculative_token_capacity, batch_capacities, request_capacity
 from ignition.components.sampling import AdmissionBuffers
 from ignition.preparation import inspect_qwen38_checkpoint
 from ignition.preparation.capture import capture_forwards
@@ -75,6 +75,7 @@ class PreparationConfig:
     speculative_proposal_source: str = "mtp"
     speculative_widths: tuple[int, ...] = (1, 2, 3, 4, 5, 6)
     speculative_fixed_width: int | None = None
+    speculative_token_capacity: int | None = None
     history_drafts: bool = False
     # Run shared experts, small-batch attention projections and selection, and GDN input projections
     # on an auxiliary stream; without overlap every branch runs serially on the main stream.
@@ -151,13 +152,14 @@ class PreparationConfig:
         modes = (True, False) if self.mtp else (False,)
         return tuple((enabled, b, w, p) for enabled in modes
             for b, w, p in mixed_shapes(self.max_active, self.prefill_chunk_size,
-                                        self.speculative_widths if enabled else (1,)))
+                                        self.speculative_widths if enabled else (1,),
+                                        self.speculative_token_capacity if enabled else None))
 
     @property
     def speculative_shapes(self) -> tuple[tuple[int, int], ...]:
         from ignition.components.capacity import speculative_shapes
 
-        return speculative_shapes(self.max_active, self.speculative_widths)
+        return speculative_shapes(self.max_active, self.speculative_widths, self.speculative_token_capacity)
 
     @property
     def prefill_capacities(self) -> tuple[int, ...]:
@@ -244,7 +246,7 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
     collectives = dict(runtime=collective, vocabulary_runtime=vocabulary_collective, coordinator=coordinator)
     session = preparation_session(device=device, checkpoint=REVISION, coordinator=coordinator,
         namespace={"config": manifest.metadata_sha256["config.json"], "headers": manifest.headers_sha256, "world_size": shard.world_size},
-        headroom_bytes=config.headroom_bytes)
+        headroom_bytes=config.headroom_bytes, benchmark_storage=package_storage)
     session.__enter__()
     graphs = {}
     try:
@@ -436,7 +438,8 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
             captured, compiled = capture_forwards(functions, signatures, session=session, device=device,
                 stream=stream, pool=graph_pool, compile_decoder=compile_decoder, materialize=materialize,
                 progress=progress, label=label, cache_root=config.kernel_cache,
-                collective=collective, coordinator=coordinator, retain_graphs=config.retain_graphs)
+                collective=collective, coordinator=coordinator, retain_graphs=config.retain_graphs,
+                warmup_storage=package_storage)
             graphs.update(captured)
             compiled_functions.clear()
             compiled_functions.update(compiled)
@@ -498,6 +501,7 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
         if speculation is not None:
             memory.update(mtp_weights_bytes=0 if mtp_weights is None else mtp_weights.allocated_bytes,
                 speculative_widths=config.speculative_widths,
+            speculative_token_capacity=speculative_token_capacity(config.max_active, max(config.speculative_widths), config.speculative_token_capacity),
                 speculative_shapes=config.speculative_shapes,
                 speculative_proposal_source=config.speculative_proposal_source,
                 speculative_state_columns=8, draft_raw_ring_capacity=layout.draft_ring_capacity if has_mtp else 0,
@@ -520,6 +524,7 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
                        for name, (filename, digest) in hashes.items()}}
         if speculation is not None:
             server_config.update(speculative_widths=config.speculative_widths,
+            speculative_token_capacity=speculative_token_capacity(config.max_active, max(config.speculative_widths), config.speculative_token_capacity),
                 speculative_proposal_source=config.speculative_proposal_source,
                 speculative_fixed_width=config.speculative_fixed_width,
                 history_drafts=config.history_drafts)

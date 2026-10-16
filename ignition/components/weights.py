@@ -27,6 +27,23 @@ class MLPWeights:
     down: Weight | torch.Tensor
 
 
+def quantize_bf16_linear_as_mxfp8(weight):
+    """Convert a BF16 projection to b12x MXFP8 storage during loading."""
+    import torch
+    from b12x.gemm._shared.wo_mxfp8 import quantize_mxfp8_rows_torch
+    from b12x.gemm.blockscaled._linear import MXFP8LinearWeight
+
+    if (weight.ndim != 2 or weight.dtype != torch.bfloat16 or not weight.is_cuda
+            or min(weight.shape) <= 0 or weight.shape[1] % 32):
+        raise ValueError("MXFP8 conversion requires a BF16 CUDA matrix with 32-aligned input width")
+    if not bool(torch.isfinite(weight).all()):
+        raise ValueError("MXFP8 conversion requires finite BF16 weights")
+    rows, columns = weight.shape
+    padded = (columns + 127) // 128 * 128
+    source = weight if columns == padded else torch.nn.functional.pad(weight, (0, padded - columns))
+    return MXFP8LinearWeight(quantize_mxfp8_rows_torch(source), columns, padded, rows)
+
+
 def _release_unused_contexts(device):
     """Destroy primary contexts that checkpoint reads opened on other visible GPUs.
 
@@ -341,16 +358,101 @@ class DirectWeightLoader:
                            in_features=columns)
         return pack_weight(values, scales, recipe="mxfp8")
 
+    def load_bf16_experts_as_nvfp4(
+        self, prefix, *, num_experts, hidden_size, intermediate_size,
+        intermediate_range=None, swiglu_limit=None, swiglu_clamp_after_silu=False,
+        scale_compression=None, scale_scratch=None,
+    ):
+        """Quantize stacked BF16 expert shards once for NVFP4 W4A16 execution.
+
+        Gate and up share one global scale per expert shard; down has its own.
+        Staging holds one expert. Zero intermediate channels align packed W4A16
+        tiles without changing the live channels or their TP partition.
+        CSF compression requires two caller-owned scale expansion buffers.
+        """
+        import torch
+        from flashinfer import fp4_quantize
+        from b12x.moe import fused_moe as moe
+        from ignition.preparation.tensor_metadata import record_numeric_tensor
+
+        self._require_open()
+        sources = {}
+        for projection in ("up", "gate", "down"):
+            name = f"{prefix}.{projection}_proj.weight"
+            source = self._sources[name]
+            shape = ((num_experts, hidden_size, intermediate_size) if projection == "down"
+                     else (num_experts, intermediate_size, hidden_size))
+            if source.dtype != torch.bfloat16 or source.shape != shape:
+                raise ValueError(f"{name}: storage disagrees with BF16 expert geometry")
+            sources[projection] = source
+        if hidden_size % 128:
+            raise ValueError("NVFP4 W4A16 experts require hidden size divisible by 128")
+        first, last = _aligned_range(intermediate_range, intermediate_size, 16)
+        local = last - first
+        padded = (local + 127) // 128 * 128
+        plan = moe.plan_weights(
+            source=moe.PackedSource(format="modelopt_nvfp4", w13_layout="w13"),
+            activation=moe.ActivationSpec(mode="a16", nonlinearity="silu", io_dtype=torch.bfloat16,
+                swiglu_limit=swiglu_limit, swiglu_clamp_after_silu=swiglu_clamp_after_silu),
+            geometry=moe.MoEGeometry(num_experts=num_experts, hidden_size=hidden_size,
+                                     intermediate_size=padded),
+            constraints=moe.WeightPlanConstraints(scale_compression=scale_compression))
+        w13 = torch.empty((num_experts, 2 * padded, hidden_size // 2), dtype=torch.uint8, device=self.device)
+        w2 = torch.empty((num_experts, hidden_size, padded // 2), dtype=torch.uint8, device=self.device)
+        s13 = torch.empty((num_experts, 2 * padded, hidden_size // 16), dtype=torch.float8_e4m3fn, device=self.device)
+        s2 = torch.empty((num_experts, hidden_size, padded // 16), dtype=torch.float8_e4m3fn, device=self.device)
+        g13, g2 = (torch.empty(num_experts, dtype=torch.float32, device=self.device) for _ in range(2))
+        up_gate = torch.zeros((2 * padded, hidden_size), dtype=torch.bfloat16, device=self.device)
+        down = torch.zeros((hidden_size, padded), dtype=torch.bfloat16, device=self.device)
+        down_stage = torch.empty((hidden_size, local), dtype=torch.bfloat16, device=self.device)
+        stream = torch.cuda.current_stream(self.device)
+        stream.synchronize()
+        for expert in range(num_experts):
+            self._copy(up_gate[:local], sources["up"][expert, first:last])
+            self._copy(up_gate[padded:padded + local], sources["gate"][expert, first:last])
+            self._copy(down_stage, sources["down"][expert, :, first:last])
+            self._session.flush()
+            down[:, :local].copy_(down_stage)
+            for source, values, scales, gains in ((up_gate, w13, s13, g13), (down, w2, s2, g2)):
+                amax = source.abs().amax().float()
+                if not bool(torch.isfinite(amax)):
+                    raise ValueError(f"{prefix}: expert {expert} contains nonfinite BF16 weights")
+                gain = torch.where(amax > 0, (amax / (448 * 6)).clamp_min(torch.finfo(torch.float32).tiny), 1.)
+                packed, blocks = fp4_quantize(source, gain.reciprocal().reshape(1),
+                    sf_vec_size=16, sf_use_ue8m0=False, is_sf_swizzled_layout=True,
+                    nvfp4_4over6=None)
+                values[expert].copy_(packed)
+                scales[expert].copy_(blocks.view(torch.float8_e4m3fn))
+                gains[expert].copy_(gain)
+            # Direct transfers may use another stream; finish quantization before reusing staging.
+            stream.synchronize()
+        del up_gate, down, down_stage, source, packed, blocks
+        for tensor in (w13, w2, s13, s2, g13, g2):
+            record_numeric_tensor(tensor)
+        return moe.prepare_weights(plan=plan, weights=moe.PackedWeights(
+            w13=w13, w2=w2, w13_block_scales=s13, w2_block_scales=s2,
+            w13_global_scales=g13, w2_global_scales=g2), scale_scratch=scale_scratch)
+
     def load_fp4_experts(self, prefixes, *, hidden_size, intermediate_size, format, activation_mode,
                          intermediate_range=None, scale_vectors=None, swiglu_limit=None,
+                         swiglu_clamp_after_silu=False,
+                         scale_compression=None, scale_scratch=None,
                          projection_names=("up_proj", "gate_proj", "down_proj"), scale_name="weight_scale"):
-        """Prepare ordinary NVFP4 or MXFP4 expert storage through b12x."""
+        """Prepare NVFP4 or MXFP4 experts, optionally compressing their block scales.
+
+        CSF compression requires two caller-owned expansion buffers. Serial
+        routed layers may share those buffers; overlapping calls must not.
+        """
         import torch
         from b12x.moe import fused_moe as moe
         from b12x._lib.intrinsics import swizzle_block_scale
+        from .sm103 import is_sm103
 
         self._require_open()
         prefixes = tuple(prefixes)
+        sm103 = is_sm103(self.device)
+        if sm103 and (scale_compression is not None or scale_scratch is not None):
+            raise ValueError("SM103 FP4 experts do not support load-time scale compression")
         up_name, gate_name, down_name = projection_names
         if format not in ("nvfp4", "mxfp4"):
             raise ValueError("ordinary FP4 experts require NVFP4 or MXFP4")
@@ -414,23 +516,27 @@ class DirectWeightLoader:
             self._copy(target, values)
             device_scales.append(target)
         self._session.flush()
-        from .sm103 import is_sm103
-
-        if is_sm103(self.device):
+        if sm103:
+            if swiglu_clamp_after_silu:
+                raise ValueError("SM103 FP4 experts do not support post-SiLU clamping")
             return _sm103_fp4_experts(w13, s13, w2, s2, vectors, format=format,
                                       activation_mode=activation_mode, swiglu_limit=swiglu_limit)
         plan = moe.plan_weights(
             source=moe.PackedSource(format="modelopt_nvfp4" if format == "nvfp4" else "fp4_e8m0_k32", w13_layout="w13"),
             activation=moe.ActivationSpec(mode=activation_mode, nonlinearity="silu", io_dtype=torch.bfloat16,
-                                          swiglu_limit=swiglu_limit),
-            geometry=moe.MoEGeometry(num_experts=count, hidden_size=hidden_size, intermediate_size=local))
+                                          swiglu_limit=swiglu_limit,
+                                          swiglu_clamp_after_silu=swiglu_clamp_after_silu),
+            geometry=moe.MoEGeometry(num_experts=count, hidden_size=hidden_size, intermediate_size=local),
+            constraints=moe.WeightPlanConstraints(scale_compression=scale_compression))
         gains = {} if not device_scales else dict(w13_global_scales=device_scales[0], w2_global_scales=device_scales[1])
         if activation_mode == "a4":
             gains.update(input_scale=device_scales[2], intermediate_scale=device_scales[3], immutable_input_scales=True)
-        return moe.prepare_weights(plan=plan, weights=moe.PackedWeights(
+        packed = moe.PackedWeights(
             w13=w13, w2=w2,
             w13_block_scales=swizzle_block_scale(s13) if format == "nvfp4" else s13,
-            w2_block_scales=swizzle_block_scale(s2) if format == "nvfp4" else s2, **gains))
+            w2_block_scales=swizzle_block_scale(s2) if format == "nvfp4" else s2, **gains)
+        del s13, s2, blocks
+        return moe.prepare_weights(plan=plan, weights=packed, scale_scratch=scale_scratch)
 
     def load_mxfp4_experts(
         self, prefixes, *, hidden_size, intermediate_size, scale_scratch,

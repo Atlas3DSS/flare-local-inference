@@ -1078,7 +1078,8 @@ def test_operator_benchmark_owners_release_after_trial_close(backend, operator):
             call = hyperconnection.benchmark_call(state, "scaled_silu", (source, output), {})
         elif operator == "varlen_attention":
             arguments = dict(q=source.view(4, 2, 16), k=source.view(4, 2, 16),
-                v=source.view(4, 2, 16), cu_seqlens_q=torch.zeros(3, dtype=torch.int32))
+                v=source.view(4, 2, 16), cu_seqlens_q=torch.zeros(3, dtype=torch.int32),
+                max_seqlen_q=2, max_seqlen_k=2)
             call = varlen_attention.benchmark_call(state, arguments=arguments,
                 session=session, workspace=None)
         elif operator == "mtp_feedback":

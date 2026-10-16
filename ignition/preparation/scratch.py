@@ -218,6 +218,10 @@ def scratch_storage(workspace, *, nbytes, device):
 
 def bind_scratch(layout, *, device, workspace=None):
     """Bind contiguous operand prefixes from caller-owned, typed capacity buffers."""
+    if isinstance(workspace, GraphBuffers):
+        if workspace.pool.device != torch.device(device):
+            raise ValueError("graph scratch and operands must share a device")
+        return {name: workspace.zeros(shape, dtype) for name, (shape, dtype) in layout.items()}
     if workspace is None:
         return {name: torch.empty(shape, dtype=dtype, device=device)
                 for name, (shape, dtype) in layout.items()}
@@ -351,7 +355,7 @@ class GraphBuffers:
         return self._take(shape, dtype).fill_(value)
 
     def _take(self, shape, dtype):
-        shape = tuple(shape)
+        shape = (shape,) if isinstance(shape, int) else tuple(shape)
         if any(type(dim) is not int or dim < 0 for dim in shape):
             raise ValueError("graph buffer dimensions must be nonnegative integers")
         count = prod(shape)

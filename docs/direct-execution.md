@@ -107,6 +107,14 @@ its committed tokens and deliveries, as in `helios/src/scheduler/service.rs`.
 `tests/direct/test_helios_decode_rounds.py` checks every round against the
 rounds Helios chose for the same requests, graph times and acceptance.
 
+For separate proposal and verification catalogs, a direct step runs the proposal
+at the loaded depth followed by its selected verification graph. Its timing
+covers both graphs. Width selection uses the preceding round's native confidence
+curve, and proposal execution reserves the complete draft block's randomness.
+The diagnostic scheduler does not retain proposals across steps or regroup
+requests using fresh confidence. Those behaviors are exercised through native
+Helios serving.
+
 The scheduling clock, which ages requests and expires estimates, advances by
 each step's graph time, and by wall time only while the loop waits for
 requests. Helios's clock is wall time, but its host work between rounds is

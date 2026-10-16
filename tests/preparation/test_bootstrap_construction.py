@@ -31,6 +31,8 @@ def forbid_cuda_initialization(monkeypatch):
 class MetadataValues(TorchDispatchMode):
     """Track small integer metadata on CPU while all large/model storage stays meta."""
 
+    supports_higher_order_operators = True
+
     def __torch_dispatch__(self, func, types, args=(), kwargs=None):
         kwargs = kwargs or {}
         if func == torch.ops.aten._local_scalar_dense.default:
@@ -234,10 +236,10 @@ def _install_boundaries(monkeypatch, checkpoint):
     from b12x.preparation.types import DeviceIdentity
     from triton.runtime.jit import JITFunction
 
+    from ignition.components import gated_delta
     from ignition.preparation import tuning
     from ignition.recipes.qwen38 import (
         attention,
-        gdn,
         hyperconnection,
         moe,
         mtp,
@@ -377,9 +379,9 @@ def _install_boundaries(monkeypatch, checkpoint):
         attention.qsa,
         attention.paged_kv_write,
         hyperconnection.hc,
-        gdn.short_conv,
-        gdn.gdn_prefill,
-        gdn.gdn_decode,
+        gated_delta.short_conv,
+        gated_delta.gdn_prefill,
+        gated_delta.gdn_decode,
         moe.fused_moe,
         ple.ple_embedding,
         vision.varlen,
@@ -607,7 +609,6 @@ def _install_boundaries(monkeypatch, checkpoint):
         "attention",
         "decoder",
         "decoder_state",
-        "gdn",
         "hyperconnection",
         "maintenance",
         "mtp",
@@ -620,7 +621,8 @@ def _install_boundaries(monkeypatch, checkpoint):
         "vision",
         "vision_state",
     )
-    for name in ("ignition.components.linear", "ignition.components.speculation", *("ignition.recipes.qwen38." + name for name in modules)):
+    for name in ("ignition.components.linear", "ignition.components.speculation", "ignition.components.gated_delta",
+                 *("ignition.recipes.qwen38." + name for name in modules)):
         module = importlib.import_module(name)
         for cls in vars(module).values():
             if not inspect.isclass(cls) or cls.__module__ != module.__name__:

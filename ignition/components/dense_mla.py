@@ -8,26 +8,30 @@ from ignition.preparation.scratch import planned_scratch, prime_owners
 from ignition.preparation.tuning import benchmark_resource, declare, register_finalizer
 
 
-@torch.library.custom_op("flare::dense_mla", mutates_args=("output", "scratch"))
+@torch.library.custom_op("flare::dense_mla", mutates_args=("output", "scratch", "lse"))
 def _attend(q: torch.Tensor, cache: torch.Tensor, output: torch.Tensor, pages: torch.Tensor,
-            lengths: torch.Tensor, starts: torch.Tensor, scratch: list[torch.Tensor], handle: int, scale: float) -> None:
+            lengths: torch.Tensor, starts: torch.Tensor, scratch: list[torch.Tensor], handle: int, scale: float,
+            lse: torch.Tensor | None) -> None:
     plan = plan_from_handle(handle)
     binding = dense_mla.bind(plan, q=q, kv_cache=cache, output=output, page_table=pages,
         cache_seqlens=lengths, cu_seqlens_q=starts, scratch=scratch, sm_scale=scale)
-    dense_mla.run(binding=binding)
+    _, logsumexp = dense_mla.run(binding=binding)
+    if lse is not None:
+        lse.copy_(logsumexp)
 
 
 @_attend.register_fake
-def _fake_attend(q, cache, output, pages, lengths, starts, scratch, handle, scale):
+def _fake_attend(q, cache, output, pages, lengths, starts, scratch, handle, scale, lse):
     pass
 
 
 class PreparedDenseMLA:
-    def __init__(self, query, cache, output, page_table, lengths, starts, *, caps, scale, session, name, workspace):
+    def __init__(self, query, cache, output, page_table, lengths, starts, *, caps, scale, session, name, workspace, lse=None):
         self.arguments = dict(q=query, kv_cache=cache, output=output, page_table=page_table,
                               cache_seqlens=lengths, cu_seqlens_q=starts)
         self.plan = dense_mla.plan(caps, invocation=dense_mla.invocation_from_tensors(caps, **self.arguments))
         self.output, self.scale = output, float(scale)
+        self.lse = lse
 
         def prepare(state, arguments):
             scratch = planned_scratch(state.scratch_specs(), workspace)
@@ -75,5 +79,5 @@ class PreparedDenseMLA:
     def __call__(self):
         a = self.arguments
         _attend(a["q"], a["kv_cache"], a["output"], a["page_table"], a["cache_seqlens"],
-                a["cu_seqlens_q"], self.scratch, self.plan.handle, self.scale)
+                a["cu_seqlens_q"], self.scratch, self.plan.handle, self.scale, self.lse)
         return self.output

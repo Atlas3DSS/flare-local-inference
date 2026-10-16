@@ -27,6 +27,7 @@ class PreparedMaintenance:
         admission_buffers,
         draft_state=True,
         page_tokens=PAGE_TOKENS,
+        buffers=None,
     ):
         self.pool, self.commands, self.inputs, self.requests = pool, commands, inputs, requests
         self.page_tokens = page_tokens
@@ -54,6 +55,7 @@ class PreparedMaintenance:
             world_size=1 if runtime is None else runtime.world_size,
             capacity=capacity,
             admission_buffers=admission_buffers,
+            buffers=buffers,
         )
         self.state.prepare()
         self.validation = PreparedAllReduce(

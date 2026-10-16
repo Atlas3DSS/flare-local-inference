@@ -19,9 +19,9 @@ fn cubic(x: f64) -> f64 {
     }
 }
 
-fn axis(input: usize, output: usize, pillow: bool) -> Axis {
+fn axis(input: usize, output: usize, pillow: bool, linear: bool) -> Axis {
     let scale = input as f64 / output as f64;
-    let support = 2.0 * scale.max(1.0);
+    let support = (if linear { 1.0 } else { 2.0 }) * scale.max(1.0);
     let inverse_scale = if scale >= 1.0 { 1.0 / scale } else { 1.0 };
     let max_taps = support.ceil() as usize * 2 + 1;
     let mut maximum = 0.0f64;
@@ -32,7 +32,14 @@ fn axis(input: usize, output: usize, pillow: bool) -> Axis {
             let end = ((center + support + 0.5) as usize).min(input);
             let count = (end - start).min(max_taps);
             let mut weights: Vec<_> = (0..count)
-                .map(|j| cubic((j as f64 + start as f64 - center + 0.5) * inverse_scale))
+                .map(|j| {
+                    let x = (j as f64 + start as f64 - center + 0.5) * inverse_scale;
+                    if linear {
+                        (1.0 - x.abs()).max(0.0)
+                    } else {
+                        cubic(x)
+                    }
+                })
                 .collect();
             let sum: f64 = weights.iter().sum();
             if sum != 0.0 {
@@ -79,19 +86,23 @@ fn axis(input: usize, output: usize, pillow: bool) -> Axis {
 }
 
 pub(super) fn resize(input: &RgbImage, width: usize, height: usize) -> Vec<u8> {
-    resample(input, width, height, false)
+    resample(input, width, height, false, false)
 }
 
 pub(super) fn pillow(input: &RgbImage, width: usize, height: usize) -> Vec<u8> {
-    resample(input, width, height, true)
+    resample(input, width, height, true, false)
 }
 
-fn resample(input: &RgbImage, width: usize, height: usize, pillow: bool) -> Vec<u8> {
+pub(super) fn bilinear(input: &RgbImage, width: usize, height: usize) -> Vec<u8> {
+    resample(input, width, height, false, true)
+}
+
+fn resample(input: &RgbImage, width: usize, height: usize, pillow: bool, linear: bool) -> Vec<u8> {
     let source = &input.pixels;
     let horizontal = if width == input.width {
         None
     } else {
-        let axis = axis(input.width, width, pillow);
+        let axis = axis(input.width, width, pillow, linear);
         let mut pixels = vec![0; input.height * width * 3];
         for y in 0..input.height {
             for (x, (start, weights)) in axis.taps.iter().enumerate() {
@@ -112,7 +123,7 @@ fn resample(input: &RgbImage, width: usize, height: usize, pillow: bool) -> Vec<
     if height == input.height {
         return source.clone();
     }
-    let axis = axis(input.height, height, pillow);
+    let axis = axis(input.height, height, pillow, linear);
     let mut pixels = vec![0; height * width * 3];
     for (y, (start, weights)) in axis.taps.iter().enumerate() {
         for x in 0..width * 3 {

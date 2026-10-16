@@ -6,6 +6,7 @@ from ignition.components.collectives import PreparedAllReduce
 from ignition.components.resume import PreparedResumeState
 from ignition.components.sampling import PreparedCompletion, PreparedSampling
 from ignition.components.vocabulary import PreparedVocabularyProjection
+from ignition.preparation.scratch import bind_scratch
 
 
 class PreparedResume:
@@ -26,6 +27,7 @@ class PreparedResume:
         session,
         name,
         activation_mode="a16",
+        buffers=None,
     ):
         self.state = PreparedResumeState(
             requests,
@@ -35,6 +37,7 @@ class PreparedResume:
             inputs.live_rows,
             world_size=weights.shard.world_size,
             state_rows=inputs.request_state_rows,
+            buffers=buffers,
         )
         self.validation = PreparedAllReduce(
             self.state.validation_input,
@@ -44,14 +47,12 @@ class PreparedResume:
             session=session,
             name=name + ".validation",
         )
-        self.local_logits = torch.empty(
-            (rows, requests.vocab_size // weights.shard.world_size),
-            dtype=torch.bfloat16,
-            device=pool.backing.device,
-        )
-        self.logits = torch.empty(
-            (rows, requests.vocab_size), dtype=torch.bfloat16, device=pool.backing.device
-        )
+        def empty(shape):
+            return (torch.empty(shape, dtype=torch.bfloat16, device=pool.backing.device) if buffers is None
+                    else buffers.zeros(shape, torch.bfloat16))
+        self.local_logits = empty((rows, weights.head.shape[0] if isinstance(weights.head, torch.Tensor)
+                                   else weights.head.out_features))
+        self.logits = empty((rows, requests.vocab_size))
         self.projection = PreparedVocabularyProjection(
             self.state.hidden,
             weights.head,
@@ -62,6 +63,7 @@ class PreparedResume:
             session=session,
             name=name + ".head",
             activation_mode=activation_mode,
+            buffers=buffers,
         )
         args = (
             requests,
@@ -73,8 +75,12 @@ class PreparedResume:
             sequence,
         )
         self.replicated_sampling = weights.draft is not None
+        # Shared forward artifacts require identical pool layouts on sampling and consuming ranks.
+        sampling_workspace = None if buffers is None else bind_scratch(
+            PreparedSampling.scratch_layout(rows, requests.vocab_size),
+            device=self.logits.device, workspace=buffers)
         self.completion = (
-            PreparedSampling(self.logits, *args)
+            PreparedSampling(self.logits, *args, workspace=sampling_workspace)
             if weights.shard.rank == 0 or self.replicated_sampling
             else PreparedCompletion(*args)
         )

@@ -9,6 +9,7 @@ from pathlib import Path
 import torch
 
 from ignition.components.capacity import (
+    speculative_token_capacity,
     batch_capacities,
     prefill_capacities,
     request_capacity,
@@ -54,7 +55,6 @@ class PreparationConfig:
     context: int = 1048576
     prefill_chunk_size: int = 4096
     max_active: int = 4
-    minimum_pages: int = 8
     snapshot_budget_bytes: int = 4 << 30
     headroom_bytes: int = 4 << 30
     compile_decoder: bool = True
@@ -63,6 +63,7 @@ class PreparationConfig:
     dspark: bool = True
     speculative_widths: tuple[int, ...] = (1, 2, 3, 4, 5, 6)
     speculative_fixed_width: int | None = None
+    speculative_token_capacity: int | None = None
     # Run single-row decode's shared expert on an auxiliary stream; without overlap it runs serially.
     stream_overlap: bool = True
 
@@ -86,8 +87,8 @@ class PreparationConfig:
             and self.speculative_fixed_width not in self.speculative_widths
         ):
             raise ValueError("fixed verification width must belong to the prepared widths")
-        if self.minimum_pages <= 0 or self.snapshot_budget_bytes <= 0 or self.headroom_bytes < 0:
-            raise ValueError("page and snapshot budgets must be positive and headroom nonnegative")
+        if self.snapshot_budget_bytes <= 0 or self.headroom_bytes < 0:
+            raise ValueError("snapshot budget must be positive and headroom nonnegative")
 
     @property
     def request_capacity(self):
@@ -105,7 +106,7 @@ class PreparationConfig:
     def speculative_shapes(self):
         from ignition.components.capacity import speculative_shapes
 
-        return speculative_shapes(self.max_active, self.speculative_widths) if self.dspark else ()
+        return speculative_shapes(self.max_active, self.speculative_widths, self.speculative_token_capacity) if self.dspark else ()
 
     @property
     def decode_tokens(self):
@@ -138,10 +139,9 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         if snapshots < 1:
             raise ValueError("snapshot budget must hold a complete DeepSeek continuation")
         slots, blocks = config.request_capacity, config.context // PAGE_TOKENS
-        state_rows = snapshots + slots * (max(config.speculative_widths) if config.dspark else 1)
-        initial_pages = max(
-            config.minimum_pages, (config.prefill_chunk_size + PAGE_TOKENS - 1) // PAGE_TOKENS, 2 * slots
-        )
+        execution_rows = slots * (max(config.speculative_widths) if config.dspark else 1)
+        state_rows = snapshots + execution_rows
+        initial_pages = (config.prefill_chunk_size + PAGE_TOKENS - 1) // PAGE_TOKENS + 2 * slots
         bytes_per_page = page_bytes(weights.config)
         total_memory = minimum_across_ranks(torch.cuda.mem_get_info(device)[1], group)
         pool = ContinuationPool.allocate(
@@ -152,6 +152,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
             storage=package_storage,
             maximum_pages=total_memory // bytes_per_page,
             maximum_rows=total_memory // layout.row_bytes,
+            backed_slots=min(state_rows + 1, 1 + execution_rows + slots),
             dspark=config.dspark,
         )
         requests = DeviceRequestState.allocate(device, vocab_size=129280, capacity=slots)
@@ -162,13 +163,13 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         records = torch.zeros((2, slots, 24 if config.dspark else 8), dtype=torch.int64, device=device)
         coordinator = CollectivePreparation(group)
         ipc = package_storage.peer_storage
-        tokens = max(config.prefill_chunk_size, config.decode_tokens)
+        tokens = max(config.prefill_chunk_size, config.decode_tokens, slots * config.draft_tokens)
         collective = create_all_reduce_runtime(group, device, max_tokens=tokens, hidden_size=4096, ipc=ipc)
         prefill_collective = create_dma_all_reduce_runtime(
             group, device, max_tokens=config.prefill_chunk_size, hidden_size=4096, ipc=ipc
         )
         vocabulary_collective = create_all_gather_runtime(
-            group, device, max_rows=config.decode_tokens, columns=129280, ipc=ipc
+            group, device, max_rows=max(config.decode_tokens, slots * config.draft_tokens), columns=129280, ipc=ipc
         )
         markov_collective = (
             create_all_gather_runtime(group, device, max_rows=slots, columns=2 * 129280, ipc=ipc)
@@ -193,6 +194,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
             numerical_policy="default",
             coordinator=coordinator,
             headroom_bytes=config.headroom_bytes,
+            benchmark_storage=package_storage,
         )
         session.__enter__()
         session.register_benchmark_resource("continuations", pool, restore=pool.clear_for_preparation)
@@ -436,6 +438,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         cache_root=config.kernel_cache,
         retain_graphs=config.retain_graphs,
         materialize=materialize_cache,
+        warmup_storage=package_storage,
         compile_kinds=("prefill", "decode", "resume", "speculative", "vision"),
     )
     session.freeze()
@@ -478,6 +481,8 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         "mapped_host_bytes": 0,
         "offloaded_bytes": 0,
         "continuation_bytes": pool.backing.nbytes,
+        "preparation_state_rows": int(pool.memory_capacity[0].item()),
+        "preparation_state_bytes": int(pool.memory_capacity[0].item()) * layout.row_bytes,
         "state_rows": state_rows,
         "pages": pages,
         "page_bytes": bytes_per_page,
@@ -497,6 +502,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
     if config.dspark:
         server_config.update(
             speculative_widths=config.speculative_widths,
+            speculative_token_capacity=speculative_token_capacity(config.max_active, max(config.speculative_widths), config.speculative_token_capacity),
             speculative_fixed_width=config.speculative_fixed_width,
         )
         memory.update(speculative_shapes=config.speculative_shapes)

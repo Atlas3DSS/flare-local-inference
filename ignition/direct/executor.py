@@ -38,6 +38,12 @@ class StepRunner:
         self.device = torch.device("cuda", model.device)
         self.inputs = {name: frozenset((*signature.inputs, *_RESERVED))
                        for name, signature in model.signatures.items()}
+        self.proposals = {}
+        for name, signature in model.signatures.items():
+            if signature.kind == "verification" and signature.token_capacity > 1:
+                candidates = [(s.token_capacity, n) for n, s in model.signatures.items()
+                              if s.kind == "proposal" and s.batch_capacity == signature.batch_capacity]
+                self.proposals[name] = max(candidates)[1]
         self.staging = {}
         # Collective runtimes that report transport failures only when asked, after each step.
         health, seen = [], set()
@@ -56,14 +62,15 @@ class StepRunner:
         self.started = torch.cuda.Event(enable_timing=True)
         self.finished = torch.cuda.Event(enable_timing=True)
 
-    def _upload(self, name, offset, data):
+    def _upload(self, name, offset, data, *, staging_key=None):
         target = self.model.buffers[name].view(-1)
         size = target.element_size()
         if offset % size or len(data) % size or offset + len(data) > target.numel() * size or not data:
             raise ValueError(f"misaligned or out-of-range upload to {name}")
-        staging = self.staging.get(name)
+        key = name if staging_key is None else staging_key
+        staging = self.staging.get(key)
         if staging is None:
-            staging = self.staging[name] = torch.empty(target.numel(), dtype=target.dtype, pin_memory=True)
+            staging = self.staging[key] = torch.empty(target.numel(), dtype=target.dtype, pin_memory=True)
         start, count = offset // size, len(data) // size
         staging[start:start + count].copy_(torch.frombuffer(bytearray(data), dtype=target.dtype))
         target[start:start + count].copy_(staging[start:start + count], non_blocking=True)
@@ -85,8 +92,16 @@ class StepRunner:
                     raise ValueError(f"graph {name} does not bind input {buffer}")
                 self._upload(buffer, offset, data)
             self._upload("frame_index", 0, struct.pack("<i", step["frame"]))
-            self._upload("submission_sequence", 0, struct.pack("<q", step["sequence"]))
+            proposal = self.proposals.get(name)
+            self._upload("submission_sequence", 0, struct.pack("<q", step["sequence"] - bool(proposal)),
+                         staging_key="proposal_sequence" if proposal is not None else None)
             self.started.record(self.stream)
+            if proposal is not None:
+                if self.eager:
+                    self.model.forwards[proposal]()
+                else:
+                    self.model.graphs[proposal].replay()
+                self._upload("submission_sequence", 0, struct.pack("<q", step["sequence"]))
             if self.eager:
                 self.model.forwards[name]()
             else:
@@ -129,6 +144,11 @@ class RankSteps:
 
     def records(self, frame):
         return self.runner.records(frame)
+
+    def confidence(self, graph):
+        if graph not in self.runner.proposals:
+            return None
+        return self.runner.model.proposal_confidence.tolist()
 
     def stop(self):
         """End every peer's step loop; peers then close their models with this rank."""

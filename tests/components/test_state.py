@@ -67,3 +67,20 @@ def test_declared_state_extent_does_not_depend_on_rank_local_device_memory():
         StateStorage.allocate(layout, 6, "cpu", backed_slots=3)
     with pytest.raises(ValueError, match="extent"):
         StateStorage.allocate(layout, 6, "cpu", storage=Storage(), maximum_slots=5)
+
+
+def test_request_row_scatter_and_prefix_gather_preserve_unselected_data():
+    from ignition.components.state import gather_rows, scatter_rows
+
+    retained = torch.full((4, 7, 13), -1.0)
+    proposals = torch.arange(2 * 3 * 13, dtype=torch.float32).view(2, 3, 13)
+    scatter_rows(proposals, torch.tensor([3, 1]), retained, torch.tensor([True, True]))
+    assert torch.equal(retained[3, :3], proposals[0])
+    assert torch.equal(retained[1, :3], proposals[1])
+    assert retained[[0, 2]].eq(-1).all() and retained[:, 3:].eq(-1).all()
+    verification = torch.empty((2, 2, 13))
+    gather_rows(retained, torch.tensor([1, 3]), verification)
+    assert verification.is_contiguous()
+    assert torch.equal(verification, proposals[[1, 0], :2])
+    scatter_rows(proposals, torch.tensor([-1, 0]), retained, torch.tensor([True, False]))
+    assert retained[0].eq(-1).all()

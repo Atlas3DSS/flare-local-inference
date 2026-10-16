@@ -29,7 +29,7 @@ def prepare(signatures, buffers, pool, *, page_tokens, draft_lag, rows=1, embedd
         cursor=cursor, rows=rows, embedding_tables=embedding_tables)
     for graph in graphs:
         if graph["kind"] in (p.PROPOSAL, p.VERIFICATION):
-            graph["state"].extend(dict(view=c.state_view(name, tensor.numel() * tensor.element_size()),
+            graph["state"].extend(dict(view=c.state_view(name, tensor.stride(0) * tensor.element_size()),
                 access=p.READ_WRITE) for name, tensor in buffers.items() if name.startswith("proposal_"))
     return c.model_contract(vocabulary=VOCABULARY, input_vocabulary=INPUT_VOCABULARY,
         page_tokens=page_tokens, page_tables=[dict(buffer="page_tables", page_offset=0),

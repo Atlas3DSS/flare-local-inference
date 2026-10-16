@@ -34,7 +34,7 @@ from b12x.preparation import MemoryRequirements, PersistentMemory, Plan
 from b12x.preparation.tuning import BackendConfig, Knob, TuningContract
 from b12x.preparation.types import plan_from_handle, require_prepared
 
-from .sm103 import native_contract, native_plan
+from .native_operator import native_contract, native_plan
 
 CAPABILITY = (10, 3)
 COMPONENT = "flare.sm103.packed_projection"

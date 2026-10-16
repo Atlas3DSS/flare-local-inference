@@ -3,6 +3,7 @@
 from ignition.components.collectives import PreparedAllReduce
 from ignition.components.sampling import PreparedCompletion, PreparedSampling
 from ignition.components.state import save_hidden
+from ignition.preparation.scratch import bind_scratch
 
 
 class PreparedGeneration:
@@ -20,6 +21,7 @@ class PreparedGeneration:
         name,
         workspace,
         context_factory=None,
+        buffers=None,
     ):
         self.decoder, self.batch = decoder, batch
         self.validation = PreparedAllReduce(
@@ -41,8 +43,12 @@ class PreparedGeneration:
             sequence,
         )
         self.replicated_sampling = decoder.weights.draft is not None
+        # Shared forward artifacts require identical pool layouts on sampling and consuming ranks.
+        sampling_workspace = None if buffers is None else bind_scratch(
+            PreparedSampling.scratch_layout(rows, batch.requests.vocab_size),
+            device=decoder.scratch.logits.device, workspace=buffers)
         self.completion = (
-            PreparedSampling(decoder.scratch.logits, *args, sample_enabled=b.sample_enabled[:rows])
+            PreparedSampling(decoder.scratch.logits, *args, sample_enabled=b.sample_enabled[:rows], workspace=sampling_workspace)
             if batch.shard.rank == 0 or self.replicated_sampling
             else PreparedCompletion(*args)
         )

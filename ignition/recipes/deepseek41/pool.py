@@ -52,9 +52,11 @@ class ContinuationPool(PagedStateStorage):
     config: object
 
     @classmethod
-    def allocate(cls, config, slots, pages, device, *, storage=None, maximum_pages=None, maximum_rows=None, dspark=False):
+    def allocate(cls, config, slots, pages, device, *, storage=None, maximum_pages=None, maximum_rows=None,
+                 backed_slots=None, dspark=False):
         backing = PagedStateStorage.allocate(continuation_layout(config, dspark=dspark), page_specs(config),
-            slots, pages, device, storage=storage, maximum_pages=maximum_pages, maximum_rows=maximum_rows)
+            slots, pages, device, storage=storage, maximum_pages=maximum_pages, maximum_rows=maximum_rows,
+            backed_slots=backed_slots)
         return cls(backing.backing, backing.layout, backing.memory_capacity,
                    backing.pages, backing.reserved_backing, config)
 

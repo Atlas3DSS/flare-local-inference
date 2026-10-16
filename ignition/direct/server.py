@@ -41,10 +41,10 @@ class _Frontend:
     """Chat rendering, tokenization and reply decoding with the checkpoint's own tokenizer and template."""
 
     def __init__(self, server_config):
-        from transformers import AutoTokenizer
+        from transformers import PreTrainedTokenizerFast
 
         directory = Path(server_config["assets"]["tokenizer"]["path"]).parent
-        self.tokenizer = AutoTokenizer.from_pretrained(directory, local_files_only=True)
+        self.tokenizer = PreTrainedTokenizerFast.from_pretrained(directory, local_files_only=True)
         self.eos = set(server_config["frontend"]["eos_token_ids"])
 
     def render(self, body):
@@ -296,8 +296,12 @@ class DirectServer:
                 graph_ns = self.recorded.get(step.graph) if self.eager else measured
                 self.clock_ns += graph_ns or 0
                 records = self.steps.records(step.frame)
+                confidence = self.steps.confidence(step.graph) if step.graph in self.scheduler.layout.paired_graphs else None
                 with self.lock:
                     self.scheduler.advance_to(self.clock_ns)
+                    if confidence is not None:
+                        for lane, values in zip(step.lanes, confidence):
+                            lane.request.acceptance.confidence(values)
                     retired = self.scheduler.complete(step, records, graph_ns)
                 if self.verbose:
                     scheduled = f" (scheduled as {graph_ns / 1e6:.2f} ms)" if self.eager and graph_ns else ""

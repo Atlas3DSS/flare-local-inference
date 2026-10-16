@@ -208,11 +208,12 @@ impl TensorParallelExecutor {
                     return Err(invalid("rank completion fence or graph differs"));
                 }
                 let timing = wire::timing(&mut reader)?;
+                let proposal_confidence = wire::proposal_confidence(&mut reader)?;
                 if reader.0.len() != self.local.manifest().completion_bytes() {
                     return Err(invalid("rank completion size differs from its ABI"));
                 }
                 peer.completion = Some(FrameCompletion {
-                    proposal_confidence: None,
+                    proposal_confidence,
                     fence,
                     graph_index: graph,
                     timing,
@@ -297,6 +298,26 @@ pub(super) fn agree(root: &FrameCompletion, peer: &FrameCompletion) -> Result<()
     }
     if root.records.len() != peer.records.len() {
         return Err(invalid("rank completion record counts differ"));
+    }
+    match (&root.proposal_confidence, &peer.proposal_confidence) {
+        (None, None) => {}
+        (Some(root_values), Some(peer_values)) => {
+            // Rank zero supplies the shared scheduling decision. Replicated FP32
+            // probabilities allow reduction roundoff within 1e-5 absolute error.
+            for (row, (a, b)) in root_values.iter().zip(peer_values).enumerate() {
+                for (draft, (&a, &b)) in a.iter().zip(b).enumerate() {
+                    if !(0.0..=1.0).contains(&a) || !(0.0..=1.0).contains(&b)
+                        || (a - b).abs() > 1e-5
+                    {
+                        return Err(invalid(format!(
+                            "tensor-parallel proposal confidence differs at row {row}, draft {draft}: root {a:?}, peer {b:?}; graph {}, fence {}",
+                            root.graph_index, root.fence.0,
+                        )));
+                    }
+                }
+            }
+        }
+        _ => return Err(invalid("tensor-parallel proposal confidence presence differs")),
     }
     for (root, peer) in root.records.iter().zip(peer.records.iter()) {
         if root.generation != peer.generation

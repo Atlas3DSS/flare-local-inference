@@ -1,11 +1,11 @@
-//! Causal prefix selection between retained proposal and verification operations.
+//! Bounded retained proposals, causal verification widths, and shared execution costs.
 
-use super::*;
+use super::{policy::{Candidate, bits}, utility::{LaneValue, ValueRate}, *};
 
 pub(super) struct SplitSpeculation {
     pub width: usize,
-    pub threshold: f64,
-    pub retained: Option<RetainedProposal>,
+    pub retained: [Option<RetainedProposal>; REQUEST_LANES],
+    forecast: [Option<(RequestHandle, [f32; 7])>; REQUEST_LANES],
 }
 
 #[derive(Clone, Copy)]
@@ -14,97 +14,326 @@ pub(super) struct RetainedProposal {
     pub fence: Fence,
     pub consumed: u64,
     pub width: usize,
+    limit: usize,
+    confidence: [f32; 7],
 }
 
-/// Confidence for position i may depend only on history and proposals preceding i.
-/// Looking ahead past the first failed prefix would condition sampling on future draws.
-pub fn causal_prefix(confidence: &[f32], threshold: f64) -> Result<usize> {
-    if !threshold.is_finite() || !(0.0 < threshold && threshold <= 1.0) {
-        return Err("proposal confidence threshold must be finite and in (0, 1]".into());
-    }
-    if confidence
-        .iter()
-        .any(|p| !p.is_finite() || !(0.0..=1.0).contains(p))
-    {
-        return Err("proposal confidence must be finite and in [0, 1]".into());
-    }
+#[derive(Clone, Copy, Default)]
+struct PackedCall {
+    mask: u64,
+    batch: usize,
+    width: usize,
+    nanos: u64,
+}
+
+struct Packing {
+    nanos: u64,
+    calls: Vec<PackedCall>,
+}
+
+fn horizon(a: u64, b: u64) -> u64 {
+    if a == 0 || b == 0 { 0 } else { a.saturating_add(b) }
+}
+
+fn expected(confidence: &[f32; 7], width: usize) -> f64 {
     let mut survival = 1.0;
-    for (index, &p) in confidence.iter().enumerate() {
+    let mut tokens = 1.0;
+    for &p in &confidence[..width.saturating_sub(1)] {
         survival *= f64::from(p);
-        if survival < threshold {
-            return Ok(index);
+        tokens += survival;
+    }
+    tokens
+}
+
+// Sorting widths permits optimal contiguous groups with O(requests squared) transitions.
+fn pack(needs: &[(usize, usize)], shapes: &[[Option<PackedCall>; 9]; REQUEST_LANES + 1]) -> Option<Packing> {
+    if needs.is_empty() { return Some(Packing { nanos: 0, calls: vec![] }); }
+    let mut rows = needs.to_vec();
+    rows.sort_unstable_by_key(|&(slot, width)| (std::cmp::Reverse(width), slot));
+    let mut masks = [0; REQUEST_LANES + 1];
+    for (index, &(slot, _)) in rows.iter().enumerate() { masks[index + 1] = masks[index] | (1 << slot); }
+    let mut best = [None; REQUEST_LANES + 1];
+    best[0] = Some((0u64, 0usize, 0usize, PackedCall::default(), false));
+    for end in 1..=rows.len() {
+        for start in 0..end {
+            let Some((previous, count, _, _, unknown)) = best[start] else { continue; };
+            let Some(mut call) = shapes[end - start][rows[start].1] else { continue; };
+            call.mask = masks[end] ^ masks[start];
+            let unknown = unknown || call.nanos == 0;
+            let total = previous.saturating_add(call.nanos);
+            let key = (!unknown, total, count + 1, call.batch, call.width);
+            if best[end].is_none_or(|(old, n, _, c, u)| key < (!u, old, n, c.batch, c.width)) {
+                best[end] = Some((total, count + 1, start, call, unknown));
+            }
         }
     }
-    Ok(confidence.len())
+    let (total, _, _, _, unknown) = best[rows.len()]?;
+    let mut calls = Vec::new();
+    let mut end = rows.len();
+    while end > 0 {
+        let (_, _, start, call, _) = best[end]?;
+        calls.push(call);
+        end = start;
+    }
+    Some(Packing { nanos: if unknown { 0 } else { total }, calls })
 }
 
 impl RequestScheduler {
-    pub fn split_speculation(&mut self, width: usize, threshold: f64) -> Result<()> {
-        causal_prefix(&[], threshold)?;
+    pub fn split_speculation(&mut self, width: usize) -> Result<()> {
         if self.submitted != Fence(0)
             || self.slots.iter().any(|s| s.request.is_some())
-            || self.limits.max_active != 1
-            || self.limits.request_capacity() != 1
             || !(2..=8).contains(&width)
             || self.speculative_widths != (1..=width).collect::<Vec<_>>()
             || !self.mixed_catalog.is_empty()
             || self.proposal_source != speculation::ProposalSource::Mtp
         {
-            return Err("split speculation requires a single retained lane and every prefix width before admission".into());
+            return Err("split speculation requires learned proposals and contiguous logical prefix widths before admission".into());
         }
         self.split = Some(SplitSpeculation {
             width,
-            threshold,
-            retained: None,
+            retained: [None; REQUEST_LANES],
+            forecast: [None; REQUEST_LANES],
         });
         Ok(())
     }
 
+    pub(super) fn owns_proposal(&self, request: &LiveRequest) -> bool {
+        self.split.as_ref().is_some_and(|s| s.retained[request.handle.slot as usize]
+            .is_some_and(|p| p.request == request.handle))
+    }
+
     pub(super) fn retained_proposal(&self, request: &LiveRequest) -> Option<RetainedProposal> {
-        self.split.as_ref()?.retained.filter(|p| {
+        self.split.as_ref()?.retained[request.handle.slot as usize].filter(|p| {
             p.request == request.handle
-                && p.fence == self.completed
-                && p.fence == self.submitted
+                && p.fence <= self.completed
+                && request.phase == RequestPhase::Decode
                 && p.consumed == request.consumed_tokens
         })
     }
 
-    pub fn complete_proposal(
-        &mut self,
-        fence: Fence,
-        records: &[CompletionRecord],
-        timing: crate::execution::ExecutionTiming,
-        confidence: &[f32],
-    ) -> Result<Vec<GeneratedToken>> {
-        let split = self
-            .split
-            .as_ref()
-            .ok_or("proposal completion without a split catalog")?;
-        let step = self.submitted_step(fence)?;
-        if step.kind != GraphKind::Proposal
-            || step.lanes.len() != 1
-            || confidence.len() + 1 != split.width
-        {
-            return Err(
-                "proposal completion does not match its retained lane and confidence extent".into(),
-            );
+    pub(super) fn expected_speculative_tokens(&self, request: &LiveRequest, width: usize) -> f64 {
+        if let Some(proposal) = self.retained_proposal(request) {
+            return expected(&proposal.confidence, width.min(proposal.width));
         }
-        let lane = step.lanes[0].clone();
-        let width = self
-            .speculative_fixed_width
-            .unwrap_or(causal_prefix(confidence, split.threshold)? + 1);
-        let generated = self.complete(fence, records, timing)?;
-        let retained = self
-            .request(lane.request)
-            .ok()
-            .filter(|request| request.phase == RequestPhase::Decode && request.error_code.is_none())
-            .map(|request| RetainedProposal {
-                request: lane.request,
-                fence,
-                consumed: request.consumed_tokens,
-                width,
+        if let Some(split) = &self.split {
+            let confidence = split.forecast[request.handle.slot as usize]
+                .filter(|(h, _)| *h == request.handle).map_or([0.5; 7], |(_, p)| p);
+            expected(&confidence, width)
+        } else {
+            request.acceptance.expected_tokens(self.proposal_source, width)
+        }
+    }
+
+    pub(super) fn proposal_round_duration(&self, batch: usize, width: usize) -> Option<u64> {
+        match &self.split {
+            Some(split) if width > 1 => Some(horizon(self.costs.duration(GraphKind::Proposal, batch, split.width)?,
+                self.costs.duration(GraphKind::Verification, batch, width)?)),
+            _ => self.costs.duration(GraphKind::Speculative, batch, width),
+        }
+    }
+
+    pub(super) fn speculative_duration(&self, request: &LiveRequest, batch: usize, width: usize) -> Option<u64> {
+        if let Some(split) = &self.split {
+            if let Some(p) = self.retained_proposal(request) {
+                if width < p.width { return None; }
+                self.costs.duration(GraphKind::Verification, batch, width)
+            } else if width == 1 {
+                self.costs.duration(GraphKind::Speculative, batch, 1)
+            } else {
+                Some(horizon(self.costs.duration(GraphKind::Proposal, batch, split.width)?,
+                    self.costs.duration(GraphKind::Verification, batch, width)?))
+            }
+        } else {
+            self.costs.duration(GraphKind::Speculative, batch, width)
+        }
+    }
+
+    fn packing_shapes(&self, kind: GraphKind) -> [[Option<PackedCall>; 9]; REQUEST_LANES + 1] {
+        let mut choices = [[None; 9]; REQUEST_LANES + 1];
+        for batch in crate::execution::BATCH_CAPACITIES.into_iter()
+            .take_while(|b| *b <= self.limits.max_active.next_power_of_two()) {
+            let proposal_width = [self.split.as_ref().unwrap().width];
+            let widths = if kind == GraphKind::Proposal { &proposal_width[..] }
+                else { &self.speculative_catalog[batch.ilog2() as usize][..] };
+            for &width in widths {
+                let Some(nanos) = self.costs.duration(kind, batch, width) else { continue; };
+                let call = PackedCall { mask: 0, batch, width, nanos };
+                for row in choices.iter_mut().take(batch + 1).skip(1) {
+                    for choice in row.iter_mut().take(width + 1).skip(1) {
+                        if choice.is_none_or(|c: PackedCall| (nanos, batch, width) < (c.nanos, c.batch, c.width)) {
+                            *choice = Some(call);
+                        }
+                    }
+                }
+            }
+        }
+        choices
+    }
+
+    #[cfg(test)]
+    fn pack(&self, kind: GraphKind, needs: &[(usize, usize)]) -> Option<Packing> {
+        pack(needs, &self.packing_shapes(kind))
+    }
+
+    fn retained_needs(&self) -> Vec<(usize, usize)> {
+        self.slots.iter().enumerate().filter_map(|(slot, entry)| {
+            let r = entry.request.as_ref()?;
+            self.retained_proposal(r).map(|p| (slot, p.width))
+        }).collect()
+    }
+
+    // Neither the participant set nor measured costs change while fresh confidence is read.
+    fn finalize_proposals(&mut self, fresh: u64) -> Result<()> {
+        let mut needs = self.retained_needs();
+        let (values, age_price, _) = self.lane_values(0);
+        let shapes = self.packing_shapes(GraphKind::Verification);
+        let split = self.split.as_ref().unwrap();
+        let maximum = needs.iter().filter(|(s, _)| fresh & (1 << s) != 0)
+            .map(|(s, _)| split.retained[*s].unwrap().limit).max().unwrap_or(1);
+        let trial = crate::execution::BATCH_CAPACITIES.into_iter()
+            .filter(|b| *b <= needs.len().max(1).next_power_of_two())
+            .rev().find_map(|batch| self.speculative_catalog[batch.ilog2() as usize].iter().copied()
+                .find(|w| *w <= maximum && self.costs.duration(GraphKind::Verification, batch, *w) == Some(0)));
+        if let Some(width) = self.speculative_fixed_width.or(trial) {
+            for (slot, selected) in &mut needs {
+                if fresh & (1 << *slot) != 0 { *selected = width.min(split.retained[*slot].unwrap().limit); }
+            }
+        } else {
+            let score = |needs: &[(usize, usize)]| -> Result<ValueRate> {
+                let packing = pack(needs, &shapes).ok_or("no verification packing for retained proposals")?;
+                let value = needs.iter().map(|&(s, w)| values[s].decode(
+                    expected(&split.retained[s].unwrap().confidence, w), packing.nanos as f64 / 1e6)).sum();
+                Ok(ValueRate::new(packing.nanos, value, age_price))
+            };
+            let mut rate = score(&needs)?;
+            loop {
+                let mut best = None;
+                for index in 0..needs.len() {
+                    let (slot, width) = needs[index];
+                    if fresh & (1 << slot) == 0 || width >= split.retained[slot].unwrap().limit { continue; }
+                    needs[index].1 += 1;
+                    let candidate = score(&needs)?;
+                    needs[index].1 -= 1;
+                    if candidate.compare(rate).is_gt()
+                        && best.is_none_or(|(_, old)| candidate.compare(old).is_gt()) {
+                        best = Some((index, candidate));
+                    }
+                }
+                let Some((index, candidate)) = best else { break; };
+                needs[index].1 += 1;
+                rate = candidate;
+            }
+        }
+        let split = self.split.as_mut().unwrap();
+        for (slot, width) in needs {
+            let proposal = split.retained[slot].as_mut().unwrap();
+            proposal.width = width;
+            if fresh & (1 << slot) != 0 { split.forecast[slot] = Some((proposal.request, proposal.confidence)); }
+        }
+        Ok(())
+    }
+
+    pub(super) fn split_candidates(&self, output: &mut Vec<Candidate>, values: &[LaneValue; REQUEST_LANES], age_price: f64) {
+        if !self.submissions.is_empty() { return; }
+        let split = self.split.as_ref().unwrap();
+        let retained = self.retained_needs();
+        let proposal_shapes = self.packing_shapes(GraphKind::Proposal);
+        let verification_shapes = self.packing_shapes(GraphKind::Verification);
+        let make = |kind, call: PackedCall, rate| Candidate {
+            kind, mask: call.mask, batch: call.batch, capacity: call.width,
+            prefill_capacity: 0, prefill_slot: None, work: 0, duration_ns: call.nanos, rate, feedback: true,
+        };
+        if let Some(packing) = pack(&retained, &verification_shapes) {
+            for call in packing.calls {
+                let value = bits(call.mask).map(|s| {
+                    let p = split.retained[s].unwrap();
+                    values[s].decode(expected(&p.confidence, p.width), call.nanos as f64 / 1e6)
+                }).sum();
+                output.push(make(GraphKind::Verification, call, ValueRate::new(call.nanos, value, age_price)));
+            }
+        }
+        let available: Vec<_> = self.slots.iter().enumerate().filter_map(|(slot, entry)| {
+            let r = entry.request.as_ref()?;
+            (r.phase == RequestPhase::Decode && self.eligible(r) && !self.owns_proposal(r)).then_some(slot)
+        }).collect();
+        for batch in crate::execution::BATCH_CAPACITIES.into_iter()
+            .take_while(|b| *b <= self.limits.max_active.next_power_of_two()) {
+            let Some(ns) = self.costs.duration(GraphKind::Speculative, batch, 1) else { continue; };
+            let full = self.speculative_fixed_width.is_some_and(|w| self.speculative_catalog[batch.ilog2() as usize].contains(&w));
+            let offers: Vec<_> = available.iter().filter(|&&s| !full
+                || self.speculative_tokens(self.slots[s].request.as_ref().unwrap(), split.width) == 1)
+                .map(|&s| (s, values[s].decode(1.0, ns as f64 / 1e6))).collect();
+            let mask = utility::best_cohort::<REQUEST_LANES>(&offers, batch);
+            if mask != 0 {
+                let value = offers.iter().filter(|(s, _)| mask & (1 << s) != 0).map(|(_, v)| v).sum();
+                output.push(make(GraphKind::Speculative, PackedCall { mask, batch, width: 1, nanos: ns }, ValueRate::new(ns, value, age_price)));
+            }
+        }
+        for &width in self.speculative_widths.iter().filter(|w| **w > 1
+            && self.speculative_fixed_width.is_none_or(|fixed| fixed == **w)) {
+            let mut offers: Vec<_> = available.iter().copied().filter(|s| {
+                self.speculative_tokens(self.slots[*s].request.as_ref().unwrap(), split.width) > 1
+            }).collect();
+            let value = |slot: usize| {
+                let r = self.slots[slot].request.as_ref().unwrap();
+                values[slot].decode(self.expected_speculative_tokens(r, self.speculative_tokens(r, width)), 0.0)
+            };
+            offers.sort_by(|a, b| value(*b).total_cmp(&value(*a)).then(a.cmp(b)));
+            for count in 1..=offers.len() {
+                let propose: Vec<_> = offers[..count].iter().map(|&s| (s, split.width)).collect();
+                let Some(proposal) = pack(&propose, &proposal_shapes) else { continue; };
+                let mut verify = retained.clone();
+                verify.extend(offers[..count].iter().map(|&s| (s, self.speculative_tokens(self.slots[s].request.as_ref().unwrap(), width))));
+                let Some(verification) = pack(&verify, &verification_shapes) else { continue; };
+                let ns = horizon(proposal.nanos, verification.nanos);
+                let expected = verify.iter().map(|&(s, w)| {
+                    let tokens = split.retained[s].map_or_else(|| self.expected_speculative_tokens(self.slots[s].request.as_ref().unwrap(), w),
+                        |p| expected(&p.confidence, p.width));
+                    values[s].decode(tokens, ns as f64 / 1e6)
+                }).sum();
+                if let Some(call) = proposal.calls.into_iter().max_by(|a, b| {
+                    let value = |c: &PackedCall| bits(c.mask).map(value).sum::<f64>();
+                    value(a).total_cmp(&value(b)).then(b.mask.cmp(&a.mask))
+                }) {
+                    output.push(make(GraphKind::Proposal, call, ValueRate::new(ns, expected, age_price)));
+                }
+            }
+        }
+    }
+
+    pub fn complete_proposal(&mut self, fence: Fence, records: &[CompletionRecord],
+        timing: crate::execution::ExecutionTiming, confidence: &[[f32; 7]]) -> Result<Vec<GeneratedToken>> {
+        let split = self.split.as_ref().ok_or("proposal completion without a split catalog")?;
+        let step = self.submitted_step(fence)?.clone();
+        if step.kind != GraphKind::Proposal || confidence.len() < step.batch_capacity || step.token_capacity != split.width {
+            return Err("proposal completion does not match its batch and confidence extent".into());
+        }
+        for row in confidence.iter().take(step.lanes.len()) {
+            if row[..split.width - 1].iter().any(|p| !p.is_finite() || !(0.0..=1.0).contains(p)) {
+                return Err("proposal confidence must be finite and in [0, 1]".into());
+            }
+        }
+        for (lane, &confidence) in step.lanes.iter().zip(confidence) {
+            self.split.as_mut().unwrap().retained[lane.request.slot as usize] = Some(RetainedProposal {
+                request: lane.request, fence, consumed: lane.start_position, width: 1, limit: lane.tokens, confidence,
             });
-        self.split.as_mut().unwrap().retained = retained;
+        }
+        let generated = match self.complete(fence, records, timing) {
+            Ok(generated) => generated,
+            Err(error) => {
+                for lane in &step.lanes { self.split.as_mut().unwrap().retained[lane.request.slot as usize] = None; }
+                return Err(error);
+            }
+        };
+        let mut fresh = 0;
+        for lane in &step.lanes {
+            if self.request(lane.request).is_ok_and(|r| r.phase == RequestPhase::Decode && r.error_code.is_none()) {
+                fresh |= 1 << lane.request.slot;
+            } else {
+                self.split.as_mut().unwrap().retained[lane.request.slot as usize] = None;
+            }
+        }
+        self.finalize_proposals(fresh)?;
         Ok(generated)
     }
 }
@@ -114,165 +343,193 @@ mod tests {
     use super::*;
     use crate::execution::{GraphDescriptor, SamplingMode, TokenVector};
 
-    fn engine() -> RequestScheduler {
-        let mut s = super::super::tests::scheduler(1, 128, 8);
+    fn engine(active: usize) -> RequestScheduler {
+        let mut s = super::super::tests::scheduler(active, 512, 64);
         s.enable_speculation(&(1..=8).collect::<Vec<_>>()).unwrap();
-        let mut graphs = super::super::tests::duration_graphs(1);
+        let mut graphs = super::super::tests::duration_graphs(active);
         graphs.retain(|g| g.kind != GraphKind::Speculative);
-        for (kind, widths) in [
-            (GraphKind::Proposal, vec![8]),
-            (GraphKind::Verification, (1..=8).collect()),
-        ] {
-            graphs.extend(widths.into_iter().map(|width| GraphDescriptor {
-                name: format!("{kind:?}-{width}"),
-                kind,
-                sampling_mode: SamplingMode::General,
-                handle: 1,
-                batch_capacity: 1,
-                token_capacity: width,
-                prefill_capacity: 0,
-                estimated_duration_ns: 1000,
-                input_bindings: vec![],
-            }));
+        let mut shapes = Vec::new();
+        for batch in crate::execution::BATCH_CAPACITIES.into_iter().take_while(|b| *b <= active.next_power_of_two()) {
+            for (kind, widths) in [
+                (GraphKind::Proposal, vec![8]), (GraphKind::Speculative, vec![1]),
+                (GraphKind::Verification, (1..=8).filter(|w| *w == 1 || batch * w <= 8).collect()),
+            ] {
+                for width in widths {
+                    if kind == GraphKind::Verification { shapes.push((batch, width)); }
+                    graphs.push(GraphDescriptor { name: format!("{kind:?}-{batch}-{width}"), kind,
+                        sampling_mode: SamplingMode::General, handle: 1, batch_capacity: batch,
+                        token_capacity: width, prefill_capacity: 0,
+                        estimated_duration_ns: if kind == GraphKind::Speculative { 100_000 } else { 1000 },
+                        input_bindings: vec![] });
+                }
+            }
         }
+        s.speculative_graphs(&shapes).unwrap();
         s.measured_graph_durations(&graphs).unwrap();
-        s.split_speculation(8, 0.15).unwrap();
+        s.split_speculation(8).unwrap();
         s
     }
 
     fn ready(s: &mut RequestScheduler) -> RequestHandle {
-        let handle = s.admit(super::super::tests::spec(65, 32)).unwrap();
-        while s.request(handle).unwrap().phase != RequestPhase::Decode {
-            let step = s.plan().unwrap();
-            let fence = Fence(s.submitted.0 + 1);
-            s.commit(&step, fence).unwrap();
-            let live = s.request(handle).unwrap();
-            let sampled = step.kind.samples();
-            let record = CompletionRecord {
-                generation: handle.generation as i64,
-                submission_sequence: fence.0 as i64,
-                consumed_tokens: if sampled {
-                    65
-                } else {
-                    live.consumed_tokens as i64
-                },
-                generated_tokens: live.generated_tokens as i64 + i64::from(sampled),
-                token_id: if sampled { 3 } else { -1 },
-                status: 1,
-                ..Default::default()
-            };
-            s.complete(fence, &[record], Default::default()).unwrap();
-        }
+        let handle = s.admit(super::super::tests::spec(65, 64)).unwrap();
+        let r = s.request_mut(handle).unwrap();
+        r.phase = RequestPhase::Decode;
+        r.consumed_tokens = 65;
+        r.scheduled_consumed = 65;
+        r.generated_tokens = 1;
         handle
     }
 
-    fn propose(s: &mut RequestScheduler, handle: RequestHandle) -> (Fence, CompletionRecord) {
-        let step = s.plan().unwrap();
-        assert_eq!((step.kind, step.token_capacity), (GraphKind::Proposal, 8));
+    fn proposal(s: &mut RequestScheduler, handles: &[RequestHandle], confidence: &[[f32; 7]]) -> Fence {
         let fence = Fence(s.submitted.0 + 1);
-        s.commit(&step, fence).unwrap();
-        assert!(s.plan().is_none());
-        let live = s.request(handle).unwrap();
-        (
-            fence,
-            CompletionRecord {
-                generation: handle.generation as i64,
-                submission_sequence: fence.0 as i64,
-                consumed_tokens: live.consumed_tokens as i64,
-                generated_tokens: live.generated_tokens as i64,
-                token_id: -1,
-                status: 1,
-                vector: Some(TokenVector::default()),
-                ..Default::default()
-            },
-        )
-    }
-
-    #[test]
-    fn causal_prefix_stops_before_later_confidence_can_change_the_decision() {
-        assert_eq!(
-            causal_prefix(&[0.9, 0.8, 0.3, 0.1, 1.0, 1.0, 1.0], 0.15).unwrap(),
-            3
-        );
-        assert_eq!(causal_prefix(&[0.0, 1.0, 1.0], 0.15).unwrap(), 0);
-        assert_eq!(causal_prefix(&[1.0; 7], 0.15).unwrap(), 7);
-        assert_eq!(causal_prefix(&[0.5, 0.5], 0.25).unwrap(), 2);
-        assert!(causal_prefix(&[f32::NAN], 0.15).is_err());
-        assert!(causal_prefix(&[1.01], 0.15).is_err());
-        assert!(causal_prefix(&[0.9], 0.0).is_err());
-    }
-
-    #[test]
-    fn proposal_keeps_progress_and_verification_consumes_it_once() {
-        let mut s = engine();
-        let handle = ready(&mut s);
-        let (fence, record) = propose(&mut s, handle);
-        assert!(
-            s.complete_proposal(fence, &[record], Default::default(), &[f32::NAN; 7])
-                .is_err()
-        );
-        assert!(s.submitted_step(fence).is_ok());
-        let output = s
-            .complete_proposal(
-                fence,
-                &[record],
-                Default::default(),
-                &[0.9, 0.8, 0.3, 0.1, 1.0, 1.0, 1.0],
-            )
-            .unwrap();
+        let step = ScheduledStep { kind: GraphKind::Proposal, batch_capacity: handles.len().next_power_of_two(),
+            token_capacity: 8, mixed: None, requires_feedback: true,
+            lanes: handles.iter().map(|&h| ScheduledLane { request: h, start_position: 65, tokens: 8 }).collect() };
+        let plan = ScheduledPlan { owner: s.plan_owner.clone(), epochs: handles.iter().map(|h| s.request(*h).unwrap().epoch).collect(),
+            estimated_duration_ns: 1000, selection_value_rate: 0.0, selection_log_scale: 0.0, step };
+        s.commit(&plan, fence).unwrap();
+        let mut records = vec![CompletionRecord::default(); s.limits.request_capacity()];
+        for &h in handles { records[h.slot as usize] = CompletionRecord {
+            generation: h.generation as i64, submission_sequence: fence.0 as i64,
+            consumed_tokens: 65, generated_tokens: 1, token_id: -1, status: 1,
+            vector: Some(TokenVector::default()), ..Default::default()
+        }; }
+        let output = s.complete_proposal(fence, &records, Default::default(), confidence).unwrap();
         assert!(output.is_empty());
-        assert_eq!(s.request(handle).unwrap().consumed_tokens, 65);
-        assert_eq!(s.request(handle).unwrap().generated_tokens, 1);
-        let step = s.plan().unwrap();
-        assert_eq!(
-            (step.kind, step.token_capacity, step.lanes[0].tokens),
-            (GraphKind::Verification, 4, 4)
-        );
-        assert!(s.commit(&step, Fence(fence.0 + 2)).is_err());
-        let verify_fence = Fence(fence.0 + 1);
-        s.commit(&step, verify_fence).unwrap();
-        assert!(s.commit(&step, Fence(fence.0 + 2)).is_err());
-        let record = CompletionRecord {
-            submission_sequence: verify_fence.0 as i64,
-            consumed_tokens: 67,
-            generated_tokens: 3,
-            token_id: 4,
-            vector: Some(TokenVector {
-                emitted_count: 2,
-                offered_drafts: 3,
-                accepted_drafts: 1,
-                verification_width: 4,
-                tokens: [3, 4, -1, -1, -1, -1, -1, -1],
-                ..Default::default()
-            }),
-            ..record
-        };
-        assert_eq!(
-            s.complete(verify_fence, &[record], Default::default())
-                .unwrap()
-                .len(),
-            2
-        );
-        assert_eq!(s.plan().unwrap().kind, GraphKind::Proposal);
+        fence
+    }
+
+    fn retain(s: &mut RequestScheduler, handle: RequestHandle, confidence: [f32; 7]) {
+        s.split.as_mut().unwrap().retained[handle.slot as usize] = Some(RetainedProposal {
+            request: handle, fence: s.completed, consumed: 65, width: 1, limit: 8, confidence,
+        });
+    }
+
+    fn costs(s: &mut RequestScheduler, batch: usize, times: &[u64]) {
+        for (i, &ns) in times.iter().enumerate() {
+            s.costs.set_measured(&ScheduledStep { kind: GraphKind::Verification, batch_capacity: batch,
+                token_capacity: i + 1, mixed: None, lanes: vec![], requires_feedback: true }, ns);
+        }
     }
 
     #[test]
-    fn cancellation_during_proposal_cannot_attach_drafts_to_reused_slot() {
-        let mut s = engine();
-        let handle = ready(&mut s);
-        let (fence, record) = propose(&mut s, handle);
-        s.cancel(handle).unwrap();
-        assert!(!s.has_available_slot());
-        s.complete_proposal(fence, &[record], Default::default(), &[1.0; 7])
-            .unwrap();
-        assert!(s.has_available_slot());
+    fn delivery_references_do_not_batch_incompatible_retained_widths() {
+        let mut s = engine(2);
+        let narrow = ready(&mut s);
+        let wide = ready(&mut s);
+        for h in [narrow, wide] { retain(&mut s, h, [0.5; 7]); }
+        s.split.as_mut().unwrap().retained[wide.slot as usize].as_mut().unwrap().width = 8;
+        costs(&mut s, 1, &[100, 200, 300, 400, 500, 600, 700, 800]);
+        costs(&mut s, 2, &[100, 200, 300, 400]);
+        let mut rates = [None; REQUEST_LANES];
+        rates[narrow.slot as usize] = s.service_rates(s.request(narrow).unwrap()).1;
+        rates[wide.slot as usize] = s.service_rates(s.request(wide).unwrap()).1;
+        let references = s.delivery_reference_intervals(&rates);
+        assert_eq!(references[narrow.slot as usize], Some(0.0002));
+        assert_eq!(references[wide.slot as usize], Some(0.0016));
+    }
+
+    #[test]
+    fn causal_frontier_never_uses_a_suffix_to_cross_an_unprofitable_extension() {
+        for tail in [0.0, 1.0] {
+            let mut s = engine(1);
+            let h = ready(&mut s);
+            costs(&mut s, 1, &[100, 300, 210, 210, 210, 210, 210, 210]);
+            retain(&mut s, h, [1.0, tail, tail, tail, tail, tail, tail]);
+            s.finalize_proposals(1 << h.slot).unwrap();
+            assert_eq!(s.retained_proposal(s.request(h).unwrap()).unwrap().width, 1);
+        }
+    }
+
+    #[test]
+    fn conditional_confidence_is_multiplied_and_replaces_acceptance_history() {
+        let mut s = engine(1);
+        let h = ready(&mut s);
+        retain(&mut s, h, [0.8, 0.5, 0.0, 1.0, 1.0, 1.0, 1.0]);
+        s.finalize_proposals(1 << h.slot).unwrap();
+        assert_eq!(s.retained_proposal(s.request(h).unwrap()).unwrap().width, 3);
+        assert!((s.expected_speculative_tokens(s.request(h).unwrap(), 8) - 2.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn unmeasured_trial_width_does_not_depend_on_fresh_confidence() {
+        let mut chosen = Vec::new();
+        for p in [0.0, 1.0] {
+            let mut s = engine(1);
+            let h = ready(&mut s);
+            costs(&mut s, 1, &[100, 100, 0, 100, 100, 100, 100, 100]);
+            retain(&mut s, h, [p; 7]);
+            s.finalize_proposals(1 << h.slot).unwrap();
+            chosen.push(s.retained_proposal(s.request(h).unwrap()).unwrap().width);
+        }
+        assert_eq!(chosen, [3, 3]);
+    }
+
+    #[test]
+    fn multiple_proposals_regroup_without_changing_finalized_prefixes() {
+        let mut s = engine(4);
+        let handles: Vec<_> = (0..4).map(|_| ready(&mut s)).collect();
+        proposal(&mut s, &handles[..2], &[[1.0; 7], [0.0; 7]]);
+        assert_eq!(s.request(handles[0]).unwrap().consumed_tokens, 65);
+        proposal(&mut s, &handles[2..], &[[0.0; 7], [1.0; 7]]);
+        let needs = s.retained_needs();
+        assert_eq!(needs.iter().map(|r| r.1).collect::<Vec<_>>(), [4, 1, 1, 4]);
+        let packing = s.pack(GraphKind::Verification, &needs).unwrap();
+        assert_eq!(packing.calls.len(), 2);
+        assert!(packing.calls.iter().any(|c| c.mask == (1 << handles[1].slot) | (1 << handles[2].slot)));
+        let mut seen = 0;
+        for call in packing.calls {
+            assert_eq!(seen & call.mask, 0);
+            seen |= call.mask;
+            for slot in bits(call.mask) { assert!(needs[slot].1 <= call.width); }
+        }
+        assert_eq!(seen, 15);
+        let plan = s.plan().unwrap();
+        assert_eq!(plan.kind, GraphKind::Verification);
+        let fence = Fence(s.submitted.0 + 1);
+        s.commit(&plan, fence).unwrap();
+        assert!(s.commit(&plan, Fence(fence.0 + 1)).is_err());
+        for lane in &plan.lanes { assert!(s.split.as_ref().unwrap().retained[lane.request.slot as usize].is_none()); }
+    }
+
+    #[test]
+    fn proposal_is_a_prerequisite_with_no_progress_credit() {
+        let mut s = engine(2);
+        let h = ready(&mut s);
+        let before = s.request(h).unwrap().accounting;
+        let plan = s.plan().unwrap();
+        assert_eq!(plan.kind, GraphKind::Proposal);
+        proposal(&mut s, &[h], &[[0.9; 7]]);
+        let after = s.request(h).unwrap().accounting;
+        assert_eq!(before.committed_output_tokens, after.committed_output_tokens);
+        assert_eq!(before.published_deliveries, after.published_deliveries);
+        assert!(s.plan().unwrap().kind == GraphKind::Verification);
+    }
+
+    #[test]
+    fn proposal_storage_is_bounded_and_cancellation_does_not_follow_slot_reuse() {
+        let mut s = engine(1);
+        let h = ready(&mut s);
+        proposal(&mut s, &[h], &[[1.0; 7]]);
+        s.cancel(h).unwrap();
         let replacement = ready(&mut s);
-        assert_eq!(replacement.slot, handle.slot);
-        assert_ne!(replacement.generation, handle.generation);
-        assert_eq!(s.plan().unwrap().kind, GraphKind::Proposal);
-        assert!(
-            s.complete_proposal(fence, &[record], Default::default(), &[1.0; 7])
-                .is_err()
-        );
+        assert_eq!(replacement.slot, h.slot);
+        assert_ne!(replacement.generation, h.generation);
+        assert!(!s.owns_proposal(s.request(replacement).unwrap()));
+        assert!((s.expected_speculative_tokens(s.request(replacement).unwrap(), 8) - 1.9921875).abs() < 1e-10);
+    }
+
+    #[test]
+    fn retained_proposal_cannot_be_preempted_for_another_request() {
+        let mut s = engine(2);
+        let first = ready(&mut s);
+        let last = ready(&mut s);
+        s.request_mut(first).unwrap().growable_output = true;
+        s.request_mut(last).unwrap().growable_output = true;
+        proposal(&mut s, &[last], &[[1.0; 7]]);
+        s.preempt_newest().unwrap();
+        assert!(s.request(first).unwrap().preempted);
+        assert!(!s.request(last).unwrap().preempted);
+        assert!(s.owns_proposal(s.request(last).unwrap()));
     }
 }

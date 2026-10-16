@@ -27,13 +27,22 @@ fn wide(path: &Path) -> io::Result<Vec<u16>> {
 }
 
 pub fn trust_path() -> io::Result<PathBuf> {
+    Ok(known_folder(&FOLDERID_LocalAppData)?
+        .join("Flare")
+        .join("trust.toml"))
+}
+
+pub fn home_directory() -> io::Result<PathBuf> {
+    known_folder(&FOLDERID_Profile)
+}
+
+fn known_folder(folder: &windows_sys::core::GUID) -> io::Result<PathBuf> {
     unsafe {
         let mut text = std::ptr::null_mut();
-        let status =
-            SHGetKnownFolderPath(&FOLDERID_LocalAppData, 0, std::ptr::null_mut(), &mut text);
+        let status = SHGetKnownFolderPath(folder, 0, std::ptr::null_mut(), &mut text);
         if status < 0 {
             return Err(io::Error::other(format!(
-                "resolve LocalAppData: HRESULT {status:#x}"
+                "resolve user folder: HRESULT {status:#x}"
             )));
         }
         let mut length = 0;
@@ -44,7 +53,7 @@ pub fn trust_path() -> io::Result<PathBuf> {
             text, length,
         )));
         CoTaskMemFree(text.cast());
-        Ok(path.join("Flare").join("trust.toml"))
+        Ok(path)
     }
 }
 

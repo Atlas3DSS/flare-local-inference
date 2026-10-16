@@ -35,28 +35,47 @@ def batch_capacities(concurrency: int) -> tuple[int, ...]:
     return tuple(batch for batch in BATCH_CAPACITIES if batch <= capacity)
 
 
-def speculative_shapes(concurrency, widths):
-    """Capture every verification width at every prepared batch capacity."""
+def speculative_token_capacity(concurrency, width, capacity=None):
+    """Bound target-token rows while retaining single-request maximum depth."""
+    if capacity is None:
+        return max(request_capacity(concurrency), width)
+    if type(capacity) is not int or capacity < width:
+        raise ValueError("speculative token capacity must cover the maximum verification width")
+    return capacity
+
+
+def speculative_shapes(concurrency, widths, token_capacity=None):
+    """Cover every prefix inside the target-token envelope and every decode batch."""
     batches = batch_capacities(concurrency)
     if (not widths or widths[0] != 1 or tuple(sorted(set(widths))) != tuple(widths)
             or any(type(w) is not int or not 1 <= w <= 8 for w in widths)):
         raise ValueError("speculative widths must increase from one through at most eight")
-    return tuple((batch, width) for batch in batches for width in reversed(widths))
+    capacity = speculative_token_capacity(concurrency, widths[-1], token_capacity)
+    return tuple((batch, width) for batch in batches for width in reversed(widths)
+                 if width == 1 or batch * width <= capacity)
 
 
-def mixed_shapes(concurrency, chunk_size, widths=(1,)):
+def proposal_shapes(concurrency, drafts):
+    """Proposal blocks cover every request batch and selectable draft depth."""
+    if type(drafts) is not int or not 1 <= drafts <= 7:
+        raise ValueError("proposal depth must be in [1, 7]")
+    return tuple((batch, depth) for batch in batch_capacities(concurrency)
+                 for depth in range(drafts, 0, -1))
+
+
+def mixed_shapes(concurrency, chunk_size, widths=(1,), token_capacity=None):
     """Cover prompt lengths and verification depths without their Cartesian product.
 
     Each batch retains every prompt bucket at width one and every other width
     at a common prompt bucket. The anchor minimizes the worst multiplicative
     distance to the shortest and longest chunks, balancing padding of short
-    prompts against subdivision of long prompts. Pure graphs retain complete
-    batch/width coverage. This is a bounded coverage policy, not a latency model.
+    prompts against subdivision of long prompts. Pure and mixed graphs use the
+    same bounded batch/width coverage. This is a bounded coverage policy, not a latency model.
     """
-    speculative_shapes(concurrency, widths)
+    shapes = set(speculative_shapes(concurrency, widths, token_capacity))
     prompts = prefill_capacities(chunk_size)
     anchor = min(prompts, key=lambda p: (max(p / prompts[0], prompts[-1] / p), p))
     return tuple((batch, width, prompt)
         for batch in reversed(batch_capacities(concurrency)) if batch > 1
-        for width in reversed(widths)
+        for width in reversed(widths) if (batch, width) in shapes
         for prompt in reversed(prompts) if width == 1 or prompt == anchor)

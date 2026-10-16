@@ -447,7 +447,7 @@ impl NativeModel {
         self.server_config["snapshots"] = snapshots.into();
         self.server_config["pages"] = pages.into();
         phase.finish(format!(
-            "{:.1} GiB · {} KV tokens before checkpoint retention · {snapshots} shared snapshot slots",
+            "{:.1} GiB · {} KV tokens · {snapshots} shared snapshot slots",
             gpu_bytes as f64 / (1u64 << 30) as f64,
             pages * logical_page_tokens
         ));

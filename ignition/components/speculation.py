@@ -409,7 +409,7 @@ class PreparedSpeculativeCommit:
 
     def __init__(self, requests: DeviceRequestState, acceptance: SpeculativeAcceptance,
                  input_ids, slots, generations, live_rows, completion_records, frame_index,
-                 submission_sequence, *, rng=None, copy_offered_mask=None, draft_context_lag=1, token_limits=None):
+                 submission_sequence, *, rng=None, copy_offered_mask=None, draft_context_lag=1, token_limits=None, buffers=None):
         batch, width = input_ids.shape
         _geometry(batch, width)
         device = input_ids.device
@@ -437,21 +437,23 @@ class PreparedSpeculativeCommit:
         self.rows, self.columns = torch.arange(batch, device=device), torch.arange(width, device=device)
         self.eos_columns = torch.arange(requests.eos_token_ids.shape[1], device=device)
         self.history_columns = torch.arange(2, device=device)
-        self.emitted_ids = torch.full_like(input_ids, -1)
-        self.committed_input_ids = torch.full_like(input_ids, -1)
-        self.emitted_count = torch.zeros(batch, dtype=torch.int32, device=device)
-        self.accepted_count = torch.zeros_like(self.emitted_count)
-        self.accepted_drafts = torch.zeros_like(self.emitted_count)
-        self.commit_column = torch.full_like(self.emitted_count, -1)
-        self.consumed_before = torch.zeros(batch, dtype=torch.int64, device=device)
-        self.generated_before = torch.zeros_like(self.consumed_before)
-        self.history_before = torch.zeros((batch, 2), dtype=torch.int64, device=device)
+        def zeros(shape, dtype=torch.int64):
+            return torch.zeros(shape, dtype=dtype, device=device) if buffers is None else buffers.zeros(shape, dtype)
+        self.emitted_ids = zeros(input_ids.shape).fill_(-1)
+        self.committed_input_ids = zeros(input_ids.shape).fill_(-1)
+        self.emitted_count = zeros((batch,), torch.int32)
+        self.accepted_count = zeros((batch,), torch.int32)
+        self.accepted_drafts = zeros((batch,), torch.int32)
+        self.commit_column = zeros((batch,), torch.int32).fill_(-1)
+        self.consumed_before = zeros((batch,))
+        self.generated_before = zeros((batch,))
+        self.history_before = zeros((batch, 2))
         # Pool-backed request state is staged here, so compiled commits write the pool without copying it.
-        self.consumed_after = torch.empty(requests.capacity, dtype=torch.int64, device=device)
-        self.history_after = torch.empty((requests.capacity, 2), dtype=torch.int64, device=device)
+        self.consumed_after = zeros((requests.capacity,))
+        self.history_after = zeros((requests.capacity, 2))
         # One extra entry receives the rows that own no slot.
-        self.owners = torch.empty(requests.capacity + 1, dtype=torch.int64, device=device)
-        self._records = torch.zeros((requests.capacity, 24), dtype=torch.int64, device=device)
+        self.owners = zeros((requests.capacity + 1,))
+        self._records = zeros((requests.capacity, 24))
         self.idle_record = torch.zeros(24, dtype=torch.int64, device=device)
         self.idle_record[[4, 12, *range(16, 24)]] = -1
         if draft_context_lag is None:

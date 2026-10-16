@@ -238,15 +238,16 @@ def _compile_module(module, calls, owner, output_tree):
         with _artifact_kernel_table():
             artifact = CompiledArtifact.load(path=str(path))
     else:
-        token = _INVOCATIONS.set(calls)
-        try:
-            with _compiler_recursion(module):
-                artifact = standalone_compile(module, inputs, dynamic_shapes='from_example_inputs',
-                    options={'config_patches': _OPTIONS}, aot=True, donate_graph_module=True)
-            # Tune with caller-owned state rather than synthetic full-pool inputs.
-            artifact(*inputs)
-        finally:
-            _INVOCATIONS.reset(token)
+        with _compiler_recursion(module):
+            artifact = standalone_compile(module, inputs, dynamic_shapes='from_example_inputs',
+                options={'config_patches': _OPTIONS}, aot=True, donate_graph_module=True)
+    token = _INVOCATIONS.set(calls)
+    try:
+        # Warm caller-owned state on both paths so TP ranks issue equal collectives.
+        artifact(*inputs)
+    finally:
+        _INVOCATIONS.reset(token)
+    if not cache_hit:
         path.parent.mkdir(parents=True, exist_ok=True)
         with _artifact_kernel_table():
             artifact.save(path=str(path))
@@ -285,6 +286,7 @@ def compile_forward(fn, *, tracer=None):
     Inductor can preserve mutations without cloning strided state regions.
     Pointwise tensor operations remain visible to ordinary Inductor compilation.
     Mean reductions, FP32 sigmoid, LayerNorm and RMSNorm retain ATen's rounding.
+    Both compilation and cache restoration execute one warmup on caller-owned state.
     Compiled artifacts take persistent tensors as inputs and are cached without
     weight payloads or process-local kernel handles. Each callable retains its
     own prepared invocations, buffers, and forward owner.

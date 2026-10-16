@@ -63,7 +63,7 @@ def test_attention_residual_and_situ():
 
 
 @pytest.mark.skipif(os.getenv("FLARE_RUN_CUDA_TESTS") != "1", reason="requires CUDA checkpoint tests")
-@pytest.mark.parametrize("mode,tokens", [("decode", 1), ("prefill", 65)])
+@pytest.mark.parametrize("mode,tokens", [("decode", 1), ("prefill", 65), ("prefill", 256)])
 def test_checkpoint_kda(config, mode, tokens):
     import torch
     from ignition.preparation.checkpoint import inspect_indexed_checkpoint

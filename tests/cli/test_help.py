@@ -1,0 +1,100 @@
+"""Recipe discovery and preparation syntax without GPU initialization."""
+
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+from ignition.cli import _parser, main
+from ignition.errors import UsageError
+from ignition.recipes import aliases, recipes, resolve
+
+
+@pytest.mark.parametrize("command", [[], ["run"], ["export"], ["serve"]])
+def test_help_lists_every_recipe(command, capsys):
+    with pytest.raises(SystemExit) as error:
+        main([*command, "--help"])
+    assert error.value.code == 0
+    captured = capsys.readouterr()
+    output = captured.out
+    assert not captured.err
+    for alias in aliases():
+        assert alias in output
+    assert "Drafts (default/max)" in output
+
+
+@pytest.mark.parametrize("command", ["run", "export", "serve"])
+def test_model_help_explains_step5_limits_and_compression(command, capsys):
+    with pytest.raises(SystemExit) as error:
+        main([command, "step5-preview-nvfp4", "--help"])
+    assert error.value.code == 0
+    captured = capsys.readouterr()
+    output = captured.out
+    assert "--gpus: select 4, 8, 16 GPUs" in output
+    assert "--mtp-draft-tokens: 0..3; default 3" in output
+    assert "--max-concurrency: 1..64; recipe default 4" in output
+    assert "--expert-scale-compression [MODE]" in output
+    assert "estimated 6% less resident weight storage" in output
+    assert "MODE: csf" in output
+    assert "batch * width <= N" in output
+    assert not captured.err
+
+
+def test_help_for_all_aliases_and_repositories_needs_no_model_dependencies():
+    script = """
+import contextlib
+import io
+import sys
+from ignition.cli import main
+from ignition.recipes import recipes
+with contextlib.redirect_stdout(io.StringIO()):
+    for recipe in recipes():
+        for checkpoint in recipe.checkpoints:
+            for model in (checkpoint.alias, checkpoint.repository):
+                try:
+                    main(['export', model, '--help'])
+                except SystemExit as error:
+                    assert error.code == 0
+assert not {'torch', 'transformers', 'flare_heliopause', 'huggingface_hub', 'pynvml'} & set(sys.modules)
+"""
+    result = subprocess.run([sys.executable, "-c", script], cwd=Path(__file__).resolve().parents[2],
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_optional_features_follow_the_selected_recipe(capsys):
+    for recipe in recipes():
+        checkpoint = recipe.checkpoints[0]
+        with pytest.raises(SystemExit):
+            main(["export", checkpoint.alias, "--help"])
+        details = capsys.readouterr().out.split("Optional features for this recipe:")[1]
+        assert ("--mixed-prefill" in details) == recipe.mixed_prefill
+        assert ("--history-drafts" in details) == recipe.history_copy
+        assert ("--no-stream-overlap" in details) == recipe.stream_overlap
+        assert ("--expert-scale-compression" in details) == bool(checkpoint.scale_compressed_device_bytes)
+
+
+@pytest.mark.parametrize("flag", [["--expert-scale-compression"], ["--expert-scale-compression", "csf"],
+                                  ["--expert-scale-compression=csf"]])
+def test_export_command_accepts_bare_and_explicit_compression(flag):
+    args = _parser().parse_args([
+        "export", "step5-preview-nvfp4", *flag, "--prefill-chunk-size", "4096",
+        "--mtp-draft-tokens", "3", "--no-mtp-adaptive-verification",
+        "--speculative-token-capacity", "16", "--max-concurrency", "16", "--output", "model.safetensors"])
+    assert args.expert_scale_compression == "csf"
+    assert (args.prefill_chunk_size, args.mtp_draft_tokens, args.speculative_token_capacity,
+            args.max_concurrency) == (4096, 3, 16, 16)
+    assert _parser().parse_args(["run", "step5-preview-nvfp4"]).expert_scale_compression is None
+
+
+def test_invalid_compression_is_rejected_with_the_supported_encoding(capsys):
+    with pytest.raises(SystemExit) as error:
+        main(["export", "step5-preview-nvfp4", "--expert-scale-compression", "zip", "--output", "model"])
+    assert error.value.code == 2
+    assert "invalid choice: 'zip' (choose from csf)" in capsys.readouterr().err
+
+
+def test_mistyped_alias_suggests_step5():
+    with pytest.raises(UsageError, match="did you mean 'step5-preview-nvfp4'"):
+        resolve("step4-preview-nvfp4")

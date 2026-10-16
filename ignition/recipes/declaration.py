@@ -53,6 +53,8 @@ class Checkpoint:
     # Device bytes that loading adds beyond the stored tensors, such as block scales
     # expanded from a compressed encoding.
     expansion_bytes: int = 0
+    # Estimated resident device weights after optional lossless expert-scale compression.
+    scale_compressed_device_bytes: Mapping[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -60,9 +62,9 @@ class Speculation:
     """Multi-token speculation: how many draft tokens a round verifies and where drafts come from.
 
     A round verifies the pending input and up to `draft_tokens` drafts.
-    Preparation captures every width from one through `draft_tokens + 1` at
-    every prepared batch capacity. `adaptive` sets the serving default: choose
-    widths from measured acceptance when true, or use the fixed maximum when
+    Preparation captures width one at every request bucket and wider widths
+    within the target-token capacity. `adaptive` sets the serving default: choose
+    widths from measured costs and conditional acceptance estimates when true, or use the fixed maximum when
     false. Flare can reduce both capacities when loading the package. Drafts
     come from the checkpoint's MTP module or, with the `copy` source, from
     continuations of the request's own history; `history_drafts` adds those
@@ -73,6 +75,7 @@ class Speculation:
     adaptive: bool = True
     proposal_source: str = "mtp"
     history_drafts: bool = False
+    token_capacity: int | None = None
 
     @property
     def learned(self) -> bool:
@@ -156,7 +159,8 @@ class Recipe:
             return ()
         modes = (True, False) if speculation is not None else (False,)
         return tuple((enabled, b, w, p) for enabled in modes
-            for b, w, p in mixed_shapes(concurrency, chunk, speculation.widths if enabled else (1,)))
+            for b, w, p in mixed_shapes(concurrency, chunk, speculation.widths if enabled else (1,),
+                                        speculation.token_capacity if enabled else None))
 
     def __post_init__(self):
         if self.speculation is not None and set(self.plain_ranks) != set(self.ranks):
@@ -174,10 +178,13 @@ class Recipe:
         return costs if speculation.learned else replace(
             costs, page_bytes=costs.page_bytes - costs.draft_page_bytes, draft_page_bytes=0)
 
-    def weights_bytes(self, checkpoint: Checkpoint, world_size: int, speculation: Speculation | None) -> int:
+    def weights_bytes(self, checkpoint: Checkpoint, world_size: int, speculation: Speculation | None,
+                      expert_scale_compression: str | None = None) -> int:
         """Estimate one rank's device weights from the checkpoint's stored tensors and their expansion."""
         learned = speculation is not None and speculation.learned
-        return -(-(checkpoint.device_bytes + checkpoint.expansion_bytes
+        device_bytes = (checkpoint.device_bytes if expert_scale_compression is None else
+                        checkpoint.scale_compressed_device_bytes[expert_scale_compression])
+        return -(-(device_bytes + checkpoint.expansion_bytes
                    - (0 if learned else checkpoint.draft_bytes)) // world_size)
 
     def live_rows(self, concurrency: int, speculation: Speculation | None) -> int:

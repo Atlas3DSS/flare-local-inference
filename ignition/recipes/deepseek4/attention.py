@@ -136,6 +136,7 @@ def rotate_index(source, destination):
 @dataclass(frozen=True)
 class AttentionScratch:
     projected: torch.Tensor
+    norm_input: torch.Tensor
     query_low: torch.Tensor
     query: torch.Tensor
     window_values: torch.Tensor
@@ -153,6 +154,7 @@ class AttentionScratch:
 
         return cls(
             zeros((tokens, 1536)),
+            zeros((tokens, 1024)),
             zeros((tokens, 1024)),
             zeros((tokens, 64 // world, 512)),
             zeros((tokens, 512)),
@@ -343,6 +345,7 @@ class PreparedAttention:
             eps=self.eps,
             session=session,
             name=name + ".q_norm",
+            staging=scratch.norm_input,
         )
         self.kvnorm = PreparedRMSNorm(
             scratch.projected[:, 1024:],
@@ -351,6 +354,7 @@ class PreparedAttention:
             eps=self.eps,
             session=session,
             name=name + ".kv_norm",
+            staging=scratch.norm_input,
         )
         self.output_projection = PreparedGroupedOutputProjection(
             scratch.attended.view(tokens, 8 // world, 4096),

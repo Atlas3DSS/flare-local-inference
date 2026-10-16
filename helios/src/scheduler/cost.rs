@@ -13,6 +13,7 @@ pub(super) fn observed_duration_ns(timing: ExecutionTiming) -> Option<u64> {
         .flatten()
         .max()
         .filter(|ns| *ns > 0)
+        .map(|ns| if timing.queued { ns } else { ns.max(timing.wall_ns) })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -25,6 +26,7 @@ struct Key {
 
 struct Estimate {
     nanos: u64,
+    handoff_ns: u64,
     observed_at_ns: u64,
 }
 
@@ -52,6 +54,7 @@ impl ActionCosts {
         };
         let estimate = &mut self.entries.iter_mut().find(|(k, _)| *k == key).unwrap().1;
         estimate.nanos = nanos;
+        estimate.handoff_ns = 0;
         estimate.observed_at_ns = self.now_ns;
     }
 
@@ -71,6 +74,7 @@ impl ActionCosts {
                 key,
                 Estimate {
                     nanos: 0,
+                    handoff_ns: 0,
                     observed_at_ns: 0,
                 },
             ));
@@ -106,7 +110,7 @@ impl ActionCosts {
         })
         .map(|estimate| {
             if estimate.fresh(self.now_ns, self.ttl_ns) {
-                estimate.nanos
+                estimate.nanos.saturating_add(estimate.handoff_ns)
             } else {
                 0
             }
@@ -130,7 +134,7 @@ impl ActionCosts {
     }
 
     pub fn observe(&mut self, step: &ScheduledStep, timing: ExecutionTiming) {
-        let Some(sample) = observed_duration_ns(timing) else {
+        let Some(sample) = timing.gpu_ns.into_iter().flatten().max().filter(|n| *n > 0) else {
             return;
         };
         let key = Key {
@@ -140,6 +144,15 @@ impl ActionCosts {
             prefill: step.prefill_capacity(),
         };
         if let Some((_, estimate)) = self.entries.iter_mut().find(|(k, _)| *k == key) {
+            let fresh = estimate.fresh(self.now_ns, self.ttl_ns);
+            if !timing.queued {
+                let handoff = timing.wall_ns.saturating_sub(sample);
+                estimate.handoff_ns = if fresh {
+                    ((7 * u128::from(estimate.handoff_ns) + u128::from(handoff) + 4) / 8) as u64
+                } else { handoff };
+            } else if !fresh {
+                estimate.handoff_ns = 0;
+            }
             estimate.nanos = if estimate.fresh(self.now_ns, self.ttl_ns) {
                 ((7 * u128::from(estimate.nanos) + u128::from(sample) + 4) / 8) as u64
             } else {

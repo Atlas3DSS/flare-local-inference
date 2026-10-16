@@ -58,7 +58,6 @@ class Driver:
         self.executor = group.start_executor()
         self.generation = 0
         self.last_fence = 0
-        self.observed_costs = None
 
     def execute(self, graph, uploads):
         start = time.perf_counter_ns()
@@ -78,7 +77,7 @@ class Driver:
         return completion, time.perf_counter_ns() - start
 
     def snapshot(self, pages):
-        o = self.model.proposal_state.source.owner
+        o = self.model.proposal_state.owner
         values = {f'request.{name}': value.detach().cpu().clone()
                   for name, value in vars(o.requests).items() if isinstance(value, torch.Tensor)
                   and name != 'generation'}
@@ -89,7 +88,7 @@ class Driver:
         values['target_rng'] = o.rng.target_offset.cpu().clone()
         return values
 
-    def initialize(self, tokens, seed, output_tokens, *, observed=False, reuse_prefix=False):
+    def initialize(self, tokens, seed, output_tokens, *, reuse_prefix=False):
         if reuse_prefix:
             if not hasattr(self, 'reuse_scheduler'):
                 self.reuse_scheduler = Scheduler(self.layout, prefix_cache=True)
@@ -97,8 +96,6 @@ class Driver:
             assert scheduler.idle
         else:
             scheduler = Scheduler(self.layout, prefix_cache=False)
-        if observed and self.observed_costs is not None:
-            scheduler.policy.costs = self.observed_costs
         scheduler.advance_to(time.monotonic_ns())
         scheduler.sequence = self.last_fence
         scheduler.generations[0] = self.generation
@@ -119,13 +116,14 @@ class Driver:
         return scheduler, request
 
     def step(self, scheduler, request, width):
-        return Step('speculative', f'speculative1x{width}', 1, width,
+        graph = self.layout.graphs['speculative', 1, width]
+        return Step('speculative', graph, 1, width,
             [Lane(request, request.consumed, scheduler._round_tokens(request, width))],
             self.last_fence + 1)
 
     def generate(self, tokens, seed, count, *, mode, width=8, threshold=.25, costs=None, capture_state=False,
                  debug=False, full_uploads=False, reuse_prefix=False, widths=None, poison=False):
-        if mode not in ('monolithic', 'combined', 'observed', 'split', 'lagged', 'causal'):
+        if mode not in ('combined', 'split', 'lagged', 'causal'):
             raise ValueError('unknown split-speculation diagnostic mode')
         if type(count) is not int or count < 2 or type(width) is not int or not 1 <= width <= 8:
             raise ValueError('diagnostics require at least two output tokens and verification width 1 through 8')
@@ -134,8 +132,7 @@ class Driver:
             raise ValueError('fixed width sequences require combined or split execution and widths 1 through 8')
         if poison and mode != 'split':
             raise ValueError('scratch poisoning requires a completed proposal before split verification')
-        scheduler, request = self.initialize(tokens, seed, count, observed=mode in ('observed', 'monolithic'),
-                                              reuse_prefix=reuse_prefix)
+        scheduler, request = self.initialize(tokens, seed, count, reuse_prefix=reuse_prefix)
         rows, stale, elapsed, gpu_total = [], [1.] * 7, 0, 0
         debug_states = []
         if debug:
@@ -149,7 +146,7 @@ class Driver:
                 width = widths[len(rows) % len(widths)]
             proposal_ns = proposal_wall = 0
             confidence = None
-            if mode not in ('monolithic', 'combined', 'observed'):
+            if mode != 'combined':
                 selected = lagged_budget(stale, costs) if mode == 'lagged' else width
                 proposal_step = self.step(scheduler, request, 8)
                 proposal, proposal_wall = self.execute('proposal1x8', scheduler.pack(proposal_step))
@@ -157,7 +154,7 @@ class Driver:
                 assert proposal.records[0][8] == 0 and proposal.records[0][5] == 1
                 confidence = self.model.proposal_confidence[0].tolist()
                 if poison:
-                    self.model.proposal_state.source.owner.workspace.tensor.fill_(255)
+                    self.model.proposal_state.owner.workspace.tensor.fill_(255)
                     forwards = next(r for r in self.model.resources
                                     if isinstance(r, dict) and 'verification1x8' in r)
                     for workspace in forwards['verification1x8'].target.sampling_scratch.values():
@@ -169,13 +166,12 @@ class Driver:
                 width_used = selected
             else:
                 width_used = width
-            step = scheduler.plan() if mode == 'observed' else self.step(scheduler, request, width_used)
+            step = self.step(scheduler, request, width_used)
             if step is None or step.kind != 'speculative':
                 raise AssertionError('a live decode request requires a speculative step')
             width_used = step.width
-            name = (step.graph if mode in ('monolithic', 'observed') else f'combined1x{width_used}'
-                    if mode == 'combined' else f'verification1x{width_used}')
-            uploads = (scheduler.pack(step) if full_uploads or mode in ('monolithic', 'combined', 'observed') else
+            name = f'combined1x{width_used}' if mode == 'combined' else f'verification1x{width_used}'
+            uploads = (scheduler.pack(step) if full_uploads or mode == 'combined' else
                        [('query_lengths', 0, struct.pack('<i', step.lanes[0].tokens))])
             completion, verification_wall = self.execute(name, uploads)
             step.sequence = scheduler.sequence = completion.fence
@@ -192,8 +188,8 @@ class Driver:
                 proposal_gpu_ns=proposal_ns, verify_gpu_ns=completion.gpu_ns, wall_ns=duration,
                 proposal_wall_ns=proposal_wall, verify_wall_ns=verification_wall,
                 verify_rank_gpu_ns=completion.rank_gpu_ns, verify_native_wall_ns=completion.wall_ns,
-                proposal_rank_gpu_ns=None if mode in ('monolithic', 'combined', 'observed') else proposal.rank_gpu_ns,
-                proposal_native_wall_ns=0 if mode in ('monolithic', 'combined', 'observed') else proposal.wall_ns,
+                proposal_rank_gpu_ns=None if mode == 'combined' else proposal.rank_gpu_ns,
+                proposal_native_wall_ns=0 if mode == 'combined' else proposal.wall_ns,
                 emitted=record[8], offered=record[9], accepted=record[10], confidence=confidence))
             if request.error is not None:
                 raise AssertionError(f'{mode} width {width_used}: device error {request.error}')
@@ -201,8 +197,6 @@ class Driver:
                 debug_states.append(self.debug_state(width_used))
         decode_elapsed_ns = time.perf_counter_ns() - decode_started
         assert torch.cuda.memory_stats()['allocation.all.allocated'] == allocated
-        if mode in ('observed', 'monolithic'):
-            self.observed_costs = scheduler.policy.costs
         snapshot = self.snapshot((len(tokens) + count + 127) // 128) if capture_state else None
         if snapshot is not None:
             snapshot['confidence'] = self.model.proposal_confidence.clone()
@@ -220,14 +214,14 @@ class Driver:
 
     def debug_state(self, width, *, include_cache=False):
         forwards = next(r for r in self.model.resources if isinstance(r, dict) and 'speculative1x1' in r)
-        target = forwards[f'speculative1x{width}']
+        target = forwards[f'verification1x{width}'].target
         o = target.owner
         probability, _, verification, _ = target.operations
         values = dict(pending=o.requests.pending_token, consumed=o.requests.consumed_tokens,
             seed=o.requests.seed, counter=o.requests.rng_counter, target_offset=o.rng.target_offset,
             logits=target.decoder.scratch.logits, probabilities=probability.probabilities,
             verifier_seed=verification.seed_bits, verifier_offset=verification.offset,
-            source_base=self.model.proposal_state.source.base_offset,
+            source_base=self.model.proposal_state.base_offset,
             candidate=target.candidates, target_hidden=target.decoder.scratch.hidden,
             proposal_confidence=self.model.proposal_confidence)
         if include_cache:
@@ -242,7 +236,10 @@ class Driver:
         pages = (len(tokens) + 32 + 127) // 128
         before = self.snapshot(pages)
         self.execute('proposal1x8', scheduler.pack(step))
-        assert_same(before, self.snapshot(pages), 'proposal does not commit')
+        proposed = self.snapshot(pages)
+        assert proposed['draft_rng'][0] == 28
+        before['draft_rng'] = proposed['draft_rng']
+        assert_same(before, proposed, 'proposal only advances draft randomness')
         uploads = scheduler.pack(step)
         uploads = [(name, offset, np.array([0], dtype=np.int32).tobytes() if name == 'live_rows' else data)
                    for name, offset, data in uploads]
@@ -258,7 +255,7 @@ class Driver:
         assert completion.records[0][5:7] == [3, 256]
         assert_same(before, self.snapshot(pages), 'generation reuse')
 
-        # A rejected proposal is consumed diagnostically and cannot become valid later.
+        # A retained proposal from another generation remains invalid on repeated verification.
         completion, _ = self.execute('verification1x8', replacement.pack(invalid))
         assert completion.records[0][5:7] == [3, 256]
         assert_same(before, self.snapshot(pages), 'duplicate verification')
@@ -273,7 +270,7 @@ class Driver:
         completion, _ = self.execute('verification1x8', terminal.pack(step))
         assert completion.records[0][5:7] == [3, 256]
         assert_same(before, self.snapshot(pages), 'terminal request')
-        return ['proposal leaves committed state unchanged', 'inactive verification leaves state unchanged',
+        return ['proposal only advances draft randomness', 'inactive verification leaves state unchanged',
                 'generation reuse rejects without changing replacement', 'duplicate verification rejects',
                 'terminal request rejects without state or RNG mutation']
 
@@ -350,7 +347,8 @@ def main(args):
     print(json.dumps(dict(preparation=asdict(config), sampling=dict(temperature=1., top_p=.95, top_k=0),
                           embedding_table_storage='ram'), default=str), flush=True)
     from tokenizers import Tokenizer
-    tokenizer = Tokenizer.from_file(str(snapshot / 'tokenizer.json'))
+    from ignition.preparation.checkpoint import inspect_indexed_checkpoint
+    tokenizer = Tokenizer.from_file(str(inspect_indexed_checkpoint(snapshot).metadata_path / 'tokenizer.json'))
     from ignition.recipes.deepseek41 import bootstrap
     template = Path(bootstrap.__file__).with_name('assets').joinpath('chat_template.jinja').read_text()
     from transformers.utils.chat_template_utils import _compile_jinja_template
@@ -385,7 +383,7 @@ def main(args):
             result['qualification'] = driver.rejection_checks(prompts['math'])
             save()
             # A shared saved prefix gives both executions the same initial floating-point state.
-            driver.generate(prompts['math'], 1085999, 16, mode='monolithic', width=1, reuse_prefix=True)
+            driver.generate(prompts['math'], 1085999, 16, mode='combined', width=1, reuse_prefix=True)
             costs = [None] * 8
             for width in range(1, 9):
                 mono, mono_state = driver.generate(prompts['math'], 1086000, args.qualification_tokens,
@@ -416,16 +414,16 @@ def main(args):
             if args.qualify_only:
                 return
             result['costs_ns'] = costs
-            result['observed_policy_warmup'] = {}
+            result['combined_warmup'] = {}
             for workload, tokens in prompts.items():
-                warmup, _ = driver.generate(tokens, 1085999, 128, mode='observed', reuse_prefix=True)
-                result['observed_policy_warmup'][workload] = warmup
+                warmup, _ = driver.generate(tokens, 1085999, 128, mode='combined', reuse_prefix=True)
+                result['combined_warmup'][workload] = warmup
             import os
             pids = [os.getpid(), *(p.pid for p in group.processes)]
             before_io = read_io(pids)
             for seed in args.seeds:
                 for workload, tokens in prompts.items():
-                    for mode, threshold in [('observed', .25), ('monolithic', .25), ('lagged', .25), ('causal', .15), ('causal', .25), ('causal', .4)]:
+                    for mode, threshold in [('combined', .25), ('lagged', .25), ('causal', .15), ('causal', .25), ('causal', .4)]:
                         case, _ = driver.generate(tokens, seed, args.tokens, mode=mode, width=8,
                             threshold=threshold, costs=costs, reuse_prefix=True)
                         result['cases'].append(dict(workload=workload, **case))

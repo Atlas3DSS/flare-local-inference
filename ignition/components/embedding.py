@@ -1,5 +1,6 @@
 """Prepared b12x embedding lookup with fixed output and device live counts."""
 
+import torch
 from b12x.preparation import PreparedCall
 from b12x.sequence import embedding
 
@@ -18,8 +19,12 @@ class PreparedEmbedding:
         self.weight, self.ids, self.output, self.num_rows = weight, ids, output, num_rows
         self.arguments = {"out": output, "num_rows": num_rows}
         self.plan = embedding.plan(embedding.query_from_call(weight, ids, **self.arguments), device=weight.device)
-        declare(session, (self.plan.request(name=name, prepare_call=lambda state: PreparedCall(
-            run=lambda: state.run(weight, ids, **self.arguments))),))
+        def prepare(state):
+            prime_ids = torch.zeros_like(ids)
+            arguments = {**self.arguments, "num_rows": None if num_rows is None else torch.zeros_like(num_rows)}
+            return PreparedCall(run=lambda: state.run(weight, prime_ids, **arguments))
+
+        declare(session, (self.plan.request(name=name, prepare_call=prepare),))
 
     def __call__(self):
         if self.num_rows is not None:

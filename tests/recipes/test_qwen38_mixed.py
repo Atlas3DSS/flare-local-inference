@@ -20,12 +20,13 @@ def test_joint_catalog_covers_both_axes_without_cross_product(concurrency, width
     prompts = prefill_capacities(4096)
     shapes = mixed_shapes(concurrency, 4096, widths)
     batches = batch_capacities(concurrency)[1:]
-    assert len(shapes) == len(batches) * (len(prompts) + len(widths) - 1)
+    budget = max(batch_capacities(concurrency)[-1], max(widths))
+    assert len(shapes) == sum(len(prompts) + sum(w > 1 and b * w <= budget for w in widths) for b in batches)
     assert len(shapes) == len(set(shapes))
     for batch in batches:
         assert {(b, 1, p) for b in (batch,) for p in prompts} <= set(shapes)
         for width in widths:
-            assert any(b == batch and w == width for b, w, _ in shapes)
+            assert any(b == batch and w == width for b, w, _ in shapes) == (width == 1 or batch * width <= budget)
     config = PreparationConfig(max_active=concurrency, mtp=True, speculative_widths=widths, mixed_prefill=True)
     assert all(p + (b - 1) * w <= config.token_capacity for _, b, w, p in config.mixed_shapes)
     assert all(w == 1 for enabled, _, w, _ in config.mixed_shapes if not enabled)
@@ -47,7 +48,7 @@ def test_plan_and_preparation_use_identical_catalogs(mixed, monkeypatch):
         assert config.mixed_shapes == plan.mixed_shapes == expected
         assert plan.to_dict()["mixed_shapes"] == expected
         assert config.mtp == (speculation is not None)
-    assert len(PreparationConfig(mtp=True, mixed_prefill=True).mixed_shapes) == 50
+    assert len(PreparationConfig(mtp=True, mixed_prefill=True).mixed_shapes) == 42
     assert PreparationConfig(max_active=1, mtp=True, mixed_prefill=True).mixed_shapes == ()
 
 

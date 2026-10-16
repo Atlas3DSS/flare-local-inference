@@ -1,5 +1,8 @@
 # Ignition preparation and Flare serving commands
 
+For environment setup and model-specific launch examples, see
+[model preparation and serving](model-preparation.md).
+
 Flare serves the model architectures its recipes support on NVIDIA SM120 and
 SM121 GPUs. Recipes declare default checkpoints and supported preparation
 capacities. The command line selects models, GPUs, concurrency, storage, and
@@ -56,6 +59,14 @@ Every command has exactly one name. `MODEL` is a recipe alias, a Hugging Face
 repository id with an optional `@revision`, or a local checkpoint directory;
 with no `MODEL`, `run` and `export` use `defaults.model` from the configuration file and
 fail with a usage error if it is unset.
+
+`ignition --help` and preparation-command help list every declared model alias,
+supported tensor-parallel size, and default/maximum draft count. Put an alias or
+declared checkpoint repository before `--help` for its defaults, limits, and
+optional features, for example `ignition export step5-preview-nvfp4 --help`.
+Help reads recipe declarations without loading model dependencies, probing GPUs,
+or downloading checkpoint files. Unknown model aliases suggest a close match
+when one exists.
 
 Ignition exposes preparation and development launch commands. It prints
 preparation progress without a banner. The Rust Flare executable displays the
@@ -116,15 +127,19 @@ requires `--output FILE`, and excludes `--host` and `--port`.
 | `--trust-store PATH` | Remembered execution trust passed to Flare; `run` only | `~/.config/flare/trust.toml` |
 | `--verify-weights` | Check the stored allocation and table ranges of the ranks served; `run` only | off |
 
-Advanced flags appear in their own section of `--help`. Recipe values apply when flags are omitted; explicit flags take precedence.
+Preparation flags are grouped by capacity/compression, speculative decoding,
+and advanced options in `--help`. Recipe values apply when flags are omitted;
+explicit flags take precedence.
 
 | Flag | Meaning | Default |
 |---|---|---|
 | `--prefill-chunk-size N` | Most prompt tokens processed in one prefill step, a multiple of 64. A larger chunk reaches a long prompt's first token sooner; while it runs, other active requests wait for their next token. Command line only. | The recipe's chunk |
 | `--mixed-prefill` | Capture mixed prompt/decode graphs alongside separate graphs. Supported by Qwen with concurrency of at least two, with or without speculation. Command line only; existing packages retain their captured catalog. | Disabled |
+| `--expert-scale-compression [MODE]` | Losslessly compress Step-5 routed-expert NVFP4 block scales, including BF16 experts converted to W4A16. `csf` is a compressed scale encoding expanded during execution, reducing resident GPU weight storage by an estimated 6%; actual savings depend on encoded scales. A bare flag selects `csf`; `--expert-scale-compression csf` also works. Retain compressed scales and share expansion scratch across serial layers. Selects a separate cached package. | Native scales |
 | `--no-mtp` | Disable multi-token speculation: load no draft model, keep no verification rows, and decode one token per step. | Speculation on |
-| `--mtp-draft-tokens N` | Most draft tokens verified in one round, up to 7. Graphs are captured for every count from 0 through `N`, and verification adapts among them from measured acceptance. | 5 |
-| `--no-mtp-adaptive-verification` | Default to fixed-width serving. Capture still includes every smaller width at every batch capacity. | Adaptive |
+| `--mtp-draft-tokens N` | Most draft tokens verified in one round; see `MODEL --help` for its limit. Graphs are captured for every count from 0 through `N` within the speculative token capacity, and verification adapts using measured cost and historical acceptance or native proposal confidence. Zero retains draft state with width-one execution; `--no-mtp` excludes draft weights and state. | Recipe declaration |
+| `--speculative-token-capacity N` | Maximum target-token rows in wider speculative graphs; width one covers every request bucket. Applies to every speculative recipe. | Larger of padded concurrency and maximum verification width |
+| `--no-mtp-adaptive-verification` | Default to fixed-width serving. Capture includes every smaller width within the speculative token capacity. | Adaptive |
 | `--mtp-proposal-source {mtp,copy}` | Where drafts come from: the checkpoint's MTP module, or `copy` for continuations of the request's own history, which loads no draft model. Qwen only. | `mtp` |
 | `--history-drafts` | Also draft continuations copied from the request's own history. Qwen only. | off |
 | `--no-stream-overlap` | Run every concurrent branch (shared experts, projection chains, query chains) serially on the main stream with the same kernels, to diagnose scheduling-dependent faults. Slower. Recipes that run no branches concurrently reject it. | Overlap |
@@ -198,29 +213,32 @@ for final native performance validation: development ranks run in separate
 processes with separate delivery staging, while the native CLI shares staging
 between its rank threads.
 
-For DS4.1 research with separate draft preparation and prefix verification, run
-the qualification launcher from the repository root:
+DeepSeek V4.1 uses separate proposal and verification graphs in exported packages
+and native serving. A batch-four package with up to seven drafts and eight target
+token rows is prepared with:
 
 ```sh
-.venv/bin/python -m qualify.deepseek41_native_split \
-  --gpus 0,1,2,3 --mode split --max-concurrency 1 \
-  --headroom-mib 4096 --threshold 0.15 \
-  --output /tmp/ds41-split --bind 127.0.0.1:8001
+.venv/bin/ignition export deepseek-v4.1-flash --gpus 0,1,2,3 \
+  --max-concurrency 4 --mtp-draft-tokens 7 --speculative-token-capacity 8 \
+  --prefill-chunk-size 4096 --output /data/flare-runtime/ds41-tp4-c4-d7-r8.safetensors
 ```
 
-This mode prepares seven drafts, then Helios selects a causal prefix from their
-confidence before verification. `--threshold` defaults to `0.15`; keep that value
-for comparison, or pass another value in `(0, 1]` to study prefix selection.
-`--mode baseline` uses complete speculative rounds. Both modes keep Engram tables
-in shared RAM. Split execution supports one active request and cannot be exported
-as a runtime package. Ordinary `ignition serve`, `export`, and `run` continue to
-use complete speculative rounds, including at higher concurrency.
+Proposal captures cover batches 1, 2, and 4 at each draft depth 1 through 7.
+Verification captures cover widths 1–8 at batch one, 1–4 at batch two, and 1–2
+at batch four. Native scheduling uses conditional confidence, measured costs,
+and shared fairness prices to finalize logical prefixes and group them into
+verification calls. Proposal-free width-one graphs serve every batch bucket.
+See [retained proposals](scheduling-runtime-design.md#retained-proposals-and-confidence).
 
 ### 3.2 Native serving flags
 
 `flare run PACKAGE` loads an exported file without the Ignition configuration
-reader. `flare --help` lists commands; `flare run --help`, `flare run -h`, and
-`flare help run` describe every serving option, its defaults, and accepted values.
+reader. `PACKAGE` can also be a Hugging Face repository ID with an optional
+`@revision`; Flare downloads its prepared package before loading it. A
+[serving container](container.md) packages Flare and Helios without
+Python or the CUDA toolkit. `flare --help` lists commands; `flare run --help`,
+`flare run -h`, and `flare help run` describe every serving option, its defaults,
+and accepted values.
 Help also works after the package path and other options, without opening the
 package or initializing CUDA. Options may precede or follow `PACKAGE`;
 value-taking options accept both `--option VALUE` and `--option=VALUE`.
@@ -232,7 +250,7 @@ Help exits with status 0; usage errors go to stderr with status 2. Its options a
 | `--dangerously-approve-key FINGERPRINT` | Explicitly approve this full lowercase SHA-256 key fingerprint; requires the matching publisher flag | Interactive first use or remembered trust |
 | `--dangerously-accept-publisher NAMESPACE` | Accept this exact publisher namespace; requires the matching key flag | Interactive first use or remembered trust |
 | `--trust-store PATH` | Persistent key/namespace acceptance file | `~/.config/flare/trust.toml` |
-| `--verify-weights` | Verify the stored allocation and table ranges of the ranks served before CUDA initialization | off |
+| `--verify-weights` | Verify the stored allocation and table ranges of the ranks served before loading model GPU resources | off |
 | `--gpus N[,N...]` | Selected GPUs in rank order; indices follow an inherited `CUDA_VISIBLE_DEVICES` list when present | `0` |
 | `--bind IP:PORT` | Listener address | `127.0.0.1:8000` |
 | `--api-key-file PATH` | File containing the serving API key | No authentication |
@@ -251,10 +269,64 @@ from requests each time the server starts.
 
 Selected concurrency and draft depth cannot exceed prepared capacity.
 Concurrency three requires the batch-four bucket. Fixed verification loads
-width `N+1` for each required batch; adaptive verification loads the permitted
+width `N+1` where the token envelope permits it, plus width-one execution at every
+batch; adaptive verification loads the permitted
 widths. Missing variants fail before GPU allocation. Continuation rows and
 KV pages receive physical backing after graph upload, within fixed virtual
 extents. Reducing execution state can leave more memory for KV pages.
+
+### Downloading published packages
+
+```sh
+flare download local-inference-lab/MODEL --gpus 0,1,2,3
+flare run local-inference-lab/MODEL --gpus 0,1,2,3
+flare download local-inference-lab/MODEL --revision gb10
+flare run local-inference-lab/MODEL@gb202 --filename model.safetensors --gpus 0,1,2,3
+```
+
+These examples use `MODEL` as a repository-name placeholder. Repositories contain
+prepared Flare packages, not source Transformers checkpoints. Hardware variants
+are separate Hugging Face revisions named `gb10` and `gb202`. Automatic selection
+queries the selected GPUs' PCI device identifiers through the CUDA driver without
+creating a context. GB10 selects `gb10`; known GB202 devices, including RTX PRO
+6000 Blackwell, select `gb202`. All selected GPUs must belong to the same family.
+An unknown identifier or a driver unable to report it requires an explicit
+revision. GPU selection follows `CUDA_VISIBLE_DEVICES` for both commands.
+
+An explicit `--revision` overrides `@revision` and hardware detection. It accepts
+a branch, tag, or commit, and permits downloading on a machine without NVIDIA
+hardware. Online resolution obtains the revision's commit and downloads from
+that exact commit. If the revision contains exactly one `.safetensors` file,
+Flare selects it. Multiple files require `--filename`; Flare prints the available
+names. Hardware selection does not infer tensor-parallel size or graph capacities
+from filenames. The selected package must match the serving GPU count, topology,
+and capacities; the native loader validates its contract.
+
+`flare download` prints only the cached package path on stdout; resolution and
+terminal download progress go to stderr. It does not load or execute the package,
+or grant publisher trust. `flare run` applies the existing signature checks and
+publisher-approval flow after resolution. An existing path, an absolute path, a
+path starting with `./` or `../`, or a `.safetensors` path selects local serving.
+Download options are rejected for local package paths.
+
+Both commands accept these download options:
+
+| Flag | Meaning | Default |
+|---|---|---|
+| `--revision REVISION` | Explicit Hub branch, tag, or commit | Detected `gb10` or `gb202` |
+| `--filename FILE` | Repository-relative prepared package filename | Sole `.safetensors` file |
+| `--cache-dir PATH` | Hugging Face hub cache directory | `~/.cache/huggingface/hub` from the OS user account |
+| `--token-file PATH` | File containing a Hub token for gated or private repositories | No authentication |
+| `--offline` | Resolve only from cached refs and snapshots; make no network requests | Off |
+
+The native client uses Hugging Face's `refs`, `snapshots`, and `blobs` cache
+layout. Existing cached files can be reused without copying their weights.
+Offline automatic filename selection considers the files present in that cached
+snapshot; use `--filename` to select one explicitly. Cache paths, endpoint, and
+authentication are configured explicitly; native commands do not interpret
+`HF_HOME`, `HF_HUB_CACHE`, `HF_TOKEN`, or `HF_ENDPOINT`.
+Downloads use resumable HTTP transfers through `hf-hub`; Xet chunk reconstruction
+is not used.
 
 ### Signing and local development
 
@@ -268,10 +340,16 @@ namespace = "local-inference-lab"
 official_source = "https://huggingface.co/local-inference-lab/foobar"
 ```
 
-The key must be an unencrypted Ed25519 PKCS#8 PEM file. Keep it private;
-runtime publisher profiles contain only its verification key. `--official-source`
-overrides the configured repository URL. A partial publishing configuration is
-an error and never falls back to local credentials.
+The key must be an owner-only Ed25519 PKCS#8 PEM file. Encrypted keys prompt
+for their passphrase in an interactive terminal; unencrypted keys are also
+accepted. Runtime publisher profiles contain only the verification key.
+`--official-source` overrides the configured repository URL. A partial publishing
+configuration is an error and never falls back to local credentials.
+
+`ignition keygen` creates an encrypted production key and public profile.
+`ignition sign` verifies and promotes an existing development package without
+model preparation or GPU access. See [production signing](signing.md) for key
+custody, commands, and package promotion.
 
 With no publishing configuration, Ignition creates and reuses
 `development-signing-key.pem` beside its configuration file, with owner-only
@@ -334,6 +412,9 @@ cuda = "/opt/cuda"                # Used when installed packages provide no tool
 ```
 
 `[models.<alias>]` overrides `[defaults]`; flags override both.
+Both sections accept `speculative_token_capacity`, overridden during preparation
+by `--speculative-token-capacity`. Omitting it derives the capacity from the
+prepared concurrency and draft depth.
 
 Default request parameters, meaning the values a request receives for fields
 it does not set, such as thinking, reasoning effort, sampling, and output
@@ -385,7 +466,7 @@ Configuration assigns each decision to one owner:
 | Seed, sampling controls, output limit, and stops | Request fields, with declared defaults for missing values |
 
 Explicit request values take precedence over defaults. Speculation's benefit
-depends on measured acceptance and round cost. Reducing the draft limit at
+depends on native confidence or measured acceptance and execution cost. Reducing the draft limit at
 load time retains draft weights; freeing those weights requires preparation
 with `--no-mtp`.
 
@@ -399,7 +480,7 @@ disk settings require the implementation and measurements defined there.
 |---|---|
 | Tensor-parallel size | Count of `--gpus`, or the smallest recipe-supported size whose estimate fits the first GPUs with enough free memory |
 | Context limit | The smaller of the prepared context ceiling and loaded KV capacity after per-request draft-page storage; admission also checks available shared capacity |
-| KV pages | All remaining supply after engine headroom, `memory.reserve`, weights, graphs, scratch, and execution rows. Retained snapshot rows borrow page backing; the load display reports KV capacity before checkpoint retention |
+| KV pages | All remaining supply after engine headroom, `memory.reserve`, weights, graphs, scratch, and execution rows. Retained snapshot rows borrow page backing; the load display reports total KV capacity |
 | Prefix cache | Up to eight snapshot slots per `--max-concurrency` request, acquired on demand from shared KV backing and evicted under pressure |
 | Live state | One null row plus the recipe's execution rows per active request slot; GLM verification commits into one live row |
 | Decode graph capacities | 1 through `--max-concurrency`, rounded to the recipe's captured set |
@@ -558,6 +639,11 @@ The hub cache follows the Hugging Face hub library's convention unless
 `[paths].hub_cache` is set. A hub alias downloads its pinned revision. A local
 alias resolves its directory directly and fails if it is absent.
 `kimi-k3-mxfp4-csf` names `/data/models/Kimi-K3-MXFP4-CSF`.
+Its DFlash2 draft checkpoint, `lightseekorg/kimi-k3-dflash2` at revision
+`e77935fb4804e17eb55085bffd045eae1d779769`, is downloaded to
+`/data/models/Kimi-K3-DFlash2` during preparation. Seven draft tokens and adaptive
+verification are the defaults. `--no-mtp` prepares ordinary execution without
+downloading or loading the draft checkpoint.
 
 ## 9. Recipe obligations
 

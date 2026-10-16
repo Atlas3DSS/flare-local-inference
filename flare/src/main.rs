@@ -5,6 +5,8 @@ mod agent;
 mod cli;
 mod cluster;
 mod environment;
+mod hardware;
+mod hub;
 #[cfg(unix)]
 mod launch;
 mod trust;
@@ -32,6 +34,12 @@ extern "C" fn stop(_: libc::c_int) {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = match cli::Cli::parse().command {
         cli::Command::Run(args) => args,
+        cli::Command::Download(args) => {
+            environment::configure(&args.gpus)?;
+            let path = hub::download(&args.repository, &args.hub, args.gpus.len())?;
+            println!("{}", path.display());
+            return Ok(());
+        }
         #[cfg(windows)]
         cli::Command::Agent(_) => {
             return Err("multi-host serving is not supported on Windows".into());
@@ -67,8 +75,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err(std::io::Error::last_os_error().into());
         }
     }
-    let root = args
-        .package
+    environment::configure(&args.gpus)?;
+    let package = if hub::is_repository(&args.package) {
+        hub::download(
+            args.package.to_str().ok_or("repository must be UTF-8")?,
+            &args.hub,
+            args.gpus.len(),
+        )?
+    } else {
+        if args.hub.revision.is_some()
+            || args.hub.filename.is_some()
+            || args.hub.cache_dir.is_some()
+            || args.hub.token_file.is_some()
+            || args.hub.offline
+        {
+            return Err(
+                "download options apply to Hugging Face repositories, not local package paths"
+                    .into(),
+            );
+        }
+        args.package.clone()
+    };
+    let root = package
         .canonicalize()
         .map_err(|error| format!("cannot access package {}: {error}", args.package.display()))?;
     let key = args
@@ -84,22 +112,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(unix)]
     let rank_options = args.rank_options();
     let devices = &args.gpus;
-    let inherited =
-        std::env::var("CUDA_VISIBLE_DEVICES")
-            .map(Some)
-            .or_else(|error| match error {
-                std::env::VarError::NotPresent => Ok(None),
-                error => Err(error),
-            })?;
-    let visibility = environment::visibility(devices, inherited.as_deref())?;
     let local_devices: Vec<i32> = (0..devices.len() as i32).collect();
-    // SAFETY: Startup is single-threaded here, before Helios starts workers or
-    // loads CUDA. Packages contain compiled cubins and require no driver JIT.
-    unsafe {
-        std::env::set_var("CUDA_VISIBLE_DEVICES", visibility);
-        std::env::set_var("CUDA_FORCE_PRELOAD_LIBRARIES", "0");
-        std::env::set_var("CUDA_DISABLE_JIT", "1");
-    }
     let mut progress = StartupProgress::stderr();
     let phase = progress.phase("Verify package", None);
     // A peer of a multi-host package holds only its rank's bytes, so it verifies that rank alone.

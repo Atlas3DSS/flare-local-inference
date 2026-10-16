@@ -42,7 +42,7 @@ class PreparedModel(PreparedExecution):
         fixed = self.server_config.get("speculative_fixed_width")
         if fixed is not None and not all_variants:
             manifest["graphs"] = [graph for graph in manifest["graphs"]
-                if graph["kind"] not in ("speculative", "verification") or graph["token_capacity"] == fixed]
+                if graph["kind"] not in ("speculative", "verification") or graph["token_capacity"] in (1, fixed)]
         if self._embedding_binding is not None and not all_variants:
             manifest["engram"] = self._embedding_binding
         return manifest

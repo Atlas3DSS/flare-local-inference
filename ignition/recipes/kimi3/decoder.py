@@ -3,6 +3,8 @@
 from dataclasses import dataclass
 
 import torch
+import triton
+import triton.language as tl
 
 from ignition.components.collectives import PreparedAllGather, PreparedAllReduce
 from ignition.components.embedding import PreparedShardedEmbedding
@@ -10,10 +12,28 @@ from ignition.components.linear import UnquantizedProjection
 from ignition.components.moe import PreparedRouter, PreparedRoutedExperts, RouterScratch
 from ignition.components.recurrent import DeltaMetadata
 from ignition.components.vocabulary import PreparedVocabularyProjection
+from ignition.components.kda_speculation import PreparedKDAReplay
 
 from .attention import PreparedMLA
 from .kda import PreparedKDA
 from .model import attention_residual, rms_norm, situ
+
+
+@triton.jit
+def _commit_convolution(Backing, Offsets, Rows, Counts, STRIDE: tl.constexpr,
+                        CHANNELS: tl.constexpr, COLUMNS: tl.constexpr, BLOCK: tl.constexpr):
+    layer, row, tile = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    count = tl.load(Counts + row)
+    state = tl.load(Rows + row)
+    channel = tile * BLOCK + tl.arange(0, BLOCK)
+    live = (count > 1) & (state > 0) & (channel < CHANNELS)
+    base = Backing + state * STRIDE + tl.load(Offsets + layer) + channel * COLUMNS
+    first = tl.load(base + count - 1, live, other=0)
+    second = tl.load(base + count, live, other=0)
+    third = tl.load(base + count + 1, live, other=0)
+    tl.store(base, first, live)
+    tl.store(base + 1, second, live)
+    tl.store(base + 2, third, live)
 
 
 @dataclass(frozen=True)
@@ -54,7 +74,7 @@ class PreparedMLP:
     def __init__(self, weights, source, *, session, name, buffers):
         rows, device = source.shape[0], source.device
         def buffer(field, width):
-            if field not in buffers:
+            if field not in buffers or buffers[field].shape[0] < rows:
                 buffers[field] = torch.zeros((rows, width), dtype=source.dtype, device=device)
             return buffers[field][:rows]
         self.input = buffer("input", weights["gate_up"].shape[0] // 2)
@@ -75,7 +95,7 @@ class PreparedLatentMoE:
         latent = c["routed_expert_hidden_size"]
 
         def buffer(field, width, dtype=torch.bfloat16):
-            if field not in buffers:
+            if field not in buffers or buffers[field].shape[0] < tokens:
                 buffers[field] = torch.zeros((tokens, width), dtype=dtype, device=device)
             return buffers[field][:tokens]
 
@@ -135,7 +155,7 @@ class PreparedLatentMoE:
 
 class PreparedDecoder:
     def __init__(self, weights, scratch, metadata, pool, *, mode, runtime, vocabulary_runtime, embedding_runtime, router_runtime, vision_state,
-                 coordinator, session, name, workspace, buffers):
+                 coordinator, session, name, workspace, buffers, kda_records=None):
         self.weights, self.scratch, self.metadata, self.pool = weights, scratch, metadata, pool
         self.vision_state = vision_state if mode == "prefill" else None
         config, source = weights.config, scratch.activations
@@ -143,15 +163,24 @@ class PreparedDecoder:
         self.embedding = PreparedShardedEmbedding(weights.embedding, metadata.token_ids, self.local_embedding, source,
             runtime=embedding_runtime, coordinator=coordinator,
             num_rows=metadata.live_counts[:1], session=session, name=name + ".embedding")
-        self.delta = DeltaMetadata.allocate(metadata.starts.numel(), source.device)
+        self.delta = DeltaMetadata.allocate(metadata.starts.numel(), source.device,
+            verification_columns=8 if mode == "verify" else 1)
         self.buffers, self.layers = buffers.scratch, []
+        self.target_layers = () if weights.draft is None else config.draft.target_layers
+        self.auxiliary = None
+        if self.target_layers:
+            if "auxiliary" not in self.buffers:
+                self.buffers["auxiliary"] = torch.zeros((source.shape[0], len(self.target_layers) * config.hidden),
+                    dtype=source.dtype, device=source.device)
+            self.auxiliary = self.buffers["auxiliary"][:source.shape[0]]
         for index, w in enumerate(weights.layers):
             prefix = f"{name}.layer{index}"
             kind = config.layers[index]
             kwargs = dict(mode=mode, session=session, name=prefix + ".attention", workspace=workspace,
                           buffers=self.buffers.setdefault(kind, {}))
             attention = (PreparedKDA(w["attention"], source, pool.recurrent(index), self.delta,
-                eps=config.text["rms_norm_eps"], **kwargs) if kind == "kda" else
+                eps=config.text["rms_norm_eps"], records=kda_records.layer(index) if mode == "verify" else None,
+                **kwargs) if kind == "kda" else
                 PreparedMLA(w["attention"], source, metadata, pool.attention(index), **kwargs))
             if "mlp" in w:
                 mlp = PreparedMLP(w["mlp"], source, session=session, name=prefix + ".mlp",
@@ -173,6 +202,23 @@ class PreparedDecoder:
         self.norm = rms_norm(weights.norm, config.text["rms_norm_eps"])
         self.head = PreparedVocabularyProjection(scratch.hidden, weights.head, scratch.local_logits, scratch.logits,
             runtime=vocabulary_runtime, coordinator=coordinator, session=session, name=name + ".head")
+        self.replay = None
+        if mode == "verify":
+            indices = kda_records.layers
+            states = [pool.recurrent(i).recurrent[:kda_records.corrections.shape[1]] for i in indices]
+            self.replay = PreparedKDAReplay(pool.backing, states, kda_records, self.layers[indices[0]][1].plan,
+                self.delta.state_indices[:, 0], session=session, workspace=workspace)
+            regions = [pool.layout.region(f"layer{i}.convolution") for i in indices]
+            self.convolution_offsets = torch.tensor([r.offset // 2 for r in regions], dtype=torch.int64, device=source.device)
+            self.convolution_shape = regions[0].shape
+
+    def commit(self, counts):
+        self.replay(counts)
+        channels, columns = self.convolution_shape
+        torch.library.wrap_triton(_commit_convolution)[
+            (self.convolution_offsets.numel(), counts.numel(), triton.cdiv(channels, 128))](
+            self.pool.backing.view(torch.bfloat16), self.convolution_offsets, self.metadata.state_rows, counts,
+            self.pool.layout.row_bytes // 2, channels, columns, 128)
 
     def __call__(self):
         m, d, c = self.metadata, self.delta, self.weights.config.text
@@ -199,6 +245,9 @@ class PreparedDecoder:
             prefix = attended.clone() if boundary else prefix + attended
             hidden = attention_residual(prefix, blocks, w["mlp_res_norm"], w["mlp_res_proj"], c["rms_norm_eps"])
             prefix = prefix + reduce(mlp(post_norm(hidden)))
+            if index in self.target_layers:
+                column = self.target_layers.index(index) * c["hidden_size"]
+                self.auxiliary[:, column:column + c["hidden_size"]].copy_(prefix)
         hidden = attention_residual(prefix, blocks, self.weights.output_res_norm,
                                     self.weights.output_res_proj, c["rms_norm_eps"])
         self.scratch.hidden.copy_(self.norm(hidden[m.sample_indices]))

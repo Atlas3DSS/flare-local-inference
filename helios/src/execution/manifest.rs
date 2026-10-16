@@ -335,14 +335,15 @@ impl ExecutionManifest {
         for graph in &self.graphs {
             if graph.kind == GraphKind::Proposal {
                 let confidence = self.buffer("proposal_confidence")?;
-                if self.max_active != 1
-                    || graph.batch_capacity != 1
-                    || graph.token_capacity < 2
+                if graph.token_capacity < 2
                     || confidence.dtype != Dtype::Float32
-                    || confidence.shape != [1, graph.token_capacity - 1]
+                    || confidence.shape.len() != 2
+                    || confidence.shape[0] != self.request_capacity()
+                    || !(graph.token_capacity - 1..=7).contains(&confidence.shape[1])
+                    || confidence.strides != [confidence.shape[1], 1]
                 {
                     return Err(
-                        "proposal confidence requires one lane and one FP32 value per draft".into(),
+                        "proposal confidence requires one FP32 value per request row and draft".into(),
                     );
                 }
             }
