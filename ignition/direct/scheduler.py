@@ -72,6 +72,7 @@ class Layout:
     state_rows_per_request: int | None = None
     draft_pages: int = 0
     record_fields: int = 8
+    paired_graphs: frozenset[str] = frozenset()
 
     def __post_init__(self):
         if not 1 <= self.max_active <= self.capacity or self.pages <= 0 or self.page_tokens <= 0:
@@ -89,6 +90,11 @@ class Layout:
                   for name, signature in model.signatures.items()
                   if signature.kind in ("init", "restore", "snapshot", "prefill", "decode", "resume", "speculative")
                   and signature.speculation_enabled in (None, speculative)}
+        paired = {name for name, signature in model.signatures.items()
+                  if signature.kind == "verification" and signature.token_capacity > 1}
+        for name in paired:
+            signature = model.signatures[name]
+            graphs["speculative", signature.batch_capacity, signature.token_capacity] = name
         return cls(capacity=buffers["row_slot_ids"].numel(), max_active=model.max_active,
                    context=config["max_sequence_tokens"], page_tokens=config["model_contract"]["cache"]["page_tokens"],
                    table_width=buffers["page_tables"].shape[1], pages=config["pages"],
@@ -103,7 +109,7 @@ class Layout:
                    page_views={v["buffer"]: v["page_offset"] for v in config["model_contract"]["cache"]["page_tables"]},
                    state_rows_per_request=max(g["state_rows_per_request"] for g in config["model_contract"]["graphs"] if g["graph"] in graphs.values()),
                    draft_pages=max((v["page_offset"] for v in config["model_contract"]["cache"]["page_tables"]), default=0),
-                   record_fields=buffers["completion_records"].shape[-1])
+                   record_fields=buffers["completion_records"].shape[-1], paired_graphs=frozenset(paired))
 
     @property
     def speculative(self):
@@ -182,9 +188,14 @@ class Acceptance:
 
     def __init__(self):
         self.depths = [[.5, 2.] for _ in range(7)]
+        self.native_confidence = False
+
+    def confidence(self, values):
+        self.depths[:len(values)] = [[float(p), 2.] for p in values]
+        self.native_confidence = True
 
     def observe(self, offered, accepted, rejected):
-        if offered == 0:
+        if offered == 0 or self.native_confidence:
             return
         for depth in range(accepted):
             self._observe(depth, True)
@@ -464,7 +475,7 @@ class Scheduler:
         if rates is None:
             rates = self.policy.rates(active)[0]
         step.participants = self.policy.participants(active, rates)
-        self.sequence += 1
+        self.sequence += 2 if step.graph in self.layout.paired_graphs else 1
         step.sequence = self.sequence
         for lane in step.lanes:
             lane.request.last_use = self.sequence

@@ -24,6 +24,86 @@ def checkpoint(path, tensors, layers):
     return inspect_indexed_checkpoint(path)
 
 
+@pytest.mark.parametrize("local,tokens", [(96, 1), (192, 7), (384, 128), (864, 4), (1728, 1), (384, 4096)])
+@torch.no_grad()
+def test_mxfp8_gate_up_conversion_and_compiled_mlp(local, tokens):
+    from torch.multiprocessing.reductions import StorageWeakRef
+    from ignition.components.mlp import MLPScratch, PreparedMLP
+    from ignition.components.weights import MLPWeights, quantize_bf16_linear_as_mxfp8
+    from ignition.preparation.compilation import compile_forward
+    from ignition.preparation.scratch import ScratchArena
+    from ignition.preparation.tuning import RecordedPreparationSession
+    from ignition.reference.qwen38_quant import decode_mxfp8, quantize_mxfp8_activation
+
+    gen = torch.Generator().manual_seed(570)
+    hidden, limit = 4096, .5
+    original = (torch.randn(2 * local, hidden, generator=gen) * .03125).bfloat16()
+    original[0].zero_()
+    source = original.cuda()
+    old_storage = StorageWeakRef(source.untyped_storage())
+    packed = quantize_bf16_linear_as_mxfp8(source)
+    del source
+    assert old_storage.expired()
+    decoded = decode_mxfp8(packed.weight.values.cpu(), packed.weight.scale_rows[0].view(torch.uint8).cpu())
+    assert not decoded[0].any()
+    assert (decoded - original.float()).norm() / original.float().norm() < .035
+    down = (torch.randn(hidden, local, generator=gen) / local**.5).bfloat16()
+    cpu = (torch.randn(tokens, hidden, generator=gen) * .5).bfloat16()
+    x = cpu.cuda()
+    scratch = MLPScratch.allocate(tokens, hidden, local, x.device)
+    arena = ScratchArena(x.device)
+    with RecordedPreparationSession(device=x.device, checkpoint="mxfp8-conversion",
+            workload_schema="packed-swiglu", numerical_policy="auto") as session:
+        session.register_scratch(arena)
+        mlp = PreparedMLP(x, MLPWeights(packed, down.cuda()), scratch.gate_up, scratch.intermediate,
+            scratch.output, session=session, name="mxfp8-mlp", workspace=arena,
+            swiglu_limit=limit, round_silu=False, clamp_after_silu=True)
+        session.tune(show_progress=False)
+        compiled = compile_forward(lambda: mlp(x))
+        compiled()
+        session.freeze()
+        graph = torch.cuda.CUDAGraph()
+        with session.capture(), torch.cuda.graph(graph):
+            compiled()
+        for factor in (1, -.5):
+            current = (cpu * factor).bfloat16()
+            x.copy_(current)
+            operand = current.float()
+            if mlp.up_projection.plan.selection.config.mode == "quantized":
+                operand = quantize_mxfp8_activation(operand)
+            gate, up = (operand @ decoded.T).bfloat16().float().chunk(2, -1)
+            intermediate = (torch.nn.functional.silu(gate).clamp(max=limit)
+                            * up.clamp(-limit, limit)).bfloat16()
+            expected = intermediate.float() @ down.float().T
+            scratch.gate_up.fill_(float("nan"))
+            scratch.intermediate.fill_(float("nan"))
+            scratch.output.fill_(float("nan"))
+            arena.tensor.fill_(0x7f)
+            allocated = torch.cuda.memory_stats()["allocation.all.allocated"]
+            graph.replay()
+            torch.cuda.synchronize()
+            assert torch.cuda.memory_stats()["allocation.all.allocated"] == allocated
+            actual = scratch.output.float().cpu()
+            assert torch.isfinite(actual).all()
+            assert (actual - expected).norm() / expected.norm() < .025
+        graph.reset()
+
+
+def test_mxfp8_conversion_padding_and_nonfinite_weights():
+    from ignition.components.weights import quantize_bf16_linear_as_mxfp8
+    from ignition.reference.qwen38_quant import decode_mxfp8
+
+    weight = torch.ones((64, 288), device="cuda", dtype=torch.bfloat16)
+    packed = quantize_bf16_linear_as_mxfp8(weight)
+    assert (packed.in_features, packed.padded_in_features) == (288, 384)
+    decoded = decode_mxfp8(packed.weight.values.cpu(), packed.weight.scale_rows[0].view(torch.uint8).cpu())
+    torch.testing.assert_close(decoded[:, :288], weight.float().cpu(), atol=0, rtol=0)
+    assert not decoded[:, 288:].any()
+    weight[0, 0] = float("nan")
+    with pytest.raises(ValueError, match="finite BF16 weights"):
+        quantize_bf16_linear_as_mxfp8(weight)
+
+
 def packed(rows, columns, fmt, generator):
     group = 32 if fmt == "mxfp4" else 16
     w = torch.randint(0, 256, (rows, columns // 2), dtype=torch.uint8, generator=generator)
@@ -99,7 +179,10 @@ def test_ordinary_fp4_linear_graph(tmp_path, rows, fmt):
 
 
 @pytest.mark.parametrize("fmt,mode", [("nvfp4", "a16"), ("nvfp4", "a4"), ("mxfp4", "a8")])
-def test_ordinary_fp4_experts_graph(tmp_path, fmt, mode):
+@pytest.mark.parametrize("compression", [None, "csf"])
+def test_ordinary_fp4_experts_graph(tmp_path, monkeypatch, fmt, mode, compression):
+    from torch.multiprocessing.reductions import StorageWeakRef
+    from b12x.moe import fused_moe
     from b12x.preparation import PreparationSession
     from ignition.components.moe import PreparedRoutedExperts
     from ignition.reference.qwen38_quant import Nvfp4Projection, nvfp4_expert_reference, quantize_mxfp8_activation
@@ -120,11 +203,29 @@ def test_ordinary_fp4_experts_graph(tmp_path, fmt, mode):
         serialized.append(stored)
     manifest = checkpoint(tmp_path, tensors, {})
     scale_vectors = (torch.full((2,), .5), torch.full((2,), .5), torch.full((2,), 32.), torch.full((2,), 32.))
+    buffers = None
+    if compression is not None:
+        shapes = ((2, 256, 16), (2, 256, 8)) if fmt == "nvfp4" else ((2, 8, 256), (2, 4, 256))
+        dtype = torch.float8_e4m3fn if fmt == "nvfp4" else torch.uint8
+        buffers = tuple(torch.empty(shape, dtype=dtype, device="cuda") for shape in shapes)
+    native_scales = []
+    prepare_weights = fused_moe.prepare_weights
+
+    def inspect_scales(*, plan, weights, scale_scratch=None):
+        if compression is not None:
+            native_scales.extend(StorageWeakRef(t.untyped_storage())
+                                 for t in (weights.w13_block_scales, weights.w2_block_scales))
+        return prepare_weights(plan=plan, weights=weights, scale_scratch=scale_scratch)
+
+    monkeypatch.setattr(fused_moe, "prepare_weights", inspect_scales)
     with DirectWeightLoader(manifest, "cuda:0") as loader:
         experts = loader.load_fp4_experts(("experts.0", "experts.1"), hidden_size=256, intermediate_size=256,
             intermediate_range=(128, 256), format=fmt, activation_mode=mode,
-            scale_vectors=scale_vectors if mode == "a4" else None)
+            scale_vectors=scale_vectors if mode == "a4" else None,
+            scale_compression=compression, scale_scratch=buffers)
         assert loader._session.torch_copy_bytes == 0
+    assert experts.plan.scale_compression == compression
+    assert all(reference.expired() for reference in native_scales)
     cpu = (torch.randn(2, 256, generator=gen) * .1).to(torch.bfloat16)
     x, out = cpu.cuda(), torch.empty_like(cpu, device="cuda")
     ids = torch.tensor([[0], [1]], dtype=torch.int32, device="cuda")
@@ -136,6 +237,8 @@ def test_ordinary_fp4_experts_graph(tmp_path, fmt, mode):
             operation()
         for order in ((0, 1), (1, 0)):
             ids.copy_(torch.tensor(order, dtype=torch.int32)[:, None])
+            for buffer in buffers or ():
+                buffer.view(torch.uint8).fill_(0x7f)
             allocated = torch.cuda.memory_stats()["allocation.all.allocated"]
             graph.replay()
             torch.cuda.synchronize()
@@ -162,3 +265,112 @@ def test_ordinary_fp4_experts_graph(tmp_path, fmt, mode):
             expected = torch.cat(expected)
             relative = torch.linalg.vector_norm(out.float().cpu() - expected) / torch.linalg.vector_norm(expected)
             assert relative < .035, float(relative)
+
+
+@pytest.mark.parametrize("local", [96, 192, 384])
+@pytest.mark.parametrize("tokens", [1, 7, 128])
+@pytest.mark.parametrize("compression", [None, "csf"])
+@torch.no_grad()
+def test_bf16_experts_convert_to_nvfp4_w4a16(tmp_path, monkeypatch, local, tokens, compression):
+    from torch.multiprocessing.reductions import StorageWeakRef
+    from b12x.moe import fused_moe
+    from b12x.moe._shared.kernels.w4a16.host import unswizzle_block_scale
+    from b12x.preparation import PreparationSession
+    from ignition.components.moe import PreparedRoutedExperts
+    from ignition.preparation.compilation import compile_forward
+    from ignition.preparation.scratch import ScratchArena
+
+    gen = torch.Generator().manual_seed(501)
+    count, hidden, intermediate, topk, limit = 4, 256, 1536, 2, .5
+    tensors = {}
+    for name, scale in (("up", .125), ("gate", .5), ("down", .0625)):
+        shape = (count, hidden, intermediate) if name == "down" else (count, intermediate, hidden)
+        value = (torch.randn(shape, generator=gen) * scale).bfloat16()
+        value[0].zero_()
+        tensors[f"moe.{name}_proj.weight"] = value
+    manifest = checkpoint(tmp_path, tensors, {})
+    decoded = {}
+    prepare_weights = fused_moe.prepare_weights
+    native_scales = []
+    padded = (local + 127) // 128 * 128
+    buffers = None if compression is None else tuple(
+        torch.empty(shape, dtype=torch.float8_e4m3fn, device="cuda")
+        for shape in ((count, 2 * padded, hidden // 16), (count, hidden, padded // 16)))
+
+    def inspect_quantized(*, plan, weights, scale_scratch=None):
+        assert plan.activation.mode is fused_moe.ActivationMode.A16
+        assert plan.scale_compression == compression
+        assert weights.input_scale is None and weights.intermediate_scale is None
+        if compression is not None:
+            native_scales.extend(StorageWeakRef(t.untyped_storage())
+                                 for t in (weights.w13_block_scales, weights.w2_block_scales))
+        lut = torch.tensor([0, .5, 1, 1.5, 2, 3, 4, 6, 0, -.5, -1, -1.5, -2, -3, -4, -6])
+        for name, packed_weights, blocks, gains in (
+            ("up_gate", weights.w13, weights.w13_block_scales, weights.w13_global_scales),
+            ("down", weights.w2, weights.w2_block_scales, weights.w2_global_scales),
+        ):
+            packed_weights, blocks, gains = packed_weights.cpu(), blocks.cpu(), gains.cpu()
+            assert (torch.isfinite(gains) & (gains > 0)).all()
+            rows, columns = packed_weights.shape[1], packed_weights.shape[2] * 2
+            scales = torch.stack([unswizzle_block_scale(blocks[e], rows, columns // 16) for e in range(count)])
+            values = lut[torch.stack((packed_weights & 15, packed_weights >> 4), -1).long()].flatten(-2)
+            decoded[name] = values * scales.repeat_interleave(16, -1) * gains[:, None, None]
+            assert not decoded[name][0].any()
+        return prepare_weights(plan=plan, weights=weights, scale_scratch=scale_scratch)
+
+    monkeypatch.setattr(fused_moe, "prepare_weights", inspect_quantized)
+    with DirectWeightLoader(manifest, "cuda:0") as loader:
+        experts = loader.load_bf16_experts_as_nvfp4("moe", num_experts=count, hidden_size=hidden,
+            intermediate_size=intermediate, intermediate_range=(local, 2 * local),
+            swiglu_limit=limit, swiglu_clamp_after_silu=True,
+            scale_compression=compression, scale_scratch=buffers)
+        assert loader._session.torch_copy_bytes == 0
+    assert all(reference.expired() for reference in native_scales)
+    assert experts.intermediate_size == padded
+    up, gate = decoded["up_gate"].chunk(2, 1)
+    down = decoded["down"]
+    assert not up[:, local:].any() and not gate[:, local:].any() and not down[:, :, local:].any()
+    for name, quantized in (("up", up[:, :local]), ("gate", gate[:, :local]), ("down", down[:, :, :local])):
+        original = tensors[f"moe.{name}_proj.weight"].float()
+        original = original[:, :, local:2 * local] if name == "down" else original[:, local:2 * local]
+        assert (quantized - original).norm() / original.norm() < .12
+
+    cpu = (torch.randn(tokens, hidden, generator=gen) * .5).bfloat16()
+    x, output = cpu.cuda(), torch.empty_like(cpu, device="cuda")
+    ids = (torch.arange(tokens * topk, dtype=torch.int32).reshape(tokens, topk) % count).cuda()
+    routes = torch.randn(tokens, topk, generator=gen).softmax(-1).cuda()
+    arena = ScratchArena(x.device)
+    with PreparationSession(device=x.device, autotune=True, compile_workers=0) as session:
+        operation = PreparedRoutedExperts(x, experts, ids, routes, output, session=session,
+                                          name="converted-experts", workspace=arena)
+        session.freeze()
+        arena.finalize()
+        arena.freeze()
+        compiled = compile_forward(operation)
+        compiled()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            compiled()
+        for shift in (0, 1):
+            ids.add_(shift).remainder_(count)
+            expected = torch.zeros_like(cpu, dtype=torch.float32)
+            for expert in range(count):
+                rows, choices = (ids.cpu() == expert).nonzero(as_tuple=True)
+                if not rows.numel():
+                    continue
+                g = cpu[rows].float() @ gate[expert].T
+                u = cpu[rows].float() @ up[expert].T
+                activation = (torch.nn.functional.silu(g).clamp(max=limit) * u.clamp(-limit, limit)).bfloat16()
+                expected[rows] += (activation.float() @ down[expert].T) * routes.cpu()[rows, choices, None]
+            output.fill_(float("nan"))
+            arena.tensor.fill_(0x7f)
+            for buffer in buffers or ():
+                buffer.view(torch.uint8).fill_(0x7f)
+            allocated = torch.cuda.memory_stats()["allocation.all.allocated"]
+            graph.replay()
+            torch.cuda.synchronize()
+            assert torch.cuda.memory_stats()["allocation.all.allocated"] == allocated
+            actual = output.float().cpu()
+            assert torch.isfinite(actual).all()
+            assert (actual - expected).norm() / expected.norm() < .025
+        graph.reset()

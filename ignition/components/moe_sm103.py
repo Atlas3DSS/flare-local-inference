@@ -33,7 +33,7 @@ from b12x.preparation.types import plan_from_handle, require_prepared
 from ignition.preparation.scratch import ScratchArena, planned_scratch, prime_owners
 from ignition.preparation.tuning import benchmark_resource, declare, register_finalizer
 
-from .sm103 import native_contract, native_plan
+from .native_operator import native_contract, native_plan
 
 _CHUNK = 64
 

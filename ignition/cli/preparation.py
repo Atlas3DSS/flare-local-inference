@@ -41,13 +41,13 @@ def resolve_model(configuration: Configuration, name: str | None) -> ResolvedMod
 def derive(configuration: Configuration, model: ResolvedModel, host: Host, *, gpus: str | None,
            concurrency: Setting, speculation: Speculation | None, prefill_chunk: int | None = None,
            context_parallel: bool = True, stream_overlap: bool = True,
-           mixed_prefill: bool = False) -> planning.Plan:
+           mixed_prefill: bool = False, expert_scale_compression: str | None = None) -> planning.Plan:
     """Select GPUs and estimate memory for one checkpoint from the configuration and command-line intent."""
     return planning.plan(
         model.recipe, model.checkpoint, host.gpus, selected=None if gpus is None else planning.parse_gpus(gpus),
         concurrency=concurrency.value, reserve_bytes=configuration.reserve_bytes, speculation=speculation,
         prefill_chunk=prefill_chunk, context_parallel=context_parallel, stream_overlap=stream_overlap,
-        mixed_prefill=mixed_prefill)
+        mixed_prefill=mixed_prefill, expert_scale_compression=expert_scale_compression)
 
 
 def context_parallel(args, model: ResolvedModel) -> bool:
@@ -71,12 +71,13 @@ def stream_overlap(args, model: ResolvedModel) -> bool:
     return not args.no_stream_overlap
 
 
-def speculation(args, model: ResolvedModel) -> Speculation | None:
+def speculation(args, model: ResolvedModel, configuration: Configuration | None = None) -> Speculation | None:
     """Apply the command line's speculation overrides to the recipe's settings; None disables speculation."""
     recipe, alias = model.recipe, model.checkpoint.alias
     default, limit = recipe.speculation, recipe.max_draft_tokens
     given = [flag for flag, value in (
         ("--mtp-draft-tokens", args.mtp_draft_tokens),
+        ("--speculative-token-capacity", args.speculative_token_capacity),
         ("--no-mtp-adaptive-verification", args.no_mtp_adaptive_verification or None),
         ("--mtp-proposal-source", args.mtp_proposal_source),
         ("--history-drafts", args.history_drafts or None)) if value is not None]
@@ -98,7 +99,12 @@ def speculation(args, model: ResolvedModel) -> Speculation | None:
     if (source == "copy" or history) and not recipe.history_copy:
         flag = "--history-drafts" if args.history_drafts else "--mtp-proposal-source copy"
         raise UsageError(f"{alias} drafts only with its MTP module; {flag} does not apply")
-    return Speculation(drafts, adaptive, source, history)
+    capacity = args.speculative_token_capacity
+    if configuration is not None:
+        capacity = configuration.model_setting(alias, "speculative_token_capacity", default.token_capacity, capacity).value
+    if capacity is not None and (type(capacity) is not int or capacity < drafts + 1):
+        raise UsageError("--speculative-token-capacity must cover the maximum verification width")
+    return Speculation(drafts, adaptive, source, history, capacity)
 
 
 def fetch(model: ResolvedModel, hub_cache, *, progress_bars: bool = True) -> str:

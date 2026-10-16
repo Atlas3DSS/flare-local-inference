@@ -116,3 +116,17 @@ GPU regrouping, native preparation, and upload separately from replay.
 Scale-expansion tuning includes live producers and consuming expert work.
 Poison reusable scale scratch between calls and verify alternate graph
 capacities through 4,096-token prefill.
+
+## Cross-model scratch planning
+
+Review scratch lifetimes across the Qwen, GLM, DeepSeek, MiMo, and Kimi recipes.
+Measure prepared fixed memory and available KV capacity before changing each
+recipe. Inspect attention, rotary, activation, expert, and vision temporaries
+for caller-owned outputs and shared storage across sequential graph variants.
+Keep persistent state and overlapping branches disjoint; include stream joins
+and image feature consumption when determining lifetimes.
+
+Use the shared scratch planner where the lifetime contract fits. Validate
+numerical correctness, allocation stability, and native replay across decode,
+chunked prefill, vision, and supported speculative capacities. Record fixed
+memory, KV capacity, and complete graph latency before and after each change.

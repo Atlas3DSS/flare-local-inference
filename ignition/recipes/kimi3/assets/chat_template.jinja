@@ -1,5 +1,4 @@
 {%- set ns = namespace(segments=[], calls=[], tool_index=0, next_message=0) -%}
-{%- set thinking = enable_thinking | default(thinking | default(true)) -%}
 {%- macro emit(text, special=false) -%}
     {%- if text | string -%}
         {%- set ns.segments = ns.segments + [{'text': text | string, 'allow_special': special}] -%}
@@ -52,12 +51,10 @@
         {%- if m.role == 'assistant' -%}
             {%- set ns.calls = m.tool_calls | default([], true) -%}
             {%- set ns.tool_index = 0 -%}
-            {%- if thinking -%}
-                {{- open('think') -}}
-                {%- set reasoning = m.reasoning_content or m.reasoning -%}
-                {%- if reasoning and reasoning | trim -%}{{- emit(reasoning) -}}{%- endif -%}
-                {{- close('think') -}}
-            {%- endif -%}
+            {{- open('think') -}}
+            {%- set reasoning = m.reasoning_content or m.reasoning -%}
+            {%- if reasoning and reasoning | trim -%}{{- emit(reasoning) -}}{%- endif -%}
+            {{- close('think') -}}
             {{- open('response') -}}{{- content(m.content) -}}{{- close('response') -}}
             {%- if ns.calls -%}
                 {{- open('tools') -}}
@@ -82,12 +79,10 @@
 {%- endmacro -%}
 {%- if tools -%}{{- declare_tools(tools) -}}{%- endif -%}
 {%- set effort = reasoning_effort | default(thinking_effort | default('max')) -%}
-{%- if thinking and effort not in ['low', 'high', 'max'] -%}
+{%- if effort not in ['low', 'high', 'max'] -%}
     {{- raise_exception('Kimi K3 reasoning effort must be low, high, or max') -}}
 {%- endif -%}
-{%- if thinking and effort -%}
-    {{- internal('thinking-effort', '`thinking_effort` guides on how much to think in your thinking channel (not including the response channel), supported values include `low`, `medium`, `high`, and `max`.\nNow the system is invoked with `thinking_effort=' + effort + '`.') -}}
-{%- endif -%}
+{{- internal('thinking-effort', '`thinking_effort` guides on how much to think in your thinking channel (not including the response channel), supported values include `low`, `medium`, `high`, and `max`.\nNow the system is invoked with `thinking_effort=' + effort + '`.') -}}
 {%- for m in messages -%}
     {%- if loop.index0 >= ns.next_message -%}
         {%- if m.role == 'tool' -%}
@@ -127,6 +122,6 @@
     {{- internal('response-format', body) -}}
 {%- endif -%}
 {%- if add_generation_prompt -%}
-    {{- open('message', [('role', 'assistant')]) -}}{{- open('think' if thinking else 'response') -}}
+    {{- open('message', [('role', 'assistant')]) -}}{{- open('think') -}}
 {%- endif -%}
 {{- ns.segments | tojson(ensure_ascii=false) -}}

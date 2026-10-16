@@ -104,7 +104,8 @@ def host(monkeypatch, tmp_path):
     monkeypatch.setattr(serve, "resolve_model", lambda configuration, name: ResolvedModel(recipe, model.checkpoint))
     monkeypatch.setattr(runtime, "binary", lambda: Path("/native/flare"))
     monkeypatch.setattr(runtime, "package_key", lambda model, plan, no_compile:
-        str((plan.concurrency, plan.prefill_chunk, plan.speculation, plan.stream_overlap, plan.mixed_prefill, no_compile)))
+        str((plan.concurrency, plan.prefill_chunk, plan.speculation, plan.stream_overlap,
+             plan.mixed_prefill, plan.expert_scale_compression, no_compile)))
 
     def export_model(prepared, images, storage, path, *, options, publisher, progress):
         assert prepared is calls["prepared"] and not prepared.closed
@@ -215,7 +216,7 @@ def test_mixed_prefill_opt_in_prepares_and_reuses_a_separate_package(host, capsy
     assert run("qwen3.8-flash", "--mixed-prefill", *options) == 0
     mixed_package = host["exec"][2]
     assert mixed_package != ordinary_package and host["exports"] == 2
-    assert host["plan"].mixed_prefill and len(host["plan"].mixed_shapes) == 50
+    assert host["plan"].mixed_prefill and len(host["plan"].mixed_shapes) == 42
     assert host["plan"].stream_overlap == overlap
     assert "mixed prefill on" in capsys.readouterr().err
     assert run("qwen3.8-flash", "--mixed-prefill", *options) == 0
@@ -235,6 +236,33 @@ def test_package_cache_key_includes_mixed_capture(overlap):
                         reserve_bytes=0, speculation=model.recipe.speculation, stream_overlap=overlap)
     assert runtime.package_key(model, plan, False) != runtime.package_key(
         model, replace(plan, mixed_prefill=True), False)
+
+
+@pytest.mark.parametrize("compression", [["--expert-scale-compression"], ["--expert-scale-compression", "csf"]])
+def test_expert_scale_compression_reaches_preparation_and_package_cache(host, monkeypatch, capsys, compression):
+    original = serve.resolve_model(None, None)
+    checkpoint = replace(original.checkpoint, scale_compressed_device_bytes={"csf": original.checkpoint.device_bytes})
+    model = ResolvedModel(original.recipe, checkpoint)
+    monkeypatch.setattr(serve, "resolve_model", lambda *_: model)
+    assert run("qwen3.8-flash") == 0
+    native = host["exec"][2]
+    assert run("qwen3.8-flash", *compression) == 0
+    compressed = host["exec"][2]
+    assert compressed != native and host["exports"] == 2
+    assert host["plan"].expert_scale_compression == "csf"
+    assert "expert scales csf" in capsys.readouterr().err
+    assert run("qwen3.8-flash", "--expert-scale-compression", "csf") == 0
+    assert host["exec"][2] == compressed and host["exports"] == 2
+
+
+def test_package_cache_key_includes_expert_scale_compression():
+    model = resolve("step5-preview-nvfp4")
+    gpus = tuple(planning.Gpu(i, "NVIDIA RTX PRO 6000 Blackwell", f"GPU-{i}", 96 * GIB, FREE, (12, 0))
+                 for i in range(4))
+    plan = planning.fit(model.recipe, model.checkpoint, gpus, concurrency=4,
+                        reserve_bytes=0, speculation=model.recipe.speculation)
+    assert runtime.package_key(model, plan, False) != runtime.package_key(
+        model, replace(plan, expert_scale_compression="csf"), False)
 
 
 def test_serialized_branches_reach_the_plan_and_the_startup_line(host, capsys):

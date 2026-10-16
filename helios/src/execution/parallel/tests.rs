@@ -167,6 +167,7 @@ fn completion_wire_preserves_the_execution_abi() {
     assert_eq!(reader.number().unwrap(), 3);
     assert_eq!(reader.number().unwrap(), 2);
     assert_eq!(timing(&mut reader).unwrap(), root.timing);
+    assert_eq!(proposal_confidence(&mut reader).unwrap(), root.proposal_confidence);
     let records = super::super::transport::decode_records(reader.0, Fence(3), 4, 8).unwrap();
     for (expected, actual) in root.records.iter().zip(records.iter()) {
         assert_eq!(expected.fields(), actual.fields());
@@ -198,4 +199,41 @@ fn rank_completion_requires_every_record() {
     let mut peer = completed(1);
     peer.records = [peer.records[0]; 3].into();
     assert!(agree(&root, &peer).is_err());
+}
+
+#[test]
+fn proposal_confidence_survives_rank_transport_and_requires_agreement() {
+    let mut root = completed(1);
+    root.proposal_confidence = Some([[0.5; 7]; 64]);
+    let mut peer = completed(1);
+    assert!(agree(&root, &peer).is_err());
+    peer.proposal_confidence = root.proposal_confidence;
+    agree(&root, &peer).unwrap();
+    peer.proposal_confidence.as_mut().unwrap()[3][2] = 0.6;
+    assert!(agree(&root, &peer).is_err());
+    let bytes = completion(&root);
+    let mut reader = Reader(&bytes);
+    reader.number().unwrap();
+    reader.number().unwrap();
+    timing(&mut reader).unwrap();
+    assert_eq!(proposal_confidence(&mut reader).unwrap(), root.proposal_confidence);
+    assert_eq!(reader.0.len(), 4 * 8 * 8);
+}
+
+#[test]
+fn proposal_confidence_allows_fp32_roundoff_and_rejects_invalid_probabilities() {
+    let mut root = completed(1);
+    let mut peer = completed(1);
+    root.proposal_confidence = Some([[0.0; 7]; 64]);
+    peer.proposal_confidence = root.proposal_confidence;
+    root.proposal_confidence.as_mut().unwrap()[1][2] = f32::from_bits(0x3f79148d);
+    peer.proposal_confidence.as_mut().unwrap()[1][2] = f32::from_bits(0x3f79149e);
+    agree(&root, &peer).unwrap();
+    peer.proposal_confidence.as_mut().unwrap()[1][2] = 0.973;
+    assert!(agree(&root, &peer).is_err());
+    for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -0.000001, 1.000001] {
+        root.proposal_confidence.as_mut().unwrap()[1][2] = invalid;
+        peer.proposal_confidence.as_mut().unwrap()[1][2] = invalid;
+        assert!(agree(&root, &peer).is_err());
+    }
 }

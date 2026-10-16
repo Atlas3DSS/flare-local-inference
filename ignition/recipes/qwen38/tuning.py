@@ -3,10 +3,10 @@
 from ignition.preparation.tuning import RecordedPreparationSession
 
 
-def preparation_session(*, device, checkpoint, namespace=None, coordinator=None, headroom_bytes=0):
+def preparation_session(*, device, checkpoint, namespace=None, coordinator=None, headroom_bytes=0, benchmark_storage=None):
     return RecordedPreparationSession(
         device=device, checkpoint=checkpoint, namespace=namespace, coordinator=coordinator,
-        headroom_bytes=headroom_bytes,
+        headroom_bytes=headroom_bytes, benchmark_storage=benchmark_storage,
         workload_schema="qwen38-active-operators-v1",
         numerical_policy="qsa16-gdn-sequential-k1-dense-mxfp8-auto-vision-nvfp4-a16-moe-a4-route-fp32",
         search_limits={

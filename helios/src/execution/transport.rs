@@ -149,8 +149,8 @@ pub struct FrameCompletion {
     pub graph_index: usize,
     pub timing: ExecutionTiming,
     pub records: CompletionRecords,
-    /// Root-rank confidence for a completed single-lane proposal; unused tail is zero.
-    pub proposal_confidence: Option<[f32; MAX_OUTPUT_TOKENS - 1]>,
+    /// Confidence by proposal batch row; rows and columns outside the graph shape are zero.
+    pub proposal_confidence: Option<[[f32; MAX_OUTPUT_TOKENS - 1]; REQUEST_LANES]>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -566,12 +566,17 @@ impl GraphExecutor {
             proposal_confidence: if self.manifest.graphs[pending.graph_index].kind
                 == GraphKind::Proposal
             {
-                let mut confidence = [0.0; MAX_OUTPUT_TOKENS - 1];
-                for (value, bytes) in confidence
+                let mut confidence = [[0.0; MAX_OUTPUT_TOKENS - 1]; REQUEST_LANES];
+                let graph = &self.manifest.graphs[pending.graph_index];
+                for (row, bytes) in confidence
                     .iter_mut()
-                    .zip(frame.confidence.as_ref().unwrap().bytes().chunks_exact(4))
+                    .take(graph.batch_capacity)
+                    .zip(frame.confidence.as_ref().unwrap().bytes()
+                        .chunks_exact(4 * self.manifest.buffer("proposal_confidence")?.shape[1]))
                 {
-                    *value = f32::from_ne_bytes(bytes.try_into().unwrap());
+                    for (value, bytes) in row.iter_mut().take(graph.token_capacity - 1).zip(bytes.chunks_exact(4)) {
+                        *value = f32::from_ne_bytes(bytes.try_into().unwrap());
+                    }
                 }
                 Some(confidence)
             } else {

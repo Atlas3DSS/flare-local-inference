@@ -644,7 +644,7 @@ fn price_close(actual: utility::ServicePrice, expected: utility::ServicePrice) {
 }
 
 #[test]
-fn service_uses_validated_progress_and_slowest_rank_time_once() {
+fn service_uses_validated_progress_and_serial_execution_time_once() {
     let mut s = engine(1, false);
     let h = add(&mut s, 1, 4096, 32);
     step(&mut s, 0);
@@ -655,7 +655,7 @@ fn service_uses_validated_progress_and_slowest_rank_time_once() {
     s.commit(&plan, fence).unwrap();
     let mut expected = s.request(h).unwrap().accounting.service.tokens.unwrap();
     expected.observe(
-        3.0,
+        500.0,
         plan.lanes[0].tokens as f64,
         rate,
         s.policy.adaptation_ms,

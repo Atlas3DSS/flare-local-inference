@@ -8,11 +8,89 @@ implementation is in `helios/src/scheduler/{policy,service,utility,cost}.rs`;
 flow. Python experiments are in `scripts/scheduling_sim/`.
 
 The native catalog supports separate prefill, decode, speculative verification,
-state-management, and mixed prefill/decode graphs. Mixed shape selection, native
+retained proposal, state-management, and mixed prefill/decode graphs. Mixed shape selection, native
 uploads, completion accounting, package selection, and rank-layout validation
 are implemented. With Ignition's `--mixed-prefill` flag, the Qwen recipe captures
 mixed target forwards alongside its separate inference graphs. Mixed capture is
 disabled by default. Other recipes expose their declared graph catalogs.
+
+## Speculative graph coverage
+
+Every recipe uses the same target-token envelope. For prepared concurrency `C`,
+maximum draft depth `D`, request bucket `B`, and verification width `W` including
+the pending input, Ignition captures width one at every power-of-two bucket
+through `next_power_of_two(C)`. Wider target graphs require `B * W <= R`, where
+`--speculative-token-capacity R` defaults to `max(next_power_of_two(C), D + 1)`.
+The rule applies to combined speculative graphs, separate verification graphs,
+and the decode side of mixed graphs. It bounds preparation without imposing a
+model-specific concurrency cutoff. The scheduler chooses among the resulting
+physical graphs using measured costs and useful output. Fixed mode uses its
+loaded width where captured; larger buckets retain width-one execution.
+
+A retained proposal catalog captures every request bucket at every load-time
+selectable depth from one through `D`. Proposal depth is independent of target
+verification width and is not capped by `R`. Separate width-one speculative
+graphs execute without producing a proposal and maintain draft context. With
+`C=4`, `D=7`, and `R=8`, the catalog has 21 proposal graphs, 14 verification
+graphs (eight at batch one, four at batch two, two at batch four), and three
+proposal-free width-one graphs, alongside ordinary execution and maintenance.
+
+## Retained proposals and confidence
+
+A proposal occupies one bank entry per prepared request slot. The entry contains
+candidate tokens, proposal distributions, validity, request generation, consumed
+cursor, continuation-row ownership, and producer sequence. Storage is allocated
+before capture and shared across every proposal and verification shape. A
+verification graph gathers the selected rows and probability prefixes into its
+contiguous workspace; proposal and verification row orders may differ.
+
+Proposal submission reserves enough cache capacity to consume its results. A
+request owning retained proposals cannot be preempted and resampled. Verification
+or cancellation disposes of ownership; retirement fences protect slot reuse.
+Generation, cursor, pending token, continuation row, and producer completion are
+checked before verification can commit. Other requests' graphs may execute
+between proposal and verification. Proposal generation reserves its full draft
+RNG range once, including discarded suffixes. Verification never reserves those
+draws again.
+
+For conditional acceptance estimates `p_i`, expected output at width `W` is
+`1 + p_1 + p_1*p_2 + ... + product(p_1..p_(W-1))`. Combined graphs search all
+loaded widths using request-local historical acceptance. A producer supplying
+native confidence uses its previous confidence curve to forecast proposal work,
+with a neutral 0.5 prior before the first proposal; observed acceptance is not
+substituted for that curve.
+
+Rank zero supplies the confidence curve used for the shared scheduling decision.
+Peer probabilities must be finite, within `[0, 1]`, and agree within `1e-5`
+absolute error; replicated floating-point reductions need not be bitwise equal.
+Request identities, completion fences, and consumed-token counts agree exactly.
+
+Fresh confidence is consumed through a causal frontier. After proposal
+completion, the participating retained requests, measured costs, and fairness
+prices are fixed for the decision. Existing finalized widths remain fixed. Each
+new proposal begins at width one; only its next extension is eligible. The
+scheduler admits the improving extension with the greatest utility and repeats
+until no extension improves the shared objective. It cannot use a later
+confidence to reverse an earlier inclusion. Unknown-cost trials choose their
+width independently of fresh confidence. Fixed mode retains the loaded depth,
+limited by each request's remaining output, context, and sampling restrictions.
+
+Finalized widths are never shortened to make a cheaper batch. A dynamic program
+over requests sorted by width minimizes the cost of physical verification
+calls, including padding. Proposal planning evaluates bounded request counts
+and the complete remaining proposal-plus-verification cost. Once proposals are
+retained, their elapsed time has already entered service accounting and only
+remaining work is priced. Proposal completion earns no output or delivery credit.
+The dispatcher executes one operation and replans, allowing several proposal
+calls before differently grouped verification calls.
+
+GPU replay and serial host handoff have separate duration estimates. Scheduling
+uses their sum; queued completion wall time does not become a handoff sample.
+Per-operation trace measurements retain GPU and wall intervals independently.
+`flare_proposal_rounds_total` and `flare_proposal_gpu_nanoseconds_total` expose
+separate proposal work by batch capacity and draft depth. The corresponding
+`flare_speculative_*` metrics cover combined or verification graphs by batch
+capacity and verification width; their GPU duration excludes separate proposals.
 
 ## Useful service and selection
 
@@ -295,19 +373,18 @@ request state and overlapping b12x operations retain separate storage.
 `ignition/components/capacity.py::mixed_shapes` bounds the joint catalog before
 tuning and compilation when `--mixed-prefill` is enabled. Each batch bucket of at
 least two rows has every prompt bucket at verification width one and one prompt
-bucket for each wider width.
+bucket for each wider width within the target-token envelope.
 The latter bucket minimizes `max(P / P_min, P_max / P)`, balancing the worst
 multiplicative distance to short and long prompt chunks; ties choose the smaller
-bucket. This coverage policy provides a mixed option at every fixed verification
-depth without requiring every prompt/depth combination. Separate graphs retain
-all batch/width combinations. Graph durations measured by Helios determine which
+bucket. The prompt bucket limits the prompt/depth combinations; the target-token
+envelope limits the batch/depth combinations. Graph durations measured by Helios determine which
 captured alternatives execute.
 
-For `B` mixed batch buckets, `P` prompt buckets, and `W` verification widths,
-speculative mixed capture adds `B * (P + W - 1)` graphs. Ordinary execution adds
-`B * P` width-one graphs without draft-state updates. Qwen concurrency four,
-4096-token chunks, and five draft tokens therefore add 30 speculative and 20
-ordinary mixed graphs, compared with 140 for both complete products. Adaptive
+For each mixed batch bucket, speculative capture adds every prompt bucket at
+width one and one graph per eligible wider width. Ordinary execution adds every
+prompt bucket at width one without draft-state updates. Qwen concurrency four,
+4096-token chunks, five draft tokens, and the default token capacity six add 22
+speculative and 20 ordinary mixed graphs. Adaptive
 speculative width one preserves draft state; loading with zero drafts selects
 the ordinary catalog. Planning reports the same catalog used by preparation and
 includes its maximum packed token extent in capture headroom.

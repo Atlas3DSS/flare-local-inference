@@ -133,7 +133,7 @@ def test_diagnostic_manifest_selects_fixed_width_without_discarding_export_graph
     monkeypatch.setattr(model, "_validate_resources", lambda: (9, list(range(11, 16)), spans))
     selected = model.manifest()["graphs"]
     assert selected[0]["kind"] == "prefill"
-    assert [g["token_capacity"] for g in selected[1:]] == ([1, 2, 3, 4] if width is None else [width])
+    assert [g["token_capacity"] for g in selected[1:]] == ([1, 2, 3, 4] if width is None else sorted({1, width}))
     assert [g["token_capacity"] for g in model.manifest(all_variants=True)["graphs"][1:]] == [1, 2, 3, 4]
     assert tuple(model.graphs) == tuple(signatures)
 

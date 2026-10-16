@@ -93,7 +93,7 @@ def gather_rows(source, rows, destination):
         torch.library.wrap_triton(_gather_rows)[(output.shape[0], triton.cdiv(output.shape[1], 1024))](
             source, rows, output, source.stride(0), output.stride(0), rows.stride(0), output.shape[1], 1024)
     else:
-        output.copy_(source[rows])
+        output.copy_(source[rows, :output.shape[1]])
     return destination
 
 
@@ -119,6 +119,30 @@ def save_hidden(source, destination, slots, active):
     else:
         selected = active.bool()
         destination[slots[selected]] = source[selected]
+
+
+def scatter_rows(source, rows, destination, active):
+    """Store active rows at unique request slots, preserving all other rows."""
+    source = source.view(source.shape[0], -1)
+    output = destination.view(destination.shape[0], -1)
+    if source.is_cuda:
+        torch.library.wrap_triton(_scatter_rows)[(source.shape[0], triton.cdiv(source.shape[1], 1024))](
+            source, rows, output, active, source.stride(0), source.stride(1), output.stride(0),
+            source.shape[1], output.shape[0], 1024)
+    else:
+        selected = active.bool() & (rows >= 0) & (rows < output.shape[0])
+        output[rows[selected], :source.shape[1]] = source[selected]
+
+
+@triton.jit
+def _scatter_rows(Source, Rows, Output, Active, SS: tl.constexpr, CS: tl.constexpr,
+                  OS: tl.constexpr, WIDTH: tl.constexpr, SLOTS: tl.constexpr, BLOCK: tl.constexpr):
+    row = tl.program_id(0)
+    columns = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    selected = tl.load(Rows + row)
+    active = (tl.load(Active + row) != 0) & (selected >= 0) & (selected < SLOTS)
+    values = tl.load(Source + row * SS + columns * CS, active & (columns < WIDTH), other=0)
+    tl.store(Output + selected * OS + columns, values, active & (columns < WIDTH))
 
 
 @triton.jit

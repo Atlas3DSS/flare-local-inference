@@ -37,7 +37,10 @@ def _fake_attend(q, key, value, pages, lengths, cu, sink, output, scratch, handl
 class PreparedPagedAttention:
     def __init__(self, q, key, value, pages, lengths, cu, output, *, sink=None, mode,
                  window=-1, width=1, causal=True, session, workspace, name):
-        self.decode = mode in ("decode", "verify") and q.shape[2] != 256
+        self.decode = mode in ("decode", "verify") and paged_decode.supports(
+            num_q_heads=q.shape[1], num_kv_heads=key.shape[2], head_dim_qk=q.shape[2],
+            head_dim_vo=value.shape[3], page_size=key.shape[1], kv_dtype=key.dtype,
+            max_q_per_req=width, window_left=window, causal=causal, has_sinks=sink is not None)
         self.window, self.workspace = window, workspace
         self.arguments = dict(q=q, k_cache=key, v_cache=value, page_table=pages,
             cache_seqlens=lengths, cu_seqlens_q=cu, output=output, attention_sink_bias=sink)

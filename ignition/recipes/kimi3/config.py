@@ -14,6 +14,7 @@ PAGE_TOKENS = 128
 class ModelConfig:
     text: dict
     vision: dict
+    draft: object = None
 
     @classmethod
     def load(cls, snapshot):

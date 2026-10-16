@@ -92,6 +92,7 @@ pub(super) fn frontend_settings(value: wire::FrontendSettings) -> Result<serde_j
                 }}),
                 Profile::Deepseek4(_) => serde_json::json!({"deepseek4": {}}),
                 Profile::Moonvit(_) => serde_json::json!({"moonvit": {}}),
+                Profile::Step(_) => serde_json::json!({"step": {}}),
             })
         })
         .transpose()?;

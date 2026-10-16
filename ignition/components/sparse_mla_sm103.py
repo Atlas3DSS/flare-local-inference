@@ -34,7 +34,7 @@ from ignition.preparation.scratch import ScratchArena
 from ignition.preparation.triton import launch_triton
 from ignition.preparation.tuning import declare, register_finalizer
 
-from .sm103 import native_contract, native_plan
+from .native_operator import native_contract, native_plan
 
 _RECORD_BYTES = 528
 _DIM = 512

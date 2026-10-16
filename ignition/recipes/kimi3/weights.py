@@ -1,6 +1,6 @@
 """Kimi K3 direct transfers with sharded attention, latent projections, and experts."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import torch
 
@@ -27,7 +27,7 @@ class ModelWeights:
     draft: object = None
 
     @classmethod
-    def load(cls, manifest, device, *, shard, progress=None):
+    def load(cls, manifest, device, *, shard, progress=None, draft_checkpoint=None):
         before = torch.cuda.memory_allocated(device)
         with KimiWeightLoader(manifest, device, shard=shard, progress=progress) as loader:
             config = loader.config
@@ -39,8 +39,15 @@ class ModelWeights:
             layers = tuple(loader.load_layer(i) for i in range(len(config.layers)))
         from .vision import VisionWeights
         vision = VisionWeights.load(manifest, device, progress=progress)
+        draft = None
+        if draft_checkpoint is not None:
+            from .draft_config import DraftConfig
+            from .draft_weights import DraftWeights
+
+            config = replace(config, draft=DraftConfig.load(draft_checkpoint, config))
+            draft = DraftWeights.load(draft_checkpoint, config.draft, device, shard, progress=progress)
         return cls(config, shard, embedding, norm, head, res_norm, res_proj, layers,
-                   loader.scale_scratch, torch.cuda.memory_allocated(device) - before, vision=vision)
+                   loader.scale_scratch, torch.cuda.memory_allocated(device) - before, vision=vision, draft=draft)
 
 
 class KimiWeightLoader(DirectWeightLoader):

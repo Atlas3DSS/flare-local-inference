@@ -41,15 +41,18 @@ def attention_benchmark_inputs(arguments):
         result[f"seed_{name}"] = seed
         result[name] = torch.empty_strided(source.shape, source.stride(),
                                            dtype=source.dtype, device=source.device).copy_(seed)
-    lengths = torch.full_like(arguments["cu_seqlens_q"], query.shape[0])
-    lengths[0] = 0
+    count = arguments["cu_seqlens_q"].numel()
+    maximum = arguments["max_seqlen_q"]
+    if (count - 1) * maximum < query.shape[0]:
+        raise ValueError("attention benchmark segments cannot hold the prepared query rows")
+    lengths = (torch.arange(count, device=query.device, dtype=torch.int32) * maximum).clamp_max(query.shape[0])
     return AttentionBenchmarkInputs(**result, cu_seqlens_q=lengths)
 
 
 def benchmark_call(state, *, arguments, session, workspace):
-    identity = tuple((name, tuple(arguments[name].shape), arguments[name].stride(),
+    identity = (arguments["max_seqlen_q"], arguments["max_seqlen_k"], tuple((name, tuple(arguments[name].shape), arguments[name].stride(),
                       arguments[name].dtype, arguments[name].device)
-                     for name in ("q", "k", "v", "cu_seqlens_q"))
+                     for name in ("q", "k", "v", "cu_seqlens_q")))
     inputs = benchmark_resource(session, ("vision_attention_inputs", identity),
                                 lambda: attention_benchmark_inputs(arguments))
     arguments = {**arguments, **{key: getattr(inputs, key)

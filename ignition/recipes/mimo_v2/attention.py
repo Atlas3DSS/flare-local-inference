@@ -8,6 +8,7 @@ from ignition.components.block_fp8 import BlockFP8Projection, BlockFP8Weight
 from ignition.components.collectives import PreparedAllReduce
 from ignition.components.linear import UnquantizedProjection
 from ignition.components.paged_attention import PreparedPagedAttention, PreparedPagedKVWriter
+from ignition.components.window_attention import stage_windows
 
 from .pool import PAGE_TOKENS
 
@@ -67,22 +68,6 @@ def commit_window(history, values, row, start, length):
     rows = row.expand_as(offsets)
     previous = history[rows, offsets]
     history[rows, offsets] = torch.where(((positions >= start) & (positions < end))[:, None, None], current, previous)
-
-
-def stage_windows(history, values, output, metadata):
-    """Append packed candidate rows to private, linearized request histories."""
-    m = metadata
-    rows, window = m.starts.numel(), history.shape[1]
-    capacity = output.shape[0] * output.shape[1] // rows
-    offsets = torch.arange(capacity, device=values.device)[None, :]
-    prefix = m.starts.clamp(max=window)[:, None]
-    positions = m.starts[:, None] - prefix + offsets
-    previous = history[m.state_rows[:, None], positions.remainder(window)]
-    indices = (m.query_start_loc[:-1, None] + offsets - prefix).clamp(0, values.shape[0] - 1)
-    current = values[indices]
-    valid = (m.lengths[:, None] > 0) & (offsets < prefix + m.lengths[:, None])
-    output.view(rows, capacity, *values.shape[1:]).copy_(torch.where(valid[:, :, None, None],
-        torch.where((offsets < prefix)[:, :, None, None], previous, current), 0))
 
 
 def partial_rotary(values, positions, inverse):

@@ -82,3 +82,98 @@ def test_strided_rms_norm_compiled_replay(tokens, width):
             assert (output != expected).float().mean() < .001
             del values, expected, lower, upper
         graph.reset()
+
+
+@pytest.mark.parametrize("tokens", [1, 7, 64])
+@pytest.mark.parametrize("update_dtype", [torch.bfloat16, torch.float32])
+@torch.no_grad()
+def test_fp32_zero_centered_residual_normalization(tokens, update_dtype):
+    from ignition.preparation.compilation import compile_forward
+    from ignition.preparation.tuning import RecordedPreparationSession
+
+    device = torch.device("cuda:0")
+    residual = torch.randn(tokens, 4096, device=device)
+    seed = residual.clone()
+    update = torch.randn(tokens, 4096, device=device).to(update_dtype)
+    weight = torch.randn(4096, device=device) * .1
+    output = torch.empty_like(residual, dtype=torch.bfloat16)
+    with RecordedPreparationSession(device=device, checkpoint="residual-rms", workload_schema="residual-rms",
+                                    numerical_policy="default") as session:
+        operation = PreparedRMSNorm(residual, weight, output, eps=1e-6, zero_centered=True,
+                                   residual=update, session=session, name="residual_rms")
+        session.tune()
+        forward = compile_forward(lambda: operation(residual, update))
+        forward()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            forward()
+        residual.copy_(seed)
+        output.fill_(float("nan"))
+        graph.replay()
+        torch.cuda.synchronize()
+        expected_residual = seed + update.float()
+        torch.testing.assert_close(residual, expected_residual, atol=0, rtol=0)
+        expected = (expected_residual * torch.rsqrt(expected_residual.square().mean(-1, keepdim=True) + 1e-6)
+                    * (1 + weight)).bfloat16()
+        lower = torch.nextafter(expected, torch.full_like(expected, -torch.inf))
+        upper = torch.nextafter(expected, torch.full_like(expected, torch.inf))
+        assert ((output >= lower) & (output <= upper)).all()
+        graph.reset()
+
+
+@torch.no_grad()
+def test_paired_normalization_preserves_independent_rounding():
+    from ignition.components.rms_norm import PreparedPairedRMSNorm
+    from ignition.preparation.compilation import compile_forward
+    from ignition.preparation.tuning import RecordedPreparationSession
+
+    device = torch.device("cuda:0")
+    left, right = (torch.randn(7, 4096, device=device).bfloat16() for _ in range(2))
+    weights = tuple(torch.randn(4096, device=device) * .1 for _ in range(2))
+    out = torch.empty(7, 8192, device=device, dtype=torch.bfloat16)
+    with RecordedPreparationSession(device=device, checkpoint="paired-rms", workload_schema="paired-rms",
+                                    numerical_policy="default") as session:
+        operation = PreparedPairedRMSNorm(left, right, weights, out, eps=1e-6,
+                                         zero_centered=True, session=session, name="pair")
+        session.tune()
+        forward = compile_forward(lambda: operation(left, right))
+        forward()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            forward()
+        left.mul_(2)
+        right.mul_(-.5)
+        out.fill_(float("nan"))
+        graph.replay()
+        torch.cuda.synchronize()
+        expected = torch.cat(tuple((x.float() * torch.rsqrt(x.float().square().mean(-1, keepdim=True) + 1e-6)
+                                    * (1 + w)).bfloat16() for x, w in zip((left, right), weights, strict=True)), -1)
+        lower = torch.nextafter(expected, torch.full_like(expected, -torch.inf))
+        upper = torch.nextafter(expected, torch.full_like(expected, torch.inf))
+        assert ((out >= lower) & (out <= upper)).all()
+        graph.reset()
+
+
+@torch.no_grad()
+def test_residual_normalization_candidates_share_activation_storage(tmp_path):
+    from ignition.preparation.tuning import RecordedPreparationSession
+
+    device = torch.device("cuda:0")
+    residual = torch.randn(4096, 4096, device=device)
+    update = torch.randn_like(residual, dtype=torch.bfloat16)
+    weight = torch.zeros(4096, device=device)
+    output = torch.empty_like(update)
+    with RecordedPreparationSession(device=device, checkpoint=str(tmp_path), workload_schema="rms-tuning-memory",
+                                    numerical_policy="default") as session:
+        PreparedRMSNorm(residual, weight, output, eps=1e-6, zero_centered=True,
+                        residual=update, session=session, name="residual_rms")
+        torch.cuda.synchronize()
+        before = torch.cuda.memory_allocated(device)
+        torch.cuda.reset_peak_memory_stats(device)
+        report = session.tune()
+        torch.cuda.synchronize()
+        assert report["benchmarked_candidates"] > 1
+        fixture_bytes = 2 * (residual.nbytes + update.nbytes) + output.nbytes
+        eviction_bytes = max(2 * torch.cuda.get_device_properties(device).L2_cache_size, 64 << 20)
+        assert torch.cuda.max_memory_allocated(device) - before < fixture_bytes + eviction_bytes + (16 << 20)
+        assert torch.cuda.memory_allocated(device) - before < 1 << 20

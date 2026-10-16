@@ -12,6 +12,7 @@ pub(crate) mod packing;
 mod patches;
 mod qwen;
 mod resize;
+mod step;
 
 use std::io::Cursor;
 
@@ -125,6 +126,7 @@ pub enum ImageSettings {
     Mimo(MimoImageSettings),
     Deepseek4 {},
     Moonvit {},
+    Step {},
 }
 
 impl ImageSettings {
@@ -135,6 +137,7 @@ impl ImageSettings {
             Self::Mimo(_) => ImagePreparationKind::Mimo,
             Self::Deepseek4 {} => ImagePreparationKind::Deepseek,
             Self::Moonvit {} => ImagePreparationKind::Moonvit,
+            Self::Step {} => ImagePreparationKind::Step,
         }
     }
 }
@@ -163,6 +166,7 @@ enum Profile {
     MiMo(patches::PatchProcessor),
     DeepSeek4,
     Moonvit,
+    Step,
 }
 
 impl ImageProcessor {
@@ -184,6 +188,7 @@ impl ImageProcessor {
         let profile = match settings {
             ImageSettings::Deepseek4 {} => Profile::DeepSeek4,
             ImageSettings::Moonvit {} => Profile::Moonvit,
+            ImageSettings::Step {} => Profile::Step,
             ImageSettings::Mimo(settings) => Profile::MiMo(mimo::load(&settings, limits)?),
             ImageSettings::Qwen(settings) => {
                 Profile::Qwen(qwen::QwenProcessor::load(&settings, limits)?)
@@ -371,6 +376,7 @@ impl ImageProcessor {
             Profile::MiMo(profile) => profile.geometry(width, height),
             Profile::DeepSeek4 => deepseek4::geometry(self.limits, width, height),
             Profile::Moonvit => moonvit::geometry(self.limits, width, height),
+            Profile::Step => step::geometry(self.limits, width, height),
         }
     }
     pub fn resized_rgb(&self, image: &RgbImage) -> Result<(ImageGeometry, Vec<u8>)> {
@@ -379,6 +385,7 @@ impl ImageProcessor {
             Profile::MiMo(profile) => profile.resized_rgb(image),
             Profile::DeepSeek4 => deepseek4::resized_rgb(self.limits, image),
             Profile::Moonvit => moonvit::resized_rgb(self.limits, image),
+            Profile::Step => step::resized_rgb(self.limits, image),
         }
     }
     pub fn process(&self, images: &[RgbImage]) -> Result<ProcessedImages> {
@@ -387,6 +394,7 @@ impl ImageProcessor {
             Profile::MiMo(profile) => profile.process(images),
             Profile::DeepSeek4 => deepseek4::process(self.limits, images),
             Profile::Moonvit => moonvit::process(self.limits, images),
+            Profile::Step => step::process(self.limits, images),
         }
     }
     pub fn expand_prompt(
@@ -400,6 +408,7 @@ impl ImageProcessor {
             Profile::DeepSeek4 => Err("DeepSeek image spans require its model contract".into()),
             Profile::MiMo(_) => Err("MiMo image expansion requires its model contract".into()),
             Profile::Moonvit => Err("MoonViT image expansion requires its model contract".into()),
+            Profile::Step => Err("Step image expansion requires its model contract".into()),
         }
     }
 }

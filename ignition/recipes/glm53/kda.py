@@ -1,13 +1,12 @@
 """Prepared GLM KDA projections, convolution, recurrence and gated output norm."""
 
-import itertools
-import weakref
 from dataclasses import dataclass, fields
 
 import torch
 from b12x.sequence import gdn_decode, kda_prefill, short_conv
 
 from ignition.components import sm103
+from ignition.components.kda_speculation import KDARecords, _record, register_recording
 from ignition.components.gated_norm import PreparedGatedRMSNorm
 from ignition.components.linear import QuantizedProjection
 from ignition.components.projection_overlap import ConcurrentProjectionChain
@@ -53,57 +52,6 @@ class KDAScratch:
         if tokens == 1:
             views["forget_input"] = views["projected_input"][:, -128:]
         return KDAScratch(**views)
-
-
-_VERIFIERS = weakref.WeakValueDictionary()
-_VERIFIER_HANDLES = itertools.count()
-
-
-# b12x launches recording verification directly, so compiled forwards see it as one operator whose
-# reads and writes are listed: it reads the live states and writes the output and the records.
-@torch.library.custom_op("flare::glm_kda_verify", mutates_args=("output", "corrections", "keys_and_gates"))
-def _verify(reads: list[torch.Tensor], output: torch.Tensor, corrections: torch.Tensor,
-            keys_and_gates: torch.Tensor, handle: int) -> None:
-    owner = _VERIFIERS[handle]
-    gdn_decode.run_kda(owner.recurrent_binding, **owner.run_options)
-
-
-@_verify.register_fake
-def _fake_verify(reads, output, corrections, keys_and_gates, handle) -> None:
-    pass
-
-
-@dataclass(frozen=True)
-class KDARecords:
-    """Verification records of every KDA layer, so speculative rounds keep one recurrent row per request.
-
-    Verification leaves each request's committed FP32 state unchanged and records, per verified
-    token, its FP32 delta-rule correction and BF16 raw key and gate; accepting a prefix replays
-    those records into the committed row for every layer in one launch. Records are indexed by
-    state row like the recurrent pool. ``A_log`` and ``dt_bias`` stack every layer's gate
-    parameters for that replay.
-    """
-
-    layers: tuple[int, ...]
-    corrections: torch.Tensor
-    keys_and_gates: torch.Tensor
-    A_log: torch.Tensor
-    dt_bias: torch.Tensor
-
-    @classmethod
-    def allocate(cls, attention_weights, slots, heads, device, *, window=8):
-        """``attention_weights`` maps each KDA layer's decoder index to its attention weights."""
-        layers = tuple(sorted(attention_weights))
-        count = len(layers)
-        return cls(layers,
-            torch.zeros((count, slots, heads, window, 128), dtype=torch.float32, device=device),
-            torch.zeros((count, slots, heads, window, 256), dtype=torch.bfloat16, device=device),
-            torch.stack([attention_weights[layer]["A_log"] for layer in layers]),
-            torch.stack([attention_weights[layer]["dt_bias"].view(heads, 128) for layer in layers]))
-
-    def layer(self, index):
-        position = self.layers.index(index)
-        return self.corrections[position], self.keys_and_gates[position]
 
 
 class PreparedGlmKDA:
@@ -184,7 +132,7 @@ class PreparedGlmKDA:
             # Decode writes normalized output straight into the output projection's input.
             "output": (scratch.gated if mode == "decode" else scratch.recurrence).view(self.tokens, self.heads, 128),
         }
-        self.run_options = {"lower_bound": -5.0}
+        self.options = {"lower_bound": -5.0}
         if mode == "decode" and records is not None and sm103.is_sm103(self.device):
             # On SM103 Triton records verification (b12x's CuTe recording runs 1.6x slower there); the gated
             # output norm follows as a separate launch.
@@ -201,7 +149,7 @@ class PreparedGlmKDA:
             self.recurrent_plan = None
             return
         if mode == "decode":
-            self.run_options["eps"] = module.layer_norm_epsilon
+            self.options["eps"] = module.layer_norm_epsilon
             # Speculative rounds record each verified token instead of persisting its FP32 state.
             caps = gdn_decode.Caps(device=self.device, max_tokens=self.tokens, max_seqs=self.sequences,
                 max_state_slots=state.recurrent.shape[0], key_heads=self.heads, value_heads=self.heads,
@@ -213,8 +161,7 @@ class PreparedGlmKDA:
             if records is not None:
                 args.update(correction_cache=records[0], kg_cache=records[1])
                 self.records = records
-                self.handle = next(_VERIFIER_HANDLES)
-                _VERIFIERS[self.handle] = self
+                self.handle = register_recording(self)
             self.recurrent_plan = gdn_decode.plan(caps, invocation=gdn_decode.invocation_from_tensors(caps, **args))
             public_bind, bind_method = gdn_decode.bind_kda, "bind_kda"
         else:
@@ -227,10 +174,10 @@ class PreparedGlmKDA:
                 checkpoint_state_indices=metadata.checkpoint_state_indices, checkpoint_offsets=metadata.checkpoint_offsets)
             self.recurrent_plan = kda_prefill.plan(caps, invocation=kda_prefill.invocation_from_tensors(**args))
             public_bind, bind_method = kda_prefill.bind, "bind"
-        self.recurrent_binding = prepare_sequence_binding(self.recurrent_plan, args,
+        self.recurrence = prepare_sequence_binding(self.recurrent_plan, args,
             session=session, name=f"{name}.{mode}", public_bind=public_bind, bind_method=bind_method,
-            mode=mode, workspace=workspace, run_options=self.run_options,
-            set_binding=lambda binding: setattr(self, "recurrent_binding", binding))
+            mode=mode, workspace=workspace, run_options=self.options,
+            set_binding=lambda binding: setattr(self, "recurrence", binding))
         if mode == "prefill":
             # The canonical sigmoid-gated FP32 RMSNorm, fused, writing the output projection's input.
             self.output_norm = PreparedGatedRMSNorm(scratch.recurrence.view(self.tokens, self.heads, 128),
@@ -256,11 +203,11 @@ class PreparedGlmKDA:
             self.output_norm()
         elif self.mode == "decode" and self.records is not None:
             m = self.metadata
-            _verify([s.convolved_qkv, s.raw_g, s.raw_beta, s.z, self.state.recurrent, m.query_start_loc,
+            _record([s.convolved_qkv, s.raw_g, s.raw_beta, s.z, self.state.recurrent, m.query_start_loc,
                      m.state_indices, m.num_seqs, m.num_tokens], s.gated, *self.records, self.handle)
         elif self.mode == "decode":
-            gdn_decode.run_kda(self.recurrent_binding, **self.run_options)
+            gdn_decode.run_kda(self.recurrence, **self.options)
         else:
-            kda_prefill.run(self.recurrent_binding, **self.run_options)
+            kda_prefill.run(self.recurrence, **self.options)
             self.output_norm()
         return p["o_proj"](s.gated)

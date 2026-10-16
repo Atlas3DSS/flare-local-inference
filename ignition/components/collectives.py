@@ -125,6 +125,53 @@ class PreparedAllReduce:
         return self.output
 
 
+@torch.library.custom_op("flare::pcie_all_reduce_rmsnorm", mutates_args=("residual", "output"))
+def _all_reduce_rmsnorm(source: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor,
+                       output: torch.Tensor, handle: int) -> None:
+    owner = _OWNERS[handle]
+    owner.runtime.all_reduce_fused_add_rms_norm(source, residual, weight, owner.eps, plan=owner.plan,
+        out=output, residual_out=residual, zero_centered=owner.zero_centered, reduction_dtype=owner.reduction_dtype)
+
+
+@_all_reduce_rmsnorm.register_fake
+def _fake_all_reduce_rmsnorm(source, residual, weight, output, handle):
+    pass
+
+
+class PreparedAllReduceRMSNorm:
+    """One-shot collective with an in-place residual update and independent output dtype."""
+
+    @staticmethod
+    def fits(runtime, source):
+        from b12x.comm import pcie
+
+        return (isinstance(runtime, pcie.AllReduce) and runtime.algorithm == "oneshot"
+                and runtime.single_channel and source.ndim == 2 and 0 < source.shape[0] <= 36)
+
+    def __init__(self, source, residual, weight, output, *, eps, runtime, session, coordinator, name,
+                 zero_centered=False, reduction_dtype=None):
+        import torch.distributed as dist
+        from b12x.comm.pcie._oneshot_preparation import _prepare_fused_call
+
+        if not self.fits(runtime, source):
+            raise ValueError("fused all-reduce RMSNorm requires a single-channel one-shot runtime and at most 36 rows")
+        self.runtime, self.residual, self.weight, self.output = runtime, residual, weight, output
+        self.eps, self.zero_centered, self.reduction_dtype = eps, zero_centered, reduction_dtype
+        self.plan = runtime.plan(source, operation="all_reduce_fused_add_rms_norm", residual=residual,
+            weight=weight, out=output, residual_out=residual, zero_centered=zero_centered, reduction_dtype=reduction_dtype)
+        ranks = tuple(dist.get_process_group_ranks(runtime.exchange_group))
+        declare(session, (self.plan.request(name=name,
+            prepare_call=lambda state: _prepare_fused_call(state, inp=source, residual=residual, weight=weight,
+                out=output, residual_out=residual, epsilon=eps, owners=(runtime, source, residual, weight, output)),
+            collective=CollectiveRequirement(key=name, ranks=ranks)),), coordinator=coordinator)
+        self.handle = next(_HANDLES)
+        _OWNERS[self.handle] = self
+
+    def __call__(self, source, residual):
+        _all_reduce_rmsnorm(source, residual, self.weight, self.output, self.handle)
+        return self.output
+
+
 def _gather_columns(source, output, handle):
     owner = _OWNERS[handle]
     runtime = owner.runtime

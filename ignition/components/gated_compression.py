@@ -76,18 +76,18 @@ def _commit(
     EXTENT: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
-    request, ring_row = tl.program_id(0), tl.program_id(1)
+    request, distance = tl.program_id(0), tl.program_id(1)
     dim = tl.program_id(2) * BLOCK + tl.arange(0, BLOCK)
     start, count = tl.load(Starts + request), tl.load(Counts + request)
     begin, state = tl.load(Begins + request), tl.load(StateRows + request)
     end = start + count
-    distance = ((end - 1) % EXTENT - ring_row + EXTENT) % EXTENT
     absolute = end - 1 - distance
+    ring_row = absolute % EXTENT
     valid = (state > 0) & (count > 0) & (absolute >= start) & (dim < WIDTH)
     source = (begin + absolute - start) * TS + dim
     destination = state * SS + ring_row * WIDTH + dim
-    values = tl.load(Values + source, valid, other=0)
-    scores = tl.load(Scores + source, valid, other=0)
+    values = tl.load(Values + source, valid, other=0.)
+    scores = tl.load(Scores + source, valid, other=0.)
     tl.store(StateValues + destination, values, valid)
     tl.store(StateScores + destination, scores, valid)
 
@@ -120,7 +120,7 @@ def pool_gated(values, scores, ape, state_values, state_scores, metadata, output
 def commit_gated(values, scores, state_values, state_scores, metadata, counts):
     """Update ring slots touched by the accepted prefix, preserving inactive rows."""
     torch.library.wrap_triton(_commit)[
-        (counts.numel(), state_values.shape[1], triton.cdiv(values.shape[1], 256))
+        (counts.numel(), min(state_values.shape[1], values.shape[0]), triton.cdiv(values.shape[1], 256))
     ](
         values,
         scores,

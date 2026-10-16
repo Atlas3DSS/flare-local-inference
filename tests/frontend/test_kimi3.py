@@ -76,6 +76,12 @@ def test_native_xtml_matches_checkpoint(reference, tmp_path):
         ('required', [{'role': 'user', 'content': 'Search'}], {'tools': tools, 'tool_choice': 'required'}),
         ('none', [{'role': 'user', 'content': 'Answer'}], {'tools': tools, 'tool_choice': 'none'}),
         ('thinking_disabled', [{'role': 'user', 'content': 'Hello'}], {'enable_thinking': False}),
+        ('thinking_alias_disabled', [{'role': 'user', 'content': 'Hello'}], {'thinking': False}),
+        ('thinking_disabled_history', [{'role': 'user', 'content': 'Search'},
+            {'role': 'assistant', 'reasoning_content': 'Look up the documents.', 'tool_calls': calls},
+            {'role': 'tool', 'tool_call_id': 'opaque-b', 'content': 'first result'},
+            {'role': 'tool', 'tool_call_id': 'opaque-a', 'content': 'second result'}],
+            {'tools': tools, 'enable_thinking': False, 'thinking': False, 'reasoning_effort': 'low'}),
         ('thinking_enabled', [{'role': 'user', 'content': 'Hello'}], {'enable_thinking': True}),
         ('default', [{'role': 'user', 'content': 'Hello'}], {'enable_thinking': True, 'add_generation_prompt': False}),
         ('low', [{'role': 'user', 'content': 'Hello'}], {'reasoning_effort': 'low'}),
@@ -88,7 +94,7 @@ def test_native_xtml_matches_checkpoint(reference, tmp_path):
     for name, messages, options in cases:
         options = {'add_generation_prompt': True, **options}
         arguments = {k: v for k, v in options.items() if k not in ('enable_thinking', 'reasoning_effort')}
-        arguments['thinking'] = options.get('enable_thinking', True)
+        arguments['thinking'] = True
         arguments['thinking_effort'] = options.get('reasoning_effort', 'max')
         if name == 'image-marker':
             arguments['image_prompts'] = ['<|media_pad|>']

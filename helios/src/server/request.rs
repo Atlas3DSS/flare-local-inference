@@ -176,6 +176,14 @@ pub(super) fn prepare_inference(
         }
     }
     let mut options = opts.template.clone();
+    let tool_choice = match request.tool_choice {
+        ToolChoice::Auto => None,
+        ToolChoice::None => Some("none"),
+        ToolChoice::Required => Some("required"),
+    };
+    if let Some(choice) = tool_choice {
+        options.insert("tool_choice".into(), choice.into());
+    }
     if !options.contains_key("reasoning_effort") {
         if let Some(effort) = opts.effort {
             use super::inference::Effort;

@@ -8,14 +8,22 @@ from ignition.errors import FlareError
 
 def _parser() -> argparse.ArgumentParser:
     from . import serve
+    from . import publishing
+    from .help import RecipeHelp, recipe_help
 
     parser = argparse.ArgumentParser(
         prog="ignition", allow_abbrev=False,
-        description="Prepare native runtime packages for NVIDIA SM103, SM120, and SM121 GPUs.")
+        description="Prepare native runtime packages for NVIDIA SM103, SM120, and SM121 GPUs.",
+        formatter_class=argparse.RawDescriptionHelpFormatter, epilog=recipe_help())
     subparsers = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
 
     def command(name, handler, summary):
-        subparser = subparsers.add_parser(name, help=summary, description=summary, allow_abbrev=False)
+        subparser = subparsers.add_parser(
+            name, help=summary, description=summary, allow_abbrev=False, add_help=False,
+            formatter_class=argparse.RawDescriptionHelpFormatter)
+        subparser.add_argument("-h", "--help",
+                               action=RecipeHelp if name in ("run", "export", "serve") else "help",
+                               help="show this help message and exit")
         subparser.set_defaults(handler=handler)
         subparser.add_argument("--config", type=Path, metavar="PATH",
                                help="configuration file (default: ~/.config/flare/config.toml)")
@@ -27,9 +35,12 @@ def _parser() -> argparse.ArgumentParser:
                            help="destination .safetensors file; must not already exist")
     for preparing in (running, exporting):
         _preparation_arguments(preparing)
-    running.add_argument("--publisher-keys", type=Path, action="append", default=[], metavar="PATH")
-    running.add_argument("--trust-store", type=Path, metavar="PATH")
-    running.add_argument("--verify-weights", action="store_true")
+    running.add_argument("--publisher-keys", type=Path, action="append", default=[], metavar="PATH",
+                         help="additional publisher profiles passed to Flare; repeatable")
+    running.add_argument("--trust-store", type=Path, metavar="PATH",
+                         help="remembered execution trust passed to Flare (default: ~/.config/flare/trust.toml)")
+    running.add_argument("--verify-weights", action="store_true",
+                         help="verify stored allocation and table contents when Flare loads the package")
     serving = command("serve", serve.serve, "prepare in this process and serve over HTTP, with peer ranks on other hosts")
     for listening in (running, serving):
         listening.add_argument("--host", metavar="ADDR", help="listening address (default: server.host, else 127.0.0.1)")
@@ -61,10 +72,25 @@ def _parser() -> argparse.ArgumentParser:
     joining.add_argument("--rank", type=int, required=True, metavar="R", help="this host's rank, 1 through N-1")
     joining.add_argument("--ranks", type=int, required=True, choices=(2, 4), metavar="N", help="tensor-parallel ranks")
     joining.add_argument("--gpu", type=int, default=0, metavar="INDEX", help="this host's GPU (default: 0)")
+    keys = command("keygen", publishing.keygen, "create an encrypted production signing key and public profile")
+    keys.add_argument("--directory", required=True, type=Path, help="new private directory; must not exist")
+    keys.add_argument("--name", required=True, help="publisher display name")
+    keys.add_argument("--namespace", required=True, help="publisher Hugging Face namespace")
+    signing = command("sign", publishing.sign, "verify and sign a development package for production")
+    signing.add_argument("package", type=Path, help="signed development .safetensors package")
+    signing.add_argument("--output", required=True, type=Path, help="destination package; must not exist")
+    signing.add_argument("--signing-key", type=Path, help="Ed25519 PEM key (default: publishing.signing_key)")
+    signing.add_argument("--namespace", help="publisher namespace (default: publishing.namespace)")
+    signing.add_argument("--official-source", help="published repository URL (default: publishing.official_source)")
+    signing.add_argument("--development-publisher", type=Path, help="source public profile (default: beside config)")
     return parser
 
 
 def _preparation_arguments(running):
+    from .help import recipe_help
+
+    running.usage = "%(prog)s [MODEL] " + ("--output FILE " if running.prog.endswith(" export") else "") + "[options]"
+    running.epilog = recipe_help()
     running.add_argument("--official-source", metavar="URL", help="published checkpoint repository URL")
     running.add_argument("model", nargs="?", metavar="MODEL",
                          help="recipe alias, repository id, or checkpoint directory (default: defaults.model)")
@@ -75,26 +101,40 @@ def _preparation_arguments(running):
                          help="maximum simultaneously active requests (default: defaults.max_concurrency,"
                               " else the recipe default)")
     running.add_argument("--verbose", action="store_true", help="per-phase detail on stderr")
-    advanced = running.add_argument_group("advanced options")
-    advanced.add_argument("--prefill-chunk-size", type=int, metavar="N",
+    capacity = running.add_argument_group("capacity and compression")
+    capacity.add_argument("--expert-scale-compression", choices=("csf",), nargs="?", const="csf", metavar="MODE",
+                          help="losslessly compress routed-expert quantization scales to reduce GPU weight memory."
+                               " MODE: csf, a compressed scale encoding expanded during execution."
+                               " With no MODE, selects csf; omitted flag preserves native scales."
+                               " See MODEL --help for recipe support and estimated savings")
+    capacity.add_argument("--prefill-chunk-size", type=int, metavar="N",
                           help="most prompt tokens per prefill step; larger chunks reach a long prompt's first"
-                               " token sooner and pause other requests longer (default: the recipe's)")
-    advanced.add_argument("--mixed-prefill", action="store_true",
+                               " token sooner and pause other requests longer; a multiple of 64"
+                               " (default: see MODEL --help)")
+    capacity.add_argument("--mixed-prefill", action="store_true",
                           help="capture graphs combining prompt prefill with decode or verification"
                                " (Qwen only; default: disabled)")
-    advanced.add_argument("--no-mtp", action="store_true",
+    speculative = running.add_argument_group("speculative decoding",
+        "MTP flags configure speculative decoding, including DSpark and DFlash.\n"
+        "Recipe defaults and limits: ignition export MODEL --help.")
+    speculative.add_argument("--no-mtp", action="store_true",
                           help="disable multi-token speculation: load no draft model and decode one token"
-                               " per step")
-    advanced.add_argument("--mtp-draft-tokens", type=int, metavar="N",
-                          help="most draft tokens verified in one round, 0 through 7; rounds adapt among"
-                               " 0 through N (default: the recipe's)")
-    advanced.add_argument("--no-mtp-adaptive-verification", action="store_true",
-                          help="default to fixed verification at runtime; capture still includes every smaller width")
-    advanced.add_argument("--mtp-proposal-source", choices=("mtp", "copy"),
-                          help="where drafts come from: the checkpoint's MTP module, or copy for continuations"
+                               " per step; cannot accompany other speculation flags")
+    speculative.add_argument("--mtp-draft-tokens", type=int, metavar="N",
+                          help="most draft tokens verified per round; limits and defaults depend on MODEL."
+                               " 0 selects width-one rounds while retaining draft state; --no-mtp excludes it")
+    speculative.add_argument("--no-mtp-adaptive-verification", action="store_true",
+                          help="default to the maximum verification width where captured, otherwise width one")
+    speculative.add_argument("--speculative-token-capacity", type=int, metavar="N",
+                          help="maximum target-token rows in wider speculative graphs; width one covers every"
+                               " request batch. Wider graphs require batch * width <= N, where width is drafts + 1"
+                               " (default: larger of padded concurrency and maximum verification width)")
+    speculative.add_argument("--mtp-proposal-source", choices=("mtp", "copy"),
+                          help="where drafts come from: the learned draft model, or copy for continuations"
                                " of the request's own history, which loads no draft model (default: mtp)")
-    advanced.add_argument("--history-drafts", action="store_true",
+    speculative.add_argument("--history-drafts", action="store_true",
                           help="also draft continuations copied from the request's own history")
+    advanced = running.add_argument_group("advanced options")
     advanced.add_argument("--no-context-parallel", action="store_true",
                           help="keep each rank's attention context whole instead of sharding it across"
                                " tensor-parallel ranks; fewer cached tokens (default: the recipe's)")

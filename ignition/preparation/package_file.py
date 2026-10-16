@@ -1,6 +1,7 @@
 """Safetensors containers with an opaque payload and an authoritative protobuf index."""
 
 import json
+from contextlib import nullcontext
 import os
 from itertools import chain
 from pathlib import Path
@@ -13,6 +14,10 @@ from . import runtime_package_pb2 as proto
 ALIGNMENT = 4096
 MAX_HEADER_BYTES = 64 << 10
 MAX_INDEX_BYTES = 128 << 20
+
+
+def _open_source(source):
+    return nullcontext(source) if hasattr(source, 'read') else Path(source).open('rb')
 
 
 def align(value):
@@ -54,7 +59,8 @@ def _validate_spans(index, length):
 
 def read_index(path):
     """Inspect staging or signed metadata without authenticating it or reading payloads."""
-    with Path(path).open("rb") as source:
+    with _open_source(path) as source:
+        source.seek(0)
         prefix = source.read(8)
         if len(prefix) != 8:
             raise ValueError("truncated safetensors header length")
@@ -147,7 +153,7 @@ def _publish(path, index, payload, protection=None):
                         protection.absorb(written, block)
                         written += len(block)
                 output.seek(data_start + destination)
-                with Path(source).open("rb") as contents:
+                with _open_source(source) as contents:
                     contents.seek(offset)
                     remaining = size
                     while remaining:

@@ -241,12 +241,32 @@ pub(super) fn completion(value: &FrameCompletion) -> Vec<u8> {
     number(&mut bytes, value.timing.gpu_ns[0].unwrap_or(0) as usize);
     number(&mut bytes, value.timing.wall_ns as usize);
     number(&mut bytes, usize::from(value.timing.queued));
+    number(&mut bytes, usize::from(value.proposal_confidence.is_some()));
+    if let Some(rows) = &value.proposal_confidence {
+        for value in rows.iter().flatten() {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+    }
     for record in value.records.iter() {
         for field in record.fields() {
             bytes.extend_from_slice(&field.to_le_bytes());
         }
     }
     bytes
+}
+
+pub(super) fn proposal_confidence(reader: &mut Reader<'_>) -> Result<Option<[[f32; 7]; 64]>> {
+    match reader.number()? {
+        0 => Ok(None),
+        1 => {
+            let mut rows = [[0.0; 7]; 64];
+            for value in rows.iter_mut().flatten() {
+                *value = f32::from_le_bytes(reader.bytes(4)?.try_into().unwrap());
+            }
+            Ok(Some(rows))
+        }
+        _ => Err(invalid("invalid proposal confidence presence")),
+    }
 }
 
 pub(super) fn timing(reader: &mut Reader<'_>) -> Result<super::super::ExecutionTiming> {

@@ -166,7 +166,7 @@ def test_qwen_adapter_passes_speculation_overrides(monkeypatch, tmp_path):
     assert config.mtp and (config.speculative_widths, config.speculative_fixed_width) == ((1, 2, 3), 3)
     assert (config.speculative_proposal_source, config.history_drafts) == (
         "copy", True)
-    assert config.speculative_shapes == tuple((b, w) for b in (1, 2, 4) for w in (3, 2, 1))
+    assert config.speculative_shapes == tuple((b, w) for b in (1, 2, 4) for w in (3, 2, 1) if w == 1 or b * w <= 4)
 
     plan, config = configured(None)
     assert not config.mtp

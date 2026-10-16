@@ -17,7 +17,7 @@ class PreparedMLA:
         heads = weights["key"].shape[0]
 
         def buffer(key, *shape):
-            if key not in buffers:
+            if key not in buffers or buffers[key].shape[0] < tokens:
                 buffers[key] = torch.zeros((tokens, *shape), dtype=source.dtype, device=source.device)
             return buffers[key][:tokens]
 

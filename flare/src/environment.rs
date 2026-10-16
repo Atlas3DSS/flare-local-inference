@@ -1,5 +1,55 @@
 use std::collections::HashSet;
 
+pub fn configure(devices: &[i32]) -> Result<(), Box<dyn std::error::Error>> {
+    let inherited = match std::env::var("CUDA_VISIBLE_DEVICES") {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(error) => return Err(error.into()),
+    };
+    let selected = visibility(devices, inherited.as_deref())?;
+    // SAFETY: Called once from main before driver initialization or worker startup.
+    unsafe {
+        std::env::set_var("CUDA_VISIBLE_DEVICES", selected);
+        std::env::set_var("CUDA_FORCE_PRELOAD_LIBRARIES", "0");
+        std::env::set_var("CUDA_DISABLE_JIT", "1");
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+pub fn home_directory() -> std::io::Result<std::path::PathBuf> {
+    let mut storage = vec![0u8; 65536];
+    let mut record = std::mem::MaybeUninit::<libc::passwd>::uninit();
+    let mut result = std::ptr::null_mut();
+    // SAFETY: getpwuid_r writes into the supplied record and backing storage.
+    let status = unsafe {
+        libc::getpwuid_r(
+            libc::getuid(),
+            record.as_mut_ptr(),
+            storage.as_mut_ptr().cast(),
+            storage.len(),
+            &mut result,
+        )
+    };
+    if status != 0 {
+        return Err(std::io::Error::from_raw_os_error(status));
+    }
+    if result.is_null() {
+        return Err(std::io::Error::other(
+            "cannot resolve home directory; specify --cache-dir",
+        ));
+    }
+    // SAFETY: The passwd field points into storage, which remains live until copied.
+    let home = unsafe { std::ffi::CStr::from_ptr((*result).pw_dir) };
+    use std::os::unix::ffi::OsStrExt;
+    Ok(std::path::PathBuf::from(std::ffi::OsStr::from_bytes(
+        home.to_bytes(),
+    )))
+}
+
+#[cfg(windows)]
+pub use crate::windows::home_directory;
+
 pub fn visibility(devices: &[i32], inherited: Option<&str>) -> Result<String, String> {
     if devices.is_empty()
         || devices.iter().any(|&device| device < 0)

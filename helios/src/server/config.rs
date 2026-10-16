@@ -147,14 +147,7 @@ impl Bootstrap {
             },
             eos_token_ids: frontend_settings.eos_token_ids,
             sampling_defaults,
-            proposal_confidence_threshold: object
-                .get("proposal_confidence_threshold")
-                .map(|v| {
-                    v.as_f64()
-                        .ok_or("proposal_confidence_threshold must be a number")
-                })
-                .transpose()?
-                .unwrap_or(0.15),
+            speculative_token_capacity: usize::try_from(integer("speculative_token_capacity", Some(0))?).map_err(|_| "speculative token capacity exceeds usize")?,
             speculative_fixed_width: object
                 .get("speculative_fixed_width")
                 .filter(|v| !v.is_null())
@@ -275,10 +268,7 @@ impl Bootstrap {
                 frontend_settings
                     .image
                     .ok_or("vision requires prepared image settings")?,
-                ImageLimits {
-                    max_total_patches: 65536,
-                    ..ImageLimits::default()
-                },
+                image_limits(&model.contract.vision)?,
             )?)
         } else {
             if frontend_settings.image.is_some() {
@@ -354,5 +344,61 @@ impl Bootstrap {
             images,
             server,
         })
+    }
+}
+
+fn image_limits(vision: &crate::model::VisionCapabilities) -> Result<ImageLimits> {
+    let max_total_patches = vision
+        .features_per_request
+        .checked_mul(vision.patches_per_feature)
+        .ok_or("prepared image patch capacity overflow")?;
+    let max_patches_per_image = vision
+        .patch_capacities
+        .last()
+        .copied()
+        .ok_or("vision requires a captured patch capacity")?
+        .min(max_total_patches);
+    Ok(ImageLimits {
+        max_images: vision.max_images,
+        max_patches_per_image,
+        max_total_patches,
+        ..ImageLimits::default()
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{frontend::images::ImageSettings, model::VisionCapabilities};
+
+    #[test]
+    fn image_limits_follow_graph_and_feature_storage_capacities() {
+        for (features, merge, graph_patches, total) in [
+            (16384, 4, 65536, 65536),
+            (16384, 4, 16384, 65536),
+            (1536, 9, 3456, 13824),
+            (1024, 4, 16384, 4096),
+        ] {
+            let vision = VisionCapabilities {
+                features_per_request: features,
+                max_images: 4,
+                patches_per_feature: merge,
+                patch_capacities: vec![graph_patches],
+            };
+            vision.validate().unwrap();
+            let limits = image_limits(&vision).unwrap();
+            assert_eq!(limits.max_images, 4);
+            assert_eq!(limits.max_total_patches, total);
+            assert_eq!(limits.max_patches_per_image, graph_patches.min(total));
+            let processor = ImageProcessor::load(ImageSettings::Moonvit {}, limits).unwrap();
+            let geometry = processor.geometry(3584, 3584);
+            if graph_patches == 65536 {
+                let geometry = geometry.unwrap();
+                assert_eq!(geometry.patches, 65536);
+                assert_eq!(geometry.tokens, 16384);
+            } else {
+                assert!(geometry.is_err());
+            }
+        }
     }
 }

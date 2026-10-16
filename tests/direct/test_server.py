@@ -37,6 +37,31 @@ def test_replies_split_reasoning_when_the_prompt_opens_a_think_block():
     assert frontend().reply([ord(c) for c in "plain"], "<|assistant|>") == ("plain", None)
 
 
+def test_frontend_preserves_the_prepared_tokenizer_pipeline(tmp_path):
+    import json
+
+    from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
+
+    text = "hello world\nhello again"
+    tokenizer = Tokenizer(models.BPE(unk_token="<unk>"))
+    tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
+    tokenizer.decoder = decoders.ByteLevel()
+    tokenizer.train_from_iterator([text], trainers.BpeTrainer(
+        vocab_size=128, special_tokens=["<unk>", "<s>", "</s>"]))
+    path = tmp_path / "tokenizer.json"
+    tokenizer.save(str(path))
+    (tmp_path / "tokenizer_config.json").write_text(json.dumps({
+        "tokenizer_class": "LlamaTokenizerFast", "bos_token": "<s>", "eos_token": "</s>",
+        "unk_token": "<unk>"}))
+    (tmp_path / "chat_template.jinja").write_text("{{ messages[0]['content'] }}")
+    frontend = _Frontend({"assets": {"tokenizer": {"path": str(path)}},
+                          "frontend": {"eos_token_ids": [tokenizer.token_to_id("</s>")]}})
+    ids, rendered = frontend.render({"messages": [{"role": "user", "content": text}]})
+    assert rendered == text
+    assert ids == tokenizer.encode(text, add_special_tokens=False).ids
+    assert frontend.reply(ids, rendered) == (text, None)
+
+
 def test_graph_replay_saves_graph_times_that_eager_execution_reads(tmp_path):
     import threading
 

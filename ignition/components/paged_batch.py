@@ -56,12 +56,12 @@ class Metadata:
     live_counts: torch.Tensor
 
     @classmethod
-    def allocate(cls, tokens, rows, blocks, device, *, samples=None):
+    def allocate(cls, tokens, rows, blocks, device, *, samples=None, buffers=None):
         def zeros(shape, dtype=torch.int32):
-            return torch.zeros(shape, dtype=dtype, device=device)
+            return torch.zeros(shape, dtype=dtype, device=device) if buffers is None else buffers.zeros(shape, dtype)
 
-        pages = zeros((rows, blocks)) - 1
-        per_token = pages.expand(tokens, -1) if rows == 1 else zeros((tokens, blocks)) - 1
+        pages = zeros((rows, blocks)).fill_(-1)
+        per_token = pages.expand(tokens, -1) if rows == 1 else zeros((tokens, blocks)).fill_(-1)
         return cls(
             zeros(tokens, torch.int64),
             zeros(rows if samples is None else samples, torch.int64),
@@ -70,7 +70,7 @@ class Metadata:
             zeros(rows, torch.int64),
             zeros(rows),
             zeros(tokens, torch.int64),
-            zeros(tokens, torch.int64) - 1,
+            zeros(tokens, torch.int64).fill_(-1),
             pages,
             per_token,
             zeros(2),
@@ -118,6 +118,7 @@ class PreparedBatch:
         input_vocabulary=None,
         validate_prefill=None,
         page_tokens=PAGE_TOKENS,
+        buffers=None,
     ):
         self.inputs, self.requests, self.metadata, self.shard = inputs, requests, metadata, shard
         self.rows, self.tokens, self.mode = metadata.starts.numel(), metadata.token_ids.numel(), mode
@@ -135,9 +136,11 @@ class PreparedBatch:
         self.slot_ids = torch.arange(capacity, device=device)
         self.token_offsets = torch.arange(self.tokens, device=device)
         self.block_ids = torch.arange(inputs.page_tables.shape[1], device=device)
-        self.validation_input = torch.zeros((1, max(8, 2 * capacity)), dtype=torch.bfloat16, device=device)
-        self.validation_sum = torch.zeros_like(self.validation_input)
-        self.present = torch.zeros(capacity, dtype=torch.bool, device=device)
+        def zeros(shape, dtype):
+            return torch.zeros(shape, dtype=dtype, device=device) if buffers is None else buffers.zeros(shape, dtype)
+        self.validation_input = zeros((1, max(8, 2 * capacity)), torch.bfloat16)
+        self.validation_sum = zeros(self.validation_input.shape, torch.bfloat16)
+        self.present = zeros((capacity,), torch.bool)
         self.token_state = PreparedTokenState(
             requests,
             metadata.token_ids,
@@ -145,6 +148,7 @@ class PreparedBatch:
             inputs.row_slot_ids[: self.rows],
             inputs.row_generations[: self.rows],
             inputs.live_rows,
+            buffers=buffers,
         )
         self.token_state.prepare()
 

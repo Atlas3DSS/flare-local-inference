@@ -14,7 +14,7 @@ from .speculation import (
 from .state import save_hidden
 
 
-def prepare_sampling_scratch(batch, width, vocab, device):
+def prepare_sampling_scratch(batch, width, vocab, device, *, buffers=None):
     """Share sequential shapes while keeping target probabilities live through verification.
 
     Proposal probabilities must be copied to retained storage before the next
@@ -24,9 +24,9 @@ def prepare_sampling_scratch(batch, width, vocab, device):
     from ignition.preparation.scratch import bind_scratch
 
     return {
-        "proposal": bind_scratch(PreparedDraftDistribution.scratch_layout(batch, 1, vocab), device=device),
-        "target": bind_scratch(PreparedSpeculativeDistributions.scratch_layout(batch, width, vocab), device=device),
-        "verify": bind_scratch(PreparedStochasticVerification.scratch_layout(batch, width, vocab), device=device),
+        "proposal": bind_scratch(PreparedDraftDistribution.scratch_layout(batch, 1, vocab), device=device, workspace=buffers),
+        "target": bind_scratch(PreparedSpeculativeDistributions.scratch_layout(batch, width, vocab), device=device, workspace=buffers),
+        "verify": bind_scratch(PreparedStochasticVerification.scratch_layout(batch, width, vocab), device=device, workspace=buffers),
     }
 
 
@@ -43,9 +43,10 @@ class PreparedParallelDraftRound:
                     logits=((batch, 1, vocab), torch.float32))
 
     def __init__(self, owner, batch, width, name, *, generate_proposals=True, sampling_scratch=None,
-                 round_storage=None):
+                 round_storage=None, proposal_only=False):
         self.owner, self.batch, self.width = owner, batch, width
         self.generate_proposals = generate_proposals
+        self.proposal_only = proposal_only
         self.sampling_scratch = {} if sampling_scratch is None else sampling_scratch
         o, b, w = owner, batch, width
         device, blocks = o.pool.backing.device, o.inputs.page_tables.shape[1]
@@ -70,7 +71,7 @@ class PreparedParallelDraftRound:
             session=o.session,
             name=name + ".validation",
         )
-        self.decoder = o.forwards.decoder(
+        self.decoder = None if proposal_only else o.forwards.decoder(
             o.weights,
             o.tables,
             o.scratch.rows(b * w, b * w),
@@ -82,7 +83,7 @@ class PreparedParallelDraftRound:
             workspace=o.workspace,
             **o.collectives,
         )
-        self.context = o.forwards.context(
+        self.context = None if proposal_only else o.forwards.context(
             o.weights,
             self.decoder.auxiliary,
             self.metadata,
@@ -92,7 +93,7 @@ class PreparedParallelDraftRound:
             workspace=o.workspace,
         )
         block = o.block_size
-        self.draft_metadata = Metadata.allocate(b * block, b, 1, device, samples=b * block)
+        self.draft_metadata = Metadata.allocate(b * block, b, blocks, device, samples=b * block)
         self.draft = (
             None
             if w == 1 or not generate_proposals
@@ -107,6 +108,7 @@ class PreparedParallelDraftRound:
                 **o.collectives,
             )
         )
+        self.selector = getattr(self.draft, "selector", None)
         self.draft_inputs = torch.full(
             (b, block), o.weights.config.draft.noise_token, dtype=torch.int64, device=device
         )
@@ -147,7 +149,7 @@ class PreparedParallelDraftRound:
             return
         o, b, w = self.owner, self.batch, self.width
         args = (o.requests, o.inputs.row_slot_ids[:b], o.inputs.row_generations[:b], o.inputs.live_rows)
-        target = PreparedSpeculativeDistributions(
+        target = None if self.proposal_only else PreparedSpeculativeDistributions(
             self.decoder.scratch.logits.view(b, w, -1), *args, self.drafts,
             workspace=self.sampling_scratch.get("target")
         )
@@ -164,9 +166,13 @@ class PreparedParallelDraftRound:
             )
             for i in range(w - 1 if self.generate_proposals else 0)
         )
-        target.prepare()
+        if target is not None:
+            target.prepare()
         for proposal in proposals:
             proposal.prepare()
+        if self.proposal_only:
+            self.operations = None, proposals, None, None
+            return
         verify = PreparedStochasticVerification(
             self.probabilities,
             self.drafts,
@@ -199,7 +205,7 @@ class PreparedParallelDraftRound:
         self.propose()
         self.verify()
 
-    def propose(self, advance_rng=True, observer=None):
+    def propose(self, advance_rng=True, observer=None, allowed=None):
         if not self.generate_proposals:
             raise RuntimeError("verification-only preparation cannot generate proposals")
         o, b, w = self.owner, self.batch, self.width
@@ -208,6 +214,8 @@ class PreparedParallelDraftRound:
         slots = o.inputs.row_slot_ids[:b].long()
         safe = slots.clamp(0, o.requests.capacity - 1)
         self.active.copy_(self.validator.token_state.active.bool())
+        if allowed is not None:
+            self.active.logical_and_(allowed)
         self.before.copy_(o.requests.consumed_tokens[safe])
         limits = torch.where(self.active, o.inputs.query_lengths[:b], 0)
         states = o.inputs.request_state_rows[safe, 0]
@@ -223,7 +231,7 @@ class PreparedParallelDraftRound:
                 self.before,
                 self.active.int() * block,
                 states,
-                o.inputs.page_tables[safe, :1],
+                o.inputs.page_tables[safe],
                 self.draft_inputs,
                 o.inputs.live_rows,
             )
@@ -235,6 +243,8 @@ class PreparedParallelDraftRound:
                 )
                 if self.markov is not None:
                     self.logits[:, 0].add_(self.markov())
+                if self.selector is not None:
+                    self.selector(self.logits[:, 0], self.markov_token, i + o.logit_offset)
                 if observer is not None:
                     observer.record_embedding(i, self.markov.embedding)
                 self.offset.copy_(self.base_offset + 4 * i)

@@ -15,6 +15,16 @@ fn help_exits_successfully_before_accessing_files() {
         vec!["run", "--help"],
         vec!["run", "-h"],
         vec!["help", "run"],
+        vec!["download", "--help"],
+        vec!["download", "-h"],
+        vec!["help", "download"],
+        vec![
+            "download",
+            "owner/model",
+            "--token-file",
+            "/nonexistent/token",
+            "--help",
+        ],
         vec![
             "run",
             "/nonexistent/model.safetensors",
@@ -39,6 +49,47 @@ fn help_exits_successfully_before_accessing_files() {
             assert!(help.contains("127.0.0.1:8000"), "{help}");
         }
     }
+}
+
+#[test]
+fn offline_download_and_run_share_the_cached_package_path() {
+    let temp = tempfile::tempdir().unwrap();
+    let commit = "0123456789012345678901234567890123456789";
+    let directory = temp
+        .path()
+        .join("models--owner--model/snapshots")
+        .join(commit);
+    std::fs::create_dir_all(&directory).unwrap();
+    let package = directory.join("model.safetensors");
+    std::fs::write(&package, b"invalid package fixture").unwrap();
+    let cache = temp.path().to_str().unwrap();
+    let output = flare(&[
+        "download",
+        &format!("owner/model@{commit}"),
+        "--offline",
+        "--cache-dir",
+        cache,
+    ]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap().trim(),
+        package.to_str().unwrap()
+    );
+
+    let output = flare(&[
+        "run",
+        "owner/model",
+        "--revision",
+        commit,
+        "--offline",
+        "--cache-dir",
+        cache,
+    ]);
+    assert!(!output.status.success());
+    let error = String::from_utf8(output.stderr).unwrap();
+    assert!(error.contains("Verify package"), "{error}");
+    assert!(!error.contains("cannot load NVIDIA"), "{error}");
+    assert!(!error.contains("cannot access package"), "{error}");
 }
 
 #[test]
