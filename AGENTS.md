@@ -56,9 +56,9 @@ The JPEG decoder builds its bundled libjpeg-turbo source. Preparation requires
 the CUDA toolkit, including `nvcc` and CUPTI; configure `[paths] cuda` when it
 is not supplied by the Python environment.
 
-The preparation dependency tracks the `main` branch of `local-inference-lab/flashinfer`
-in `pyproject.toml`; `uv.lock` records the resolved commit. To refresh it, run
-`uv lock --upgrade-package flashinfer-python`, then sync the environment.
+The preparation dependency pins a Git revision of `local-inference-lab/flashinfer`
+in `pyproject.toml`; `uv.lock` records the resolved commit. To change it, update
+the revision, run `uv lock --upgrade-package flashinfer-python`, then sync the environment.
 For local FlashInfer development, install the sibling
 checkout explicitly with `uv pip install --python .venv/bin/python --no-deps -e ../flashinfer`;
 `uv sync --locked --extra prepare --extra test` restores the Git dependency.

@@ -7,14 +7,15 @@ import json
 from pathlib import Path
 
 import torch
+from safetensors import safe_open
 from b12x.preparation import PreparationSession
 
 from ignition.preparation import inspect_qwen38_checkpoint
 from ignition.preparation.qwen38 import TRANSFORMERS_REVISION
+from ignition.preparation.compilation import ForwardTracer, compile_forward
 from ignition.preparation.graphs import PreparedGraphBundle
 from ignition.recipes.qwen38 import create_model_tree
 from ignition.recipes.qwen38.hyperconnection import HyperconnectionScratch, PreparedHyperconnection
-from ignition.recipes.qwen38.weights import QwenWeightLoader
 
 
 def qualify(snapshot: Path) -> list[dict]:
@@ -28,14 +29,17 @@ def qualify(snapshot: Path) -> list[dict]:
     module = tree.get_submodule(prefix)
     following_prefix = "model.language_model.layers.0.mlp_hyper_connection"
     following_module = tree.get_submodule(following_prefix)
-    with QwenWeightLoader(manifest, device, prefixes=(prefix, following_prefix)) as loader:
-        for path, mixer in ((prefix, module), (following_prefix, following_module)):
-            for name in ("hc_norm", "input_mix_weight_down", "input_mix_weight_up", "block_inject_weight"):
-                child = mixer.get_submodule(name)
-                child.weight = torch.nn.Parameter(loader.load_tensor(f"{path}.{name}.weight"), requires_grad=False)
+    weight_map = json.loads((snapshot / "model.safetensors.index.json").read_text())["weight_map"]
+    for path, mixer in ((prefix, module), (following_prefix, following_module)):
+        for name in ("hc_norm", "input_mix_weight_down", "input_mix_weight_up", "block_inject_weight"):
+            tensor_name = f"{path}.{name}.weight"
+            with safe_open(snapshot / weight_map[tensor_name], framework="pt", device="cpu") as shard:
+                weight = shard.get_tensor(tensor_name).to(device)
+            mixer.get_submodule(name).weight = torch.nn.Parameter(weight, requires_grad=False)
     generator = torch.Generator().manual_seed(1607)
     reports = []
     with torch.inference_mode(), PreparationSession(device=device, autotune=True, compile_workers=0) as session:
+        tracer = ForwardTracer()
         for tokens in (1, 4, 8, 16, 64, 4096):
             scratch = HyperconnectionScratch.allocate(tokens, device)
             source = torch.zeros((tokens, 10240), dtype=torch.bfloat16, device=device)
@@ -45,7 +49,7 @@ def qualify(snapshot: Path) -> list[dict]:
                 session=session, name=f"following_{tokens}")
             prepared.prepare_combine_norm(following, priming_state=source,
                 session=session, name=f"combine_norm_{tokens}")
-            for projection in (prepared.down, prepared.up):
+            for projection in (prepared.down, prepared.gate):
                 assert projection.plan.selection.source in ("tuned", "cached")
             block = torch.zeros((tokens, 2560), dtype=torch.bfloat16, device=device)
             mixed = torch.empty_like(block)
@@ -69,24 +73,26 @@ def qualify(snapshot: Path) -> list[dict]:
                 normalized.copy_(scratch.normalized)
                 following_mixed.copy_(following.mix(source, pre_normalized=True))
 
+            compiled_unfused = compile_forward(run_unfused, tracer=tracer)
+            compiled = compile_forward(run, tracer=tracer)
             stream = torch.cuda.Stream(device=device)
             stream.wait_stream(torch.cuda.current_stream(device))
             with torch.cuda.stream(stream):
-                run_unfused()
-                run()
+                compiled_unfused()
+                compiled()
             stream.synchronize()
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph, stream=stream):
-                run()
+                compiled()
             unfused_graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(unfused_graph, stream=stream):
-                run_unfused()
+                compiled_unfused()
             bundle = PreparedGraphBundle(device=0, graphs={"unfused": unfused_graph, "hyperconnection": graph},
                 buffers={"source": source, "block": block, "mixed": mixed, "combined": combined,
                          "normalized": normalized, "following_mixed": following_mixed,
                          "unfused_combined": unfused_combined, "unfused_normalized": unfused_normalized,
                          "unfused_following": unfused_following},
-                resources=(module, prepared, following, session, stream))
+                resources=(module, prepared, following, session, stream, compiled_unfused, compiled))
             worker = bundle.start_worker()
             try:
                 for iteration in range(2):
@@ -95,6 +101,7 @@ def qualify(snapshot: Path) -> list[dict]:
                     expected_mixed, residual, injection = module(source)
                     expected_combined = residual + (block[:, None, :] * injection[:, :, None]).flatten(1)
                     expected_following, _, _ = following_module(expected_combined)
+                    scratch.gate_workspace.fill_(float("nan"))
                     torch.cuda.synchronize(device)
                     allocated = torch.cuda.memory_allocated(device)
                     ticket = worker.submit(0)
@@ -117,7 +124,7 @@ def qualify(snapshot: Path) -> list[dict]:
                         difference = (actual.float() - expected.float())
                         reports.append({"tokens": tokens, "iteration": iteration, "operation": name,
                             "down_backend": prepared.down.plan.selection.config.backend,
-                            "up_backend": prepared.up.plan.selection.config.backend,
+                            "gate_implementation": prepared.gate.plan.selection.config.implementation,
                             "max_absolute_error": difference.abs().max().item(),
                             "relative_l2_error": (difference.norm() / expected.float().norm().clamp_min(1e-12)).item()})
                     for label, values in (("fused", following_mixed), ("unfused", unfused_following)):
@@ -145,6 +152,8 @@ def main():
         "cuda_version": torch.version.cuda,
         "device": torch.cuda.get_device_name(0),
         "seed": 1607,
+        "compiled_forwards": True,
+        "poisoned_gate_workspace": True,
         "rtol": .02,
         "atol": .02,
         "comparisons": comparisons,

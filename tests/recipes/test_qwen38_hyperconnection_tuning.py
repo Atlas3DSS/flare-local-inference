@@ -10,6 +10,7 @@ import torch
 from ignition.recipes.qwen38 import hyperconnection
 from ignition.recipes.qwen38.hyperconnection import HyperconnectionScratch
 from ignition.preparation.fixtures.hyperconnection import HyperconnectionBenchmarkInputs, benchmark_call
+from ignition.preparation.fixtures.hyperconnection_gate import HyperconnectionGateInputs
 
 
 def test_packed_projection_preserves_canonical_weights_without_duplicate_storage():
@@ -126,7 +127,7 @@ def test_priming_borrows_one_source_across_capacities_and_retains_its_owner():
     assert reference() is None
 
 
-@pytest.mark.parametrize("operation", ["grouped_rmsnorm", "scaled_silu", "gate_mean", "combine"])
+@pytest.mark.parametrize("operation", ["grouped_rmsnorm", "scaled_silu", "combine"])
 def test_borrowed_priming_keeps_exact_private_benchmark_fixture(operation):
     scratch = HyperconnectionScratch.allocate(4, torch.device("cpu"))
     source = torch.zeros_like(scratch.normalized)
@@ -183,7 +184,7 @@ def test_combine_norm_fixture_retains_fp32_gain_and_owns_both_outputs():
     source = torch.zeros_like(scratch.normalized)
     gain = torch.linspace(.5, 1.5, 10240)
     arguments = (source, scratch.block_input, scratch.injection_logits, gain,
-                 scratch.gate_logits, scratch.normalized)
+                 scratch.gate_workspace, scratch.normalized)
     fixture = HyperconnectionBenchmarkInputs("combine_norm", arguments)
     fixture.produce()
     assert fixture.arguments[3] is gain
@@ -226,3 +227,31 @@ def test_combine_uses_public_prepared_plan_and_functional_output(monkeypatch):
     with pytest.raises(ValueError, match="no residual injection"):
         operator.combine(residual, block)
     assert len(calls) == 2
+
+
+def test_projection_gate_trials_produce_private_inputs_and_retain_weights():
+    source = torch.zeros(6, 320, dtype=torch.bfloat16)
+    normalized = torch.zeros(6, 10240, dtype=torch.bfloat16)
+    output = torch.zeros(6, 2560, dtype=torch.bfloat16)
+    workspace = torch.zeros_like(normalized)
+    weight = torch.ones(10240, 320, dtype=torch.bfloat16)
+    inputs = HyperconnectionGateInputs(source, normalized, output, workspace)
+    calls = []
+
+    def run(x, w, values, out, scratch):
+        calls.append((x, w, values, out, scratch))
+        out.fill_(7)
+
+    call = inputs.call(SimpleNamespace(run=run), weight)
+    call.produce()
+    expected = inputs.source.clone(), inputs.normalized.clone()
+    call.run()
+    assert calls[-1] == (inputs.source, weight, inputs.normalized, inputs.output, inputs.workspace)
+    assert call.output is inputs.output and torch.all(call.output == 7)
+    inputs.source.fill_(float("nan"))
+    inputs.normalized.fill_(float("nan"))
+    call.produce()
+    assert torch.equal(inputs.source, expected[0]) and torch.equal(inputs.normalized, expected[1])
+    assert not source.count_nonzero() and not normalized.count_nonzero() and not output.count_nonzero()
+    assert inputs.nbytes == sum(t.nbytes for t in (
+        inputs.source, inputs.normalized, inputs.output, inputs.workspace, *inputs.seeds))
