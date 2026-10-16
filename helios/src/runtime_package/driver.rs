@@ -144,10 +144,12 @@ driver! {
     parameter_info: "cuFuncGetParamInfo"(Handle, usize, *mut usize, *mut usize);
     function_attribute: "cuFuncSetAttribute"(Handle, c_int, c_int);
     function_load: "cuFuncLoad"(Handle);
+    occupancy: "cuOccupancyMaxActiveBlocksPerMultiprocessor"(*mut c_int, Handle, c_int, usize);
     graph_upload: "cuGraphUpload"(Handle, Handle);
     graph_create: "cuGraphCreate"(*mut Handle, c_uint);
     graph_destroy: "cuGraphDestroy"(Handle);
     graph_kernel: "cuGraphAddKernelNode_v2"(*mut Handle, Handle, *const Handle, usize, *const KernelParams);
+    graph_kernel_params: "cuGraphKernelNodeSetParams_v2"(Handle, *const KernelParams);
     graph_memset: "cuGraphAddMemsetNode"(*mut Handle, Handle, *const Handle, usize, *const MemsetParams, Handle);
     graph_copy: "cuGraphAddMemcpyNode"(*mut Handle, Handle, *const Handle, usize, *const CopyParams, Handle);
     graph_empty: "cuGraphAddEmptyNode"(*mut Handle, Handle, *const Handle, usize);
