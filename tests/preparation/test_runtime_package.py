@@ -107,6 +107,59 @@ def test_export_never_overwrites_an_existing_directory(tmp_path):
         package().write(tmp_path, {})
 
 
+@pytest.mark.parametrize("offset,nbytes,closed,accepted", [
+    (0, 2 << 20, False, True),
+    (4096, 4096, False, True),
+    (0, 2 << 20, True, False),
+    (0, (2 << 20) + 4096, False, False),
+    (-4096, 8192, False, False),
+    (2 << 20, 4096, False, False),
+])
+def test_export_classifies_recorded_host_vmm_by_declared_ownership(
+        tmp_path, monkeypatch, offset, nbytes, closed, accepted):
+    from types import SimpleNamespace
+
+    from ignition.preparation import runtime_package, tensor_metadata
+
+    base = 0xc0000000000
+    calls = []
+
+    class Cuda:
+        def call(self, name, *args):
+            if name == "cuCtxGetCurrent":
+                args[0]._obj.value = 17
+            elif name == "cuPointerGetAttribute":
+                calls.append(args[2].value)
+                # Host-backed VMM has host memory type and no owning context.
+                args[0]._obj.value = 1 if args[1].value == 2 else None
+
+    class Classified(Exception):
+        pass
+
+    def classified(allocations, *args):
+        host, = allocations
+        assert (host.address, host.nbytes, host.memory) == (base, 2 << 20, "mapped_host")
+        raise Classified
+
+    monkeypatch.setattr(runtime_package, "_Cuda", Cuda)
+    monkeypatch.setattr(tensor_metadata, "live_metadata", classified)
+    prepared = SimpleNamespace(_consumed=False, signatures={}, export_zero_ranges=[], buffers={})
+    storage = SimpleNamespace(error=None, dynamic_regions=[], transports=[], mappings={}, peer_storage=None,
+        host_regions=[SimpleNamespace(address=base, extent=2 << 20, closed=closed)], granularity=2 << 20,
+        unused_ranges=lambda: [],
+        graph_pool=SimpleNamespace(snapshot=lambda **kwargs: []), numeric_storage=None)
+    images = SimpleNamespace(allocations={base + offset: (nbytes, "device")},
+                             allocation_contexts={base + offset: 17})
+    if accepted:
+        with pytest.raises(Classified):
+            runtime_package.export_model(prepared, images, storage, tmp_path / "package", options={})
+        assert calls == []
+    else:
+        with pytest.raises(ValueError, match="not device memory in the serving context"):
+            runtime_package.export_model(prepared, images, storage, tmp_path / "package", options={})
+        assert calls == [base + offset, base + offset]
+
+
 def test_peer_export_keeps_shared_frontend_only_on_rank_zero(tmp_path, monkeypatch):
     import hashlib
     from types import SimpleNamespace
@@ -153,7 +206,7 @@ def test_peer_export_keeps_shared_frontend_only_on_rank_zero(tmp_path, monkeypat
     storage = SimpleNamespace(error=None, dynamic_regions=[], transports=[], integrated=False,
         mappings={address: SimpleNamespace(address=address, nbytes=4096)},
         peer_storage=None, host_regions=[], granularity=4096, DEVICE_BASE=0x100000000000,
-        RESERVATION_BYTES=1 << 20, unused_ranges=lambda: [], low_allocations=lambda outside: {},
+        RESERVATION_BYTES=1 << 20, unused_ranges=lambda: [],
         graph_pool=SimpleNamespace(snapshot=lambda **kwargs: []),
         numeric_storage=SimpleNamespace(ranges=lambda: []))
     images = SimpleNamespace(allocations={}, image_for=lambda cuda, function: b"\x7fELFfixture")
@@ -186,17 +239,26 @@ def test_external_allocations_share_pages_without_reading_unallocated_bytes():
 @pytest.mark.parametrize("dependency", ["unused", "direct", "indirect"])
 def test_export_rejects_reachable_storage_below_the_address_floor(tmp_path, monkeypatch, dependency):
     from types import SimpleNamespace
-    from ignition.preparation import module_images, runtime_package
+    from ignition.preparation import module_images, runtime_package, tensor_metadata
     from ignition.preparation.package_file import read_index
-    from ignition.preparation.reachability import Reachability
 
     low, high, floor = 0x1208400000, 0x40000000000, 0x4000000000
 
     class Cuda:
-        lib = SimpleNamespace(cuCtxGetLimit=lambda *args: 215)
+        lib = SimpleNamespace(cuCtxGetLimit=lambda *args: 215, cuFuncGetParamInfo=lambda *args: 1)
 
         def call(self, name, *args):
-            if name == "cuFuncGetName":
+            if name == "cuCtxGetCurrent":
+                args[0]._obj.value = 17
+            elif name == "cuPointerGetAttribute":
+                args[0]._obj.value = 2 if args[1].value == 2 else 17
+            elif name == "cuGraphGetNodes":
+                args[2]._obj.value = 1
+                if args[1] is not None:
+                    args[1][0] = 1
+            elif name == "cuGraphKernelNodeGetParams_v2":
+                args[1]._obj.func = 1
+            elif name == "cuFuncGetName":
                 args[0]._obj.value = b"fixture"
 
         def download(self, address, size):
@@ -208,21 +270,33 @@ def test_export_rejects_reachable_storage_below_the_address_floor(tmp_path, monk
                         {"name": name, "nodes": [], "edges": []})
     monkeypatch.setattr(module_images, "strip_debug", lambda image: image)
     monkeypatch.setattr(module_images, "global_symbols", lambda image: [])
-    allocations = [Allocation("device", high, 256, preserve_address=True),
-                   Allocation("external", low, 256, preserve_address=True)]
-    roots = ("external",) if dependency == "direct" else ("device",)
-    owner = RuntimePackage(allocations=allocations, modules={"kernel": b"\x7fELFfixture"},
-        kernels=[Kernel(1, "kernel", ())], device_address_floor=floor,
-        reachability=Reachability(allocations, roots=roots))
+    monkeypatch.setattr(tensor_metadata, "live_metadata", lambda *args: ([], {}))
     graph = SimpleNamespace(raw_cuda_graph=lambda: 1, raw_cuda_graph_exec=lambda: 1)
+    prepared = SimpleNamespace(_consumed=False, signatures={"decode": SimpleNamespace(kind="decode")},
+        export_zero_ranges=[], graphs={"decode": graph},
+        buffers={}, export_events={}, package_data=None, server_config={},
+        manifest=lambda **kwargs: {"context": {}, "device": 0, "graphs": [], "buffers": [
+            {"name": "root", "address": low if dependency == "direct" else high, "nbytes": 8}]})
+    storage = SimpleNamespace(error=None, dynamic_regions=[], transports=[], integrated=True,
+        mappings={high: SimpleNamespace(address=high, nbytes=256)}, peer_storage=None,
+        host_regions=[], granularity=256, EXTERNAL_FLOOR=floor,
+        unused_ranges=lambda: [],
+        graph_pool=SimpleNamespace(snapshot=lambda **kwargs: []), numeric_storage=None)
+    images = SimpleNamespace(allocations={low: (256, "device")}, allocation_contexts={low: 17},
+                             image_for=lambda cuda, function: b"\x7fELFfixture")
     path = tmp_path / "package.safetensors"
+
+    def export():
+        return runtime_package.export_model(prepared, images, storage, path, options={}, bundle_only=True)
+
     if dependency == "unused":
-        owner.write(path, {"decode": graph})
+        export()
         index, _ = read_index(path)
-        assert [a.name for a in index.ranks[0].allocations] == ["device"]
+        assert [a.name for a in index.ranks[0].allocations] == ["device-0"]
+        assert all(reservation.address >= floor for reservation in index.ranks[0].reservations)
     else:
         with pytest.raises(ValueError, match="below the restorable address floor"):
-            owner.write(path, {"decode": graph})
+            export()
         assert not path.exists()
         assert not list(tmp_path.iterdir())
 

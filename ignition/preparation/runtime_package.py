@@ -703,6 +703,7 @@ def export_model(prepared, images, storage, path, *, options, progress=None, pub
     if progress is not None:
         progress(f"Cleared {sum(size for _, size in zero_ranges) / (1 << 30):.2f} GiB of disposable storage")
     mappings = storage.mappings
+    host_regions = tuple(region for region in storage.host_regions if not region.closed)
     imports = {} if storage.peer_storage is None else storage.peer_storage.imported
     imported_mappings = (() if storage.peer_storage is None else
                          (part for parts in storage.peer_storage.imported_mappings.values() for part in parts))
@@ -712,7 +713,10 @@ def export_model(prepared, images, storage, path, *, options, progress=None, pub
     outside = [(address, size) for address, (size, kind) in images.allocations.items()
                if kind == "device" and address not in mappings
                and not any(base <= address < base + size for base, size in imports.items())
-               and not any(region.address <= address < region.address + region.extent for region in dynamic.values())]
+               and not any(region.address <= address < region.address + region.extent for region in dynamic.values())
+               # Host-backed VMM is recorded through cuMemMap just like device storage.
+               and not any(region.address <= address and address + size <= region.address + region.extent
+                           for region in host_regions)]
     current = C.c_void_p()
     cuda.call("cuCtxGetCurrent", C.byref(current))
     for address, nbytes in outside:
@@ -725,12 +729,8 @@ def export_model(prepared, images, storage, path, *, options, progress=None, pub
                      f"serving context {current.value}")
         if memory.value != 2 or context.value != current.value:
             raise ValueError(f"external allocation {address:#x}+{nbytes} is not device memory in the serving context")
-    # A serving process's own CUDA context occupies these addresses on an integrated GPU, so it could
-    # not restore an allocation there.
-    if low := storage.low_allocations(dict(outside)):
-        raise RuntimeError("external device allocations lie below "
-                           f"{storage.EXTERNAL_FLOOR:#x}, where a serving context's storage lies: "
-                           + ", ".join(f"{address:#x}+{size}" for address, size in low))
+    # RuntimePackage.write checks the address floor after tracing graph dependencies, so unused
+    # library allocations can be omitted even when the serving context could not restore them.
     allocations = [Allocation(f"device-{index}", mapping.address, mapping.nbytes,
                              alignment=storage.granularity, preserve_address=True)
                    for index, mapping in enumerate(sorted(mappings.values(), key=lambda m: m.address))]
