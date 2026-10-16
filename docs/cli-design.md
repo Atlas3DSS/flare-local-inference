@@ -745,8 +745,9 @@ including `--hosts` order when agents launch peers. The transport accepts 2..16
 ranks, while recipe validation retains each model's supported TP sizes. This
 option is recorded in the preparation plan, sent to preparation peers, and
 forwarded to serving peers. It changes native transport routing, not the
-captured collective operation contracts. See [rings](multi-host.md#experimental-rings)
-for setup, the transport test harness, and qualification limits.
+captured collective operation contracts. See [RoCE ring transport](roce-ring.md)
+for routing, buffer ownership, setup, the transport test harness, and qualification
+limits.
 
 ## 10. Non-goals
 
