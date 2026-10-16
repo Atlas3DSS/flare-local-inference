@@ -11,6 +11,8 @@ use crate::{Result, execution::BATCH_CAPACITIES};
 pub struct LoadOptions {
     /// Auxiliary embedding-table storage; defaults to disk when absent.
     pub embedding_table_storage: Option<crate::engram::Storage>,
+    /// Per-host bytes for disk-backed embedding row caches; zero disables.
+    pub embedding_table_cache_bytes: u64,
     pub max_concurrency: Option<usize>,
     pub mtp_draft_tokens: Option<usize>,
     pub adaptive_verification: Option<bool>,
@@ -23,6 +25,11 @@ pub struct LoadOptions {
 
 impl LoadOptions {
     pub(super) fn select(&self, packages: &mut [Package], config: &mut Value) -> Result<usize> {
+        if self.embedding_table_cache_bytes != 0
+            && self.embedding_table_storage == Some(crate::engram::Storage::Ram)
+        {
+            return Err(invalid("embedding row cache requires disk table storage"));
+        }
         let execution = packages
             .first()
             .and_then(|p| p.execution.as_ref())
@@ -459,6 +466,22 @@ mod tests {
         LoadOptions::default()
             .select(&mut [package], &mut config())
             .unwrap();
+    }
+
+    #[test]
+    fn cached_disk_rows_reject_resident_table_storage_before_cuda() {
+        let options = LoadOptions {
+            embedding_table_storage: Some(crate::engram::Storage::Ram),
+            embedding_table_cache_bytes: 1 << 30,
+            ..Default::default()
+        };
+        assert!(
+            options
+                .select(&mut [package()], &mut config())
+                .unwrap_err()
+                .to_string()
+                .contains("embedding row cache requires disk table storage")
+        );
     }
 
     #[test]

@@ -271,6 +271,11 @@ impl NativeModel {
             .take()
             .map(|value| super::engram::decode(value, archive.start, &packages))
             .transpose()?;
+        if options.embedding_table_cache_bytes != 0 && engram.is_none() {
+            return Err(invalid(
+                "embedding row cache requires an embedding table catalog",
+            ));
+        }
         let prepared: crate::model::PreparedContract =
             serde_json::from_value(server_config["model_contract"].clone())
                 .map_err(|error| invalid(format!("invalid prepared contract: {error}")))?;
@@ -512,10 +517,20 @@ impl NativeModel {
                     model.ranks[0].context as usize,
                     devices[0],
                     storage,
+                    options.embedding_table_cache_bytes,
                 )?);
-                phase.finish(match storage {
+                let label = match storage {
                     crate::engram::Storage::Disk => "disk",
                     crate::engram::Storage::Ram => "RAM",
+                };
+                let cache_bytes = model.engram.as_ref().unwrap().cache_bytes();
+                phase.finish(if cache_bytes == 0 {
+                    label.to_owned()
+                } else {
+                    format!(
+                        "{label} · {:.0} MiB row cache",
+                        cache_bytes as f64 / (1u64 << 20) as f64
+                    )
                 });
             }
             archive.release_page_cache();

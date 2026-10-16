@@ -255,7 +255,12 @@ impl ModelRuntime {
         let worker_config = config.clone();
         let finished = Arc::new((Mutex::new(false), Condvar::new()));
         let worker_finished = finished.clone();
-        let metrics = Arc::new(super::metrics::Metrics::default());
+        let mut metrics = super::metrics::Metrics::default();
+        metrics.engram = manifest
+            .engram
+            .as_ref()
+            .map(|binding| binding.shared.stats());
+        let metrics = Arc::new(metrics);
         metrics.scheduler_trace.configure(&manifest.graphs);
         let worker_metrics = metrics.clone();
         let thread = thread::Builder::new()
