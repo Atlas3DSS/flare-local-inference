@@ -65,3 +65,106 @@ def test_terminal_echo_failure_cannot_expose_passphrase(monkeypatch):
     monkeypatch.setattr(signing.getpass, 'getpass', no_echo)
     with pytest.raises(ValueError, match='cannot disable terminal echo'):
         signing.passphrase('secret')
+
+
+def test_key_password_cli_preserves_identity_and_signed_messages(tmp_path, monkeypatch, capsys):
+    from ignition.cli import main
+
+    directory = tmp_path / 'keys'
+    old, new = b'original-fixture-passphrase', b'replacement-fixture-passphrase'
+    fingerprint = signing.generate(directory, 'Example publisher', 'example', old)
+    path = directory / 'signing-key.pem'
+    original = path.read_bytes()
+    key = serialization.load_pem_private_key(original, old)
+    signature = key.sign(b'previously signed package')
+    profile = (directory / 'publisher.json').read_bytes()
+    passwords = iter((old, new, new))
+    monkeypatch.setattr(signing, 'passphrase', lambda prompt: next(passwords))
+    assert main(['key-password', '--signing-key', str(path)]) == 0
+    result = path.read_bytes()
+    assert result != original and result.startswith(b'-----BEGIN ENCRYPTED PRIVATE KEY-----')
+    with pytest.raises(ValueError):
+        serialization.load_pem_private_key(result, old)
+    changed = serialization.load_pem_private_key(result, new)
+    assert changed.public_key().public_bytes_raw() == key.public_key().public_bytes_raw()
+    changed.public_key().verify(signature, b'previously signed package')
+    assert (directory / 'publisher.json').read_bytes() == profile
+    assert sorted(p.name for p in directory.iterdir()) == ['publisher.json', 'signing-key.pem']
+    output = capsys.readouterr().out
+    assert fingerprint in output
+    assert old.decode() not in output and new.decode() not in output
+    if os.name != 'nt':
+        assert path.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize('failure', ['wrong_password', 'mismatch', 'short', 'replace', 'interrupted'])
+def test_password_change_failure_preserves_original_key(tmp_path, monkeypatch, failure):
+    old, new = b'original-fixture-passphrase', b'replacement-fixture-passphrase'
+    directory = tmp_path / 'keys'
+    signing.generate(directory, 'Example publisher', 'example', old)
+    path = directory / 'signing-key.pem'
+    original = path.read_bytes()
+    passwords = iter((b'wrong' if failure == 'wrong_password' else old,
+                      b'short' if failure == 'short' else new,
+                      b'short' if failure == 'short' else b'different' if failure == 'mismatch' else new))
+    monkeypatch.setattr(signing, 'passphrase', lambda prompt: next(passwords))
+
+    def failed_replace(*args):
+        if failure == 'interrupted':
+            raise KeyboardInterrupt()
+        raise OSError('replacement failed')
+
+    if failure in ('replace', 'interrupted'):
+        monkeypatch.setattr(signing.os, 'replace', failed_replace)
+    with pytest.raises((ValueError, OSError, KeyboardInterrupt)):
+        signing.change_password(path)
+    assert path.read_bytes() == original
+    assert sorted(p.name for p in directory.iterdir()) == ['publisher.json', 'signing-key.pem']
+
+
+def test_password_change_refuses_to_overwrite_a_replaced_key(tmp_path, monkeypatch):
+    directory = tmp_path / 'keys'
+    old, new = b'original-fixture-passphrase', b'replacement-fixture-passphrase'
+    signing.generate(directory, 'Example publisher', 'example', old)
+    path = directory / 'signing-key.pem'
+    original = path.read_bytes()
+    calls = 0
+
+    def password(prompt):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return old
+        if calls == 3:
+            path.rename(directory / 'moved.pem')
+            path.write_bytes(b'another key')
+        return new
+
+    monkeypatch.setattr(signing, 'passphrase', password)
+    with pytest.raises(ValueError, match='key changed'):
+        signing.change_password(path)
+    assert path.read_bytes() == b'another key'
+    assert (directory / 'moved.pem').read_bytes() == original
+    assert not list(directory.glob('.signing-key.pem-*'))
+
+
+@pytest.mark.skipif(os.name != 'posix', reason='POSIX directory synchronization')
+def test_password_change_reports_replacement_when_directory_sync_fails(tmp_path, monkeypatch):
+    directory = tmp_path / 'keys'
+    old, new = b'original-fixture-passphrase', b'replacement-fixture-passphrase'
+    signing.generate(directory, 'Example publisher', 'example', old)
+    path = directory / 'signing-key.pem'
+    passwords = iter((old, new, new))
+    monkeypatch.setattr(signing, 'passphrase', lambda prompt: next(passwords))
+    fsync = signing.os.fsync
+
+    def fail_directory_sync(descriptor):
+        if signing.stat.S_ISDIR(signing.os.fstat(descriptor).st_mode):
+            raise OSError('directory sync failed')
+        return fsync(descriptor)
+
+    monkeypatch.setattr(signing.os, 'fsync', fail_directory_sync)
+    with pytest.raises(OSError, match='passphrase was changed'):
+        signing.change_password(path)
+    serialization.load_pem_private_key(path.read_bytes(), new)
+    assert not list(directory.glob('.signing-key.pem-*'))
