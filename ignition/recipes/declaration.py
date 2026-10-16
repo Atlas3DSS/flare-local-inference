@@ -62,9 +62,9 @@ class Speculation:
     """Multi-token speculation: how many draft tokens a round verifies and where drafts come from.
 
     A round verifies the pending input and up to `draft_tokens` drafts.
-    Preparation captures every width from one through `draft_tokens + 1` at
-    every prepared batch capacity. `adaptive` sets the serving default: choose
-    widths from measured acceptance when true, or use the fixed maximum when
+    Preparation captures width one at every request bucket and wider widths
+    within the target-token capacity. `adaptive` sets the serving default: choose
+    widths from measured costs and conditional acceptance estimates when true, or use the fixed maximum when
     false. Flare can reduce both capacities when loading the package. Drafts
     come from the checkpoint's MTP module or, with the `copy` source, from
     continuations of the request's own history; `history_drafts` adds those
@@ -75,6 +75,7 @@ class Speculation:
     adaptive: bool = True
     proposal_source: str = "mtp"
     history_drafts: bool = False
+    token_capacity: int | None = None
 
     @property
     def learned(self) -> bool:
@@ -158,7 +159,8 @@ class Recipe:
             return ()
         modes = (True, False) if speculation is not None else (False,)
         return tuple((enabled, b, w, p) for enabled in modes
-            for b, w, p in mixed_shapes(concurrency, chunk, speculation.widths if enabled else (1,)))
+            for b, w, p in mixed_shapes(concurrency, chunk, speculation.widths if enabled else (1,),
+                                        speculation.token_capacity if enabled else None))
 
     def __post_init__(self):
         if self.speculation is not None and set(self.plain_ranks) != set(self.ranks):

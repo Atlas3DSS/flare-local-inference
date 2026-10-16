@@ -175,6 +175,13 @@ class Plan:
         return len(self.gpus)
 
     @property
+    def speculative_token_capacity(self) -> int:
+        from ignition.components.capacity import speculative_token_capacity
+
+        return (0 if self.speculation is None else speculative_token_capacity(
+            self.concurrency, self.speculation.draft_tokens + 1, self.speculation.token_capacity))
+
+    @property
     def costs(self):
         return self.recipe.costs(self.world_size, self.speculation)
 
@@ -259,6 +266,7 @@ class Plan:
             "stream_overlap": self.stream_overlap,
             "mixed_prefill": self.mixed_prefill,
             "expert_scale_compression": self.expert_scale_compression,
+            "speculative_token_capacity": self.speculative_token_capacity,
             "speculation": None if self.speculation is None else {
                 "draft_tokens": self.speculation.draft_tokens, "adaptive": self.speculation.adaptive,
                 "proposal_source": self.speculation.proposal_source,

@@ -422,9 +422,11 @@ compiled cubins; missing native GPU code fails instead of compiling PTX.
 
 `LoadOptions` selects runtime concurrency, MTP draft-token count, and adaptive
 or fixed verification before any CUDA context is initialized. Ignition captures
-every power-of-two batch capacity up to the concurrency maximum and every
-verification width up to the draft-token maximum plus one for separate decode
-and verification graphs. Mixed graph coverage is sparse over prompt capacity
+every power-of-two request bucket through the padded concurrency maximum.
+Width one covers every bucket; wider speculative and verification graphs require
+`batch_capacity * token_capacity <= speculative_token_capacity`. The capacity
+defaults to the larger of padded concurrency and maximum verification width.
+Proposal graphs independently cover every bucket and selectable draft depth. Mixed graph coverage is sparse over prompt capacity
 and verification width; see [mixed execution](scheduling-runtime-design.md).
 Execution metadata
 identifies graph kind, sampling mode, batch capacity, token capacity, draft
@@ -435,8 +437,11 @@ The scheduler compares declared prefill capacities by useful service and
 estimated graph duration. A package must include its configured maximum prefill chunk;
 intermediate capacities are optional and need not follow a generated sequence.
 Draft count and verification count are independent declaration fields.
-Verification count includes the pending input token. For a given selected
-batch and verification width, the loader chooses one permitted draft count;
+Verification count includes the pending input token. Proposal graphs declare
+only draft count and source; verification graphs declare only verification count.
+A split catalog selects the loaded proposal depth once at every request bucket
+and reuses verification graphs across depths. Combined graphs declare both
+counts. For a selected combined batch and width, the loader chooses one permitted draft count;
 it never loads duplicate MTP alternatives for that shape. The index lists
 each graph's function dependencies, so kernel selection also precedes graph
 body reads. Selection does not infer semantics from graph names.
@@ -452,7 +457,10 @@ ordinary operations alongside speculative operations, including width-one rounds
 that maintain draft state for subsequent wider rounds. Selection removes all
 unneeded variants before reading graph bodies. Captured weights and storage layouts
 remain shared; pinned zero does not execute draft generation or state maintenance.
-Missing variants and increases beyond package capacities fail before allocation.
+Missing variants required by the declared envelope and increases beyond package
+capacities fail before allocation. Split catalogs also require proposal-free
+width-one speculative graphs. Fixed loading retains those graphs and width-one
+verification alongside the full loaded width where the envelope permits it.
 
 Unselected graph templates and executables are never reconstructed. Functions
 used only by omitted graphs are dropped, as are unused modules without globals.

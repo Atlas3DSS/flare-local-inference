@@ -81,6 +81,7 @@ message ServingContract {
   optional uint64 max_body_bytes = 21;
   string context_hint = 22;
   string capacity_hint = 23;
+  uint64 speculative_token_capacity = 24;
 }
 message ModelContract {
   uint32 version = 1;

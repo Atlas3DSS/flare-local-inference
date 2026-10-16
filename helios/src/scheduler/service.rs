@@ -50,6 +50,7 @@ impl RequestScheduler {
         let mut references = rates.map(|r| r.map(|r| count / r));
         let family = |r: &LiveRequest| match r.phase {
             RequestPhase::Decode if self.speculative_widths.is_empty() => Some(GraphKind::Decode),
+            RequestPhase::Decode if self.retained_proposal(r).is_some() => Some(GraphKind::Verification),
             RequestPhase::Decode => Some(GraphKind::Speculative),
             RequestPhase::Resume => Some(GraphKind::Resume),
             RequestPhase::Snapshot if policy::terminal_cleanup(r) => Some(GraphKind::Snapshot),
@@ -58,6 +59,7 @@ impl RequestScheduler {
         for kind in [
             GraphKind::Decode,
             GraphKind::Speculative,
+            GraphKind::Verification,
             GraphKind::Resume,
             GraphKind::Snapshot,
         ] {
@@ -77,20 +79,37 @@ impl RequestScheduler {
             if streams == 0 {
                 continue;
             }
-            let mut per_delivery_ms = f64::INFINITY;
+            let mut per_delivery_ms = [f64::INFINITY; REQUEST_LANES];
+            let mut consider = |nanos: u64, batch: usize, eligible: u64| {
+                if nanos == 0 || eligible == 0 { return; }
+                let cost = nanos as f64 / 1e6 / batch.min(eligible.count_ones() as usize) as f64;
+                for slot in policy::bits(eligible) {
+                    per_delivery_ms[slot] = per_delivery_ms[slot].min(cost);
+                }
+            };
             for batch in crate::execution::BATCH_CAPACITIES
                 .into_iter()
                 .take_while(|b| *b <= self.limits.max_active.next_power_of_two())
             {
-                let widths: &[usize] = if kind == GraphKind::Speculative {
+                let widths: &[usize] = if matches!(kind, GraphKind::Speculative | GraphKind::Verification) {
                     &self.speculative_catalog[batch.ilog2() as usize]
                 } else {
                     &[1]
                 };
                 for &width in widths {
-                    if let Some(ns) = self.costs.duration(kind, batch, width).filter(|ns| *ns > 0) {
-                        per_delivery_ms =
-                            per_delivery_ms.min(ns as f64 / 1e6 / batch.min(streams) as f64);
+                    if matches!(kind, GraphKind::Speculative | GraphKind::Verification) {
+                        let mut eligible = 0;
+                        let mut nanos = None;
+                        for slot in policy::bits(mask) {
+                            if let Some(ns) = self.speculative_duration(
+                                self.slots[slot].request.as_ref().unwrap(), batch, width) {
+                                eligible |= 1 << slot;
+                                nanos = Some(ns);
+                            }
+                        }
+                        if let Some(ns) = nanos { consider(ns, batch, eligible); }
+                    } else if let Some(ns) = self.costs.duration(kind, batch, width) {
+                        consider(ns, batch, mask);
                     }
                 }
             }
@@ -101,16 +120,13 @@ impl RequestScheduler {
                         .shape_duration(GraphKind::Mixed, batch, width, prefill)
                         .filter(|ns| *ns > 0)
                     {
-                        per_delivery_ms =
-                            per_delivery_ms.min(ns as f64 / 1e6 / batch.min(streams) as f64);
+                        consider(ns, batch, mask);
                     }
                 }
             }
-            if per_delivery_ms.is_finite() {
-                for (slot, reference) in references.iter_mut().enumerate() {
-                    if mask & (1 << slot) != 0 {
-                        *reference = Some(count * per_delivery_ms);
-                    }
+            for (slot, reference) in references.iter_mut().enumerate() {
+                if mask & (1 << slot) != 0 && per_delivery_ms[slot].is_finite() {
+                    *reference = Some(count * per_delivery_ms[slot]);
                 }
             }
         }
@@ -124,10 +140,10 @@ impl RequestScheduler {
         let mut delivery_rate = 0.0f64;
         let prefill = request.consumed_tokens < request.prompt_tokens as u64;
         let mut consider = |kind, batch, capacity, tokens: f64, delivery: bool| {
-            if let Some(ns) = self
-                .costs
-                .duration(kind, batch, capacity)
-                .filter(|n| *n > 0)
+            let ns = if kind == GraphKind::Speculative {
+                self.speculative_duration(request, batch, capacity)
+            } else { self.costs.duration(kind, batch, capacity) };
+            if let Some(ns) = ns.filter(|n| *n > 0)
             {
                 let per_ms = 1e6 / ns as f64;
                 token_rate = token_rate.max(tokens * per_ms);
@@ -177,9 +193,7 @@ impl RequestScheduler {
                                     GraphKind::Speculative,
                                     batch,
                                     width,
-                                    request
-                                        .acceptance
-                                        .expected_tokens(self.proposal_source, tokens),
+                                    self.expected_speculative_tokens(request, tokens),
                                     true,
                                 );
                             }

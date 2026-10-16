@@ -82,7 +82,7 @@ impl Fixture {
                 max_new_tokens: 16,
                 speculative_widths: vec![],
                 speculative_fixed_width: None,
-                proposal_confidence_threshold: 0.15,
+                speculative_token_capacity: 512,
                 history_drafts: false,
                 speculative_proposal_source: Default::default(),
             },
@@ -322,7 +322,7 @@ fn worker_observes_prefill_decode_and_prerequisite_timings() {
         ];
         frame.timing.wall_ns = 350;
         worker.complete(kind, frame).unwrap();
-        assert_eq!(worker.scheduler.estimated_duration_ns(&step), Some(900));
+        assert_eq!(worker.scheduler.estimated_duration_ns(&step), Some(919));
     }
 }
 
@@ -793,7 +793,7 @@ fn speculative_dashboard_counts_live_rounds_and_batched_forward_passes() {
         let source = fixture.config.speculative_proposal_source;
         assert!(profile.probability(source, 0).unwrap() > 0.5);
         assert!(profile.probability(source, 2).unwrap() < 0.5);
-        assert_eq!(worker.scheduler.estimated_duration_ns(&step), Some(1000));
+        assert_eq!(worker.scheduler.estimated_duration_ns(&step), Some(1063));
         let metrics = fixture.metrics.snapshot(!copy);
         assert_eq!((metrics.prefill_tokens, metrics.generated_tokens), (13, 4));
         assert_eq!((metrics.accepted_drafts, metrics.draft_rounds), (2, 1));

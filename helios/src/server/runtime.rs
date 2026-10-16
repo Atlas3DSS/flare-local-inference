@@ -350,7 +350,8 @@ impl ModelRuntime {
                                     )
                                 })
                                 .map(|graph| (graph.batch_capacity, graph.token_capacity))
-                                .collect::<Vec<_>>(),
+                                .collect::<std::collections::BTreeSet<_>>()
+                                .into_iter().collect::<Vec<_>>(),
                         )
                     })
                     .and_then(|()| {
@@ -360,10 +361,7 @@ impl ModelRuntime {
                             .iter()
                             .find(|g| g.kind == GraphKind::Proposal)
                         {
-                            scheduler.split_speculation(
-                                proposal.token_capacity,
-                                worker_config.proposal_confidence_threshold,
-                            )?;
+                            scheduler.split_speculation(proposal.token_capacity)?;
                         }
                         Ok(())
                     })
@@ -654,7 +652,6 @@ struct Worker<'a> {
     /// the host-store fetch policy compares with transfer time.
     prefill_rate: f64,
     prefill_started: VecDeque<(crate::cache::Fence, std::time::Instant, u64)>,
-    proposal_timing: Option<(crate::cache::Fence, crate::execution::ExecutionTiming)>,
 }
 
 impl<'a> Worker<'a> {
@@ -684,7 +681,6 @@ impl<'a> Worker<'a> {
             inputs: None,
             prefill_rate: crate::offload::INITIAL_PREFILL_RATE,
             prefill_started: VecDeque::new(),
-            proposal_timing: None,
         }
     }
 
@@ -1029,7 +1025,7 @@ impl<'a> Worker<'a> {
                 completion.fence,
                 &completion.records,
                 completion.timing,
-                &confidence[..measured_step.token_capacity - 1],
+                &confidence[..measured_step.batch_capacity],
             )?
         } else {
             self.scheduler
@@ -1047,28 +1043,20 @@ impl<'a> Worker<'a> {
             completion.timing,
         );
         if kind == GraphKind::Proposal {
-            self.proposal_timing = Some((completion.fence, completion.timing));
+            self.metrics.proposal_completed(measured_step.batch_capacity, measured_step.token_capacity,
+                completion.timing.gpu_ns.into_iter().flatten().max().unwrap_or(0));
         }
         if matches!(kind, GraphKind::Speculative | GraphKind::Verification) {
-            let mut nanos = completion
+            let nanos = completion
                 .timing
                 .gpu_ns
                 .into_iter()
                 .flatten()
                 .max()
                 .unwrap_or(0);
-            if kind == GraphKind::Verification {
-                let (fence, proposal) = self
-                    .proposal_timing
-                    .take()
-                    .ok_or("verification lacks proposal timing")?;
-                if fence.0 + 1 != completion.fence.0 {
-                    return Err("verification timing does not follow its proposal".into());
-                }
-                nanos += proposal.gpu_ns.into_iter().flatten().max().unwrap_or(0);
-            }
             let step = &measured_step;
             self.metrics.speculative_completed(
+                kind,
                 step.batch_capacity,
                 step.token_capacity,
                 nanos,

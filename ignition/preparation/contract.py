@@ -74,7 +74,7 @@ def graph_contracts(signatures, inputs, *, continuation, pending, cursor=None, r
         if pending is not None and kind not in ("snapshot", "vision"):
             states.append(dict(view=pending, access=p.WRITE if kind in ("init", "restore") else p.READ if kind == "proposal" else p.READ_WRITE))
         result.append(dict(graph=name, kind=p.GraphOperation.Value(kind.upper()), inputs=values, state=states,
-            state_rows_per_request=signature.token_capacity if rows is None and kind in ("speculative", "proposal", "verification") else (rows or 1),
+            state_rows_per_request=signature.token_capacity if rows is None and kind in ("speculative", "verification") else (rows or 1),
             draft_cursor=cursor if signature.speculation_enabled and kind in ("speculative", "verification", "mixed") else None,
             embedding_tables=list(embedding_tables) if kind in ("prefill", "decode", "speculative", "verification", "mixed") else [],
             pending_token=pending if reads_pending else None))

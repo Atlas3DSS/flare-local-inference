@@ -9,7 +9,7 @@ from pathlib import Path
 
 import torch
 
-from ignition.components.capacity import batch_capacities, prefill_capacities, request_capacity
+from ignition.components.capacity import speculative_token_capacity, batch_capacities, prefill_capacities, request_capacity
 from ignition.components.parallel import TensorParallelShard
 from ignition.components.sampling import AdmissionBuffers, DeviceRequestState
 from ignition.components.state_transfer import StateCommands
@@ -82,6 +82,7 @@ class PreparationConfig:
     stream_overlap: bool = True
     speculative_widths: tuple[int, ...] = (1, 2, 3, 4, 5, 6)
     speculative_fixed_width: int | None = None
+    speculative_token_capacity: int | None = None
 
     def __post_init__(self):
         if type(self.mtp) is not bool:
@@ -119,7 +120,7 @@ class PreparationConfig:
     def speculative_shapes(self):
         from ignition.components.capacity import speculative_shapes
 
-        return speculative_shapes(self.max_active, self.speculative_widths)
+        return speculative_shapes(self.max_active, self.speculative_widths, self.speculative_token_capacity)
 
     @property
     def token_capacity(self):
@@ -558,6 +559,7 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
         "model_contract": prepare_contract(signatures, buffers, pool, page_tokens=config.page_tokens, draft_lag=1 if config.mtp else None, regions=cache_regions)}
     if config.mtp:
         server_config.update(speculative_widths=config.speculative_widths,
+            speculative_token_capacity=speculative_token_capacity(config.max_active, max(config.speculative_widths), config.speculative_token_capacity),
             speculative_fixed_width=config.speculative_fixed_width)
         memory.update(speculative_shapes=config.speculative_shapes)
     resources = (weights, pool, requests, inputs, admission, commands, arena, forwards, decoders,

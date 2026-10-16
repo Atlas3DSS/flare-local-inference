@@ -670,8 +670,6 @@ def export_model(prepared, images, storage, path, *, options, progress=None, pub
     With `bundle_only`, a multi-host peer's export omits frontend assets and package-level
     tables: rank zero's package already holds them once for every host.
     """
-    if any(s.kind in ("proposal", "verification") for s in prepared.signatures.values()):
-        raise ValueError("split proposal graphs are diagnostic-only and cannot be exported")
     cuda = _Cuda()
     cuda.call("cuCtxSynchronize")
     if storage.error is not None:
@@ -826,6 +824,11 @@ def export_model(prepared, images, storage, path, *, options, progress=None, pub
             graph["draft_tokens"] = graph["token_capacity"] - 1
             graph["verify_tokens"] = graph["token_capacity"]
             graph["draft_source"] = "COPY_DRAFT" if prepared.server_config.get("speculative_proposal_source") == "copy" else "MTP"
+        elif graph["kind"] == "proposal":
+            graph["draft_tokens"] = graph["token_capacity"] - 1
+            graph["draft_source"] = "MTP"
+        elif graph["kind"] == "verification":
+            graph["verify_tokens"] = graph["token_capacity"]
     server = None if bundle_only else {**prepared.server_config, **options}
     package.write(path, prepared.graphs, execution=execution, server=server, progress=progress,
                   package_data=None if bundle_only else prepared.package_data, publisher=publisher)

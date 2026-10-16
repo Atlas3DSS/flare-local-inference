@@ -83,8 +83,8 @@ pub struct ModelConfig {
     pub max_new_tokens: u32,
     pub speculative_widths: Vec<usize>,
     pub speculative_fixed_width: Option<usize>,
-    /// Stop admitting a proposal prefix below this cumulative causal confidence.
-    pub proposal_confidence_threshold: f64,
+    /// Maximum target-token rows in wider speculative graphs.
+    pub speculative_token_capacity: usize,
     pub history_drafts: bool,
     pub speculative_proposal_source: crate::scheduler::speculation::ProposalSource,
 }

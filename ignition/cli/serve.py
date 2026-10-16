@@ -92,7 +92,7 @@ def run(args) -> int:
     concurrency = configuration.max_concurrency(model.checkpoint.alias, model.recipe.concurrency,
                                                 args.max_concurrency)
     plan = derive(configuration, model, Host.discover(), gpus=args.gpus, concurrency=concurrency,
-                  speculation=speculation(args, model), prefill_chunk=args.prefill_chunk_size,
+                  speculation=speculation(args, model, configuration), prefill_chunk=args.prefill_chunk_size,
                   context_parallel=context_parallel(args, model), stream_overlap=stream_overlap(args, model),
                   mixed_prefill=args.mixed_prefill, expert_scale_compression=args.expert_scale_compression)
     runtime = binary()
@@ -172,7 +172,7 @@ def _export_hosts(args, *, export_path) -> int:
     gpus = tuple(topology_gpu(topology, index) for index, topology in enumerate(topologies))
     plan = planning.plan(model.recipe, model.checkpoint, gpus, selected=tuple(range(len(gpus))),
                          concurrency=concurrency.value, reserve_bytes=configuration.reserve_bytes,
-                         speculation=speculation(args, model), prefill_chunk=args.prefill_chunk_size,
+                         speculation=speculation(args, model, configuration), prefill_chunk=args.prefill_chunk_size,
                          context_parallel=context_parallel(args, model), stream_overlap=stream_overlap(args, model),
                          mixed_prefill=args.mixed_prefill, expert_scale_compression=args.expert_scale_compression)
     environment.apply(configuration, local)
@@ -233,15 +233,16 @@ def _prepare(args, *, export_path) -> int:
                                                     args.max_concurrency)
         host = Host.discover()
         plan = derive(configuration, model, host, gpus=args.gpus, concurrency=concurrency,
-                      speculation=speculation(args, model), prefill_chunk=args.prefill_chunk_size,
+                      speculation=speculation(args, model, configuration), prefill_chunk=args.prefill_chunk_size,
                       context_parallel=context_parallel(args, model), stream_overlap=stream_overlap(args, model),
                       mixed_prefill=args.mixed_prefill, expert_scale_compression=args.expert_scale_compression)
         indices = planning.format_gpus(gpu.index for gpu in plan.gpus)
         # A caller's restriction changes which GPU each index names.
         restricted = "" if host.restriction is None else f" of CUDA_VISIBLE_DEVICES={host.restriction}"
         serial = "" if plan.stream_overlap or not plan.recipe.stream_overlap else " · branches serialized"
+        capacity = "" if plan.speculation is None else f" · speculative token capacity {plan.speculative_token_capacity}"
         stage.update(f"GPU{'s' if plan.world_size > 1 else ''} {indices}{restricted}"
-                     f" · concurrency {plan.concurrency} · {display.speculation(plan.speculation, brief=True)}{serial}"
+                     f" · concurrency {plan.concurrency} · {display.speculation(plan.speculation, brief=True)}{capacity}{serial}"
                      f" · mixed prefill {'on' if plan.mixed_prefill else 'off'}"
                      f" · expert scales {plan.expert_scale_compression or 'native'}")
     if args.config is None and not configuration.exists:
@@ -365,7 +366,7 @@ def serve(args) -> int:
     plan = planning.plan(model.recipe, model.checkpoint, gpus,
                          selected=None if args.ranks == 1 and args.gpus is None else tuple(range(len(gpus))),
                          concurrency=concurrency.value, reserve_bytes=configuration.reserve_bytes,
-                         speculation=speculation(args, model), prefill_chunk=args.prefill_chunk_size,
+                         speculation=speculation(args, model, configuration), prefill_chunk=args.prefill_chunk_size,
                          context_parallel=context_parallel(args, model), stream_overlap=stream_overlap(args, model),
                          cache_states=args.prefix_cache_states, mixed_prefill=args.mixed_prefill,
                          expert_scale_compression=args.expert_scale_compression)

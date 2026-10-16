@@ -375,7 +375,7 @@ fn abi3_requires_vector_storage_and_speculative_widths() {
 }
 
 #[test]
-fn split_graphs_require_single_lane_confidence_and_deliver_embeddings_only_to_verification() {
+fn split_graphs_require_confidence_and_deliver_embeddings_only_to_verification() {
     let mut m = manifest();
     m.max_active = 1;
     m.abi_version = SPECULATIVE_ABI_VERSION;

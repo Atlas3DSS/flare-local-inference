@@ -53,16 +53,16 @@ impl RequestAccounting {
 
 #[derive(Clone, Copy)]
 pub(super) struct Candidate {
-    kind: GraphKind,
-    mask: u64,
-    batch: usize,
-    capacity: usize,
-    prefill_capacity: usize,
-    prefill_slot: Option<usize>,
-    work: usize,
-    duration_ns: u64,
-    rate: ValueRate,
-    feedback: bool,
+    pub kind: GraphKind,
+    pub mask: u64,
+    pub batch: usize,
+    pub capacity: usize,
+    pub prefill_capacity: usize,
+    pub prefill_slot: Option<usize>,
+    pub work: usize,
+    pub duration_ns: u64,
+    pub rate: ValueRate,
+    pub feedback: bool,
 }
 
 impl RequestScheduler {
@@ -161,7 +161,7 @@ impl RequestScheduler {
         })
     }
 
-    fn eligible(&self, request: &LiveRequest) -> bool {
+    pub(super) fn eligible(&self, request: &LiveRequest) -> bool {
         if self.request_kind(request).is_none() {
             return false;
         }
@@ -226,7 +226,7 @@ impl RequestScheduler {
         )
     }
 
-    fn lane_values(&self, window_ns: u64) -> ([LaneValue; REQUEST_LANES], f64, f64) {
+    pub(super) fn lane_values(&self, window_ns: u64) -> ([LaneValue; REQUEST_LANES], f64, f64) {
         let mut values = [LaneValue::default(); REQUEST_LANES];
         let count = self
             .slots
@@ -344,12 +344,9 @@ impl RequestScheduler {
                     }
                 } else {
                     for &width in &self.speculative_catalog[batch.ilog2() as usize] {
-                        if let Some(ns) = self.costs.duration(GraphKind::Speculative, batch, width)
+                        if let Some(ns) = self.speculative_duration(r, batch, width)
                         {
-                            let expected = r.acceptance.expected_tokens(
-                                self.proposal_source,
-                                self.speculative_tokens(r, width),
-                            );
+                            let expected = self.expected_speculative_tokens(r, self.speculative_tokens(r, width));
                             consider(ns, value.decode(expected, ns as f64 / 1e6));
                         }
                     }
@@ -485,7 +482,10 @@ impl RequestScheduler {
         };
         let mut best: Option<(u64, ValueRate)> = None;
         let mut consider = |following, batch, width, prefill| {
-            let Some(ns) = self.costs.shape_duration(following, batch, width, prefill) else {
+            let ns = if following == GraphKind::Speculative {
+                self.proposal_round_duration(batch, width)
+            } else { self.costs.shape_duration(following, batch, width, prefill) };
+            let Some(ns) = ns else {
                 return;
             };
             let horizon = if ns == 0 || duration_ns == 0 {
@@ -522,7 +522,8 @@ impl RequestScheduler {
                 let ready_kind = self
                     .eligible(request)
                     .then(|| self.request_kind(request))
-                    .flatten();
+                    .flatten()
+                    .map(|k| if k == GraphKind::Proposal { GraphKind::Speculative } else { k });
                 let accepts = |k: GraphKind| {
                     if mixed {
                         k == GraphKind::Prefill || k == decode
@@ -637,7 +638,9 @@ impl RequestScheduler {
         match kind {
             GraphKind::Prefill => self.prefill_work(r, capacity),
             GraphKind::Decode => 1,
-            GraphKind::Speculative | GraphKind::Proposal | GraphKind::Verification => {
+            GraphKind::Verification => self.retained_proposal(r)
+                .map_or_else(|| self.speculative_tokens(r, capacity), |p| p.width),
+            GraphKind::Speculative | GraphKind::Proposal => {
                 self.speculative_tokens(r, capacity)
             }
             _ => 0,
@@ -662,7 +665,7 @@ impl RequestScheduler {
             | GraphKind::Speculative
             | GraphKind::Proposal
             | GraphKind::Verification => value.decode(
-                r.acceptance.expected_tokens(self.proposal_source, tokens),
+                self.expected_speculative_tokens(r, tokens),
                 duration_ns as f64 / 1e6,
             ),
             GraphKind::Resume => value.decode(1.0, duration_ns as f64 / 1e6),
@@ -691,6 +694,11 @@ impl RequestScheduler {
                 continue;
             }
             if kind == GraphKind::Vision && capacity < r.vision_patches[0] {
+                continue;
+            }
+            if kind == GraphKind::Verification
+                && self.retained_proposal(r).is_none_or(|p| p.width > capacity)
+            {
                 continue;
             }
             offers[count] = (
@@ -767,6 +775,9 @@ impl RequestScheduler {
     ) {
         output.clear();
         self.mixed_candidates(output, values, age_price);
+        if self.split.is_some() {
+            self.split_candidates(output, values, age_price);
+        }
         for kind in [
             GraphKind::Prefill,
             GraphKind::Vision,
@@ -776,8 +787,6 @@ impl RequestScheduler {
             GraphKind::Resume,
             GraphKind::Decode,
             GraphKind::Speculative,
-            GraphKind::Proposal,
-            GraphKind::Verification,
         ] {
             let mask = self
                 .slots
@@ -801,14 +810,6 @@ impl RequestScheduler {
             } else if kind == GraphKind::Vision {
                 for &capacity in &self.capabilities.vision.patch_capacities {
                     self.add_candidate(output, kind, 1, capacity, mask, values, age_price);
-                }
-            } else if kind == GraphKind::Proposal {
-                if let Some(split) = &self.split {
-                    self.add_candidate(output, kind, 1, split.width, mask, values, age_price);
-                }
-            } else if kind == GraphKind::Verification {
-                if let Some(retained) = self.split.as_ref().and_then(|s| s.retained) {
-                    self.add_candidate(output, kind, 1, retained.width, mask, values, age_price);
                 }
             } else {
                 for batch in crate::execution::BATCH_CAPACITIES
@@ -1050,7 +1051,7 @@ pub(super) fn terminal_cleanup(request: &LiveRequest) -> bool {
         })
 }
 
-fn bits(mut mask: u64) -> impl Iterator<Item = usize> {
+pub(super) fn bits(mut mask: u64) -> impl Iterator<Item = usize> {
     std::iter::from_fn(move || {
         if mask == 0 {
             return None;

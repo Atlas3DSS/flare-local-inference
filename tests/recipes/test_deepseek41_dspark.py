@@ -12,7 +12,7 @@ from ignition.recipes.deepseek41.recipe import RECIPE
 def test_dspark_defaults_to_five_drafts_with_adaptive_verification():
     config = PreparationConfig(max_active=4)
     assert config.speculative_widths == (1, 2, 3, 4, 5, 6)
-    assert config.draft_tokens == 5 and config.decode_tokens == 24
+    assert config.draft_tokens == 5 and config.decode_tokens == 6
     assert RECIPE.speculation.draft_tokens == 5 and RECIPE.max_draft_tokens == 7
     assert RECIPE.speculation.adaptive and not RECIPE.history_copy
     assert PreparationConfig(dspark=False).speculative_shapes == ()
@@ -26,7 +26,7 @@ def test_explicit_draft_limit_sizes_the_parallel_block(width):
     config = PreparationConfig(speculative_widths=tuple(range(1, width + 1)),
                                speculative_fixed_width=width)
     assert config.draft_tokens == width - 1
-    assert config.decode_tokens == 4 * width
+    assert config.decode_tokens == max(4, width)
 
 
 def test_native_dspark_geometry():

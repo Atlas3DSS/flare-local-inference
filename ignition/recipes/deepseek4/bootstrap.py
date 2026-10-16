@@ -9,6 +9,7 @@ from pathlib import Path
 import torch
 
 from ignition.components.capacity import (
+    speculative_token_capacity,
     batch_capacities,
     prefill_capacities,
     request_capacity,
@@ -63,6 +64,7 @@ class PreparationConfig:
     dspark: bool = True
     speculative_widths: tuple[int, ...] = (1, 2, 3, 4, 5, 6)
     speculative_fixed_width: int | None = None
+    speculative_token_capacity: int | None = None
     # Run single-row decode's shared expert on an auxiliary stream; without overlap it runs serially.
     stream_overlap: bool = True
 
@@ -105,7 +107,7 @@ class PreparationConfig:
     def speculative_shapes(self):
         from ignition.components.capacity import speculative_shapes
 
-        return speculative_shapes(self.max_active, self.speculative_widths) if self.dspark else ()
+        return speculative_shapes(self.max_active, self.speculative_widths, self.speculative_token_capacity) if self.dspark else ()
 
     @property
     def decode_tokens(self):
@@ -162,13 +164,13 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         records = torch.zeros((2, slots, 24 if config.dspark else 8), dtype=torch.int64, device=device)
         coordinator = CollectivePreparation(group)
         ipc = package_storage.peer_storage
-        tokens = max(config.prefill_chunk_size, config.decode_tokens)
+        tokens = max(config.prefill_chunk_size, config.decode_tokens, slots * config.draft_tokens)
         collective = create_all_reduce_runtime(group, device, max_tokens=tokens, hidden_size=4096, ipc=ipc)
         prefill_collective = create_dma_all_reduce_runtime(
             group, device, max_tokens=config.prefill_chunk_size, hidden_size=4096, ipc=ipc
         )
         vocabulary_collective = create_all_gather_runtime(
-            group, device, max_rows=config.decode_tokens, columns=129280, ipc=ipc
+            group, device, max_rows=max(config.decode_tokens, slots * config.draft_tokens), columns=129280, ipc=ipc
         )
         markov_collective = (
             create_all_gather_runtime(group, device, max_rows=slots, columns=2 * 129280, ipc=ipc)
@@ -497,6 +499,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
     if config.dspark:
         server_config.update(
             speculative_widths=config.speculative_widths,
+            speculative_token_capacity=speculative_token_capacity(config.max_active, max(config.speculative_widths), config.speculative_token_capacity),
             speculative_fixed_width=config.speculative_fixed_width,
         )
         memory.update(speculative_shapes=config.speculative_shapes)

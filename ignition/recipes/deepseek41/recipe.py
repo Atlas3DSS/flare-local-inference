@@ -13,13 +13,13 @@ def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress, retain_
 
     speculation = plan.speculation
     drafting = {} if speculation is None else {
-        "speculative_widths": speculation.widths, "speculative_fixed_width": speculation.fixed_width}
+        "speculative_widths": speculation.widths, "speculative_token_capacity": plan.speculative_token_capacity, "speculative_fixed_width": speculation.fixed_width}
     config = PreparationConfig(devices=tuple(range(plan.world_size)), compile_decoder=compile_forwards,
         retain_graphs=retain_graphs, max_active=plan.concurrency, context=plan.context,
         prefill_chunk_size=plan.prefill_chunk, minimum_pages=plan.minimum_pages,
         snapshot_budget_bytes=plan.snapshots * plan.costs.state_row_bytes,
         headroom_bytes=HEADROOM_BYTES + plan.reserve_bytes, kernel_cache=kernel_cache,
-        dspark=speculation is not None, stream_overlap=plan.stream_overlap, **drafting)
+        dspark=speculation is not None, split_speculation=speculation is not None and speculation.draft_tokens > 0, stream_overlap=plan.stream_overlap, **drafting)
     return prepare_group(snapshot, config, prepare_rank, progress=progress, package_storage=package_storage)
 
 

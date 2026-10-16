@@ -121,7 +121,8 @@ use the same prepared model graphs; the flag selects table storage only.
 
 DeepSeek V4.1 Flash supports TP4 text generation, reasoning, and DSML tool calls.
 DSpark is its learned draft method, defaulting to five draft tokens per round
-with adaptive verification based on observed acceptance and GPU round cost;
+with separate proposal and verification graphs, using native conditional
+confidence and measured execution cost for adaptive verification;
 vision graphs are not prepared. Its 188.8 GiB of Engram tables are
 stored once in the package and read on demand through bounded direct-I/O
 staging by default; `flare run --embedding-table-storage ram` loads them into
@@ -302,7 +303,11 @@ sizes its caches after uploading the selected graphs, keeping a separate 64 MiB
 driver margin.
 Ignition captures power-of-two
 batch capacities through the concurrency limit
-and every verification width through the draft-token maximum. Flare can reduce
+and width one at every bucket. Wider speculative and verification shapes require
+`batch * width <= speculative_token_capacity`; the preparation flag
+`--speculative-token-capacity` defaults to the larger of padded concurrency and
+maximum verification width. Separate proposal catalogs cover every bucket and
+load-time draft depth independently of that limit. Flare can reduce
 concurrency and draft tokens at load time; prefill capacity stays prepared.
 With `--mixed-prefill`, Qwen also captures mixed prompt/decode graphs: every
 prompt bucket at width one and one balanced prompt bucket at each wider
@@ -333,7 +338,8 @@ without draft execution or draft-state updates. Every speculative package also
 contains these ordinary graphs. Adaptive width-one rounds retain draft state so
 later rounds can resume speculation. Ignition's `--no-mtp` excludes the draft model
 during preparation. `--mtp-adaptive-verification` selects among the loaded
-widths; `--no-mtp-adaptive-verification` selects the fixed width. Omitted flags
+widths; `--no-mtp-adaptive-verification` selects the fixed width where captured,
+with width-one execution available at larger batch capacities. Omitted flags
 use the package's serving defaults. Limits cannot exceed captured capacity;
 missing required batch/width combinations fail before GPU initialization.
 Concurrency three requires the batch-four bucket. Only selected graphs and

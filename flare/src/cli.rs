@@ -139,7 +139,7 @@ pub struct Run {
     #[arg(long, value_name = "N", help_heading = "Speculation options")]
     pub mtp_draft_tokens: Option<usize>,
 
-    /// Adapt verification width to acceptance and round cost [default: package setting].
+    /// Adapt verification width to acceptance estimates and execution cost [default: package setting].
     #[arg(
         long,
         overrides_with = "no_mtp_adaptive_verification",
@@ -147,7 +147,7 @@ pub struct Run {
     )]
     pub mtp_adaptive_verification: bool,
 
-    /// Use a fixed verification width [default: package setting].
+    /// Use the maximum width where captured, otherwise width one [default: package setting].
     #[arg(
         long,
         overrides_with = "mtp_adaptive_verification",

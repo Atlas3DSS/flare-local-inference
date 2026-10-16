@@ -28,6 +28,7 @@ def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress, retain_
         retain_graphs=retain_graphs, kernel_cache=kernel_cache, mtp=speculation is not None,
         speculative_widths=(1,) if speculation is None else speculation.widths,
         speculative_fixed_width=None if speculation is None else speculation.fixed_width,
+        speculative_token_capacity=None if speculation is None else plan.speculative_token_capacity,
         stream_overlap=plan.stream_overlap, expert_scale_compression=plan.expert_scale_compression)
     return prepare_group(snapshot, config, prepare_rank, progress=progress, package_storage=package_storage,
                          checkpoint=plan.checkpoint)

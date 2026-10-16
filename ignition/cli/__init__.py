@@ -92,7 +92,10 @@ def _preparation_arguments(running):
                           help="most draft tokens verified in one round, 0 through 7; rounds adapt among"
                                " 0 through N (default: the recipe's)")
     advanced.add_argument("--no-mtp-adaptive-verification", action="store_true",
-                          help="default to fixed verification at runtime; capture still includes every smaller width")
+                          help="default to the maximum verification width where captured, otherwise width one")
+    advanced.add_argument("--speculative-token-capacity", type=int, metavar="N",
+                          help="maximum target-token rows in wider speculative graphs; width one covers every"
+                               " request batch (default: larger of padded concurrency and maximum verification width)")
     advanced.add_argument("--mtp-proposal-source", choices=("mtp", "copy"),
                           help="where drafts come from: the checkpoint's MTP module, or copy for continuations"
                                " of the request's own history, which loads no draft model (default: mtp)")

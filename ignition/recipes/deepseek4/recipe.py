@@ -23,7 +23,7 @@ def prepare(
     drafting = (
         {}
         if speculation is None
-        else {"speculative_widths": speculation.widths, "speculative_fixed_width": speculation.fixed_width}
+        else {"speculative_widths": speculation.widths, "speculative_token_capacity": plan.speculative_token_capacity, "speculative_fixed_width": speculation.fixed_width}
     )
     config = PreparationConfig(
         devices=tuple(range(plan.world_size)),

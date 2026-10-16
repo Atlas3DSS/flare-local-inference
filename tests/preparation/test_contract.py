@@ -64,6 +64,29 @@ def test_history_plane_registers_actual_row_geometry():
     assert region["storage"] == dict(buffer="keys", offset=0, stride=1536, nbytes=1536)
 
 
+@pytest.mark.parametrize("capacity", [1, 2, 4, 64])
+def test_retained_proposal_views_cover_individual_request_rows(capacity):
+    import torch
+    from ignition.components.split_draft import PreparedProposalStorage
+    from ignition.recipes.deepseek41.contract import prepare
+
+    requests = SimpleNamespace(capacity=capacity, generation=torch.zeros(capacity, dtype=torch.int64), vocab_size=17)
+    storage = PreparedProposalStorage(SimpleNamespace(requests=requests), 7)
+    buffers = dict(storage.buffers(), proposal_confidence=torch.empty((capacity, 7)))
+    pool = SimpleNamespace(pages={}, layout=SimpleNamespace(row_bytes=32,
+        region=lambda name: SimpleNamespace(offset=24, nbytes=8)))
+    signatures = {kind: GraphSignature(kind, capacity, 8 if kind == "proposal" else 1,
+        tuple(c.text_inputs(kind)), speculation_enabled=True) for kind in ("proposal", "verification")}
+    value = ParseDict(prepare(signatures, buffers, pool, page_tokens=128, draft_lag=0, rows=None), p.ModelContract())
+    for graph in value.graphs:
+        views = [s.view for s in graph.state if s.view.buffer.startswith("proposal_")]
+        assert len(views) == len(buffers)
+        for view in views:
+            tensor = buffers[view.buffer]
+            assert view.stride == tensor[0].numel() * tensor.element_size()
+            assert (capacity - 1) * view.stride + view.offset + view.nbytes == tensor.nbytes
+
+
 def test_unknown_packing_fields_do_not_acquire_sources_from_model_identity():
     pool = SimpleNamespace(layout=SimpleNamespace(row_bytes=32, region=lambda _: SimpleNamespace(offset=0, nbytes=8)))
     module = importlib.import_module("ignition.recipes.glm53.contract")

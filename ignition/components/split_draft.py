@@ -1,7 +1,7 @@
 """Proposal and verification graphs with persistent proposal ownership.
 
-Proposal generation leaves target state and proposal RNG counters unchanged;
-verification consumes one proposal. Native scheduling supports a single lane.
+Proposal generation reserves its random draws and leaves target state unchanged.
+Verification gathers request-owned prefixes independently of the proposal batch.
 """
 
 import math
@@ -12,14 +12,16 @@ import triton.language as tl
 
 from .linear import UnquantizedProjection
 from .sampling import PreparedCompletion, _write_completion
+from .state import gather_rows, scatter_rows
 
 
 @triton.jit
 def _reject_stale(Valid, Slots, Epochs, Live, Generation, Consumed, Generated, Records, Frame, Sequence,
                   CS: tl.constexpr, SLOTS: tl.constexpr):
-    slot = tl.program_id(0)
-    if (tl.load(Live) > 0) & (tl.load(Slots) == slot) & ~tl.load(Valid):
-        epoch = tl.load(Epochs)
+    row = tl.program_id(0)
+    slot = tl.load(Slots + row)
+    if (row < tl.load(Live)) & (slot >= 0) & (slot < SLOTS) & ~tl.load(Valid + row):
+        epoch = tl.load(Epochs + row)
         current = epoch == tl.load(Generation + slot)
         consumed = tl.load(Consumed + slot * CS, current, other=0)
         generated = tl.load(Generated + slot, current, other=0)
@@ -95,92 +97,116 @@ class PreparedDraftConfidence:
         self.output.copy_(self.logits.sigmoid())
 
 
-class PreparedDraftProposal:
-    """Generate a retained block without consuming target state or reserving RNG."""
+class PreparedProposalStorage:
+    """One retained block per physical request slot across all graph shapes."""
 
-    def __init__(self, source, confidence_output):
-        if source.batch != 1 or source.width <= 1 or source.markov is None:
-            raise ValueError("split proposal qualification requires one Markov-conditioned request")
-        self.source = source
-        o = source.owner
-        self.confidence = PreparedDraftConfidence(source, o.weights.draft.confidence_head,
-            confidence_output, name="split.proposal.confidence")
-        self.ready = torch.zeros_like(source.active)
-        self.slots = torch.zeros_like(o.inputs.row_slot_ids[:source.batch])
-        self.generations = torch.zeros_like(source.before)
-        self.state_rows = torch.zeros_like(source.before)
-        self.sequence = torch.zeros_like(o.sequence)
-        self.completion = PreparedCompletion(o.requests, o.inputs.row_slot_ids[:source.batch],
-            o.inputs.row_generations[:source.batch], o.inputs.live_rows, o.records, o.frame, o.sequence)
-        self.completion.prepare()
+    def __init__(self, owner, drafts):
+        self.owner, self.depth = owner, drafts
+        c, device = owner.requests.capacity, owner.requests.generation.device
+        self.ready = torch.zeros(c, dtype=torch.bool, device=device)
+        self.generations = torch.zeros(c, dtype=torch.int64, device=device)
+        self.state_rows = torch.zeros_like(self.generations)
+        self.sequence = torch.zeros_like(self.generations)
+        self.before = torch.zeros_like(self.generations)
+        self.depths = torch.zeros_like(self.generations)
+        self.base_offset = torch.zeros_like(self.generations)
+        self.candidates = torch.zeros((c, drafts + 1), dtype=torch.int64, device=device)
+        self.drafts = torch.zeros((c, drafts), dtype=torch.int64, device=device)
+        self.probabilities = torch.zeros((c, drafts, owner.requests.vocab_size), dtype=torch.float32, device=device)
+        self.valid = torch.zeros((c, drafts), dtype=torch.bool, device=device)
 
     def buffers(self):
-        source = self.source
-        return {"proposal_" + name: tensor for name, tensor in dict(
-            ready=self.ready, slots=self.slots, generations=self.generations,
-            state_rows=self.state_rows, sequence=self.sequence, before=source.before,
-            base_offset=source.base_offset, candidates=source.candidates,
-            drafts=source.drafts, probabilities=source.probabilities,
-            valid=source.valid, active=source.active).items()}
+        return {"proposal_" + name: getattr(self, name) for name in (
+            "ready", "generations", "state_rows", "sequence", "before", "depths",
+            "base_offset", "candidates", "drafts", "probabilities", "valid")}
+
+
+class PreparedDraftProposal:
+    """Publish independently owned blocks and consume their RNG reservation once."""
+
+    def __init__(self, source, confidence_output, storage):
+        if source.width <= 1 or source.markov is None or source.width > storage.depth + 1:
+            raise ValueError("split proposals require compatible retained storage and a confidence head")
+        self.source, self.storage = source, storage
+        o, b = source.owner, source.batch
+        self.confidence = PreparedDraftConfidence(source, o.weights.draft.confidence_head,
+            confidence_output[:b, :source.width - 1], name=f"split.proposal{b}x{source.width}.confidence")
+        self.allowed = torch.zeros_like(source.active)
+        self.depth = torch.full_like(source.before, source.width - 1)
+        self.completion = PreparedCompletion(o.requests, o.inputs.row_slot_ids[:b],
+            o.inputs.row_generations[:b], o.inputs.live_rows, o.records, o.frame, o.sequence)
+        self.completion.prepare()
 
     def __call__(self):
-        s, o = self.source, self.source.owner
-        s.propose(False, self.confidence)
+        s, p, o = self.source, self.storage, self.source.owner
+        slots = o.inputs.row_slot_ids[:s.batch]
+        safe = slots.long().clamp(0, o.requests.capacity - 1)
+        self.allowed.copy_(~p.ready[safe] | (p.generations[safe] != o.requests.generation[safe]))
+        s.propose(True, self.confidence, self.allowed)
         self.confidence()
-        self.ready.copy_(s.active)
-        self.slots.copy_(o.inputs.row_slot_ids[:s.batch])
-        safe = self.slots.long().clamp(0, o.requests.capacity - 1)
-        self.generations.copy_(o.requests.generation[safe])
-        self.state_rows.copy_(o.inputs.request_state_rows[safe, 0])
-        self.sequence.copy_(o.sequence)
+        for source, destination in (
+            (o.requests.generation[safe], p.generations),
+            (o.inputs.request_state_rows[safe, 0], p.state_rows),
+            (o.sequence.expand(s.batch), p.sequence),
+            (self.depth, p.depths), (s.before, p.before), (s.base_offset, p.base_offset),
+            (s.candidates, p.candidates), (s.drafts, p.drafts),
+            (s.probabilities, p.probabilities), (s.valid, p.valid), (s.active, p.ready),
+        ):
+            scatter_rows(source, slots, destination, s.active)
         self.completion()
+        torch.library.wrap_triton(_reject_stale)[(s.batch,)](
+            self.allowed, slots, o.inputs.row_generations, o.inputs.live_rows, o.requests.generation,
+            o.requests.consumed_tokens, o.requests.generated_tokens, o.records, o.frame, o.sequence,
+            o.requests.consumed_tokens.stride(0), o.requests.capacity)
 
 
 class PreparedDraftVerification:
-    """Verify a prefix of the immediately preceding retained proposal exactly once."""
+    """Gather and consume request-owned proposal prefixes exactly once."""
 
-    def __init__(self, proposal, target):
-        if target.batch != proposal.source.batch or target.width > proposal.source.width:
-            raise ValueError("verification shape must fit the retained proposal")
-        self.proposal, self.target = proposal, target
-        self.original_live = torch.zeros_like(target.owner.inputs.live_rows)
-        self.admitted = torch.zeros_like(proposal.ready)
+    def __init__(self, storage, target):
+        if target.width > storage.depth + 1:
+            raise ValueError("verification shape must fit retained proposal storage")
+        self.storage, self.target = storage, target
+        self.original_slots = torch.zeros_like(target.owner.inputs.row_slot_ids[:target.batch])
+        self.rows = torch.arange(target.batch, device=target.active.device)
+        self.admitted = torch.zeros_like(target.active)
+        self.cleared = torch.zeros_like(target.active)
 
     def __call__(self, same_graph=False):
-        p, t = self.proposal, self.target
-        s, o, w = p.source, t.owner, t.width
+        p, t = self.storage, self.target
+        o, w = t.owner, t.width
         slots = o.inputs.row_slot_ids[:t.batch]
         safe = slots.long().clamp(0, o.requests.capacity - 1)
-        valid = p.ready & (p.sequence + (0 if same_graph else 1) == o.sequence)
-        valid &= (o.inputs.live_rows == 1) & (o.requests.status[safe] == 1)
-        valid &= (slots == p.slots) & (o.inputs.row_generations[:t.batch] == p.generations)
-        valid &= (o.requests.generation[safe] == p.generations)
-        valid &= (o.requests.consumed_tokens[safe] == s.before)
-        valid &= (o.requests.pending_token[safe] == s.candidates[:, 0])
-        valid &= (o.inputs.request_state_rows[safe, 0] == p.state_rows)
-        valid &= (o.inputs.query_lengths[:t.batch] >= 1) & (o.inputs.query_lengths[:t.batch] <= w)
+        valid = p.ready[safe] & (p.sequence[safe] <= o.sequence if same_graph else p.sequence[safe] < o.sequence)
+        valid &= (self.rows < o.inputs.live_rows) & (o.requests.status[safe] == 1)
+        valid &= (slots >= 0) & (slots < o.requests.capacity)
+        valid &= (o.inputs.row_generations[:t.batch] == p.generations[safe])
+        valid &= (o.requests.generation[safe] == p.generations[safe])
+        valid &= (o.requests.consumed_tokens[safe] == p.before[safe])
+        valid &= (o.requests.pending_token[safe] == p.candidates[safe, 0])
+        valid &= (o.inputs.request_state_rows[safe, 0] == p.state_rows[safe])
+        lengths = o.inputs.query_lengths[:t.batch]
+        valid &= (lengths >= 1) & (lengths <= w) & (lengths <= p.depths[safe] + 1)
         self.admitted.copy_(valid)
-        self.original_live.copy_(o.inputs.live_rows)
-        # Invalid ownership must not make the ordinary commit fail a replacement request.
-        o.inputs.live_rows.copy_(torch.where(valid, self.original_live, 0))
-        t.before.copy_(s.before)
-        t.base_offset.copy_(s.base_offset)
-        t.active.copy_(s.active & valid)
-        t.candidates.copy_(s.candidates[:, :w])
-        t.drafts.copy_(s.drafts[:, :w - 1])
-        t.probabilities.copy_(s.probabilities[:, :w - 1])
-        t.valid.copy_(s.valid[:, :w - 1])
-        # Confidence can expose discarded proposals to a later width decision. Never
-        # reuse any of their uniforms, including after target-only verification.
-        t.commit_draft_rng(s.width - 1)
+        self.original_slots.copy_(slots)
+        for source, destination in (
+            (p.before, t.before), (p.base_offset, t.base_offset),
+            (p.candidates, t.candidates), (p.drafts, t.drafts),
+            (p.probabilities, t.probabilities), (p.valid, t.valid),
+        ):
+            if destination.numel():
+                gather_rows(source, safe, destination)
+        t.active.copy_(valid)
+        # Invalid ownership must not let commit mutate a replacement request.
+        slots.copy_(torch.where(valid, self.original_slots, -1))
         t.verify(valid)
-        o.inputs.live_rows.copy_(self.original_live)
+        slots.copy_(self.original_slots)
+        scatter_rows(self.cleared, slots, p.ready, self.admitted)
         r = o.requests
-        torch.library.wrap_triton(_reject_stale)[(r.capacity,)](
-            self.admitted, o.inputs.row_slot_ids, o.inputs.row_generations, self.original_live, r.generation,
+        torch.library.wrap_triton(_reject_stale)[(t.batch,)](
+            self.admitted, slots, o.inputs.row_generations, o.inputs.live_rows, r.generation,
             r.consumed_tokens, r.generated_tokens, o.records, o.frame, o.sequence,
             r.consumed_tokens.stride(0), r.capacity)
-        p.ready.zero_()
 
 
 class PreparedCombinedDraftRound:

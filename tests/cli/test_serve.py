@@ -216,7 +216,7 @@ def test_mixed_prefill_opt_in_prepares_and_reuses_a_separate_package(host, capsy
     assert run("qwen3.8-flash", "--mixed-prefill", *options) == 0
     mixed_package = host["exec"][2]
     assert mixed_package != ordinary_package and host["exports"] == 2
-    assert host["plan"].mixed_prefill and len(host["plan"].mixed_shapes) == 50
+    assert host["plan"].mixed_prefill and len(host["plan"].mixed_shapes) == 42
     assert host["plan"].stream_overlap == overlap
     assert "mixed prefill on" in capsys.readouterr().err
     assert run("qwen3.8-flash", "--mixed-prefill", *options) == 0

@@ -189,7 +189,8 @@ class Policy:
         # speculation.rs `graph_catalog`, restricted to loaded shapes as `speculative_graphs` restricts it.
         self.catalog = {batch: tuple(width for width in sorted(layout.widths)
                                      if ("speculative", batch, width) in layout.graphs
-                                     and layout.fixed_width in (None, width))
+                                     and (layout.fixed_width in (None, width)
+                                          or (width == 1 and ("speculative", batch, layout.fixed_width) not in layout.graphs)))
                         for batch in self.batches}
         self.prefill_catalog = tuple(layout.capacities("prefill"))
         self.now_ns = 0

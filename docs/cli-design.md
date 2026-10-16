@@ -124,8 +124,9 @@ Advanced flags appear in their own section of `--help`. Recipe values apply when
 | `--mixed-prefill` | Capture mixed prompt/decode graphs alongside separate graphs. Supported by Qwen with concurrency of at least two, with or without speculation. Command line only; existing packages retain their captured catalog. | Disabled |
 | `--expert-scale-compression csf` | Compress all Step-5 routed-expert NVFP4 block scales losslessly during loading, including BF16 experts converted to W4A16. Retain compressed scales and share expansion scratch across serial layers. Selects a separate cached package. | Native scales |
 | `--no-mtp` | Disable multi-token speculation: load no draft model, keep no verification rows, and decode one token per step. | Speculation on |
-| `--mtp-draft-tokens N` | Most draft tokens verified in one round, up to 7. Graphs are captured for every count from 0 through `N`, and verification adapts among them from measured acceptance. | 5 |
-| `--no-mtp-adaptive-verification` | Default to fixed-width serving. Capture still includes every smaller width at every batch capacity. | Adaptive |
+| `--mtp-draft-tokens N` | Most draft tokens verified in one round, up to 7. Graphs are captured for every count from 0 through `N`, and verification adapts using measured cost and historical acceptance or native proposal confidence. | 5 |
+| `--speculative-token-capacity N` | Maximum target-token rows in wider speculative graphs; width one covers every request bucket. Applies to every speculative recipe. | Larger of padded concurrency and maximum verification width |
+| `--no-mtp-adaptive-verification` | Default to fixed-width serving. Capture includes every smaller width within the speculative token capacity. | Adaptive |
 | `--mtp-proposal-source {mtp,copy}` | Where drafts come from: the checkpoint's MTP module, or `copy` for continuations of the request's own history, which loads no draft model. Qwen only. | `mtp` |
 | `--history-drafts` | Also draft continuations copied from the request's own history. Qwen only. | off |
 | `--no-stream-overlap` | Run every concurrent branch (shared experts, projection chains, query chains) serially on the main stream with the same kernels, to diagnose scheduling-dependent faults. Slower. Recipes that run no branches concurrently reject it. | Overlap |
@@ -199,23 +200,22 @@ for final native performance validation: development ranks run in separate
 processes with separate delivery staging, while the native CLI shares staging
 between its rank threads.
 
-For DS4.1 research with separate draft preparation and prefix verification, run
-the qualification launcher from the repository root:
+DeepSeek V4.1 uses separate proposal and verification graphs in exported packages
+and native serving. A batch-four package with up to seven drafts and eight target
+token rows is prepared with:
 
 ```sh
-.venv/bin/python -m qualify.deepseek41_native_split \
-  --gpus 0,1,2,3 --mode split --max-concurrency 1 \
-  --headroom-mib 4096 --threshold 0.15 \
-  --output /tmp/ds41-split --bind 127.0.0.1:8001
+.venv/bin/ignition export deepseek-v4.1-flash --gpus 0,1,2,3 \
+  --max-concurrency 4 --mtp-draft-tokens 7 --speculative-token-capacity 8 \
+  --prefill-chunk-size 4096 --output /data/flare-runtime/ds41-tp4-c4-d7-r8.safetensors
 ```
 
-This mode prepares seven drafts, then Helios selects a causal prefix from their
-confidence before verification. `--threshold` defaults to `0.15`; keep that value
-for comparison, or pass another value in `(0, 1]` to study prefix selection.
-`--mode baseline` uses complete speculative rounds. Both modes keep Engram tables
-in shared RAM. Split execution supports one active request and cannot be exported
-as a runtime package. Ordinary `ignition serve`, `export`, and `run` continue to
-use complete speculative rounds, including at higher concurrency.
+Proposal captures cover batches 1, 2, and 4 at each draft depth 1 through 7.
+Verification captures cover widths 1–8 at batch one, 1–4 at batch two, and 1–2
+at batch four. Native scheduling uses conditional confidence, measured costs,
+and shared fairness prices to finalize logical prefixes and group them into
+verification calls. Proposal-free width-one graphs serve every batch bucket.
+See [retained proposals](scheduling-runtime-design.md#retained-proposals-and-confidence).
 
 ### 3.2 Native serving flags
 
@@ -244,7 +244,8 @@ Help exits with status 0; usage errors go to stderr with status 2. Its options a
 
 Selected concurrency and draft depth cannot exceed prepared capacity.
 Concurrency three requires the batch-four bucket. Fixed verification loads
-width `N+1` for each required batch; adaptive verification loads the permitted
+width `N+1` where the token envelope permits it, plus width-one execution at every
+batch; adaptive verification loads the permitted
 widths. Missing variants fail before GPU allocation. Continuation rows and
 KV pages receive physical backing after graph upload, within fixed virtual
 extents. Reducing execution state can leave more memory for KV pages.
@@ -327,6 +328,9 @@ cuda = "/opt/cuda"                # Used when installed packages provide no tool
 ```
 
 `[models.<alias>]` overrides `[defaults]`; flags override both.
+Both sections accept `speculative_token_capacity`, overridden during preparation
+by `--speculative-token-capacity`. Omitting it derives the capacity from the
+prepared concurrency and draft depth.
 
 Default request parameters, meaning the values a request receives for fields
 it does not set, such as thinking, reasoning effort, sampling, and output
@@ -378,7 +382,7 @@ Configuration assigns each decision to one owner:
 | Seed, sampling controls, output limit, and stops | Request fields, with declared defaults for missing values |
 
 Explicit request values take precedence over defaults. Speculation's benefit
-depends on measured acceptance and round cost. Reducing the draft limit at
+depends on native confidence or measured acceptance and execution cost. Reducing the draft limit at
 load time retains draft weights; freeing those weights requires preparation
 with `--no-mtp`.
 

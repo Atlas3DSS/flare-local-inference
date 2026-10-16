@@ -38,12 +38,14 @@ port = 9000
 [defaults]
 model = "qwen3.8-flash"
 max_concurrency = 6
+speculative_token_capacity = 32
 
 [memory]
 reserve = "16G"
 
 [models."qwen3.8-flash"]
 max_concurrency = 2
+speculative_token_capacity = 8
 """)
     assert configuration.get("server.host") == Setting("0.0.0.0", "[server]")
     assert configuration.get("server.port") == Setting(9000, "[server]")
@@ -53,6 +55,9 @@ max_concurrency = 2
     assert configuration.max_concurrency("qwen3.8-flash", 4) == Setting(2, '[models."qwen3.8-flash"]')
     assert configuration.max_concurrency("glm-5.3-flash", 4) == Setting(6, "[defaults]")
     assert configuration.max_concurrency("qwen3.8-flash", 4, 9) == Setting(9, "flag")
+    assert configuration.model_setting("qwen3.8-flash", "speculative_token_capacity", None).value == 8
+    assert configuration.model_setting("glm-5.3-flash", "speculative_token_capacity", None).value == 32
+    assert configuration.model_setting("qwen3.8-flash", "speculative_token_capacity", None, 16).value == 16
 
 
 def test_prefix_cache_settings_validate_and_forward(tmp_path):
@@ -79,6 +84,7 @@ def test_recipe_supplies_concurrency_when_the_file_is_silent(tmp_path):
     ("[server]\nport = 70000\n", "1 through 65535"),
     ("[defaults]\nmax_concurrency = true\n", "must be int"),
     ("[defaults]\nmax_concurrency = 0\n", "at least 1"),
+    ("[defaults]\nspeculative_token_capacity = 0\n", "at least 1"),
     ("[memory]\nconversation_cache = 16\n", "unknown key conversation_cache"),
     ("[memory]\nreserve = \"lots\"\n", "memory size"),
     ("[memory]\nreserve = 16\n", "must be str"),

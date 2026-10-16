@@ -1670,11 +1670,11 @@ fn graph_duration_ema_uses_runtime_observations_and_excludes_queue_wait() {
             },
         );
     }
-    assert_eq!(s.estimated_duration_ns(&plan), Some(1188));
+    assert_eq!(s.estimated_duration_ns(&plan), Some(13463));
     let mut same_graph = (*plan).clone();
     same_graph.lanes[0].start_position = 32769;
     same_graph.lanes[0].tokens = 1;
-    assert_eq!(s.estimated_duration_ns(&same_graph), Some(1188));
+    assert_eq!(s.estimated_duration_ns(&same_graph), Some(13463));
     same_graph.batch_capacity = 2;
     assert_eq!(s.estimated_duration_ns(&same_graph), Some(1000));
     s.observe_execution(
@@ -1685,7 +1685,7 @@ fn graph_duration_ema_uses_runtime_observations_and_excludes_queue_wait() {
             queued: false,
         },
     );
-    assert_eq!(s.estimated_duration_ns(&plan), Some(1188));
+    assert_eq!(s.estimated_duration_ns(&plan), Some(13463));
 }
 
 #[test]

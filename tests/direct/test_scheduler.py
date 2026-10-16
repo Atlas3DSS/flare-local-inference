@@ -395,3 +395,20 @@ def test_layout_selects_the_serving_variant_of_each_graph():
                              ("speculative", 4, 2): "speculative4x2"}
     assert (result.capacity, result.max_active, result.table_width, result.draft_pages) == (4, 3, 32, 1)
     assert (result.execution_width, result.state_row(2), result.snapshot_row(1)) == (2, 3, 5)
+
+    Model.signatures["proposal4x3"] = Signature("proposal", 4, 3, True)
+    Model.signatures["verification4x2"] = Signature("verification", 4, 2, True)
+    Model.signatures["speculative4x1"] = Signature("speculative", 4, 1, True)
+    result = Layout.of(Model())
+    assert result.graphs["speculative", 4, 2] == "verification4x2"
+    assert result.graphs["speculative", 4, 1] == "speculative4x1"
+    assert result.paired_graphs == frozenset({"verification4x2"})
+    assert not any(kind == "proposal" for kind, _, _ in result.graphs)
+
+
+def test_native_confidence_uses_conditional_survival_without_observed_acceptance_updates():
+    acceptance = Acceptance()
+    acceptance.confidence([.8, .25, .5])
+    assert acceptance.expected(4) == pytest.approx(1 + .8 + .8 * .25 + .8 * .25 * .5)
+    acceptance.observe(3, 0, True)
+    assert acceptance.expected(4) == pytest.approx(2.1)

@@ -16,6 +16,7 @@ from ignition.components.capacity import (
     prefill_capacities,
     request_capacity,
     speculative_shapes,
+    speculative_token_capacity,
 )
 from ignition.components.paged_batch import BatchInputs, Metadata, PreparedBatch
 from ignition.components.paged_generation import PreparedGeneration
@@ -77,6 +78,7 @@ class PreparationConfig:
     mtp: bool = True
     speculative_widths: tuple[int, ...] = (1, 2, 3, 4)
     speculative_fixed_width: int | None = None
+    speculative_token_capacity: int | None = None
     stream_overlap: bool = True
     expert_scale_compression: str | None = None
 
@@ -90,13 +92,19 @@ class PreparationConfig:
             raise ValueError("Step-5 context must be 128-aligned in [128,1048576]")
         if not 128 <= self.prefill_chunk_size <= self.context or self.prefill_chunk_size % 128:
             raise ValueError("Step-5 prefill chunk must be 128-aligned and fit the context")
-        speculative_shapes(self.max_active, self.speculative_widths)
+        speculative_shapes(self.max_active, self.speculative_widths, self.speculative_token_capacity)
         if max(self.speculative_widths) > 4:
             raise ValueError("Step-5 MTP supports at most three draft tokens")
         if self.speculative_fixed_width is not None and self.speculative_fixed_width not in self.speculative_widths:
             raise ValueError("fixed verification width must belong to the prepared catalog")
         if self.snapshot_budget_bytes <= 0 or self.headroom_bytes < 0:
             raise ValueError("snapshot budget must be positive and headroom nonnegative")
+
+
+    @property
+    def speculative_shapes(self):
+        return (speculative_shapes(self.max_active, self.speculative_widths, self.speculative_token_capacity)
+                if self.mtp else ())
 
 
 @torch.no_grad()
@@ -121,7 +129,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
     if snapshots < 1:
         raise ValueError("snapshot budget must hold one complete Step-5 continuation")
     slots, blocks = request_capacity(config.max_active), config.context // PAGE_TOKENS
-    shapes = speculative_shapes(config.max_active, config.speculative_widths) if config.mtp else ()
+    shapes = config.speculative_shapes
     decode_tokens = max((b * w for b, w in shapes), default=slots)
     draft_tokens = max((b * (weights.config.text["num_nextn_predict_layers"] + w) for b, w in shapes), default=slots)
     tokens = max(config.prefill_chunk_size, decode_tokens)
@@ -281,7 +289,10 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         "page_tokens": PAGE_TOKENS, "frontend": frontend, "sampling_defaults": RECIPE.sampling_defaults.as_dict(), "assets": assets,
         "model_contract": prepare_contract(signatures, buffers, pool, vocabulary=vocabulary, mtp=config.mtp)}
     if config.mtp:
-        server_config.update(speculative_widths=config.speculative_widths, speculative_fixed_width=config.speculative_fixed_width)
+        server_config.update(speculative_widths=config.speculative_widths,
+            speculative_fixed_width=config.speculative_fixed_width,
+            speculative_token_capacity=speculative_token_capacity(
+                config.max_active, max(config.speculative_widths), config.speculative_token_capacity))
     free, total = torch.cuda.mem_get_info(device)
     memory = {"rank": rank, "world_size": shard.world_size, "device": config.devices[rank], "weights_bytes": weights.allocated_bytes,
         "expert_scale_compression": config.expert_scale_compression,
@@ -290,7 +301,8 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         "kv_bytes": pages * page_bytes(weights.config, shard), "operator_scratch_bytes": arena.nbytes, "graphs": len(graphs),
         "prefill_capacities": prefills, "free_device_bytes": free, "total_device_bytes": total,
         "headroom_bytes": config.headroom_bytes, "tuning": tuning, "compiled_decoder": config.compile_decoder,
-        "speculative_shapes": shapes}
+        "speculative_shapes": shapes,
+        "speculative_token_capacity": server_config.get("speculative_token_capacity", 0)}
     channels = (collective, prefill_collective, vision_collective, vocabulary_collective, embedding_collective)
     disposable = [prefill_storage, decode_storage, vision_storage, arena.tensor, metadata, vision_state.arena,
                   weights.scale_scratch]

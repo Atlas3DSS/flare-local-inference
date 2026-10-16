@@ -15,16 +15,6 @@ from ignition.preparation.runtime_package import (
 )
 
 
-@pytest.mark.parametrize("kind", ["proposal", "verification"])
-def test_split_diagnostic_graphs_cannot_export_before_cuda(kind):
-    from types import SimpleNamespace
-    from ignition.preparation.runtime_package import export_model
-
-    prepared = SimpleNamespace(signatures={"diagnostic": SimpleNamespace(kind=kind)})
-    with pytest.raises(ValueError, match="diagnostic-only"):
-        export_model(prepared, None, None, None, options={})
-
-
 def package(*, allocations=None, arguments=None):
     return RuntimePackage(
         allocations=[Allocation("weight", 0x1000, 256)] if allocations is None else allocations,

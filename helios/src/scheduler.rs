@@ -598,11 +598,15 @@ impl RequestScheduler {
                         width != 1
                     } else {
                         !self.speculative_widths.contains(&width)
-                            || self.speculative_fixed_width.is_some_and(|w| w != width)
+                            || self.speculative_fixed_width.is_some_and(|w| w != width && width != 1)
                     }
             })
         {
             return Err("mixed graph shape is duplicated or outside runtime limits".into());
+        }
+        if let Some(fixed) = self.speculative_fixed_width {
+            catalog.retain(|&(batch, width, _)| width == fixed
+                || !shapes.iter().any(|&(b, w, _)| b == batch && w == fixed));
         }
         self.mixed_catalog = catalog;
         Ok(())
@@ -653,7 +657,7 @@ impl RequestScheduler {
                 || !self.speculative_widths.contains(&width)
                 || self
                     .speculative_fixed_width
-                    .is_some_and(|fixed| fixed != width)
+                    .is_some_and(|fixed| fixed != width && width != 1)
             {
                 return Err("loaded speculative shape is outside runtime limits".into());
             }
@@ -667,6 +671,9 @@ impl RequestScheduler {
             &mut catalog[..self.limits.max_active.next_power_of_two().ilog2() as usize + 1]
         {
             widths.sort_unstable();
+            if let Some(fixed) = self.speculative_fixed_width.filter(|fixed| widths.contains(fixed)) {
+                widths.retain(|w| *w == fixed);
+            }
             if !self.speculative_widths.is_empty() && widths.is_empty() {
                 return Err("missing speculative graph for a runtime batch capacity".into());
             }
@@ -962,6 +969,7 @@ impl RequestScheduler {
                     && !request.preempted
                     && request.phase == RequestPhase::Decode
                     && request.pending == 0
+                    && !self.owns_proposal(request)
             })
             .max_by_key(|request| request.admission_order)
             .map(|request| request.handle);
@@ -1472,17 +1480,22 @@ impl RequestScheduler {
         let step = &plan.step;
         step.validate_mixed()?;
         if step.kind == GraphKind::Verification {
-            let retained = step
-                .lanes
-                .first()
-                .and_then(|lane| self.request(lane.request).ok())
-                .and_then(|request| self.retained_proposal(request));
-            if !retained.is_some_and(|p| p.fence.0 + 1 == fence.0 && p.width == step.token_capacity)
-            {
+            if step.lanes.iter().any(|lane| {
+                !self.request(lane.request).ok()
+                    .and_then(|request| self.retained_proposal(request))
+                    .is_some_and(|p| p.fence < fence
+                        && p.width <= step.token_capacity && lane.tokens == p.width)
+            }) {
                 return Err(
-                    "verification requires the immediately preceding retained proposal".into(),
+                    "verification requires each request's retained proposal and token limit".into(),
                 );
             }
+        }
+        if step.kind == GraphKind::Proposal && step.lanes.iter().any(|lane| {
+            self.request(lane.request).ok()
+                .and_then(|request| self.retained_proposal(request)).is_some()
+        }) {
+            return Err("request already owns a retained proposal".into());
         }
         if fence <= self.submitted || fence.0 > i64::MAX as u64 {
             return Err("submission fences must increase within int64 range".into());
@@ -1533,7 +1546,9 @@ impl RequestScheduler {
         }
         self.submitted = fence;
         if step.kind == GraphKind::Verification {
-            self.split.as_mut().unwrap().retained = None;
+            for lane in &step.lanes {
+                self.split.as_mut().unwrap().retained[lane.request.slot as usize] = None;
+            }
         }
         let expected_finish_ns = self
             .now_ns
@@ -1983,6 +1998,9 @@ impl RequestScheduler {
             None => None,
         };
         let mut request = self.slots[handle.slot as usize].request.take().unwrap();
+        if let Some(split) = &mut self.split {
+            split.retained[handle.slot as usize] = None;
+        }
         let mut snapshot = request.terminal_snapshot;
         if matches!(result, Some(PublishResult::Created { .. })) {
             if let Some(PublishResult::Created { id, ready: true }) = result {
