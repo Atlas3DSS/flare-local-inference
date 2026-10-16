@@ -1,0 +1,3 @@
+[ ] Review scratch-memory lifetimes and sharing across Qwen, GLM, DeepSeek,
+    MiMo, and Kimi recipes.
+    See performance-work.md#cross-model-scratch-planning for scope and checks.
