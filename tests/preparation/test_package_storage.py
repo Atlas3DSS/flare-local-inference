@@ -2,9 +2,11 @@
 allocations above the addresses a serving context occupies."""
 
 import ctypes
+import os
 import struct
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from ignition.preparation.package_storage import PackageStorage
@@ -61,16 +63,20 @@ def test_unused_bytes_include_live_block_padding_and_retired_pools(monkeypatch, 
     assert traversal.reached == {"mixed", "live"}
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Linux package address layout")
 def test_linux_device_ranges_avoid_mimalloc_arena_hints():
-    import os
-
-    if os.name == "nt":
-        return
     # mimalloc hints its aligned arena reservations into 2-6 TiB; PyTorch allocates CPU tensors there.
     hint_start, hint_end = 2 << 40, 6 << 40
     host_end = PackageStorage.HOST_BASE
-    for rank in range(4):
+    for rank in range(16):
         start = PackageStorage.DEVICE_BASE + rank * PackageStorage.RESERVATION_BYTES
         end = start + PackageStorage.RESERVATION_BYTES
         assert end <= hint_start or start >= hint_end
         assert end <= host_end
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows WDDM address layout")
+def test_windows_host_range_stays_below_stalling_wddm_addresses():
+    # RTX Spark's driver stalls on host-address hints at 16 TiB and 32 TiB.
+    assert PackageStorage.DEVICE_BASE + PackageStorage.RESERVATION_BYTES <= PackageStorage.HOST_BASE
+    assert PackageStorage.HOST_BASE + PackageStorage.RESERVATION_BYTES <= 16 << 40
