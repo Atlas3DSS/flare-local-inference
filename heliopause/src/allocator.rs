@@ -21,7 +21,11 @@ const BASE: u64 = 0x80000000000;
 #[cfg(target_os = "windows")]
 const BASE: u64 = 0x40000000000;
 const EXTENT: usize = 1 << 40;
+#[cfg(target_os = "linux")]
 const HOST_BASE: u64 = 0x200000000000;
+// WDDM on RTX Spark stalls on high host-address hints; keep its mapped storage at 12 TiB.
+#[cfg(target_os = "windows")]
+const HOST_BASE: u64 = 0xc0000000000;
 struct Arena {
     driver: Driver,
     device: i32,

@@ -107,12 +107,15 @@ to satisfy the Windows driver's allocation granularity without changing recorded
 buffer addresses or graph parameters. This requires host-NUMA VMM support from
 the Windows driver and GPU.
 
-Ignition places rank-zero host storage at 12 TiB on both operating systems.
+Ignition places rank-zero host storage at 12 TiB on Windows and 32 TiB on Linux,
+where the larger address range leaves room for sixteen device ranks.
 The package format and mailbox release/acquire protocol are shared. Packages
 still require matching GPU architecture, available virtual addresses, and supported
 CUDA operations. On RTX Spark N1X with driver 617.42, requesting the 16 TiB host
-address used by earlier exports hangs inside `cuMemAddressReserve`; those packages
-need re-exporting before Windows use. The runtime does not relocate graph storage.
+address used by earlier exports hangs inside `cuMemAddressReserve`; the 32 TiB
+address also stalls, even for a 2 MiB reservation.
+Packages using those host addresses need re-exporting before Windows use. The
+runtime does not relocate graph storage.
 
 Validate fixed device mappings and graph replay using the exported runtime
 fixtures on each target GPU. Packages with mapped host storage additionally
