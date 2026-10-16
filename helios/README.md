@@ -400,6 +400,18 @@ The Jinja environment and continuation semantics follow Transformers
 `utils/chat_template_utils.py` at revision
 `4cc2aa84301c9aa210b5513dab9fefae03981f6e` (Apache-2.0).
 
+## Embedding row cache
+
+Disk-backed embedding tables can use a separate bounded row cache through
+`flare run --embedding-table-cache-size 1G`. The loader accounts for its host
+storage before sizing KV pages and continuation snapshots. Entries hold immutable
+table rows shared across requests; they copy into existing pinned row staging,
+whose consumer fences remain unchanged. Approximate usage counts protect frequently
+requested rows; recency breaks ties, and periodic count decay adapts to workload
+changes. Each server start creates an empty row cache; request gathers populate
+it without persistent cache files. `/metrics` exposes `flare_engram_` gather
+time, disk traffic, cache hits, misses, evictions, occupancy, capacity and bytes.
+
 ## Prefix checkpoint policy
 
 `cache::PrefixHistory` incrementally hashes 64-token blocks with BLAKE2b-128.

@@ -47,6 +47,7 @@ pub(super) struct Snapshot {
 #[derive(Default)]
 pub(super) struct Metrics {
     pub scheduler_trace: scheduler::SchedulerMetrics,
+    pub engram: Option<std::sync::Arc<crate::engram::Stats>>,
     prefill_tokens: AtomicU64,
     generated_tokens: AtomicU64,
     accepted_drafts: AtomicU64,
@@ -305,6 +306,9 @@ impl Metrics {
             );
         }
 
+        if let Some(stats) = &self.engram {
+            stats.render(&mut text);
+        }
         text.push_str("# HELP flare_sampling_graph_launches_total Successful native submissions by captured sampler mode; includes consumption-only prefill.\n# TYPE flare_sampling_graph_launches_total counter\n");
         for (kind, count) in ["prefill", "decode", "resume", "speculative", "mixed"]
             .into_iter()

@@ -244,10 +244,11 @@ impl PreparedTables {
                 return Err("prepared embedding graph lacks its hash input binding".into());
             }
         }
+        let stats = Arc::new(super::Stats::default());
         let readers = self
             .data
             .iter()
-            .map(|data| reader::Reader::Ram(data.clone()))
+            .map(|data| reader::Reader::resident(data.clone(), stats.clone()))
             .collect();
         Ok(Binding {
             shared: Shared::with_readers(
@@ -257,6 +258,7 @@ impl PreparedTables {
                 tokens,
                 manifest.context,
                 manifest.device,
+                stats,
             )?,
             rank: 0,
             events: handles,
@@ -308,7 +310,7 @@ mod tests {
         assert!(PreparedTables::from_shared(129280, &sources, &owner.descriptors()[..1]).is_err());
         std::fs::remove_dir_all(root).unwrap();
         drop(owner);
-        let mut reader = reader::Reader::Ram(peer.data[0].clone());
+        let mut reader = reader::Reader::resident(peer.data[0].clone(), Arc::default());
         let mut output = vec![0; 3 * (256 + 8)];
         reader
             .gather(&peer.index.tables[0].planes, &[31, -1, 0], &mut output)

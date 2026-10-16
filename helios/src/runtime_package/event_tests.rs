@@ -44,16 +44,18 @@ fn named_external_wait_survives_export_and_native_replay() {
 
 #[test]
 #[ignore = "requires FLARE_ENGRAM_TEST_PACKAGE exported by engram_package_fixture.py on the assigned GPU"]
-fn disk_and_resident_tables_feed_native_b12x_graphs() {
+fn disk_cached_and_resident_tables_feed_native_b12x_graphs() {
     use crate::{
         engram::{Binding, Shared, Storage},
         execution::{GraphExecutor, Upload},
     };
     let root = std::path::PathBuf::from(std::env::var_os("FLARE_ENGRAM_TEST_PACKAGE").unwrap());
-    for (storage, fail_read) in [
-        (Storage::Disk, false),
-        (Storage::Ram, false),
-        (Storage::Disk, true),
+    for (storage, cache_bytes, fail_read) in [
+        (Storage::Disk, 0, false),
+        (Storage::Ram, 0, false),
+        (Storage::Disk, 1 << 20, false),
+        (Storage::Disk, 0, true),
+        (Storage::Disk, 1 << 20, true),
     ] {
         let AuthorizedPackage { archive, mut index } =
             test_support::authorize(root.join("package"));
@@ -95,8 +97,10 @@ fn disk_and_resident_tables_feed_native_b12x_graphs() {
             owner.context as usize,
             0,
             storage,
+            cache_bytes,
         )
         .unwrap();
+        assert!(shared.cache_bytes() <= cache_bytes);
         let mut manifest = owner.execution_manifest().unwrap();
         let output = manifest.buffer("output").unwrap().clone();
         manifest.engram = Some(Binding {
@@ -145,7 +149,9 @@ fn disk_and_resident_tables_feed_native_b12x_graphs() {
             std::fs::remove_file(failed_source).unwrap();
             continue;
         }
-        for generation in 1..=3 {
+        // Repeat each request to deliver both disk misses and cache hits through
+        // the same native readiness and GPU consumer events.
+        for generation in [1, 1, 2, 2, 3, 3] {
             let ids: Vec<i64> = (0..96)
                 .map(|row| {
                     if generation == 3 && row >= 48 {
