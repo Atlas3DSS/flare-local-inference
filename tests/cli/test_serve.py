@@ -238,14 +238,15 @@ def test_package_cache_key_includes_mixed_capture(overlap):
         model, replace(plan, mixed_prefill=True), False)
 
 
-def test_expert_scale_compression_reaches_preparation_and_package_cache(host, monkeypatch, capsys):
+@pytest.mark.parametrize("compression", [["--expert-scale-compression"], ["--expert-scale-compression", "csf"]])
+def test_expert_scale_compression_reaches_preparation_and_package_cache(host, monkeypatch, capsys, compression):
     original = serve.resolve_model(None, None)
     checkpoint = replace(original.checkpoint, scale_compressed_device_bytes={"csf": original.checkpoint.device_bytes})
     model = ResolvedModel(original.recipe, checkpoint)
     monkeypatch.setattr(serve, "resolve_model", lambda *_: model)
     assert run("qwen3.8-flash") == 0
     native = host["exec"][2]
-    assert run("qwen3.8-flash", "--expert-scale-compression", "csf") == 0
+    assert run("qwen3.8-flash", *compression) == 0
     compressed = host["exec"][2]
     assert compressed != native and host["exports"] == 2
     assert host["plan"].expert_scale_compression == "csf"

@@ -8,6 +8,7 @@ repository replaces them for one invocation.
 import hashlib
 import json
 from dataclasses import dataclass, replace
+from difflib import get_close_matches
 from pathlib import Path
 
 from ignition.errors import FetchError, UsageError
@@ -197,7 +198,9 @@ def resolve(model: str, hub_cache: Path | None = None) -> ResolvedModel:
                             raise UsageError(f"checkpoint directory is unavailable: {checkpoint.repository}")
                         return resolve(checkpoint.repository, hub_cache)
                     return ResolvedModel(recipe, checkpoint)
-        raise _unsupported(f"unknown model {model!r}")
+        suggestions = get_close_matches(model, aliases(), n=1, cutoff=0.6)
+        hint = f"; did you mean {suggestions[0]!r}?" if suggestions else ""
+        raise _unsupported(f"unknown model {model!r}{hint}")
     for recipe in recipes():
         for checkpoint in recipe.checkpoints:
             if checkpoint.repository == repository and revision in ("", checkpoint.revision):

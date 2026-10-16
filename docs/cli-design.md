@@ -60,6 +60,14 @@ repository id with an optional `@revision`, or a local checkpoint directory;
 with no `MODEL`, `run` and `export` use `defaults.model` from the configuration file and
 fail with a usage error if it is unset.
 
+`ignition --help` and preparation-command help list every declared model alias,
+supported tensor-parallel size, and default/maximum draft count. Put an alias or
+declared checkpoint repository before `--help` for its defaults, limits, and
+optional features, for example `ignition export step5-preview-nvfp4 --help`.
+Help reads recipe declarations without loading model dependencies, probing GPUs,
+or downloading checkpoint files. Unknown model aliases suggest a close match
+when one exists.
+
 Ignition exposes preparation and development launch commands. It prints
 preparation progress without a banner. The Rust Flare executable displays the
 Flare banner on a terminal and reports model loading through Helios.
@@ -119,15 +127,17 @@ requires `--output FILE`, and excludes `--host` and `--port`.
 | `--trust-store PATH` | Remembered execution trust passed to Flare; `run` only | `~/.config/flare/trust.toml` |
 | `--verify-weights` | Check the stored allocation and table ranges of the ranks served; `run` only | off |
 
-Advanced flags appear in their own section of `--help`. Recipe values apply when flags are omitted; explicit flags take precedence.
+Preparation flags are grouped by capacity/compression, speculative decoding,
+and advanced options in `--help`. Recipe values apply when flags are omitted;
+explicit flags take precedence.
 
 | Flag | Meaning | Default |
 |---|---|---|
 | `--prefill-chunk-size N` | Most prompt tokens processed in one prefill step, a multiple of 64. A larger chunk reaches a long prompt's first token sooner; while it runs, other active requests wait for their next token. Command line only. | The recipe's chunk |
 | `--mixed-prefill` | Capture mixed prompt/decode graphs alongside separate graphs. Supported by Qwen with concurrency of at least two, with or without speculation. Command line only; existing packages retain their captured catalog. | Disabled |
-| `--expert-scale-compression csf` | Compress all Step-5 routed-expert NVFP4 block scales losslessly during loading, including BF16 experts converted to W4A16. Retain compressed scales and share expansion scratch across serial layers. Selects a separate cached package. | Native scales |
+| `--expert-scale-compression [MODE]` | Losslessly compress Step-5 routed-expert NVFP4 block scales, including BF16 experts converted to W4A16. `csf` is a compressed scale encoding expanded during execution, reducing resident GPU weight storage by an estimated 6%; actual savings depend on encoded scales. A bare flag selects `csf`; `--expert-scale-compression csf` also works. Retain compressed scales and share expansion scratch across serial layers. Selects a separate cached package. | Native scales |
 | `--no-mtp` | Disable multi-token speculation: load no draft model, keep no verification rows, and decode one token per step. | Speculation on |
-| `--mtp-draft-tokens N` | Most draft tokens verified in one round, up to 7. Graphs are captured for every count from 0 through `N`, and verification adapts using measured cost and historical acceptance or native proposal confidence. | 5 |
+| `--mtp-draft-tokens N` | Most draft tokens verified in one round; see `MODEL --help` for its limit. Graphs are captured for every count from 0 through `N` within the speculative token capacity, and verification adapts using measured cost and historical acceptance or native proposal confidence. Zero retains draft state with width-one execution; `--no-mtp` excludes draft weights and state. | Recipe declaration |
 | `--speculative-token-capacity N` | Maximum target-token rows in wider speculative graphs; width one covers every request bucket. Applies to every speculative recipe. | Larger of padded concurrency and maximum verification width |
 | `--no-mtp-adaptive-verification` | Default to fixed-width serving. Capture includes every smaller width within the speculative token capacity. | Adaptive |
 | `--mtp-proposal-source {mtp,copy}` | Where drafts come from: the checkpoint's MTP module, or `copy` for continuations of the request's own history, which loads no draft model. Qwen only. | `mtp` |
