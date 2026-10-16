@@ -396,6 +396,22 @@ fn gibibytes(bytes: u64) -> String {
     format!("{:.1} GiB", bytes as f64 / (1u64 << 30) as f64)
 }
 
+fn kv_cache_lines(s: Snapshot) -> [Line<'static>; 1] {
+    [
+        // Line::from(format!(
+        //     " KV PAGES {} cached / {} free / {} total",
+        //     s.cached_pages, s.free_pages, s.total_pages
+        // )),
+        Line::from(format!(
+            " KV TOKENS {} cached / {} free / {} total",
+            s.cached_pages.saturating_mul(s.page_tokens),
+            s.free_pages.saturating_mul(s.page_tokens),
+            s.total_pages.saturating_mul(s.page_tokens)
+        )),
+    ]
+    .map(|line| line.style(Style::default().fg(MUTED)))
+}
+
 fn render_header(frame: &mut Frame, title: &str, history: &History, area: Rect) {
     let s = history.snapshot;
     let age = history.points.back().map_or(0, |(t, _)| *t as u64);
@@ -438,6 +454,7 @@ fn render_overview(frame: &mut Frame, history: &History, area: Rect) {
         .acceptance
         .map_or_else(|| "—".into(), |v| format!("{v:.2}"));
     let depth = r.depth.map_or_else(|| "—".into(), |v| format!("{v:.2}"));
+    let [kv_tokens] = kv_cache_lines(s);
     if area.width < 64 || area.height < 22 {
         frame.render_widget(
             Paragraph::new(vec![
@@ -447,6 +464,7 @@ fn render_overview(frame: &mut Frame, history: &History, area: Rect) {
                 Line::from(format!(" Acceptance   {acceptance} drafts/round")),
                 Line::from(format!(" Verify depth {depth} drafts/step")),
                 Line::from(format!(" Active {}  Queued {}", s.active, s.pending)),
+                kv_tokens,
                 Line::from(" Enlarge terminal for history plots.")
                     .style(Style::default().fg(MUTED)),
             ]),
@@ -457,7 +475,7 @@ fn render_overview(frame: &mut Frame, history: &History, area: Rect) {
     let rows = Layout::vertical([
         Constraint::Min(8),
         Constraint::Min(8),
-        Constraint::Length(3),
+        Constraint::Length(4),
     ])
     .split(area);
     let top =
@@ -502,10 +520,11 @@ fn render_overview(frame: &mut Frame, history: &History, area: Rect) {
                 s.active, s.pending, s.completed, s.failed
             )),
             Line::from(format!(
-                " PREFILL {}   GENERATED {}   REUSED {}   KV PAGES {} cached / {} free",
-                s.prefill_tokens, s.generated_tokens, s.reused_tokens, s.cached_pages, s.free_pages
+                " PREFILL {}   GENERATED {}   REUSED {}",
+                s.prefill_tokens, s.generated_tokens, s.reused_tokens
             ))
             .style(Style::default().fg(MUTED)),
+            kv_tokens,
             Line::from(format!(
                 " HOST CACHE {} hits   {} reused   {} in memory / {} on disk   {} out / {} in",
                 s.host_hits,
@@ -716,8 +735,15 @@ mod tests {
     #[test]
     fn terminal_renders_braille_and_handles_resize_without_nonfinite_rates() {
         let start = Instant::now();
-        let mut history = History::new(start, Snapshot::default());
-        history.sample(start, Snapshot::default());
+        let metrics = Metrics::new(100, 128);
+        metrics.scheduler(crate::scheduler::SchedulerStats {
+            cached_pages: 3,
+            free_pages: 20,
+            ..Default::default()
+        });
+        let cache = metrics.snapshot(false);
+        let mut history = History::new(start, cache);
+        history.sample(start, cache);
         for tick in 1..=120 {
             history.sample(
                 start + Duration::from_secs(tick),
@@ -729,11 +755,11 @@ mod tests {
                     verification_drafts: tick * 12,
                     accepted_drafts: tick * 7,
                     draft_rounds: tick * 3,
-                    ..Default::default()
+                    ..cache
                 },
             );
         }
-        for (width, height) in [(120, 35), (80, 24), (40, 12), (1, 1), (0, 0)] {
+        for (width, height) in [(120, 35), (80, 24), (80, 20), (40, 12), (1, 1), (0, 0)] {
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
             terminal
                 .draw(|frame| render_overview(frame, &history, frame.area()))
@@ -747,7 +773,11 @@ mod tests {
                 .collect();
             assert!(!content.contains("NaN"));
             assert!(!content.contains("inf"));
+            assert!(!content.contains("KV PAGES"));
             if width >= 80 {
+                assert!(content.contains("KV TOKENS 384 cached / 2560 free / 12800 total"));
+            }
+            if width >= 80 && height >= 22 {
                 assert!(content.contains("PREFILL"));
                 assert!(content.contains("ACCEPTANCE"));
                 assert!(

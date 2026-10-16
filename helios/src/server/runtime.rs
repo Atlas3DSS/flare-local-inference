@@ -255,7 +255,8 @@ impl ModelRuntime {
         let worker_config = config.clone();
         let finished = Arc::new((Mutex::new(false), Condvar::new()));
         let worker_finished = finished.clone();
-        let mut metrics = super::metrics::Metrics::default();
+        let mut metrics =
+            super::metrics::Metrics::new(config.limits.pages, config.contract.cache.page_tokens);
         metrics.engram = manifest
             .engram
             .as_ref()

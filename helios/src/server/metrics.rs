@@ -36,6 +36,8 @@ pub(super) struct Snapshot {
     pub reused_tokens: u64,
     pub cached_pages: u64,
     pub free_pages: u64,
+    pub total_pages: u64,
+    pub page_tokens: u64,
     pub host_hits: u64,
     pub host_reused_tokens: u64,
     pub host_memory_records: u64,
@@ -47,6 +49,8 @@ pub(super) struct Snapshot {
 #[derive(Default)]
 pub(super) struct Metrics {
     pub scheduler_trace: scheduler::SchedulerMetrics,
+    total_pages: u64,
+    page_tokens: u64,
     pub engram: Option<std::sync::Arc<crate::engram::Stats>>,
     prefill_tokens: AtomicU64,
     generated_tokens: AtomicU64,
@@ -103,6 +107,14 @@ pub(super) struct Metrics {
 }
 
 impl Metrics {
+    pub fn new(total_pages: u32, page_tokens: usize) -> Self {
+        Self {
+            total_pages: total_pages as u64,
+            page_tokens: page_tokens as u64,
+            ..Self::default()
+        }
+    }
+
     pub fn progress(&self, prefill: u64, generated: usize, accepted: u64, rounds: u64) {
         for (counter, value) in [
             (&self.prefill_tokens, prefill),
@@ -129,6 +141,8 @@ impl Metrics {
             reused_tokens: self.reused_tokens.load(Ordering::Relaxed),
             cached_pages: self.cached_pages.load(Ordering::Relaxed),
             free_pages: self.free_pages.load(Ordering::Relaxed),
+            total_pages: self.total_pages,
+            page_tokens: self.page_tokens,
             host_hits: self.host_hits.load(Ordering::Relaxed),
             host_reused_tokens: self.host_reused_tokens.load(Ordering::Relaxed),
             host_memory_records: self.host_memory_records.load(Ordering::Relaxed),
@@ -659,6 +673,39 @@ impl Metrics {
                 value.load(Ordering::Relaxed),
             );
         }
+        for (name, help, value) in [
+            (
+                "total_kv_pages",
+                "Total pages in the per-rank KV pool before checkpoint retention.",
+                self.total_pages,
+            ),
+            (
+                "kv_page_tokens",
+                "Logical history tokens per KV page, including compressed storage.",
+                self.page_tokens,
+            ),
+            (
+                "total_kv_tokens",
+                "Logical token capacity of the per-rank KV pool before checkpoint retention.",
+                self.total_pages.saturating_mul(self.page_tokens),
+            ),
+            (
+                "free_kv_tokens",
+                "Logical token capacity of KV pages reusable after completed GPU fences.",
+                self.free_pages
+                    .load(Ordering::Relaxed)
+                    .saturating_mul(self.page_tokens),
+            ),
+            (
+                "cached_kv_tokens",
+                "Logical token capacity of pages owned by immutable checkpoints.",
+                self.cached_pages
+                    .load(Ordering::Relaxed)
+                    .saturating_mul(self.page_tokens),
+            ),
+        ] {
+            metric(&mut text, name, "gauge", help, value);
+        }
         text
     }
 }
@@ -733,12 +780,13 @@ mod tests {
 
     #[test]
     fn counters_expose_fixed_names_without_request_payloads() {
-        let metrics = Metrics::default();
+        let metrics = Metrics::new(100, 128);
         metrics.scheduler(SchedulerStats {
             cache_lookups: 5,
             cache_hits: 2,
             reused_tokens: 192,
             free_pages: 10,
+            cached_pages: 3,
             host_lookups: 4,
             host_hits: 1,
             host_reused_tokens: 640,
@@ -755,6 +803,18 @@ mod tests {
             ..StoreStats::default()
         });
         let text = metrics.render();
+        for (name, value) in [
+            ("total_kv_pages", 100),
+            ("kv_page_tokens", 128),
+            ("total_kv_tokens", 12800),
+            ("free_kv_pages", 10),
+            ("free_kv_tokens", 1280),
+            ("cached_kv_pages", 3),
+            ("cached_kv_tokens", 384),
+        ] {
+            assert!(text.contains(&format!("# TYPE flare_{name} gauge\n")));
+            assert!(text.contains(&format!("\nflare_{name} {value}\n")));
+        }
         assert!(text.contains("flare_host_cache_lookups_total 4\n"));
         assert!(text.contains("flare_host_cache_hits_total 1\n"));
         assert!(text.contains("flare_host_cache_reused_tokens_total 640\n"));
