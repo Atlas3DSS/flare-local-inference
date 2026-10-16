@@ -56,7 +56,7 @@ Use a distinct destination and the actual repository URL where the production
 package will be published:
 
 ```sh
-.venv/bin/ignition resign /data/flare-runtime/development.safetensors \
+.venv/bin/ignition sign /data/flare-runtime/development.safetensors \
   --output /data/flare-runtime/production.safetensors \
   --signing-key ~/.config/flare/signing/local-inference-lab/signing-key.pem \
   --namespace local-inference-lab \

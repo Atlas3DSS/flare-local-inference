@@ -76,13 +76,13 @@ def _parser() -> argparse.ArgumentParser:
     keys.add_argument("--directory", required=True, type=Path, help="new private directory; must not exist")
     keys.add_argument("--name", required=True, help="publisher display name")
     keys.add_argument("--namespace", required=True, help="publisher Hugging Face namespace")
-    resigning = command("resign", publishing.resign, "verify and re-sign a development package for production")
-    resigning.add_argument("package", type=Path, help="signed development .safetensors package")
-    resigning.add_argument("--output", required=True, type=Path, help="destination package; must not exist")
-    resigning.add_argument("--signing-key", type=Path, help="Ed25519 PEM key (default: publishing.signing_key)")
-    resigning.add_argument("--namespace", help="publisher namespace (default: publishing.namespace)")
-    resigning.add_argument("--official-source", help="published repository URL (default: publishing.official_source)")
-    resigning.add_argument("--development-publisher", type=Path, help="source public profile (default: beside config)")
+    signing = command("sign", publishing.sign, "verify and sign a development package for production")
+    signing.add_argument("package", type=Path, help="signed development .safetensors package")
+    signing.add_argument("--output", required=True, type=Path, help="destination package; must not exist")
+    signing.add_argument("--signing-key", type=Path, help="Ed25519 PEM key (default: publishing.signing_key)")
+    signing.add_argument("--namespace", help="publisher namespace (default: publishing.namespace)")
+    signing.add_argument("--official-source", help="published repository URL (default: publishing.official_source)")
+    signing.add_argument("--development-publisher", type=Path, help="source public profile (default: beside config)")
     return parser
 
 

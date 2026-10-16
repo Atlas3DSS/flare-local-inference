@@ -19,7 +19,7 @@ def keygen(args):
     print(f'SHA-256 fingerprint: {fingerprint}')
 
 
-def resign(args):
+def sign(args):
     import json
     from google.protobuf.message import DecodeError
     from ignition.cli.config import Configuration
@@ -36,7 +36,7 @@ def resign(args):
         namespace = args.namespace or values.get('namespace')
         source = args.official_source or values.get('official_source')
         if not all((key, namespace, source)):
-            raise ValueError('re-signing requires signing_key, namespace, and official_source')
+            raise ValueError('signing requires signing_key, namespace, and official_source')
         publisher = Publisher.load(key, namespace, source)
         profile = args.development_publisher or configuration.path.parent / 'development-publisher.json'
         profiles = json.loads(profile.expanduser().read_text())

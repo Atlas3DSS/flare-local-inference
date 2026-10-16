@@ -339,7 +339,7 @@ accepted. Runtime publisher profiles contain only the verification key.
 configuration is an error and never falls back to local credentials.
 
 `ignition keygen` creates an encrypted production key and public profile.
-`ignition resign` verifies and promotes an existing development package without
+`ignition sign` verifies and promotes an existing development package without
 model preparation or GPU access. See [production signing](signing.md) for key
 custody, commands, and package promotion.
 

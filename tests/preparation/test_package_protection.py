@@ -617,7 +617,7 @@ def test_promotion_detects_in_place_weight_change_during_copy(tmp_path, monkeypa
     assert not output.exists()
 
 
-def test_resign_cli_with_encrypted_key_and_tensor_parallel_package(native, tmp_path, monkeypatch):
+def test_sign_cli_with_encrypted_key_and_tensor_parallel_package(native, tmp_path, monkeypatch):
     from ignition import signing
     from ignition.cli import main
     from ignition.preparation.package_file import combine
@@ -649,7 +649,7 @@ def test_resign_cli_with_encrypted_key_and_tensor_parallel_package(native, tmp_p
     config.write_text('[publishing]\nnamespace = "example"\n'
                       'official_source = "https://huggingface.co/example/default"\n')
     output = tmp_path / 'production.safetensors'
-    args = ['resign', str(source), '--output', str(output), '--config', str(config),
+    args = ['sign', str(source), '--output', str(output), '--config', str(config),
             '--signing-key', str(tmp_path / 'keys/signing-key.pem'),
             '--official-source', 'https://huggingface.co/example/override']
     assert main(args) == 0
