@@ -1,5 +1,8 @@
 # Ignition preparation and Flare serving commands
 
+For environment setup and model-specific launch examples, see
+[model preparation and serving](model-preparation.md).
+
 Flare serves the model architectures its recipes support on NVIDIA SM120 and
 SM121 GPUs. Recipes declare default checkpoints and supported preparation
 capacities. The command line selects models, GPUs, concurrency, storage, and
