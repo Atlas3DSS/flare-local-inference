@@ -466,7 +466,7 @@ disk settings require the implementation and measurements defined there.
 |---|---|
 | Tensor-parallel size | Count of `--gpus`, or the smallest recipe-supported size whose estimate fits the first GPUs with enough free memory |
 | Context limit | The smaller of the prepared context ceiling and loaded KV capacity after per-request draft-page storage; admission also checks available shared capacity |
-| KV pages | All remaining supply after engine headroom, `memory.reserve`, weights, graphs, scratch, and execution rows. Retained snapshot rows borrow page backing; the load display reports KV capacity before checkpoint retention |
+| KV pages | All remaining supply after engine headroom, `memory.reserve`, weights, graphs, scratch, and execution rows. Retained snapshot rows borrow page backing; the load display reports total KV capacity |
 | Prefix cache | Up to eight snapshot slots per `--max-concurrency` request, acquired on demand from shared KV backing and evicted under pressure |
 | Live state | One null row plus the recipe's execution rows per active request slot; GLM verification commits into one live row |
 | Decode graph capacities | 1 through `--max-concurrency`, rounded to the recipe's captured set |
