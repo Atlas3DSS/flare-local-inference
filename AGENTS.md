@@ -42,11 +42,12 @@ covers build dependencies, checkpoint formats, and graph capacities. The
 [CLI design](docs/cli-design.md) defines flags, configuration, signing, and
 package selection.
 
-The preparation dependency tracks `local-inference-lab/flashinfer` in
-`pyproject.toml`, with its resolved commit in `uv.lock`. Refresh it with
-`uv lock --upgrade-package flashinfer-python`, then sync. For local development,
-inspect the sibling checkout and its changes before editing it, and install it
-explicitly with `uv pip install --python .venv/bin/python --no-deps -e ../flashinfer`.
+The preparation dependency pins a Git revision of `local-inference-lab/flashinfer`
+in `pyproject.toml`, with its resolved commit in `uv.lock`. To change it, update
+the revision, run `uv lock --upgrade-package flashinfer-python`, then sync.
+For local development, inspect the sibling checkout and its changes before
+editing it, and install it explicitly with
+`uv pip install --python .venv/bin/python --no-deps -e ../flashinfer`.
 `uv sync --locked --extra prepare --extra test` restores the Git dependency.
 
 After changing `heliopause/` or Helios code used by the extension, rebuild the

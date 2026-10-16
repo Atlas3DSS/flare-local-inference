@@ -258,6 +258,14 @@ Help exits with status 0; usage errors go to stderr with status 2. Its options a
 | `--mtp-draft-tokens N` | Reduce the maximum draft count; zero selects ordinary execution without draft generation, absorption, or draft-state maintenance | Package default |
 | `--mtp-adaptive-verification` / `--no-mtp-adaptive-verification` | Adaptive or fixed selection among captured widths | Package default |
 | `--embedding-table-storage disk\|ram` | PLE and Engram table storage; both modes deliver compact GPU rows | `disk` |
+| `--embedding-table-cache-size SIZE` | Per-host budget for cached disk-backed PLE/Engram rows, including the index, usage counters and miss workspace; accepts sizes such as `1G` or `2GiB` | `0` (disabled) |
+
+An embedding row cache selects disk storage and cannot be combined with
+`--embedding-table-storage ram`. Each host shares its budget across embedding
+tables and local tensor-parallel ranks. The loader commits cache memory before
+sizing KV and continuation pools, so the cache uses part of the integrated GPU's
+existing memory budget. The cache remains fixed in size while serving and warms
+from requests each time the server starts.
 
 Selected concurrency and draft depth cannot exceed prepared capacity.
 Concurrency three requires the batch-four bucket. Fixed verification loads
