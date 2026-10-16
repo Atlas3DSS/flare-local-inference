@@ -93,6 +93,28 @@ def test_preparation_closures_cannot_execute_in_compiler():
         restored.callback.anything
 
 
+@pytest.mark.parametrize("kind", ["storage", "session", "recorded_session"])
+def test_preparation_resources_do_not_serialize_active_package_storage(kind):
+    from b12x.preparation import PreparationSession
+    from ignition.preparation.package_storage import PackageStorage
+    from ignition.preparation.tensor_metadata import NumericStorage, _NUMERIC_STORAGE
+    from ignition.preparation.tuning import RecordedPreparationSession
+
+    with NumericStorage() as registry:
+        storage = PackageStorage.__new__(PackageStorage)
+        storage.numeric_storage = registry
+        resource = storage
+        if kind != "storage":
+            cls = PreparationSession if kind == "session" else RecordedPreparationSession
+            resource = cls.__new__(cls)
+            resource.benchmark_storage = storage
+        restored = loads(dumps(SimpleNamespace(resource=resource, alias=resource)))
+        assert restored.resource is restored.alias
+        with pytest.raises(RuntimeError, match="process-local resource"):
+            restored.resource.numeric_storage
+        assert storage.numeric_storage is registry and _NUMERIC_STORAGE.get() is registry
+
+
 def test_native_lock_methods_are_not_rebound_in_worker():
     from threading import Lock
 

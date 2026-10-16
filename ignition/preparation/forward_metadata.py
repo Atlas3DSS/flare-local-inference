@@ -77,8 +77,10 @@ class _ForwardPickler(pickle.Pickler):
         from triton.compiler import CompiledKernel
         from cutlass.base_dsl.jit_executor import JitCompiledFunction
         from b12x._lib.compile_plan import CompiledCuTeProgram, DeferredCuTeKernel, DeferredTritonKernel
+        from b12x.preparation import PreparationSession
         from b12x.preparation.types import _PreparedSlot, _Prepared
         from torch._dynamo.aot_compile_types import _deserialize_triton_kernel, _serialize_triton_kernel
+        from .package_storage import PackageStorage
 
         if isinstance(value, _Unavailable):
             return _Unavailable, (value.description,)
@@ -110,7 +112,9 @@ class _ForwardPickler(pickle.Pickler):
                               torch.distributed.ProcessGroup, socket.socket, ctypes.CDLL, ctypes._Pointer,
                               ctypes._CFuncPtr, ctypes.Structure, ctypes.Array, ctypes._SimpleCData,
                               CompiledKernel, JitCompiledFunction, CompiledCuTeProgram, local,
-                              DeferredCuTeKernel, DeferredTritonKernel, *_LOCK_TYPES)):
+                              DeferredCuTeKernel, DeferredTritonKernel, PreparationSession, PackageStorage,
+                              *_LOCK_TYPES)):
+            # Preparation sessions and allocators retain process-local contexts, not forward metadata.
             return _Unavailable, (f'{type(value).__module__}.{type(value).__qualname__}',)
         if not isinstance(value, type) and (hasattr(type(value), '__del__')
                 or type(value).__module__.startswith('cutlass._mlir.')):
