@@ -24,9 +24,8 @@ def _compile_forward(payload, device, options, path, num_threads, grad_enabled):
     torch.set_num_threads(num_threads)
     torch.set_grad_enabled(grad_enabled)
     torch.cuda.set_device(device)
-    _OPTIONS.update(options)
     forward = loads(payload)
-    artifact = aot_forward(forward)
+    artifact = aot_forward(forward, options=options)
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(dir=path.parent, suffix='.tmp', delete=False) as file:
@@ -39,16 +38,17 @@ def _compile_forward(payload, device, options, path, num_threads, grad_enabled):
 
 
 class CompilePool:
-    def __init__(self, device, *, headroom_bytes=0, pools=1):
+    def __init__(self, device, *, headroom_bytes=0, pools=1, options=None):
         """Size workers for `device`, beside `pools - 1` other ranks' pools compiling on this host."""
         self.device = torch.device(device)
         self.pool = None
+        options = dict(_OPTIONS if options is None else options)
         if type(headroom_bytes) is not int or headroom_bytes < 0:
             raise ValueError("headroom_bytes must be a nonnegative byte count")
         if type(pools) is not int or pools < 1:
             raise ValueError("pools must be a positive count")
         # Ranks sharing this host share its compile threads.
-        budget = max(1, _OPTIONS['compile_threads'] // pools)
+        budget = max(1, options['compile_threads'] // pools)
         # Workers open contexts on the owning device; a nearly full device compiles with fewer of them.
         free = device_memory_info(self.device)[0]
         shared = torch.cuda.get_device_properties(self.device).is_integrated
@@ -67,7 +67,7 @@ class CompilePool:
             # Each compile thread is an Inductor subprocess in the worker's shared memory.
             threads = min(threads, compile_threads(threads, workers=pools * self.workers, available=free,
                                                    device_bytes=_WORKER_DEVICE_BYTES, headroom_bytes=headroom_bytes))
-        self.options = dict(_OPTIONS, compile_threads=threads)
+        self.options = dict(options, compile_threads=threads)
 
     def submit(self, forward, path):
         from torch._inductor.compile_worker.subproc_pool import SubprocKind, SubprocPool

@@ -22,7 +22,7 @@ import torch
 import triton
 import triton.language as tl
 
-from ignition.preparation.triton import launch_triton
+from ignition.preparation.triton import launch_triton, warmup_triton
 
 BLOCK_N = 32
 # One warp per row and KV head. The launch configuration rides on the kernel so
@@ -212,12 +212,12 @@ class PreparedSparseAttention:
             self.merge_args = (partial, partial_lse, output, output.stride(0))
             self.merge_options = {"HEAD_DIM": dim, "Q_HEADS": q_heads, "ROWS": rows, "SPLITS": self.splits}
             self.merge_grid = (rows, q_heads, 1)
-            self.merge = _merge_splits.fn.warmup(*self.merge_args, grid=self.merge_grid,
-                                                 num_warps=_MERGE_CONFIG.num_warps,
-                                                 num_stages=_MERGE_CONFIG.num_stages, **self.merge_options)
-        self.compiled = self._kernel().fn.warmup(*self._args(key_cache, value_cache), grid=self.grid,
-                                                 num_warps=_CONFIG.num_warps, num_stages=_CONFIG.num_stages,
-                                                 **self.options)
+            self.merge = warmup_triton(_merge_splits.fn, self.merge_args, self.merge_grid,
+                                       num_warps=_MERGE_CONFIG.num_warps,
+                                       num_stages=_MERGE_CONFIG.num_stages, **self.merge_options)
+        self.compiled = warmup_triton(self._kernel().fn, self._args(key_cache, value_cache), self.grid,
+                                      num_warps=_CONFIG.num_warps, num_stages=_CONFIG.num_stages,
+                                      **self.options)
 
     def _kernel(self):
         # Looked up by name: compile workers receive this object pickled, and Triton

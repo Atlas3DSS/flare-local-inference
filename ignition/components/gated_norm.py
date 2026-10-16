@@ -4,7 +4,7 @@ import torch
 import triton
 import triton.language as tl
 
-from ignition.preparation.triton import launch_triton
+from ignition.preparation.triton import launch_triton, warmup_triton
 
 
 @triton.jit
@@ -69,7 +69,7 @@ class PreparedGatedRMSNorm:
                         "ROUND_NORMALIZED": bool(round_normalized),
                         "BF16_WEIGHT": weight.dtype == torch.bfloat16, "SILU_GATE": activation == "silu",
                         "num_warps": 4}
-        self.compiled = _gated_rms_norm.warmup(*self.args, grid=self.grid, **self.options)
+        self.compiled = warmup_triton(_gated_rms_norm, self.args, self.grid, **self.options)
 
     def __call__(self):
         launch_triton(_gated_rms_norm, self.compiled, self.args, self.grid, **self.options)

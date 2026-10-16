@@ -24,7 +24,7 @@ import torch
 import triton
 import triton.language as tl
 
-from ignition.preparation.triton import launch_triton
+from ignition.preparation.triton import launch_triton, warmup_triton
 
 ROWS = 16
 # The launch configuration rides on the kernels so whole-forward compilation, which drops
@@ -153,8 +153,8 @@ class PreparedKDAVerification:
         self.options = {"HEADS": heads, "SCALE": 1.0 / math.sqrt(128), "LOWER": float(lower_bound),
                         "WINDOW": window, "ROWS": ROWS, "NULL_SLOT": null_slot}
         self.grid = (128 // ROWS, sequences * heads, 1)
-        self.compiled = _verify.fn.warmup(*self.args, grid=self.grid, num_warps=_CONFIG.num_warps,
-                                          num_stages=_CONFIG.num_stages, **self.options)
+        self.compiled = warmup_triton(_verify.fn, self.args, self.grid, num_warps=_CONFIG.num_warps,
+                                      num_stages=_CONFIG.num_stages, **self.options)
 
     def __call__(self):
         launch_triton(_verify, self.compiled, self.args, self.grid, **self.options)
@@ -187,8 +187,8 @@ class PreparedKDAReplay:
         self.options = {"SLOTS": rows, "HEADS": heads, "LOWER": float(lower_bound), "WINDOW": window,
                         "ROWS": ROWS, "NULL_SLOT": null_slot}
         self.grid = (128 // ROWS, counts.numel(), layers * heads)
-        self.compiled = _commit.fn.warmup(*self.args, grid=self.grid, num_warps=_CONFIG.num_warps,
-                                          num_stages=_CONFIG.num_stages, **self.options)
+        self.compiled = warmup_triton(_commit.fn, self.args, self.grid, num_warps=_CONFIG.num_warps,
+                                      num_stages=_CONFIG.num_stages, **self.options)
 
     def __call__(self):
         launch_triton(_commit, self.compiled, self.args, self.grid, **self.options)

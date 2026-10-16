@@ -73,6 +73,66 @@ class ElementwiseForward:
         self.output.copy_(self.source.sin() * self.source)
 
 
+class ReductionForward:
+    def __init__(self):
+        self.source = torch.empty((128, 4096), device="cuda")
+        self.output = torch.empty(128, device="cuda")
+
+    def __call__(self):
+        self.output.copy_(self.source.sum(dim=1))
+
+
+@torch.no_grad()
+def test_compile_time_reduction_winner_restores_without_search(tmp_path, monkeypatch):
+    from ignition.preparation import aot
+    from ignition.preparation.compilation import _OPTIONS
+    from ignition.preparation.execution import GraphSignature
+    from torch._inductor.runtime.triton_heuristics import CachingAutotuner
+
+    cache = ForwardCache(namespace={"model": "prepared-reduction"}, device="cuda:0",
+        root=tmp_path, options=dict(_OPTIONS, **{"triton.autotune_at_compile_time": True}))
+    signature = {"reduce": GraphSignature("prefill", 1, 128)}
+    original = ReductionForward()
+    original.source.fill_(1)
+    first = cache.prepare_many({"reduce": original}, signature)["reduce"]
+    assert not first.cache_hit
+    torch.testing.assert_close(original.output, torch.full_like(original.output, 4096), rtol=0, atol=0)
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("restoring a completed reduction must not compile or search")
+
+    fresh = ReductionForward()
+    fresh.source.fill_(2)
+    monkeypatch.setattr(aot, "aot_forward", unexpected)
+    monkeypatch.setattr(triton, "compile", unexpected)
+    monkeypatch.setattr(CachingAutotuner, "benchmark_all_configs", unexpected)
+    restored = cache.prepare_many({"reduce": fresh}, signature)["reduce"]
+    assert restored.cache_hit
+    backend = restored.artifact._artifacts.compiled_fn
+    entry = backend.artifact.inner_fn.compiled_fn.serialize()
+    tuners = entry.compiled_fw.result._triton_bundle.static_autotuners
+    assert tuners
+    for selected in tuners:
+        assert len(selected.kernel.compile_results) == 1
+        assert selected.kernel.inductor_meta["dynamic_scale_rblock"] is False
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=torch.cuda.Stream()):
+        restored()
+    try:
+        for value in (2, -3, 0):
+            fresh.source.fill_(value)
+            fresh.output.fill_(float("nan"))
+            allocated = torch.cuda.memory_stats()["allocation.all.allocated"]
+            graph.replay()
+            torch.cuda.synchronize()
+            assert torch.cuda.memory_stats()["allocation.all.allocated"] == allocated
+            torch.testing.assert_close(fresh.output,
+                torch.full_like(fresh.output, 4096 * value), rtol=0, atol=0)
+    finally:
+        graph.reset()
+
+
 class SharedResidualForward:
     def __init__(self, triton_write=False):
         self.triton_write = triton_write
