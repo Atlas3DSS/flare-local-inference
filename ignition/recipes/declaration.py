@@ -53,6 +53,8 @@ class Checkpoint:
     # Device bytes that loading adds beyond the stored tensors, such as block scales
     # expanded from a compressed encoding.
     expansion_bytes: int = 0
+    # Estimated resident device weights after optional lossless expert-scale compression.
+    scale_compressed_device_bytes: Mapping[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -174,10 +176,13 @@ class Recipe:
         return costs if speculation.learned else replace(
             costs, page_bytes=costs.page_bytes - costs.draft_page_bytes, draft_page_bytes=0)
 
-    def weights_bytes(self, checkpoint: Checkpoint, world_size: int, speculation: Speculation | None) -> int:
+    def weights_bytes(self, checkpoint: Checkpoint, world_size: int, speculation: Speculation | None,
+                      expert_scale_compression: str | None = None) -> int:
         """Estimate one rank's device weights from the checkpoint's stored tensors and their expansion."""
         learned = speculation is not None and speculation.learned
-        return -(-(checkpoint.device_bytes + checkpoint.expansion_bytes
+        device_bytes = (checkpoint.device_bytes if expert_scale_compression is None else
+                        checkpoint.scale_compressed_device_bytes[expert_scale_compression])
+        return -(-(device_bytes + checkpoint.expansion_bytes
                    - (0 if learned else checkpoint.draft_bytes)) // world_size)
 
     def live_rows(self, concurrency: int, speculation: Speculation | None) -> int:

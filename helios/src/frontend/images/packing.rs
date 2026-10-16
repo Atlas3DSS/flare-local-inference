@@ -17,28 +17,37 @@ pub(crate) fn tensor_layout(
         (ImageLayoutKind::Qwen | ImageLayoutKind::Mimo, "vision_pixel_values") => {
             (Float32, patches * 1536)
         }
-        (ImageLayoutKind::Deepseek | ImageLayoutKind::Moonvit, "vision_pixel_values") => {
-            (Float32, patches * 588)
-        }
+        (
+            ImageLayoutKind::Deepseek | ImageLayoutKind::Moonvit | ImageLayoutKind::Step,
+            "vision_pixel_values",
+        ) => (Float32, patches * 588),
         (_, "vision_position_ids") => (Int64, patches * 2),
+        (ImageLayoutKind::Step, "vision_cu_seqlens") => (Int32, super::step::MAX_VIEWS + 1),
         (_, "vision_cu_seqlens") => (Int32, 2),
         (_, "vision_num_patches" | "vision_feature_offset") => (Int32, 1),
         (
-            ImageLayoutKind::Mimo | ImageLayoutKind::Deepseek | ImageLayoutKind::Moonvit,
+            ImageLayoutKind::Mimo
+            | ImageLayoutKind::Deepseek
+            | ImageLayoutKind::Moonvit
+            | ImageLayoutKind::Step,
             "vision_num_features",
         ) => (Int32, 1),
-        (ImageLayoutKind::Qwen | ImageLayoutKind::Moonvit, "vision_interpolation_indices") => {
-            (Int64, patches * 4)
-        }
-        (ImageLayoutKind::Qwen | ImageLayoutKind::Moonvit, "vision_interpolation_weights") => {
-            (Float32, patches * 4)
-        }
+        (
+            ImageLayoutKind::Qwen | ImageLayoutKind::Moonvit | ImageLayoutKind::Step,
+            "vision_interpolation_indices",
+        ) => (Int64, patches * 4),
+        (
+            ImageLayoutKind::Qwen | ImageLayoutKind::Moonvit | ImageLayoutKind::Step,
+            "vision_interpolation_weights",
+        ) => (Float32, patches * 4),
         (ImageLayoutKind::Mimo, "vision_column_indices" | "vision_row_indices") => {
             (Int32, patches / 4)
         }
         (ImageLayoutKind::Deepseek | ImageLayoutKind::Moonvit, "vision_merge_indices") => {
             (Int32, patches)
         }
+        (ImageLayoutKind::Step, "vision_downsample1_indices") => (Int32, patches / 4 * 9),
+        (ImageLayoutKind::Step, "vision_downsample2_indices") => (Int32, patches / 16 * 9),
         _ => return Err(format!("image layout has no tensor {name}").into()),
     };
     Ok(layout)
@@ -60,6 +69,7 @@ pub(crate) fn prepare(
         ImageLayoutKind::Mimo => mimo(config, handle, images, image),
         ImageLayoutKind::Deepseek => deepseek(config, handle, images, image),
         ImageLayoutKind::Moonvit => moonvit(config, handle, images, image),
+        ImageLayoutKind::Step => step(config, handle, images, image),
     }
 }
 
@@ -69,7 +79,10 @@ fn qwen(
     images: &ProcessedImages,
     image: usize,
 ) -> Result<UploadBatch> {
-    let pixel_width = if config.contract.frontend.image_layout == Some(ImageLayoutKind::Moonvit) {
+    let pixel_width = if matches!(
+        config.contract.frontend.image_layout,
+        Some(ImageLayoutKind::Moonvit | ImageLayoutKind::Step)
+    ) {
         588
     } else {
         1536
@@ -145,7 +158,9 @@ fn qwen(
             .flatten()
             .copied(),
     );
-    staging.i32("vision_cu_seqlens", 0, [0, geometry.patches as i32]);
+    if config.contract.frontend.image_layout != Some(ImageLayoutKind::Step) {
+        staging.i32("vision_cu_seqlens", 0, [0, geometry.patches as i32]);
+    }
     staging.i32("vision_num_patches", 0, [geometry.patches as i32]);
     staging.i32(
         "vision_feature_offset",
@@ -337,6 +352,69 @@ fn moonvit(
         }
     }
     staging.i32("vision_merge_indices", 0, indices);
+    staging.i32("vision_num_features", 0, [geometry.tokens as i32]);
+    Ok(staging)
+}
+
+fn convolution_indices(side: usize, base: usize) -> Vec<i32> {
+    let mut indices = Vec::with_capacity(side * side / 4 * 9);
+    for y in (0..side).step_by(2) {
+        for x in (0..side).step_by(2) {
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    let (y, x) = (y as isize + dy, x as isize + dx);
+                    indices.push(
+                        if y < 0 || x < 0 || y >= side as isize || x >= side as isize {
+                            -1
+                        } else {
+                            (base + y as usize * side + x as usize) as i32
+                        },
+                    );
+                }
+            }
+        }
+    }
+    indices
+}
+
+fn step(
+    config: &ModelConfig,
+    handle: RequestHandle,
+    images: &ProcessedImages,
+    image: usize,
+) -> Result<UploadBatch> {
+    let geometry = images
+        .geometry
+        .get(image)
+        .ok_or("missing scheduled image")?;
+    let ny = usize::try_from(geometry.grid_thw[1]).map_err(|_| "invalid crop rows")?;
+    let nx = usize::try_from(geometry.grid_thw[2]).map_err(|_| "invalid crop columns")?;
+    let local = ny
+        .checked_mul(nx)
+        .filter(|n| *n < super::step::MAX_VIEWS)
+        .ok_or("too many image crops")?;
+    if geometry.grid_thw[0] != 1
+        || (nx == 0) != (ny == 0)
+        || geometry.patches != local * 1296 + 2704
+        || geometry.tokens != geometry.patches / 16
+    {
+        return Err("invalid Step image geometry".into());
+    }
+    let mut staging = qwen(config, handle, images, image)?;
+    let mut cu = vec![0];
+    let (mut first, mut second) = (vec![], vec![]);
+    let mut base = 0;
+    for view in 0..=local {
+        let side = if view == local { 52 } else { 36 };
+        first.extend(convolution_indices(side, base));
+        second.extend(convolution_indices(side / 2, base / 4));
+        base += side * side;
+        cu.push(base as i32);
+    }
+    cu.resize(super::step::MAX_VIEWS + 1, base as i32);
+    staging.i32("vision_cu_seqlens", 0, cu);
+    staging.i32("vision_downsample1_indices", 0, first);
+    staging.i32("vision_downsample2_indices", 0, second);
     staging.i32("vision_num_features", 0, [geometry.tokens as i32]);
     Ok(staging)
 }

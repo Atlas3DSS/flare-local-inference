@@ -78,6 +78,56 @@ def mailbox_storage():
 
 @pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
                     reason="requires an explicitly assigned CUDA device")
+def test_retired_loading_pools_release_staging_and_preserve_graph_reachability(mailbox_storage):
+    import ctypes as C
+    import torch
+    from torch.multiprocessing.reductions import StorageWeakRef
+    from ignition.preparation.reachability import Reachability
+    from ignition.preparation.runtime_package import Allocation, RuntimePackage
+
+    storage = mailbox_storage
+    graph_pool = storage.graph_pool.id
+    pools = storage._preparation_pools.copy()
+    weights, retired = [], []
+    for value in range(3):
+        with storage.transient():
+            weights.append(torch.full((1 << 20,), value + 1., dtype=torch.float32, device="cuda"))
+            staging = torch.empty(16 << 20, dtype=torch.uint8, device="cuda")
+            retired.append(StorageWeakRef(staging.untyped_storage()))
+            del staging
+    assert all(reference.expired() for reference in retired)
+    loading_pools = storage._preparation_pools - pools
+    retained = [segment for segment in torch.cuda.memory_snapshot()
+                if tuple(segment["segment_pool_id"]) in loading_pools]
+    assert sum(segment["total_size"] for segment in retained) <= sum(t.nbytes for t in weights) + 3 * storage.granularity
+    assert storage.graph_pool.id == graph_pool and graph_pool not in storage._preparation_pools
+
+    output = torch.empty_like(weights[-1])
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    graph = torch.cuda.CUDAGraph(keep_graph=True)
+    with torch.cuda.graph(graph, pool=graph_pool, stream=stream):
+        storage.cuda.call("cuMemcpyDtoDAsync_v2", C.c_uint64(output.data_ptr()), C.c_uint64(weights[-1].data_ptr()),
+                          C.c_size_t(output.nbytes), C.c_void_p(stream.cuda_stream))
+    graph.instantiate()
+    mappings = storage.mappings
+    allocations = tuple(Allocation(f"device-{i}", m.address, m.nbytes, preserve_address=True)
+                        for i, m in enumerate(mappings.values()))
+    package = RuntimePackage(allocations=allocations, modules={}, kernels=())
+    description = package._graph(storage.cuda, "weight-copy", graph.raw_cuda_graph())
+    traversal = Reachability(allocations, inactive=storage.unused_ranges())
+    traversal.graph(description, ())
+    for tensor in (weights[-1], output):
+        owner = next(a for a in allocations if a.address <= tensor.data_ptr() < a.address + a.nbytes)
+        assert owner.name in traversal.reached
+    graph.replay()
+    torch.cuda.synchronize()
+    torch.testing.assert_close(output, weights[-1], rtol=0, atol=0)
+    graph.reset()
+
+
+@pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
+                    reason="requires an explicitly assigned CUDA device")
 def test_scratch_backing_released_for_compilation_and_restored():
     subprocess.run([sys.executable, "-c", """
 import torch

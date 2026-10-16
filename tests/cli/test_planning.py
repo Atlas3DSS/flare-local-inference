@@ -84,6 +84,24 @@ def test_pages_take_all_remaining_supply():
     assert whole.supply_bytes - whole.page_bytes - whole.fixed_bytes < 2 * MIB
 
 
+def test_expert_scale_compression_changes_weight_budget_and_preserves_native_default():
+    import pickle
+
+    checkpoint = replace(SOLO.checkpoints[0], scale_compressed_device_bytes={"csf": 56 * GIB})
+    assert pickle.loads(pickle.dumps(checkpoint)) == checkpoint
+    settings = dict(concurrency=4, reserve_bytes=0, speculation=DRAFTING)
+    native = planning.fit(SOLO, checkpoint, (gpu(0, 95),), **settings)
+    compressed = planning.fit(SOLO, checkpoint, (gpu(0, 95),), expert_scale_compression="csf", **settings)
+    assert native.weights_bytes == 60 * GIB and native.expert_scale_compression is None
+    assert compressed.weights_bytes == 56 * GIB and compressed.pages > native.pages
+    assert compressed.to_dict()["expert_scale_compression"] == "csf"
+    plain = planning.fit(SOLO, checkpoint, (gpu(0, 95),), concurrency=4, reserve_bytes=0,
+                          speculation=None, expert_scale_compression="csf")
+    assert plain.weights_bytes == 54 * GIB
+    with pytest.raises(UsageError, match="does not prepare this scale encoding"):
+        planning.fit(SOLO, SOLO.checkpoints[0], (gpu(0, 95),), expert_scale_compression="csf", **settings)
+
+
 def test_live_state_counts_only_null_live_and_speculative_rows():
     assert SOLO.live_rows(4, DRAFTING) == 1 + 4 * 4
     assert SOLO.live_rows(5, DRAFTING) == 1 + 8 * 4

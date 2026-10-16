@@ -41,10 +41,10 @@ class _Frontend:
     """Chat rendering, tokenization and reply decoding with the checkpoint's own tokenizer and template."""
 
     def __init__(self, server_config):
-        from transformers import AutoTokenizer
+        from transformers import PreTrainedTokenizerFast
 
         directory = Path(server_config["assets"]["tokenizer"]["path"]).parent
-        self.tokenizer = AutoTokenizer.from_pretrained(directory, local_files_only=True)
+        self.tokenizer = PreTrainedTokenizerFast.from_pretrained(directory, local_files_only=True)
         self.eos = set(server_config["frontend"]["eos_token_ids"])
 
     def render(self, body):

@@ -201,6 +201,66 @@ draft modeling and state updates are captured by Ignition. The vision encoder
 publishes compact image features for causal text prefill. Loading with
 `--mtp-draft-tokens 0` selects ordinary execution without draft-state updates.
 
+Step-5 Preview uses `stepfun-ai/Step-5-Preview-NVFP4`. The
+`step5-preview-nvfp4` alias prepares text, up to four images per request,
+and three causal MTP draft tokens with adaptive verification. Checkpoint NVFP4
+routed experts use W4A4. Routed experts declared BF16 in checkpoint metadata
+are converted to NVFP4 during loading and use b12x W4A16 with BF16 activations;
+the converted weights are retained in captured graphs and exported packages.
+Shared, dense, and MTP MLP gate/up weights are packed and converted to MXFP8
+during loading. Target-model projections select BF16 or quantized activations
+through autotuning. MTP projections retain BF16 activations to bound rounding
+error through the predictor feedback chain. Down projections, attention
+projections, and KV remain BF16, with FP32 residual accumulation. CSF scale
+compression allows the C1/MTP3 graph
+catalog, including vision, to fit on four RTX PRO 6000 Blackwell GPUs:
+
+```sh
+.venv/bin/ignition export step5-preview-nvfp4 --gpus 0,1,2,3 \
+  --max-concurrency 1 --mtp-draft-tokens 3 --no-mtp-adaptive-verification \
+  --prefill-chunk-size 4096 --expert-scale-compression csf \
+  --output /data/flare-runtime/step5-tp4-c1-mtp3-csf.safetensors --verbose
+
+./flare/target/release/flare run \
+  /data/flare-runtime/step5-tp4-c1-mtp3-csf.safetensors \
+  --gpus 0,1,2,3 --bind 127.0.0.1:8001
+```
+
+Add `--expert-scale-compression csf` to compress all Step-5 routed-expert block
+scales losslessly during loading. Both checkpoint W4A4 experts and converted
+W4A16 experts use CSF, retaining their activation modes. Serialized layers share
+one pair of expansion buffers, whose contents are zero-initialized on export.
+One transient loading pool reuses conversion scratch across layers and retires
+after weight loading, retaining live weights for graph export. The separate
+graph-capture pool remains alive.
+The memory plan estimates 6% lower resident weight storage; actual memory depends
+on encoded exceptions and is reported after loading. Larger concurrency requires
+separate preparation and memory validation.
+
+Sliding attention keeps a 512-token continuation window. Sparse attention uses
+128-token logical pages containing BF16 keys and values and an FP8 retrieval
+index for eight-token regions. Continuation rows also preserve partial index
+regions and accepted MTP state. Accepted target tokens, hidden states, and embeddings
+remain in continuation storage until the following round consumes them in three
+packed predictor passes. Candidate KV never enters committed predictor windows.
+Region scoring, selection, and attention use
+b12x kernels. Attention output gating is fused into the direct output or split
+merge store, preserving BF16 rounding of attention and sigmoid before their
+product. SwiGLU clamps the gate after SiLU. Helios manages these resources
+through the shared cache and speculative execution contracts. The perception encoder
+prepares 504-pixel local crops and a 728-pixel overview. Serving defaults follow
+the model card: temperature 1, top-p 0.95, no top-k filter, and neutral penalties.
+
+One-shot TP reductions with up to 36 rows fuse the residual update and
+zero-centered RMSNorm into the collective, preserving FP32 residual storage and
+BF16 normalized outputs. Attention and dense MLP projections enter the fused
+collective directly as BF16; routed MLP updates enter as FP32. Attention and dense
+MLP reductions round to BF16 before residual addition; routed MLP reductions retain
+FP32. MLP reductions consume the following layer's input-normalization weight.
+The final target and predictor MLPs
+retain their separate final residual update. DMA prefill and hierarchical
+collectives use separate reduction and normalization kernels.
+
 Kimi K3 uses the local `/data/models/Kimi-K3-MXFP4-CSF` checkpoint. The
 `kimi-k3-mxfp4-csf` alias prepares text generation, reasoning, XTML tool calls,
 and up to four images per request on sixteen GPUs. It preserves MXFP4 experts

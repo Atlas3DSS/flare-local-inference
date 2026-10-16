@@ -40,7 +40,7 @@ class PreparedMLP:
 
     def __init__(self, source, weights: MLPWeights, gate_up, intermediate, output, *,
                  session, name, workspace, swiglu_limit=float("inf"), round_silu=True,
-                 activation_mode="auto", gate_up_bias=None, down_bias=None):
+                 activation_mode="auto", gate_up_bias=None, down_bias=None, clamp_after_silu=False):
         self.gate_up, self.intermediate, self.output = gate_up, intermediate, output
         self.swiglu_limit, self.round_silu = swiglu_limit, round_silu
         if source.ndim != 2 or intermediate.ndim != 2:
@@ -70,7 +70,8 @@ class PreparedMLP:
         self.down_projection = projection(intermediate, weights.down, output, "down", down_bias)
         self.activation_plan = hyperconnection.plan(
             hyperconnection.Caps(device=source.device, max_tokens=tokens, hidden_size=width),
-            invocation={"operation": "swiglu", "limit": swiglu_limit, "round_silu": round_silu},
+            invocation={"operation": "swiglu", "limit": swiglu_limit, "round_silu": round_silu,
+                        "clamp_after_silu": clamp_after_silu},
         )
         declare(session, (self.activation_plan.request(
             name=f"{name}.swiglu", prepare_call=lambda state: PreparedCall(

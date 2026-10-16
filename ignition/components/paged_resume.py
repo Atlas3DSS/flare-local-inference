@@ -45,7 +45,8 @@ class PreparedResume:
             name=name + ".validation",
         )
         self.local_logits = torch.empty(
-            (rows, requests.vocab_size // weights.shard.world_size),
+            (rows, weights.head.shape[0] if isinstance(weights.head, torch.Tensor)
+             else weights.head.out_features),
             dtype=torch.bfloat16,
             device=pool.backing.device,
         )

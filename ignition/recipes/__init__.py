@@ -23,8 +23,9 @@ def recipes() -> tuple[Recipe, ...]:
     from .qwen38_dense.recipe import RECIPE as qwen38_dense
     from .mimo_v2.recipe import RECIPE as mimo_v2
     from .kimi3.recipe import RECIPE as kimi3
+    from .step5.recipe import RECIPE as step5
 
-    return qwen38, qwen38_dense, glm53, deepseek41, deepseek4, mimo_v2, kimi3
+    return qwen38, qwen38_dense, glm53, deepseek41, deepseek4, mimo_v2, kimi3, step5
 
 
 def snapshot_directory(hub_cache: Path, checkpoint: Checkpoint) -> Path:
@@ -144,6 +145,8 @@ def _replacement(qualified: Checkpoint, repository: str, revision: str, stored_b
     scale = stored_bytes / qualified.stored_bytes
     return replace(qualified, repository=repository, revision=revision, stored_bytes=stored_bytes,
                    device_bytes=round(qualified.device_bytes * scale),
+                   scale_compressed_device_bytes={encoding: round(size * scale)
+                       for encoding, size in qualified.scale_compressed_device_bytes.items()},
                    mapped_host_bytes=round(qualified.mapped_host_bytes * scale),
                    expansion_bytes=round(qualified.expansion_bytes * scale))
 

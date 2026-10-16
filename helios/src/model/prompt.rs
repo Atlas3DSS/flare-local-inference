@@ -31,6 +31,9 @@ pub fn prepare_input(
         Some(ImageLayoutKind::Moonvit) => crate::frontend::images::layouts::moonvit::prepare_input(
             frontend, processor, rendered, images,
         )?,
+        Some(ImageLayoutKind::Step) => crate::frontend::images::layouts::step::prepare_input(
+            frontend, processor, rendered, images,
+        )?,
         Some(ImageLayoutKind::Mimo) => crate::frontend::images::layouts::mimo::prepare_input(
             frontend, processor, rendered, images,
         )?,

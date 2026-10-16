@@ -313,6 +313,30 @@ def test_rms_norm_preserves_aten_rounding(eps):
 
 @pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1", reason="explicit CUDA assignment required")
 @torch.no_grad()
+def test_compilation_cache_preserves_warmup_mutations(tmp_path, monkeypatch):
+    monkeypatch.setattr("ignition.preparation.compilation.DEFAULT_CACHE_ROOT", tmp_path)
+
+    for cache_hit in (False, True):
+        counter = torch.zeros(64, device="cuda")
+        compiled = compile_forward(lambda: _increment_output(counter))
+        assert compiled.cache_hit == cache_hit
+        torch.testing.assert_close(counter, torch.ones_like(counter), rtol=0, atol=0)
+        compiled()
+        torch.testing.assert_close(counter, torch.full_like(counter, 2), rtol=0, atol=0)
+
+
+@torch.library.custom_op("test_compilation::increment_output", mutates_args=("out",))
+def _increment_output(out: torch.Tensor) -> None:
+    out.add_(1)
+
+
+@_increment_output.register_fake
+def _fake_increment_output(out):
+    pass
+
+
+@pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1", reason="explicit CUDA assignment required")
+@torch.no_grad()
 def test_compilation_cache_binds_each_invocation_and_buffer(tmp_path, monkeypatch):
     monkeypatch.setattr("ignition.preparation.compilation.DEFAULT_CACHE_ROOT", tmp_path / "compiled")
     monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", str(tmp_path))

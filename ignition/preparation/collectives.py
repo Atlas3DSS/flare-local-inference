@@ -48,8 +48,8 @@ def create_roce_runtime(group, device, *, max_tokens, pipe_tokens, hidden_size, 
         package_storage.transports.append(runtime)
     return runtime
 
-def create_all_reduce_runtime(group, device, *, max_tokens, hidden_size, ipc=None):
-    """Allocate one b12x IPC channel for the largest BF16 hidden activation.
+def create_all_reduce_runtime(group, device, *, max_tokens, hidden_size, ipc=None, element_bytes=2):
+    """Allocate one b12x IPC channel for the largest hidden activation.
 
     Every rank supplies identical capacities before preparing graph variants.
     The bootstrap retains the runtime until every native rank worker drains.
@@ -58,9 +58,11 @@ def create_all_reduce_runtime(group, device, *, max_tokens, hidden_size, ipc=Non
 
     if any(type(value) is not int or value <= 0 for value in (max_tokens, hidden_size)):
         raise ValueError("all-reduce capacities must be positive integers")
-    nbytes = max_tokens * hidden_size * 2
+    if element_bytes not in (2, 4):
+        raise ValueError("all-reduce storage must use two- or four-byte elements")
+    nbytes = max_tokens * hidden_size * element_bytes
     if nbytes % 16:
-        raise ValueError("BF16 all-reduce capacity must occupy complete 16-byte packs")
+        raise ValueError("all-reduce capacity must occupy complete 16-byte packs")
     return AllReduce.from_exchange_group(exchange_group=group, device=device, single_channel=True,
                                          max_size=nbytes, eager_buffer_bytes=nbytes, ipc=ipc)
 
@@ -77,13 +79,15 @@ def create_all_gather_runtime(group, device, *, max_rows, columns, ipc=None):
         max_batch_size=max_rows, total_heads=columns // 64, head_dim=64, stream_affine=False, ipc=ipc)
 
 
-def create_dma_all_reduce_runtime(group, device, *, max_tokens, hidden_size, ipc=None):
-    """Allocate a b12x copy-engine ring for prefill-sized BF16 reductions in caller-owned shared storage."""
+def create_dma_all_reduce_runtime(group, device, *, max_tokens, hidden_size, ipc=None, element_bytes=2):
+    """Allocate a b12x copy-engine ring for prefill reductions in caller-owned shared storage."""
     from b12x.comm.pcie import DmaAllReduce
 
     if any(type(value) is not int or value <= 0 for value in (max_tokens, hidden_size)):
         raise ValueError("all-reduce capacities must be positive integers")
-    return DmaAllReduce(exchange_group=group, device=device, max_bytes=max_tokens * hidden_size * 2, ipc=ipc)
+    if element_bytes not in (2, 4):
+        raise ValueError("all-reduce storage must use two- or four-byte elements")
+    return DmaAllReduce(exchange_group=group, device=device, max_bytes=max_tokens * hidden_size * element_bytes, ipc=ipc)
 
 
 def create_head_exchange(group, device, *, max_rows, heads, head_dim, ipc=None):

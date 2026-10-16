@@ -15,13 +15,13 @@ pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
 
 
 @pytest.mark.parametrize("mode,tokens", [("decode", 4), ("prefill", 64), ("prefill", 4096)])
-@pytest.mark.parametrize("dimension,value_dimension,heads", [(192, 128, 16), (256, 256, 6)])
+@pytest.mark.parametrize("dimension,value_dimension,heads", [(192, 128, 16), (192, 192, 8), (256, 256, 6)])
 def test_gqa_strided_pages_and_sinks(mode, tokens, dimension, value_dimension, heads):
     device = torch.device("cuda", 0)
     rows = tokens if mode == "decode" else 1
     pages = max(2, (tokens + 127) // 128)
     key_size, value_size = 128 * dimension, 128 * value_dimension
-    padding = 16384 if dimension == 256 else 8192
+    padding = 16384 if dimension == 256 else 12288 if value_dimension == 192 else 8192
     backing = torch.randn((pages, key_size + value_size + padding), device=device, dtype=torch.bfloat16) * .1
     key = backing[:, :key_size].view(pages, 128, 1, dimension)
     value = backing[:, key_size:key_size + value_size].view(pages, 128, 1, value_dimension)

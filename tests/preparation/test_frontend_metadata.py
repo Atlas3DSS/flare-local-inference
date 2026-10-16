@@ -139,7 +139,8 @@ def test_cached_checkpoint_structural_metadata_extracts_without_model_weights(re
     token_source = snapshot / "generation_config.json"
     if not token_source.exists():
         token_source = snapshot / "config.json"
-    eos = json.loads(token_source.read_text())["eos_token_id"]
+    token_config = json.loads(token_source.read_text())
+    eos = token_config.get("text_config", token_config)["eos_token_id"]
     result = prepare_frontend(snapshot, eos_token_ids=eos, image_profile=profiles.get(recipe.name), preprocessor=preprocessor)
     index = ModelIndex()
     source = server()

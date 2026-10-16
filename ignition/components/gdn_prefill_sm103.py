@@ -23,7 +23,7 @@ from b12x.preparation.types import plan_from_handle, require_prepared
 from ignition.preparation.triton import launch_triton
 from ignition.preparation.tuning import declare, register_finalizer
 
-from .sm103 import native_contract, native_plan
+from .native_operator import native_contract, native_plan
 
 _ZERO_CONFIG = triton.Config({}, num_warps=4, num_stages=1)
 _ZERO_BLOCK = 2048

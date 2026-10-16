@@ -7,6 +7,7 @@ from functools import partial
 
 import torch
 from b12x.moe import fused_moe
+from b12x.moe.fused_moe.workloads import TUNING_WORKLOAD_VERSION
 from b12x.preparation import FrozenMapping, PreparationSession, PreparedCall
 
 from ignition.preparation.fixtures import fused_moe as moe_fixtures
@@ -112,7 +113,8 @@ class PreparedRoutedExperts:
         self.source = source
         self.output = output
         self.scratch = None
-        invocation = FrozenMapping({"tuning_execution": "cuda_graph"}) if experts.has_csf_blocks else FrozenMapping()
+        invocation = FrozenMapping({"tuning_route_pattern": TUNING_WORKLOAD_VERSION,
+            **({"tuning_execution": "cuda_graph"} if experts.has_csf_blocks else {})})
         self.scale_plan = fused_moe.plan_scale_expansion(
             experts, routes=ids.numel(), ids_dtype=ids.dtype, invocation=invocation,
         ) if experts.has_csf_blocks else None

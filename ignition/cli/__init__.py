@@ -76,6 +76,9 @@ def _preparation_arguments(running):
                               " else the recipe default)")
     running.add_argument("--verbose", action="store_true", help="per-phase detail on stderr")
     advanced = running.add_argument_group("advanced options")
+    advanced.add_argument("--expert-scale-compression", choices=("csf",),
+                          help="losslessly compress all routed-expert block scales during loading"
+                               " (Step-5; default: preserve native scales)")
     advanced.add_argument("--prefill-chunk-size", type=int, metavar="N",
                           help="most prompt tokens per prefill step; larger chunks reach a long prompt's first"
                                " token sooner and pause other requests longer (default: the recipe's)")
