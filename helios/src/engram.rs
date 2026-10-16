@@ -3,7 +3,7 @@
 mod reader;
 use crate::{
     Error, Result,
-    cuda::{PinnedHost, Stream},
+    cuda::{Event, PinnedHost, Stream},
     execution::{ExecutionManifest, GraphKind, Upload},
 };
 pub(crate) use reader::Plane;
@@ -306,7 +306,13 @@ impl Transfers {
         }
         Ok(Self { binding, layers })
     }
-    pub fn enqueue(&self, sequence: u64, tokens: usize, uploads: &[Upload<'_>]) -> Result<()> {
+    pub fn enqueue(
+        &self,
+        sequence: u64,
+        tokens: usize,
+        uploads: &[Upload<'_>],
+        inputs_ready: &Event,
+    ) -> Result<()> {
         for (i, (transfer, table)) in self
             .layers
             .iter()
@@ -342,6 +348,9 @@ impl Transfers {
                     .shared
                     .start(i, self.binding.rank, sequence, requests)?;
             let staging = &self.binding.shared.layers[i].staging;
+            // The host reader may wait for IDs produced by the model graph. Express its input
+            // upload prerequisite to CUDA before an otherwise opaque stream-memory wait.
+            transfer.stream.wait(inputs_ready)?;
             unsafe {
                 transfer.stream.wait_value(transfer.flag, generation)?;
                 transfer.stream.upload(

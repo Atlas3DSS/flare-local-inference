@@ -69,13 +69,6 @@ def test_every_free_span_below_the_floor_is_reserved_and_frees_are_resealed():
     assert space.calls - calls < 2 * (context[1] // GRANULE) + 50
 
 
-def test_low_external_allocations_are_named_on_an_integrated_gpu():
-    owner = storage(AddressSpace([]))
-    assert owner.low_allocations({0x327c00000: 8 << 20, PackageStorage.EXTERNAL_FLOOR: 8 << 20}) == [(0x327c00000, 8 << 20)]
-    owner.integrated = False
-    assert owner.low_allocations({0x327c00000: 8 << 20}) == []
-
-
 @pytest.mark.skipif(os.name == "nt", reason="Windows retains its low device allocation pool")
 def test_setup_seals_the_window_and_verifies_allocations_land_above_the_floor():
     space = AddressSpace([(0x327c00000, 0x32ee00000 - 0x327c00000)])

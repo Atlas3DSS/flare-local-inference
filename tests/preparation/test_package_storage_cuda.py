@@ -1,11 +1,35 @@
 """Preparation storage preserves GPU capabilities and mapped mailbox publication."""
 
 import os
+from pathlib import Path
 import subprocess
 import sys
 import time
 
 import pytest
+
+
+@pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
+                    reason="requires an explicitly assigned CUDA device")
+def test_export_keeps_host_mailbox_and_omits_unused_library_storage(tmp_path):
+    from ignition.preparation.package_storage import PackageStorage
+    from ignition.preparation import runtime_package_pb2 as proto
+    from ignition.preparation.package_file import read_index
+
+    assert os.environ.get("CUDA_VISIBLE_DEVICES")
+    root = Path(__file__).resolve().parents[2]
+    output = tmp_path / "mailbox"
+    subprocess.run([sys.executable, str(root / "helios/tests/engram_package_fixture.py"), str(output)],
+                   check=True, cwd=root, timeout=180)
+    index, _ = read_index(output / "package")
+    allocations = index.ranks[0].allocations
+    host, = (allocation for allocation in allocations if allocation.memory == proto.MAPPED_HOST)
+    assert host.address == 0xc0000000000
+    assert all(allocation.address >= PackageStorage.EXTERNAL_FLOOR
+               for allocation in allocations if allocation.memory == proto.DEVICE)
+    assert all(not allocation.name.startswith("external-") for allocation in allocations)
+    assert all(allocation.name == host.name or allocation.address + allocation.nbytes <= host.address
+               or allocation.address >= host.address + host.nbytes for allocation in allocations)
 
 
 @pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",

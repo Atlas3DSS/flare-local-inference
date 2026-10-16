@@ -106,6 +106,7 @@ fn disk_and_resident_tables_feed_native_b12x_graphs() {
         });
         let stream = Stream::open(manifest.context, 0).unwrap();
         let mut downloaded = stream.host_buffer(output.nbytes).unwrap();
+        let transfer = vec![0x5a; manifest.buffer("transfer_source").unwrap().nbytes];
         let mut executor = unsafe { GraphExecutor::new(manifest).unwrap() };
         if fail_read {
             std::fs::OpenOptions::new()
@@ -118,11 +119,18 @@ fn disk_and_resident_tables_feed_native_b12x_graphs() {
             executor
                 .submit(
                     0,
-                    &[Upload {
-                        buffer: "engram_1_hashes",
-                        offset: 0,
-                        bytes: &bytes,
-                    }],
+                    &[
+                        Upload {
+                            buffer: "engram_1_hashes",
+                            offset: 0,
+                            bytes: &bytes,
+                        },
+                        Upload {
+                            buffer: "transfer_source",
+                            offset: 0,
+                            bytes: &transfer,
+                        },
+                    ],
                     false,
                 )
                 .unwrap()
@@ -159,11 +167,18 @@ fn disk_and_resident_tables_feed_native_b12x_graphs() {
             executor
                 .submit(
                     0,
-                    &[Upload {
-                        buffer: "engram_1_hashes",
-                        offset: 0,
-                        bytes: &bytes,
-                    }],
+                    &[
+                        Upload {
+                            buffer: "engram_1_hashes",
+                            offset: 0,
+                            bytes: &bytes,
+                        },
+                        Upload {
+                            buffer: "transfer_source",
+                            offset: 0,
+                            bytes: &transfer,
+                        },
+                    ],
                     false,
                 )
                 .unwrap()

@@ -398,11 +398,6 @@ impl GraphExecutor {
         });
         self.next_sequence += 1;
         let operation = || -> Result<()> {
-            if crate::engram::consumes(graph.kind) {
-                if let Some(engram) = &resources.engram {
-                    engram.enqueue(fence.0, graph.packed_tokens(), uploads)?;
-                }
-            }
             for upload in resolved.copies() {
                 // SAFETY: Validation resolved aligned device/host subranges within the
                 // retained manifest allocations and this pinned frame. The frame is
@@ -419,6 +414,11 @@ impl GraphExecutor {
                 }
             }
             resources.model.record(&frame.started)?;
+            if crate::engram::consumes(graph.kind) {
+                if let Some(engram) = &resources.engram {
+                    engram.enqueue(fence.0, graph.packed_tokens(), uploads, &frame.started)?;
+                }
+            }
             resources.model.launch(graph.handle)?;
             resources.model.record(&frame.produced)?;
             resources.copy.wait(&frame.produced)?;

@@ -139,12 +139,6 @@ class PackageStorage:
             # A granule taken since the probe is skipped.
             address += size
 
-    def low_allocations(self, allocations):
-        """Device allocations among `allocations`, {address: size}, that lie below EXTERNAL_FLOOR."""
-        if not self.integrated:
-            return []
-        return sorted((address, size) for address, size in allocations.items() if address < self.EXTERNAL_FLOOR)
-
     def _snapshot(self):
         pointer = self.library.flare_package_snapshot()
         if not pointer:
