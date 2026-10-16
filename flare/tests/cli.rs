@@ -30,8 +30,12 @@ fn help_exits_successfully_before_accessing_files() {
             "/nonexistent/model.safetensors",
             "--embedding-table-storage",
             "disk",
-            "--bind",
-            "127.0.0.1:8000",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "8000",
+            "--served-model-name",
+            "local-model",
             "--api-key-file",
             "/nonexistent/key.txt",
             "--help",
@@ -46,7 +50,11 @@ fn help_exits_successfully_before_accessing_files() {
             assert!(help.contains("--embedding-table-storage"), "{help}");
             assert!(help.contains("--no-mtp-adaptive-verification"), "{help}");
             assert!(help.contains("--prefix-cache-disk-transport"), "{help}");
-            assert!(help.contains("127.0.0.1:8000"), "{help}");
+            assert!(help.contains("--host"), "{help}");
+            assert!(help.contains("--port"), "{help}");
+            assert!(help.contains("--served-model-name"), "{help}");
+            assert!(help.contains("127.0.0.1"), "{help}");
+            assert!(!help.contains("--bind"), "{help}");
         }
     }
 }
@@ -103,12 +111,24 @@ fn usage_errors_identify_the_problem_before_accessing_files() {
             "unexpected argument '--bogus'",
         ),
         (
-            vec!["run", "/nonexistent/model", "--bind"],
-            "a value is required for '--bind",
+            vec!["run", "/nonexistent/model", "--host"],
+            "a value is required for '--host",
         ),
         (
-            vec!["run", "/nonexistent/model", "--bind", "bad"],
-            "invalid value 'bad' for '--bind",
+            vec!["run", "/nonexistent/model", "--host", "localhost"],
+            "invalid value 'localhost' for '--host",
+        ),
+        (
+            vec!["run", "/nonexistent/model", "--port", "65536"],
+            "invalid value '65536' for '--port",
+        ),
+        (
+            vec!["run", "/nonexistent/model", "--served-model-name", " "],
+            "served model name must not be empty",
+        ),
+        (
+            vec!["run", "/nonexistent/model", "--bind", "127.0.0.1:8000"],
+            "unexpected argument '--bind'",
         ),
         (
             vec![

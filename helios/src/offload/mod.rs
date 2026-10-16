@@ -76,28 +76,41 @@ impl PrefixCacheOffload {
         self.memory_bytes.unwrap_or(0) != 0 || (self.disk.is_some() && self.disk_limit != Some(0))
     }
 
-    /// Device memory each of `ranks` GPUs needs for the store beyond the caches.
-    /// Host memory a device maps costs it about 2 MiB per GiB (126 MiB for 64 GiB
-    /// on an RTX PRO 6000), and transfer streams and their staging add a fixed
-    /// margin. A registered pool maps into every device; without a disk tier the
-    /// memory store is split by rank and each device maps its own part, an equal
-    /// share when the ranks' records are alike.
-    pub fn device_headroom_bytes(&self, ranks: usize) -> u64 {
+    /// Future device and host bytes, sized from the actual record layout. A registered host
+    /// pool costs each device about 2 MiB per GiB, plus transfer streams and events. Without
+    /// a disk tier the retaining pool is split by rank; disk staging is shared by all ranks.
+    pub fn headroom_bytes(&self, ranks: usize, layout: &Layout) -> Result<(u64, u64)> {
         if !self.enabled() {
-            return 0;
+            return Ok((0, 0));
         }
         let memory = self.memory_bytes.unwrap_or(0);
-        let mapped = if self.disk.is_some() && self.disk_limit != Some(0) {
-            memory + DISK_STAGING_REGISTRATION_BYTES
+        let disk = self.disk.is_some() && self.disk_limit != Some(0);
+        let staging = if disk {
+            layout
+                .page_record_bytes
+                .checked_mul(slab::STAGING_PAGE_SLABS as u64)
+                .and_then(|n| {
+                    layout
+                        .row_record_bytes
+                        .checked_mul(slab::STAGING_ROW_SLABS as u64)
+                        .and_then(|rows| n.checked_add(rows))
+                })
+                .ok_or("prefix cache staging memory overflows the device budget")?
+        } else {
+            0
+        };
+        let host = memory
+            .checked_add(staging)
+            .ok_or("prefix cache host memory overflows the device budget")?;
+        let mapped = if disk {
+            host
         } else {
             memory.div_ceil(ranks.max(1) as u64)
         };
-        mapped / 512 + STORE_DEVICE_MARGIN_BYTES
+        Ok((mapped.div_ceil(512) + STORE_DEVICE_MARGIN_BYTES, host))
     }
 }
 
-/// An upper bound on the disk transport's registered staging pool.
-const DISK_STAGING_REGISTRATION_BYTES: u64 = 4 << 30;
 /// Transfer streams, events, and their driver allocations on each GPU; eight streams
 /// take 4 MiB.
 const STORE_DEVICE_MARGIN_BYTES: u64 = 16 << 20;
@@ -740,6 +753,32 @@ mod tests {
         for text in ["", "G", "16X", "1.2.3G", "-1G", "16 GB extra"] {
             assert!(parse_size(text).is_err(), "{text:?}");
         }
+    }
+
+    #[test]
+    fn memory_headroom_accounts_for_the_actual_host_staging_geometry() {
+        let layout = Layout {
+            page_tokens: 64,
+            ranks: Vec::new(),
+            page_record_bytes: 32 << 20,
+            row_record_bytes: 8 << 20,
+        };
+        let mut options = PrefixCacheOffload::default();
+        assert_eq!(options.headroom_bytes(2, &layout).unwrap(), (0, 0));
+        options.memory_bytes = Some(16 << 30);
+        assert_eq!(
+            options.headroom_bytes(2, &layout).unwrap(),
+            ((8u64 << 30) / 512 + STORE_DEVICE_MARGIN_BYTES, 16 << 30)
+        );
+        options.disk = Some("records".into());
+        let staging = 256 * (32u64 << 20) + 4 * (8u64 << 20);
+        let host = (16u64 << 30) + staging;
+        assert_eq!(
+            options.headroom_bytes(2, &layout).unwrap(),
+            (host.div_ceil(512) + STORE_DEVICE_MARGIN_BYTES, host)
+        );
+        options.disk_limit = Some(0);
+        assert_eq!(options.headroom_bytes(2, &layout).unwrap().1, 16 << 30);
     }
 
     #[test]

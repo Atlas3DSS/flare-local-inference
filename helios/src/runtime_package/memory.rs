@@ -1,8 +1,8 @@
 //! Choose physical cache capacities within reserved virtual address ranges.
 
 use super::{
-    NativeModel, NativeResources,
-    format::{Package, invalid},
+    KvCacheLimit, LoadOptions, MemoryLimit, NativeModel, NativeResources,
+    format::{Memory, Package, invalid},
 };
 use crate::{
     Result,
@@ -20,7 +20,7 @@ const INTEGRATED_HOST_BYTES: u64 = 2 << 30;
 const INTEGRATED_SYSTEM_SHARE: u64 = 20;
 
 #[cfg(any(unix, test))]
-fn shared_available(meminfo: &str, total: usize) -> Result<usize> {
+pub(super) fn shared_available(meminfo: &str, total: usize) -> Result<usize> {
     let available = meminfo.lines().find_map(|line| {
         let mut fields = line.split_whitespace();
         if fields.next()? != "MemAvailable:" {
@@ -108,6 +108,145 @@ fn budget(free: u64, total: u64, headroom: u64, integrated: bool) -> u64 {
     free.saturating_sub(headroom.saturating_add(host))
 }
 
+/// Account for loaded storage and observed module/graph growth. The device observation is
+/// taken before loading model resources; on integrated GPUs it includes host allocations too.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct MemorySnapshot {
+    pub free: u64,
+    pub total: u64,
+}
+
+impl NativeResources {
+    pub(super) unsafe fn memory_snapshot(&self) -> Result<MemorySnapshot> {
+        // Keep raw system availability for consumption deltas. Clamping both observations
+        // to CUDA's smaller total can hide driver/graph allocations while RAM is plentiful.
+        #[cfg(unix)]
+        let free = if self.integrated {
+            let info = std::fs::read_to_string("/proc/meminfo").map_err(|e| e.to_string())?;
+            shared_available(&info, usize::MAX)? as u64
+        } else {
+            unsafe { self.available_memory()? as u64 }
+        };
+        #[cfg(windows)]
+        let free = unsafe { self.available_memory()? as u64 };
+        Ok(MemorySnapshot {
+            free,
+            total: unsafe { self.total_memory()? as u64 },
+        })
+    }
+}
+
+fn fixed_bytes(package: &Package, integrated: bool) -> Result<u64> {
+    package
+        .allocations
+        .iter()
+        .filter(|a| {
+            a.sizing.is_none()
+                && (matches!(a.memory, Memory::Device)
+                    || integrated && matches!(a.memory, Memory::MappedHost))
+        })
+        .try_fold(0u64, |total, a| {
+            total
+                .checked_add(a.nbytes as u64)
+                .ok_or_else(|| invalid("fixed model memory overflows the device budget"))
+        })
+}
+
+fn limited_budget(
+    memory: MemorySnapshot,
+    loaded: u64,
+    limit: Option<MemoryLimit>,
+    default_headroom: u64,
+    integrated: bool,
+    future: u64,
+) -> Result<u64> {
+    let headroom = match limit {
+        None => default_headroom,
+        Some(MemoryLimit::Reserve(reserve)) => reserve
+            .checked_add(HEADROOM_BYTES)
+            .ok_or_else(|| invalid("memory reserve overflows the device budget"))?,
+        Some(_) => HEADROOM_BYTES,
+    };
+    let available = budget(
+        memory.free.min(memory.total),
+        memory.total,
+        headroom,
+        integrated,
+    )
+    .saturating_sub(future);
+    let Some(cap) = limit.and_then(|limit| limit.occupied_bytes(memory.total)) else {
+        return Ok(available);
+    };
+    // System headroom is unoccupied memory, whereas the server's later host allocations
+    // and driver allowance are part of its occupied budget.
+    let required = loaded
+        .checked_add(future)
+        .and_then(|n| n.checked_add(HEADROOM_BYTES))
+        .and_then(|n| n.checked_add(if integrated { INTEGRATED_HOST_BYTES } else { 0 }))
+        .ok_or_else(|| invalid("loaded memory footprint overflows the device budget"))?;
+    let remaining = cap.checked_sub(required).ok_or_else(|| invalid(format!(
+        "memory limit is {cap} bytes, but loaded model resources and runtime headroom require {required} bytes"
+    )))?;
+    Ok(available.min(remaining))
+}
+
+/// Token limits describe useful history. Draft-page offsets are storage required in addition
+/// to that history, and depend on the selected graphs' actual page-table bindings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PageLimit {
+    minimum: u64,
+    maximum: u64,
+}
+
+fn page_ceiling(
+    mode: KvCacheLimit,
+    context: u64,
+    active: u64,
+    contract: &crate::model::PreparedContract,
+) -> Result<Option<PageLimit>> {
+    if mode == KvCacheLimit::Memory {
+        return Ok(None);
+    }
+    if context == 0 || contract.cache.page_tokens == 0 {
+        return Err(invalid(
+            "KV cache limit requires a positive context and page size",
+        ));
+    }
+    let histories = if mode == KvCacheLimit::Concurrency {
+        active
+    } else {
+        1
+    };
+    let draft = contract
+        .cache
+        .page_tables
+        .iter()
+        .filter(|view| {
+            contract
+                .graphs
+                .iter()
+                .any(|g| g.inputs.iter().any(|b| b.buffer == view.buffer))
+        })
+        .map(|view| view.page_offset as u64)
+        .max()
+        .unwrap_or(0);
+    let maximum = context
+        .div_ceil(contract.cache.page_tokens as u64)
+        .checked_mul(histories)
+        .and_then(|pages| draft.checked_mul(active).and_then(|n| pages.checked_add(n)))
+        .ok_or_else(|| invalid("KV cache limit overflows page capacity"))?;
+    let minimum = draft
+        .checked_add(1)
+        .and_then(|n| n.checked_mul(active))
+        .ok_or_else(|| invalid("minimum KV storage overflows page capacity"))?;
+    if minimum > maximum {
+        return Err(invalid(
+            "KV cache limit cannot hold one history page and required draft storage per active request",
+        ));
+    }
+    Ok(Some(PageLimit { minimum, maximum }))
+}
+
 fn bytes(package: &Package, capacity: i32, units: u64) -> Result<u64> {
     package
         .allocations
@@ -134,12 +273,13 @@ fn bytes(package: &Package, capacity: i32, units: u64) -> Result<u64> {
         })
 }
 
-pub(super) fn capacities(
+fn capacities(
     packages: &[Package],
     available: &[u64],
     active: u64,
     width: u64,
     page_tokens: u64,
+    page_limit: Option<PageLimit>,
 ) -> Result<(u64, u64, u64)> {
     if packages.len() != available.len()
         || packages.is_empty()
@@ -150,9 +290,14 @@ pub(super) fn capacities(
         return Err(invalid("invalid cache planning geometry"));
     }
     let execution = 1 + active * width;
-    let minimum_pages = active * 8192u64.div_ceil(page_tokens);
+    let minimum_pages = page_limit.map_or(active * 8192u64.div_ceil(page_tokens), |limit| {
+        limit.minimum
+    });
+    if minimum_pages == 0 {
+        return Err(invalid("KV cache limit leaves no physical pages"));
+    }
     let mut cached = active * 8;
-    let mut maximum_pages = u64::MAX;
+    let mut maximum_pages = page_limit.map_or(u64::MAX, |limit| limit.maximum);
     for (package, &budget) in packages.iter().zip(available) {
         let rows: Vec<_> = package
             .allocations
@@ -183,6 +328,11 @@ pub(super) fn capacities(
         }
         cached = cached.min(rows[0].maximum - execution);
         maximum_pages = maximum_pages.min(pages.iter().map(|s| s.maximum).min().unwrap());
+    }
+    if maximum_pages < minimum_pages {
+        return Err(invalid(
+            "prepared virtual extent cannot hold minimum KV capacity",
+        ));
     }
     let fits = |rows, pages| {
         packages.iter().zip(available).all(|(p, &budget)| {
@@ -258,24 +408,86 @@ pub(super) fn capacities(
 }
 
 impl NativeModel {
+    /// Refuse an occupied limit smaller than the known fixed model storage before loading it.
+    pub(super) unsafe fn check_memory_limit(
+        &self,
+        packages: &[Package],
+        options: &LoadOptions,
+        initial: &[MemorySnapshot],
+        embedding_host_bytes: u64,
+    ) -> Result<()> {
+        if !matches!(
+            options.memory_limit,
+            Some(MemoryLimit::Bytes(_) | MemoryLimit::Fraction(_))
+        ) {
+            return Ok(());
+        }
+        for ((rank, package), &memory) in self.ranks.iter().zip(packages).zip(initial) {
+            let fixed = if rank.integrated {
+                packages
+                    .iter()
+                    .zip(&self.ranks)
+                    .filter(|(_, r)| r.integrated)
+                    .try_fold(0u64, |total, (p, _)| {
+                        fixed_bytes(p, true).and_then(|n| {
+                            total
+                                .checked_add(n)
+                                .ok_or_else(|| invalid("shared fixed memory overflow"))
+                        })
+                    })?
+            } else {
+                fixed_bytes(package, false)?
+            };
+            let current = unsafe { rank.memory_snapshot()? };
+            let loaded = fixed
+                .checked_add(if rank.integrated {
+                    embedding_host_bytes
+                } else {
+                    0
+                })
+                .and_then(|fixed| fixed.checked_add(memory.free.saturating_sub(current.free)))
+                .ok_or_else(|| invalid("fixed memory and context footprint overflow"))?;
+            limited_budget(
+                current,
+                loaded,
+                options.memory_limit,
+                headroom(&self.server_config)?,
+                rank.integrated,
+                0,
+            )?;
+        }
+        Ok(())
+    }
+
     pub(super) unsafe fn allocate_caches(
         &mut self,
         packages: &mut [Package],
         progress: &StartupProgress,
         active: usize,
         agree: super::model::CacheAgreement<'_>,
-        offload_bytes: u64,
+        options: &LoadOptions,
+        initial: &[MemorySnapshot],
+        embedding_host_bytes: u64,
     ) -> Result<()> {
         // The host prefix store registers and streams after the caches are backed.
-        let reserve = headroom(&self.server_config)?
-            .checked_add(offload_bytes)
-            .ok_or_else(|| invalid("prefix cache headroom overflows the device budget"))?;
+        let reserve = headroom(&self.server_config)?;
         let page_tokens = self.server_config["page_tokens"]
             .as_u64()
             .ok_or_else(|| invalid("model requires physical page geometry"))?;
-        let contract: crate::model::PreparedContract =
+        let mut contract: crate::model::PreparedContract =
             serde_json::from_value(self.server_config["model_contract"].clone())
                 .map_err(|error| invalid(format!("invalid prepared storage contract: {error}")))?;
+        // The package also declares graphs excluded by runtime reductions. Their storage
+        // requirements must not enlarge the selected cache budget.
+        contract.graphs.retain(|g| {
+            packages[0]
+                .execution
+                .as_ref()
+                .unwrap()
+                .graphs
+                .iter()
+                .any(|graph| graph.name == g.graph)
+        });
         let width = packages[0]
             .execution
             .as_ref()
@@ -291,26 +503,133 @@ impl NativeModel {
             .into_iter()
             .max()
             .unwrap_or(1);
+        let observations = self
+            .ranks
+            .iter()
+            .map(|rank| unsafe { rank.memory_snapshot() })
+            .collect::<Result<Vec<_>>>()?;
+        let integrated = self.ranks.iter().filter(|rank| rank.integrated).count() as u64;
+        let (offload_bytes, host_future) = if options.prefix_cache.enabled() {
+            let geometry = packages
+                .iter()
+                .map(|package| {
+                    cache_geometry(
+                        package,
+                        contract.cache.page_tokens as u64,
+                        1 + active as u64 * width,
+                        1,
+                    )
+                })
+                .collect::<Result<Vec<_>>>()?;
+            options
+                .prefix_cache
+                .headroom_bytes(self.ranks.len(), &crate::offload::Layout::new(&geometry)?)?
+        } else {
+            (0, 0)
+        };
         let mut available = Vec::new();
-        for rank in &self.ranks {
-            let (free, total) = unsafe {
+        let mut loaded_bytes = Vec::new();
+        for (index, (rank, package)) in self.ranks.iter().zip(packages.iter()).enumerate() {
+            let (memory, loaded, future, share) = if rank.integrated {
+                let memory = MemorySnapshot {
+                    free: observations
+                        .iter()
+                        .zip(&self.ranks)
+                        .filter(|(_, r)| r.integrated)
+                        .map(|(m, _)| m.free)
+                        .min()
+                        .unwrap(),
+                    total: observations[index].total,
+                };
+                let fixed = packages
+                    .iter()
+                    .zip(&self.ranks)
+                    .filter(|(_, r)| r.integrated)
+                    .try_fold(0u64, |n, (p, _)| {
+                        fixed_bytes(p, true).and_then(|bytes| {
+                            n.checked_add(bytes)
+                                .ok_or_else(|| invalid("shared fixed memory overflow"))
+                        })
+                    })?;
+                let fixed = fixed
+                    .checked_add(embedding_host_bytes)
+                    .ok_or_else(|| invalid("resident host memory overflows the shared budget"))?;
                 (
-                    rank.available_memory()? as u64,
-                    if rank.integrated {
-                        rank.total_memory()? as u64
-                    } else {
-                        0
-                    },
+                    memory,
+                    fixed.max(initial[index].free.saturating_sub(memory.free)),
+                    offload_bytes
+                        .saturating_mul(integrated)
+                        .saturating_add(host_future),
+                    integrated,
+                )
+            } else {
+                (
+                    observations[index],
+                    fixed_bytes(package, false)?
+                        .max(initial[index].free.saturating_sub(observations[index].free)),
+                    offload_bytes,
+                    1,
                 )
             };
-            available.push(budget(free, total, reserve, rank.integrated));
+            available.push(
+                limited_budget(
+                    memory,
+                    loaded,
+                    options.memory_limit,
+                    reserve,
+                    rank.integrated,
+                    future,
+                )? / share,
+            );
+            loaded_bytes.push(loaded / share);
         }
-        let (local_rows, local_pages, _) =
-            capacities(packages, &available, active as u64, width, page_tokens)?;
+        let context = self.server_config["max_sequence_tokens"]
+            .as_u64()
+            .ok_or_else(|| invalid("model requires a prepared context ceiling"))?;
+        let ceiling = page_ceiling(options.kv_cache_limit, context, active as u64, &contract)?;
+        let (local_rows, local_pages, _) = capacities(
+            packages,
+            &available,
+            active as u64,
+            width,
+            page_tokens,
+            ceiling,
+        )?;
         // Fewer pages only shrink KV, and fewer rows only the snapshot slots aliased into it, so
         // the smallest capacity any rank can back fits every rank. Snapshot rows need no
         // dedicated backing; the alias layout below rejects rows the agreed pages cannot back.
         let (rows, pages) = agree((local_rows, local_pages))?;
+        let virtual_pages = packages
+            .iter()
+            .flat_map(|p| &p.allocations)
+            .filter_map(|a| a.sizing.as_ref().filter(|s| s.capacity == 1))
+            .map(|s| s.maximum)
+            .min()
+            .unwrap();
+        let limiting = if ceiling.is_some_and(|limit| pages == limit.maximum) {
+            options.kv_cache_limit.to_string()
+        } else if pages == virtual_pages {
+            "prepared extent".into()
+        } else {
+            "memory".into()
+        };
+        let gib = |values: &[u64]| {
+            values
+                .iter()
+                .map(|n| format!("{:.2}", *n as f64 / (1u64 << 30) as f64))
+                .collect::<Vec<_>>()
+                .join("/")
+        };
+        progress.phase("Plan cache", None).finish(format!(
+            "KV {} · memory {} · loaded {} GiB · cache budget {} GiB per rank",
+            options.kv_cache_limit,
+            options
+                .memory_limit
+                .map(|limit| limit.to_string())
+                .unwrap_or_else(|| "available with package reserve".into()),
+            gib(&loaded_bytes),
+            gib(&available),
+        ));
         let execution = 1 + active as u64 * width;
         if rows > local_rows || pages > local_pages || rows < execution {
             return Err(invalid(
@@ -447,9 +766,9 @@ impl NativeModel {
         self.server_config["snapshots"] = snapshots.into();
         self.server_config["pages"] = pages.into();
         phase.finish(format!(
-            "{:.1} GiB · {} KV tokens · {snapshots} shared snapshot slots",
+            "{:.1} GiB · {} KV tokens · {snapshots} shared snapshot slots · limited by {limiting}",
             gpu_bytes as f64 / (1u64 << 30) as f64,
-            pages * logical_page_tokens
+            pages * logical_page_tokens,
         ));
         Ok(())
     }
@@ -548,6 +867,182 @@ mod tests {
         assert_eq!(budget(40 * gib, 120 * gib, 5 * gib, true), 27 * gib);
         assert_eq!(budget(40 * gib, 120 * gib, 0, true), 32 * gib);
         assert_eq!(budget(6 * gib, 120 * gib, 0, true), 0);
+    }
+
+    #[test]
+    fn occupied_limits_include_loaded_resources_and_use_total_capacity() {
+        let gib = 1u64 << 30;
+        let memory = MemorySnapshot {
+            free: 40 * gib,
+            total: 100 * gib,
+        };
+        let legacy = 5 * gib + HEADROOM_BYTES;
+        assert_eq!(
+            limited_budget(memory, 20 * gib, None, legacy, false, 0).unwrap(),
+            35 * gib - HEADROOM_BYTES
+        );
+        // An explicit flag replaces the package reserve, including for occupied limits.
+        assert_eq!(
+            limited_budget(
+                memory,
+                20 * gib,
+                Some(MemoryLimit::Bytes(30 * gib)),
+                legacy,
+                false,
+                gib
+            )
+            .unwrap(),
+            9 * gib - HEADROOM_BYTES
+        );
+        assert_eq!(
+            limited_budget(
+                memory,
+                20 * gib,
+                Some(MemoryLimit::Fraction(0.5)),
+                legacy,
+                false,
+                0
+            )
+            .unwrap(),
+            30 * gib - HEADROOM_BYTES
+        );
+        assert_eq!(
+            limited_budget(
+                memory,
+                20 * gib,
+                Some(MemoryLimit::Reserve(10 * gib)),
+                legacy,
+                false,
+                0
+            )
+            .unwrap(),
+            30 * gib - HEADROOM_BYTES
+        );
+        // Other processes still bound the physical supply, even when our cap is larger.
+        let busy = MemorySnapshot {
+            free: gib,
+            ..memory
+        };
+        assert_eq!(
+            limited_budget(
+                busy,
+                20 * gib,
+                Some(MemoryLimit::Bytes(80 * gib)),
+                legacy,
+                false,
+                0
+            )
+            .unwrap(),
+            gib - HEADROOM_BYTES
+        );
+        assert!(
+            limited_budget(
+                memory,
+                30 * gib,
+                Some(MemoryLimit::Bytes(30 * gib)),
+                legacy,
+                false,
+                0
+            )
+            .is_err()
+        );
+        assert!(
+            limited_budget(
+                memory,
+                0,
+                Some(MemoryLimit::Reserve(u64::MAX)),
+                legacy,
+                false,
+                0
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn integrated_budgets_charge_later_host_allocations_once() {
+        let gib = 1u64 << 30;
+        let memory = MemorySnapshot {
+            free: 60 * gib,
+            total: 100 * gib,
+        };
+        // 20 GiB loaded + 2 GiB server host allowance + 8 GiB offload + driver headroom.
+        assert_eq!(
+            limited_budget(
+                memory,
+                20 * gib,
+                Some(MemoryLimit::Bytes(40 * gib)),
+                HEADROOM_BYTES,
+                true,
+                8 * gib
+            )
+            .unwrap(),
+            10 * gib - HEADROOM_BYTES
+        );
+        // Without an occupied cap, retain the five-percent system margin too.
+        assert_eq!(
+            limited_budget(memory, 20 * gib, None, HEADROOM_BYTES, true, 8 * gib).unwrap(),
+            45 * gib - HEADROOM_BYTES
+        );
+        let plentiful = MemorySnapshot {
+            free: 120 * gib,
+            ..memory
+        };
+        assert_eq!(
+            limited_budget(plentiful, 0, None, HEADROOM_BYTES, true, 0).unwrap(),
+            93 * gib - HEADROOM_BYTES
+        );
+    }
+
+    #[test]
+    fn history_limits_round_each_context_and_use_bound_page_table_offsets() {
+        use crate::model::contract::{HistoryKind, PageTableView};
+        let mut contract = crate::model::testing::metadata();
+        contract.cache.page_tokens = 128;
+        contract.cache.page_tables = vec![
+            PageTableView {
+                buffer: contract.graphs[0].inputs[0].buffer.clone(),
+                page_offset: 2,
+            },
+            PageTableView {
+                buffer: "unused-draft-table".into(),
+                page_offset: 999,
+            },
+        ];
+        // Cache storage semantics do not select a different sizing policy.
+        for kind in [
+            HistoryKind::PagedKeyValue,
+            HistoryKind::PagedLatent,
+            HistoryKind::SlidingWindow,
+            HistoryKind::RecurrentState,
+        ] {
+            for region in &mut contract.cache.regions {
+                region.kind = kind;
+            }
+            assert_eq!(
+                page_ceiling(KvCacheLimit::Memory, 1025, 3, &contract).unwrap(),
+                None
+            );
+            assert_eq!(
+                page_ceiling(KvCacheLimit::Context, 1025, 3, &contract).unwrap(),
+                Some(PageLimit {
+                    minimum: 9,
+                    maximum: 15
+                })
+            );
+            assert_eq!(
+                page_ceiling(KvCacheLimit::Concurrency, 1025, 3, &contract).unwrap(),
+                Some(PageLimit {
+                    minimum: 9,
+                    maximum: 33
+                })
+            );
+        }
+        let mut overflow = contract.clone();
+        overflow.cache.page_tokens = 1;
+        assert!(page_ceiling(KvCacheLimit::Concurrency, u64::MAX, 64, &overflow).is_err());
+        assert!(page_ceiling(KvCacheLimit::Context, 0, 3, &contract).is_err());
+        assert!(page_ceiling(KvCacheLimit::Context, 1, 64, &contract).is_err());
     }
 
     fn package(row_bytes: u64, page_bytes: u64, maximum_pages: u64) -> Package {
@@ -668,9 +1163,9 @@ mod tests {
     fn lower_concurrency_and_verification_move_physical_budget_to_kv() {
         let p = [package(100 << 20, 2 << 20, 100000)];
         let budget = [80 << 30];
-        let full = capacities(&p, &budget, 32, 6, 64).unwrap();
-        let reduced = capacities(&p, &budget, 4, 6, 64).unwrap();
-        let target_only = capacities(&p, &budget, 4, 1, 64).unwrap();
+        let full = capacities(&p, &budget, 32, 6, 64, None).unwrap();
+        let reduced = capacities(&p, &budget, 4, 6, 64, None).unwrap();
+        let target_only = capacities(&p, &budget, 4, 1, 64, None).unwrap();
         assert!(full.0 > reduced.0 && reduced.0 > target_only.0);
         assert!(full.1 < reduced.1 && reduced.1 < target_only.1);
         assert_eq!(reduced.0, 1 + 4 * 6 + reduced.2);
@@ -679,19 +1174,112 @@ mod tests {
             assert!(used <= budget[0] && budget[0] - used < 2 << 20);
         }
         // Capture concurrency is deliberately absent from the allocation policy.
-        assert_eq!(reduced, capacities(&p, &budget, 4, 6, 64).unwrap());
+        assert_eq!(reduced, capacities(&p, &budget, 4, 6, 64, None).unwrap());
     }
 
     #[test]
     fn ranks_share_capacities_and_respect_alignment_and_virtual_extents() {
         let p = [package(123456, 45678, 1000), package(246912, 91356, 1000)];
-        let (rows, pages, snapshots) = capacities(&p, &[256 << 20, 80 << 20], 4, 3, 256).unwrap();
+        let (rows, pages, snapshots) =
+            capacities(&p, &[256 << 20, 80 << 20], 4, 3, 256, None).unwrap();
         assert!(pages <= 1000);
         for (p, budget) in p.iter().zip([256 << 20, 80 << 20]) {
             assert!(bytes(p, 0, rows - snapshots).unwrap() + bytes(p, 1, pages).unwrap() <= budget);
         }
-        assert!(capacities(&p, &[256 << 20, 1 << 20], 4, 3, 256).is_err());
-        let (_, pages, _) = capacities(&[package(1024, 1024, 1024)], &[1 << 30], 1, 1, 64).unwrap();
+        assert!(capacities(&p, &[256 << 20, 1 << 20], 4, 3, 256, None).is_err());
+        let (_, pages, _) =
+            capacities(&[package(1024, 1024, 1024)], &[1 << 30], 1, 1, 64, None).unwrap();
         assert_eq!(pages, 1024);
+    }
+
+    #[test]
+    fn capped_pools_can_shrink_below_the_default_floor_without_exceeding_the_ceiling() {
+        let packages = [
+            package(65536, 1 << 20, 10000),
+            package(65536, 2 << 20, 10000),
+        ];
+        let limit = Some(PageLimit {
+            minimum: 4,
+            maximum: 16,
+        });
+        for width in [1, 6] {
+            let (rows, pages, snapshots) =
+                capacities(&packages, &[1 << 30, 1 << 30], 4, width, 64, limit).unwrap();
+            assert_eq!(pages, 16);
+            assert_eq!(rows - snapshots, 1 + 4 * width);
+            // A busy TP rank reduces the common pool. Context mode still starts with fewer
+            // pages than a full context when the usable memory budget requires it.
+            let (_, pages, _) =
+                capacities(&packages, &[1 << 30, 20 << 20], 4, width, 64, limit).unwrap();
+            assert!((4..16).contains(&pages));
+        }
+        assert!(capacities(&packages, &[1 << 30, 1 << 20], 4, 6, 64, limit).is_err());
+        assert!(capacities(&packages, &[1 << 30, 20 << 20], 4, 6, 64, None).is_err());
+    }
+
+    #[test]
+    #[ignore = "requires an assigned CUDA_VISIBLE_DEVICES GPU"]
+    fn cuda_memory_limits_account_for_context_and_allocations() {
+        use super::super::driver::Driver;
+        let driver = Driver::load().unwrap();
+        unsafe {
+            let initial = NativeResources::memory_before_context(0).unwrap();
+            let mut device = 0;
+            driver
+                .check("cuDeviceGet", (driver.device)(&mut device, 0))
+                .unwrap();
+            let mut p = package(65536, 65536, 1024);
+            for (value, attribute) in p.architecture.iter_mut().zip([75, 76]) {
+                driver
+                    .check(
+                        "cuDeviceGetAttribute",
+                        (driver.device_attribute)(value, attribute, device),
+                    )
+                    .unwrap();
+            }
+            p.allocations.truncate(1);
+            p.allocations[0].sizing = None;
+            p.allocations[0].address = None;
+            p.allocations[0].nbytes = 8 << 20;
+            let mut owner = NativeResources::initialize(&p, 0).unwrap();
+            let phase = StartupProgress::silent().phase("Test memory", None);
+            owner.allocate(&p, &phase).unwrap();
+            let memory = owner.memory_snapshot().unwrap();
+            assert_eq!(memory.total, initial.total);
+            let loaded = fixed_bytes(&p, owner.integrated)
+                .unwrap()
+                .max(initial.free.saturating_sub(memory.free));
+            assert!(
+                limited_budget(
+                    memory,
+                    loaded,
+                    Some(MemoryLimit::Bytes(loaded)),
+                    0,
+                    owner.integrated,
+                    0
+                )
+                .is_err()
+            );
+            let cap = loaded
+                + HEADROOM_BYTES
+                + (16 << 20)
+                + if owner.integrated {
+                    INTEGRATED_HOST_BYTES
+                } else {
+                    0
+                };
+            assert_eq!(
+                limited_budget(
+                    memory,
+                    loaded,
+                    Some(MemoryLimit::Bytes(cap)),
+                    0,
+                    owner.integrated,
+                    0
+                )
+                .unwrap(),
+                16 << 20
+            );
+        }
     }
 }

@@ -30,6 +30,9 @@ Anthropic Messages, stateless Responses, authentication, and client configuratio
   engine headroom. The page pool holds active requests and every cached prefix,
   so memory beyond what active requests need keeps more history resident.
   The configuration's GPU reserve leaves memory for processes started later.
+  Runtime `--memory-limit` replaces that serving reserve with an occupied-memory
+  cap, free-memory reserve, or fraction of total memory. `--kv-cache-limit`
+  optionally bounds the shared page pool by one context or context times concurrency.
 - **Estimate roughly, allocate from the device.** Before weights load, Flare
   estimates memory from the recipe's declared sizes, only to choose GPUs and to
   refuse a model that cannot fit. Allocation follows the memory the device has
@@ -88,7 +91,7 @@ Build the public serving executable, which links the Helios library:
 
 ```sh
 cargo build --release --manifest-path flare/Cargo.toml
-flare/target/release/flare run PACKAGE --gpus 0 --bind 127.0.0.1:8000
+flare/target/release/flare run PACKAGE --gpus 0 --host 127.0.0.1 --port 8000
 ```
 
 For MSVC cross-compilation, native Windows builds, and GPU compatibility
@@ -120,7 +123,10 @@ requires `--output FILE`, and excludes `--host` and `--port`.
 | `--max-concurrency N` | Maximum simultaneously active requests, 1 through the recipe's limit | `defaults.max_concurrency`, else the recipe default |
 | `--host ADDR` | Listening address. `run` only. | `server.host`, else `127.0.0.1` |
 | `--port N` | Listening port. `run` only. | `server.port`, else `8000` |
+| `--served-model-name ALIAS` | `run` only: replace the serving alias when Flare loads the package | Package alias |
 | `--verbose` | Per-phase detail on stderr | off |
+| `--kv-cache-limit concurrency\|context\|memory` | `run` only: pass the shared KV-pool ceiling to Flare without changing preparation | `memory` |
+| `--memory-limit LIMIT` | `run` only: pass an occupied size (`30G`), free reserve (`-30G`), or total-memory fraction (`0.8`) to Flare | Package serving reserve |
 | `--config PATH` | Configuration file | `~/.config/flare/config.toml` |
 | `--official-source URL` | Published repository URL under the configured publisher namespace | `[publishing] official_source` |
 | `--publisher-keys PATH` | Additional publisher profiles passed to Flare; repeatable, `run` only | Embedded keys plus the local development profile when applicable |
@@ -252,9 +258,13 @@ Help exits with status 0; usage errors go to stderr with status 2. Its options a
 | `--trust-store PATH` | Persistent key/namespace acceptance file | `~/.config/flare/trust.toml` |
 | `--verify-weights` | Verify the stored allocation and table ranges of the ranks served before loading model GPU resources | off |
 | `--gpus N[,N...]` | Selected GPUs in rank order; indices follow an inherited `CUDA_VISIBLE_DEVICES` list when present | `0` |
-| `--bind IP:PORT` | Listener address | `127.0.0.1:8000` |
+| `--host ADDR` | Listener IP address, IPv4 or IPv6 | `127.0.0.1` |
+| `--port N` | Listener port | `8000` |
+| `--served-model-name ALIAS` | Replace the package's serving aliases with this nonblank alias | Package aliases |
 | `--api-key-file PATH` | File containing the serving API key | No authentication |
 | `--max-concurrency N` | Reduce concurrency within captured batch capacities | Package default |
+| `--kv-cache-limit concurrency\|context\|memory` | Bound shared KV history by prepared context times selected concurrency, one prepared context, or available memory | `memory` |
+| `--memory-limit LIMIT` | Per-GPU occupied size (`30G`), free-memory reserve (`-30G`), or fraction of total memory (`0.8`) | Package serving reserve |
 | `--mtp-draft-tokens N` | Reduce the maximum draft count; zero selects ordinary execution without draft generation, absorption, or draft-state maintenance | Package default |
 | `--mtp-adaptive-verification` / `--no-mtp-adaptive-verification` | Adaptive or fixed selection among captured widths | Package default |
 | `--embedding-table-storage disk\|ram` | PLE and Engram table storage; both modes deliver compact GPU rows | `disk` |
@@ -267,6 +277,14 @@ sizing KV and continuation pools, so the cache uses part of the integrated GPU's
 existing memory budget. The cache remains fixed in size while serving and warms
 from requests each time the server starts.
 
+`--served-model-name` changes the name advertised by `/v1/models` and accepted
+for requests. It replaces the package aliases; the canonical model ID remains
+accepted and appears as the model card's `root`. The override does not modify
+the package, change its identity, or select a different cached package in
+`ignition run`. Both launchers accept numeric IPv4 and IPv6 addresses through
+`--host`; use an unbracketed IPv6 address such as `--host ::1 --port 8001`.
+The combined `--bind` flag has been removed.
+
 Selected concurrency and draft depth cannot exceed prepared capacity.
 Concurrency three requires the batch-four bucket. Fixed verification loads
 width `N+1` where the token envelope permits it, plus width-one execution at every
@@ -274,6 +292,57 @@ batch; adaptive verification loads the permitted
 widths. Missing variants fail before GPU allocation. Continuation rows and
 KV pages receive physical backing after graph upload, within fixed virtual
 extents. Reducing execution state can leave more memory for KV pages.
+
+### Runtime memory limits
+
+`--kv-cache-limit memory` uses the remaining memory budget for KV, as before.
+`context` caps useful KV history at one prepared context; `concurrency` caps it
+at one prepared context per selected active request. Concurrency three uses
+three contexts even though its graphs use a batch-four bucket. Context means
+prompt plus generated tokens. These modes leave `--max-concurrency` unchanged:
+multiple shorter requests share the pool in `context` mode.
+
+History caps round each context up to logical cache pages and add the selected
+graphs' required private draft-page storage. They use the prepared context
+ceiling before fitting the served context to physical memory. All modes remain
+bounded by available memory and prepared virtual extents. The capped modes may
+start with a smaller pool than their ceiling; their minimum is one history page
+plus required draft storage per active request. The default memory mode retains
+its 8,192-token-per-request startup floor. A pool below its minimum fails startup.
+Prefix checkpoints continue borrowing the shared KV backing and are evicted
+under the existing shared policy.
+
+`--memory-limit 30g` budgets at most 30 GiB for Flare on each selected GPU,
+including loaded weights, graph and kernel setup, scratch, execution state,
+caches, and runtime headroom. `--memory-limit -30g` leaves at least 30 GiB free
+at startup, in addition to mandatory engine headroom. `--memory-limit 0.8`
+uses 80% of CUDA-visible total memory as Flare's occupied budget; it is not
+80% of the memory currently free. Other processes still constrain the actual
+available supply. Lowercase and uppercase size suffixes use binary units,
+including `G`, `GB`, and `GiB`; occupied and reserve sizes require a suffix.
+Bare numbers must be greater than zero and at most one. Zero, negative
+fractions, nonfinite values, and overflowing sizes are rejected. Both
+`--memory-limit -30g` and `--memory-limit=-30g` work.
+
+An explicit memory flag replaces the package's serving reserve; the two are
+never subtracted together. Omission preserves the exported `[memory] reserve`.
+Integrated GPUs also count resident host tables, embedding row caches, and
+future prefix-cache host pools in the same physical budget. Shared host memory
+is charged once per host. The existing driver margin, host allowance, and
+system headroom remain in force. An occupied cap smaller than known fixed
+resources fails before loading those resources. The loader reconciles observed
+startup consumption after graph upload and before allocating cache backing.
+Discrete occupied/fraction limits use NVIDIA NVML to observe memory before
+CUDA context creation; Linux integrated devices use `MemAvailable` instead.
+
+These are startup sizing budgets, not OS-enforced quotas. Pools stay fixed
+during serving; Flare does not resize them as other processes allocate memory.
+Startup reports the requested policies, loaded footprint, per-rank cache
+budgets, allocated KV tokens, and whether memory, the selected KV ceiling, or
+prepared virtual extents limited the pool. TP ranks agree on a capacity each
+can back. Runtime memory flags reuse the same prepared package and do not
+alter preparation, captured graphs, or the package cache key. They are absent
+from `ignition export` and the diagnostic `ignition serve` commands.
 
 ### Downloading published packages
 
@@ -449,10 +518,11 @@ Configuration assigns each decision to one owner:
 | Checkpoint and revision | `MODEL`, including a local directory or `org/name@revision` |
 | GPUs and TP size | `--gpus`; rank count follows the selected list |
 | Concurrent requests | `--max-concurrency` |
-| Listener | Ignition `--host` and `--port`; native Flare `--bind` |
+| Listener | Ignition and native Flare `--host` and `--port` |
 | Context limit | Checkpoint maximum; admission still requires sufficient shared cache capacity |
 | KV pages and GPU prefix-cache rows | Derived from available memory, graph cost, and concurrency |
-| GPU memory for later processes | `[memory] reserve` |
+| KV history ceiling | Runtime `--kv-cache-limit` |
+| Serving memory budget | Runtime `--memory-limit`, otherwise exported `[memory] reserve` |
 | Preparation headroom | 1 GiB for compiled warmup and capture |
 | Serving driver margin | 64 MiB after graph upload |
 | Prefill chunk | Recipe default, overridden by `--prefill-chunk-size` |
@@ -481,7 +551,7 @@ disk settings require the implementation and measurements defined there.
 |---|---|
 | Tensor-parallel size | Count of `--gpus`, or the smallest recipe-supported size whose estimate fits the first GPUs with enough free memory |
 | Context limit | The smaller of the prepared context ceiling and loaded KV capacity after per-request draft-page storage; admission also checks available shared capacity |
-| KV pages | All remaining supply after engine headroom, `memory.reserve`, weights, graphs, scratch, and execution rows. Retained snapshot rows borrow page backing; the load display reports total KV capacity |
+| KV pages | Remaining supply after the runtime memory limit or package reserve, engine headroom, weights, graphs, scratch, and execution rows; bounded by `--kv-cache-limit` and prepared virtual extents. Retained snapshot rows borrow page backing; the load display reports total KV capacity |
 | Prefix cache | Up to eight snapshot slots per `--max-concurrency` request, acquired on demand from shared KV backing and evicted under pressure |
 | Live state | One null row plus the recipe's execution rows per active request slot; GLM verification commits into one live row |
 | Decode graph capacities | 1 through `--max-concurrency`, rounded to the recipe's captured set |

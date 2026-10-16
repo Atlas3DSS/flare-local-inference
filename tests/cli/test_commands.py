@@ -95,6 +95,50 @@ def test_multi_host_ranks_parse_for_rank_zero_and_its_peers():
     assert (peer.rendezvous, peer.rank, peer.ranks, peer.gpu) == ("10.0.0.1:29600", 3, 4, 0)
 
 
+@pytest.mark.parametrize("limit", ["30g", "-30g", "0.8", "1", "1.5GiB", "0.001K"])
+def test_runtime_memory_flags_accept_both_value_spellings(limit):
+    for mode in ("concurrency", "context", "memory"):
+        for flags in (["--memory-limit", limit], [f"--memory-limit={limit}"]):
+            args = _parser().parse_args(["run", "qwen3.8-flash", "--kv-cache-limit", mode, *flags])
+            assert (args.memory_limit, args.kv_cache_limit) == (limit, mode)
+
+
+@pytest.mark.parametrize("limit", ["0", "0G", "-0G", "-0.8", "1.1", "30", "NaN", "inf", "1e-1", "--2G", "2P"])
+def test_invalid_runtime_memory_limits_fail_before_preparation(limit, capsys):
+    with pytest.raises(SystemExit) as error:
+        main(["run", "qwen3.8-flash", f"--memory-limit={limit}"])
+    assert error.value.code == 2
+    assert "memory limit must be" in capsys.readouterr().err
+
+
+def test_runtime_memory_flags_do_not_select_preparation_or_diagnostic_behavior(capsys):
+    defaults = _parser().parse_args(["run"])
+    assert defaults.kv_cache_limit == "memory" and defaults.memory_limit is None
+    for command in (["export", "--output", "model.safetensors"], ["serve"]):
+        for flags in (["--kv-cache-limit", "context"], ["--memory-limit", "30G"]):
+            with pytest.raises(SystemExit) as error:
+                main([*command, "qwen3.8-flash", *flags])
+            assert error.value.code == 2
+    capsys.readouterr()
+
+
+@pytest.mark.parametrize("alias", ["", " ", "\t"])
+def test_empty_served_model_name_is_rejected_before_preparation(alias, capsys):
+    with pytest.raises(SystemExit) as error:
+        main(["run", "qwen3.8-flash", "--served-model-name", alias])
+    assert error.value.code == 2
+    assert "served model name must not be empty" in capsys.readouterr().err
+
+
+def test_served_model_name_is_a_runtime_override(capsys):
+    assert _parser().parse_args(["run"]).served_model_name is None
+    for command in (["export", "--output", "model.safetensors"], ["serve"]):
+        with pytest.raises(SystemExit) as error:
+            main([*command, "qwen3.8-flash", "--served-model-name", "local-model"])
+        assert error.value.code == 2
+    capsys.readouterr()
+
+
 def test_stream_overlap_flag_is_a_preparation_flag_that_overlapping_recipes_accept(host, tmp_path, capsys):
     for command in (["run"], ["export", "--output", str(tmp_path / "package")], ["serve"]):
         assert _parser().parse_args([*command, "glm-5.3-flash", "--no-stream-overlap"]).no_stream_overlap

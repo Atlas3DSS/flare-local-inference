@@ -4,6 +4,7 @@ mod archive;
 mod cache_memory;
 #[cfg(test)]
 mod cooperative_tests;
+mod device_memory;
 pub mod driver;
 mod engram;
 #[cfg(test)]
@@ -11,6 +12,7 @@ mod event_tests;
 mod format;
 #[cfg(any(windows, test))]
 mod host;
+mod limits;
 mod memory;
 mod model;
 mod payload;
@@ -22,6 +24,7 @@ pub mod test_support;
 pub use protection::{AuthorizedPackage, Publisher, VerifiedPackage};
 mod selection;
 mod serving;
+pub use limits::{KvCacheLimit, MemoryLimit};
 pub use model::{CacheAgreement, ClusterRank, NativeModel, RoceSpec, package_cluster, rank_ranges};
 pub use selection::LoadOptions;
 

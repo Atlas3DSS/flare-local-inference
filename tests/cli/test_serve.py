@@ -153,6 +153,31 @@ def test_run_exports_then_replaces_python_with_flare_and_reuses_the_package(host
     assert host["exports"] == 1
 
 
+def test_runtime_memory_flags_are_forwarded_without_preparing_another_package(host):
+    assert run("qwen3.8-flash") == 0
+    original = host["exec"][2]
+    assert not any(flag.startswith(("--memory-limit", "--kv-cache-limit")) for flag in host["exec"])
+    for limit, mode in [("30G", "concurrency"), ("-30G", "context"), ("0.8", "memory")]:
+        assert run("qwen3.8-flash", "--memory-limit", limit, "--kv-cache-limit", mode) == 0
+        assert host["exec"][2] == original and host["exports"] == 1
+        assert f"--memory-limit={limit}" in host["exec"]
+        if mode != "memory":
+            assert host["exec"][host["exec"].index("--kv-cache-limit") + 1] == mode
+        assert host["options"]["reserve_bytes"] == 0
+
+
+def test_served_model_name_is_forwarded_without_changing_the_package_alias(host):
+    assert run("qwen3.8-flash") == 0
+    original = host["exec"][2]
+    assert "--served-model-name" not in host["exec"]
+    for alias in ("local-model", "organization/model", "local model"):
+        assert run("qwen3.8-flash", "--served-model-name", alias) == 0
+        arguments = host["exec"]
+        assert arguments[arguments.index("--served-model-name") + 1] == alias
+        assert arguments[2] == original and host["exports"] == 1
+        assert host["options"]["served_names"] == ["qwen3.8-flash"]
+
+
 def test_diagnostic_serving_retains_storage_until_native_shutdown(host, monkeypatch):
     closed = []
 
@@ -315,8 +340,17 @@ def test_listener_and_authentication_are_supplied_after_export(host, tmp_path):
     config.write_text(f'[server]\nport = {port}\napi_key = "secret"\n')
     assert main(["run", "qwen3.8-flash", "--config", str(config)]) == 0
     assert host["api_key"] == "secret"
-    assert host["exec"][5:7] == ["--bind", f"127.0.0.1:{port}"]
+    assert host["exec"][5:9] == ["--host", "127.0.0.1", "--port", str(port)]
     assert "secret" not in host["exec"]
+
+
+def test_listener_flags_override_configuration(host, tmp_path):
+    config = tmp_path / "config.toml"
+    config.write_text('[server]\nhost = "0.0.0.0"\nport = 8000\n')
+    port = free_port()
+    assert main(["run", "qwen3.8-flash", "--config", str(config),
+                 "--host", "127.0.0.1", "--port", str(port)]) == 0
+    assert host["exec"][5:9] == ["--host", "127.0.0.1", "--port", str(port)]
 
 
 def test_prefix_cache_settings_are_forwarded_only_when_set(host, tmp_path):

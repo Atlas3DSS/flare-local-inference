@@ -57,7 +57,7 @@ in the CPU suite.
 
 ```powershell
 .\flare\target\release\flare.exe run C:\models\qwen38-tp1-mtp5.safetensors `
-  --publisher-keys C:\models\publisher.json --gpus 0 --bind 127.0.0.1:8001
+  --publisher-keys C:\models\publisher.json --gpus 0 --host 127.0.0.1 --port 8001
 ```
 
 Publisher acceptance, request sampling, graph-capacity selection, and HTTP APIs

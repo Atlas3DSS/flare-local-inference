@@ -1,10 +1,14 @@
-use std::{net::SocketAddr, num::NonZeroUsize, path::PathBuf};
+use std::{
+    net::{IpAddr, SocketAddr},
+    num::NonZeroUsize,
+    path::PathBuf,
+};
 
 use clap::{Args, Parser, Subcommand, builder::PossibleValuesParser, builder::TypedValueParser};
 use flare_helios::{
     engram::Storage,
     offload::{PrefixCacheOffload, Transport, parse_size},
-    runtime_package::LoadOptions,
+    runtime_package::{KvCacheLimit, LoadOptions, MemoryLimit},
 };
 
 #[derive(Debug, Parser)]
@@ -96,7 +100,7 @@ pub enum TrustCommand {
 #[derive(Debug, Args)]
 #[command(
     args_override_self = true,
-    after_help = "Examples:\n  flare run model.safetensors --gpus 0 --bind 127.0.0.1:8000\n  flare run model.safetensors --embedding-table-storage ram --mtp-draft-tokens 3\n\nConcurrency and draft limits must fit the package's prepared capacities.\nOmitted concurrency and speculation options use package defaults."
+    after_help = "Examples:\n  flare run model.safetensors --gpus 0 --host 127.0.0.1 --port 8000\n  flare run model.safetensors --embedding-table-storage ram --mtp-draft-tokens 3\n\nConcurrency and draft limits must fit the package's prepared capacities.\nOmitted concurrency and speculation options use package defaults."
 )]
 pub struct Run {
     /// Additional publisher verification profiles (JSON); does not grant execution trust.
@@ -126,20 +130,58 @@ pub struct Run {
     #[command(flatten)]
     pub hub: HubOptions,
 
-    /// Address and port for the HTTP server.
+    /// IP address for the HTTP server.
     #[arg(
         long,
-        value_name = "IP:PORT",
-        default_value = "127.0.0.1:8000",
+        value_name = "ADDR",
+        default_value = "127.0.0.1",
         help_heading = "Serving options"
     )]
-    pub bind: SocketAddr,
+    pub host: IpAddr,
+
+    /// Port for the HTTP server.
+    #[arg(
+        long,
+        value_name = "N",
+        default_value = "8000",
+        help_heading = "Serving options"
+    )]
+    pub port: u16,
+
+    /// Replace the package's serving alias; the canonical model ID remains accepted.
+    #[arg(long, value_name = "ALIAS", value_parser = served_model_name, help_heading = "Serving options")]
+    pub served_model_name: Option<String>,
 
     /// GPUs in rank order, relative to CUDA_VISIBLE_DEVICES when set.
     #[arg(long, value_name = "N[,N...]", value_delimiter = ',', action = clap::ArgAction::Set,
         default_value = "0", value_parser = clap::value_parser!(i32).range(0..),
         help_heading = "Serving options")]
     pub gpus: Vec<i32>,
+
+    /// Limit KV capacity by available memory, one context, or context times concurrency.
+    #[arg(
+        long,
+        default_value = "memory",
+        value_name = "MODE",
+        help_heading = "Serving options",
+        value_parser = PossibleValuesParser::new(["concurrency", "context", "memory"])
+            .map(|value| match value.as_str() {
+                "concurrency" => KvCacheLimit::Concurrency,
+                "context" => KvCacheLimit::Context,
+                _ => KvCacheLimit::Memory,
+            })
+    )]
+    pub kv_cache_limit: KvCacheLimit,
+
+    /// Per-GPU serving memory: occupied size (30G), free reserve (-30G), or total fraction (0.8).
+    /// Omitted: package serving reserve.
+    #[arg(
+        long,
+        allow_hyphen_values = true,
+        value_name = "LIMIT",
+        help_heading = "Serving options"
+    )]
+    pub memory_limit: Option<MemoryLimit>,
 
     /// Peer hosts of a multi-host package, ranks 1 onward, each running `flare agent`. Flare sends
     /// the package and itself to hosts that lack them, starts their ranks with these serving
@@ -223,11 +265,29 @@ pub struct Run {
     pub prefix_cache_disk_transport: Option<Transport>,
 }
 
+fn served_model_name(value: &str) -> Result<String, String> {
+    if value.trim().is_empty() {
+        Err("served model name must not be empty".into())
+    } else {
+        Ok(value.to_owned())
+    }
+}
+
 impl Run {
+    pub fn bind_address(&self) -> SocketAddr {
+        SocketAddr::new(self.host, self.port)
+    }
+
     /// Serving options every rank of a multi-host package must load with: they select the same
     /// graphs and capacities on every host.
     pub fn rank_options(&self) -> Vec<String> {
         let mut options = Vec::new();
+        if self.kv_cache_limit != KvCacheLimit::Memory {
+            options.extend(["--kv-cache-limit".into(), self.kv_cache_limit.to_string()]);
+        }
+        if let Some(limit) = self.memory_limit {
+            options.push(format!("--memory-limit={limit}"));
+        }
         if self.verify_weights {
             options.push("--verify-weights".into());
         }
@@ -265,6 +325,8 @@ impl Run {
 
     pub fn load_options(&self) -> LoadOptions {
         LoadOptions {
+            kv_cache_limit: self.kv_cache_limit,
+            memory_limit: self.memory_limit,
             embedding_table_storage: self.embedding_table_storage,
             embedding_table_cache_bytes: self.embedding_table_cache_size,
             max_concurrency: self.max_concurrency.map(NonZeroUsize::get),
@@ -302,12 +364,15 @@ mod tests {
     #[test]
     fn omitted_limits_preserve_package_defaults() {
         let args = run(&["flare", "run", "model.safetensors"]);
-        assert_eq!(args.bind.to_string(), "127.0.0.1:8000");
+        assert_eq!(args.bind_address().to_string(), "127.0.0.1:8000");
+        assert_eq!(args.served_model_name, None);
         let options = args.load_options();
         assert_eq!(options.device_labels, Some(vec![0]));
         assert_eq!(options.embedding_table_storage, None);
         assert_eq!(options.embedding_table_cache_bytes, 0);
         assert_eq!(options.max_concurrency, None);
+        assert_eq!(options.kv_cache_limit, KvCacheLimit::Memory);
+        assert_eq!(options.memory_limit, None);
         assert_eq!(options.mtp_draft_tokens, None);
         assert_eq!(options.adaptive_verification, None);
         assert_eq!(options.prefix_cache, PrefixCacheOffload::default());
@@ -320,8 +385,10 @@ mod tests {
             "run",
             "--gpus=1",
             "--gpus=2,0",
-            "--bind",
-            "[::1]:8001",
+            "--host",
+            "::1",
+            "--port",
+            "8001",
             "model.safetensors",
             "--api-key-file",
             "key.txt",
@@ -340,7 +407,7 @@ mod tests {
             "direct",
         ]);
         assert_eq!(args.package, PathBuf::from("model.safetensors"));
-        assert_eq!(args.bind.to_string(), "[::1]:8001");
+        assert_eq!(args.bind_address().to_string(), "[::1]:8001");
         assert_eq!(args.api_key_file, Some(PathBuf::from("key.txt")));
         let options = args.load_options();
         assert_eq!(options.device_labels, Some(vec![2, 0]));
@@ -378,6 +445,45 @@ mod tests {
     }
 
     #[test]
+    fn listener_flags_support_independent_overrides_and_ipv6() {
+        for (flags, expected) in [
+            (vec!["--host", "0.0.0.0"], "0.0.0.0:8000"),
+            (vec!["--port", "8001"], "127.0.0.1:8001"),
+            (vec!["--host", "::1", "--port", "8002"], "[::1]:8002"),
+        ] {
+            let mut arguments = vec!["flare", "run", "model.safetensors"];
+            arguments.extend(flags);
+            assert_eq!(run(&arguments).bind_address().to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn served_model_name_accepts_aliases_and_rejects_blank_values() {
+        for name in ["my-model", "organization/model", "local model"] {
+            let args = run(&[
+                "flare",
+                "run",
+                "model.safetensors",
+                "--served-model-name",
+                name,
+            ]);
+            assert_eq!(args.served_model_name.as_deref(), Some(name));
+        }
+        for name in ["", " ", "\t"] {
+            assert!(
+                Cli::try_parse_from([
+                    "flare",
+                    "run",
+                    "model.safetensors",
+                    "--served-model-name",
+                    name
+                ])
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
     fn embedding_row_cache_accepts_a_binary_memory_budget() {
         let args = run(&[
             "flare",
@@ -392,6 +498,53 @@ mod tests {
         assert_eq!(
             args.rank_options(),
             ["--embedding-table-cache-size", "1073741824"]
+        );
+    }
+
+    #[test]
+    fn memory_limits_accept_signed_values_and_reach_every_rank() {
+        for value in ["30g", "-30g", "0.8"] {
+            for flags in [
+                vec!["--memory-limit".to_owned(), value.to_owned()],
+                vec![format!("--memory-limit={value}")],
+            ] {
+                let mut arguments = vec![
+                    "flare",
+                    "run",
+                    "model.safetensors",
+                    "--kv-cache-limit",
+                    "context",
+                ];
+                arguments.extend(flags.iter().map(String::as_str));
+                let args = run(&arguments);
+                assert_eq!(args.load_options().kv_cache_limit, KvCacheLimit::Context);
+                assert_eq!(
+                    args.load_options().memory_limit,
+                    Some(value.parse().unwrap())
+                );
+                let forwarded = args.rank_options();
+                let mut peer = vec!["flare", "run", "model.safetensors"];
+                peer.extend(forwarded.iter().map(String::as_str));
+                let peer = run(&peer).load_options();
+                assert_eq!(peer.memory_limit, args.load_options().memory_limit);
+                assert_eq!(peer.kv_cache_limit, KvCacheLimit::Context);
+            }
+        }
+        for value in ["0", "-0.8", "2", "NaN", "1e-1", "-0G"] {
+            assert!(
+                Cli::try_parse_from(["flare", "run", "model.safetensors", "--memory-limit", value])
+                    .is_err()
+            );
+        }
+        assert!(
+            Cli::try_parse_from([
+                "flare",
+                "run",
+                "model.safetensors",
+                "--kv-cache-limit",
+                "unknown"
+            ])
+            .is_err()
         );
     }
 }

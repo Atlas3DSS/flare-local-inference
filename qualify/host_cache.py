@@ -33,7 +33,8 @@ class Server:
     def __init__(self, flare: Path, package: Path, gpus: str, port: int, log: Path, extra: list[str]):
         self.url = f"http://127.0.0.1:{port}"
         self.log = log.open("ab")
-        command = [str(flare), "run", str(package), "--gpus", gpus, "--bind", f"127.0.0.1:{port}", *extra]
+        command = [str(flare), "run", str(package), "--gpus", gpus,
+                   "--host", "127.0.0.1", "--port", str(port), *extra]
         self.log.write((" ".join(command) + "\n").encode())
         self.process = subprocess.Popen(command, stdout=self.log, stderr=subprocess.STDOUT, cwd=ROOT)
 

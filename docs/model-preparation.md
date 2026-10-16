@@ -133,7 +133,7 @@ GPUs explicitly:
 
 ./flare/target/release/flare run \
   /data/flare-runtime/deepseek-v41-flash-tp4-c4-dspark5.safetensors \
-  --gpus 0,4,6,8 --bind 127.0.0.1:8001
+  --gpus 0,4,6,8 --host 127.0.0.1 --port 8001
 ```
 
 DeepSeek V4.1's logical cache pages cover 128 tokens across compressed latent and
@@ -161,7 +161,7 @@ Use two or four available GPUs for preparation and serving:
 
 ./flare/target/release/flare run \
   /data/flare-runtime/deepseek-v4-flash-vision-tp4-c4-dspark5.safetensors \
-  --gpus 3,4,5,6 --bind 127.0.0.1:8001
+  --gpus 3,4,5,6 --host 127.0.0.1 --port 8001
 ```
 
 V4 uses 256-token logical pages containing 64 C4 latent records with an FP8
@@ -189,7 +189,7 @@ Select eight available GPUs:
 
 ./flare/target/release/flare run \
   /data/flare-runtime/mimo-v26-pro-mopd-tp8-c4-dflash7.safetensors \
-  --gpus 0,1,2,3,4,5,6,7 --bind 127.0.0.1:8001
+  --gpus 0,1,2,3,4,5,6,7 --host 127.0.0.1 --port 8001
 ```
 
 Global attention uses paged KV storage; continuation rows retain sliding-window
@@ -227,7 +227,7 @@ catalog, including vision, fits on four RTX PRO 6000 Blackwell GPUs:
 
 ./flare/target/release/flare run \
   /data/flare-runtime/step5-tp4-mtp3-c16-fp8kv.safetensors \
-  --gpus 0,1,2,3 --bind 127.0.0.1:8001
+  --gpus 0,1,2,3 --host 127.0.0.1 --port 8001
 ```
 
 Add `--expert-scale-compression csf` to compress all Step-5 routed-expert block
@@ -289,7 +289,7 @@ residuals, and latent SiTU experts. DFlash2 uses
 
 ./flare/target/release/flare run \
   /data/flare-runtime/kimi-k3-mxfp4-csf-tp16-c4-dflash2-7.safetensors \
-  --gpus 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15 --bind 127.0.0.1:8001
+  --gpus 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15 --host 127.0.0.1 --port 8001
 ```
 
 The draft consumes prefix residuals from target layers 19, 37, 66, 78, and 90
@@ -328,6 +328,16 @@ the declared continuation extent from `preparation_state_rows` and
 full virtual extents in the package. Helios
 sizes its caches after uploading the selected graphs, keeping a separate 64 MiB
 driver margin.
+At package load time, `flare run --kv-cache-limit context` bounds the shared
+KV pool by one prepared context; `concurrency` uses one context per selected
+active request, and the default `memory` fills the available budget. Runtime
+`--memory-limit` accepts an occupied size (`30G`), free reserve (`-30G`), or
+fraction of total device memory (`0.8`). It replaces the exported serving
+reserve and includes model resources as well as caches. `ignition run` forwards
+both flags without selecting a different prepared package. See
+[runtime memory limits](cli-design.md#runtime-memory-limits) for rounding,
+minimum capacities, and integrated-memory accounting. Preparation retains its
+own existing memory policy.
 Ignition captures power-of-two
 batch capacities through the concurrency limit
 and width one at every bucket. Wider speculative and verification shapes require
@@ -349,7 +359,7 @@ Load an exported `.safetensors` package directly with the native CLI:
 
 ```sh
 ./flare/target/release/flare run /data/flare-runtime/qwen38-tp2-mtp5.safetensors \
-  --gpus 0,1 --bind 127.0.0.1:8001
+  --gpus 0,1 --host 127.0.0.1 --port 8001
 curl --fail http://127.0.0.1:8001/health
 ```
 
@@ -358,7 +368,7 @@ Select a subset of a package's captured execution capacities:
 ```sh
 ./flare/target/release/flare run /data/flare-runtime/qwen38-tp1-c4-mtp5.safetensors \
   --gpus 2 --max-concurrency 2 --mtp-draft-tokens 3 \
-  --no-mtp-adaptive-verification --bind 127.0.0.1:8001
+  --no-mtp-adaptive-verification --host 127.0.0.1 --port 8001
 ```
 
 `--mtp-draft-tokens N` limits each round to N drafts plus its pending input.

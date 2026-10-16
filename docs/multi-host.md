@@ -122,7 +122,7 @@ On rank zero:
 
 ```sh
 ./flare/target/release/flare run /data/flare-runtime/glm53-spark-tp2.safetensors \
-  --hosts hertz --gpus 0 --bind 0.0.0.0:8000
+  --hosts hertz --gpus 0 --host 0.0.0.0 --port 8000
 ```
 
 Name the peer hosts in rank order (`--hosts faraday,hertz,ampere` for four

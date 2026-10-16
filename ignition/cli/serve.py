@@ -96,16 +96,24 @@ def run(args) -> int:
                   context_parallel=context_parallel(args, model), stream_overlap=stream_overlap(args, model),
                   mixed_prefill=args.mixed_prefill, expert_scale_compression=args.expert_scale_compression)
     runtime = binary()
-    bind = _address(configuration.get("server.host", args.host).value,
-                    configuration.get("server.port", args.port).value)
+    host = configuration.get("server.host", args.host).value
+    port = configuration.get("server.port", args.port).value
+    _address(host, port)
     with cached_package(configuration, model, plan, args.no_compile, publisher) as package:
         if not package.exists():
             _prepare(args, export_path=package)
         else:
             print(f"Load cached runtime package. {package}", flush=True)
     environment.apply(configuration, plan.gpus)
-    command = [str(runtime), "run", str(package), "--gpus", ",".join(str(rank) for rank in range(plan.world_size)), "--bind", bind]
+    command = [str(runtime), "run", str(package), "--gpus", ",".join(str(rank) for rank in range(plan.world_size)),
+               "--host", host, "--port", str(port)]
     command += configuration.prefix_cache_flags()
+    if args.served_model_name is not None:
+        command += ["--served-model-name", args.served_model_name]
+    if args.kv_cache_limit != "memory":
+        command += ["--kv-cache-limit", args.kv_cache_limit]
+    if args.memory_limit is not None:
+        command += [f"--memory-limit={args.memory_limit}"]
     for path in args.publisher_keys:
         command += ["--publisher-keys", str(path)]
     if publisher.development:

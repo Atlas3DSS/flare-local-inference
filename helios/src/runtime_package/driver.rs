@@ -102,6 +102,8 @@ macro_rules! driver {
 driver! {
     init: "cuInit"(c_uint);
     device: "cuDeviceGet"(*mut c_int, c_int);
+    device_total_memory: "cuDeviceTotalMem_v2"(*mut usize, c_int);
+    device_pci_bus_id: "cuDeviceGetPCIBusId"(*mut c_char, c_int, c_int);
     device_attribute: "cuDeviceGetAttribute"(*mut c_int, c_int, c_int);
     context_create: "cuCtxCreate_v2"(*mut Handle, c_uint, c_int);
     context_set: "cuCtxSetCurrent"(Handle);

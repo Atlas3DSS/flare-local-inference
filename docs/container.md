@@ -46,7 +46,7 @@ docker run --rm --name flare \
   flare:local run /models/model.safetensors \
   --publisher-keys /models/publisher.json \
   --trust-store /models/trust.toml \
-  --gpus 0 --bind 0.0.0.0:8000
+  --gpus 0 --host 0.0.0.0 --port 8000
 ```
 
 The image runs as UID/GID `10001:10001`; mounted files and parent directories

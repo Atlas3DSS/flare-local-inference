@@ -276,6 +276,21 @@ impl NativeModel {
                 "embedding row cache requires an embedding table catalog",
             ));
         }
+        let embedding_host_bytes =
+            if options.embedding_table_storage == Some(crate::engram::Storage::Ram) {
+                engram
+                    .as_ref()
+                    .into_iter()
+                    .flat_map(|index| &index.tables)
+                    .flat_map(|table| &table.planes)
+                    .try_fold(0u64, |bytes, plane| {
+                        bytes.checked_add(plane.nbytes as u64).ok_or_else(|| {
+                            invalid("resident embedding tables exceed the memory budget")
+                        })
+                    })?
+            } else {
+                options.embedding_table_cache_bytes
+            };
         let prepared: crate::model::PreparedContract =
             serde_json::from_value(server_config["model_contract"].clone())
                 .map_err(|error| invalid(format!("invalid prepared contract: {error}")))?;
@@ -415,6 +430,19 @@ impl NativeModel {
             roce,
         };
         unsafe {
+            let before_contexts = if matches!(
+                options.memory_limit,
+                Some(super::MemoryLimit::Bytes(_) | super::MemoryLimit::Fraction(_))
+            ) {
+                Some(
+                    devices
+                        .iter()
+                        .map(|&device| NativeResources::memory_before_context(device))
+                        .collect::<Result<Vec<_>>>()?,
+                )
+            } else {
+                None
+            };
             let phase = progress.phase(
                 if devices.len() == 1 {
                     "Initialize GPU"
@@ -441,6 +469,15 @@ impl NativeModel {
                     .collect::<Vec<_>>()
                     .join(" / "),
             );
+            let initial = match before_contexts {
+                Some(initial) => initial,
+                None => model
+                    .ranks
+                    .iter()
+                    .map(|rank| rank.memory_snapshot())
+                    .collect::<Result<Vec<_>>>()?,
+            };
+            model.check_memory_limit(&packages, options, &initial, embedding_host_bytes)?;
             let (mut gpu_bytes, mut host_bytes, mut payload_bytes) = (0u64, 0u64, 0u64);
             for allocation in packages.iter().flat_map(|package| &package.allocations) {
                 match allocation.memory {
@@ -539,7 +576,9 @@ impl NativeModel {
                 progress,
                 active,
                 agree,
-                options.prefix_cache.device_headroom_bytes(devices.len()),
+                options,
+                &initial,
+                embedding_host_bytes,
             )?;
             model.grant_peer_access(&descriptor.peer_memory)?;
             model.prepare_offload(root, options, progress)?;

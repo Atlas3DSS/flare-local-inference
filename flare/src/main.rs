@@ -75,6 +75,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err(std::io::Error::last_os_error().into());
         }
     }
+    let bind = args.bind_address();
     environment::configure(&args.gpus)?;
     let package = if hub::is_repository(&args.package) {
         hub::download(
@@ -225,7 +226,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let phase = progress.phase("Read model configuration", None);
     let mut config = owner.server_config().clone();
-    config["bind"] = args.bind.to_string().into();
+    config["bind"] = bind.to_string().into();
+    if let Some(name) = args.served_model_name {
+        config["served_names"] = serde_json::json!([name]);
+    }
     config["api_key"] = key.unwrap_or_default().into();
     phase.finish(config["model_id"].as_str().unwrap_or_default());
     serve(owner, config, progress, cluster)

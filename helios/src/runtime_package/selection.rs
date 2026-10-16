@@ -9,6 +9,8 @@ use crate::{Result, execution::BATCH_CAPACITIES};
 
 #[derive(Clone, Debug, Default)]
 pub struct LoadOptions {
+    pub kv_cache_limit: super::KvCacheLimit,
+    pub memory_limit: Option<super::MemoryLimit>,
     /// Auxiliary embedding-table storage; defaults to disk when absent.
     pub embedding_table_storage: Option<crate::engram::Storage>,
     /// Per-host bytes for disk-backed embedding row caches; zero disables.
@@ -25,6 +27,9 @@ pub struct LoadOptions {
 
 impl LoadOptions {
     pub(super) fn select(&self, packages: &mut [Package], config: &mut Value) -> Result<usize> {
+        if let Some(limit) = self.memory_limit {
+            limit.validate()?;
+        }
         if self.embedding_table_cache_bytes != 0
             && self.embedding_table_storage == Some(crate::engram::Storage::Ram)
         {
