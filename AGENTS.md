@@ -267,17 +267,28 @@ Kimi K3 uses the local `/data/models/Kimi-K3-MXFP4-CSF` checkpoint. The
 and up to four images per request on sixteen GPUs. It preserves MXFP4 experts
 with compressed scales, BF16 projections, and FP32 KDA recurrent state.
 Its 93-layer decoder combines KDA, unrotated latent attention, attention
-residuals, and latent SiTU experts. There is no learned draft model.
+residuals, and latent SiTU experts. DFlash2 uses
+`lightseekorg/kimi-k3-dflash2` revision
+`e77935fb4804e17eb55085bffd045eae1d779769`, downloaded to
+`/data/models/Kimi-K3-DFlash2`, and defaults to seven draft tokens per round.
 
 ```sh
 .venv/bin/python -m ignition export /data/models/Kimi-K3-MXFP4-CSF --gpus 0-15 \
-  --max-concurrency 4 --prefill-chunk-size 4096 \
-  --output /data/flare-runtime/kimi-k3-mxfp4-csf-tp16-c4.safetensors --verbose
+  --max-concurrency 4 --mtp-draft-tokens 7 --prefill-chunk-size 4096 \
+  --output /data/flare-runtime/kimi-k3-mxfp4-csf-tp16-c4-dflash2-7.safetensors --verbose
 
 ./flare/target/release/flare run \
-  /data/flare-runtime/kimi-k3-mxfp4-csf-tp16-c4.safetensors \
+  /data/flare-runtime/kimi-k3-mxfp4-csf-tp16-c4-dflash2-7.safetensors \
   --gpus 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15 --bind 127.0.0.1:8001
 ```
+
+The draft consumes prefix residuals from target layers 19, 37, 66, 78, and 90
+(zero-based). Its five noncausal MLA layers predict an eight-position block;
+grouped convolutions and a predecessor-conditioned candidate selector generate
+seven proposals. Only accepted target features enter the draft's paged context,
+and KDA verification records replay the accepted prefix into committed state.
+Loading with `--mtp-draft-tokens 0` selects ordinary execution; exporting with
+`--no-mtp` excludes draft weights and state.
 
 MLA latent records occupy 128-token pages. Continuation rows preserve KDA
 convolution and recurrent state, partial latent pages, and the normalized
