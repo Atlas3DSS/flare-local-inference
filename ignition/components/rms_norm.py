@@ -9,7 +9,7 @@ from ignition.preparation.tuning import benchmark_resource, declare
 
 
 class PreparedRMSNorm:
-    def __init__(self, source, weight, output, *, eps, session, name, zero_centered=False, residual=None):
+    def __init__(self, source, weight, output, *, eps, session, name, zero_centered=False, residual=None, staging=None):
         if (source.ndim != 2 or source.shape != output.shape or weight.shape != source.shape[1:]
                 or source.dtype not in (torch.bfloat16, torch.float32) or output.dtype != torch.bfloat16
                 or weight.dtype not in (torch.bfloat16, torch.float32)
@@ -20,6 +20,16 @@ class PreparedRMSNorm:
         self.zero_centered, self.add_residual = bool(zero_centered), residual is not None
         if residual is not None and (residual.shape != source.shape or residual.dtype not in (torch.bfloat16, torch.float32)):
             raise ValueError("normalization residual must match the input matrix")
+        self.staging = None
+        if not source.is_contiguous():
+            if staging is None:
+                staging = torch.empty(source.shape, dtype=source.dtype, device=source.device)
+            if (not staging.is_contiguous() or staging.dtype != source.dtype
+                    or staging.device != source.device or staging.numel() < source.numel()):
+                raise ValueError("RMS normalization staging must hold a contiguous input matrix")
+            self.staging = staging.view(-1)[:source.numel()].view(source.shape)
+            self.staging.copy_(source)
+        prepared_source = source if self.staging is None else self.staging
         self.plan = hyperconnection.plan(hyperconnection.Caps(device=source.device,
             max_tokens=source.shape[0], hidden_size=source.shape[1], streams=1, lowrank=1, dtype=source.dtype),
             invocation={"operation": "grouped_rmsnorm", "zero_centered": self.zero_centered, "eps": self.eps,
@@ -28,7 +38,8 @@ class PreparedRMSNorm:
                         "weight_dtype": str(weight.dtype).removeprefix("torch.")})
         kwargs = {"eps": self.eps} if residual is None else {"eps": self.eps, "residual": residual}
         def benchmark(state):
-            arguments = (source, weight, output) if residual is None else (source, weight, residual, output)
+            arguments = ((prepared_source, weight, output) if residual is None
+                         else (prepared_source, weight, residual, output))
             operands = benchmark_resource(session, ("rms_norm", name),
                 lambda: HyperconnectionBenchmarkInputs("grouped_rmsnorm", arguments))
             if residual is None:
@@ -38,13 +49,19 @@ class PreparedRMSNorm:
             return PreparedCall(run=lambda: state.launch(a, w, o, eps=self.eps, residual=r),
                                 output=o, produce=operands.produce, owners=(operands,))
         declare(session, (self.plan.request(name=name,
-            prepare_call=lambda state: PreparedCall(run=lambda: state.launch(source, weight, output, **kwargs)),
+            prepare_call=lambda state: PreparedCall(run=lambda: state.launch(prepared_source, weight, output, **kwargs)),
             benchmark_call=benchmark),))
 
     def __call__(self, source, residual=None):
+        original_source = source
+        if self.staging is not None:
+            self.staging.copy_(source)
+            source = self.staging
         if self.add_residual:
             torch.ops.b12x.hyperconnection_residual_rmsnorm(
                 source, residual, self.weight, self.output, self.eps, self.plan.handle, self.zero_centered)
+            if self.staging is not None:
+                original_source.copy_(source)
         else:
             torch.ops.b12x.hyperconnection_grouped_rmsnorm(
                 source, self.weight, self.output, self.eps, self.plan.handle, self.zero_centered)
