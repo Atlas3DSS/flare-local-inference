@@ -61,6 +61,27 @@ def test_discrete_discovery_does_not_initialize_cuda(devices):
     assert calls == ["init", "shutdown"]
 
 
+@pytest.mark.parametrize("gpu_index", [0, 1])
+def test_non_cuda_nvml_devices_are_skipped_without_renumbering_gpus(devices, monkeypatch, gpu_index):
+    nvml, _, calls = devices
+    monkeypatch.setattr(nvml, "device_get_count_v2", lambda: 2)
+
+    def capability(handle):
+        if handle != gpu_index:
+            raise nvml.NotSupportedError()
+        return (12, 1)
+
+    def memory(handle):
+        assert handle == gpu_index, "non-CUDA devices do not expose GPU memory"
+        return SimpleNamespace(total=96 * GIB, free=80 * GIB)
+
+    monkeypatch.setattr(nvml, "device_get_cuda_compute_capability", capability)
+    monkeypatch.setattr(nvml, "device_get_memory_info_v2", memory)
+    gpu, = planning.discover_gpus()
+    assert (gpu.index, gpu.capability) == (gpu_index, (12, 1))
+    assert calls == ["init", "shutdown"]
+
+
 def unsupported(nvml, monkeypatch):
     def memory(handle):
         raise nvml.NotSupportedError()

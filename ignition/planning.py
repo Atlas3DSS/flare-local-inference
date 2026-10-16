@@ -59,6 +59,11 @@ def discover_gpus() -> tuple[Gpu, ...]:
         for index in range(nvml.device_get_count_v2()):
             handle = nvml.device_get_handle_by_index_v2(index)
             try:
+                capability = tuple(nvml.device_get_cuda_compute_capability(handle))
+            except nvml.NotSupportedError:
+                # NVML also enumerates non-CUDA devices, including Windows NPUs.
+                continue
+            try:
                 memory = nvml.device_get_memory_info_v2(handle)
                 total, free = memory.total, memory.free
                 if os.name == "nt":
@@ -69,7 +74,7 @@ def discover_gpus() -> tuple[Gpu, ...]:
                 # GB10 has no framebuffer for NVML to report; it allocates from system memory.
                 total, free = _integrated_memory(nvml.device_get_pci_info_v3(handle).bus_id)
             gpus.append(Gpu(index, nvml.device_get_name(handle), nvml.device_get_uuid(handle), total,
-                            free, tuple(nvml.device_get_cuda_compute_capability(handle))))
+                            free, capability))
         return tuple(gpus)
     finally:
         nvml.shutdown()

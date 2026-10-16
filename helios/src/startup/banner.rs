@@ -14,13 +14,18 @@ const SURFACE_SPANS: [&[(usize, usize)]; 4] = [
 ];
 
 pub(super) fn frame(progress: f64, width: usize) -> String {
-    let frames: Vec<_> = ART.split("\n---\n").collect();
+    render(ART, progress, width)
+}
+
+fn render(art: &str, progress: f64, width: usize) -> String {
+    let lines: Vec<_> = art.lines().collect();
+    let frames: Vec<_> = lines.split(|line| *line == "---").collect();
     let index = (progress * (frames.len() - 1) as f64).round() as usize;
     let art = frames[index];
     let mut output = String::new();
     let cooling = ((progress - 0.15) / 0.8).clamp(0.0, 1.0);
     let cooling = cooling * cooling * (3.0 - 2.0 * cooling);
-    for (row, line) in art.lines().enumerate() {
+    for (row, line) in art.iter().enumerate() {
         output.push_str("\r\x1b[2K");
         for (column, character) in line
             .chars()
@@ -73,4 +78,24 @@ pub(super) fn frame(progress: f64, width: usize) -> String {
     }
     output.push('\n');
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn all_animation_frames_render_identically_with_lf_and_crlf() {
+        let lf = ART.replace("\r\n", "\n");
+        let crlf = lf.replace('\n', "\r\n");
+        for step in 0..=48 {
+            let progress = step as f64 / 48.0;
+            for width in [0, 1, 40, 72, 120] {
+                let expected = render(&lf, progress, width);
+                assert_eq!(expected.lines().count(), COLORS.len() + 1);
+                assert_eq!(render(&crlf, progress, width), expected);
+                assert_eq!(frame(progress, width), expected);
+            }
+        }
+    }
 }
