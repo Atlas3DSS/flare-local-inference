@@ -34,12 +34,12 @@ class AttentionScratch:
     selected_tokens: torch.Tensor
 
     @classmethod
-    def allocate(cls, config, shard, tokens, context, device, *, requests=1):
+    def allocate(cls, config, shard, tokens, context, device, *, requests=1, buffers=None):
         a = config.attention(0)
         heads, groups = a.local(shard)
         ih = config.sparse["sparse_indexer_num_heads"] // config.sparse["num_provider_groups"]
         def zeros(*shape, dtype=torch.bfloat16):
-            return torch.zeros(shape, dtype=dtype, device=device)
+            return torch.zeros(shape, dtype=dtype, device=device) if buffers is None else buffers.zeros(shape, dtype)
         index_width = (groups * ih + 2) * 256 + groups * ih
         return cls(zeros(tokens, (heads + 2 * groups) * a.dimension + heads + index_width),
             zeros(tokens, heads, a.dimension), zeros(tokens, groups, a.dimension), zeros(tokens, groups, a.dimension),
@@ -57,7 +57,7 @@ class AttentionScratch:
 
 class PreparedAttention(torch.nn.Module):
     def __init__(self, layer, weights, config, shard, source, scratch, metadata, pool, *, mode,
-                 runtime, coordinator, session, name, workspace, first_position=0, proposal=None, reduce_output=True):
+                 runtime, coordinator, session, name, workspace, first_position=0, proposal=None, reduce_output=True, buffers=None):
         super().__init__()
         self.scratch, self.metadata, self.mode = scratch, metadata, mode
         self.geometry = a = config.attention(layer)
@@ -65,7 +65,8 @@ class PreparedAttention(torch.nn.Module):
         self.retained = None
         if mode == "verify":
             shapes = (scratch.key, scratch.value) if a.window > 0 else (scratch.index_key, scratch.index_gate)
-            self.retained = tuple(torch.zeros_like(x) for x in shapes)
+            self.retained = tuple(torch.zeros_like(x) if buffers is None else buffers.zeros(x.shape, x.dtype)
+                                  for x in shapes)
         self.projected = scratch.projected.flatten()[:source.shape[0] * weights.qkvg.shape[0]].view(
             source.shape[0], weights.qkvg.shape[0])
         self.projection = UnquantizedProjection(source, weights.qkvg, self.projected, session=session, name=name + ".qkvg")
@@ -94,7 +95,7 @@ class PreparedAttention(torch.nn.Module):
             self.summaries = pool.cache(layer, "index")
             self.pending_key, self.pending_gate = pool.cache(layer, "pending_key"), pool.cache(layer, "pending_gate")
             self.selection = PreparedRegionSelection(scratch.index_query, scratch.index_weight, self.summaries,
-                metadata, scratch.selected, ratio=8, session=session, workspace=workspace, name=name + ".selection")
+                metadata, scratch.selected, ratio=8, session=session, workspace=workspace, name=name + ".selection", buffers=buffers)
             self.attention = PreparedSelectedAttention(scratch.query, self.key, self.value, metadata.page_table,
                 metadata.requests, metadata.positions, scratch.selected_tokens, scratch.attended, output_gate=self.gate,
                 session=session, workspace=workspace, name=name + ".attention")

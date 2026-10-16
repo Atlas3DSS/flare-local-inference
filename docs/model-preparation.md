@@ -211,19 +211,22 @@ the converted weights are retained in captured graphs and exported packages.
 Shared, dense, and MTP MLP gate/up weights are packed and converted to MXFP8
 during loading. Target-model projections select BF16 or quantized activations
 through autotuning. MTP projections retain BF16 activations to bound rounding
-error through the predictor feedback chain. Down projections, attention
-projections, and KV remain BF16, with FP32 residual accumulation. CSF scale
-compression allows the C1/MTP3 graph
-catalog, including vision, to fit on four RTX PRO 6000 Blackwell GPUs:
+error through the predictor feedback chain. Down and attention projections remain
+BF16, with FP32 residual accumulation. Paged and sliding-window
+K/V, including MTP windows, use FP8 E4M3 with unit descales;
+sliding attention consumes live candidates in BF16 before committing them to FP8 history;
+Q/K normalization and rotary computation retain their BF16 rounding before the
+FP8 store. With CSF scales and shared scratch, the concurrency-16/MTP3 graph
+catalog, including vision, fits on four RTX PRO 6000 Blackwell GPUs:
 
 ```sh
 .venv/bin/ignition export step5-preview-nvfp4 --gpus 0,1,2,3 \
-  --max-concurrency 1 --mtp-draft-tokens 3 --no-mtp-adaptive-verification \
-  --prefill-chunk-size 4096 --expert-scale-compression csf \
-  --output /data/flare-runtime/step5-tp4-c1-mtp3-csf.safetensors --verbose
+  --max-concurrency 16 --mtp-draft-tokens 3 --no-mtp-adaptive-verification \
+  --speculative-token-capacity 16 --prefill-chunk-size 4096 --expert-scale-compression \
+  --output /data/flare-runtime/step5-tp4-mtp3-c16-fp8kv.safetensors --verbose
 
 ./flare/target/release/flare run \
-  /data/flare-runtime/step5-tp4-c1-mtp3-csf.safetensors \
+  /data/flare-runtime/step5-tp4-mtp3-c16-fp8kv.safetensors \
   --gpus 0,1,2,3 --bind 127.0.0.1:8001
 ```
 
@@ -233,13 +236,18 @@ W4A16 experts use CSF, retaining their activation modes. Serialized layers share
 one pair of expansion buffers, whose contents are zero-initialized on export.
 One transient loading pool reuses conversion scratch across layers and retires
 after weight loading, retaining live weights for graph export. The separate
-graph-capture pool remains alive.
+graph-capture pool remains alive. Vision, prefill, decode, and draft activations
+reuse typed graph buffers. MTP feedback, sampling, metadata, and resume scratch
+reuse a separate buffer pool across graph variants, with disjoint buffers within
+each graph. Sequential predictors share their norm-concatenation output. Kernel
+workspaces use the shared operator arena, with separate slices for overlapping
+expert branches. Compiler-created intermediates use one shared CUDA graph pool.
 The memory plan estimates 6% lower resident weight storage; actual memory depends
 on encoded exceptions and is reported after loading. Larger concurrency requires
 separate preparation and memory validation.
 
 Sliding attention keeps a 512-token continuation window. Sparse attention uses
-128-token logical pages containing BF16 keys and values and an FP8 retrieval
+128-token logical pages containing FP8 keys and values and an FP8 retrieval
 index for eight-token regions. Continuation rows also preserve partial index
 regions and accepted MTP state. Accepted target tokens, hidden states, and embeddings
 remain in continuation storage until the following round consumes them in three

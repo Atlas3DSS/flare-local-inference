@@ -1,6 +1,6 @@
 """Prepared b12x paged GQA over caller-selected logical token positions."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import torch
 from b12x._lib.compile_plan import attach_programs, compile_only_launches, load_programs
@@ -67,7 +67,7 @@ class State:
     programs: dict
 
 
-def _run(query, key, value, pages, requests, positions, selected, output, output_gate, scratch, state):
+def _run(query, key, value, pages, requests, positions, selected, output, output_gate, descale, scratch, state):
     rows, heads, dim = query.shape
     splits, warps = state.tactic
     partial = lse = None
@@ -79,20 +79,21 @@ def _run(query, key, value, pages, requests, positions, selected, output, output
     launch_sparse_paged_gqa(query=query, key_cache=key, value_cache=value, block_table=pages,
         request_ids=requests, query_positions=positions, selected_positions=selected, output=output,
         partial_output=partial, partial_lse=lse, softmax_scale=dim ** -.5, block_n=16,
-        splits=splits, direct_kv_warps=warps, output_gate=output_gate, _prepared=state.programs)
+        splits=splits, direct_kv_warps=warps, output_gate=output_gate,
+        k_descale=descale, v_descale=descale, _prepared=state.programs)
 
 
 @torch.library.custom_op("flare::selected_gqa", mutates_args=("output", "scratch"))
 def _execute(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, pages: torch.Tensor,
              requests: torch.Tensor, positions: torch.Tensor, selected: torch.Tensor,
-             output: torch.Tensor, output_gate: torch.Tensor | None, scratch: torch.Tensor, handle: int) -> None:
+             output: torch.Tensor, output_gate: torch.Tensor | None, descale: torch.Tensor, scratch: torch.Tensor, handle: int) -> None:
     plan = plan_from_handle(handle)
-    _run(query, key, value, pages, requests, positions, selected, output, output_gate, scratch,
+    _run(query, key, value, pages, requests, positions, selected, output, output_gate, descale, scratch,
          require_prepared(plan, plan.component_id, query.device))
 
 
 @_execute.register_fake
-def _fake(query, key, value, pages, requests, positions, selected, output, output_gate, scratch, handle):
+def _fake(query, key, value, pages, requests, positions, selected, output, output_gate, descale, scratch, handle):
     pass
 
 
@@ -103,6 +104,7 @@ class PreparedSelectedAttention:
 
         _output_gate_stride(output_gate, query)
         self.output_gate = output_gate
+        self.descale = torch.ones(1, dtype=torch.float32, device=query.device)
         q = Query(tuple(tensor_facts(x) for x in (query, key, value, requests, selected)),
                   tensor_facts(output_gate) if output_gate is not None else None)
 
@@ -140,10 +142,10 @@ class PreparedSelectedAttention:
             nbytes = 0 if q.direct else q.rows * state.tactic[0] * query.shape[1] * (query.shape[2] + 1) * 4
             scratch = planned_scratch((scratch_buffer_spec(CONTRACT.component_id, nbytes=nbytes,
                                                           device=query.device),), workspace)
-            return PreparedCall(run=lambda: _run(*args, gate, scratch, state), output=args[-1], produce=produce,
+            return PreparedCall(run=lambda: _run(*args, gate, self.descale, scratch, state), output=args[-1], produce=produce,
                                 owners=prime_owners(workspace, scratch, (args, gate)))
 
-        declare(session, (self.plan.request(name=name, prepare_call=call,
+        declare(session, (self.plan.request(name=name, prepare_call=lambda state: replace(call(state, True), owners=()),
             benchmark_call=lambda state: call(state, True)),))
         register_finalizer(session, lambda: self._bind(workspace), workspace=workspace)
 
@@ -151,5 +153,5 @@ class PreparedSelectedAttention:
         self.scratch = planned_scratch(self.plan.scratch_specs(), workspace)
 
     def __call__(self):
-        _execute(*self.arguments, self.output_gate, self.scratch, self.plan.handle)
+        _execute(*self.arguments, self.output_gate, self.descale, self.scratch, self.plan.handle)
         return self.arguments[-1]

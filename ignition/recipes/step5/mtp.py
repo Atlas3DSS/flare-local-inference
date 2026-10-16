@@ -17,14 +17,16 @@ from .decoder import PreparedDecoderLayer, PreparedFeedForward, Scratch
 class PreparedPredictor:
     def __init__(self, index, weights, scratch, metadata, pool, output, *, mode, runtime, embedding_runtime,
                  vocabulary_runtime, coordinator, session, workspace, name, proposal=None, logits=None, vision=None,
-                 embedded=None, cache_only=False):
+                 embedded=None, cache_only=False, buffers=None, joined=None):
         self.metadata, self.output, self.vision = metadata, output, vision
         self.external_embedding, self.cache_only, self.scratch = embedded, cache_only, scratch
         w, c = weights.draft[index], weights.config
         self.embedding = None if embedded is not None else PreparedShardedEmbedding(weights.embedding, metadata.token_ids,
             scratch.local_embedding, scratch.embedding, runtime=embedding_runtime, coordinator=coordinator,
             session=session, name=name + ".embedding")
-        self.joined = torch.zeros((output.shape[0], 2 * c.hidden), dtype=torch.bfloat16, device=output.device)
+        def zeros(shape, dtype=torch.bfloat16):
+            return torch.zeros(shape, dtype=dtype, device=output.device) if buffers is None else buffers.zeros(shape, dtype)
+        self.joined = zeros((output.shape[0], 2 * c.hidden)) if joined is None else joined
         self.join = PreparedPairedRMSNorm(output, output, (w["enorm"], w["hnorm"]), self.joined,
             eps=c.text["rms_norm_eps"], session=session, name=name + ".norm_concat", zero_centered=True)
         self.project = UnquantizedProjection(self.joined, w["projection"], scratch.embedding,
@@ -34,7 +36,7 @@ class PreparedPredictor:
         fused = PreparedAllReduceRMSNorm.fits(runtime, scratch.partial)
         attention = PreparedAttention(layer, w["layer"], c, weights.shard, scratch.normalized, scratch.attention,
             metadata, pool, mode=mode, name=name + ".attention", first_position=index + 1, proposal=proposal,
-            reduce_output=not fused, **common)
+            reduce_output=not fused, buffers=buffers, **common)
         # FP8 activation rounding compounds through the predictor feedback chain.
         mlp = PreparedFeedForward(layer, w["layer"], c, scratch, name=name + ".mlp", overlap=False,
                                  activation_mode="a16", **common)
@@ -42,13 +44,13 @@ class PreparedPredictor:
                                          session=session, name=name + ".layer", runtime=runtime, coordinator=coordinator)
         self.head = None
         if logits is not None:
-            self.sampled = torch.empty((logits.shape[0], c.hidden), dtype=output.dtype, device=output.device)
-            self.normalized = torch.empty_like(self.sampled)
+            self.sampled = zeros((logits.shape[0], c.hidden), output.dtype)
+            self.normalized = zeros(self.sampled.shape, self.sampled.dtype)
             self.norm = PreparedRMSNorm(self.sampled, w["norm"], self.normalized, eps=c.text["rms_norm_eps"],
                 session=session, name=name + ".norm", zero_centered=True)
-            self.local_logits = torch.empty((logits.shape[0], w["head"].shape[0]), dtype=logits.dtype, device=output.device)
+            self.local_logits = zeros((logits.shape[0], w["head"].shape[0]), logits.dtype)
             self.head = PreparedVocabularyProjection(self.normalized, w["head"], self.local_logits, logits,
-                runtime=vocabulary_runtime, coordinator=coordinator, session=session, name=name + ".head")
+                runtime=vocabulary_runtime, coordinator=coordinator, session=session, name=name + ".head", buffers=buffers)
 
     def __call__(self, previous):
         embedded = self.external_embedding
@@ -80,24 +82,28 @@ class PreparedFeedback:
     """Teacher-force all predictors using each preceding level's shifted hidden states."""
 
     def __init__(self, weights, auxiliary, metadata, pool, *, scratch, runtime, embedding_runtime,
-                 vocabulary_runtime, coordinator, session, name, workspace, vision=None):
+                 vocabulary_runtime, coordinator, session, name, workspace, vision=None, buffers=None):
         self.source, self.pool = metadata, pool
         self.flush = PreparedProposals(weights, pool, scratch, metadata.starts.numel(), 0,
             runtime=runtime, embedding_runtime=embedding_runtime, vocabulary_runtime=vocabulary_runtime,
-            coordinator=coordinator, session=session, workspace=workspace, name=name + ".pending")
+            coordinator=coordinator, session=session, workspace=workspace, name=name + ".pending", buffers=buffers)
         self.metadata = m = Metadata.allocate(auxiliary.shape[0], metadata.starts.numel(), metadata.page_table.shape[1],
-                                              auxiliary.device, samples=auxiliary.shape[0])
-        self.previous, self.output = torch.zeros_like(auxiliary), torch.zeros_like(auxiliary)
+                                              auxiliary.device, samples=auxiliary.shape[0], buffers=buffers)
+        def zeros(shape):
+            return (torch.zeros(shape, dtype=torch.bfloat16, device=auxiliary.device) if buffers is None
+                    else buffers.zeros(shape, torch.bfloat16))
+        self.previous, self.output = zeros(auxiliary.shape), zeros(auxiliary.shape)
+        joined = zeros((auxiliary.shape[0], 2 * weights.config.hidden))
         self.indices = torch.arange(auxiliary.shape[0], device=auxiliary.device)
         self.rows = torch.arange(metadata.starts.numel(), device=auxiliary.device)
         self.histories = (pool.reserved_region("draft.target_hidden"),
                           *(pool.reserved_region(f"draft{i}.hidden") for i in range(len(weights.draft) - 1)))
-        self.saved = tuple(torch.zeros((metadata.starts.numel(), weights.config.hidden), dtype=torch.bfloat16,
-                                       device=auxiliary.device) for _ in weights.draft)
+        self.saved = tuple(zeros((metadata.starts.numel(), weights.config.hidden)) for _ in weights.draft)
         self.predictors = tuple(PreparedPredictor(i, weights, scratch, m, pool, self.output,
             mode="prefill" if metadata.starts.numel() == 1 and auxiliary.shape[0] > 1 else "decode",
             runtime=runtime, embedding_runtime=embedding_runtime, vocabulary_runtime=vocabulary_runtime,
-            coordinator=coordinator, session=session, workspace=workspace, name=f"{name}.{i}", vision=vision, cache_only=i == len(weights.draft) - 1)
+            coordinator=coordinator, session=session, workspace=workspace, name=f"{name}.{i}", vision=vision, cache_only=i == len(weights.draft) - 1,
+            buffers=buffers, joined=joined)
             for i in range(len(weights.draft)))
 
     def __call__(self, auxiliary, counts):
@@ -138,19 +144,19 @@ class PreparedProposals:
     """
 
     def __init__(self, weights, pool, scratch, batch, depth, *, runtime, embedding_runtime,
-                 vocabulary_runtime, coordinator, session, workspace, name):
+                 vocabulary_runtime, coordinator, session, workspace, name, buffers=None):
         self.batch, self.depth, self.pool = batch, depth, pool
         c, device = weights.config, pool.backing.device
         self.pending_width = len(weights.draft) + 1
         self.pitch = self.pending_width + depth
         tokens = batch * self.pitch
         if scratch.embedding.shape[0] < tokens:
-            scratch = Scratch.allocate(c, weights.shard, tokens, tokens, 0, device)
+            scratch = Scratch.allocate(c, weights.shard, tokens, tokens, 0, device, buffers=buffers)
         else:
             scratch = scratch.rows(tokens, tokens)
         self.scratch = scratch
         def zeros(*shape, dtype=torch.bfloat16):
-            return torch.zeros(shape, dtype=dtype, device=device)
+            return torch.zeros(shape, dtype=dtype, device=device) if buffers is None else buffers.zeros(shape, dtype)
         self.previous, self.output, self.embedded = (zeros(tokens, c.hidden) for _ in range(3))
         self.logits = zeros(batch, c.vocabulary)
         self.pending_count = zeros(batch, 1, dtype=torch.int32)
@@ -167,14 +173,15 @@ class PreparedProposals:
         self.saved = tuple(zeros(batch, c.hidden) for _ in self.histories)
         self.rows = torch.arange(batch, device=device)
         self.columns = torch.arange(self.pitch, device=device)
+        joined = zeros(tokens, 2 * c.hidden)
         self.predictors = []
         for i in range(len(weights.draft)):
-            m = Metadata.allocate(tokens, batch, 1, device, samples=batch)
+            m = Metadata.allocate(tokens, batch, 1, device, samples=batch, buffers=buffers)
             predictor = PreparedPredictor(i, weights, scratch, m, pool, self.output, mode="verify",
                 runtime=runtime, embedding_runtime=embedding_runtime, vocabulary_runtime=vocabulary_runtime,
                 coordinator=coordinator, session=session, workspace=workspace, name=f"{name}.{i}",
                 logits=self.logits if i < depth else None, embedded=self.embedded,
-                cache_only=i == len(weights.draft) - 1 and i >= depth)
+                cache_only=i == len(weights.draft) - 1 and i >= depth, buffers=buffers, joined=joined)
             self.predictors.append((m, predictor))
 
     def begin(self, states):

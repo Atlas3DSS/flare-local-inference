@@ -75,7 +75,7 @@ class PreparedTokenState:
     """
 
     def __init__(self, state: DeviceRequestState, token_ids, cu_seqlens, row_slot_ids, row_generations, live_rows,
-                 *, history: torch.Tensor | None = None, history_pad_id: int = 0):
+                 *, history: torch.Tensor | None = None, history_pad_id: int = 0, buffers=None):
         rows, device = row_slot_ids.numel(), state.generation.device
         if device.type != "cuda" or not 1 <= rows <= state.capacity or token_ids.ndim != 1 or not token_ids.numel():
             raise ValueError("token state requires CUDA storage, rows within request capacity and a nonempty packed token capacity")
@@ -89,10 +89,12 @@ class PreparedTokenState:
             if history.stride(0) <= 0 or history.stride(1) != 1:
                 raise ValueError("history requires positive row stride and contiguous columns")
         self.state = state
-        self.pending_tokens = torch.empty(rows, dtype=torch.int64, device=device)
-        self.positions = torch.empty(rows, dtype=torch.int64, device=device)
-        self.history = None if history is None else torch.empty((rows, 2), dtype=torch.int64, device=device)
-        self.active = torch.empty(rows, dtype=torch.int32, device=device)
+        def empty(shape, dtype):
+            return torch.empty(shape, dtype=dtype, device=device) if buffers is None else buffers.zeros(shape, dtype)
+        self.pending_tokens = empty((rows,), torch.int64)
+        self.positions = empty((rows,), torch.int64)
+        self.history = None if history is None else empty((rows, 2), torch.int64)
+        self.active = empty((rows,), torch.int32)
         self._gather_args = (row_slot_ids, row_generations, live_rows, state.generation, state.status,
             state.pending_token, state.consumed_tokens, history,
             self.pending_tokens, self.positions, self.history, self.active, rows,

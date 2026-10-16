@@ -18,18 +18,18 @@ from .mtp import PreparedAcceptedContext, PreparedProposals
 
 
 class PreparedRound:
-    def __init__(self, owner, batch, width, name):
+    def __init__(self, owner, batch, width, name, *, buffers=None):
         o, b, w = owner, batch, width
-        self.batch, self.width = b, w
+        self.batch, self.width, self.buffers = b, w, buffers
         self.inputs, self.requests, self.pool = o.inputs, o.requests, o.pool
         self.records, self.frame, self.sequence = o.records, o.frame, o.sequence
         self.rng, self.draft_offset, self.draft_generation = o.rng, o.offset, o.generation
         self.hidden = o.weights.config.hidden
         device, blocks = o.pool.backing.device, o.inputs.page_tables.shape[1]
         self.rows = torch.arange(b, device=device)
-        self.metadata = Metadata.allocate(b * w, b, blocks, device, samples=b * w)
-        self.validator = PreparedBatch(o.inputs, o.requests, Metadata.allocate(b, b, blocks, device),
-            mode="decode", shard=o.weights.shard, pool=o.pool, verification_width=w)
+        self.metadata = Metadata.allocate(b * w, b, blocks, device, samples=b * w, buffers=buffers)
+        self.validator = PreparedBatch(o.inputs, o.requests, Metadata.allocate(b, b, blocks, device, buffers=buffers),
+            mode="decode", shard=o.weights.shard, pool=o.pool, verification_width=w, buffers=buffers)
         self.validator.accept_unsampled = False
         self.validation = PreparedAllReduce(self.validator.validation_input, self.validator.validation_sum,
             runtime=o.collectives["runtime"], coordinator=o.collectives["coordinator"],
@@ -37,18 +37,22 @@ class PreparedRound:
         common = dict(session=o.session, workspace=o.workspace, **o.collectives)
         scratch = o.scratch.rows(b * w, b * w)
         self.decoder = PreparedDecoder(o.weights, scratch, self.metadata, o.pool,
-            mode="decode" if w == 1 else "verify", name=name + ".target", overlap=o.overlap, **common)
+            mode="decode" if w == 1 else "verify", name=name + ".target", overlap=o.overlap, buffers=buffers, **common)
         self.context = PreparedAcceptedContext(o.weights, self.metadata, o.pool)
         self.draft = PreparedProposals(o.weights, o.pool, o.draft_scratch, b, w - 1,
-                                      name=name + ".draft", **common)
-        self.before = torch.zeros(b, dtype=torch.int64, device=device)
-        self.active = torch.zeros(b, dtype=torch.bool, device=device)
-        self.candidates = torch.zeros((b, w), dtype=torch.int64, device=device)
-        self.drafts = torch.zeros((b, w - 1), dtype=torch.int64, device=device)
-        self.probabilities = torch.zeros((b, w - 1, o.requests.vocab_size), dtype=torch.float32, device=device)
-        self.valid = torch.zeros((b, w - 1), dtype=torch.bool, device=device)
-        self.seed, self.offset, self.base_offset, self.sampled = (torch.zeros_like(self.before) for _ in range(4))
-        self.sampling_scratch = o.sampling_scratch
+                                      name=name + ".draft", buffers=buffers, **common)
+        def zeros(shape, dtype=torch.int64):
+            return torch.zeros(shape, dtype=dtype, device=device) if buffers is None else buffers.zeros(shape, dtype)
+        self.before = zeros((b,))
+        self.active = zeros((b,), torch.bool)
+        self.candidates = zeros((b, w))
+        self.drafts = zeros((b, w - 1))
+        self.probabilities = zeros((b, w - 1, o.requests.vocab_size), torch.float32)
+        self.valid = zeros((b, w - 1), torch.bool)
+        self.seed, self.offset, self.base_offset, self.sampled = (zeros((b,)) for _ in range(4))
+        from ignition.components.parallel_draft import prepare_sampling_scratch
+        self.sampling_scratch = (o.sampling_scratch if buffers is None else
+            prepare_sampling_scratch(b, w, o.requests.vocab_size, device, buffers=buffers))
         self.operations = None
 
     def prepare(self):
@@ -70,7 +74,7 @@ class PreparedRound:
         verify.prepare()
         commit = PreparedSpeculativeCommit(self.requests, verify.output, self.candidates,
             self.inputs.row_slot_ids[:b], self.inputs.row_generations[:b], self.inputs.live_rows, self.records, self.frame,
-            self.sequence, rng=self.rng, token_limits=self.inputs.query_lengths[:b], draft_context_lag=0)
+            self.sequence, rng=self.rng, token_limits=self.inputs.query_lengths[:b], draft_context_lag=0, buffers=self.buffers)
         self.operations = target, proposals, verify, commit
 
     def __call__(self):

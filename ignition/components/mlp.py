@@ -18,10 +18,11 @@ class MLPScratch:
     output: torch.Tensor
 
     @classmethod
-    def allocate(cls, tokens, hidden, intermediate, device):
+    def allocate(cls, tokens, hidden, intermediate, device, *, buffers=None):
         if any(type(value) is not int or value <= 0 for value in (tokens, hidden, intermediate)):
             raise ValueError("MLP scratch dimensions must be positive integers")
-        return cls(*(torch.zeros((tokens, width), dtype=torch.bfloat16, device=device)
+        return cls(*((torch.zeros((tokens, width), dtype=torch.bfloat16, device=device)
+                      if buffers is None else buffers.zeros((tokens, width), torch.bfloat16))
                      for width in (2 * intermediate, intermediate, hidden)))
 
     def rows(self, tokens):

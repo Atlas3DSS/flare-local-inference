@@ -36,18 +36,19 @@ class Scratch:
     logits: torch.Tensor
 
     @classmethod
-    def allocate(cls, config, shard, tokens, samples, context, device):
+    def allocate(cls, config, shard, tokens, samples, context, device, *, buffers=None):
         c = config.text
         def zeros(rows, columns, dtype=torch.bfloat16):
-            return torch.zeros((rows, columns), dtype=dtype, device=device)
+            return (torch.zeros((rows, columns), dtype=dtype, device=device) if buffers is None
+                    else buffers.zeros((rows, columns), dtype))
         width = config.vocabulary_partition(shard)[2]
         return cls(zeros(tokens, config.hidden), zeros(tokens, config.hidden // shard.world_size),
             zeros(tokens, config.hidden), zeros(tokens, config.hidden, torch.float32),
-            AttentionScratch.allocate(config, shard, tokens, context, device, requests=samples),
-            MLPScratch.allocate(tokens, config.hidden, c["intermediate_size"] // shard.world_size, device),
-            MLPScratch.allocate(tokens, config.hidden, c["share_expert_dim"] // shard.world_size, device),
+            AttentionScratch.allocate(config, shard, tokens, context, device, requests=samples, buffers=buffers),
+            MLPScratch.allocate(tokens, config.hidden, c["intermediate_size"] // shard.world_size, device, buffers=buffers),
+            MLPScratch.allocate(tokens, config.hidden, c["share_expert_dim"] // shard.world_size, device, buffers=buffers),
             zeros(tokens, c["moe_num_experts"], torch.float32),
-            RouterScratch.allocate(tokens, device, experts=c["moe_num_experts"], top_k=c["moe_top_k"]),
+            RouterScratch.allocate(tokens, device, experts=c["moe_num_experts"], top_k=c["moe_top_k"], buffers=buffers),
             zeros(tokens, config.hidden), zeros(tokens, config.hidden, torch.float32),
             zeros(tokens, config.hidden, torch.float32), zeros(samples, config.hidden),
             zeros(samples, width), zeros(samples, config.vocabulary))
@@ -147,10 +148,12 @@ class PreparedDecoderLayer(torch.nn.Module):
 
 class PreparedDecoder:
     def __init__(self, weights, scratch, metadata, pool, *, mode, runtime, embedding_runtime, vocabulary_runtime,
-                 coordinator, session, name, workspace, overlap=True, vision=None):
+                 coordinator, session, name, workspace, overlap=True, vision=None, buffers=None):
         self.weights, self.scratch, self.metadata, self.pool = weights, scratch, metadata, pool
         self.vision = vision if mode == "prefill" else None
-        self.auxiliary = torch.zeros_like(scratch.embedding) if weights.draft is not None else None
+        self.auxiliary = ((torch.zeros_like(scratch.embedding) if buffers is None
+                           else buffers.zeros(scratch.embedding.shape, scratch.embedding.dtype))
+                          if weights.draft is not None else None)
         self.embedding = PreparedShardedEmbedding(weights.embedding, metadata.token_ids, scratch.local_embedding,
             scratch.embedding, runtime=embedding_runtime, coordinator=coordinator, session=session,
             name=name + ".embedding", num_rows=metadata.live_counts[:1])
@@ -160,18 +163,19 @@ class PreparedDecoder:
             prefix = f"{name}.layer{index}"
             common = {"runtime": runtime, "coordinator": coordinator, "session": session, "workspace": workspace}
             attention = PreparedAttention(index, w, weights.config, weights.shard, scratch.normalized,
-                scratch.attention, metadata, pool, mode=mode, name=prefix + ".attention", reduce_output=not fused, **common)
+                scratch.attention, metadata, pool, mode=mode, name=prefix + ".attention", reduce_output=not fused, buffers=buffers, **common)
             next_norm = weights.layers[index + 1].input_norm if fused and index + 1 < len(weights.layers) else None
             feed_forward = PreparedFeedForward(index, w, weights.config, scratch, name=prefix + ".mlp",
                                                overlap=overlap, reduce_output=next_norm is None, **common)
             self.layers.append(PreparedDecoderLayer(w, attention, feed_forward, scratch,
                 weights.config.text["rms_norm_eps"], session=session, name=prefix, accumulate=index > 0,
                 runtime=runtime, coordinator=coordinator, input_normalized=fused and index > 0, next_norm=next_norm))
-        self.sampled_hidden = torch.empty_like(scratch.hidden)
+        self.sampled_hidden = (torch.empty_like(scratch.hidden) if buffers is None
+                               else buffers.zeros(scratch.hidden.shape, scratch.hidden.dtype))
         self.norm = PreparedRMSNorm(self.sampled_hidden, weights.norm, scratch.hidden,
             eps=weights.config.text["rms_norm_eps"], session=session, name=name + ".norm", zero_centered=True)
         self.head = PreparedVocabularyProjection(scratch.hidden, weights.head, scratch.local_logits, scratch.logits,
-            runtime=vocabulary_runtime, coordinator=coordinator, session=session, name=name + ".head")
+            runtime=vocabulary_runtime, coordinator=coordinator, session=session, name=name + ".head", buffers=buffers)
 
     def __call__(self):
         local = self.embedding.lookup()

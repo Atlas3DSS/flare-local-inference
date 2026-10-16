@@ -16,7 +16,7 @@ def page_specs(config, shard):
         if a.window < 0:
             _, heads = a.local(shard)
             for kind in ("key", "value"):
-                yield f"layer{layer}.{kind}", (PAGE_TOKENS * heads * a.dimension * 2,)
+                yield f"layer{layer}.{kind}", (PAGE_TOKENS * heads * a.dimension,)
             yield f"layer{layer}.index", (PAGE_TOKENS // config.sparse["region_block_size"] * config.sparse["proxy_dim"],)
 
 
@@ -30,7 +30,7 @@ def continuation_layout(config, shard, *, mtp=True):
         a = config.attention(layer)
         if a.window > 0:
             _, heads = a.local(shard)
-            regions.extend((f"layer{layer}.{kind}", (a.window, heads, a.dimension), torch.bfloat16)
+            regions.extend((f"layer{layer}.{kind}", (a.window, heads, a.dimension), torch.float8_e4m3fn)
                            for kind in ("key", "value"))
         else:
             regions.extend((f"layer{layer}.pending_{kind}",
@@ -47,7 +47,7 @@ def continuation_layout(config, shard, *, mtp=True):
         for index in range(config.text["num_nextn_predict_layers"]):
             a = config.attention(config.layers + index)
             _, heads = a.local(shard)
-            regions.extend((f"draft{index}.{kind}", (a.window, heads, a.dimension), torch.bfloat16)
+            regions.extend((f"draft{index}.{kind}", (a.window, heads, a.dimension), torch.float8_e4m3fn)
                            for kind in ("key", "value"))
             if index + 1 < config.text["num_nextn_predict_layers"]:
                 regions.append((f"draft{index}.hidden", (config.hidden,), torch.bfloat16))
@@ -76,4 +76,4 @@ class ContinuationPool(PagedStateStorage):
             return self.pages[name].view(torch.float8_e4m3fn).view(-1,
                 PAGE_TOKENS // self.config.sparse["region_block_size"], self.config.sparse["proxy_dim"])
         _, heads = a.local(self.shard)
-        return self.pages[name].view(torch.bfloat16).view(-1, PAGE_TOKENS, heads, a.dimension)
+        return self.pages[name].view(torch.float8_e4m3fn).view(-1, PAGE_TOKENS, heads, a.dimension)

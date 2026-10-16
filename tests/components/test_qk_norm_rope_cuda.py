@@ -16,8 +16,9 @@ pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1", r
 
 @pytest.mark.parametrize("indexer", [False, True])
 @pytest.mark.parametrize("tokens", [1, 7, 128])
+@pytest.mark.parametrize("kv_dtype", [torch.bfloat16, torch.float8_e4m3fn])
 @torch.no_grad()
-def test_qk_normalization_rotary_and_append(indexer, tokens):
+def test_qk_normalization_rotary_and_append(indexer, tokens, kv_dtype):
     torch.manual_seed(719)
     device = torch.device("cuda:0")
     heads, groups, dim, rotated = (4, 1, 256, 32) if indexer else (8, 1, 192, 192)
@@ -36,16 +37,22 @@ def test_qk_normalization_rotary_and_append(indexer, tokens):
     if tokens > 1:
         m.positions[-1] = -1
     q = torch.empty(tokens, heads, dim, device=device, dtype=torch.float8_e4m3fn if indexer else torch.bfloat16)
-    k = torch.empty(tokens, groups, dim, device=device, dtype=torch.bfloat16)
+    kv_dtype = torch.bfloat16 if indexer else kv_dtype
+    k = torch.empty(tokens, groups, dim, device=device, dtype=kv_dtype)
     v = torch.empty_like(k)
-    kc = torch.full((8, 128, groups, dim), 17, device=device, dtype=torch.bfloat16)
+    kc = torch.full((8, 128, groups, dim), 17, device=device, dtype=kv_dtype)
     vc = torch.full_like(kc, 23)
     with RecordedPreparationSession(device=device, checkpoint="qk-rope", workload_schema="qk-rope",
                                     numerical_policy="default") as session:
         operation = PreparedQKNormRoPE(projected, qw, kw, inverse, m, q, k, epsilon=1e-6,
             session=session, name="qk", bias=bias, value=None if indexer else v,
             key_cache=None if indexer else kc, value_cache=None if indexer else vc)
+        saved = tuple(t.clone() for t in (m.requests, m.positions, m.page_table))
+        for tensor in (m.requests, m.positions, m.page_table):
+            tensor.fill_(1 << 30)
         session.tune()
+        for tensor, initial in zip((m.requests, m.positions, m.page_table), saved, strict=True):
+            tensor.copy_(initial)
         forward = compile_forward(operation)
         forward()
         graph = torch.cuda.CUDAGraph()
@@ -71,10 +78,10 @@ def test_qk_normalization_rotary_and_append(indexer, tokens):
             ek = RMSNorm(kw, 1e-6)(ik)
         ek = rotary(ek, m.positions, inverse)
         torch.testing.assert_close(q.float(), eq.float(), atol=.016 if indexer else .008, rtol=.01)
-        torch.testing.assert_close(k, ek, atol=.008, rtol=.01)
+        torch.testing.assert_close(k.float(), ek.to(kv_dtype).float(), atol=.008, rtol=.01)
         if not indexer:
             ev = projected[:, (heads + groups) * dim:(heads + 2 * groups) * dim].view_as(v)
-            torch.testing.assert_close(v, ev, atol=0, rtol=0)
+            torch.testing.assert_close(v.float(), ev.to(kv_dtype).float(), atol=0, rtol=0)
             expected_key, expected_value = torch.full_like(kc, 17), torch.full_like(vc, 23)
             for row in range(tokens):
                 position = int(m.positions[row])
@@ -82,8 +89,8 @@ def test_qk_normalization_rotary_and_append(indexer, tokens):
                     page = int(m.page_table[0, position // 128])
                     expected_key[page, position % 128] = k[row]
                     expected_value[page, position % 128] = ev[row]
-            torch.testing.assert_close(kc, expected_key, atol=0, rtol=0)
-            torch.testing.assert_close(vc, expected_value, atol=0, rtol=0)
+            torch.testing.assert_close(kc.float(), expected_key.float(), atol=0, rtol=0)
+            torch.testing.assert_close(vc.float(), expected_value.float(), atol=0, rtol=0)
         graph.reset()
 
 

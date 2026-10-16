@@ -15,7 +15,7 @@ class PreparedVocabularyProjection:
     """
 
     def __init__(self, source, weight, local_output, output, *, runtime, session,
-                 coordinator, name, activation_mode="a16"):
+                 coordinator, name, activation_mode="a16", buffers=None):
         if isinstance(weight, torch.Tensor):
             self.projection = UnquantizedProjection(source, weight, local_output,
                 session=session, name=f"{name}.projection")
@@ -26,8 +26,9 @@ class PreparedVocabularyProjection:
         columns = local_output.shape[1] * world
         if columns < output.shape[1]:
             raise ValueError("vocabulary shards must cover every output token")
-        self.gathered = output if columns == output.shape[1] else torch.empty(
-            (output.shape[0], columns), dtype=output.dtype, device=output.device)
+        self.gathered = output if columns == output.shape[1] else (
+            torch.empty((output.shape[0], columns), dtype=output.dtype, device=output.device) if buffers is None
+            else buffers.zeros((output.shape[0], columns), output.dtype))
         self.gather = PreparedAllGather(local_output, self.gathered, runtime=runtime,
             session=session, coordinator=coordinator, name=f"{name}.gather")
         self.output = output

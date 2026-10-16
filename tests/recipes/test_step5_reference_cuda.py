@@ -14,7 +14,7 @@ from safetensors import safe_open
 from ignition.components.parallel import TensorParallelShard
 from ignition.preparation.checkpoint import inspect_indexed_checkpoint
 from ignition.preparation.compilation import compile_forward
-from ignition.preparation.scratch import ScratchArena
+from ignition.preparation.scratch import GraphBufferPool, ScratchArena
 from ignition.preparation.tuning import RecordedPreparationSession
 from ignition.recipes.step5.weights import Step5WeightLoader
 
@@ -64,6 +64,25 @@ def load_mxfp8_reference_mlp(module, weight):
     module.up_proj.weight.copy_(up)
 
 
+def serial_fp8_window_attention(query, key, value, window):
+    """Reference serial decode: quantized history and one BF16 live candidate."""
+    repeats = query.shape[1] // key.shape[1]
+    key = key.repeat_interleave(repeats, dim=1).transpose(0, 1).float()
+    value = value.repeat_interleave(repeats, dim=1).transpose(0, 1).float()
+    q = query.transpose(0, 1).float()
+    history_key = key.to(torch.float8_e4m3fn).float()
+    history_value = value.to(torch.float8_e4m3fn).float()
+    logits = q @ history_key.transpose(1, 2)
+    logits.diagonal(dim1=1, dim2=2).copy_((q * key).sum(-1))
+    positions = torch.arange(query.shape[0], device=query.device)
+    distance = positions[:, None] - positions[None, :]
+    logits = (logits * query.shape[-1] ** -.5).masked_fill((distance < 0) | (distance >= window), -torch.inf)
+    probabilities = logits.softmax(-1)
+    output = probabilities @ history_value
+    output += probabilities.diagonal(dim1=1, dim2=2)[..., None] * (value - history_value)
+    return output.transpose(0, 1).bfloat16()
+
+
 @torch.no_grad()
 @pytest.mark.parametrize("index", [0, 91])
 def test_dense_decoder_layer(checkpoint, index, monkeypatch, record_property):
@@ -108,6 +127,14 @@ def test_dense_decoder_layer(checkpoint, index, monkeypatch, record_property):
         layer = DecoderLayer(weights, attention, feed_forward, config.text["rms_norm_eps"])
         session.tune()
         load_mxfp8_reference_mlp(ref.mlp, weights.mlp.gate_up)
+        if ref.self_attn.is_sparse:
+            project = ref.self_attn._project
+
+            def fp8_paged_projection(*args, **kwargs):
+                query, key, value = project(*args, **kwargs)
+                return query, key.to(torch.float8_e4m3fn).bfloat16(), value.to(torch.float8_e4m3fn).bfloat16()
+
+            monkeypatch.setattr(ref.self_attn, "_project", fp8_paged_projection)
         if feed_forward.mlp.up_projection.plan.selection.config.mode == "quantized":
             ref.mlp.register_forward_pre_hook(
                 lambda module, args: (quantize_mxfp8_activation(args[0].float()).bfloat16(),))
@@ -136,7 +163,7 @@ def test_dense_decoder_layer(checkpoint, index, monkeypatch, record_property):
 
 
 @torch.no_grad()
-def test_mtp_feedback_and_proposals(checkpoint):
+def test_mtp_feedback_and_proposals(checkpoint, monkeypatch, record_property):
 
     from ignition.components.paged_batch import Metadata
     from ignition.recipes.step5.decoder import Scratch
@@ -163,6 +190,7 @@ def test_mtp_feedback_and_proposals(checkpoint):
         ref = load_reference(ref, f"model.layers.{config.layers + index}.", manifest)
         ref.self_attn.build_rope(max_position=1024, device=device)
         refs.append(ref)
+        monkeypatch.setattr(ref.self_attn, "_sliding_prefill_chunked", serial_fp8_window_attention)
     pool = ContinuationPool.for_model(config, shard, 2, 1, device)
     scratch = Scratch.allocate(config, shard, 128, 128, 1024, device)
     metadata = Metadata.allocate(128, 1, 1, device)
@@ -177,8 +205,11 @@ def test_mtp_feedback_and_proposals(checkpoint):
         session.register_scratch(arena)
         common = {"runtime": None, "embedding_runtime": None, "vocabulary_runtime": None,
                       "coordinator": None, "session": session, "workspace": arena}
-        feedback = PreparedFeedback(weights, auxiliary, metadata, pool, scratch=scratch, name="feedback", **common)
-        draft = PreparedProposals(weights, pool, scratch.rows(1, 1), 1, 3, name="draft", **common)
+        buffers = GraphBufferPool(device, chunk_bytes=2 << 20)
+        feedback = PreparedFeedback(weights, auxiliary, metadata, pool, scratch=scratch, name="feedback",
+                                    buffers=buffers.cursor(), **common)
+        draft = PreparedProposals(weights, pool, scratch.rows(1, 1), 1, 3, name="draft",
+                                  buffers=buffers.cursor(), **common)
         session.tune()
         compiled = compile_forward(lambda: feedback(auxiliary, counts))
         start = 0
@@ -224,10 +255,13 @@ def test_mtp_feedback_and_proposals(checkpoint):
         for region in pool.layout.regions:
             actual = pool.backing[:, region.offset:region.offset + region.nbytes].view(region.dtype)
             expected = compiled_state[:, region.offset:region.offset + region.nbytes].view(region.dtype)
-            if region.name.startswith("draft") and region.dtype == torch.bfloat16:
-                if bool(expected.any()):
-                    tolerance = .02 if region.name.endswith("hidden") else .002
-                    assert relative_error(actual, expected) < tolerance, region.name
+            if region.name.startswith("draft") and region.dtype in (torch.bfloat16, torch.float8_e4m3fn):
+                if bool(expected.float().any()):
+                    # Chunked execution retains BF16 candidates until the history commit.
+                    tolerance = .04 if region.dtype == torch.float8_e4m3fn else (.02 if region.name.endswith("hidden") else .002)
+                    error = relative_error(actual, expected)
+                    record_property(region.name + ".chunk_relative_error", error)
+                    assert error < tolerance, (region.name, error)
                 else:
                     torch.testing.assert_close(actual, expected, atol=0, rtol=0)
             else:
@@ -264,7 +298,7 @@ def test_mtp_feedback_and_proposals(checkpoint):
                 torch.tensor([start - first], device=device), torch.zeros(1, dtype=torch.int64, device=device), is_decode=False)
             for kind in ("key", "value"):
                 actual = pool.cache(config.layers + i, kind)[1, live_positions % 512]
-                expected = getattr(prefix_cache, kind)[0, (live_positions - first) % 512]
+                expected = getattr(prefix_cache, kind)[0, (live_positions - first) % 512].to(actual.dtype)
                 errors[f"draft{i}.{kind}"] = relative_error(actual, expected)
 
         state_before = pool.backing.clone()
@@ -274,8 +308,11 @@ def test_mtp_feedback_and_proposals(checkpoint):
                                 torch.ones(1, dtype=torch.int64, device=device), torch.ones(1, dtype=torch.bool, device=device))
             errors[f"draft{i}.logits"] = relative_error(logits[0], expected_logits[i])
         torch.testing.assert_close(pool.backing, state_before, atol=0, rtol=0)
-        # Projection and attention rounding propagates through all three predictors.
-        assert max(errors.values()) < .03, errors
+        # FP8 bin crossings amplify small projection differences in stored K/V.
+        for name, error in errors.items():
+            record_property(name + ".reference_relative_error", error)
+            tolerance = .04 if name.endswith((".key", ".value")) else .03
+            assert error < tolerance, (name, error)
 
         record = PreparedAcceptedContext(weights, metadata, pool)
         embedded = torch.zeros_like(auxiliary)
@@ -329,8 +366,9 @@ def test_mtp_feedback_and_proposals(checkpoint):
                 if region.name.startswith("draft") and not region.name.startswith("draft.pending"):
                     actual = pool.backing[:, region.offset:region.offset + region.nbytes].view(region.dtype)
                     expected = expected_state[:, region.offset:region.offset + region.nbytes].view(region.dtype)
-                    if bool(expected.any()):
-                        assert relative_error(actual, expected) < .03, region.name
+                    if bool(expected.float().any()):
+                        tolerance = .04 if region.dtype == torch.float8_e4m3fn else .03
+                        assert relative_error(actual, expected) < tolerance, region.name
                     else:
                         torch.testing.assert_close(actual, expected, atol=0, rtol=0)
             assert not pool.reserved_region("draft.pending_count")[1].any()

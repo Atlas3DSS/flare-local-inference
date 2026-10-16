@@ -86,8 +86,8 @@ def _commit(
     valid = (state > 0) & (count > 0) & (absolute >= start) & (dim < WIDTH)
     source = (begin + absolute - start) * TS + dim
     destination = state * SS + ring_row * WIDTH + dim
-    values = tl.load(Values + source, valid, other=0)
-    scores = tl.load(Scores + source, valid, other=0)
+    values = tl.load(Values + source, valid, other=0.)
+    scores = tl.load(Scores + source, valid, other=0.)
     tl.store(StateValues + destination, values, valid)
     tl.store(StateScores + destination, scores, valid)
 

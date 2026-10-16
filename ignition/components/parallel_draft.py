@@ -14,7 +14,7 @@ from .speculation import (
 from .state import save_hidden
 
 
-def prepare_sampling_scratch(batch, width, vocab, device):
+def prepare_sampling_scratch(batch, width, vocab, device, *, buffers=None):
     """Share sequential shapes while keeping target probabilities live through verification.
 
     Proposal probabilities must be copied to retained storage before the next
@@ -24,9 +24,9 @@ def prepare_sampling_scratch(batch, width, vocab, device):
     from ignition.preparation.scratch import bind_scratch
 
     return {
-        "proposal": bind_scratch(PreparedDraftDistribution.scratch_layout(batch, 1, vocab), device=device),
-        "target": bind_scratch(PreparedSpeculativeDistributions.scratch_layout(batch, width, vocab), device=device),
-        "verify": bind_scratch(PreparedStochasticVerification.scratch_layout(batch, width, vocab), device=device),
+        "proposal": bind_scratch(PreparedDraftDistribution.scratch_layout(batch, 1, vocab), device=device, workspace=buffers),
+        "target": bind_scratch(PreparedSpeculativeDistributions.scratch_layout(batch, width, vocab), device=device, workspace=buffers),
+        "verify": bind_scratch(PreparedStochasticVerification.scratch_layout(batch, width, vocab), device=device, workspace=buffers),
     }
 
 

@@ -68,9 +68,10 @@ class VisionScratch:
     output: torch.Tensor
 
     @classmethod
-    def allocate(cls, patches, shard, device):
+    def allocate(cls, patches, shard, device, *, buffers=None):
         def zeros(*shape):
-            return torch.zeros(shape, dtype=torch.bfloat16, device=device)
+            return (torch.zeros(shape, dtype=torch.bfloat16, device=device) if buffers is None
+                    else buffers.zeros(shape, torch.bfloat16))
         world = shard.world_size
         heads = 16 // world
         return cls(zeros(patches, 588), zeros(patches, 1536), zeros(patches, 1536),
@@ -159,17 +160,19 @@ def neighborhood(source, indices, output):
 
 
 class PreparedVision:
-    def __init__(self, weights, scratch, inputs, *, runtime, coordinator, session, workspace, name):
+    def __init__(self, weights, scratch, inputs, *, runtime, coordinator, session, workspace, name, buffers=None):
         self.weights, self.scratch, self.inputs = weights, scratch, inputs
         s = scratch
         n, device = s.patches.shape[0], s.patches.device
-        self.positions = torch.zeros((n, 2), dtype=torch.int64, device=device)
-        self.interpolation_indices = torch.zeros((n, 4), dtype=torch.int64, device=device)
-        self.interpolation_weights = torch.zeros((n, 4), dtype=torch.float32, device=device)
-        self.first_indices = torch.zeros((n // 4, 9), dtype=torch.int32, device=device)
-        self.second_indices = torch.zeros((n // 16, 9), dtype=torch.int32, device=device)
-        self.cu = torch.zeros(MAX_VIEWS + 1, dtype=torch.int32, device=device)
-        self.num_patches, self.num_features = (torch.zeros(1, dtype=torch.int32, device=device) for _ in range(2))
+        def zeros(shape, dtype=torch.int32):
+            return torch.zeros(shape, dtype=dtype, device=device) if buffers is None else buffers.zeros(shape, dtype)
+        self.positions = zeros((n, 2), torch.int64)
+        self.interpolation_indices = zeros((n, 4), torch.int64)
+        self.interpolation_weights = zeros((n, 4), torch.float32)
+        self.first_indices = zeros((n // 4, 9))
+        self.second_indices = zeros((n // 16, 9))
+        self.cu = zeros((MAX_VIEWS + 1,))
+        self.num_patches, self.num_features = zeros((1,)), zeros((1,))
         self.inverse = 10000 ** (-torch.arange(0, 48, 2, dtype=torch.float32, device=device) / 48)
         self.patch = UnquantizedProjection(s.patches, weights.patch, s.hidden, session=session, name=name + ".patch")
         self.norm = layer_norm(weights.norm)

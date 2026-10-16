@@ -17,7 +17,8 @@ pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1", r
 @pytest.mark.parametrize("batch,width,first,step", [(1, 4096, 0, None), (1, 640, 0, None), (1, 4, 0, None), (4, 7, 3, None),
                                                  (4, 4, 3, None), (4, 1, 3, 2)])
 @pytest.mark.parametrize("gated", [False, True])
-def test_window_attention(batch, width, first, step, gated):
+@pytest.mark.parametrize("kv_dtype", [torch.bfloat16, torch.float8_e4m3fn])
+def test_window_attention(batch, width, first, step, gated, kv_dtype):
     torch.manual_seed(721)
     device = torch.device("cuda:0")
     window, heads, groups, dim = 512, 8, 1, 192
@@ -27,6 +28,7 @@ def test_window_attention(batch, width, first, step, gated):
     v = torch.randn_like(k)
     hk = torch.randn(batch + 1, window, groups, dim, device=device).bfloat16()
     hv = torch.randn_like(hk)
+    hk, hv = hk.to(kv_dtype), hv.to(kv_dtype)
     original = hk.clone(), hv.clone()
     m = Metadata.allocate(tokens, batch, 1, device)
     counts = torch.full((batch,), width, dtype=torch.int32, device=device)
@@ -79,26 +81,28 @@ def test_window_attention(batch, width, first, step, gated):
                 current_k, current_v = (k[row * width:(row + 1) * width], v[row * width:(row + 1) * width]) if step is None else (pk[row], pv[row])
                 keys, values = [] , []
                 for history, current, result in ((hk, current_k, keys), (hv, current_v, values)):
-                    result.append(torch.cat((history[row + 1, positions[old] % window], current[positions[~old] - begin])))
+                    result.append(torch.cat((history.float()[row + 1, positions[old] % window], current.float()[positions[~old] - begin])))
                 logits = q[token].float() @ keys[0][:, 0].float().T / dim ** .5
                 expected = logits.softmax(-1) @ values[0][:, 0].float()
                 if gate is not None:
                     expected = (expected.bfloat16() * gate[token].sigmoid()[:, None]).float()
                 torch.testing.assert_close(out[token].float(), expected, atol=.004, rtol=.02)
-        torch.testing.assert_close(hk, original[0], atol=0, rtol=0)
-        torch.testing.assert_close(hv, original[1], atol=0, rtol=0)
+        torch.testing.assert_close(hk.float(), original[0].float(), atol=0, rtol=0)
+        torch.testing.assert_close(hv.float(), original[1].float(), atol=0, rtol=0)
         graph.reset()
 
 
 @pytest.mark.parametrize("extent", [8, 512])
 @pytest.mark.parametrize("capacity,count", [(1, 0), (1, 1), (4, 2), (641, 641)])
-def test_ring_commit_updates_only_accepted_slots(extent, capacity, count):
+@pytest.mark.parametrize("kv_dtype", [torch.bfloat16, torch.float8_e4m3fn])
+def test_ring_commit_updates_only_accepted_slots(extent, capacity, count, kv_dtype):
     from ignition.components.gated_compression import commit_gated
 
     device = torch.device("cuda:0")
-    values = torch.arange(capacity * 192, device=device).reshape(capacity, 192).bfloat16()
+    values = torch.arange(capacity * 192, device=device).reshape(capacity, 192).remainder(128).bfloat16()
     scores = -values
-    state_values = torch.full((3, extent, 1, 192), 17, device=device, dtype=torch.bfloat16)
+    values, scores = values.to(kv_dtype), scores.to(kv_dtype)
+    state_values = torch.full((3, extent, 1, 192), 17, device=device, dtype=kv_dtype)
     state_scores = torch.full_like(state_values, 23)
     m = Metadata.allocate(capacity, 1, 1, device)
     start = 2 * extent - 2
@@ -119,6 +123,6 @@ def test_ring_commit_updates_only_accepted_slots(extent, capacity, count):
     state_scores.fill_(23)
     graph.replay()
     torch.cuda.synchronize()
-    torch.testing.assert_close(state_values, expected_values, atol=0, rtol=0)
-    torch.testing.assert_close(state_scores, expected_scores, atol=0, rtol=0)
+    torch.testing.assert_close(state_values.float(), expected_values.float(), atol=0, rtol=0)
+    torch.testing.assert_close(state_scores.float(), expected_scores.float(), atol=0, rtol=0)
     graph.reset()

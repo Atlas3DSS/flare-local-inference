@@ -1,6 +1,6 @@
 """Prepared b12x weighted representative scoring and stable region selection."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
 
 import torch
@@ -135,12 +135,14 @@ def _fake(query, weights, cache, table, requests, positions, lengths, selected, 
 
 
 class PreparedRegionSelection:
-    def __init__(self, query, weights, cache, metadata, selected, *, ratio, session, workspace, name):
+    def __init__(self, query, weights, cache, metadata, selected, *, ratio, session, workspace, name, buffers=None):
         tokens, groups, heads, dim = query.shape
         self.metadata, self.groups = metadata, groups
-        self.requests = torch.zeros(tokens * groups, dtype=torch.int32, device=query.device)
-        self.positions = torch.zeros(tokens * groups, dtype=torch.int64, device=query.device)
-        self.lengths = torch.zeros_like(metadata.lengths)
+        def zeros(shape, dtype):
+            return torch.zeros(shape, dtype=dtype, device=query.device) if buffers is None else buffers.zeros(shape, dtype)
+        self.requests = zeros((tokens * groups,), torch.int32)
+        self.positions = zeros((tokens * groups,), torch.int64)
+        self.lengths = zeros(metadata.lengths.shape, metadata.lengths.dtype)
         self.arguments = (query.flatten(0, 1), weights.flatten(0, 1), cache, metadata.page_table,
                           self.requests, self.positions, self.lengths, selected.flatten(0, 1))
         q = Query(tokens * groups, heads, dim, metadata.page_table.shape[1] * cache.shape[1], ratio,
@@ -177,7 +179,7 @@ class PreparedRegionSelection:
             return PreparedCall(run=lambda: _run(*args, scratch, state), output=args[-1], produce=produce,
                                 owners=prime_owners(workspace, scratch, args))
 
-        declare(session, (self.plan.request(name=name, prepare_call=call,
+        declare(session, (self.plan.request(name=name, prepare_call=lambda state: replace(call(state, True), owners=()),
                                            benchmark_call=lambda state: call(state, True)),))
         register_finalizer(session, lambda: self._bind(workspace), workspace=workspace)
 

@@ -343,6 +343,20 @@ architectural boundary before committing the change.
   set after compiler workers exit and before warmup and capture. Validate compiled
   guards against those tensors. Helios sizes the serving cache independently;
   temporary compiler contexts must not reduce its budget.
+- **Share scratch across the complete graph catalog.** Vision, prefill, decode,
+  speculative, and resume graphs execute serially and should reuse caller-owned
+  activation and private buffer pools. Allocate per-variant views with
+  `GraphBufferPool` cursors; keep simultaneously live values disjoint within a
+  graph, including retained verification state and overlapping expert branches.
+  Use the shared operator arena for kernel workspaces and one CUDA graph pool for
+  compiler-created temporaries. Inspect constructor allocations as well as captured
+  allocations; sharing the CUDA graph pool alone does not share recipe scratch.
+  Constants and request-owned state must retain independent storage.
+  Prime indexed operators with private valid metadata: aliased serving scratch
+  is initialized by the complete graph, not by each operator's constructor.
+  Keep shared buffer-pool layouts identical across TP ranks, including storage
+  reserved for designated-rank sampling, so shared compiled forwards retain the
+  same storage aliases on every rank.
 - **Release preparation temporaries at phase boundaries.** Retire loading,
   conversion, tuning, and warmup pools when their temporary owners are gone;
   retain graph pools and captured addresses through export and replay. A live

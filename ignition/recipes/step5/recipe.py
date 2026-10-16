@@ -53,5 +53,5 @@ RECIPE = Recipe(name="step5", prepare=prepare, usage=usage,
     context=1048576, page_tokens=128, concurrency=4, max_concurrency=64, prefill_chunk=4096,
     speculation=Speculation(draft_tokens=3), max_draft_tokens=3, max_images=4, image_bytes=32 << 20,
     verification_rows=0, stream_overlap=True,
-    ranks=MappingProxyType({world: RankCosts(30_954_240, 2_355_200, 8 << 30) for world in (4, 8, 16)}),
-    plain_ranks=MappingProxyType({world: RankCosts(29_683_968, 2_355_200, 8 << 30) for world in (4, 8, 16)}))
+    ranks=MappingProxyType({world: RankCosts(15_667_968, 1_224_704, 8 << 30) for world in (4, 8, 16)}),
+    plain_ranks=MappingProxyType({world: RankCosts(14_987_520, 1_224_704, 8 << 30) for world in (4, 8, 16)}))

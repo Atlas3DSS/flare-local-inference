@@ -68,7 +68,7 @@ class PreparedVarlenAttention:
 
         def prepare(state):
             scratch = planned_scratch(state.scratch_plan.scratch_specs(), workspace)
-            binding = state.bind(scratch=scratch, **arguments)
+            binding = state.bind(scratch=scratch, **{**arguments, "cu_seqlens_q": torch.zeros_like(cu)})
             return PreparedCall(
                 run=lambda: state.run(binding), owners=prime_owners(workspace, scratch, binding)
             )

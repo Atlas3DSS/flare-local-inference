@@ -93,3 +93,46 @@ def test_generation_stops_at_chat_and_base_eos(tmp_path):
     (tmp_path / "tokenizer_config.json").write_text(json.dumps({"eos_token": "<missing>"}))
     with pytest.raises(ValueError, match="EOS marker is missing"):
         prepare_frontend(tmp_path, eos_token_ids=[0, 1])
+
+
+def test_vision_text_and_draft_scratch_share_storage(checkpoint_config):
+    from dataclasses import fields, is_dataclass
+    import torch
+    from ignition.preparation.scratch import GraphBufferPool
+    from ignition.recipes.step5.decoder import Scratch
+    from ignition.recipes.step5.vision import VisionScratch
+
+    config = ModelConfig.from_dict(checkpoint_config)
+    shard = TensorParallelShard(0, 4)
+    pool = GraphBufferPool('meta', chunk_bytes=2 << 20)
+    vision = VisionScratch.allocate(65536, shard, 'meta', buffers=pool.cursor())
+    text = Scratch.allocate(config, shard, 4096, 1, 1048576, 'meta', buffers=pool.cursor())
+    decode = Scratch.allocate(config, shard, 16, 16, 1048576, 'meta', buffers=pool.cursor())
+    draft = Scratch.allocate(config, shard, 64, 64, 1048576, 'meta', buffers=pool.cursor())
+
+    def tensors(value):
+        if isinstance(value, torch.Tensor):
+            yield value
+        elif is_dataclass(value):
+            for field in fields(value):
+                yield from tensors(getattr(value, field.name))
+
+    owners = {t.untyped_storage()._cdata for chunks in pool.chunks.values() for t in chunks}
+    footprints = []
+    for execution in (vision, text, decode, draft):
+        values = list(tensors(execution))
+        footprints.append(sum(t.nbytes for t in values))
+        intervals = {}
+        for tensor in values:
+            key = tensor.untyped_storage()._cdata
+            assert key in owners
+            start = tensor.storage_offset() * tensor.element_size()
+            intervals.setdefault(key, []).append((start, start + tensor.nbytes))
+        for ranges in intervals.values():
+            ordered = sorted(ranges)
+            assert all(left[1] <= right[0] for left, right in zip(ordered, ordered[1:]))
+    assert vision.patches.untyped_storage()._cdata == text.embedding.untyped_storage()._cdata
+    assert (text.embedding.untyped_storage()._cdata == decode.embedding.untyped_storage()._cdata
+            == draft.embedding.untyped_storage()._cdata)
+    assert sum(footprints) - pool.nbytes > 400 << 20
+    assert text.attention.key.dtype == text.attention.value.dtype == torch.bfloat16

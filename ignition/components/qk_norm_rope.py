@@ -1,6 +1,6 @@
 """Prepared packed Q/K normalization, rotary embedding, and optional KV append."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import torch
 import triton
@@ -104,7 +104,7 @@ class PreparedQKNormRoPE:
                 or query.ndim != 3 or key.ndim != 3 or query.shape[0] != projected.shape[0]
                 or query.shape[0] != key.shape[0] or query.shape[-1] != key.shape[-1]
                 or not query.is_contiguous() or not key.is_contiguous()
-                or query.dtype not in (torch.bfloat16, torch.float8_e4m3fn) or key.dtype != torch.bfloat16
+                or query.dtype not in (torch.bfloat16, torch.float8_e4m3fn) or key.dtype not in (torch.bfloat16, torch.float8_e4m3fn)
                 or qw.shape != query.shape[-1:] or kw.shape != qw.shape
                 or any(w.dtype not in (torch.bfloat16, torch.float32) or not w.is_contiguous() for w in (qw, kw))
                 or inverse.dtype != torch.float32 or not 0 < 2 * inverse.numel() <= query.shape[-1]
@@ -115,15 +115,15 @@ class PreparedQKNormRoPE:
         append, copy_value = key_cache is not None, value is not None
         if projected.shape[1] < (query.shape[1] + key.shape[1] * (2 if copy_value else 1)) * query.shape[-1]:
             raise ValueError("packed projection does not contain the declared Q/K/V heads")
-        if value is not None and (value.shape != key.shape or value.dtype != torch.bfloat16 or not value.is_contiguous()):
-            raise ValueError("value output must have contiguous BF16 key-head geometry")
+        if value is not None and (value.shape != key.shape or value.dtype != key.dtype or not value.is_contiguous()):
+            raise ValueError("value output must have contiguous key-head geometry and dtype")
         if (value_cache is not None) != append:
             raise ValueError("key and value caches must be supplied together")
         if append and (not copy_value or key_cache.ndim != 4 or key_cache.shape != value_cache.shape
                 or key_cache.shape[2:] != key.shape[1:] or key_cache.stride() != value_cache.stride()
                 or key_cache.stride()[1:] != (key.shape[1] * key.shape[2], key.shape[2], 1)
-                or key_cache.dtype != torch.bfloat16 or value_cache.dtype != torch.bfloat16):
-            raise ValueError("KV append requires matching BF16 pages with contiguous token/head dimensions")
+                or key_cache.dtype not in (torch.bfloat16, torch.float8_e4m3fn) or value_cache.dtype != key_cache.dtype):
+            raise ValueError("KV append requires matching BF16 or FP8 pages with contiguous token/head dimensions")
         # Unused output operands remain disjoint to preserve custom-op alias contracts.
         self.empty = torch.empty(0, dtype=torch.bfloat16, device=projected.device)
         if value is None:
@@ -169,7 +169,7 @@ class PreparedQKNormRoPE:
             return PreparedCall(run=lambda: state.run(tensors), output=tensors[7],
                                 produce=lambda: tensors[0].copy_(seed), owners=(tensors, seed))
         declare(session, (self.plan.request(name=name,
-            prepare_call=lambda state: PreparedCall(run=lambda: state.run(self.arguments)),
+            prepare_call=lambda state: replace(benchmark(state), owners=()),
             benchmark_call=benchmark),))
 
     def __call__(self):

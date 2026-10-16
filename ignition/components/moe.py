@@ -24,15 +24,14 @@ class RouterScratch:
     weights: torch.Tensor
 
     @classmethod
-    def allocate(cls, tokens: int, device, *, experts: int, top_k: int) -> RouterScratch:
+    def allocate(cls, tokens: int, device, *, experts: int, top_k: int, buffers=None) -> RouterScratch:
         if (any(type(value) is not int or value <= 0 for value in (tokens, experts, top_k))
                 or top_k > experts or experts > 1024):
             raise ValueError("router requires positive integer dimensions and top_k <= experts <= 1024")
-        return cls(
-            torch.zeros((tokens, top_k), dtype=torch.float32, device=device),
-            torch.zeros((tokens, top_k), dtype=torch.int32, device=device),
-            torch.full((tokens, top_k), 1 / top_k, dtype=torch.float32, device=device),
-        )
+        def zeros(dtype):
+            return (torch.zeros((tokens, top_k), dtype=dtype, device=device) if buffers is None
+                    else buffers.zeros((tokens, top_k), dtype))
+        return cls(zeros(torch.float32), zeros(torch.int32), zeros(torch.float32).fill_(1 / top_k))
 
     def rows(self, tokens: int) -> RouterScratch:
         if type(tokens) is not int or not 0 < tokens <= self.ids.shape[0]:
@@ -128,13 +127,13 @@ class PreparedRoutedExperts:
         def prepare_call(state):
             scratch = planned_scratch(state.scratch.scratch_specs(), workspace)
             self.scratch = scratch
-            binding = state.bind(a=source, topk_ids=ids, topk_weights=weights,
+            binding = state.bind(a=source, topk_ids=torch.zeros_like(ids), topk_weights=torch.full_like(weights, 1 / ids.shape[1]),
                 output=output, scratch=scratch, input_scales_static=True, **precision)
             return PreparedCall(run=lambda: state.run(binding), owners=prime_owners(workspace, scratch, binding))
 
         scale_requests = () if self.scale_plan is None else (self.scale_plan.request(
             name=f"{name}/scales",
-            prepare_call=partial(moe_fixtures.scale_expansion_call, ids=ids, experts=experts),
+            prepare_call=lambda state: moe_fixtures.scale_expansion_call(state, ids=torch.zeros_like(ids), experts=experts),
             benchmark_call=partial(moe_fixtures.scale_expansion_benchmark_call,
                 source=source, experts=experts, top_k=ids.shape[1], session=session, name=name,
                 allocate_router=RouterScratch.allocate, router_weight=router_weight,

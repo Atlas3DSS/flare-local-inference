@@ -1,6 +1,6 @@
 """Paged attention over circular continuations and private candidate sequences."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import torch
 from b12x._lib.compile_plan import attach_programs, compile_only_launches, load_programs
@@ -90,10 +90,11 @@ class State:
     programs: dict
 
 
-def _run(query, key, value, history_key, history_value, requests, positions, starts, begins, states, output, output_gate, scratch, state):
+def _run(query, key, value, history_key, history_value, requests, positions, starts, begins, states, output, output_gate, descale, scratch, state):
     from b12x.attention.paged._selected_forward import (
         BFloat16,
         Float32,
+        Float8E4M3FN,
         Int32,
         Int64,
         _fake_pointer,
@@ -109,11 +110,12 @@ def _run(query, key, value, history_key, history_value, requests, positions, sta
         size = rows * splits * heads * dim
         storage = scratch.view(torch.float32)
         partial, lse = _pointer(storage[:size], Float32), _pointer(storage[size:], Float32)
+    kv_type = Float8E4M3FN if history_key.dtype == torch.float8_e4m3fn else BFloat16
     continuation = tuple(_pointer(t, dtype) for t, dtype in zip((key, value, starts, begins, states),
         (BFloat16, BFloat16, Int64, Int32, Int64), strict=True))
     run_compiled(state.programs["attention"], (
-        _pointer(query, BFloat16), _pointer(history_key, BFloat16), _pointer(history_value, BFloat16),
-        _fake_pointer(Float32), _fake_pointer(Float32), _fake_pointer(Int32),
+        _pointer(query, BFloat16), _pointer(history_key, kv_type), _pointer(history_value, kv_type),
+        _pointer(descale, Float32), _pointer(descale, Float32), _fake_pointer(Int32),
         _pointer(requests, Int64), _fake_pointer(Int32), _pointer(positions, Int64), partial, lse,
         _pointer(output, BFloat16),
         _pointer(output_gate, BFloat16) if output_gate is not None else _fake_pointer(BFloat16),
@@ -130,14 +132,14 @@ def _run(query, key, value, history_key, history_value, requests, positions, sta
 def _execute(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, history_key: torch.Tensor,
              history_value: torch.Tensor, requests: torch.Tensor, positions: torch.Tensor,
              starts: torch.Tensor, begins: torch.Tensor, states: torch.Tensor, output: torch.Tensor,
-             output_gate: torch.Tensor | None, scratch: torch.Tensor, handle: int) -> None:
+             output_gate: torch.Tensor | None, descale: torch.Tensor, scratch: torch.Tensor, handle: int) -> None:
     plan = plan_from_handle(handle)
     _run(query, key, value, history_key, history_value, requests, positions, starts, begins, states,
-         output, output_gate, scratch, require_prepared(plan, plan.component_id, query.device))
+         output, output_gate, descale, scratch, require_prepared(plan, plan.component_id, query.device))
 
 
 @_execute.register_fake
-def _fake(query, key, value, history_key, history_value, requests, positions, starts, begins, states, output, output_gate, scratch, handle):
+def _fake(query, key, value, history_key, history_value, requests, positions, starts, begins, states, output, output_gate, descale, scratch, handle):
     pass
 
 
@@ -153,9 +155,12 @@ class PreparedWindowAttention:
                 or output.shape != query.shape or history_key.shape[2:] != key.shape[1:]
                 or key.shape[-1] != query.shape[-1] or key.shape[1] <= 0 or history_key.shape[1] <= 0
                 or query.shape[1] % key.shape[1] or query.shape[0] != key.shape[0]
-                or any(t.dtype != query.dtype or not t.is_contiguous() for t in (query, key, value, output))
-                or any(t.dtype != query.dtype or t.stride(-1) != 1 for t in (history_key, history_value))):
-            raise ValueError("circular GQA requires BF16 contiguous candidates and 192/256-dimensional heads")
+                or key.dtype != torch.bfloat16 or value.dtype != key.dtype
+                or history_key.dtype not in (torch.bfloat16, torch.float8_e4m3fn)
+                or output.dtype != query.dtype
+                or any(not t.is_contiguous() for t in (query, key, value, output))
+                or any(t.dtype != history_key.dtype or t.stride(-1) != 1 for t in (history_key, history_value))):
+            raise ValueError("circular GQA requires BF16 queries, BF16 candidates, matching BF16/FP8 history, and 192/256-dimensional heads")
         m = metadata
         if proposal is not None:
             key, value = (t.flatten(0, 1) for t in proposal[:2])
@@ -164,6 +169,7 @@ class PreparedWindowAttention:
 
         _output_gate_stride(output_gate, query)
         self.output_gate = output_gate
+        self.descale = torch.ones(1, dtype=torch.float32, device=query.device)
         q = Query(tuple(tensor_facts(x) for x in self.arguments), first_position,
                   tensor_facts(output_gate) if output_gate is not None else None)
         payload = CONTRACT.encode_query(q)
@@ -203,9 +209,9 @@ class PreparedWindowAttention:
                             device=output_gate.device, dtype=output_gate.dtype).normal_())
             scratch = planned_scratch((scratch_buffer_spec(CONTRACT.component_id,
                 nbytes=q.scratch_bytes(state.tactic), device=query.device),), workspace)
-            return PreparedCall(run=lambda: _run(*args, gate, scratch, state), output=args[-1], produce=produce,
+            return PreparedCall(run=lambda: _run(*args, gate, self.descale, scratch, state), output=args[-1], produce=produce,
                                 owners=prime_owners(workspace, scratch, (args, gate)))
-        declare(session, (self.plan.request(name=name, prepare_call=call,
+        declare(session, (self.plan.request(name=name, prepare_call=lambda state: replace(call(state, True), owners=()),
             benchmark_call=lambda state: call(state, True)),))
         register_finalizer(session, lambda: self._bind(workspace), workspace=workspace)
 
@@ -217,7 +223,7 @@ class PreparedWindowAttention:
             key, value, step = self.proposal
             key[:, step].copy_(self.key)
             value[:, step].copy_(self.value)
-        _execute(*self.arguments, self.output_gate, self.scratch, self.plan.handle)
+        _execute(*self.arguments, self.output_gate, self.descale, self.scratch, self.plan.handle)
         return self.arguments[-1]
 
     def scratch_tensors(self):

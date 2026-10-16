@@ -36,12 +36,14 @@ def check_graph(operation, output, arena, expected, **tolerance):
 
 @pytest.mark.parametrize("tokens", [3, 129])
 @pytest.mark.parametrize("gated", [False, True])
-def test_prepared_selected_attention(tokens, gated):
+@pytest.mark.parametrize("kv_dtype", [torch.bfloat16, torch.float8_e4m3fn])
+def test_prepared_selected_attention(tokens, gated, kv_dtype):
     torch.manual_seed(92)
     device = torch.device("cuda:0")
     q = torch.randn(tokens, 8, 192, device=device, dtype=torch.bfloat16)
     k = torch.randn(16, 128, 2, 192, device=device, dtype=torch.bfloat16)
     v = torch.randn_like(k)
+    k, v = k.to(kv_dtype), v.to(kv_dtype)
     pages = torch.arange(16, device=device, dtype=torch.int32)[None]
     requests = torch.zeros(tokens, device=device, dtype=torch.int32)
     positions = torch.full((tokens,), 2047, device=device, dtype=torch.int64)
@@ -54,7 +56,7 @@ def test_prepared_selected_attention(tokens, gated):
     expected = torch.zeros_like(output)
     for group in range(2):
         idx = selected[0, group, :1024].long()
-        keys, values = (x.flatten(0, 1)[idx, group].float() for x in (k, v))
+        keys, values = (x.float().flatten(0, 1)[idx, group] for x in (k, v))
         scores = torch.einsum("thd,kd->thk", q[:, group * 4:(group + 1) * 4].float(), keys) * 192 ** -.5
         expected[:, group * 4:(group + 1) * 4] = torch.softmax(scores, -1) @ values
     expected[-1].zero_()
