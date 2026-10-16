@@ -50,6 +50,25 @@ execution acceptance is specific to the key and namespace. If a private key is
 compromised, remove its identity from distributed builds and revoke its acceptance
 in affected trust stores with `flare trust revoke FINGERPRINT`.
 
+## Change the passphrase
+
+```sh
+.venv/bin/ignition key-password \
+  --signing-key ~/.config/flare/signing/local-inference-lab/signing-key.pem
+```
+
+The command prompts for the existing passphrase, then the replacement twice.
+It writes an encrypted temporary file with owner-only permissions beside the key,
+flushes it to disk, and atomically replaces the key file. The key and fingerprint
+stay the same; publisher profiles, Helios builds, and signed packages need no
+changes. A wrong existing passphrase or mismatched confirmation leaves the file
+untouched. An interruption before replacement can leave an encrypted hidden
+temporary file beside the key.
+
+Update the encrypted backup after changing the passphrase. Existing backups
+still use their previous passphrase. A passphrase change does not revoke copies
+of the private key; use key rotation if a copy may be compromised.
+
 ## Promote a development package
 
 Use a distinct destination and the actual repository URL where the production

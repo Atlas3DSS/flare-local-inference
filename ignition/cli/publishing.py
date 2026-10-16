@@ -19,6 +19,17 @@ def keygen(args):
     print(f'SHA-256 fingerprint: {fingerprint}')
 
 
+def key_password(args):
+    from ignition.signing import change_password
+
+    try:
+        fingerprint = change_password(args.signing_key)
+    except (ValueError, OSError, EOFError) as error:
+        raise UsageError(str(error)) from error
+    print(f'Updated encrypted key: {args.signing_key.expanduser()}')
+    print(f'SHA-256 fingerprint: {fingerprint}')
+
+
 def sign(args):
     import json
     from google.protobuf.message import DecodeError

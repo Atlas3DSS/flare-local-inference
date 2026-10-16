@@ -100,6 +100,8 @@ def _parser() -> argparse.ArgumentParser:
     keys.add_argument("--directory", required=True, type=Path, help="new private directory; must not exist")
     keys.add_argument("--name", required=True, help="publisher display name")
     keys.add_argument("--namespace", required=True, help="publisher Hugging Face namespace")
+    password = command("key-password", publishing.key_password, "change a signing key's passphrase")
+    password.add_argument("--signing-key", required=True, type=Path, help="Ed25519 PEM key to re-encrypt in place")
     signing = command("sign", publishing.sign, "verify and sign a development package for production")
     signing.add_argument("package", type=Path, help="signed development .safetensors package")
     signing.add_argument("--output", required=True, type=Path, help="destination package; must not exist")

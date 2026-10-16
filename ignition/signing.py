@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import stat
 import sys
+import tempfile
 import warnings
 
 from cryptography.hazmat.primitives import serialization
@@ -80,3 +81,45 @@ def generate(directory, name, namespace, password):
             output.flush()
             os.fsync(output.fileno())
     return hashlib.sha256(public).hexdigest()
+
+
+def change_password(path):
+    """Replace the key's encryption after terminal authentication and confirmation."""
+    path = Path(path).expanduser().resolve(strict=True)
+    before = path.stat()
+    key = load_key(path)
+    password = passphrase('New signing-key passphrase: ')
+    if password != passphrase('Confirm signing-key passphrase: '):
+        raise ValueError('passphrases do not match')
+    if len(password) < 16:
+        raise ValueError('use a unique signing passphrase of at least 16 bytes')
+    encoded = key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                                serialization.BestAvailableEncryption(password))
+    descriptor, temporary = tempfile.mkstemp(prefix=f'.{path.name}-', dir=path.parent)
+    temporary = Path(temporary)
+    try:
+        with os.fdopen(descriptor, 'wb') as output:
+            if os.name == 'nt':
+                from ._windows_permissions import restrict_file
+
+                restrict_file(temporary)
+            output.write(encoded)
+            output.flush()
+            os.fsync(output.fileno())
+        after = path.stat()
+        if any(getattr(before, field) != getattr(after, field)
+               for field in ('st_dev', 'st_ino', 'st_size', 'st_mtime_ns', 'st_ctime_ns')):
+            raise ValueError('signing key changed while entering the passphrase; retry')
+        os.replace(temporary, path)
+        if os.name == 'posix':
+            try:
+                directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(directory)
+                finally:
+                    os.close(directory)
+            except OSError as error:
+                raise OSError('key passphrase was changed, but syncing its directory failed') from error
+    finally:
+        temporary.unlink(missing_ok=True)
+    return hashlib.sha256(key.public_key().public_bytes_raw()).hexdigest()
