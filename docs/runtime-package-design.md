@@ -41,7 +41,7 @@ Ignition records four things while preparing a model, and refuses to
 write a package when any of them is incomplete.
 
 **Storage.** PyTorch's persistent device allocations come from one address range
-reserved before model loading: 1 TiB at `0x0200_0000_0000` on Linux or
+reserved before model loading: 1 TiB per rank from `0x0800_0000_0000` on Linux or
 `0x0400_0000_0000` on Windows, backed on
 demand with `cuMemCreate` and `cuMemMap` at allocation granularity. Packages
 reserve GiB-aligned ranges covering stored allocations and the declared maximum
@@ -50,7 +50,10 @@ allocates through a `MemPool` whose pluggable allocator is the Rust arena in
 `heliopause/src/allocator.rs`, so weights, state, pages, and the
 graph pool all live inside the range. Ordinary preparation and capture use
 separate PyTorch pools backed by that arena. Mapped host buffers, including
-n-gram request mailboxes, use fixed addresses from `0x0c00_0000_0000`.
+n-gram request mailboxes, use fixed addresses from `0x0c00_0000_0000` when
+the device rank ranges fit below it. Larger Linux layouts start host storage
+at `0x2000_0000_0000` to avoid overlap. Each rank has a disjoint 1 TiB host
+range; the native allocator reports the selected base to Ignition.
 Linux maps and registers host pages; Windows uses host-backed CUDA VMM.
 Both expose the recorded address to the CPU and GPU. A CUPTI subscriber logs
 driver allocations and removes records when their context is destroyed.
