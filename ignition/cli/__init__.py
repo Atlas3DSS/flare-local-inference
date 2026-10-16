@@ -42,6 +42,14 @@ def _parser() -> argparse.ArgumentParser:
                          help="remembered execution trust passed to Flare (default: ~/.config/flare/trust.toml)")
     running.add_argument("--verify-weights", action="store_true",
                          help="verify stored allocation and table contents when Flare loads the package")
+
+    def served_model_name(value):
+        if not value.strip():
+            raise argparse.ArgumentTypeError("served model name must not be empty")
+        return value
+
+    running.add_argument("--served-model-name", type=served_model_name, metavar="ALIAS",
+                         help="replace the package's serving alias; the canonical model ID remains accepted")
     from .config import parse_memory_limit
 
     def memory_limit(value):

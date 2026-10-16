@@ -122,6 +122,23 @@ def test_runtime_memory_flags_do_not_select_preparation_or_diagnostic_behavior(c
     capsys.readouterr()
 
 
+@pytest.mark.parametrize("alias", ["", " ", "\t"])
+def test_empty_served_model_name_is_rejected_before_preparation(alias, capsys):
+    with pytest.raises(SystemExit) as error:
+        main(["run", "qwen3.8-flash", "--served-model-name", alias])
+    assert error.value.code == 2
+    assert "served model name must not be empty" in capsys.readouterr().err
+
+
+def test_served_model_name_is_a_runtime_override(capsys):
+    assert _parser().parse_args(["run"]).served_model_name is None
+    for command in (["export", "--output", "model.safetensors"], ["serve"]):
+        with pytest.raises(SystemExit) as error:
+            main([*command, "qwen3.8-flash", "--served-model-name", "local-model"])
+        assert error.value.code == 2
+    capsys.readouterr()
+
+
 def test_stream_overlap_flag_is_a_preparation_flag_that_overlapping_recipes_accept(host, tmp_path, capsys):
     for command in (["run"], ["export", "--output", str(tmp_path / "package")], ["serve"]):
         assert _parser().parse_args([*command, "glm-5.3-flash", "--no-stream-overlap"]).no_stream_overlap

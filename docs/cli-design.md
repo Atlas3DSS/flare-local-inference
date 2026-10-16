@@ -91,7 +91,7 @@ Build the public serving executable, which links the Helios library:
 
 ```sh
 cargo build --release --manifest-path flare/Cargo.toml
-flare/target/release/flare run PACKAGE --gpus 0 --bind 127.0.0.1:8000
+flare/target/release/flare run PACKAGE --gpus 0 --host 127.0.0.1 --port 8000
 ```
 
 For MSVC cross-compilation, native Windows builds, and GPU compatibility
@@ -123,6 +123,7 @@ requires `--output FILE`, and excludes `--host` and `--port`.
 | `--max-concurrency N` | Maximum simultaneously active requests, 1 through the recipe's limit | `defaults.max_concurrency`, else the recipe default |
 | `--host ADDR` | Listening address. `run` only. | `server.host`, else `127.0.0.1` |
 | `--port N` | Listening port. `run` only. | `server.port`, else `8000` |
+| `--served-model-name ALIAS` | `run` only: replace the serving alias when Flare loads the package | Package alias |
 | `--verbose` | Per-phase detail on stderr | off |
 | `--kv-cache-limit concurrency\|context\|memory` | `run` only: pass the shared KV-pool ceiling to Flare without changing preparation | `memory` |
 | `--memory-limit LIMIT` | `run` only: pass an occupied size (`30G`), free reserve (`-30G`), or total-memory fraction (`0.8`) to Flare | Package serving reserve |
@@ -257,7 +258,9 @@ Help exits with status 0; usage errors go to stderr with status 2. Its options a
 | `--trust-store PATH` | Persistent key/namespace acceptance file | `~/.config/flare/trust.toml` |
 | `--verify-weights` | Verify the stored allocation and table ranges of the ranks served before loading model GPU resources | off |
 | `--gpus N[,N...]` | Selected GPUs in rank order; indices follow an inherited `CUDA_VISIBLE_DEVICES` list when present | `0` |
-| `--bind IP:PORT` | Listener address | `127.0.0.1:8000` |
+| `--host ADDR` | Listener IP address, IPv4 or IPv6 | `127.0.0.1` |
+| `--port N` | Listener port | `8000` |
+| `--served-model-name ALIAS` | Replace the package's serving aliases with this nonblank alias | Package aliases |
 | `--api-key-file PATH` | File containing the serving API key | No authentication |
 | `--max-concurrency N` | Reduce concurrency within captured batch capacities | Package default |
 | `--kv-cache-limit concurrency\|context\|memory` | Bound shared KV history by prepared context times selected concurrency, one prepared context, or available memory | `memory` |
@@ -273,6 +276,14 @@ tables and local tensor-parallel ranks. The loader commits cache memory before
 sizing KV and continuation pools, so the cache uses part of the integrated GPU's
 existing memory budget. The cache remains fixed in size while serving and warms
 from requests each time the server starts.
+
+`--served-model-name` changes the name advertised by `/v1/models` and accepted
+for requests. It replaces the package aliases; the canonical model ID remains
+accepted and appears as the model card's `root`. The override does not modify
+the package, change its identity, or select a different cached package in
+`ignition run`. Both launchers accept numeric IPv4 and IPv6 addresses through
+`--host`; use an unbracketed IPv6 address such as `--host ::1 --port 8001`.
+The combined `--bind` flag has been removed.
 
 Selected concurrency and draft depth cannot exceed prepared capacity.
 Concurrency three requires the batch-four bucket. Fixed verification loads
@@ -506,7 +517,7 @@ Configuration assigns each decision to one owner:
 | Checkpoint and revision | `MODEL`, including a local directory or `org/name@revision` |
 | GPUs and TP size | `--gpus`; rank count follows the selected list |
 | Concurrent requests | `--max-concurrency` |
-| Listener | Ignition `--host` and `--port`; native Flare `--bind` |
+| Listener | Ignition and native Flare `--host` and `--port` |
 | Context limit | Checkpoint maximum; admission still requires sufficient shared cache capacity |
 | KV pages and GPU prefix-cache rows | Derived from available memory, graph cost, and concurrency |
 | KV history ceiling | Runtime `--kv-cache-limit` |

@@ -1,4 +1,8 @@
-use std::{net::SocketAddr, num::NonZeroUsize, path::PathBuf};
+use std::{
+    net::{IpAddr, SocketAddr},
+    num::NonZeroUsize,
+    path::PathBuf,
+};
 
 use clap::{Args, Parser, Subcommand, builder::PossibleValuesParser, builder::TypedValueParser};
 use flare_helios::{
@@ -96,7 +100,7 @@ pub enum TrustCommand {
 #[derive(Debug, Args)]
 #[command(
     args_override_self = true,
-    after_help = "Examples:\n  flare run model.safetensors --gpus 0 --bind 127.0.0.1:8000\n  flare run model.safetensors --embedding-table-storage ram --mtp-draft-tokens 3\n\nConcurrency and draft limits must fit the package's prepared capacities.\nOmitted concurrency and speculation options use package defaults."
+    after_help = "Examples:\n  flare run model.safetensors --gpus 0 --host 127.0.0.1 --port 8000\n  flare run model.safetensors --embedding-table-storage ram --mtp-draft-tokens 3\n\nConcurrency and draft limits must fit the package's prepared capacities.\nOmitted concurrency and speculation options use package defaults."
 )]
 pub struct Run {
     /// Additional publisher verification profiles (JSON); does not grant execution trust.
@@ -126,14 +130,27 @@ pub struct Run {
     #[command(flatten)]
     pub hub: HubOptions,
 
-    /// Address and port for the HTTP server.
+    /// IP address for the HTTP server.
     #[arg(
         long,
-        value_name = "IP:PORT",
-        default_value = "127.0.0.1:8000",
+        value_name = "ADDR",
+        default_value = "127.0.0.1",
         help_heading = "Serving options"
     )]
-    pub bind: SocketAddr,
+    pub host: IpAddr,
+
+    /// Port for the HTTP server.
+    #[arg(
+        long,
+        value_name = "N",
+        default_value = "8000",
+        help_heading = "Serving options"
+    )]
+    pub port: u16,
+
+    /// Replace the package's serving alias; the canonical model ID remains accepted.
+    #[arg(long, value_name = "ALIAS", value_parser = served_model_name, help_heading = "Serving options")]
+    pub served_model_name: Option<String>,
 
     /// GPUs in rank order, relative to CUDA_VISIBLE_DEVICES when set.
     #[arg(long, value_name = "N[,N...]", value_delimiter = ',', action = clap::ArgAction::Set,
@@ -248,7 +265,19 @@ pub struct Run {
     pub prefix_cache_disk_transport: Option<Transport>,
 }
 
+fn served_model_name(value: &str) -> Result<String, String> {
+    if value.trim().is_empty() {
+        Err("served model name must not be empty".into())
+    } else {
+        Ok(value.to_owned())
+    }
+}
+
 impl Run {
+    pub fn bind_address(&self) -> SocketAddr {
+        SocketAddr::new(self.host, self.port)
+    }
+
     /// Serving options every rank of a multi-host package must load with: they select the same
     /// graphs and capacities on every host.
     pub fn rank_options(&self) -> Vec<String> {
@@ -335,7 +364,8 @@ mod tests {
     #[test]
     fn omitted_limits_preserve_package_defaults() {
         let args = run(&["flare", "run", "model.safetensors"]);
-        assert_eq!(args.bind.to_string(), "127.0.0.1:8000");
+        assert_eq!(args.bind_address().to_string(), "127.0.0.1:8000");
+        assert_eq!(args.served_model_name, None);
         let options = args.load_options();
         assert_eq!(options.device_labels, Some(vec![0]));
         assert_eq!(options.embedding_table_storage, None);
@@ -355,8 +385,10 @@ mod tests {
             "run",
             "--gpus=1",
             "--gpus=2,0",
-            "--bind",
-            "[::1]:8001",
+            "--host",
+            "::1",
+            "--port",
+            "8001",
             "model.safetensors",
             "--api-key-file",
             "key.txt",
@@ -375,7 +407,7 @@ mod tests {
             "direct",
         ]);
         assert_eq!(args.package, PathBuf::from("model.safetensors"));
-        assert_eq!(args.bind.to_string(), "[::1]:8001");
+        assert_eq!(args.bind_address().to_string(), "[::1]:8001");
         assert_eq!(args.api_key_file, Some(PathBuf::from("key.txt")));
         let options = args.load_options();
         assert_eq!(options.device_labels, Some(vec![2, 0]));
@@ -408,6 +440,45 @@ mod tests {
             assert_eq!(
                 run(&arguments).load_options().adaptive_verification,
                 Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn listener_flags_support_independent_overrides_and_ipv6() {
+        for (flags, expected) in [
+            (vec!["--host", "0.0.0.0"], "0.0.0.0:8000"),
+            (vec!["--port", "8001"], "127.0.0.1:8001"),
+            (vec!["--host", "::1", "--port", "8002"], "[::1]:8002"),
+        ] {
+            let mut arguments = vec!["flare", "run", "model.safetensors"];
+            arguments.extend(flags);
+            assert_eq!(run(&arguments).bind_address().to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn served_model_name_accepts_aliases_and_rejects_blank_values() {
+        for name in ["my-model", "organization/model", "local model"] {
+            let args = run(&[
+                "flare",
+                "run",
+                "model.safetensors",
+                "--served-model-name",
+                name,
+            ]);
+            assert_eq!(args.served_model_name.as_deref(), Some(name));
+        }
+        for name in ["", " ", "\t"] {
+            assert!(
+                Cli::try_parse_from([
+                    "flare",
+                    "run",
+                    "model.safetensors",
+                    "--served-model-name",
+                    name
+                ])
+                .is_err()
             );
         }
     }

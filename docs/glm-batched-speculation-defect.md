@@ -193,7 +193,7 @@ steps at 22887c1 or later.
 
    ```sh
    ./flare/target/release/flare run /data/flare-runtime/glm53-tp2.safetensors \
-     --hosts spark2 --gpus 0 --bind 0.0.0.0:8000
+     --hosts spark2 --gpus 0 --host 0.0.0.0 --port 8000
    ```
 
    Each peer caches a complete copy of the package under
@@ -254,7 +254,7 @@ at both TP2 and TP4 on Spark.
 2. Serve:
 
    ```sh
-   ./flare/target/release/flare run glm53-tp4-sm120.safetensors --gpus 0,1,2,3 --bind 0.0.0.0:8000
+   ./flare/target/release/flare run glm53-tp4-sm120.safetensors --gpus 0,1,2,3 --host 0.0.0.0 --port 8000
    ```
 
 3. Run section 4's steps 3 and 4 against this server with `--concurrency 16`

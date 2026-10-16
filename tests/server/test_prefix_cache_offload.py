@@ -74,7 +74,7 @@ def server(tmp_path, name, drafts=5, flags=()):
     devices = ",".join(str(rank) for rank in range(len(os.environ["CUDA_VISIBLE_DEVICES"].split(","))))
     args = [str(ROOT / "flare/target/release/flare"), "run",
             os.environ["FLARE_OFFLOAD_TEST_PACKAGE"], "--gpus", devices,
-            "--bind", f"127.0.0.1:{port}", "--mtp-draft-tokens", str(drafts), *flags]
+            "--host", "127.0.0.1", "--port", str(port), "--mtp-draft-tokens", str(drafts), *flags]
     if publisher := os.environ.get("FLARE_TEST_PUBLISHER_KEYS"):
         args.extend(("--publisher-keys", publisher))
     with log_path.open("w") as log:
