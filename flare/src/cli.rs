@@ -20,8 +20,10 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Serve an exported .safetensors package without Python.
+    /// Serve a local package or download a prepared package from Hugging Face.
     Run(Run),
+    /// Download a prepared package from the hardware's Hugging Face revision.
+    Download(Download),
     /// Accept rank zero's packages and executables and run its peer ranks on this host.
     Agent(AgentArgs),
     /// Manage remembered publisher trust.
@@ -29,6 +31,45 @@ pub enum Command {
         #[command(subcommand)]
         command: TrustCommand,
     },
+}
+
+#[derive(Debug, Args, Default)]
+pub struct HubOptions {
+    /// Hub revision; defaults to gb10 or gb202 detected from the selected GPUs.
+    #[arg(long, value_name = "REVISION", help_heading = "Download options")]
+    pub revision: Option<String>,
+
+    /// Package filename; required when the revision contains several .safetensors files.
+    #[arg(long, value_name = "FILE", help_heading = "Download options")]
+    pub filename: Option<String>,
+
+    /// Hugging Face hub cache [default: ~/.cache/huggingface/hub].
+    #[arg(long, value_name = "PATH", help_heading = "Download options")]
+    pub cache_dir: Option<PathBuf>,
+
+    /// Hugging Face access token file; omit for public repositories.
+    #[arg(long, value_name = "PATH", help_heading = "Download options")]
+    pub token_file: Option<PathBuf>,
+
+    /// Use only cached files, without contacting Hugging Face.
+    #[arg(long, help_heading = "Download options")]
+    pub offline: bool,
+}
+
+#[derive(Debug, Args)]
+#[command(args_override_self = true)]
+pub struct Download {
+    /// Hugging Face repository containing prepared Flare packages, optionally ORG/NAME@REVISION.
+    #[arg(value_name = "REPOSITORY")]
+    pub repository: String,
+
+    /// GPUs used to detect the hardware revision; unnecessary with --revision.
+    #[arg(long, value_name = "N[,N...]", value_delimiter = ',', action = clap::ArgAction::Set,
+        default_value = "0", value_parser = clap::value_parser!(i32).range(0..))]
+    pub gpus: Vec<i32>,
+
+    #[command(flatten)]
+    pub hub: HubOptions,
 }
 
 #[derive(Debug, Args)]
@@ -61,7 +102,7 @@ pub struct Run {
     /// Additional publisher verification profiles (JSON); does not grant execution trust.
     #[arg(long, value_name = "PATH", action = clap::ArgAction::Append)]
     pub publisher_keys: Vec<PathBuf>,
-    /// Verify the stored allocation and table ranges of the ranks served before CUDA initialization.
+    /// Verify stored allocation and table ranges before loading model GPU resources.
     #[arg(long)]
     pub verify_weights: bool,
     /// Permanently accept this exact signing key together with --dangerously-accept-publisher.
@@ -78,9 +119,12 @@ pub struct Run {
     #[arg(long, value_name = "PATH")]
     pub trust_store: Option<PathBuf>,
 
-    /// Path to the prepared .safetensors package.
+    /// Local prepared .safetensors package or Hugging Face ORG/NAME[@REVISION].
     #[arg(value_name = "PACKAGE")]
     pub package: PathBuf,
+
+    #[command(flatten)]
+    pub hub: HubOptions,
 
     /// Address and port for the HTTP server.
     #[arg(

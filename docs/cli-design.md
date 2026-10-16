@@ -233,8 +233,12 @@ See [retained proposals](scheduling-runtime-design.md#retained-proposals-and-con
 ### 3.2 Native serving flags
 
 `flare run PACKAGE` loads an exported file without the Ignition configuration
-reader. `flare --help` lists commands; `flare run --help`, `flare run -h`, and
-`flare help run` describe every serving option, its defaults, and accepted values.
+reader. `PACKAGE` can also be a Hugging Face repository ID with an optional
+`@revision`; Flare downloads its prepared package before loading it. A
+[serving container](container.md) packages Flare and Helios without
+Python or the CUDA toolkit. `flare --help` lists commands; `flare run --help`,
+`flare run -h`, and `flare help run` describe every serving option, its defaults,
+and accepted values.
 Help also works after the package path and other options, without opening the
 package or initializing CUDA. Options may precede or follow `PACKAGE`;
 value-taking options accept both `--option VALUE` and `--option=VALUE`.
@@ -246,7 +250,7 @@ Help exits with status 0; usage errors go to stderr with status 2. Its options a
 | `--dangerously-approve-key FINGERPRINT` | Explicitly approve this full lowercase SHA-256 key fingerprint; requires the matching publisher flag | Interactive first use or remembered trust |
 | `--dangerously-accept-publisher NAMESPACE` | Accept this exact publisher namespace; requires the matching key flag | Interactive first use or remembered trust |
 | `--trust-store PATH` | Persistent key/namespace acceptance file | `~/.config/flare/trust.toml` |
-| `--verify-weights` | Verify the stored allocation and table ranges of the ranks served before CUDA initialization | off |
+| `--verify-weights` | Verify the stored allocation and table ranges of the ranks served before loading model GPU resources | off |
 | `--gpus N[,N...]` | Selected GPUs in rank order; indices follow an inherited `CUDA_VISIBLE_DEVICES` list when present | `0` |
 | `--bind IP:PORT` | Listener address | `127.0.0.1:8000` |
 | `--api-key-file PATH` | File containing the serving API key | No authentication |
@@ -262,6 +266,59 @@ batch; adaptive verification loads the permitted
 widths. Missing variants fail before GPU allocation. Continuation rows and
 KV pages receive physical backing after graph upload, within fixed virtual
 extents. Reducing execution state can leave more memory for KV pages.
+
+### Downloading published packages
+
+```sh
+flare download local-inference-lab/MODEL --gpus 0,1,2,3
+flare run local-inference-lab/MODEL --gpus 0,1,2,3
+flare download local-inference-lab/MODEL --revision gb10
+flare run local-inference-lab/MODEL@gb202 --filename model.safetensors --gpus 0,1,2,3
+```
+
+These examples use `MODEL` as a repository-name placeholder. Repositories contain
+prepared Flare packages, not source Transformers checkpoints. Hardware variants
+are separate Hugging Face revisions named `gb10` and `gb202`. Automatic selection
+queries the selected GPUs' PCI device identifiers through the CUDA driver without
+creating a context. GB10 selects `gb10`; known GB202 devices, including RTX PRO
+6000 Blackwell, select `gb202`. All selected GPUs must belong to the same family.
+An unknown identifier or a driver unable to report it requires an explicit
+revision. GPU selection follows `CUDA_VISIBLE_DEVICES` for both commands.
+
+An explicit `--revision` overrides `@revision` and hardware detection. It accepts
+a branch, tag, or commit, and permits downloading on a machine without NVIDIA
+hardware. Online resolution obtains the revision's commit and downloads from
+that exact commit. If the revision contains exactly one `.safetensors` file,
+Flare selects it. Multiple files require `--filename`; Flare prints the available
+names. Hardware selection does not infer tensor-parallel size or graph capacities
+from filenames. The selected package must match the serving GPU count, topology,
+and capacities; the native loader validates its contract.
+
+`flare download` prints only the cached package path on stdout; resolution and
+terminal download progress go to stderr. It does not load or execute the package,
+or grant publisher trust. `flare run` applies the existing signature checks and
+publisher-approval flow after resolution. An existing path, an absolute path, a
+path starting with `./` or `../`, or a `.safetensors` path selects local serving.
+Download options are rejected for local package paths.
+
+Both commands accept these download options:
+
+| Flag | Meaning | Default |
+|---|---|---|
+| `--revision REVISION` | Explicit Hub branch, tag, or commit | Detected `gb10` or `gb202` |
+| `--filename FILE` | Repository-relative prepared package filename | Sole `.safetensors` file |
+| `--cache-dir PATH` | Hugging Face hub cache directory | `~/.cache/huggingface/hub` from the OS user account |
+| `--token-file PATH` | File containing a Hub token for gated or private repositories | No authentication |
+| `--offline` | Resolve only from cached refs and snapshots; make no network requests | Off |
+
+The native client uses Hugging Face's `refs`, `snapshots`, and `blobs` cache
+layout. Existing cached files can be reused without copying their weights.
+Offline automatic filename selection considers the files present in that cached
+snapshot; use `--filename` to select one explicitly. Cache paths, endpoint, and
+authentication are configured explicitly; native commands do not interpret
+`HF_HOME`, `HF_HUB_CACHE`, `HF_TOKEN`, or `HF_ENDPOINT`.
+Downloads use resumable HTTP transfers through `hf-hub`; Xet chunk reconstruction
+is not used.
 
 ### Signing and local development
 
