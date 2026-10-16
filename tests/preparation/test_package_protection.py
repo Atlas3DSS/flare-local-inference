@@ -510,3 +510,167 @@ def test_native_header_validation_rejects_bad_shapes_and_extents(native, tmp_pat
     encoded = json.dumps(header, separators=(',', ':')).encode().ljust(start - 8, b' ')
     path.write_bytes(contents[:8] + encoded + contents[start:])
     assert read(native, path).returncode != 0
+
+
+def development_publisher():
+    return Publisher(Ed25519PrivateKey.generate(), 'local-development', 'local-development', development=True)
+
+
+def development_profile(signer):
+    return {'namespace': signer.namespace, 'development': signer.development,
+            'public_key': list(signer.public_key)}
+
+
+def test_promote_development_package_preserves_resources(native, tmp_path):
+    from ignition.preparation.resign import resign as promote
+
+    original = development_publisher()
+    source, data = fixture(tmp_path, signer=original)
+    before = source.read_bytes()
+    output = tmp_path / 'production.safetensors'
+    target = publisher()
+    promote(source, output, publisher=target, development_profile=development_profile(original))
+    result = read(native, output, weights=True)
+    assert result.returncode == 0, result.stderr
+    index, start = read_index(output)
+    contents = output.read_bytes()
+    for name in ('weights', 'constant'):
+        span = index.ranks[0].resources[name]
+        assert contents[start + span.offset:start + span.offset + span.nbytes] == data[name]
+    assert dict(json.loads(result.stdout)) == {
+        index.ranks[0].resources[name].offset: hashlib.sha256(data[name]).hexdigest()
+        for name in ('kernel', 'graph', 'constant')} | {
+        index.assets[0].payload.offset: hashlib.sha256(data['tokenizer']).hexdigest()}
+    old, _ = envelope(source)
+    new, _ = envelope(output)
+    assert new.package_id != old.package_id and new.signer == target.fingerprint
+    assert not proto.PublisherMetadata.FromString(new.groups[0].body).development
+    assert source.read_bytes() == before
+    assert not list(tmp_path.glob('.flare-resign-*'))
+    with pytest.raises(FileExistsError):
+        promote(source, output, publisher=target, development_profile=development_profile(original))
+    assert output.read_bytes() == contents
+
+
+@pytest.mark.parametrize('corruption', ['weights', 'kernel', 'graph', 'constant', 'tokenizer', 'padding', 'signature', 'profile'])
+def test_promotion_rejects_tampering_without_publishing(tmp_path, corruption):
+    from ignition.preparation.resign import resign as promote
+
+    original = development_publisher()
+    source, data = fixture(tmp_path, size=41, signer=original)
+    index, start = read_index(source)
+    profile = development_profile(original)
+    if corruption == 'profile':
+        profile = development_profile(development_publisher())
+    elif corruption == 'signature':
+        value, payload = envelope(source)
+        value.ranks[0].signature = bytes(64)
+        replace_envelope(source, value, payload)
+    else:
+        offset = (len(data['weights']) if corruption == 'padding' else
+                  index.assets[0].payload.offset if corruption == 'tokenizer' else
+                  index.ranks[0].resources[corruption].offset)
+        overwrite(source, [(start + offset, 1)])
+    output = tmp_path / 'production.safetensors'
+    with pytest.raises(ValueError):
+        promote(source, output, publisher=publisher(), development_profile=profile)
+    assert not output.exists()
+    assert not list(tmp_path.glob('.flare-resign-*'))
+    assert not list(tmp_path.glob('.production.safetensors-*'))
+
+
+def test_promotion_checks_bytes_copied_from_open_source(native, tmp_path, monkeypatch):
+    import ignition.preparation.resign as promotion
+
+    original = development_publisher()
+    source, _ = fixture(tmp_path, size=41, signer=original)
+    publish_output = promotion._publish
+
+    def replace_path(*args):
+        source.rename(tmp_path / 'held-source')
+        source.write_bytes(b'unrelated replacement')
+        return publish_output(*args)
+
+    monkeypatch.setattr(promotion, '_publish', replace_path)
+    output = tmp_path / 'production.safetensors'
+    promotion.resign(source, output, publisher=publisher(), development_profile=development_profile(original))
+    result = read(native, output, weights=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_promotion_detects_in_place_weight_change_during_copy(tmp_path, monkeypatch):
+    import ignition.preparation.resign as promotion
+
+    original = development_publisher()
+    source, _ = fixture(tmp_path, size=41, signer=original)
+    _, start = read_index(source)
+    publish_output = promotion._publish
+
+    def change_weights(*args):
+        overwrite(source, [(start, 1)])
+        return publish_output(*args)
+
+    monkeypatch.setattr(promotion, '_publish', change_weights)
+    output = tmp_path / 'production.safetensors'
+    with pytest.raises(ValueError, match='stored-data digest mismatch'):
+        promotion.resign(source, output, publisher=publisher(), development_profile=development_profile(original))
+    assert not output.exists()
+
+
+def test_resign_cli_with_encrypted_key_and_tensor_parallel_package(native, tmp_path, monkeypatch):
+    from ignition import signing
+    from ignition.cli import main
+    from ignition.preparation.package_file import combine
+
+    original = development_publisher()
+    staged = []
+    for rank in range(2):
+        index = proto.ModelIndex(version=4, ranks=[proto.BundleIndex()])
+        bundle = index.ranks[0]
+        bundle.allocations.add(name='weight', file='weight')
+        bundle.graphs.add(name='decode', resource='graph')
+        payload = []
+        for name, offset, data in [('weight', 0, bytes([rank]) * 301),
+                                   ('graph', 4096, bytes([rank + 2]) * 41)]:
+            path = tmp_path / f'{name}-{rank}'
+            path.write_bytes(data)
+            bundle.resources[name].CopyFrom(proto.Span(offset=offset, nbytes=len(data)))
+            payload.append((offset, path, 0, len(data)))
+        path = tmp_path / f'rank-{rank}'
+        publish(path, index, payload)
+        staged.append(path)
+    source = tmp_path / 'development.safetensors'
+    combine(source, staged, [], publisher=original)
+    profiles(tmp_path / 'development-publisher.json', original)
+    password = b'encrypted-fixture-key-password'
+    signing.generate(tmp_path / 'keys', 'Fixture publisher', 'example', password)
+    monkeypatch.setattr(signing, 'passphrase', lambda prompt: password)
+    config = tmp_path / 'config.toml'
+    config.write_text('[publishing]\nnamespace = "example"\n'
+                      'official_source = "https://huggingface.co/example/default"\n')
+    output = tmp_path / 'production.safetensors'
+    args = ['resign', str(source), '--output', str(output), '--config', str(config),
+            '--signing-key', str(tmp_path / 'keys/signing-key.pem'),
+            '--official-source', 'https://huggingface.co/example/override']
+    assert main(args) == 0
+    value, _ = envelope(output)
+    metadata = proto.PublisherMetadata.FromString(value.groups[0].body)
+    assert metadata.official_source == 'https://huggingface.co/example/override'
+    assert metadata.ranks == 2
+    result = read(native, output, namespace='example', weights=True, profile=tmp_path / 'keys/publisher.json')
+    assert result.returncode == 0, result.stderr
+    assert {digest for _, digest in json.loads(result.stdout)} == {
+        hashlib.sha256(bytes([rank + 2]) * 41).hexdigest() for rank in range(2)}
+    assert main(args) != 0
+
+
+def test_promotion_requires_development_source_and_production_target(tmp_path):
+    from ignition.preparation.resign import resign as promote
+
+    source, _ = fixture(tmp_path, size=41)
+    output = tmp_path / 'production.safetensors'
+    with pytest.raises(ValueError, match='source profile'):
+        promote(source, output, publisher=publisher(), development_profile=development_profile(publisher()))
+    with pytest.raises(ValueError, match='production publisher'):
+        promote(source, output, publisher=development_publisher(), development_profile={})
+    assert not output.exists()

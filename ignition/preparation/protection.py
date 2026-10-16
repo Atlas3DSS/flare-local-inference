@@ -7,7 +7,7 @@ from pathlib import Path
 import re
 import struct
 
-from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
@@ -72,7 +72,9 @@ class Publisher:
 
     @classmethod
     def load(cls, key_path, namespace, official_source):
-        key = serialization.load_pem_private_key(Path(key_path).expanduser().read_bytes(), password=None)
+        from ignition.signing import load_key
+
+        key = load_key(key_path)
         return cls(key, namespace, official_source)
 
     @property
@@ -123,9 +125,10 @@ class Protection:
     holding one rank's bytes verifies that rank completely.
     """
 
-    def __init__(self, index, payload, publisher, stage):
-        from .package_file import align
+    def __init__(self, index, payload, publisher, stage, *, expected_stored=None):
+        from .package_file import _open_source, align
         self.publisher = publisher
+        self.expected_stored = expected_stored
         self.package_id = os.urandom(32)
         self.index = index
         # Parts in stored-data order: what every rank shares, then each rank.
@@ -158,7 +161,7 @@ class Protection:
                 encrypted = Path(stage) / f'executable-{cursor}'
                 resource = self.code[owner].resources.add(offset=cursor, plain_bytes=size)
                 cipher = AESGCM(resource_key(publisher.public_key, self.package_id, cursor, publisher.namespace))
-                with Path(source).open('rb') as contents, encrypted.open('xb') as output:
+                with _open_source(source) as contents, encrypted.open('xb') as output:
                     contents.seek(source_offset)
                     remaining = size
                     counter = 0
@@ -178,7 +181,7 @@ class Protection:
                 span.nbytes = size
             elif kind == 3:
                 digest = hashlib.sha256()
-                with Path(source).open('rb') as contents:
+                with _open_source(source) as contents:
                     contents.seek(source_offset)
                     remaining = size
                     while remaining:
@@ -201,6 +204,9 @@ class Protection:
         for (start, owner), (end, _) in zip(starts, starts[1:] + [(self.data_end, None)]):
             self.ranges[owner] = (start, end - start)
         self.hashes = {owner: hashlib.sha256() for owner in parts}
+        if expected_stored is not None and (set(expected_stored) != set(self.ranges)
+                or any(self.ranges[owner] != (data.offset, data.nbytes) for owner, data in expected_stored.items())):
+            raise ValueError('re-signing must preserve the signed stored-data ranges')
 
     def absorb(self, position, block):
         """Hash payload bytes written at `position`, in order, into the stored-data part holding them."""
@@ -211,6 +217,10 @@ class Protection:
 
     def envelope(self, final=False):
         """The signed envelope; before every payload byte is absorbed, one of the same size."""
+        if final and self.expected_stored is not None:
+            for owner, expected in self.expected_stored.items():
+                if self.hashes[owner].digest() != expected.sha256:
+                    raise ValueError(f'development package stored-data digest mismatch for rank {owner}')
         def stored(owner):
             offset, nbytes = self.ranges[owner]
             digest = self.hashes[owner].digest() if final else bytes(32)

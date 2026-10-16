@@ -1,4 +1,4 @@
-//! Publisher identities provisioned by the runtime distributor.
+//! Built-in publisher identities and additional release-provisioned profiles.
 
 use super::{Publisher, format::invalid};
 use crate::Result;
@@ -32,13 +32,48 @@ pub(super) fn embedded() -> Result<Vec<Publisher>> {
     if length > SLOT_SIZE - 36 {
         return Err(invalid("embedded publisher section exceeds capacity"));
     }
-    let publishers: Vec<Publisher> = if length == 0 {
-        Vec::new()
-    } else {
-        serde_json::from_slice(&slot[36..36 + length]).map_err(|e| invalid(e.to_string()))?
-    };
+    let mut publishers: Vec<Publisher> = serde_json::from_slice(include_bytes!("publishers.json"))
+        .map_err(|e| invalid(e.to_string()))?;
+    if length != 0 {
+        let additional: Vec<Publisher> =
+            serde_json::from_slice(&slot[36..36 + length]).map_err(|e| invalid(e.to_string()))?;
+        for publisher in additional {
+            if let Some(previous) = publishers
+                .iter()
+                .find(|p| p.public_key == publisher.public_key)
+            {
+                if previous != &publisher {
+                    return Err(invalid(
+                        "conflicting embedded identities for the same publisher key",
+                    ));
+                }
+            } else {
+                publishers.push(publisher);
+            }
+        }
+    }
     for publisher in &publishers {
         publisher.validate()?;
     }
     Ok(publishers)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_build_contains_production_identity() {
+        let profiles = embedded().unwrap();
+        let profile = profiles
+            .iter()
+            .find(|profile| profile.namespace == "local-inference-lab")
+            .unwrap();
+        assert_eq!(profile.name, "Local Inference Lab, Inc.");
+        assert!(!profile.development);
+        assert_eq!(
+            profile.fingerprint(),
+            "937c0143f6856d3ee8ad164f62e3d804bd825d7a8750d0accb9a5849f703a8c1"
+        );
+    }
 }

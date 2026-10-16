@@ -344,9 +344,11 @@ pathname cannot redirect those reads. Package files must remain immutable while
 loaded. Signatures authenticate bytes and do not sandbox executable code.
 Encryption does not prevent a user controlling the runtime from recovering code.
 
-Helios reserves an ELF `.flare_publishers` section for release-provisioned keys.
-A source build contains no publisher keys. The private release command stamps a
-JSON profile array into a separately named executable:
+Helios embeds the Local Inference Lab, Inc. public identity from
+`helios/src/runtime_package/publishers.json` in source builds. It also reserves an
+ELF `.flare_publishers` section for additional release-provisioned identities.
+The private release command stamps a JSON profile array into a separately named
+executable:
 
 ```sh
 .venv/bin/python -m ignition.release flare/target/release/flare \
@@ -355,10 +357,9 @@ JSON profile array into a separately named executable:
 
 Each profile has `name`, `namespace`, and `public_key` (32 integer bytes), plus
 an optional boolean `development`. The public key belongs to the Ed25519 key
-used by Ignition. A release profile can name `Local Inference Lab, Inc.` and
-namespace `local-inference-lab`; names in externally supplied profiles remain
-unverified claims. Profile import does not grant execution trust. An external
-key claiming an embedded publisher's name or namespace still receives the
+used by Ignition. The built-in identity uses namespace `local-inference-lab`;
+names in externally supplied profiles remain unverified claims. Profile import
+does not grant execution trust. An external key claiming an embedded publisher's name or namespace still receives the
 unrecognized-key warning. A key with conflicting profile attributes is rejected.
 
 Flare displays the authenticated namespace, source, and full key fingerprint.

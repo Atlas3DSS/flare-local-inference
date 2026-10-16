@@ -8,6 +8,7 @@ from ignition.errors import FlareError
 
 def _parser() -> argparse.ArgumentParser:
     from . import serve
+    from . import publishing
     from .help import RecipeHelp, recipe_help
 
     parser = argparse.ArgumentParser(
@@ -71,6 +72,17 @@ def _parser() -> argparse.ArgumentParser:
     joining.add_argument("--rank", type=int, required=True, metavar="R", help="this host's rank, 1 through N-1")
     joining.add_argument("--ranks", type=int, required=True, choices=(2, 4), metavar="N", help="tensor-parallel ranks")
     joining.add_argument("--gpu", type=int, default=0, metavar="INDEX", help="this host's GPU (default: 0)")
+    keys = command("keygen", publishing.keygen, "create an encrypted production signing key and public profile")
+    keys.add_argument("--directory", required=True, type=Path, help="new private directory; must not exist")
+    keys.add_argument("--name", required=True, help="publisher display name")
+    keys.add_argument("--namespace", required=True, help="publisher Hugging Face namespace")
+    resigning = command("resign", publishing.resign, "verify and re-sign a development package for production")
+    resigning.add_argument("package", type=Path, help="signed development .safetensors package")
+    resigning.add_argument("--output", required=True, type=Path, help="destination package; must not exist")
+    resigning.add_argument("--signing-key", type=Path, help="Ed25519 PEM key (default: publishing.signing_key)")
+    resigning.add_argument("--namespace", help="publisher namespace (default: publishing.namespace)")
+    resigning.add_argument("--official-source", help="published repository URL (default: publishing.official_source)")
+    resigning.add_argument("--development-publisher", type=Path, help="source public profile (default: beside config)")
     return parser
 
 

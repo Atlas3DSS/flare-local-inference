@@ -332,10 +332,16 @@ namespace = "local-inference-lab"
 official_source = "https://huggingface.co/local-inference-lab/foobar"
 ```
 
-The key must be an unencrypted Ed25519 PKCS#8 PEM file. Keep it private;
-runtime publisher profiles contain only its verification key. `--official-source`
-overrides the configured repository URL. A partial publishing configuration is
-an error and never falls back to local credentials.
+The key must be an owner-only Ed25519 PKCS#8 PEM file. Encrypted keys prompt
+for their passphrase in an interactive terminal; unencrypted keys are also
+accepted. Runtime publisher profiles contain only the verification key.
+`--official-source` overrides the configured repository URL. A partial publishing
+configuration is an error and never falls back to local credentials.
+
+`ignition keygen` creates an encrypted production key and public profile.
+`ignition resign` verifies and promotes an existing development package without
+model preparation or GPU access. See [production signing](signing.md) for key
+custody, commands, and package promotion.
 
 With no publishing configuration, Ignition creates and reuses
 `development-signing-key.pem` beside its configuration file, with owner-only
