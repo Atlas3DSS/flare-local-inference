@@ -27,7 +27,7 @@ from ignition.preparation.frontend import prepare_frontend
 from ignition.preparation.fixtures.recurrent import register_benchmark_state
 from ignition.preparation.host_memory import release_unused
 from ignition.preparation.model import PreparedModel
-from ignition.preparation.scratch import ScratchArena, scratch_views
+from ignition.preparation.scratch import GraphBufferPool, ScratchArena, scratch_views
 from ignition.preparation.tuning import RecordedPreparationSession
 from ignition.preparation.tuning_replicas import TuningReplica
 from ignition.progress import phase
@@ -149,20 +149,23 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                                  restore=pool.clear_for_preparation)
         arena = ScratchArena(device, overlap=False)
         session.register_scratch(arena)
+        graph_buffers = GraphBufferPool(device, chunk_bytes=2 << 20)
         with package_storage.scratch_pool() as scratch_pool:
             # Vision and text graphs execute serially and share disposable workspace.
             text_shape = (max(config.prefill_chunk_size, config.decode_tokens), weights.config.hidden)
             text_shapes = (text_shape,) * 5
             if drafting:
                 text_shapes += ((text_shape[0], len(weights.config.draft.target_layers) * text_shape[1]),)
-            shared_scratch = torch.zeros(max(PATCH_CAPACITIES[-1] * 3 * weights.config.vision["qkv_hidden_size"],
-                sum(rows * columns for rows, columns in text_shapes)), dtype=torch.bfloat16, device=device)
+            cursor = graph_buffers.cursor()
+            shared_scratch = cursor.zeros((max(PATCH_CAPACITIES[-1] * 3 * weights.config.vision["qkv_hidden_size"],
+                sum(rows * columns for rows, columns in text_shapes)),), torch.bfloat16)
             activation, total, kda_output, mla_output, moe_output, *auxiliary = scratch_views(shared_scratch, text_shapes)
             prefill_storage = Scratch.allocate(config.prefill_chunk_size, 1, weights.config, shard.world_size, device,
-                                               activations=activation[:config.prefill_chunk_size])
-            decode_storage = Scratch.allocate(config.decode_tokens, config.decode_tokens, weights.config, shard.world_size, device)
+                                               activations=activation[:config.prefill_chunk_size], buffers=cursor)
+            decode_storage = Scratch.allocate(config.decode_tokens, config.decode_tokens, weights.config, shard.world_size,
+                                              device, buffers=cursor)
             vision_inputs = VisionInputs.allocate(device)
-            vision_storage = VisionScratch.allocate(PATCH_CAPACITIES[-1], device, work=shared_scratch)
+            vision_storage = {}
         vision_prefill = PrefillVisionInputs.allocate(config.prefill_chunk_size, device)
         vision_state = VisionState(inputs, vision_prefill, requests, image_token=163605,
                                    features=FEATURES, hidden=HIDDEN // shard.world_size)
@@ -219,24 +222,26 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                         (*inputs.buffers(), "sampling_grammar_mask", *(vision_prefill.buffers() if mode == "prefill" else ())),
                         enabled=enabled)
         if speculation is not None:
-            from ignition.components.parallel_draft import PreparedParallelDraftRound, prepare_sampling_scratch
-            from ignition.preparation.scratch import bind_scratch
+            from ignition.components.parallel_draft import PreparedParallelDraftRound
 
-            sampling = prepare_sampling_scratch(slots, max(config.speculative_widths), vocabulary, device)
-            retained = bind_scratch(PreparedParallelDraftRound.storage_layout(slots, max(config.speculative_widths), vocabulary), device=device)
-            for batch, width in sorted(config.speculative_shapes, reverse=True):
+            speculation.sampling_buffers = GraphBufferPool(device, chunk_bytes=2 << 20)
+            for batch, width in sorted(config.speculative_shapes, key=lambda shape: shape[0] * shape[1], reverse=True):
                 name = f"speculative{batch}x{width}"
                 forward = PreparedParallelDraftRound(speculation, batch, width, name,
-                    sampling_scratch=sampling, round_storage=retained)
+                    buffers=speculation.sampling_buffers.cursor())
                 forward.prepare()
                 add(name, forward, "speculative", batch, width, (*inputs.buffers(), "sampling_grammar_mask"), enabled=True)
 
-        for capacity in PATCH_CAPACITIES:
+        for capacity in reversed(PATCH_CAPACITIES):
             name = f"vision{capacity}"
-            encoder = PreparedVision(weights.vision, vision_storage.rows(capacity), vision_inputs,
-                session=session, workspace=arena, name=name)
+            with scratch_pool:
+                cursor = graph_buffers.cursor()
+                work = cursor.zeros(shared_scratch.shape, torch.bfloat16)
+                vision_storage[capacity] = VisionScratch.allocate(capacity, device, work=work, buffers=cursor)
+            encoder = PreparedVision(weights.vision, vision_storage[capacity], vision_inputs,
+                session=session, workspace=arena, name=name, buffers=cursor)
             forward = PreparedVisionGeneration(encoder, vision_state, records, frame, sequence,
-                                                feature_range=shard.partition(HIDDEN))
+                                                feature_range=shard.partition(HIDDEN), buffers=cursor)
             add(name, forward, "vision", 1, capacity, vision_inputs.buffers())
         row_inputs = ("request_state_rows", "row_slot_ids", "row_generations", "live_rows")
         for enabled in modes:
@@ -318,9 +323,10 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         speculation.kda_records.corrections, speculation.kda_records.keys_and_gates]
     return PreparedModel(device=config.devices[rank], graphs=graphs, buffers=buffers, signatures=signatures,
         max_active=config.max_active, session=session, server_config=server_config, memory_report=memory,
-        export_zero_ranges=storage_ranges([prefill_storage, decode_storage, vision_storage, arena.tensor, metadata,
+        export_zero_ranges=storage_ranges([prefill_storage, decode_storage, vision_storage, graph_buffers.chunks,
+            None if speculation is None else speculation.sampling_buffers.chunks, arena.tensor, metadata,
                                            decoder_buffers.scratch_tensors(), vision_state.arena, *draft_disposable]),
         resources=(weights, pool, requests, inputs, admission, commands, arena, forwards, prefill_storage,
                    decode_storage, metadata, compiled, stream, graph_pool, session, coordinator, collective,
                    vocabulary_collective, embedding_collective, router_collective, frontend_assets,
-                   vision_inputs, vision_prefill, vision_state, vision_storage, scratch_pool, shared_scratch, speculation))
+                   vision_inputs, vision_prefill, vision_state, vision_storage, scratch_pool, shared_scratch, graph_buffers, speculation))

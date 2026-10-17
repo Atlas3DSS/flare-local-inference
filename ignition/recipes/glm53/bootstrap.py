@@ -417,7 +417,7 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
         if speculation is not None:
             from .speculative import PreparedRound
 
-            for batch, width in config.speculative_shapes:
+            for batch, width in sorted(config.speculative_shapes, key=lambda shape: shape[0] * shape[1], reverse=True):
                 name = f"speculative{batch}x{width}"
                 operation = PreparedRound(speculation, batch, width, name)
                 operation.prepare()

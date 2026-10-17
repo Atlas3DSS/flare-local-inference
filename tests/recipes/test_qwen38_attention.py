@@ -13,7 +13,7 @@ import torch
 from ignition.preparation import inspect_qwen38_checkpoint
 from ignition.preparation.graphs import PreparedGraphBundle
 from ignition.preparation.qwen38 import TEXT_PREFIX
-from ignition.preparation.scratch import ScratchArena
+from ignition.preparation.scratch import GraphBufferPool, ScratchArena
 from ignition.recipes.qwen38.attention import (
     PreparedAttention,
     QSAMetadata,
@@ -159,10 +159,11 @@ def test_checkpoint_qsa_chunked_prefill_native_decode(manifest, compiled):
     pool = torch.cuda.graph_pool_handle()
     stream = torch.cuda.Stream(device=device)
     arena = ScratchArena(device)
+    buffers = GraphBufferPool(device, chunk_bytes=2 << 20)
     with PreparationSession(device=device, autotune=False, compile_workers=0) as session:
         for label, capacity in (("prefill", 64), ("decode", 2)):
             sources[label] = torch.zeros((capacity, 2560), device=device, dtype=torch.bfloat16)
-            scratch[label] = QSAScratch.allocate(capacity, device)
+            scratch[label] = QSAScratch.allocate(capacity, device, buffers=buffers.cursor())
             metadata[label] = QSAMetadata.allocate(tokens=capacity, batch=2, context=128, device=device)
             prepared[label] = PreparedAttention(module, weights, sources[label], scratch[label], state,
                 metadata[label], rotary, session=session, name=label,
@@ -206,7 +207,9 @@ def test_checkpoint_qsa_chunked_prefill_native_decode(manifest, compiled):
                 sources[label].zero_()
                 sources[label][:count].copy_(torch.cat([h[start:start + length] for h, start, length in
                                                        zip(histories, consumed, lengths)]))
-                scratch[label].output.fill_(float("nan"))
+                for chunks in buffers.chunks.values():
+                    for tensor in chunks:
+                        tensor.fill_(float("nan") if tensor.is_floating_point() else -37)
                 torch.cuda.synchronize(device)
                 allocated = torch.cuda.memory_stats(device)["allocation.all.allocated"]
                 ticket = worker.submit(0 if label == "prefill" else 1)

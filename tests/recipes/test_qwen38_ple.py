@@ -241,6 +241,7 @@ def test_full_checkpoint_ple_native_graph_continuity(
     from b12x.preparation import PreparationSession
 
     from ignition.preparation.graphs import PreparedGraphBundle
+    from ignition.preparation.scratch import GraphBufferPool
 
     module, projections, table = cuda_components
     device = torch.device("cuda", 0)
@@ -249,8 +250,9 @@ def test_full_checkpoint_ple_native_graph_continuity(
         "prefill": torch.zeros((32, 10240), dtype=torch.bfloat16, device=device),
         "decode": torch.zeros((3, 10240), dtype=torch.bfloat16, device=device),
     }
+    buffers = GraphBufferPool(device, chunk_bytes=2 << 20)
     scratch = {
-        name: PLEScratch.allocate(source.shape[0], device)
+        name: PLEScratch.allocate(source.shape[0], device, buffers=buffers.cursor())
         for name, source in sources.items()
     }
     metadata = {
@@ -345,6 +347,9 @@ def test_full_checkpoint_ple_native_graph_continuity(
                     )
                     start += length
                 _stage_checkpoint_rows(table, adapters[mode].embedding_lookup)
+                for chunks in buffers.chunks.values():
+                    for tensor in chunks:
+                        tensor.fill_(float("nan") if tensor.is_floating_point() else -37)
                 torch.cuda.synchronize()
                 allocated = torch.cuda.memory_stats()["allocation.all.allocated"]
                 ticket = worker.submit(bundle.graph_indices[mode])

@@ -73,10 +73,11 @@ class VisionState:
 
 
 class PreparedVisionGeneration:
-    def __init__(self, encoder, state, records, frame, sequence):
+    def __init__(self, encoder, state, records, frame, sequence, *, buffers=None):
         self.encoder, self.state = encoder, state
         self.records, self.frame, self.sequence = records, frame, sequence
-        self.errors = torch.zeros(1, dtype=torch.int32, device=records.device)
+        self.errors = (torch.zeros(1, dtype=torch.int32, device=records.device) if buffers is None
+                       else buffers.zeros((1,), torch.int32))
         self.publish = PreparedFeaturePublication(state, encoder.inputs, records, frame, sequence)
 
     def __call__(self):

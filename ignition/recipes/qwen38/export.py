@@ -20,9 +20,8 @@ def disposable_ranges(*, cache, scratch, workspaces, vision_scratch, decoders, o
         from .speculative_model import PreparedPrefillAbsorption, PreparedSpeculativeRound
 
         values.append(speculation.mtp_scratch)
-        values.extend((speculation.target_workspace, speculation.proposal_workspace,
-            speculation.verification_workspace, speculation.feedback_hidden, speculation.prefill_residual,
-            speculation.verification_residual, speculation.draft_probabilities, speculation.raw_backup))
+        values.extend((speculation.sampling_buffers.chunks, speculation.feedback_hidden, speculation.prefill_residual,
+            speculation.verification_residual, speculation.raw_backup))
         for operation in speculation.owners:
             if isinstance(operation, PreparedPrefillAbsorption):
                 values.extend((operation.target_residual, operation.previous, operation.previous_rope, operation.before))

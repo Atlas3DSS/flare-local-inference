@@ -249,6 +249,10 @@ architectural boundary before committing the change.
 
 ## Optimize the serving path
 
+- When a potential correctness, memory, or performance deficiency appears in
+  one model, inspect the shared components and equivalent paths in every
+  supported recipe before scoping the fix. Track follow-up work across all
+  affected models; distinguish confirmed findings from untested paths.
 - Apply the recipe requirements below during implementation. Inspect the
   model's fusion boundaries, precision, sharding, overlap, and selected kernel
   plans. Reuse FlashInfer/b12x mechanisms directly.

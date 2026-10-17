@@ -7,6 +7,7 @@ import os
 import pytest
 import torch
 
+from ignition.preparation.scratch import GraphBufferPool
 from ignition.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission
 from ignition.recipes.qwen38.vision_state import (
     PreparedEmbeddingInjection,
@@ -69,8 +70,9 @@ def test_native_vision_handoff_append_epoch_validation_and_completion(compiled):
     records = torch.zeros((2, 4, 8), dtype=torch.int64, device=device)
     frame = torch.zeros(1, dtype=torch.int32, device=device)
     sequence = torch.ones(1, dtype=torch.int64, device=device)
+    pool = GraphBufferPool(device, chunk_bytes=2 << 20)
     operation = PreparedVisionHandoff(
-        inputs, features, requests, output, records, frame, sequence
+        inputs, features, requests, output, records, frame, sequence, buffers=pool.cursor()
     )
     operation.prepare()
     def forward():
@@ -101,6 +103,9 @@ def test_native_vision_handoff_append_epoch_validation_and_completion(compiled):
         inputs.vision_num_patches.fill_(16)
         inputs.vision_cu_seqlens[1] = 16
         inputs.vision_pixel_values[:16].fill_(0.25)
+        for chunks in pool.chunks.values():
+            for chunk in chunks:
+                chunk.fill_(37)
         _replay(worker)
         assert operation.errors.item() == 0
         assert features.count.tolist() == [0, 0, 4, 0]

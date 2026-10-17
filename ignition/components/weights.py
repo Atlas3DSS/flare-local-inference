@@ -106,7 +106,7 @@ class DirectWeightLoader:
 
     def _load_nvfp4_linear(self, prefix, *, rows=None, columns=None):
         import torch
-        from b12x._lib.intrinsics import swizzle_block_scale
+        from b12x._lib.intrinsics.reference import swizzle_block_scale
         from b12x.gemm.blockscaled import pack_weight
 
         source = self._sources[f"{prefix}.weight"]
@@ -376,7 +376,7 @@ class DirectWeightLoader:
             offset = end
         self._session.flush()
         if fp4:
-            from b12x._lib.intrinsics import swizzle_block_scale
+            from b12x._lib.intrinsics.reference import swizzle_block_scale
 
             return replace(pack_weight(values, swizzle_block_scale(scales), recipe="mxfp4"),
                            in_features=columns)
@@ -514,7 +514,7 @@ class DirectWeightLoader:
         """
         import torch
         from b12x.moe import fused_moe as moe
-        from b12x._lib.intrinsics import swizzle_block_scale
+        from b12x._lib.intrinsics.reference import swizzle_block_scale
         from .sm103 import is_sm103
 
         self._require_open()

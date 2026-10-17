@@ -18,6 +18,7 @@ def disposable_ranges(scratch, arena, forwards):
             if hasattr(sampling, "scratch_tensors"):
                 values.append(sampling.scratch_tensors)
         if isinstance(forward, PreparedRound):
+            values.append(forward.owner.sampling_buffers.chunks)
             values.extend(getattr(forward, name) for name in (
                 "draft_logits", "before", "pending", "previous", "active", "candidates", "drafts",
                 "probabilities", "valid", "seed", "offset", "base_offset", "sampled", "tail_backup"))

@@ -167,10 +167,11 @@ def prepare(snapshot, config, *, progress=None, package_storage):
         for capacity in reversed(PATCH_CAPACITIES):
             name = f"vision{capacity}"
             with scratch_pool:
-                scratch = VisionScratch.allocate(capacity, device, buffers=graph_buffers.cursor())
+                cursor = graph_buffers.cursor()
+                scratch = VisionScratch.allocate(capacity, device, buffers=cursor)
             encoder = PreparedVision(weights.vision, scratch, vision_inputs,
-                                     session=session, workspace=arena, name=name)
-            forward = PreparedVisionGeneration(encoder, vision_state, records, frame, sequence)
+                                     session=session, workspace=arena, name=name, buffers=cursor)
+            forward = PreparedVisionGeneration(encoder, vision_state, records, frame, sequence, buffers=cursor)
             add(name, forward, "vision", 1, capacity, vision_inputs.buffers())
         for enabled in modes:
             mode_weights = weights if enabled else replace(weights, draft=None)
@@ -194,17 +195,13 @@ def prepare(snapshot, config, *, progress=None, package_storage):
                     add(name, forward, mode, rows, capacity if mode == "prefill" else 1,
                         (*inputs.buffers(), "sampling_grammar_mask", *(vision_prefill.buffers() if mode == "prefill" else ())), enabled=enabled)
         if speculation is not None:
-            from ignition.components.parallel_draft import PreparedParallelDraftRound, prepare_sampling_scratch
-            from ignition.preparation.scratch import bind_scratch
+            from ignition.components.parallel_draft import PreparedParallelDraftRound
 
             for batch, width in sorted(config.speculative_shapes, reverse=True):
                 name = f"speculative{batch}x{width}"
                 speculation.begin(batch, width)
-                sampling = prepare_sampling_scratch(batch, width, vocabulary, device, buffers=speculation.cursor)
-                retained = bind_scratch(PreparedParallelDraftRound.storage_layout(batch, width, vocabulary),
-                                       device=device, workspace=speculation.cursor)
                 forward = PreparedParallelDraftRound(speculation, batch, width, name,
-                    sampling_scratch=sampling, round_storage=retained)
+                                                     buffers=speculation.cursor)
                 forward.prepare()
                 add(name, forward, "speculative", batch, width, (*inputs.buffers(), "sampling_grammar_mask"), enabled=True)
         row_inputs = ("request_state_rows", "row_slot_ids", "row_generations", "live_rows")

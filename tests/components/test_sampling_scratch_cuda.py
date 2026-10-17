@@ -7,12 +7,13 @@ import pytest
 import torch
 
 from ignition.components.draft_sampling import PreparedDraftDistribution
+from ignition.components.parallel_draft import prepare_sampling_scratch
 from ignition.components.sampling import DeviceRequestState, RequestAdmission
 from ignition.components.speculation import (
     PreparedSpeculativeDistributions, PreparedStochasticVerification, SpeculativeRngState,
 )
 from ignition.preparation.graphs import PreparedGraphBundle
-from ignition.preparation.scratch import bind_scratch
+from ignition.preparation.scratch import GraphBufferPool
 
 pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
     reason="requires an explicitly assigned CUDA device")
@@ -33,19 +34,17 @@ def test_native_shared_sampling_survives_shape_switches_and_sequential_proposals
     slots = torch.tensor([3, 0, 2, 1, *range(4, batch_limit)], dtype=torch.int32, device="cuda:0")
     epochs = torch.tensor([7, 7, 99, 7, *([7] * (batch_limit - 4))], dtype=torch.int64, device="cuda:0")
     live = torch.tensor([batch_limit], dtype=torch.int32, device="cuda:0")
-    workspaces = dict(
-        proposal=bind_scratch(PreparedDraftDistribution.scratch_layout(batch_limit, 1, vocab), device="cuda:0"),
-        target=bind_scratch(PreparedSpeculativeDistributions.scratch_layout(batch_limit, width_limit, vocab), device="cuda:0"),
-        verify=bind_scratch(PreparedStochasticVerification.scratch_layout(batch_limit, width_limit, vocab), device="cuda:0"))
-    shared_drafts = torch.empty(batch_limit * (width_limit - 1) * vocab, device="cuda:0")
+    pool = GraphBufferPool("cuda:0", chunk_bytes=2 << 20)
     owners, graphs = [], {}
     generator = torch.Generator().manual_seed(17)
     for batch, width in ((batch_limit, width_limit), (1, 1), (batch_limit // 2, 3), (1, width_limit)):
         logits = torch.randn((batch, width, vocab), generator=generator).cuda()
         proposal_logits = torch.randn((batch, 1, vocab), generator=generator).cuda()
         for shared in (False, True):
+            buffers = pool.cursor() if shared else None
+            workspaces = prepare_sampling_scratch(batch, width, vocab, "cuda:0", buffers=buffers) if shared else {}
             ids = torch.zeros((batch, width - 1), dtype=torch.int64, device="cuda:0")
-            probabilities = (shared_drafts[:batch * (width - 1) * vocab].view(batch, width - 1, vocab)
+            probabilities = (buffers.zeros((batch, width - 1, vocab), torch.float32)
                              if shared else torch.empty((batch, width - 1, vocab), device="cuda:0"))
             valid = torch.zeros((batch, width - 1), dtype=torch.bool, device="cuda:0")
             seed = torch.arange(batch, dtype=torch.int64, device="cuda:0") + 51
@@ -85,7 +84,7 @@ def test_native_shared_sampling_survives_shape_switches_and_sequential_proposals
                 call()
             owners.append((owner, call))
             graphs[f"{batch}x{width}-{shared}"] = graph
-    bundle = PreparedGraphBundle(device=0, graphs=graphs, buffers={}, resources=(owners, state, workspaces))
+    bundle = PreparedGraphBundle(device=0, graphs=graphs, buffers={}, resources=(owners, state, pool))
     worker = bundle.start_worker()
     try:
         for pair in (0, 3, 1, 0, 2, 1, 2, 3, 0):
@@ -93,10 +92,9 @@ def test_native_shared_sampling_survives_shape_switches_and_sequential_proposals
             for shared in (False, True):
                 index = pair * 2 + int(shared)
                 if shared:
-                    for workspace in workspaces.values():
-                        for tensor in workspace.values():
-                            tensor.fill_(True if tensor.dtype == torch.bool else 255)
-                    shared_drafts.fill_(float("nan"))
+                    for chunks in pool.chunks.values():
+                        for tensor in chunks:
+                            tensor.fill_(float("nan") if tensor.is_floating_point() else 255)
                 torch.cuda.synchronize()
                 allocations = torch.cuda.memory_stats()["allocation.all.allocated"]
                 ticket = worker.submit(index)

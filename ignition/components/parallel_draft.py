@@ -14,7 +14,7 @@ from .speculation import (
 from .state import save_hidden
 
 
-def prepare_sampling_scratch(batch, width, vocab, device, *, buffers=None):
+def prepare_sampling_scratch(batch, width, vocab, device, *, buffers=None, proposal=True, verification=True):
     """Share sequential shapes while keeping target probabilities live through verification.
 
     Proposal probabilities must be copied to retained storage before the next
@@ -23,11 +23,13 @@ def prepare_sampling_scratch(batch, width, vocab, device, *, buffers=None):
     """
     from ignition.preparation.scratch import bind_scratch
 
-    return {
-        "proposal": bind_scratch(PreparedDraftDistribution.scratch_layout(batch, 1, vocab), device=device, workspace=buffers),
-        "target": bind_scratch(PreparedSpeculativeDistributions.scratch_layout(batch, width, vocab), device=device, workspace=buffers),
-        "verify": bind_scratch(PreparedStochasticVerification.scratch_layout(batch, width, vocab), device=device, workspace=buffers),
-    }
+    layouts = {}
+    if proposal and width > 1:
+        layouts["proposal"] = PreparedDraftDistribution.scratch_layout(batch, 1, vocab)
+    if verification:
+        layouts["target"] = PreparedSpeculativeDistributions.scratch_layout(batch, width, vocab)
+        layouts["verify"] = PreparedStochasticVerification.scratch_layout(batch, width, vocab)
+    return {name: bind_scratch(layout, device=device, workspace=buffers) for name, layout in layouts.items()}
 
 
 class PreparedParallelDraftRound:
@@ -42,14 +44,14 @@ class PreparedParallelDraftRound:
         return dict(probabilities=((batch, width - 1, vocab), torch.float32),
                     logits=((batch, 1, vocab), torch.float32))
 
-    def __init__(self, owner, batch, width, name, *, generate_proposals=True, sampling_scratch=None,
-                 round_storage=None, proposal_only=False):
+    def __init__(self, owner, batch, width, name, *, generate_proposals=True, buffers=None, proposal_only=False):
         self.owner, self.batch, self.width = owner, batch, width
         self.generate_proposals = generate_proposals
         self.proposal_only = proposal_only
-        self.sampling_scratch = {} if sampling_scratch is None else sampling_scratch
         o, b, w = owner, batch, width
         device, blocks = o.pool.backing.device, o.inputs.page_tables.shape[1]
+        self.sampling_scratch = prepare_sampling_scratch(b, w, o.requests.vocab_size, device, buffers=buffers,
+                                                        proposal=generate_proposals, verification=not proposal_only)
         self.rows = torch.arange(b, device=device)
         self.metadata = Metadata.allocate(b * w, b, blocks, device, samples=b * w)
         self.validator = PreparedBatch(
@@ -134,7 +136,7 @@ class PreparedParallelDraftRound:
         layout = self.storage_layout(b, w, o.requests.vocab_size)
         if not generate_proposals:
             del layout["logits"]
-        retained = bind_scratch(layout, device=device, workspace=round_storage)
+        retained = bind_scratch(layout, device=device, workspace=buffers)
         self.logits, self.probabilities = retained.get("logits"), retained["probabilities"]
         for tensor in retained.values():
             tensor.zero_()

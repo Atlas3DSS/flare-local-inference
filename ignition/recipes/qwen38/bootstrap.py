@@ -38,7 +38,7 @@ from ignition.preparation.qwen38 import (
     MODEL_ID,
     REVISION,
 )
-from ignition.preparation.scratch import ScratchArena, bind_scratch
+from ignition.preparation.scratch import GraphBufferPool, ScratchArena, bind_scratch
 from ignition.progress import phase
 
 from .recipe import RECIPE
@@ -295,7 +295,9 @@ def _prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, t
 
             sampling_workspace = bind_scratch(PreparedSampling.scratch_layout(slots, requests.vocab_size), device=device)
             inputs = DecoderInputs.allocate(device, context=config.context, tokens=config.token_capacity, capacity=slots)
-            scratch = DecoderScratch.allocate(config.token_capacity, device, sample_rows=sample_rows, world_size=shard.world_size)
+            graph_buffers = GraphBufferPool(device, chunk_bytes=2 << 20)
+            scratch = DecoderScratch.allocate(config.token_capacity, device, sample_rows=sample_rows,
+                world_size=shard.world_size, buffers=graph_buffers.cursor())
             workspaces = ScratchArena(device, overlap=config.stream_overlap)
             rotary = RotaryTables.allocate(weights.tree.config.text_config, config.context, device)
             cache = {index: QSAState.allocate(pages=1, slots=slots + 1, device=device, draft_tokens=speculative_tokens, kv_heads=max(1, 2 // shard.world_size))
@@ -311,7 +313,7 @@ def _prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, t
             completion = torch.zeros((2, slots, 24 if config.mtp or config.mixed_shapes else 8), dtype=torch.int64, device=device)
             features = VisionFeatureState.allocate(device, capacity=slots)
             vision_inputs = VisionInputs.allocate(device)
-            vision_scratch = VisionScratch.allocate(16384, device)
+            vision_scratch = {}
             buffers = {**inputs.buffers(), **table.buffers(), **{name: getattr(admission, name) for name in admission.__dataclass_fields__},
                 **{f"state_{name}": getattr(transfer, name) for name in transfer.__dataclass_fields__},
                 **{name: getattr(vision_inputs, name) for name in vision_inputs.__dataclass_fields__},
@@ -344,8 +346,10 @@ def _prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, t
 
             vision_fields = tuple(vision_inputs.__dataclass_fields__)
             for capacity in (16384, 4096, 1024, 256):
-                s = vision_scratch.rows(capacity)
-                handoff = PreparedVisionHandoff(vision_inputs, features, requests, s.output, completion, frame, sequence)
+                cursor = graph_buffers.cursor()
+                s = vision_scratch[capacity] = VisionScratch.allocate(capacity, device, buffers=cursor)
+                handoff = PreparedVisionHandoff(vision_inputs, features, requests, s.output, completion, frame, sequence,
+                                               buffers=cursor)
                 handoff.prepare()
                 with torch.device("meta"):
                     module = Qwen4ExpVisionModel(weights.tree.config.vision_config)
@@ -393,7 +397,7 @@ def _prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, t
                 forward_fields = (*inputs.buffers(), "sampling_grammar_mask",
                                   *(("draft_page_tables",) if has_mtp else ()))
                 fields = (*forward_fields, *(name for name in speculation.buffers() if name != "draft_page_tables"))
-                for batch, width in config.speculative_shapes:
+                for batch, width in sorted(config.speculative_shapes, key=lambda shape: shape[0] * shape[1], reverse=True):
                     name = f"speculative{batch}x{width}"
                     operation = speculation.round(batch, width, name)
                     operation.prepare()
@@ -555,13 +559,16 @@ def _prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, t
                 speculative_fixed_width=config.speculative_fixed_width,
                 history_drafts=config.history_drafts)
         resources = (weights, table, session, state, requests, inputs, scratch, workspaces, rotary,
-            cache, final_cache, admission, transfer, features, vision_inputs, vision_scratch,
+            cache, final_cache, admission, transfer, features, vision_inputs, vision_scratch, graph_buffers,
             functions, compiled_functions, decoders, owners, stream, graph_pool, speculation, mtp_weights, collective, vocabulary_collective, coordinator)
         report(f"prepared {len(graphs)} graphs with {page_capacity} preparation KV pages")
         from .export import disposable_ranges
 
         export_zero_ranges = disposable_ranges(cache=final_cache, scratch=scratch, workspaces=workspaces,
             vision_scratch=vision_scratch, decoders=decoders, owners=owners, speculation=speculation)
+        from ignition.preparation.disposable import storage_ranges
+
+        export_zero_ranges = (*export_zero_ranges, *storage_ranges(graph_buffers.chunks))
         return PreparedModel(device=device.index, max_active=config.max_active, graphs=graphs, buffers=buffers, signatures=signatures,
             export_zero_ranges=(*export_zero_ranges, *((t.data_ptr(), t.nbytes) for t in table.buffers().values())),
             export_events=table.events(), package_data=table if rank == 0 else None,

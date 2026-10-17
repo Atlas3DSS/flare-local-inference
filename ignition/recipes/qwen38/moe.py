@@ -66,10 +66,11 @@ class SharedExpertScratch:
     output: torch.Tensor
 
     @classmethod
-    def allocate(cls, tokens: int, device, *, intermediate=640) -> SharedExpertScratch:
+    def allocate(cls, tokens: int, device, *, intermediate=640, buffers=None) -> SharedExpertScratch:
         if tokens <= 0:
             raise ValueError("shared expert capacity must be positive")
-        return cls(*(torch.zeros((tokens, width), dtype=torch.bfloat16, device=device)
+        return cls(*((torch.zeros((tokens, width), dtype=torch.bfloat16, device=device) if buffers is None
+                      else buffers.zeros((tokens, width), torch.bfloat16))
                      for width in (2 * intermediate, intermediate, 2560, 1, 2560)))
 
     def rows(self, tokens: int) -> SharedExpertScratch:
@@ -94,14 +95,14 @@ class QwenMoeScratch:
     shared: SharedExpertScratch
 
     @classmethod
-    def allocate(cls, tokens: int, device, *, intermediate=640) -> QwenMoeScratch:
+    def allocate(cls, tokens: int, device, *, intermediate=640, buffers=None) -> QwenMoeScratch:
         if tokens <= 0:
             raise ValueError("MoE capacity must be positive")
-        return cls(torch.zeros((tokens, 512), dtype=torch.bfloat16, device=device),
-            RouterScratch.allocate(tokens, device, experts=512, top_k=10),
-            torch.zeros((tokens, 2560), dtype=torch.bfloat16, device=device),
-            torch.zeros((tokens, 2560), dtype=torch.bfloat16, device=device),
-            SharedExpertScratch.allocate(tokens, device, intermediate=intermediate))
+        def zeros(width):
+            return (torch.zeros((tokens, width), dtype=torch.bfloat16, device=device) if buffers is None
+                    else buffers.zeros((tokens, width), torch.bfloat16))
+        return cls(zeros(512), RouterScratch.allocate(tokens, device, experts=512, top_k=10, buffers=buffers),
+            zeros(2560), zeros(2560), SharedExpertScratch.allocate(tokens, device, intermediate=intermediate, buffers=buffers))
 
     def rows(self, tokens: int) -> QwenMoeScratch:
         if not 0 < tokens <= self.router_logits.shape[0]:

@@ -27,14 +27,15 @@ class VisionMetadata:
     num_patches: torch.Tensor
 
     @classmethod
-    def allocate(cls, patches: int, images: int, device: torch.device) -> VisionMetadata:
+    def allocate(cls, patches: int, images: int, device: torch.device, *, buffers=None) -> VisionMetadata:
         if patches <= 0 or patches % 4 or images <= 0:
             raise ValueError("vision requires positive image capacity and a patch capacity divisible by four")
-        return cls(torch.zeros((patches, 4), dtype=torch.int64, device=device),
-                   torch.zeros((patches, 4), dtype=torch.float32, device=device),
-                   torch.zeros((patches, 2), dtype=torch.int64, device=device),
-                   torch.zeros(images + 1, dtype=torch.int32, device=device),
-                   torch.zeros((1,), dtype=torch.int32, device=device))
+        def zeros(shape, dtype):
+            return (torch.zeros(shape, dtype=dtype, device=device) if buffers is None
+                    else buffers.zeros(shape, dtype))
+        return cls(zeros((patches, 4), torch.int64), zeros((patches, 4), torch.float32),
+                   zeros((patches, 2), torch.int64), zeros((images + 1,), torch.int32),
+                   zeros((1,), torch.int32))
 
 
 @dataclass(frozen=True)
@@ -52,11 +53,12 @@ class VisionScratch:
     output: torch.Tensor
 
     @classmethod
-    def allocate(cls, patches: int, device: torch.device) -> VisionScratch:
+    def allocate(cls, patches: int, device: torch.device, *, buffers=None) -> VisionScratch:
         if patches <= 0 or patches % 4:
             raise ValueError("vision patch capacity must be positive and divisible by four")
         def zeros(*shape):
-            return torch.zeros(shape, device=device, dtype=torch.bfloat16)
+            return (torch.zeros(shape, device=device, dtype=torch.bfloat16) if buffers is None
+                    else buffers.zeros(shape, torch.bfloat16))
         return cls(zeros(patches, 1536), zeros(patches, 1152), zeros(patches, 3456),
                    zeros(patches, 16, 72), zeros(patches, 16, 72), zeros(patches, 16, 72),
                    zeros(patches, 1152), zeros(patches, 1152), zeros(patches, 4304),

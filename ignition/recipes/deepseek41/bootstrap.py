@@ -253,15 +253,10 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                     add(name, forward, mode, rows, capacity if mode == "prefill" else 1, forward_inputs, enabled=enabled)
         split = None
         if speculation is not None:
-            from ignition.components.parallel_draft import PreparedParallelDraftRound, prepare_sampling_scratch
+            from ignition.components.parallel_draft import PreparedParallelDraftRound
+            from ignition.preparation.scratch import GraphBufferPool
 
-            from ignition.preparation.scratch import bind_scratch
-
-            sampling_scratch = prepare_sampling_scratch(slots, max(config.speculative_widths), requests.vocab_size, device)
-            # Sequential graphs share scratch; retained proposals have request-owned storage.
-            round_storage = bind_scratch(
-                PreparedParallelDraftRound.storage_layout(slots, max(config.speculative_widths), requests.vocab_size),
-                device=device)
+            speculation.sampling_buffers = GraphBufferPool(device, chunk_bytes=2 << 20)
             if config.split_speculation:
                 from copy import copy
                 from ignition.components.capacity import proposal_shapes
@@ -273,27 +268,27 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                 split = PreparedProposalStorage(speculation, config.draft_tokens)
                 buffers.update(split.buffers())
                 proposals = {}
-                for batch, depth in proposal_shapes(config.max_active, config.draft_tokens):
+                for batch, depth in sorted(proposal_shapes(config.max_active, config.draft_tokens), reverse=True):
                     owner = copy(speculation)
                     owner.block_size = depth
                     name = f"proposal{batch}x{depth + 1}"
                     source = PreparedParallelDraftRound(owner, batch, depth + 1, name,
-                        sampling_scratch=sampling_scratch, round_storage=round_storage, proposal_only=True)
+                        buffers=speculation.sampling_buffers.cursor(), proposal_only=True)
                     source.prepare()
                     proposal = PreparedDraftProposal(source, confidence.device_view, split)
                     proposals[batch, depth] = proposal
                     add(name, proposal, "proposal", batch, depth + 1, forward_inputs, enabled=True)
-                for batch, width in config.speculative_shapes:
+                for batch, width in sorted(config.speculative_shapes, key=lambda shape: shape[0] * shape[1], reverse=True):
                     name = f"verification{batch}x{width}"
                     target = PreparedParallelDraftRound(speculation, batch, width, name,
-                        generate_proposals=False, sampling_scratch=sampling_scratch, round_storage=round_storage)
+                        generate_proposals=False, buffers=speculation.sampling_buffers.cursor())
                     target.prepare()
                     verification = PreparedDraftVerification(split, target)
                     add(name, verification, "verification", batch, width, forward_inputs, enabled=True)
                     if width == 1:
                         # No proposal is needed to decode while retaining draft context.
                         decode = PreparedParallelDraftRound(speculation, batch, 1, f"speculative{batch}x1",
-                            sampling_scratch=sampling_scratch, round_storage=round_storage)
+                            buffers=speculation.sampling_buffers.cursor())
                         decode.prepare()
                         add(f"speculative{batch}x1", decode, "speculative", batch, 1, forward_inputs, enabled=True)
                     if config.speculation_reference_graphs:
@@ -301,10 +296,10 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                             proposals[batch, config.draft_tokens], verification),
                             "speculative", batch, width, forward_inputs, enabled=True)
             else:
-                for batch, width in config.speculative_shapes:
+                for batch, width in sorted(config.speculative_shapes, key=lambda shape: shape[0] * shape[1], reverse=True):
                     name = f"speculative{batch}x{width}"
                     forward = PreparedParallelDraftRound(speculation, batch, width, name,
-                        sampling_scratch=sampling_scratch, round_storage=round_storage)
+                        buffers=speculation.sampling_buffers.cursor())
                     forward.prepare()
                     add(name, forward, "speculative", batch, width, forward_inputs, enabled=True)
         row_inputs = ("request_state_rows", "row_slot_ids", "row_generations", "live_rows")
@@ -383,6 +378,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
     disposable = [prefill_storage, decoder_storage, arena.tensor, metadata, tables.buffers()]
     if speculation is not None:
         disposable.append(speculation.draft_scratch)
+        disposable.append(speculation.sampling_buffers.chunks)
     if split is not None:
         disposable.append(split.buffers())
     for forward in forwards.values():

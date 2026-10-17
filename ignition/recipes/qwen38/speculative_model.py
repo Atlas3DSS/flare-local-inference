@@ -6,7 +6,7 @@ import torch
 
 from ignition.components.draft_sampling import PreparedDraftDistribution
 from ignition.components.state import gather_rows
-from ignition.preparation.scratch import bind_scratch
+from ignition.preparation.scratch import GraphBufferPool
 
 from .decoder import PreparedDecoder
 from .draft_state import DRAFT_RAW_FIELDS, DraftMetadata
@@ -41,13 +41,8 @@ class SpeculativePreparation:
             raise ValueError("verification width must be between one and eight")
         self.verification_width = verification_width
         self.sampling_workspace = sampling_workspace
-        def workspace(layout):
-            return bind_scratch(layout, device=device)
-        b, w, v = requests.capacity, verification_width, requests.vocab_size
-        self.target_workspace = workspace(PreparedSpeculativeDistributions.scratch_layout(b, w, v))
-        self.proposal_workspace = workspace(PreparedDraftDistribution.scratch_layout(b, 1, v))
-        self.verification_workspace = workspace(PreparedStochasticVerification.scratch_layout(b, w, v))
-        self.draft_probabilities = torch.zeros(b * (w - 1) * v, dtype=torch.float32, device=device)
+        b, w = requests.capacity, verification_width
+        self.sampling_buffers = GraphBufferPool(device, chunk_bytes=2 << 20)
         self.verification_residual = torch.zeros((b * w, 10240), dtype=torch.bfloat16, device=device)
         self.feedback_hidden = (torch.zeros((prefill_capacity, 10240), dtype=torch.bfloat16, device=device)
                                 if proposal_source == "mtp" else None)
@@ -203,8 +198,12 @@ class PreparedSpeculativeRound:
         self.rope_delta = torch.zeros(batch, dtype=torch.int64, device=device)
         self.active = torch.zeros(batch, dtype=torch.bool, device=device)
         self.drafts = torch.zeros((batch, width - 1), dtype=torch.int64, device=device)
-        self.draft_probabilities = owner.draft_probabilities[:batch * (width - 1) * owner.requests.vocab_size].view(
-            batch, width - 1, owner.requests.vocab_size)
+        from ignition.components.parallel_draft import prepare_sampling_scratch
+
+        buffers = owner.sampling_buffers.cursor()
+        self.sampling_scratch = prepare_sampling_scratch(batch, width, owner.requests.vocab_size, device,
+                                                         buffers=buffers, proposal=not self.copy_only)
+        self.draft_probabilities = buffers.zeros((batch, width - 1, owner.requests.vocab_size), torch.float32)
         self.draft_valid = torch.zeros((batch, width - 1), dtype=torch.bool, device=device)
         self.offered = torch.full((batch,), width - 1, dtype=torch.int32, device=device)
         self.copy_mask = torch.zeros(batch, dtype=torch.int64, device=device)
@@ -232,19 +231,20 @@ class PreparedSpeculativeRound:
         target = PreparedSpeculativeDistributions(self.decoder.scratch.logits.view(b, w, -1),
             o.requests, slots, epochs, o.inputs.live_rows, self.drafts,
             grammar_masks=o.copy_grammar_mask if self.copy_only else None,
-            grammar_mask_count=o.copy_grammar_mask_count if self.copy_only else None, workspace=o.target_workspace)
+            grammar_mask_count=o.copy_grammar_mask_count if self.copy_only else None,
+            workspace=self.sampling_scratch["target"])
         proposals = (() if self.copy_only else
             tuple(PreparedDraftDistribution(self.draft.scratch.logits.view(b, 1, -1),
             o.requests, slots, epochs, o.inputs.live_rows, self.drafts, prefix_offset=index,
             seed=self.seed, offset=self.offset, sampled=self.sampled,
-            workspace=o.proposal_workspace) for index in range(w - 1)))
+            workspace=self.sampling_scratch["proposal"]) for index in range(w - 1)))
         target.prepare()
         for proposal in proposals:
             proposal.prepare()
         verify = PreparedStochasticVerification(self.draft_probabilities, self.drafts, target.probabilities,
             o.requests, slots, epochs, o.inputs.live_rows, rng=o.rng,
             draft_valid=self.draft_valid, target_valid=target.valid, token_limits=self.token_limits,
-            workspace=o.verification_workspace)
+            workspace=self.sampling_scratch["verify"])
         verify.prepare()
         commit = PreparedSpeculativeCommit(o.requests, verify.output,
             self.state.token_ids.view(b, w), slots, epochs, o.inputs.live_rows,

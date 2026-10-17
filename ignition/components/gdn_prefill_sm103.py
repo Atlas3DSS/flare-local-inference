@@ -97,12 +97,13 @@ class PrefillBuffers:
     beta: torch.Tensor
 
     @classmethod
-    def allocate(cls, tokens: int, device, *, key_heads: int, value_heads: int) -> PrefillBuffers:
-        heads = torch.zeros((tokens, key_heads, 128), dtype=torch.bfloat16, device=device)
-        return cls(heads, torch.zeros_like(heads),
-                   torch.zeros((tokens, value_heads, 128), dtype=torch.bfloat16, device=device),
-                   torch.ones((tokens, value_heads), dtype=torch.float32, device=device),
-                   torch.zeros((tokens, value_heads), dtype=torch.float32, device=device))
+    def allocate(cls, tokens: int, device, *, key_heads: int, value_heads: int, buffers=None) -> PrefillBuffers:
+        def zeros(shape, dtype=torch.bfloat16):
+            return (torch.zeros(shape, dtype=dtype, device=device) if buffers is None
+                    else buffers.zeros(shape, dtype))
+        return cls(zeros((tokens, key_heads, 128)), zeros((tokens, key_heads, 128)),
+                   zeros((tokens, value_heads, 128)), zeros((tokens, value_heads), torch.float32).fill_(1),
+                   zeros((tokens, value_heads), torch.float32))
 
     def rows(self, tokens: int) -> PrefillBuffers:
         return PrefillBuffers(*(getattr(self, name)[:tokens] for name in ("query", "key", "value", "decay", "beta")))

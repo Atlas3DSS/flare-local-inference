@@ -183,7 +183,7 @@ def test_actual_nvfp4_shards_and_shared_scale_storage(manifest, world, rank):
 @cuda
 @pytest.mark.parametrize("world,rank", [(2, 1), (4, 3)])
 def test_mtp_experts_preserve_packed_weights_and_e4m3_scales(manifest, world, rank, monkeypatch):
-    from b12x._lib.intrinsics import swizzle_block_scale
+    from b12x._lib.intrinsics.reference import swizzle_block_scale
     from b12x.moe import fused_moe
 
     packed = {}

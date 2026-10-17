@@ -25,14 +25,15 @@ class AttentionScratch:
     window_value: torch.Tensor
 
     @classmethod
-    def allocate(cls, config, shard, tokens, device, *, requests=1):
+    def allocate(cls, config, shard, tokens, device, *, requests=1, buffers=None):
         geometries = [config.attention(i) for i in range(config.layers)]
         if len({(a.heads, a.kv_heads, a.key_dim, a.value_dim) for a in geometries}) != 1:
             raise ValueError("MiMo attention scratch requires matching global and sliding head geometry")
         geometry = geometries[0]
         heads, kv_heads = geometry.local(shard)
-        def zeros(*shape):
-            return torch.zeros(shape, dtype=torch.bfloat16, device=device)
+        def zeros(*shape, dtype=torch.bfloat16):
+            return (torch.zeros(shape, dtype=dtype, device=device) if buffers is None
+                    else buffers.zeros(shape, dtype))
         window = max(a.window for a in geometries)
         pages = max((tokens + max(window, 0) + PAGE_TOKENS - 1) // PAGE_TOKENS,
                     requests * ((max(window, 0) + 8 + PAGE_TOKENS - 1) // PAGE_TOKENS))

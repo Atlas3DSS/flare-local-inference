@@ -8,7 +8,7 @@ import torch
 from b12x._lib.scratch import ScratchBufferSpec, scratch_tensor
 from b12x.preparation import PreparationSession
 
-from ignition.preparation.scratch import ScratchArena, bind_scratch, planned_scratch, scratch_storage
+from ignition.preparation.scratch import GraphBufferPool, ScratchArena, bind_scratch, planned_scratch, scratch_storage
 from ignition.preparation.tuning import register_finalizer
 
 
@@ -37,6 +37,30 @@ def test_named_operands_share_capacity_across_shapes_without_overlapping_within_
         bind_scratch(layout, device="meta", workspace=workspace)
     with pytest.raises(ValueError, match="torch.int32"):
         bind_scratch(dict(scores=((1,), torch.int32)), device="cpu", workspace=workspace)
+
+
+def test_graph_cursor_reuses_space_skipped_by_larger_buffers_without_moving_live_views():
+    pool = GraphBufferPool("cpu", chunk_bytes=512)
+    first = pool.cursor()
+    small = first.zeros((129,), torch.uint8)
+    large = first.zeros((768,), torch.uint8)
+    tail = first.zeros((256,), torch.uint8)
+    assert pool.nbytes == 1280
+    assert tail.data_ptr() == small.data_ptr() + 256
+    for value, tensor in enumerate((small, large, tail), 1):
+        tensor.fill_(value)
+    for value, tensor in enumerate((small, large, tail), 1):
+        assert torch.all(tensor == value)
+    pointers = tuple(t.data_ptr() for t in (small, large, tail))
+    second = pool.cursor()
+    wide = second.zeros((768,), torch.uint8)
+    narrow = second.zeros((512,), torch.uint8)
+    assert pool.nbytes == 1280
+    assert wide.data_ptr() == large.data_ptr() and narrow.data_ptr() == small.data_ptr()
+    assert tuple(t.data_ptr() for t in (small, large, tail)) == pointers
+    wide.fill_(17)
+    narrow.fill_(23)
+    assert torch.all(large == 17) and torch.all(small == 23) and torch.all(tail == 23)
 
 
 def test_rank_scratch_finalization_preserves_shared_offsets(monkeypatch):

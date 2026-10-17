@@ -293,6 +293,8 @@ class PreparedVisionHandoff:
         completion_records,
         frame_index,
         submission_sequence,
+        *,
+        buffers=None,
     ):
         device = features.arena.device
         if device.type != "cuda" or output.ndim != 2 or output.shape[1] != WIDTH:
@@ -341,9 +343,12 @@ class PreparedVisionHandoff:
             requests,
             output,
         )
-        self.metadata = VisionMetadata.allocate(capacity, 1, device)
-        self.pixels = torch.zeros((capacity, 1536), dtype=torch.float32, device=device)
-        self.errors = torch.zeros(1, dtype=torch.int32, device=device)
+        self.metadata = VisionMetadata.allocate(capacity, 1, device, buffers=buffers)
+        def zeros(shape, dtype):
+            return (torch.zeros(shape, dtype=dtype, device=device) if buffers is None
+                    else buffers.zeros(shape, dtype))
+        self.pixels = zeros((capacity, 1536), torch.float32)
+        self.errors = zeros((1,), torch.int32)
         self._prepared = False
         i, m, f, r = inputs, self.metadata, features, requests
         grid = (triton.cdiv(capacity * 1536, 1024), 1, 1)

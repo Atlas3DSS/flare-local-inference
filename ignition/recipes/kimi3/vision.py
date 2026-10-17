@@ -73,9 +73,10 @@ class VisionScratch:
     output: torch.Tensor
 
     @classmethod
-    def allocate(cls, patches, device, *, work=None):
+    def allocate(cls, patches, device, *, work=None, buffers=None):
         def zeros(*shape):
-            return torch.zeros(shape, dtype=torch.bfloat16, device=device)
+            return (torch.zeros(shape, dtype=torch.bfloat16, device=device) if buffers is None
+                    else buffers.zeros(shape, torch.bfloat16))
         work = zeros(patches * 4608) if work is None else work
         if (work.ndim != 1 or work.numel() < patches * 4608 or not work.is_contiguous()
                 or work.dtype != torch.bfloat16 or work.device != torch.device(device)):
@@ -136,16 +137,19 @@ class _Attention(nn.Module):
 
 
 class PreparedVision:
-    def __init__(self, weights, scratch, inputs, *, session, workspace, name):
+    def __init__(self, weights, scratch, inputs, *, session, workspace, name, buffers=None):
         self.scratch, self.inputs = scratch, inputs
         s, tensors = scratch, weights.tensors
         n, device = s.patches.shape[0], s.patches.device
-        self.positions = torch.zeros((n, 2), dtype=torch.int64, device=device)
-        self.interpolation_indices = torch.zeros((n, 4), dtype=torch.int64, device=device)
-        self.interpolation_weights = torch.zeros((n, 4), dtype=torch.float32, device=device)
-        self.merge_indices = torch.zeros((n // 4, 4), dtype=torch.int64, device=device)
-        self.cu = torch.zeros(2, dtype=torch.int32, device=device)
-        self.num_patches, self.num_features = (torch.zeros(1, dtype=torch.int32, device=device) for _ in range(2))
+        def zeros(shape, dtype=torch.int32):
+            return (torch.zeros(shape, dtype=dtype, device=device) if buffers is None
+                    else buffers.zeros(shape, dtype))
+        self.positions = zeros((n, 2), torch.int64)
+        self.interpolation_indices = zeros((n, 4), torch.int64)
+        self.interpolation_weights = zeros((n, 4), torch.float32)
+        self.merge_indices = zeros((n // 4, 4), torch.int64)
+        self.cu = zeros((2,))
+        self.num_patches, self.num_features = zeros((1,)), zeros((1,))
         self.frequencies = 1. / (10000 ** (torch.arange(0, 128, 4, dtype=torch.float32, device=device) / 128))
         angles = torch.arange(512, dtype=torch.float32, device=device)[:, None] * self.frequencies
         self.rotary = torch.view_as_real(torch.polar(torch.ones_like(angles), angles))

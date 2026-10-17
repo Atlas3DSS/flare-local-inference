@@ -153,11 +153,12 @@ class QSAScratch:
     partial_lse: torch.Tensor
 
     @classmethod
-    def allocate(cls, tokens: int, device: torch.device, *, world_size=1) -> QSAScratch:
+    def allocate(cls, tokens: int, device: torch.device, *, world_size=1, buffers=None) -> QSAScratch:
         if tokens <= 0:
             raise ValueError("QSA token capacity must be positive")
-        def zeros(*shape):
-            return torch.zeros(shape, device=device, dtype=torch.bfloat16)
+        def zeros(*shape, dtype=torch.bfloat16):
+            return (torch.zeros(shape, device=device, dtype=dtype) if buffers is None
+                    else buffers.zeros(shape, dtype))
         q_heads, kv_heads = 24 // world_size, max(1, 2 // world_size)
         q_width, kv_width = q_heads * 512, kv_heads * 256
         qkv = zeros(tokens, q_width + 2 * kv_width)
@@ -165,10 +166,10 @@ class QSAScratch:
         return cls(qkv[:, :q_width], qkv[:, q_width:q_width + kv_width], qkv[:, q_width + kv_width:],
                    zeros(tokens, 640), zeros(tokens, q_heads, 256), zeros(tokens, kv_heads, 256),
                    zeros(tokens, q_heads, 256),
-                   torch.full((tokens, 2051), -1, device=device, dtype=torch.int32),
+                   zeros(tokens, 2051, dtype=torch.int32).fill_(-1),
                    zeros(tokens, q_heads * 256), zeros(tokens, 2560), qkv,
-                   torch.zeros((partial_rows, q_heads, 256), device=device, dtype=torch.float32),
-                   torch.zeros((partial_rows, q_heads), device=device, dtype=torch.float32))
+                   zeros(partial_rows, q_heads, 256, dtype=torch.float32),
+                   zeros(partial_rows, q_heads, dtype=torch.float32))
 
     def rows(self, tokens: int) -> QSAScratch:
         whole = ("partial", "partial_lse")

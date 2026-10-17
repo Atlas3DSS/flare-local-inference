@@ -166,16 +166,19 @@ def _norm(weight, bias, eps):
 
 
 class PreparedVision:
-    def __init__(self, weights, scratch, inputs, *, session, workspace, name):
+    def __init__(self, weights, scratch, inputs, *, session, workspace, name, buffers=None):
         self.scratch, self.inputs = scratch, inputs
         s = scratch
         tensors = weights.tensors
         n, device = s.patches.shape[0], s.patches.device
-        self.interpolation_indices = torch.zeros((n, 4), dtype=torch.int64, device=device)
-        self.interpolation_weights = torch.zeros((n, 4), dtype=torch.float32, device=device)
-        self.merge_indices = torch.zeros((n // 4, 4), dtype=torch.int64, device=device)
-        self.cu = torch.zeros(2, dtype=torch.int32, device=device)
-        self.num_features = torch.zeros(1, dtype=torch.int32, device=device)
+        def zeros(shape, dtype=torch.int32):
+            return (torch.zeros(shape, dtype=dtype, device=device) if buffers is None
+                    else buffers.zeros(shape, dtype))
+        self.interpolation_indices = zeros((n, 4), torch.int64)
+        self.interpolation_weights = zeros((n, 4), torch.float32)
+        self.merge_indices = zeros((n // 4, 4), torch.int64)
+        self.cu = zeros((2,))
+        self.num_features = zeros((1,))
         self.position_weight = tensors[PREFIX + "patch_generator.pos_embed"].reshape(-1, VISION_HIDDEN)
         self.registers = tensors[PREFIX + "patch_generator.cls_token.token"]
         self.patch = UnquantizedProjection(s.patches, weights.patch, s.patch_hidden,

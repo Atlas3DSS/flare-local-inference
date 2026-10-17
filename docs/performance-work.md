@@ -119,12 +119,27 @@ capacities through 4,096-token prefill.
 
 ## Cross-model scratch planning
 
-Review scratch lifetimes across the Qwen, GLM, DeepSeek, MiMo, and Kimi recipes.
+Review scratch lifetimes across every supported recipe and shared component,
+including Qwen, GLM, DeepSeek, MiMo, Kimi, Step, and Nemotron.
 Measure prepared fixed memory and available KV capacity before changing each
 recipe. Inspect attention, rotary, activation, expert, and vision temporaries
 for caller-owned outputs and shared storage across sequential graph variants.
 Keep persistent state and overlapping branches disjoint; include stream joins
 and image feature consumption when determining lifetimes.
+
+Size speculative score, count, probability, and retained draft buffers from
+the actual prepared (batch, verification-width) catalog. Independent maxima
+for batch and width can describe a shape that no graph uses. Inspect both
+oversized shared workspaces and separate allocations retained by serialized
+graph variants or proposal steps; keep simultaneously live distributions
+disjoint.
+
+Vision working buffers and mutable validation metadata use graph-buffer cursors;
+request-owned image features and upload inputs retain independent storage.
+Speculative graphs allocate filtering and retained-probability buffers for their
+actual batch and width, sharing backing across serialized variants and proposal
+steps. Proposal-only graphs omit target and verification workspaces. Graph-buffer
+cursors reuse available space in earlier chunks without moving existing views.
 
 Use the shared scratch planner where the lifetime contract fits. Validate
 numerical correctness, allocation stability, and native replay across decode,
