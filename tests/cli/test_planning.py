@@ -468,3 +468,14 @@ def test_compiler_budget_rejects_more_local_ranks_than_workers(model, workers, s
     plan = replace(derive(model, devices), compile_workers=workers)
     with pytest.raises(UsageError, match=message):
         tuning_devices(plan, SimpleNamespace(gpus=devices), selection)
+
+
+def test_recipe_b12x_settings_name_b12x_variables():
+    from dataclasses import replace
+
+    from ignition.recipes.kimi3.recipe import RECIPE
+
+    with pytest.raises(ValueError, match="B12X_"):
+        replace(RECIPE, b12x_environment={"CUDA_VISIBLE_DEVICES": "0"})
+    with pytest.raises(ValueError, match="B12X_"):
+        replace(RECIPE, b12x_environment={"B12X_PCIE_DCP_THREADS": 512})

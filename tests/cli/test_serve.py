@@ -62,7 +62,7 @@ def host(monkeypatch, tmp_path):
     gpus = tuple(planning.Gpu(index, "NVIDIA RTX PRO 6000 Blackwell", f"GPU-{index:04d}", 96 * GIB, FREE, (12, 0))
                  for index in range(2))
     monkeypatch.setattr(planning, "discover_gpus", lambda: gpus)
-    monkeypatch.setattr(environment, "apply", lambda configuration, selected: calls.update(gpus=selected))
+    monkeypatch.setattr(environment, "apply", lambda configuration, selected, b12x=(): calls.update(gpus=selected, b12x=b12x))
     monkeypatch.setattr(ResolvedModel, "cached", lambda self, hub_cache: True)
     calls = {"behavior": {}, "exports": 0, "signals": types.SimpleNamespace(entered=0, exited=0)}
 
@@ -429,6 +429,22 @@ def test_environment_selects_gpus_by_uuid_and_places_caches(monkeypatch, tmp_pat
     assert os.environ["HF_HUB_CACHE"] == f"{tmp_path}/.cache/huggingface/hub"
     assert os.environ["CUDA_HOME"] == f"{tmp_path}/cuda"
     assert environment.toolkit(None) is None or (environment.toolkit(None) / "bin/nvcc").is_file()
+
+
+def test_environment_sets_the_recipe_b12x_settings_over_inherited_values(monkeypatch, tmp_path):
+    from ignition.cli.config import Configuration
+    from ignition.recipes.kimi3.recipe import RECIPE
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    for name in ("CUDA_VISIBLE_DEVICES", "CUDA_HOME", "B12X_COMPILE_CACHE_DIR", "TRITON_CACHE_DIR",
+                 "TORCHINDUCTOR_CACHE_DIR", "HF_HUB_CACHE", "FLASHINFER_WORKSPACE_BASE", *RECIPE.b12x_environment):
+        monkeypatch.setenv(name, "inherited")
+    monkeypatch.setenv("B12X_PCIE_ALLREDUCE_ALGORITHM", "hierarchical")
+    path = tmp_path / "config.toml"
+    path.write_text(f'[paths]\nkernel_cache = "{tmp_path}/kernels"\n')
+    environment.apply(Configuration.load(path), (types.SimpleNamespace(uuid="GPU-a"),), RECIPE.b12x_environment)
+    assert {name: os.environ[name] for name in RECIPE.b12x_environment} == dict(RECIPE.b12x_environment)
+    assert os.environ["B12X_PCIE_ALLREDUCE_ALGORITHM"] == "island_rs"
 
 
 def test_flashinfer_workspaces_separate_checkouts_without_importing_them(monkeypatch, tmp_path):

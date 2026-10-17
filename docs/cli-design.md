@@ -43,7 +43,8 @@ Anthropic Messages, stateless Responses, authentication, and client configuratio
   `CUDA_VISIBLE_DEVICES` restricts which GPUs the caller exposed, which changes
   the GPU each index names, so Flare inspects it to interpret `--gpus`.
   Variables that underlying libraries read are set by Flare from its own
-  configuration before those libraries are imported.
+  configuration, and b12x's from the recipe's declared settings, before those
+  libraries are imported.
 - **Two levels of precedence.** Flags override the configuration file, which
   overrides the recipe. Nothing else exists.
 

@@ -38,8 +38,9 @@ def flashinfer_workspace(kernel_cache: Path) -> Path:
     return root / hashlib.sha256(source).hexdigest()[:16]
 
 
-def apply(configuration, gpus) -> None:
-    """Select the plan's GPUs as process-local devices 0 through N-1 and place every cache."""
+def apply(configuration, gpus, b12x=()) -> None:
+    """Select the plan's GPUs as process-local devices 0 through N-1, place every cache and set the recipe's
+    b12x settings, which b12x reads only from its environment."""
     kernel_cache = configuration.directory("kernel_cache")
     os.environ.update({
         "CUDA_VISIBLE_DEVICES": ",".join(gpu.uuid for gpu in gpus),
@@ -48,6 +49,7 @@ def apply(configuration, gpus) -> None:
         "FLASHINFER_WORKSPACE_BASE": str(flashinfer_workspace(kernel_cache)),
         "TRITON_CACHE_DIR": str(kernel_cache / "triton"),
         "TORCHINDUCTOR_CACHE_DIR": str(kernel_cache / "inductor"),
+        **dict(b12x),
     })
     cuda = toolkit(configuration.directory("cuda"))
     if cuda is not None:

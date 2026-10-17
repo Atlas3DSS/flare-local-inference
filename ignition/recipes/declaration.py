@@ -136,6 +136,8 @@ class Recipe:
     MXFP8 while loading, trading checkpoint precision for decode bandwidth.
     `language_model_only` states that a plan may prepare the recipe without its vision
     encoder, rejecting images and leaving the encoder's memory to KV pages.
+    `b12x_environment` holds the b12x settings the recipe prepares with. b12x reads them
+    only from its environment, so Ignition sets them for the preparing process.
     """
 
     name: str
@@ -161,6 +163,7 @@ class Recipe:
     mixed_prefill: bool = False
     online_mxfp8: bool = False
     language_model_only: bool = False
+    b12x_environment: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
 
     def mixed_shapes(self, concurrency, chunk, speculation):
         from ignition.components.capacity import mixed_shapes
@@ -173,6 +176,9 @@ class Recipe:
                                         speculation.token_capacity if enabled else None))
 
     def __post_init__(self):
+        if any(not name.startswith("B12X_") or not isinstance(value, str)
+               for name, value in self.b12x_environment.items()):
+            raise ValueError("b12x settings name B12X_ variables with string values")
         if self.speculation is not None and set(self.plain_ranks) != set(self.ranks):
             raise ValueError("a recipe that speculates declares its costs without speculation for every rank count")
         for checkpoint in self.checkpoints:

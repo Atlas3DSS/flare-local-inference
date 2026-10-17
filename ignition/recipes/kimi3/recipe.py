@@ -76,6 +76,11 @@ RECIPE = Recipe(
     stream_overlap=True,
     # Text-only plans, as vLLM serves Kimi K3 with --language-model-only, leave the MoonViT encoder unloaded.
     language_model_only=True,
+    # vLLM's Kimi K3 launch settings for b12x's PCIe all-reduce (island reduce-scatter, deferred slab
+    # consumption, 256 threads), its decode context exchange and its small-M W4A16 experts.
+    b12x_environment=MappingProxyType({"B12X_PCIE_ALLREDUCE_ALGORITHM": "island_rs",
+        "B12X_PCIE_HIERARCHICAL_DEFERRED_CONSUMPTION": "1", "B12X_PCIE_HIERARCHICAL_THREADS": "256",
+        "B12X_PCIE_DCP_THREADS": "512", "B12X_PCIE_DCP_BLOCK_LIMIT": "8", "B12X_W4A16_SMALL_M_HOST_BARRIER_RESET": "0"}),
     # E4M3 latent pages, as vLLM serves Kimi K3 (--kv-cache-dtype fp8); decode context parallelism spreads each
     # page's target positions over the sixteen ranks. DFlash2 keeps its full-attention layer's records of every
     # position on every rank, as vLLM replicates its draft cache, and its sliding layers' rings in continuations.

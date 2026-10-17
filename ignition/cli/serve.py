@@ -110,7 +110,7 @@ def run(args) -> int:
             _prepare(args, export_path=package)
         else:
             print(f"Load cached runtime package. {package}", flush=True)
-    environment.apply(configuration, plan.gpus)
+    environment.apply(configuration, plan.gpus, plan.recipe.b12x_environment)
     command = [str(runtime), "run", str(package), "--gpus", ",".join(str(rank) for rank in range(plan.world_size)),
                "--host", host, "--port", str(port)]
     command += configuration.prefix_cache_flags()
@@ -199,7 +199,7 @@ def _export_hosts(args, *, export_path) -> int:
                          mixed_prefill=args.mixed_prefill, expert_scale_compression=args.expert_scale_compression,
                          online_mxfp8=args.online_mxfp8, language_model_only=args.language_model_only)
     plan = replace(plan, compile_workers=compiler_workers(configuration, args.compile_workers), hub_cache=hub_cache)
-    environment.apply(configuration, local)
+    environment.apply(configuration, local, plan.recipe.b12x_environment)
     options = _server_options(configuration, model, plan)
     options.pop("api_key")
     print(json.dumps({"plan": plan.to_dict()}), file=sys.stderr, flush=True)
@@ -288,7 +288,7 @@ def _prepare(args, *, export_path) -> int:
             fetch(model, hub_cache, progress_bars=False)
             model.verify(hub_cache)
 
-    environment.apply(configuration, plan.gpus)
+    environment.apply(configuration, plan.gpus, plan.recipe.b12x_environment)
     import flare_heliopause
 
     # Preparation runs native CUDA work that cannot unwind; a signal ends the process at once.
@@ -417,7 +417,7 @@ def serve(args) -> int:
     if rendezvous is None:
         plan = tuning_devices(plan, host, args.tuning_gpus)
         local = plan.gpus
-    environment.apply(configuration, local)
+    environment.apply(configuration, local, plan.recipe.b12x_environment)
     options = _server_options(configuration, model, plan)
     print(json.dumps({"plan": plan.to_dict()}), file=sys.stderr, flush=True)
     preparation_options = {} if args.direct else {"retain_graphs": True}
