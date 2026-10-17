@@ -156,6 +156,9 @@ def test_ordinary_fp4_linear_graph(tmp_path, rows, fmt):
     cpu = torch.randn(rows, 288, generator=gen).to(torch.bfloat16)
     x, out = cpu.cuda(), torch.empty((rows, 128), device="cuda", dtype=torch.bfloat16)
     with PreparationSession(device=x.device, autotune=False, compile_workers=0) as session:
+        with pytest.raises(ValueError, match="output must not overlap bias"):
+            QuantizedProjection(x, w, out, bias=out[0], session=session, name="aliased",
+                                workspace=ScratchArena(x.device))
         projection = QuantizedProjection(x, w, out, session=session, name="linear", activation_mode="auto",
                                          workspace=ScratchArena(x.device))
         graph = torch.cuda.CUDAGraph()
@@ -373,4 +376,51 @@ def test_bf16_experts_convert_to_nvfp4_w4a16(tmp_path, monkeypatch, local, token
             actual = output.float().cpu()
             assert torch.isfinite(actual).all()
             assert (actual - expected).norm() / expected.norm() < .025
+        graph.reset()
+
+
+def ggml_blocks(rows, columns, codec):
+    from b12x._lib.quant.block_codec import block_codec
+    spec = block_codec(codec)
+    raw = torch.randint(0, 256, (rows, columns // spec.block_weights, spec.block_bytes), dtype=torch.uint8)
+    raw[..., :2] = torch.full((rows, columns // spec.block_weights, 1), .003, dtype=torch.float16).view(torch.uint8)
+    entry = dict(quant_algo=codec.upper(), group_size=spec.block_weights,
+                 block_payload_bytes=spec.block_bytes, packing="ggml")
+    return raw, entry
+
+
+@pytest.mark.parametrize("codec", ["iq2_xxs", "q8_0"])
+@pytest.mark.parametrize("rows", [1, 17])
+def test_ggml_projection_fusion_and_sharding_graph(tmp_path, codec, rows):
+    from importlib import import_module
+    from b12x.preparation import PreparationSession
+    from ignition.components.linear import QuantizedProjection
+    from ignition.preparation.scratch import ScratchArena
+
+    torch.manual_seed(72)
+    tensors, entries, decoded = {}, {}, []
+    for name in ("q", "k"):
+        raw, entries[name] = ggml_blocks(256, 768, codec)
+        tensors[name + ".weight"] = raw
+        decoded.append(import_module(f"b12x.testing.{codec}_reference").dequantize_blocks(raw)[8:136, 256:512])
+    manifest = checkpoint(tmp_path, tensors, entries)
+    with DirectWeightLoader(manifest, "cuda:0") as loader:
+        weight = loader.load_linear_group(("q", "k"), row_ranges=((8, 136), (8, 136)), column_range=(256, 512))
+        assert loader._session.torch_copy_bytes == 0
+    x = torch.randn(rows, 256, device="cuda", dtype=torch.bfloat16)
+    out = torch.empty(rows, 256, device="cuda", dtype=torch.bfloat16)
+    with PreparationSession(device=x.device, autotune=False, compile_workers=1) as session:
+        projection = QuantizedProjection(x, weight, out, session=session, name="blocks",
+                                         activation_mode="auto", workspace=ScratchArena(x.device))
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            projection(x)
+        for _ in range(2):
+            x.normal_()
+            expected = x.float().cpu() @ torch.cat(decoded).bfloat16().float().T
+            before = torch.cuda.memory_stats()["allocation.all.allocated"]
+            graph.replay()
+            torch.cuda.synchronize()
+            assert torch.cuda.memory_stats()["allocation.all.allocated"] == before
+            torch.testing.assert_close(out.float().cpu(), expected, rtol=.015, atol=.015)
         graph.reset()

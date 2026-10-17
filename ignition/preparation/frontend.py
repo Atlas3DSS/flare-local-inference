@@ -37,6 +37,16 @@ def _expected(config, values, label):
 
 
 def image_settings(config, model, profile):
+    if profile == "radio":
+        _expected(config, {"image_processor_type": "NemotronH_Omni_Reasoning_V3ImageProcessor",
+            "patch_size": 16, "downsample_ratio": .5, "max_model_len": 16384,
+            "min_num_patches": 1024, "max_num_patches": 13312,
+            "norm_mean": [0.48145466, 0.4578275, 0.40821073],
+            "norm_std": [0.26862954, 0.26130258, 0.27577711]}, "RADIO image processor")
+        _expected(model, {"patch_size": 16, "downsample_ratio": .5, "ps_version": "v2",
+            "img_context_token_id": 18}, "RADIO image configuration")
+        _expected(model["vision_config"], {"max_img_size": 2048, "patch_size": 16}, "RADIO vision configuration")
+        return {"radio": {}}
     if profile == "moonvit":
         _expected(config["media_proc_cfg"], {"in_patch_limit": 65536, "patch_size": 14,
             "image_mean": [0.5] * 3, "image_std": [0.5] * 3, "merge_kernel_size": 2,

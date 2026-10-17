@@ -79,13 +79,26 @@ pub struct NativeResources {
 // owning context, and mutable ownership serializes loading and destruction.
 unsafe impl Send for NativeResources {}
 
+fn clamp_cooperative_grid(mut grid: [u32; 3], capacity: u64) -> Result<[u32; 3]> {
+    let axis = (0..3).max_by_key(|&axis| grid[axis]).unwrap();
+    let plane = u64::from(grid[(axis + 1) % 3]) * u64::from(grid[(axis + 2) % 3]);
+    let max_workers = capacity / plane;
+    if max_workers == 0 {
+        return Err(invalid(format!(
+            "cooperative kernel grid {grid:?} cannot fit {capacity} resident CTAs by reducing one dimension",
+        )));
+    }
+    grid[axis] = u64::from(grid[axis]).min(max_workers) as u32;
+    Ok(grid)
+}
+
 impl NativeResources {
     /// Load compiled code and persistent storage, then bind and instantiate graphs.
     ///
     /// # Safety
     /// The package must be trusted. Its kernels and declared bindings must obey
     /// CUDA's memory and execution contracts, including any mapped host access.
-    /// Cooperative kernels must tolerate fewer worker CTAs in the grid's X dimension.
+    /// Cooperative kernels must tolerate fewer worker CTAs in the largest grid dimension.
     /// This method makes the owner's context current on the calling thread.
     pub unsafe fn load(authorized: AuthorizedPackage, ordinal: i32) -> Result<Self> {
         let AuthorizedPackage { archive, mut index } = authorized;
@@ -785,15 +798,7 @@ impl NativeResources {
             return Err(invalid("cooperative kernel has no resident CTA capacity"));
         }
         let capacity = blocks_per_sm as u64 * sms as u64;
-        // Y and Z retain the kernel's work partitioning; only the worker count shrinks.
-        let max_x = capacity / (u64::from(params.grid[1]) * u64::from(params.grid[2]));
-        if max_x == 0 {
-            return Err(invalid(format!(
-                "cooperative kernel grid {:?} cannot fit {capacity} resident CTAs by reducing X",
-                params.grid,
-            )));
-        }
-        params.grid[0] = u64::from(params.grid[0]).min(max_x) as u32;
+        params.grid = clamp_cooperative_grid(params.grid, capacity)?;
         Ok(())
     }
 

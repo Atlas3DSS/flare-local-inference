@@ -82,6 +82,8 @@ class _ForwardPickler(pickle.Pickler):
         from torch._dynamo.aot_compile_types import _deserialize_triton_kernel, _serialize_triton_kernel
         from .package_storage import PackageStorage
 
+        if isinstance(value, PreparationSession):
+            return _Unavailable, ("b12x preparation session",)
         if isinstance(value, _Unavailable):
             return _Unavailable, (value.description,)
         if isinstance(value, torch.Tensor):

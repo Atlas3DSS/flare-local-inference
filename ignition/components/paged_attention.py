@@ -19,10 +19,12 @@ def _scratch(specs, workspace):
 @torch.library.custom_op("flare::paged_attention", mutates_args=("output", "scratch"))
 def _attend(q: torch.Tensor, key: torch.Tensor, value: torch.Tensor, pages: torch.Tensor,
             lengths: torch.Tensor, cu: torch.Tensor, sink: torch.Tensor | None,
-            output: torch.Tensor, scratch: list[torch.Tensor], handle: int, decode: bool, window: int) -> None:
+            output: torch.Tensor, scratch: list[torch.Tensor], k_descale: torch.Tensor | None,
+            v_descale: torch.Tensor | None, handle: int, decode: bool, window: int) -> None:
     plan = plan_from_handle(handle)
     arguments = dict(q=q, k_cache=key, v_cache=value, page_table=pages, cache_seqlens=lengths,
-                     cu_seqlens_q=cu, attention_sink_bias=sink, output=output, scratch=scratch)
+                     cu_seqlens_q=cu, attention_sink_bias=sink, output=output, scratch=scratch,
+                     k_descale=k_descale, v_descale=v_descale)
     if decode:
         paged_decode.run(paged_decode.bind(plan, **arguments))
     else:
@@ -30,25 +32,28 @@ def _attend(q: torch.Tensor, key: torch.Tensor, value: torch.Tensor, pages: torc
 
 
 @_attend.register_fake
-def _fake_attend(q, key, value, pages, lengths, cu, sink, output, scratch, handle, decode, window):
+def _fake_attend(q, key, value, pages, lengths, cu, sink, output, scratch, k_descale, v_descale, handle, decode, window):
     pass
 
 
 class PreparedPagedAttention:
     def __init__(self, q, key, value, pages, lengths, cu, output, *, sink=None, mode,
-                 window=-1, width=1, causal=True, session, workspace, name):
+                 window=-1, width=1, causal=True, k_descale=None, v_descale=None, session, workspace, name):
         self.decode = mode in ("decode", "verify") and paged_decode.supports(
             num_q_heads=q.shape[1], num_kv_heads=key.shape[2], head_dim_qk=q.shape[2],
             head_dim_vo=value.shape[3], page_size=key.shape[1], kv_dtype=key.dtype,
             max_q_per_req=width, window_left=window, causal=causal, has_sinks=sink is not None)
+        if not causal and not self.decode:
+            raise ValueError("noncausal paged attention requires a supported paged-decode geometry")
         self.window, self.workspace = window, workspace
         self.arguments = dict(q=q, k_cache=key, v_cache=value, page_table=pages,
-            cache_seqlens=lengths, cu_seqlens_q=cu, output=output, attention_sink_bias=sink)
+            cache_seqlens=lengths, cu_seqlens_q=cu, output=output, attention_sink_bias=sink,
+            k_descale=k_descale, v_descale=v_descale)
         if self.decode:
             self.plan = paged_decode.plan(paged_decode.Caps(device=q.device, num_q_heads=q.shape[1],
                 num_kv_heads=key.shape[2], head_dim_qk=q.shape[2], head_dim_vo=value.shape[3],
                 page_size=key.shape[1], max_batch=pages.shape[0], max_q_per_req=width,
-                window_left=window, has_sinks=sink is not None, causal=causal))
+                window_left=window, has_sinks=sink is not None, causal=causal, kv_dtype=key.dtype))
         else:
             geometry = dict(device=q.device, q_dtype=q.dtype, kv_dtype=key.dtype,
                 num_q_heads=q.shape[1], num_kv_heads=key.shape[2], head_dim_qk=q.shape[2],
@@ -111,17 +116,36 @@ class PreparedPagedAttention:
         a = self.arguments
         _attend(a["q"], a["k_cache"], a["v_cache"], a["page_table"], a["cache_seqlens"],
                 a["cu_seqlens_q"], a["attention_sink_bias"], a["output"], self.scratch,
-                self.plan.handle, self.decode, self.window)
+                a["k_descale"], a["v_descale"], self.plan.handle, self.decode, self.window)
         return a["output"]
 
 
 class PreparedPagedKVWriter:
-    def __init__(self, key, value, key_cache, value_cache, slots, *, session, name):
-        self.arguments = dict(key=key, value=value, k_cache=key_cache, v_cache=value_cache, slot_mapping=slots)
+    def __init__(self, key, value, key_cache, value_cache, slots, *, session, name, k_scale=None, v_scale=None):
+        self.arguments = dict(key=key, value=value, k_cache=key_cache, v_cache=value_cache, slot_mapping=slots,
+                              k_scale=k_scale, v_scale=v_scale)
         self.plan = paged_kv_write.plan(paged_kv_write.Caps(device=key.device, num_kv_heads=key.shape[1],
-            head_dim_k=key.shape[2], head_dim_v=value.shape[2], page_size=key_cache.shape[1]))
+            head_dim_k=key.shape[2], head_dim_v=value.shape[2], page_size=key_cache.shape[1], kv_dtype=key_cache.dtype))
         declare(session, (self.plan.request(name=name, prepare_call=lambda state: PreparedCall(
             run=lambda: state.run(**self.arguments))),))
 
     def __call__(self):
         paged_kv_write.run(self.plan, **self.arguments)
+
+
+class PagedAttentionMetadata:
+    """Cache-write slots and sequence extents shared by layers with one page geometry."""
+
+    def __init__(self, metadata, *, page_tokens, buffers):
+        self.metadata, self.page_tokens = metadata, page_tokens
+        self.slots = buffers.zeros(metadata.positions.shape, torch.int64).fill_(-1)
+        self.lengths = buffers.zeros(metadata.lengths.shape, torch.int32)
+
+    def __call__(self):
+        m = self.metadata
+        columns = (m.positions.clamp_min(0) // self.page_tokens).clamp(max=m.token_page_table.shape[1] - 1)
+        rows = torch.arange(m.positions.numel(), device=m.positions.device)
+        pages = m.token_page_table[rows, columns]
+        self.slots.copy_(torch.where((m.positions >= 0) & (pages >= 0),
+            pages.long() * self.page_tokens + m.positions.remainder(self.page_tokens), -1))
+        self.lengths.copy_(torch.where(m.lengths > 0, (m.starts + m.lengths).int(), 0))

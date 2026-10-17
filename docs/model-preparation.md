@@ -72,6 +72,41 @@ downloads missing source weights, loads and tunes kernels, compiles forwards,
 warms and captures execution variants, writes the package, and exits.
 Compilation is enabled by default; `--no-compile` is for development.
 
+## Nemotron 3.5 Bolt 74B-A9B 24GB
+
+`nemotron-bolt-24gb` prepares
+`nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB` on one SM120/SM121 GPU.
+The recipe includes the C-RADIO image encoder and accepts up to four still
+images per request. Video is not prepared. LiLiCorr uses the matching
+`NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr` checkpoint and defaults to
+seven draft tokens with adaptive verification.
+
+```sh
+.venv/bin/python -m ignition export nemotron-bolt-24gb --gpus 0 \
+  --max-concurrency 8 --prefill-chunk-size 4096 --mtp-draft-tokens 7 \
+  --speculative-token-capacity 64 \
+  --output /data/flare-runtime/nemotron-bolt-images-lilicorr-c8.safetensors --verbose
+
+./flare/target/release/flare run \
+  /data/flare-runtime/nemotron-bolt-images-lilicorr-c8.safetensors \
+  --gpus 0 --bind 127.0.0.1:8001
+```
+
+Use `--no-mtp` during preparation to omit the draft model. Mamba-2 prefill
+uses b12x's packed selective scan; decode and speculative verification use
+FlashInfer state updates. Continuation rows retain BF16 recurrent state,
+convolution history, partial FP8 KV pages, and LiLiCorr context and rollback
+records. Prefix reuse and speculative acceptance preserve that complete state
+through the shared Helios cache contract. Image features enter causal prefill
+and may cross chunk boundaries.
+
+Shared experts overlap routing and routed experts for graph capacities through
+64 rows. Larger capacities execute those branches serially. LiLiCorr's separately
+scaled NVFP4 gate and up projections also overlap. Prepare with
+`--no-stream-overlap` to place those projections and expert branches on the main stream.
+Routing excludes padded target rows using the packed batch's valid-token count.
+The 64-row speculative capacity covers eight requests with seven draft tokens each.
+
 ## Qwen3.8 27B
 
 `qwen3.8-27b` prepares `nvidia/Qwen3.8-27B-NVFP4` for text generation on one GPU.

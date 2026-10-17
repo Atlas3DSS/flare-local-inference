@@ -87,3 +87,38 @@ class PreparedMLP:
                                   round_silu=self.round_silu, out=self.intermediate,
                                   plan=self.activation_plan)
         return self.down_projection(self.intermediate)
+
+
+class PreparedUngatedMLP:
+    """Two projections with a BF16 ReLU-squared or SiLU intermediate."""
+
+    def __init__(self, source, up_weight, down_weight, projected, intermediate, output, *,
+                 activation, session, name, workspace, up_bias=None, down_bias=None):
+        if activation not in ("relu2", "silu"):
+            raise ValueError("ungated MLP activation must be relu2 or silu")
+        if (source.ndim != 2 or projected.ndim != 2 or projected.shape != intermediate.shape
+                or projected.shape[0] != source.shape[0] or output.shape[0] != source.shape[0]
+                or any(t.dtype != torch.bfloat16 or t.device != source.device or not t.is_contiguous()
+                       for t in (source, projected, intermediate, output))):
+            raise ValueError("ungated MLP buffers require matching contiguous BF16 rows")
+        self.activation, self.intermediate = activation, intermediate
+
+        def projection(x, weight, y, suffix, bias):
+            kwargs = dict(session=session, name=name + suffix, bias=bias)
+            if isinstance(weight, torch.Tensor):
+                return UnquantizedProjection(x, weight, y, **kwargs)
+            return QuantizedProjection(x, weight, y, workspace=workspace, activation_mode="auto", **kwargs)
+
+        self.up_projection = projection(source, up_weight, projected, ".up", up_bias)
+        self.down_projection = projection(intermediate, down_weight, output, ".down", down_bias)
+        if activation == "relu2":
+            self.activation_plan = hyperconnection.plan(hyperconnection.Caps(device=source.device,
+                max_tokens=source.shape[0], hidden_size=projected.shape[1]), invocation={"operation": "relu2"})
+            declare(session, (self.activation_plan.request(name=name + ".relu2", prepare_call=lambda state:
+                PreparedCall(run=lambda: state.launch(projected, projected, intermediate))),))
+
+    def __call__(self, source):
+        value = self.up_projection(source)
+        self.intermediate.copy_(torch.relu(value).square() if self.activation == "relu2"
+                                else torch.nn.functional.silu(value))
+        return self.down_projection(self.intermediate)

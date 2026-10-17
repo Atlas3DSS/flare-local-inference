@@ -94,6 +94,7 @@ def run(args) -> int:
     plan = derive(configuration, model, Host.discover(), gpus=args.gpus, concurrency=concurrency,
                   speculation=speculation(args, model, configuration), prefill_chunk=args.prefill_chunk_size,
                   context_parallel=context_parallel(args, model), stream_overlap=stream_overlap(args, model),
+                  roce_ring=args.roce_ring,
                   mixed_prefill=args.mixed_prefill, expert_scale_compression=args.expert_scale_compression)
     runtime = binary()
     host = configuration.get("server.host", args.host).value
@@ -142,6 +143,8 @@ def export(args) -> int:
         args.output = args.output.with_name(args.output.name + ".safetensors")
     if args.output.exists():
         raise UsageError(f"export destination already exists: {args.output}")
+    if args.roce_ring and args.ranks < 2:
+        raise UsageError("--roce-ring requires at least two hosts")
     if args.ranks > 1:
         return _export_hosts(args, export_path=args.output)
     return _prepare(args, export_path=args.output)
@@ -158,6 +161,8 @@ def _export_hosts(args, *, export_path) -> int:
     from ignition.progress import phase
     from ignition.preparation.host_ranks import HostRendezvous, local_topology, source_identity, topology_gpu
 
+    if args.roce_ring and args.ranks < 2:
+        raise UsageError("--roce-ring requires at least two hosts in ring order")
     if args.rendezvous is None:
         raise UsageError("--ranks greater than one requires --rendezvous ADDRESS:PORT for the peer hosts")
     progress = _serving_progress(args.verbose)
@@ -182,6 +187,7 @@ def _export_hosts(args, *, export_path) -> int:
                          concurrency=concurrency.value, reserve_bytes=configuration.reserve_bytes,
                          speculation=speculation(args, model, configuration), prefill_chunk=args.prefill_chunk_size,
                          context_parallel=context_parallel(args, model), stream_overlap=stream_overlap(args, model),
+                         roce_ring=args.roce_ring,
                          mixed_prefill=args.mixed_prefill, expert_scale_compression=args.expert_scale_compression)
     environment.apply(configuration, local)
     options = _server_options(configuration, model, plan)
@@ -243,12 +249,15 @@ def _prepare(args, *, export_path) -> int:
         plan = derive(configuration, model, host, gpus=args.gpus, concurrency=concurrency,
                       speculation=speculation(args, model, configuration), prefill_chunk=args.prefill_chunk_size,
                       context_parallel=context_parallel(args, model), stream_overlap=stream_overlap(args, model),
+                      roce_ring=args.roce_ring,
                       mixed_prefill=args.mixed_prefill, expert_scale_compression=args.expert_scale_compression)
         indices = planning.format_gpus(gpu.index for gpu in plan.gpus)
         # A caller's restriction changes which GPU each index names.
         restricted = "" if host.restriction is None else f" of CUDA_VISIBLE_DEVICES={host.restriction}"
         serial = "" if plan.stream_overlap or not plan.recipe.stream_overlap else " · branches serialized"
         capacity = "" if plan.speculation is None else f" · speculative token capacity {plan.speculative_token_capacity}"
+        if plan.roce_ring:
+            serial += " · experimental RoCE ring (native neighbor relays)"
         stage.update(f"GPU{'s' if plan.world_size > 1 else ''} {indices}{restricted}"
                      f" · concurrency {plan.concurrency} · {display.speculation(plan.speculation, brief=True)}{capacity}{serial}"
                      f" · mixed prefill {'on' if plan.mixed_prefill else 'off'}"
@@ -336,6 +345,8 @@ def serve(args) -> int:
     """
     from ignition.progress import phase
 
+    if args.roce_ring and args.ranks < 2:
+        raise UsageError("--roce-ring requires at least two hosts")
     if args.eager and not args.direct:
         raise UsageError("--eager applies only to --direct execution")
     if args.graph_times is not None and not args.direct:
@@ -376,6 +387,7 @@ def serve(args) -> int:
                          concurrency=concurrency.value, reserve_bytes=configuration.reserve_bytes,
                          speculation=speculation(args, model, configuration), prefill_chunk=args.prefill_chunk_size,
                          context_parallel=context_parallel(args, model), stream_overlap=stream_overlap(args, model),
+                         roce_ring=args.roce_ring,
                          cache_states=args.prefix_cache_states, mixed_prefill=args.mixed_prefill,
                          expert_scale_compression=args.expert_scale_compression)
     if rendezvous is None:

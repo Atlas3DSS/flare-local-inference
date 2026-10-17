@@ -6,3 +6,5 @@
     parallel_draft.py consumes request_state_rows[:, 0], while their graph
     contracts reserve one row per verification token. Validate native proposal,
     verification, and rollback before reducing the declared execution rows.
+
+[ ] Add Nemotron Bolt video preprocessing, timestamps, and frame-feature pruning.

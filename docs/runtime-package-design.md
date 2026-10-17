@@ -589,14 +589,16 @@ Cubins are mapped from their file spans while loading; no anonymous copy of
 the full kernel catalog is required. Frontend assets are read from their own
 file spans. The index and loader metadata are released after startup.
 
-Cooperative kernels use resident worker grids and must tolerate a reduced X
-dimension. If restoring the cooperative launch attribute returns
-`CUDA_ERROR_COOPERATIVE_LAUNCH_TOO_LARGE`, the loader queries the kernel's maximum
-active blocks per SM for its captured block dimensions and dynamic shared memory.
-It multiplies that occupancy by the target device's SM count, reduces grid X to
-fit while preserving Y and Z, and retries the attribute once. A Y/Z plane that
-exceeds the resident block limit rejects loading. Fitting cooperative grids and
-ordinary launches retain their captured dimensions without occupancy queries.
+Cooperative kernels use resident worker grids and must tolerate a reduction in
+their largest grid dimension, whether X, Y, or Z. If restoring the cooperative
+launch attribute returns `CUDA_ERROR_COOPERATIVE_LAUNCH_TOO_LARGE`, the loader
+queries the kernel's maximum active blocks per SM for its captured block
+dimensions and dynamic shared memory.
+It multiplies that occupancy by the target device's SM count, reduces the largest
+grid dimension to fit while preserving the other two, and retries the attribute
+once. A grid that cannot fit by reducing one dimension rejects loading. Fitting
+cooperative grids and ordinary launches retain their captured dimensions without
+occupancy queries.
 
 Payload loading opens the package with `O_DIRECT`, bypassing the page cache.
 Each rank uses four file-reader threads and four pinned staging buffers of

@@ -8,7 +8,7 @@ from ignition.preparation.tuning import register_finalizer
 
 
 def _run_shared_expert(source, weights, scales, gains, scale_kinds, outputs,
-                       workspace, plans, limit, round_silu, auxiliary):
+                       workspace, plans, activation, limit, round_silu, auxiliary):
     from ignition.components.sm103_projection import bf16_out, packed_out_workspace
 
     def project(value, index, output):
@@ -22,7 +22,10 @@ def _run_shared_expert(source, weights, scales, gains, scale_kinds, outputs,
     gate_up, intermediate, projected = outputs[:3]
     with torch.cuda.stream(auxiliary):
         project(source, 0, gate_up)
-        torch.ops.b12x.hyperconnection_swiglu(gate_up, intermediate, limit, round_silu, plans[-1])
+        if activation == "relu2":
+            torch.ops.b12x.hyperconnection_relu2(gate_up, intermediate, plans[-1])
+        else:
+            torch.ops.b12x.hyperconnection_swiglu(gate_up, intermediate, limit, round_silu, plans[-1])
         project(intermediate, 1, projected)
         if len(weights) == 3:
             project(source, 2, outputs[3])
@@ -33,7 +36,7 @@ def _start_shared_expert(
     source: torch.Tensor, weights: list[torch.Tensor],
     scales: list[torch.Tensor | None], gains: list[torch.Tensor | None],
     scale_kinds: list[int], outputs: list[torch.Tensor], workspace: torch.Tensor,
-    plans: list[int], limit: float, round_silu: bool, auxiliary_stream: int,
+    plans: list[int], activation: str, limit: float, round_silu: bool, auxiliary_stream: int,
     launch_order: int,
 ) -> None:
     main = torch.cuda.current_stream(source.device)
@@ -41,12 +44,12 @@ def _start_shared_expert(
     auxiliary.wait_stream(main)
     if not launch_order:
         _run_shared_expert(source, weights, scales, gains, scale_kinds, outputs,
-                           workspace, plans, limit, round_silu, auxiliary)
+                           workspace, plans, activation, limit, round_silu, auxiliary)
 
 
 @_start_shared_expert.register_fake
 def _fake_start_shared_expert(source, weights, scales, gains, scale_kinds, outputs,
-                             workspace, plans, limit, round_silu, auxiliary_stream, launch_order):
+                             workspace, plans, activation, limit, round_silu, auxiliary_stream, launch_order):
     pass
 
 
@@ -55,25 +58,25 @@ def _join_shared_expert(
     source: torch.Tensor, routed: torch.Tensor, weights: list[torch.Tensor],
     scales: list[torch.Tensor | None], gains: list[torch.Tensor | None],
     scale_kinds: list[int], outputs: list[torch.Tensor], workspace: torch.Tensor,
-    plans: list[int], limit: float, round_silu: bool, auxiliary_stream: int,
+    plans: list[int], activation: str, limit: float, round_silu: bool, auxiliary_stream: int,
     launch_order: int,
 ) -> None:
     main = torch.cuda.current_stream(source.device)
     auxiliary = torch.cuda.ExternalStream(auxiliary_stream, device=source.device)
     if launch_order:
         _run_shared_expert(source, weights, scales, gains, scale_kinds, outputs,
-                           workspace, plans, limit, round_silu, auxiliary)
+                           workspace, plans, activation, limit, round_silu, auxiliary)
     main.wait_stream(auxiliary)
 
 
 @_join_shared_expert.register_fake
 def _fake_join_shared_expert(source, routed, weights, scales, gains, scale_kinds, outputs,
-                            workspace, plans, limit, round_silu, auxiliary_stream, launch_order):
+                            workspace, plans, activation, limit, round_silu, auxiliary_stream, launch_order):
     pass
 
 
 class ConcurrentSharedExpert:
-    """Fork a prepared MLP onto an auxiliary stream and join before consumption.
+    """Fork a prepared SwiGLU or ReLU-squared MLP and join before consumption.
 
     The recipe supplies every plan that can run concurrently on the main stream.
     Main-stream scratch occupies the arena prefix. MLP projections reuse one
@@ -94,6 +97,11 @@ class ConcurrentSharedExpert:
 
         if not isinstance(workspace, ScratchArena) or not parallel_plans:
             raise ValueError("shared-expert overlap requires an arena and concurrent main-stream plans")
+        self.activation = getattr(mlp, "activation", "swiglu")
+        if self.activation not in ("swiglu", "relu2"):
+            raise ValueError("shared-expert overlap requires SwiGLU or ReLU-squared activation")
+        self.limit = getattr(mlp, "swiglu_limit", float("inf"))
+        self.round_silu = getattr(mlp, "round_silu", True)
         self.mlp, self.parallel_plans, self.arena = mlp, tuple(parallel_plans), workspace
         self.defer_launch = bool(defer_launch)
         self.projections = (mlp.up_projection, mlp.down_projection)
@@ -138,11 +146,11 @@ class ConcurrentSharedExpert:
 
     def start(self, source):
         _start_shared_expert(source, self.weights, self.scales, self.gains, self.scale_kinds,
-                            self.outputs, self.workspace, self.plans, self.mlp.swiglu_limit,
-                            self.mlp.round_silu, self.stream_handle, self.launch_order)
+                            self.outputs, self.workspace, self.plans, self.activation, self.limit,
+                            self.round_silu, self.stream_handle, self.launch_order)
 
     def finish(self, source, routed):
         _join_shared_expert(source, routed, self.weights, self.scales, self.gains, self.scale_kinds,
-                           self.outputs, self.workspace, self.plans, self.mlp.swiglu_limit,
-                           self.mlp.round_silu, self.stream_handle, self.launch_order)
+                           self.outputs, self.workspace, self.plans, self.activation, self.limit,
+                           self.round_silu, self.stream_handle, self.launch_order)
         return self.mlp.down_projection.output

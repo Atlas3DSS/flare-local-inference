@@ -77,7 +77,7 @@ class RecurrentBenchmarkInputs:
         self.mode, self.arena = mode, arena
         self.state_name = "conv_state" if "conv_state" in original else "recurrent_state"
         self.output_name = "out" if "out" in original else "output"
-        immutable = {"A_log", "dt_bias", "norm_weight", "conv_weight"}
+        immutable = {"A_log", "A", "D", "dt_bias", "norm_weight", "conv_weight", "conv_bias"}
         # Verification records are transient scratch the trials may share with serving.
         immutable |= {"correction_cache", "kg_cache"}
         # Recording verification reads one live row per sequence instead of a checkpoint per column.

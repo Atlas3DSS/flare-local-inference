@@ -25,8 +25,9 @@ def recipes() -> tuple[Recipe, ...]:
     from .mimo_v2.recipe import RECIPE as mimo_v2
     from .kimi3.recipe import RECIPE as kimi3
     from .step5.recipe import RECIPE as step5
+    from .nemotron_h.recipe import RECIPE as nemotron_h
 
-    return qwen38, qwen38_dense, glm53, deepseek41, deepseek4, mimo_v2, kimi3, step5
+    return qwen38, qwen38_dense, glm53, deepseek41, deepseek4, mimo_v2, kimi3, step5, nemotron_h
 
 
 def snapshot_directory(hub_cache: Path, checkpoint: Checkpoint) -> Path:

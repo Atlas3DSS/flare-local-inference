@@ -171,3 +171,14 @@ Without an agent, start each peer's rank yourself with identical serving options
 - A collective that times out on a peer poisons every rank's transport. The
   frame is not published, and the ranks shut down rather than serve wrong
   results.
+
+## Experimental rings
+
+`--roce-ring` connects neighbors in rank order and uses native CPU relays for
+other destinations. It supports 2 through 16 transport ranks while preserving
+each model recipe's supported tensor-parallel sizes. Four-Spark transport
+checks pass; physical ring cabling and full-model ring serving remain
+unqualified.
+
+See [RoCE ring transport](roce-ring.md) for routing, acknowledgments and buffer
+ownership, preparation and serving commands, transport validation, and failures.

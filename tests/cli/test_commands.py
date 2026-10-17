@@ -79,7 +79,7 @@ def test_capacity_errors_exit_four_with_aligned_continuation_lines(host, tmp_pat
 def test_unknown_commands_flags_and_abbreviations_are_usage_errors(host, capsys):
     for arguments in (["run", "qwen3.8-flash", "--context", "4096"], ["run", "qwen3.8-flash", "--gpu", "0"],
                       ["run", "qwen3.8-flash", "--max", "2"], ["join", "10.0.0.1:29600"],
-                      ["join", "10.0.0.1:29600", "--rank", "1", "--ranks", "3"], ["serve", "--ranks", "3"],
+                      ["join", "10.0.0.1:29600", "--rank", "1", "--ranks", "17"], ["serve", "--ranks", "17"],
                       ["plan", "qwen3.8-flash"],
                       ["prepare", "qwen3.8-flash"], ["models"], ["pull"], ["status"], ["bench"], ["config"], ["skill"]):
         with pytest.raises(SystemExit) as exit:
@@ -283,3 +283,12 @@ def test_deepseek_v4_vision_uses_only_checkpoint_integrated_dspark():
     for flags in (("--mtp-draft-tokens", "6"), ("--mtp-proposal-source", "copy"), ("--history-drafts",)):
         with pytest.raises(UsageError):
             speculation(*flags, model="deepseek-v4-flash")
+
+
+def test_roce_ring_requires_multiple_hosts_before_model_or_gpu_work(tmp_path, capsys):
+    for arguments in (["export", "--output", str(tmp_path / "model")], ["serve"]):
+        assert main([*arguments, "qwen3.8-flash", "--roce-ring"]) == 2
+        assert "--roce-ring requires at least two hosts" in failure(capsys)[0]
+    args = _parser().parse_args(["export", "qwen3.8-flash", "--output", str(tmp_path / "model"),
+                               "--roce-ring", "--ranks", "4"])
+    assert args.roce_ring

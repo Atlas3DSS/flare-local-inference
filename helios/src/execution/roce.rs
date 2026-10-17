@@ -14,7 +14,7 @@ use crate::runtime_package::RoceSpec;
 use crate::{ExecutionError, Failure, Result};
 
 /// The proxy ABI compiled into this runtime; packages record the one their kernels use.
-pub const PROXY_ABI: u32 = 7;
+pub const PROXY_ABI: u32 = 9;
 /// Control word 7 after a variable-length all-gather met a byte count it cannot send.
 const INVALID_VARLEN_COUNT: u32 = 1;
 
@@ -48,6 +48,7 @@ unsafe extern "C" {
         err: *mut c_char,
         err_len: u64,
     ) -> *mut Context;
+    fn roce_enable_ring(c: *mut Context) -> c_int;
     fn roce_local_blob(c: *mut Context, out: *mut c_void, out_len: u64) -> c_int;
     fn roce_connect(
         c: *mut Context,
@@ -112,11 +113,16 @@ impl RoceTransport {
                 "package RoCE region differs from the proxy's layout for its geometry",
             ));
         }
-        if topology.routes.len() != spec.world
+        if (topology.ring && !(2..=16).contains(&spec.world))
+            || topology.routes.len() != spec.world
             || !(1..=super::roce_fabric::MAX_RAILS).contains(&topology.rails)
             || topology.routes.iter().enumerate().any(|(peer, links)| {
-                (peer == spec.rank) != links.is_empty()
-                    || (peer != spec.rank && links.len() != topology.rails)
+                let absent = peer == spec.rank
+                    || topology.ring
+                        && peer != (spec.rank + 1) % spec.world
+                        && peer != (spec.rank + spec.world - 1) % spec.world;
+                absent != links.is_empty()
+                    || (!absent && links.len() != topology.rails)
                     || links
                         .iter()
                         .any(|(local, _)| *local as usize >= topology.hcas.len())
@@ -155,6 +161,13 @@ impl RoceTransport {
         if context.is_null() {
             let text = unsafe { CStr::from_ptr(message.as_ptr()) }.to_string_lossy();
             return Err(failure(format!("RoCE transport setup failed: {text}")));
+        }
+        if topology.ring && unsafe { roce_enable_ring(context) } != 0 {
+            let message = unsafe { CStr::from_ptr(roce_error(context)) }
+                .to_string_lossy()
+                .into_owned();
+            unsafe { roce_destroy(context) };
+            return Err(failure(format!("RoCE ring setup failed: {message}")));
         }
         Ok(Self {
             context,
@@ -199,11 +212,12 @@ impl RoceTransport {
         let mut routes = Vec::with_capacity(self.spec.world * rails * 2);
         for (peer, links) in self.topology.routes.iter().enumerate() {
             for rail in 0..rails {
-                let (local, remote) = if peer == self.spec.rank {
-                    (0, 0)
-                } else {
-                    links[rail]
-                };
+                let (local, remote) =
+                    if peer == self.spec.rank || self.topology.ring && links.is_empty() {
+                        (0, 0)
+                    } else {
+                        links[rail]
+                    };
                 routes.push(local as i32);
                 routes.push(remote as i32);
             }

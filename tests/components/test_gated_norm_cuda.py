@@ -52,3 +52,35 @@ def test_rounded_gated_norm_matches_a_bf16_module_with_a_strided_gate(activation
     torch.testing.assert_close(output[:250], expected, rtol=2**-6, atol=4e-3)
     assert (output[:250] == expected).float().mean() > 0.9999
     assert not output[250:].any()
+
+
+@pytest.mark.parametrize("weight_dtype", [torch.bfloat16, torch.float32])
+def test_prepared_gate_before_grouped_norm_graph(weight_dtype):
+    from b12x.preparation import PreparationSession
+    from ignition.components.gated_norm import PreparedGatedRMSNorm
+
+    torch.manual_seed(38)
+    rows, groups, dim = 33, 8, 1024
+    hidden = torch.randn((rows, groups, dim), device="cuda", dtype=torch.bfloat16)
+    packed = torch.randn((rows, 18560), device="cuda", dtype=torch.bfloat16)
+    gate = packed[:, :groups * dim].view(rows, groups, dim)
+    weight = torch.randn((groups, dim), device="cuda", dtype=weight_dtype)
+    output = torch.empty_like(hidden)
+    live = torch.tensor([31], device="cuda", dtype=torch.int32)
+    with PreparationSession(device="cuda:0", autotune=True) as session:
+        norm = PreparedGatedRMSNorm(hidden, gate, weight, output, live, eps=1e-5,
+            activation="silu", norm_before_gate=False, session=session, name="mamba.norm")
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            norm()
+        allocated = torch.cuda.memory_allocated()
+        for count in (31, 1, 0, 33):
+            hidden.normal_()
+            live.fill_(count)
+            graph.replay()
+            x = hidden[:count].float() * torch.nn.functional.silu(gate[:count].float())
+            expected = (x * torch.rsqrt(x.square().mean(-1, keepdim=True) + 1e-5) * weight.float()).bfloat16()
+            torch.testing.assert_close(output[:count], expected, rtol=2**-7, atol=.004)
+            assert not output[count:].any()
+            del x, expected
+            assert torch.cuda.memory_allocated() == allocated

@@ -59,6 +59,7 @@ class PreparationConfig:
     devices: tuple[int, ...] = (0, 1)
     # Each rank's host when ranks run on separate hosts; devices are then host-local ordinals.
     hosts: tuple[str, ...] | None = None
+    roce_ring: bool = False
     context: int = 262144
     prefill_chunk_size: int = 4096
     max_active: int = 4
@@ -85,6 +86,8 @@ class PreparationConfig:
     speculative_token_capacity: int | None = None
 
     def __post_init__(self):
+        if self.roce_ring and (self.hosts is None or not 2 <= len(self.hosts) <= 16):
+            raise ValueError("RoCE ring requires 2..16 ranks on separate hosts")
         if type(self.mtp) is not bool:
             raise TypeError("mtp must be a boolean")
         self.speculative_shapes
@@ -305,7 +308,7 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
                 varlen_bytes = min(WINDOW_RECORDS, blocks * 256) * 528
             collective = prefill_collective = vocabulary_collective = create_roce_runtime(
                 group, device, max_tokens=decode_tokens, pipe_tokens=config.token_capacity, hidden_size=4096,
-                gather_bytes=gather_bytes, package_storage=package_storage, varlen_bytes=varlen_bytes)
+                gather_bytes=gather_bytes, ring=config.roce_ring, package_storage=package_storage, varlen_bytes=varlen_bytes)
         elif group is not None:
             collective = create_all_reduce_runtime(group, device, max_tokens=config.token_capacity,
                                                    hidden_size=4096, ipc=ipc)

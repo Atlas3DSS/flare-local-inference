@@ -11,6 +11,7 @@ mod orientation;
 pub(crate) mod packing;
 mod patches;
 mod qwen;
+mod radio;
 mod resize;
 mod step;
 
@@ -127,6 +128,7 @@ pub enum ImageSettings {
     Deepseek4 {},
     Moonvit {},
     Step {},
+    Radio {},
 }
 
 impl ImageSettings {
@@ -138,6 +140,7 @@ impl ImageSettings {
             Self::Deepseek4 {} => ImagePreparationKind::Deepseek,
             Self::Moonvit {} => ImagePreparationKind::Moonvit,
             Self::Step {} => ImagePreparationKind::Step,
+            Self::Radio {} => ImagePreparationKind::Radio,
         }
     }
 }
@@ -167,6 +170,7 @@ enum Profile {
     DeepSeek4,
     Moonvit,
     Step,
+    Radio,
 }
 
 impl ImageProcessor {
@@ -189,6 +193,7 @@ impl ImageProcessor {
             ImageSettings::Deepseek4 {} => Profile::DeepSeek4,
             ImageSettings::Moonvit {} => Profile::Moonvit,
             ImageSettings::Step {} => Profile::Step,
+            ImageSettings::Radio {} => Profile::Radio,
             ImageSettings::Mimo(settings) => Profile::MiMo(mimo::load(&settings, limits)?),
             ImageSettings::Qwen(settings) => {
                 Profile::Qwen(qwen::QwenProcessor::load(&settings, limits)?)
@@ -377,6 +382,7 @@ impl ImageProcessor {
             Profile::DeepSeek4 => deepseek4::geometry(self.limits, width, height),
             Profile::Moonvit => moonvit::geometry(self.limits, width, height),
             Profile::Step => step::geometry(self.limits, width, height),
+            Profile::Radio => radio::geometry(self.limits, width, height),
         }
     }
     pub fn resized_rgb(&self, image: &RgbImage) -> Result<(ImageGeometry, Vec<u8>)> {
@@ -386,6 +392,7 @@ impl ImageProcessor {
             Profile::DeepSeek4 => deepseek4::resized_rgb(self.limits, image),
             Profile::Moonvit => moonvit::resized_rgb(self.limits, image),
             Profile::Step => step::resized_rgb(self.limits, image),
+            Profile::Radio => Err("RADIO resizing produces float32 pixels; use process".into()),
         }
     }
     pub fn process(&self, images: &[RgbImage]) -> Result<ProcessedImages> {
@@ -395,6 +402,7 @@ impl ImageProcessor {
             Profile::DeepSeek4 => deepseek4::process(self.limits, images),
             Profile::Moonvit => moonvit::process(self.limits, images),
             Profile::Step => step::process(self.limits, images),
+            Profile::Radio => radio::process(self.limits, images),
         }
     }
     pub fn expand_prompt(
@@ -409,6 +417,7 @@ impl ImageProcessor {
             Profile::MiMo(_) => Err("MiMo image expansion requires its model contract".into()),
             Profile::Moonvit => Err("MoonViT image expansion requires its model contract".into()),
             Profile::Step => Err("Step image expansion requires its model contract".into()),
+            Profile::Radio => Err("RADIO image expansion requires its model contract".into()),
         }
     }
 }

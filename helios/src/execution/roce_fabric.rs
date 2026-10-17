@@ -64,6 +64,7 @@ pub struct Topology {
     pub traffic_class: u32,
     pub rails: usize,
     pub routes: Vec<Vec<(u32, u32)>>,
+    pub ring: bool,
 }
 
 fn read(path: &Path) -> Option<String> {
@@ -367,7 +368,50 @@ pub fn plan_routes(
     Ok(routes)
 }
 
+/// Experimental ring in rank order. Only adjacent ranks need a
+/// physical link; the native proxy forwards writes to every other rank.
+/// The same plan works over a switch while keeping non-neighbor QPs unconnected.
+pub fn plan_ring_routes(
+    endpoints: &[Vec<Endpoint>],
+    rank: usize,
+    rails: usize,
+) -> Result<Vec<Vec<(u32, u32)>>> {
+    if !(2..=16).contains(&endpoints.len()) || rank >= endpoints.len() {
+        return Err(failure("experimental RoCE ring requires 2..16 ranks"));
+    }
+    let world = endpoints.len();
+    let peers: Vec<_> = (0..world)
+        .filter(|p| *p == rank || *p == (rank + 1) % world || *p == (rank + world - 1) % world)
+        .collect();
+    let subset: Vec<_> = peers.iter().map(|p| endpoints[*p].clone()).collect();
+    let local = peers.iter().position(|p| *p == rank).unwrap();
+    let planned = plan_routes(&subset, local, rails)?;
+    Ok((0..world)
+        .map(|p| {
+            peers
+                .iter()
+                .position(|q| *q == p)
+                .map_or_else(Vec::new, |i| planned[i].clone())
+        })
+        .collect())
+}
+
 impl Fabric {
+    pub fn ring_topology(&self, endpoints: &[Vec<Endpoint>], rank: usize) -> Result<Topology> {
+        if endpoints.get(rank) != Some(&self.endpoints) || endpoints.iter().any(Vec::is_empty) {
+            return Err(failure("every ring rank needs at least one RoCE device"));
+        }
+        let rails = endpoints.iter().map(Vec::len).min().unwrap().min(MAX_RAILS);
+        Ok(Topology {
+            hcas: self.endpoints.iter().map(|e| e.name.clone()).collect(),
+            gid_index: self.gid_index,
+            traffic_class: self.traffic_class,
+            rails,
+            routes: plan_ring_routes(endpoints, rank, rails)?,
+            ring: true,
+        })
+    }
+
     /// The topology this rank opens, from every rank's endpoints in rank order.
     pub fn topology(&self, endpoints: &[Vec<Endpoint>], rank: usize) -> Result<Topology> {
         if endpoints.get(rank) != Some(&self.endpoints) || endpoints.iter().any(Vec::is_empty) {
@@ -380,6 +424,7 @@ impl Fabric {
             traffic_class: self.traffic_class,
             rails,
             routes: plan_routes(endpoints, rank, rails)?,
+            ring: false,
         })
     }
 }
@@ -565,6 +610,63 @@ mod tests {
             .collect();
         let error = plan_routes(&single, 0, 2).unwrap_err().to_string();
         assert!(error.contains("1 of 2 RoCE rails"), "{error}");
+    }
+
+    #[test]
+    fn variable_size_rings_route_only_neighbors_on_physical_and_switched_fabrics() {
+        for world in [2, 3, 4, 5, 6, 8, 16] {
+            for switched in [false, true] {
+                let endpoints: Vec<Vec<Endpoint>> = (0..world)
+                    .map(|rank| {
+                        if switched {
+                            return vec![
+                                endpoint("f0", &format!("10.1.0.{}/24", rank + 1)),
+                                endpoint("f1", &format!("10.2.0.{}/24", rank + 1)),
+                            ];
+                        }
+                        let previous = (rank + world - 1) % world;
+                        vec![
+                            endpoint("p0f0", &format!("10.{}.0.1/30", rank + 1)),
+                            endpoint("p0f1", &format!("10.{}.1.1/30", rank + 1)),
+                            endpoint("p1f0", &format!("10.{}.0.2/30", previous + 1)),
+                            endpoint("p1f1", &format!("10.{}.1.2/30", previous + 1)),
+                        ]
+                    })
+                    .collect();
+                if !switched && world > 3 {
+                    assert!(plan_routes(&endpoints, 0, 2).is_err());
+                }
+                let plans: Vec<_> = (0..world)
+                    .map(|r| plan_ring_routes(&endpoints, r, 2).unwrap())
+                    .collect();
+                for rank in 0..world {
+                    assert!(plans[rank][rank].is_empty());
+                    for peer in 0..world {
+                        if peer == rank
+                            || peer == (rank + 1) % world
+                            || peer == (rank + world - 1) % world
+                        {
+                            continue;
+                        }
+                        assert!(plans[rank][peer].is_empty());
+                    }
+                    for peer in [(rank + 1) % world, (rank + world - 1) % world] {
+                        assert_eq!(plans[rank][peer].len(), 2);
+                        let reverse: Vec<_> =
+                            plans[peer][rank].iter().map(|&(r, l)| (l, r)).collect();
+                        assert_eq!(plans[rank][peer], reverse);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ring_rejects_wrong_world_size_and_missing_neighbor_links() {
+        assert!(plan_ring_routes(&[], 0, 2).is_err());
+        let endpoints = vec![vec![endpoint("f0", "10.0.0.1/30")]; 4];
+        assert!(plan_ring_routes(&endpoints, 4, 2).is_err());
+        assert!(plan_ring_routes(&endpoints, 0, 2).is_err());
     }
 
     #[test]
