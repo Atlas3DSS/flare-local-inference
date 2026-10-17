@@ -78,14 +78,21 @@ class _ForwardPickler(pickle.Pickler):
         from cutlass.base_dsl.jit_executor import JitCompiledFunction
         from b12x._lib.compile_plan import CompiledCuTeProgram, DeferredCuTeKernel, DeferredTritonKernel
         from b12x.preparation import PreparationSession
+        from b12x.preparation.device import DetectedDevice
         from b12x.preparation.types import _PreparedSlot, _Prepared
         from torch._dynamo.aot_compile_types import _deserialize_triton_kernel, _serialize_triton_kernel
+        from .device_binding import restore_device, restore_prepared_device
         from .package_storage import PackageStorage
 
         if isinstance(value, PreparationSession):
             return _Unavailable, ("b12x preparation session",)
         if isinstance(value, _Unavailable):
             return _Unavailable, (value.description,)
+        # A worker may trace another local rank's forward on its own GPU; the artifact relocates when bound.
+        if isinstance(value, torch.device):
+            return restore_device, (value.type, value.index)
+        if isinstance(value, DetectedDevice):
+            return restore_prepared_device, (type(value), dict(vars(value)))
         if isinstance(value, torch.Tensor):
             if type(value) not in (torch.Tensor, torch.nn.Parameter, FakeTensor):
                 raise TypeError(f'unsupported forward tensor subclass: {type(value)}')

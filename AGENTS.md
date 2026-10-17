@@ -397,9 +397,11 @@ architectural boundary before committing the change.
   compilation uses memory-bounded parallel workers on both integrated and discrete
   GPUs; artifact binding starts no additional compiler pool.
 - **Compile tensor-parallel forwards once, sharded across ranks.** Pass the
-  preparation coordinator to `capture_forwards`. Each forward variant compiles on
-  one rank that selects it, from that rank's own forward, with a compiler pool
-  budgeted for its host's ranks. Ranks on one host share its cache directory;
+  preparation coordinator to `capture_forwards`. Each forward variant compiles
+  once, on a rank that selects it, from that rank's own forward; on one host, a
+  rank without variants left, or without room for a compiler, compiles another
+  rank's variant from that rank's traced forward metadata. Compiler pools are
+  budgeted for their host's ranks. Ranks on one host share its cache directory;
   ranks on other hosts receive the artifacts they lack. Every rank loads the same
   artifacts, binds its tensors and native handles, and participates in ordered
   warmup and local capture. Keep shard offsets and native handles in runtime

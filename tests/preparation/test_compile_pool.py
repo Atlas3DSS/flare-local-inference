@@ -33,7 +33,8 @@ def test_forward_compiler_uses_explicit_host_budget_without_eight_worker_cap(mon
     assert compile_pool.CompilePool("cuda:0", compile_workers=32).workers == 32
     assert compile_pool.CompilePool("cuda:0", compile_workers=32, pools=4).workers == 8
     monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (12 << 30, 96 << 30))
-    assert compile_pool.CompilePool("cuda:0", compile_workers=32, headroom_bytes=2 << 30).workers == 5
+    # A discrete GPU's worker holds 1 GiB.
+    assert compile_pool.CompilePool("cuda:0", compile_workers=32, headroom_bytes=2 << 30).workers == 10
 
 
 def test_metadata_preserves_tensor_aliases_and_offsets():
@@ -170,8 +171,9 @@ def test_integrated_compile_threads_fit_the_ram_workers_leave(available_gib, thr
     assert compile_threads(16, workers=1, available=available_gib << 30, device_bytes=2 << 30) == threads
 
 
+# A discrete GPU's worker holds 1 GiB, so 3 GiB free compile three forwards at once.
 @pytest.mark.parametrize(("requested", "free_gib", "workers", "threads"),
-                         [(None, 95, 8, 2), (None, 3, 1, 16), (32, 95, 32, 1), (32, 3, 1, 1)])
+                         [(None, 95, 8, 2), (None, 3, 3, 5), (32, 95, 32, 1), (32, 3, 3, 1)])
 def test_compile_pool_sizes_workers_from_free_device_memory(monkeypatch, requested, free_gib, workers, threads):
     from ignition.preparation import compile_pool
 
@@ -235,7 +237,7 @@ def test_compilation_preserves_configured_headroom(monkeypatch, integrated, work
     monkeypatch.setattr(host_memory, "available_bytes", lambda: 24 << 30)
     assert compile_pool.CompilePool("cuda:0", headroom_bytes=16 << 30).workers == workers
     with pytest.raises(MemoryError, match="headroom"):
-        compile_pool.CompilePool("cuda:0", headroom_bytes=39 << 30)
+        compile_pool.CompilePool("cuda:0", headroom_bytes=(40 << 30) - (512 << 20))
 
 
 @pytest.mark.parametrize("pools,workers", [(1, 8), (2, 4), (4, 2)])
