@@ -20,6 +20,12 @@ def linear_format(layers, prefix):
     if not isinstance(entry, Mapping):
         raise ValueError(f"{prefix}: missing quantized_layers declaration")
     algo = entry.get("quant_algo")
+    if algo in ("IQ2_XXS", "Q8_0"):
+        group, payload = (256, 66) if algo == "IQ2_XXS" else (32, 34)
+        if (entry.get("group_size") != group or entry.get("block_payload_bytes") != payload
+                or entry.get("packing") != "ggml" or entry.get("weight_scale_encoding") is not None):
+            raise ValueError(f"{prefix}: invalid {algo} block encoding {entry!r}")
+        return algo.lower()
     if algo == "FP8" and entry.get("group_size") is None and entry.get("weight_scale_encoding") is None:
         return "tensor_fp8"
     group = {"MXFP8": 32, "MXFP4": 32, "NVFP4": 16, "W4A16_NVFP4": 16}.get(algo)
@@ -53,7 +59,9 @@ def expert_format(layers, prefix):
             return "nvfp4_csf", "a4"
         raise ValueError(f"{prefix}: unsupported compressed expert scales")
     fmt = linear_format(layers, prefix)
+    if fmt in ("iq2_xxs", "q8_0"):
+        return fmt, "a16"
     if fmt not in ("nvfp4", "mxfp4"):
-        raise ValueError(f"{prefix}: expected NVFP4 or MXFP4 experts")
+        raise ValueError(f"{prefix}: expected FP4 or GGML block-quantized experts")
     mode = "a16" if entry["quant_algo"] == "W4A16_NVFP4" else "a8" if fmt == "mxfp4" else "a4"
     return fmt, mode

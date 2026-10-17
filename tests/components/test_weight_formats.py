@@ -182,3 +182,14 @@ def test_mtp_experts_use_declared_format_and_mtp_scales(tmp_path, monkeypatch, a
         assert [v.tolist() for v in options["scale_vectors"]] == [[.5, .25], [.5, .25], [2., 4.], [2., 4.]]
     else:
         assert options["scale_vectors"] is None
+
+
+@pytest.mark.parametrize("algo,group,payload", [("Q8_0", 32, 34), ("IQ2_XXS", 256, 66)])
+def test_ggml_projection_and_expert_declarations(algo, group, payload):
+    entry = dict(quant_algo=algo, group_size=group, block_payload_bytes=payload, packing="ggml")
+    assert projection_group_format({"q": entry, "k": entry}, ("q", "k")) == algo.lower()
+    assert expert_format({"expert": entry}, "expert") == (algo.lower(), "a16")
+    for field, wrong in (("group_size", group // 2), ("block_payload_bytes", payload + 2),
+                         ("packing", "row"), ("weight_scale_encoding", "csf")):
+        with pytest.raises(ValueError, match="block encoding"):
+            linear_format({"proj": entry | {field: wrong}}, "proj")

@@ -4,36 +4,18 @@ from dataclasses import dataclass
 
 import torch
 import triton
-import triton.language as tl
 
 from ignition.components.collectives import PreparedAllGather, PreparedAllReduce
 from ignition.components.embedding import PreparedShardedEmbedding
 from ignition.components.linear import UnquantizedProjection
 from ignition.components.moe import PreparedRouter, PreparedRoutedExperts, RouterScratch
-from ignition.components.recurrent import DeltaMetadata
+from ignition.components.recurrent import DeltaMetadata, _commit_convolution
 from ignition.components.vocabulary import PreparedVocabularyProjection
 from ignition.components.kda_speculation import PreparedKDAReplay
 
 from .attention import PreparedMLA
 from .kda import PreparedKDA
 from .model import attention_residual, rms_norm, situ
-
-
-@triton.jit
-def _commit_convolution(Backing, Offsets, Rows, Counts, STRIDE: tl.constexpr,
-                        CHANNELS: tl.constexpr, COLUMNS: tl.constexpr, BLOCK: tl.constexpr):
-    layer, row, tile = tl.program_id(0), tl.program_id(1), tl.program_id(2)
-    count = tl.load(Counts + row)
-    state = tl.load(Rows + row)
-    channel = tile * BLOCK + tl.arange(0, BLOCK)
-    live = (count > 1) & (state > 0) & (channel < CHANNELS)
-    base = Backing + state * STRIDE + tl.load(Offsets + layer) + channel * COLUMNS
-    first = tl.load(base + count - 1, live, other=0)
-    second = tl.load(base + count, live, other=0)
-    third = tl.load(base + count + 1, live, other=0)
-    tl.store(base, first, live)
-    tl.store(base + 1, second, live)
-    tl.store(base + 2, third, live)
 
 
 @dataclass(frozen=True)

@@ -1,4 +1,4 @@
-"""Capture a chain of MXFP8 or MXFP4 projections alongside independent main-stream work."""
+"""Capture a chain of quantized projections alongside independent main-stream work."""
 
 import torch
 
@@ -9,6 +9,7 @@ from ignition.preparation.tuning import register_finalizer
 
 @torch.library.custom_op("flare::start_projection_chain", mutates_args=("outputs", "workspace"))
 def _start(source: torch.Tensor, weights: list[torch.Tensor], scales: list[torch.Tensor],
+           gains: list[torch.Tensor | None], activation_scales: list[torch.Tensor | None], scale_kinds: list[int],
            outputs: list[torch.Tensor], workspace: torch.Tensor, plans: list[int], stream: int) -> None:
     from ignition.components.sm103_projection import packed_out_workspace
 
@@ -16,13 +17,15 @@ def _start(source: torch.Tensor, weights: list[torch.Tensor], scales: list[torch
     auxiliary.wait_stream(torch.cuda.current_stream(source.device))
     with torch.cuda.stream(auxiliary):
         value = source
-        for weight, scale, output, plan in zip(weights, scales, outputs, plans, strict=True):
-            packed_out_workspace(value, weight, scale, None, None, output, workspace, "none", None, plan, "any")
+        for weight, scale, gain, activation_scale, kind, output, plan in zip(
+                weights, scales, gains, activation_scales, scale_kinds, outputs, plans, strict=True):
+            packed_out_workspace(value, weight, scale, gain, activation_scale, output, workspace,
+                                  ("none", "multiplier", "reciprocal")[kind], None, plan, "any")
             value = output
 
 
 @_start.register_fake
-def _fake_start(source, weights, scales, outputs, workspace, plans, stream):
+def _fake_start(source, weights, scales, gains, activation_scales, scale_kinds, outputs, workspace, plans, stream):
     pass
 
 
@@ -53,16 +56,19 @@ class ConcurrentProjectionChain:
             raise ValueError("projection overlap requires an arena, a projection chain, and concurrent plans")
         self.arena = workspace
         self.weights, self.scales, self.outputs, self.plans = [], [], [], []
+        self.gains, self.activation_scales, self.scale_kinds = [], [], []
         for projection in self.projections:
             if not isinstance(projection, QuantizedProjection) or projection.bias is not None:
-                raise ValueError("projection overlap requires unbiased MXFP8 or MXFP4 projections")
+                raise ValueError("projection overlap requires unbiased quantized projections")
             values, scales, gain, fp4 = _weight_parts(projection.weight)
-            if values.dtype not in (torch.float8_e4m3fn, torch.uint8) or gain is not None or fp4:
-                raise ValueError("projection overlap requires MXFP8 or MXFP4 weights")
             if self.outputs and self.outputs[-1].shape[1] != projection.weight.in_features:
                 raise ValueError("projection chain output width must match the following input width")
             self.weights.append(values)
-            self.scales.append(scales.view(torch.uint8))
+            self.scales.append(scales.view(torch.uint8) if scales.dtype == torch.float8_e8m0fnu else scales)
+            self.gains.append(gain)
+            self.activation_scales.append(projection.activation_scale)
+            kind = projection.weight.global_scale_kind if fp4 else "none"
+            self.scale_kinds.append(("none", "multiplier", "reciprocal").index(kind))
             self.outputs.append(projection.output)
             self.plans.append(projection.plan.handle)
             for main in self.parallel_plans:
@@ -77,7 +83,8 @@ class ConcurrentProjectionChain:
         _, self.workspace = self.arena.views(((main_bytes,), torch.uint8), ((side_bytes,), torch.uint8))
 
     def start(self, source):
-        _start(source, self.weights, self.scales, self.outputs, self.workspace, self.plans, self.stream_handle)
+        _start(source, self.weights, self.scales, self.gains, self.activation_scales, self.scale_kinds,
+               self.outputs, self.workspace, self.plans, self.stream_handle)
 
     def finish(self, source, dependency):
         _join(source, dependency, self.outputs, self.workspace, self.stream_handle)

@@ -21,6 +21,7 @@ pub(crate) fn tensor_layout(
             ImageLayoutKind::Deepseek | ImageLayoutKind::Moonvit | ImageLayoutKind::Step,
             "vision_pixel_values",
         ) => (Float32, patches * 588),
+        (ImageLayoutKind::Radio, "vision_pixel_values") => (Float32, patches * 768),
         (_, "vision_position_ids") => (Int64, patches * 2),
         (ImageLayoutKind::Step, "vision_cu_seqlens") => (Int32, super::step::MAX_VIEWS + 1),
         (_, "vision_cu_seqlens") => (Int32, 2),
@@ -29,23 +30,31 @@ pub(crate) fn tensor_layout(
             ImageLayoutKind::Mimo
             | ImageLayoutKind::Deepseek
             | ImageLayoutKind::Moonvit
-            | ImageLayoutKind::Step,
+            | ImageLayoutKind::Step
+            | ImageLayoutKind::Radio,
             "vision_num_features",
         ) => (Int32, 1),
         (
-            ImageLayoutKind::Qwen | ImageLayoutKind::Moonvit | ImageLayoutKind::Step,
+            ImageLayoutKind::Qwen
+            | ImageLayoutKind::Moonvit
+            | ImageLayoutKind::Step
+            | ImageLayoutKind::Radio,
             "vision_interpolation_indices",
         ) => (Int64, patches * 4),
         (
-            ImageLayoutKind::Qwen | ImageLayoutKind::Moonvit | ImageLayoutKind::Step,
+            ImageLayoutKind::Qwen
+            | ImageLayoutKind::Moonvit
+            | ImageLayoutKind::Step
+            | ImageLayoutKind::Radio,
             "vision_interpolation_weights",
         ) => (Float32, patches * 4),
         (ImageLayoutKind::Mimo, "vision_column_indices" | "vision_row_indices") => {
             (Int32, patches / 4)
         }
-        (ImageLayoutKind::Deepseek | ImageLayoutKind::Moonvit, "vision_merge_indices") => {
-            (Int32, patches)
-        }
+        (
+            ImageLayoutKind::Deepseek | ImageLayoutKind::Moonvit | ImageLayoutKind::Radio,
+            "vision_merge_indices",
+        ) => (Int32, patches),
         (ImageLayoutKind::Step, "vision_downsample1_indices") => (Int32, patches / 4 * 9),
         (ImageLayoutKind::Step, "vision_downsample2_indices") => (Int32, patches / 16 * 9),
         _ => return Err(format!("image layout has no tensor {name}").into()),
@@ -68,7 +77,9 @@ pub(crate) fn prepare(
         ImageLayoutKind::Qwen => qwen(config, handle, images, image),
         ImageLayoutKind::Mimo => mimo(config, handle, images, image),
         ImageLayoutKind::Deepseek => deepseek(config, handle, images, image),
-        ImageLayoutKind::Moonvit => moonvit(config, handle, images, image),
+        ImageLayoutKind::Moonvit | ImageLayoutKind::Radio => {
+            spatial_merge(config, handle, images, image)
+        }
         ImageLayoutKind::Step => step(config, handle, images, image),
     }
 }
@@ -84,6 +95,8 @@ fn qwen(
         Some(ImageLayoutKind::Moonvit | ImageLayoutKind::Step)
     ) {
         588
+    } else if config.contract.frontend.image_layout == Some(ImageLayoutKind::Radio) {
+        768
     } else {
         1536
     };
@@ -316,7 +329,7 @@ fn deepseek(
     Ok(staging)
 }
 
-fn moonvit(
+fn spatial_merge(
     config: &ModelConfig,
     handle: RequestHandle,
     images: &ProcessedImages,
@@ -328,17 +341,22 @@ fn moonvit(
         .ok_or("missing scheduled image")?;
     let h = usize::try_from(geometry.grid_thw[1]).map_err(|_| "invalid vision height")?;
     let w = usize::try_from(geometry.grid_thw[2]).map_err(|_| "invalid vision width")?;
+    let max_side = if config.contract.frontend.image_layout == Some(ImageLayoutKind::Radio) {
+        13312
+    } else {
+        512
+    };
     if h == 0
         || w == 0
-        || h > 512
-        || w > 512
+        || h > max_side
+        || w > max_side
         || h % 2 != 0
         || w % 2 != 0
         || geometry.grid_thw[0] != 1
         || h.checked_mul(w) != Some(geometry.patches)
         || geometry.tokens != geometry.patches / 4
     {
-        return Err("invalid MoonViT vision grid".into());
+        return Err("invalid spatial merge vision grid".into());
     }
     let mut staging = qwen(config, handle, images, image)?;
     let mut indices = Vec::with_capacity(geometry.patches);

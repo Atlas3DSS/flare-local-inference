@@ -81,7 +81,13 @@ class QuantizedProjection:
         bias: torch.Tensor | None = None,
         workspace: ScratchArena | torch.Tensor | None = None,
     ) -> None:
-        from b12x.gemm.blockscaled._a16 import NVFP4LinearWeight, _weight_parts
+        from b12x.gemm.blockscaled._a16 import NVFP4LinearWeight, _overlap, _weight_parts
+        from b12x.gemm.blockscaled._linear import _validate_bias
+
+        # Address-dependent bias checks run before metadata-only forward compilation.
+        _validate_bias(bias, out_features=weight.out_features, out_dtype=output.dtype, device=source.device)
+        if bias is not None and _overlap(output, bias):
+            raise ValueError("projection output must not overlap bias")
 
         self.weight = weight
         self.output = output
@@ -143,11 +149,11 @@ class QuantizedProjection:
             else:
                 torch.ops.flare.sm103_packed_out(source, values, scales, gain, self.output, self.workspace,
                                                  self.plan.handle)
-            if self.bias is not None:
-                self.output.add_(self.bias)
-            return self.output
-        return blockscaled.mm(source, self.weight, out=self.output, plan=self.plan, bias=self.bias,
-                              workspace=self.workspace)
+        else:
+            blockscaled.mm(source, self.weight, out=self.output, plan=self.plan, workspace=self.workspace)
+        if self.bias is not None:
+            self.output.add_(self.bias)
+        return self.output
 
 
 _EXPANDED_BMM_WEIGHTS = {}

@@ -46,12 +46,14 @@ class PreparedRouter:
     The fixed route plan has no opaque scratch or mutable binding.
     A prepared image mask can select an image-specific correction bias per row
     within the same routing operation.
+    A device-side valid-token count excludes the padded suffix of packed input;
+    those rows receive expert ID -1 and zero weights.
     """
 
     def __init__(self, logits: torch.Tensor, scratch: RouterScratch, *,
                  session: PreparationSession, name: str, score_func="softmax",
                  renormalize=True, routed_scaling_factor=1.0, correction_bias=None,
-                 image_correction_bias=None, image_mask=None):
+                 image_correction_bias=None, image_mask=None, num_valid_tokens=None):
         if logits.ndim != 2 or logits.dtype not in (torch.bfloat16, torch.float32) or logits.stride(1) != 1:
             raise ValueError("router logits must be BF16 or FP32 [tokens, experts] with contiguous expert columns")
         tokens, experts = logits.shape
@@ -66,7 +68,7 @@ class PreparedRouter:
         self.dtype = logits.dtype
         self.options = {key: value for key, value in (
             ("correction_bias", correction_bias), ("image_correction_bias", image_correction_bias),
-            ("image_mask", image_mask)) if value is not None}
+            ("image_mask", image_mask), ("num_valid_tokens", num_valid_tokens)) if value is not None}
         self.shape, self.stride = logits.shape, logits.stride()
         self.plan = fused_moe.plan_route_topk(fused_moe.RouteTopKInvocation(
             num_tokens=tokens, num_experts=experts, top_k=shape[1], logits_dtype=str(logits.dtype).removeprefix("torch."),
@@ -74,6 +76,7 @@ class PreparedRouter:
             has_correction_bias=correction_bias is not None,
             has_image_correction_bias=image_correction_bias is not None,
             has_image_mask=image_mask is not None,
+            has_valid_tokens=num_valid_tokens is not None,
             logits_row_stride=logits.stride(0), topk_row_stride=scratch.selected_logits.stride(0),
             ids_row_stride=scratch.ids.stride(0), weights_row_stride=scratch.weights.stride(0)))
         declare(session, (self.plan.request(name=name, prepare_call=lambda state: PreparedCall(

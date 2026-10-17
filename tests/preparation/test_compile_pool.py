@@ -248,3 +248,26 @@ def test_windows_compiler_workers_fit_host_ram_with_larger_device_budget(monkeyp
     monkeypatch.setattr(host_memory, "available_bytes", lambda: 24 << 30)
     pool = compile_pool.CompilePool("cuda:0", headroom_bytes=8 << 30)
     assert (pool.workers, pool.options["compile_threads"]) == (4, 1)
+
+
+@pytest.mark.parametrize("recorded", [False, True])
+def test_compiler_does_not_serialize_preparation_session_resources(recorded):
+    from contextvars import ContextVar
+    from b12x.preparation import PreparationSession
+    from ignition.preparation.tuning import RecordedPreparationSession
+
+    session = object.__new__(RecordedPreparationSession if recorded else PreparationSession)
+    context = ContextVar("test_preparation_resource")
+    token = context.set("owning rank")
+    session.resource = token
+    try:
+        original = SimpleNamespace(session=session, selected=SimpleNamespace(tile=64),
+                                   source=torch.empty(16))
+        restored = loads(dumps(original))
+        assert restored.selected.tile == 64
+        assert isinstance(restored.source, FakeTensor)
+        with pytest.raises(RuntimeError, match="process-local resource b12x preparation session"):
+            restored.session.prepare()
+        assert session.resource is token
+    finally:
+        context.reset(token)

@@ -319,6 +319,30 @@ class DirectWeightLoader:
         if fmt == "nvfp4":
             (rows,) = tuple(row_ranges)
             return self._load_nvfp4_linear(prefixes[0], rows=rows, columns=column_range)
+        if fmt in ("iq2_xxs", "q8_0"):
+            from b12x._lib.quant.block_codec import block_codec
+
+            codec = block_codec(fmt)
+            sources = []
+            for prefix, row_range in zip(prefixes, row_ranges, strict=True):
+                source = self._sources[f"{prefix}.weight"]
+                if (source.ndim != 3 or source.dtype != torch.uint8
+                        or source.shape[2] != codec.block_bytes):
+                    raise ValueError(f"{prefix}: invalid {fmt} block payload")
+                r0, r1 = _aligned_range(row_range, source.shape[0], 8)
+                c0, c1 = _aligned_range(column_range, source.shape[1] * codec.block_weights, codec.block_weights)
+                sources.append(source[r0:r1, c0 // codec.block_weights:c1 // codec.block_weights])
+            columns = sources[0].shape[1]
+            if any(source.shape[1] != columns for source in sources):
+                raise ValueError("packed projections must share input width")
+            values = torch.empty((sum(s.shape[0] for s in sources), columns, codec.block_bytes),
+                                 dtype=torch.uint8, device=self.device)
+            offset = 0
+            for source in sources:
+                self._copy(values[offset:offset + source.shape[0]], source)
+                offset += source.shape[0]
+            self._session.flush()
+            return pack_weight(values, recipe=fmt)
         fp4 = fmt == "mxfp4"
         pack = 2 if fp4 else 1
         dtype = torch.uint8 if fp4 else torch.float8_e4m3fn
@@ -357,6 +381,51 @@ class DirectWeightLoader:
             return replace(pack_weight(values, swizzle_block_scale(scales), recipe="mxfp4"),
                            in_features=columns)
         return pack_weight(values, scales, recipe="mxfp8")
+
+    def load_block_quant_experts(self, prefixes, *, hidden_size, intermediate_size,
+                                 intermediate_range=None, projection_names=("up_proj", "down_proj"),
+                                 activation="relu2"):
+        """Retile ungated GGML expert blocks without expanding or requantizing weights."""
+        import torch
+        from b12x._lib.quant.block_codec import block_codec
+        from b12x.moe import fused_moe as moe
+        from ignition.preparation.quantization import expert_format
+
+        self._require_open()
+        prefixes = tuple(prefixes)
+        if not prefixes or activation != "relu2":
+            raise ValueError("block-quantized expert loading requires nonempty ungated ReLU-squared experts")
+        up, down = projection_names
+        formats = {expert_format(self.quantization, f"{p}.{n}")
+                   for p in prefixes for n in projection_names}
+        if len(formats) != 1:
+            raise ValueError("expert projections must share their block encoding")
+        fmt, mode = formats.pop()
+        if fmt not in ("iq2_xxs", "q8_0"):
+            raise ValueError("expected IQ2_XXS or Q8_0 experts")
+        codec = block_codec(fmt)
+        first, last = _aligned_range(intermediate_range, intermediate_size, codec.block_weights)
+        local = last - first
+        if hidden_size % codec.block_weights:
+            raise ValueError("expert hidden width must contain complete quantization blocks")
+        w1 = torch.empty((len(prefixes), local, hidden_size // codec.block_weights, codec.block_bytes),
+                         dtype=torch.uint8, device=self.device)
+        w2 = torch.empty((len(prefixes), hidden_size, local // codec.block_weights, codec.block_bytes),
+                         dtype=torch.uint8, device=self.device)
+        for index, prefix in enumerate(prefixes):
+            for projection, target, rows, columns in (
+                    (up, w1[index], intermediate_size, hidden_size),
+                    (down, w2[index], hidden_size, intermediate_size)):
+                source = self._sources[f"{prefix}.{projection}.weight"]
+                if source.dtype != torch.uint8 or source.shape != (rows, columns // codec.block_weights, codec.block_bytes):
+                    raise ValueError(f"{prefix}.{projection}: invalid {fmt} expert geometry")
+                source = source[:, first // codec.block_weights:last // codec.block_weights] if projection == down else source[first:last]
+                self._copy(target, source)
+        self._session.flush()
+        plan = moe.plan_weights(source=moe.PackedSource(format=fmt),
+            activation=moe.ActivationSpec(mode=mode, nonlinearity=activation, io_dtype=torch.bfloat16),
+            geometry=moe.MoEGeometry(num_experts=len(prefixes), hidden_size=hidden_size, intermediate_size=local))
+        return moe.prepare_weights(plan=plan, weights=moe.BlockQuantWeights(w1, w2, codec=fmt))
 
     def load_bf16_experts_as_nvfp4(
         self, prefix, *, num_experts, hidden_size, intermediate_size,

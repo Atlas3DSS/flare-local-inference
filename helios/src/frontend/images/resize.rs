@@ -136,3 +136,71 @@ fn resample(input: &RgbImage, width: usize, height: usize, pillow: bool, linear:
     }
     pixels
 }
+
+/// Float32 antialiased bicubic interpolation without integer rounding or clipping.
+pub(super) fn float_bicubic(input: &RgbImage, width: usize, height: usize) -> Vec<f32> {
+    fn weights(input: usize, output: usize) -> Vec<(usize, Vec<f32>)> {
+        let scale = input as f32 / output as f32;
+        let support = 2.0 * scale.max(1.0);
+        let inverse = if scale >= 1.0 { 1.0 / scale } else { 1.0 };
+        (0..output)
+            .map(|i| {
+                let center = scale * (i as f32 + 0.5);
+                let start = ((center - support + 0.5) as isize).max(0) as usize;
+                let end = ((center + support + 0.5) as usize).min(input);
+                let mut values: Vec<_> = (start..end)
+                    .map(|j| {
+                        let x = ((j as f32 - center + 0.5) * inverse).abs();
+                        if x < 1.0 {
+                            ((1.5 * x - 2.5) * x) * x + 1.0
+                        } else if x < 2.0 {
+                            ((-0.5 * x + 2.5) * x - 4.0) * x + 2.0
+                        } else {
+                            0.0
+                        }
+                    })
+                    .collect();
+                let sum: f32 = values.iter().sum();
+                for value in &mut values {
+                    *value /= sum;
+                }
+                (start, values)
+            })
+            .collect()
+    }
+    let mut horizontal = vec![0.0; input.height * width * 3];
+    if width == input.width {
+        for (out, value) in horizontal.iter_mut().zip(&input.pixels) {
+            *out = f32::from(*value);
+        }
+    } else {
+        let axis = weights(input.width, width);
+        for y in 0..input.height {
+            for (x, (start, taps)) in axis.iter().enumerate() {
+                for c in 0..3 {
+                    let mut value = 0.0;
+                    for (i, weight) in taps.iter().enumerate() {
+                        value +=
+                            f32::from(input.pixels[(y * input.width + start + i) * 3 + c]) * weight;
+                    }
+                    horizontal[(y * width + x) * 3 + c] = value;
+                }
+            }
+        }
+    }
+    if height == input.height {
+        return horizontal;
+    }
+    let mut output = vec![0.0; height * width * 3];
+    let axis = weights(input.height, height);
+    for (y, (start, taps)) in axis.iter().enumerate() {
+        for x in 0..width * 3 {
+            let mut value = 0.0;
+            for (i, weight) in taps.iter().enumerate() {
+                value += horizontal[(start + i) * width * 3 + x] * weight;
+            }
+            output[y * width * 3 + x] = value;
+        }
+    }
+    output
+}

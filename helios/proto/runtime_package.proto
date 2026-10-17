@@ -242,6 +242,7 @@ enum ImagePreparationKind {
   DEEPSEEK_IMAGE_PREPARATION = 3;
   MOONVIT_IMAGE_PREPARATION = 4;
   STEP_IMAGE_PREPARATION = 5;
+  RADIO_IMAGE_PREPARATION = 6;
 }
 enum ImageLayoutKind {
   IMAGE_LAYOUT_UNSPECIFIED = 0;
@@ -250,6 +251,7 @@ enum ImageLayoutKind {
   DEEPSEEK_IMAGE_LAYOUT = 3;
   MOONVIT_IMAGE_LAYOUT = 4;
   STEP_IMAGE_LAYOUT = 5;
+  RADIO_IMAGE_LAYOUT = 6;
 }
 message ToolParser {
   ToolParserKind kind = 1;
@@ -339,6 +341,7 @@ message ImageSettings {
     Empty deepseek4 = 3;
     Empty moonvit = 4;
     Empty step = 5;
+    Empty radio = 6;
   }
 }
 message QwenImageSettings {
