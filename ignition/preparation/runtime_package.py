@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from bisect import bisect_right
 import ctypes as C
 from dataclasses import asdict, dataclass, replace
 import os
@@ -155,20 +156,31 @@ def _merge_ranges(ranges):
     return tuple((start, end - start) for start, end in merged)
 
 
-def _trim_inactive_tail(allocation, inactive):
-    """Remove whole allocation granules beyond the last live preparation block."""
-    from .tensor_metadata import merge_ranges
+def _live_pieces(allocation, inactive):
+    """Split an allocation around the whole granules that no live preparation block occupies.
 
-    end = allocation.address + allocation.nbytes
-    for start, stop in merge_ranges(inactive):
-        if start < end <= stop:
-            nbytes = max(0, start - allocation.address)
-            nbytes = (nbytes + allocation.alignment - 1) // allocation.alignment * allocation.alignment
-            # Fully inactive segments remain candidates for reachability pruning.
-            if 0 < nbytes < allocation.nbytes:
-                return replace(allocation, nbytes=nbytes)
-            break
-    return allocation
+    Freed blocks between live ones, as well as beyond the last, need no physical backing: graph
+    pointers into inactive storage are not references. `inactive` holds sorted disjoint ranges.
+    """
+    granule, begin, end = allocation.alignment, allocation.address, allocation.address + allocation.nbytes
+    pieces, cursor = [], begin
+    index = max(bisect_right(inactive, (begin, begin)) - 1, 0)
+    while index < len(inactive) and inactive[index][0] < end:
+        start, stop = inactive[index]
+        index += 1
+        start, stop = -(-max(start, begin) // granule) * granule, min(stop, end) // granule * granule
+        if start < stop:
+            if cursor < start:
+                pieces.append((cursor, start))
+            cursor = max(cursor, stop)
+    if cursor < end:
+        pieces.append((cursor, end))
+    # Fully inactive segments remain candidates for reachability pruning.
+    if not pieces or pieces == [(begin, end)]:
+        return (allocation,)
+    names = [allocation.name] if len(pieces) == 1 else [f"{allocation.name}.{i}" for i in range(len(pieces))]
+    return tuple(replace(allocation, name=name, address=start, nbytes=stop - start)
+                 for name, (start, stop) in zip(names, pieces, strict=True))
 
 
 def _without_zero_ranges(allocation, zero_ranges):
@@ -787,10 +799,15 @@ def export_model(prepared, images, storage, path, *, options, progress=None, pub
                        for index, region in enumerate(storage.host_regions) if not region.closed)
     peer_addresses = set() if storage.peer_storage is None else storage.peer_storage.owned.keys()
     before_trim = sum(a.nbytes for a in allocations)
-    allocations = [(_trim_inactive_tail(a, inactive) if a.memory == "device" and a.address not in peer_addresses else a)
-                   for a in allocations]
+    from .tensor_metadata import merge_ranges
+
+    merged_inactive = merge_ranges(inactive)
+    allocations = [piece for a in allocations for piece in
+                   (_live_pieces(a, merged_inactive) if a.memory == "device" and a.address not in peer_addresses
+                    and a.snapshot_spans is None else (a,))]
     if progress is not None:
-        progress(f"Trimmed {(before_trim - sum(a.nbytes for a in allocations)) / (1 << 20):.1f} MiB of inactive allocation tails")
+        progress(f"Released {(before_trim - sum(a.nbytes for a in allocations)) / (1 << 20):.1f} MiB of inactive "
+                 "allocation granules")
     allocations = [_without_zero_ranges(allocation, zero_ranges) for allocation in allocations]
     allocations.extend(Allocation(region.name, region.address, region.extent, alignment=storage.granularity,
         initialize="zero", preserve_address=True, sizing={"capacity": region.group, "unit_bytes": region.unit_bytes,
