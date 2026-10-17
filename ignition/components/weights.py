@@ -27,6 +27,95 @@ class MLPWeights:
     down: Weight | torch.Tensor
 
 
+class SharedColumnReads:
+    """Ranks on one host read each column-sharded checkpoint tensor once and copy their columns.
+
+    A rank's column slice of a row-major tensor spans every row, so a direct read of the slice reads
+    the whole tensor, and every rank of the host reads it again. Instead each tensor has one reader
+    rank, which stages it whole in symmetric peer storage; after a barrier every rank copies its own
+    columns from the readers' GPUs. Every rank must stage and copy the same tensors in the same order.
+    """
+
+    def __init__(self, group, peer_storage, device, capacity):
+        import torch
+        import torch.distributed as dist
+
+        self.group, self.peer_storage, self.device = group, peer_storage, torch.device(device)
+        self.rank, self.world = dist.get_rank(group), dist.get_world_size(group)
+        self.capacity = capacity
+        self.pointer = peer_storage.cudaMalloc(capacity)
+        handles = [None] * self.world
+        dist.all_gather_object(handles, peer_storage.cudaIpcGetMemHandleBytes(self.pointer), group=group)
+        self.bases = [self.pointer if rank == self.rank else peer_storage.cudaIpcOpenMemHandleBytes(handle)
+                      for rank, handle in enumerate(handles)]
+
+    def reader(self, index):
+        return index % self.world
+
+    def view(self, rank, offset, shape, dtype):
+        """``rank``'s staged bytes at ``offset``, addressed from this rank's GPU."""
+        import torch
+
+        nbytes = prod(shape) * dtype.itemsize
+        if offset < 0 or offset % 256 or offset + nbytes > self.capacity:
+            raise ValueError("shared column staging lies outside its aligned capacity")
+        storage = torch._C._construct_storage_from_data_pointer(self.bases[rank] + offset, self.device, nbytes)
+        strides = tuple(prod(shape[index + 1:]) for index in range(len(shape)))
+        return torch.empty(0, dtype=dtype, device=self.device).set_(storage, 0, shape, strides)
+
+    def read_columns(self, loader, source, columns, out):
+        """Fill ``out`` with ``source[:, columns]``: ranks read disjoint blocks of whole rows and copy their columns.
+
+        Each round every rank stages one row block in its staging slot zero, so the reads of one
+        tensor proceed on all ranks at once and each checkpoint byte is read once.
+        """
+        from ignition.preparation.tensor_metadata import record_numeric_tensor
+
+        rows, width = source.shape
+        first, last = columns
+        if out.shape != (rows, last - first) or out.dtype != source.dtype:
+            raise ValueError("shared column output must hold the selected columns of every row")
+        block = max(1, min(-(-rows // self.world), self.capacity // (width * source.dtype.itemsize)))
+        for start in range(0, rows, self.world * block):
+            mine = start + self.rank * block
+            if mine < rows:
+                count = min(block, rows - mine)
+                loader._copy(self.view(self.rank, 0, (count, width), source.dtype), source[mine:mine + count],
+                             numeric=False)
+            loader._session.flush()
+            self.exchange()
+            for reader in range(self.world):
+                begin = start + reader * block
+                if begin >= rows:
+                    break
+                count = min(block, rows - begin)
+                out[begin:begin + count].copy_(self.view(reader, 0, (count, width), source.dtype)[:, first:last])
+            self.exchange()
+        record_numeric_tensor(out)
+        return out
+
+    def exchange(self):
+        """Complete this rank's staging or copies on its GPU, then wait for every rank."""
+        import torch
+        import torch.distributed as dist
+
+        torch.cuda.synchronize(self.device)
+        dist.barrier(group=self.group)
+
+    def close(self):
+        self.exchange()
+        for rank, base in enumerate(self.bases):
+            if rank != self.rank:
+                self.peer_storage.cudaIpcCloseMemHandle(base)
+        self.exchange()
+        self.peer_storage.cudaFree(self.pointer)
+
+
+def fp4_down_staging_bytes(hidden_size, intermediate_size, group):
+    """Bytes one whole packed FP4 down projection and its block scales occupy in shared staging."""
+    return -(-(hidden_size * (intermediate_size // 2 + intermediate_size // group)) // 4096) * 4096
+
+
 def quantize_bf16_linear_as_mxfp8(weight):
     """Convert a BF16 projection to b12x MXFP8 storage during loading."""
     import torch
@@ -283,12 +372,13 @@ class DirectWeightLoader:
         if self._session is None:
             raise RuntimeError(f"weight loading requires an open {type(self).__name__} context")
 
-    def _copy(self, destination, source):
+    def _copy(self, destination, source, *, numeric=True):
         from ignition.preparation.tensor_metadata import record_numeric_tensor
 
         if not self._session(destination, source):
             raise RuntimeError("b12x rejected the direct weight transfer")
-        record_numeric_tensor(destination)
+        if numeric:
+            record_numeric_tensor(destination)
         if self._display is not None:
             self._display.update(self._session.payload_bytes)
 
@@ -522,18 +612,21 @@ class DirectWeightLoader:
                          swiglu_clamp_after_silu=False,
                          scale_compression=None, scale_scratch=None,
                          projection_names=("up_proj", "gate_proj", "down_proj"), scale_name="weight_scale",
-                         weight_name="weight", activation="silu", w13_layout="w13"):
+                         weight_name="weight", activation="silu", w13_layout="w13", shared_columns=None):
         """Prepare NVFP4 or MXFP4 experts, optionally compressing their block scales.
 
         The first two projection names fill the first and second w13 halves in that
         order; ``w13_layout`` declares which halves hold up and gate. CSF compression
         requires two caller-owned expansion buffers. Serial routed layers may share
-        those buffers; overlapping calls must not.
+        those buffers; overlapping calls must not. With ``shared_columns``, each
+        expert's down projection, whose intermediate columns partition across ranks,
+        is read once per host (``SharedColumnReads``).
         """
         import torch
         from b12x.moe import fused_moe as moe
         from b12x._lib.intrinsics.reference import swizzle_block_scale
         from .sm103 import is_sm103
+        from ignition.preparation.tensor_metadata import record_numeric_tensor
 
         self._require_open()
         prefixes = tuple(prefixes)
@@ -552,6 +645,12 @@ class DirectWeightLoader:
         s13 = torch.empty((count, 2 * local, hidden_size // group), dtype=scale_dtype, device=self.device)
         s2 = torch.empty((count, hidden_size, local // group), dtype=scale_dtype, device=self.device)
         globals13, globals2 = [], []
+        shared = shared_columns
+        if shared is not None:
+            down_bytes = hidden_size * (intermediate_size // 2)
+            slot_bytes = fp4_down_staging_bytes(hidden_size, intermediate_size, group)
+            if -(-count // shared.world) * slot_bytes > shared.capacity:
+                raise ValueError("shared column staging cannot hold this rank's down projections")
         for index, prefix in enumerate(prefixes):
             scales = {}
             for projection, values, blocks in (
@@ -572,8 +671,18 @@ class DirectWeightLoader:
                     raise ValueError(f"{prefix}.{projection}: packed FP4 weight geometry mismatch")
                 if scale.shape != (rows, columns // group) or scale.dtype != scale_dtype:
                     raise ValueError(f"{prefix}.{projection}: {format.upper()} block scale geometry or dtype mismatch")
-                self._copy(values, source[:, first // 2:last // 2] if projection == down_name else source[first:last])
-                self._copy(blocks, scale[:, first // group:last // group] if projection == down_name else scale[first:last])
+                if projection == down_name and shared is not None:
+                    # The reader stages the whole projection; its rows are contiguous in the checkpoint.
+                    if shared.reader(index) == shared.rank:
+                        offset = index // shared.world * slot_bytes
+                        self._copy(shared.view(shared.rank, offset, source.shape, torch.uint8), source, numeric=False)
+                        self._copy(shared.view(shared.rank, offset + down_bytes, scale.shape, scale_dtype), scale,
+                                   numeric=False)
+                else:
+                    self._copy(values, source[:, first // 2:last // 2] if projection == down_name
+                               else source[first:last])
+                    self._copy(blocks, scale[:, first // group:last // group] if projection == down_name
+                               else scale[first:last])
                 if format == "mxfp4":
                     continue
                 value = self._sources[f"{prefix}.{projection}.weight_scale_2"]
@@ -586,6 +695,20 @@ class DirectWeightLoader:
                 raise ValueError(f"{prefix}: gate/up global scales differ")
             globals13.append(scales[up_name])
             globals2.append(scales[down_name])
+        if shared is not None:
+            # Every rank copies its intermediate columns of each staged down projection.
+            self._session.flush()
+            shared.exchange()
+            for index in range(count):
+                reader, offset = shared.reader(index), index // shared.world * slot_bytes
+                down = shared.view(reader, offset, (hidden_size, intermediate_size // 2), torch.uint8)
+                blocks = shared.view(reader, offset + down_bytes, (hidden_size, intermediate_size // group),
+                                     scale_dtype)
+                w2[index].copy_(down[:, first // 2:last // 2])
+                s2[index].copy_(blocks[:, first // group:last // group])
+            record_numeric_tensor(w2)
+            record_numeric_tensor(s2)
+            shared.exchange()
         if activation_mode == "a4":
             if scale_vectors is None or len(scale_vectors) != 4:
                 raise ValueError("NVFP4 A4 experts require weight and activation scale vectors")
