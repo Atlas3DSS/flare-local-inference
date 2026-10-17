@@ -76,11 +76,11 @@ RECIPE = Recipe(
     stream_overlap=True,
     # Text-only plans, as vLLM serves Kimi K3 with --language-model-only, leave the MoonViT encoder unloaded.
     language_model_only=True,
-    # E4M3 latent pages, as vLLM serves Kimi K3 (--kv-cache-dtype fp8). DFlash2 attends its own E4M3 pages over
-    # whole context, so each rank keeps its context whole; without a draft, decode context parallelism spreads
-    # each page's positions over the sixteen ranks.
-    ranks=MappingProxyType({16: RankCosts(state_row_bytes=32_464_128, page_bytes=2_138_112,
-                                        draft_page_bytes=368_640, graph_bytes=5 << 30)}),
+    # E4M3 latent pages, as vLLM serves Kimi K3 (--kv-cache-dtype fp8); decode context parallelism spreads each
+    # page's target positions over the sixteen ranks. DFlash2 keeps its full-attention layer's records of every
+    # position on every rank, as vLLM replicates its draft cache, and its sliding layers' rings in continuations.
+    ranks=MappingProxyType({16: RankCosts(state_row_bytes=42_712_320, page_bytes=2_949_120,
+                                        draft_page_bytes=1_179_648, graph_bytes=9 << 29, page_tokens=128 * 16)}),
     plain_ranks=MappingProxyType({16: RankCosts(state_row_bytes=29_869_824, page_bytes=1_769_472, graph_bytes=9 << 29,
                                               page_tokens=128 * 16)}),
 )

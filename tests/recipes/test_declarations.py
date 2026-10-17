@@ -75,7 +75,9 @@ def test_fp8_cache_views_and_planned_bytes(alias, world_size, drafting):
         pool = module.ContinuationPool.allocate(config, shard, 2, 3, "meta", dflash=drafting)
         caches = [pool.cache(layer, kind) for layer in range(config.layers) for kind in ("key", "value")]
     elif model.recipe.name == "kimi3":
-        pool = module.ContinuationPool.for_model(config, world_size, 2, 3, "meta")
+        # Decode context parallelism spreads each page's positions over every rank, as preparation lays it out.
+        pool = module.ContinuationPool.for_model(config, world_size, 2, 3, "meta", context_ranks=world_size,
+            speculative_tokens=model.recipe.speculation.draft_tokens if drafting else 0)
         caches = [pool.attention(layer) for layer, kind in enumerate(config.layers) if kind == "mla"]
         if drafting:
             caches.extend(pool.draft_attention(layer) for layer in range(config.draft.layers))

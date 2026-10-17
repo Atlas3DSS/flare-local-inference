@@ -87,15 +87,17 @@ def _pull_context(Addresses, Table, Window, Slab, columns, WORLD: tl.constexpr, 
 
 
 @triton.jit
-def _write_records(Latent, Indices, Table, latent_stride, WIDTH: tl.constexpr, BLOCK: tl.constexpr):
-    # Write one token's record, saturated to E4M3 with a unit scale, at its row of the table.
+def _write_records(Latent, Indices, Table, latent_stride, page_stride, WIDTH: tl.constexpr, RECORDS: tl.constexpr,
+                   BLOCK: tl.constexpr):
+    # Write one token's record, saturated to E4M3 with a unit scale, at its slot: one record of a page of RECORDS.
     row = tl.program_id(0)
     index = tl.load(Indices + row).to(tl.int64)
     if index >= 0:
         column = tl.arange(0, BLOCK)
         values = tl.load(Latent + row * latent_stride + column, mask=column < WIDTH, other=0.).to(tl.float32)
         values = tl.minimum(tl.maximum(values, -448.), 448.)
-        tl.store(Table + index * WIDTH + column, values.to(Table.dtype.element_ty), mask=column < WIDTH)
+        record = Table + index // RECORDS * page_stride + index % RECORDS * WIDTH
+        tl.store(record + column, values.to(Table.dtype.element_ty), mask=column < WIDTH)
 
 
 def _launch(kernel, grid, args, **meta):
@@ -121,9 +123,13 @@ def pull_context(addresses, table, window, slab, shards):
 
 def write_records(latent, indices, table):
     """Write each token's BF16 record [tokens, 576], saturated to E4M3 as vLLM's FP8 cache stores it, at its
-    row of `table` [rows, 576]; negative indices skip their tokens."""
-    _launch(_write_records, (latent.shape[0],), (latent, indices, table, latent.stride(0)),
-            WIDTH=RECORD_BYTES, BLOCK=triton.next_power_of_2(RECORD_BYTES), num_warps=4)
+    slot of `table`: a row of [rows, 576], or page * records + record of [pages, records, 576] with any page
+    stride, such as rings in continuation rows; negative indices skip their tokens."""
+    pages = table if table.ndim == 3 else table[:, None]
+    if pages.shape[2] != RECORD_BYTES or pages.stride(2) != 1 or pages.shape[1] > 1 and pages.stride(1) != RECORD_BYTES:
+        raise ValueError("record tables hold contiguous 576-byte records")
+    _launch(_write_records, (latent.shape[0],), (latent, indices, pages, latent.stride(0), pages.stride(0)),
+            WIDTH=RECORD_BYTES, RECORDS=pages.shape[1], BLOCK=triton.next_power_of_2(RECORD_BYTES), num_warps=4)
 
 
 @dataclass(frozen=True)

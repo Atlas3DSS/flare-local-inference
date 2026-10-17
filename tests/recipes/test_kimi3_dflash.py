@@ -7,8 +7,8 @@ from pathlib import Path
 import pytest
 import torch
 
-TARGET = Path("/data/models/Kimi-K3-MXFP4-CSF")
-DRAFT = Path("/data/models/Kimi-K3-DFlash2")
+TARGET = Path(os.getenv("FLARE_KIMI3_TARGET", "/data/models/Kimi-K3-MXFP4-CSF"))
+DRAFT = Path(os.getenv("FLARE_KIMI3_DFLASH2", "/data/models/Kimi-K3-DFlash2"))
 cuda = pytest.mark.skipif(os.getenv("FLARE_RUN_CUDA_TESTS") != "1", reason="requires an assigned CUDA device")
 
 
@@ -22,10 +22,12 @@ def test_draft_configuration_and_state_geometry():
         pytest.skip("Kimi target and DFlash2 checkpoints are unavailable")
     target = ModelConfig.load(TARGET)
     config = replace(target, draft=DraftConfig.load(DRAFT, target))
-    layout = continuation_layout(config, 16)
+    layout = continuation_layout(config, 16, context_ranks=16)
     assert layout.region("layer0.convolution").shape == (2304, 10)
+    assert layout.region("draft0.ring").shape == (4096, 576) and "draft4.ring" not in {r.name for r in layout.regions}
     assert layout.row_bytes == RECIPE.ranks[16].state_row_bytes
-    assert page_bytes(config) == RECIPE.ranks[16].page_bytes
+    assert page_bytes(config, 16) == RECIPE.ranks[16].page_bytes
+    assert page_bytes(config, 16) - page_bytes(replace(config, draft=None), 16) == RECIPE.ranks[16].draft_page_bytes
     assert RECIPE.max_draft_tokens == 7
     assert config.draft.target_layers == (19, 37, 66, 78, 90)
 
@@ -88,13 +90,20 @@ def test_checkpoint_draft_attention_context_and_noncausal_block(draft_weights, w
     from ignition.preparation.scratch import ScratchArena
     from ignition.preparation.tuning import RecordedPreparationSession
     from ignition.recipes.kimi3.dflash import DraftAttention
+    from ignition.recipes.kimi3.pool import DRAFT_RING
 
     config, weights = draft_weights
     w = weights.layers[0]["attention"]
-    device = torch.device("cuda:0")
+    device, fp8 = torch.device("cuda:0"), torch.float8_e4m3fn
     torch.manual_seed(171)
     source = torch.randn((8, 7168), dtype=torch.bfloat16, device=device) * .2
-    cache = (torch.randn((34, 128, 576), dtype=source.dtype, device=device) * .2).to(torch.float8_e4m3fn)
+    # A sliding layer reads its continuation row's ring (row 1 of 3, rows strided like continuations); the
+    # full layer reads pages of 128 positions.
+    if window:
+        rows = torch.randn((3, DRAFT_RING * 576 + 4096), device=device) * .2
+        cache = rows.to(fp8)[:, :DRAFT_RING * 576].view(3, DRAFT_RING, 576)
+    else:
+        cache = (torch.randn((34, 128, 576), device=device) * .2).to(fp8)
     metadata = Metadata.allocate(8, 1, 34, device, samples=8)
     with RecordedPreparationSession(device=device, checkpoint="kimi-dflash2-attention",
             workload_schema="kimi-dflash2-attention", numerical_policy="default") as session:
@@ -114,15 +123,19 @@ def test_checkpoint_draft_attention_context_and_noncausal_block(draft_weights, w
                 torch.zeros((1, 8), dtype=torch.int64, device=device), torch.ones(1, device=device))
             graph.replay()
             torch.cuda.synchronize()
-            latent = torch.cat((cache.flatten(0, 1)[:length].to(source.dtype), attention.latent))
-            query = attention.query
-            keys = torch.einsum("tk,hdk->thd", latent[:, :512].float(), w["key"].float())
-            keys = torch.cat((keys, latent[:, None, 512:].expand(-1, 4, -1).float()), -1)
-            values = torch.einsum("tk,hkd->thd", latent[:, :512].float(), w["value"].float())
-            scores = torch.einsum("qhd,khd->hqk", query.float(), keys) * attention.rotary.scale
+            positions = torch.arange(length, device=device)
+            context = cache[1, positions % DRAFT_RING] if window else cache.flatten(0, 1)[:length]
+            # The context half attends E4M3 records with a saturated E4M3 query; the block half in BF16.
+            absorbed = attention.absorbed.float()
+            quantized = absorbed.clamp(-448., 448.).to(fp8).float()
+            scores = torch.cat((torch.einsum("qhk,tk->hqt", quantized, context.float()),
+                                torch.einsum("qhk,tk->hqt", absorbed, attention.latent.float())), -1)
+            scores = scores * attention.rotary.scale
+            latent = torch.cat((context.float(), attention.latent.float()))
             if window:
                 allowed = torch.arange(latent.shape[0], device=device)[None] >= (length + torch.arange(8, device=device)[:, None] - window + 1)
                 scores.masked_fill_(~allowed[None], -torch.inf)
+            values = torch.einsum("tk,hkd->thd", latent[:, :512], w["value"].float())
             attended = torch.einsum("hqk,khd->qhd", scores.softmax(-1), values).bfloat16().flatten(1)
             expected = F.linear(attended, w["output"])
             error = (attention.output.float() - expected.float()).square().mean().sqrt() / expected.float().square().mean().sqrt()
@@ -243,7 +256,9 @@ def test_complete_draft_and_context_replay_with_checkpoint_weights(batch):
     with DirectWeightLoader(inspect_indexed_checkpoint(TARGET), device, prefixes=names) as loader:
         embedding, head = loader.load_tensors(names)
     weights = SimpleNamespace(config=c, draft=draft, shard=shard, embedding=embedding, head=head)
-    cache = [torch.zeros((2, 128, 576), dtype=torch.float8_e4m3fn, device=device) for _ in range(5)]
+    # Sliding layers write rings in continuation rows 0-1; the full layer pages of 128 positions.
+    cache = [torch.zeros((2, 4096, 576), dtype=torch.float8_e4m3fn, device=device) for _ in range(4)]
+    cache.append(torch.zeros((2, 128, 576), dtype=torch.float8_e4m3fn, device=device))
     pool = SimpleNamespace(draft_attention=lambda i: cache[i])
     work = torch.empty(129 * 7168 * 10, dtype=torch.bfloat16, device=device)
     activation, total, kda, mla, moe, auxiliary = scratch_views(work, ((129, 7168),) * 5 + ((129, 5 * 7168),))
@@ -273,7 +288,7 @@ def test_complete_draft_and_context_replay_with_checkpoint_weights(batch):
         compiled_context = compile_forward(lambda: context(auxiliary, context_meta.lengths))
         compiled_context()
         for actual, reference in zip(cache, expected_context, strict=True):
-            torch.testing.assert_close(actual, reference, atol=0, rtol=0)
+            torch.testing.assert_close(actual.view(torch.uint8), reference.view(torch.uint8), atol=0, rtol=0)
         inputs = torch.full((batch, 8), c.draft.noise_token, dtype=torch.int64, device=device)
         inputs[:, 0] = 42
         lengths = torch.full((batch,), 8, device=device)
@@ -291,7 +306,8 @@ def test_complete_draft_and_context_replay_with_checkpoint_weights(batch):
         compiled()
         delta = scratch.logits.float() - expected.float()
         relative = delta.norm() / expected.float().norm()
-        assert relative < .01, relative.item()
+        # The E4M3 context attention also quantizes the block's queries, so compiled and eager rounding differ.
+        assert relative < .02, relative.item()
         compiled_output = scratch.logits.clone()
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
@@ -302,7 +318,7 @@ def test_complete_draft_and_context_replay_with_checkpoint_weights(batch):
         assert torch.cuda.memory_allocated() == allocated
         torch.testing.assert_close(scratch.logits, compiled_output, rtol=0, atol=0)
         for actual, reference in zip(cache, expected_context, strict=True):
-            torch.testing.assert_close(actual, reference, atol=0, rtol=0)
+            torch.testing.assert_close(actual.view(torch.uint8), reference.view(torch.uint8), atol=0, rtol=0)
         previous = inputs[:, 0]
         for position in range(1, 8):
             logits = scratch.logits.view(batch, 8, -1)[:, position].float().clone()

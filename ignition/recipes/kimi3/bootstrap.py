@@ -94,8 +94,6 @@ class PreparationConfig:
             if self.speculative_fixed_width is not None and self.speculative_fixed_width not in self.speculative_widths:
                 raise ValueError("fixed verification width must belong to the captured widths")
             _ = self.speculative_shapes
-        if self.context_parallel and self.draft_checkpoint is not None:
-            raise ValueError("DFlash2 attends whole context on every rank, so its pages cannot share context")
         if not self.page_tokens <= self.context <= 1048576 or self.context % self.page_tokens:
             raise ValueError(f"Kimi K3 context must be {self.page_tokens}-aligned in [{self.page_tokens},1048576]")
         if not 128 <= self.prefill_chunk_size <= self.context or self.prefill_chunk_size % 128:
@@ -146,7 +144,10 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         release_unused()
     transient = contextlib.ExitStack()
     transient.enter_context(package_storage.transient())
-    layout = continuation_layout(weights.config, shard.world_size, speculative_tokens=config.draft_tokens)
+    # Ranks that share each page's positions; a DFlash2 draft still keeps every position on every rank.
+    context_ranks = shard.world_size if config.context_parallel and shard.world_size > 1 else 1
+    layout = continuation_layout(weights.config, shard.world_size, speculative_tokens=config.draft_tokens,
+                                 context_ranks=context_ranks)
     snapshots = layout.snapshot_capacity(config.snapshot_budget_bytes)
     if snapshots < 1:
         raise ValueError("snapshot budget must hold a complete Kimi K3 continuation")
@@ -160,7 +161,8 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
     total_memory = minimum_across_ranks(torch.cuda.mem_get_info(device)[1], group)
     with phase(progress, "Allocate model state"):
         pool = ContinuationPool.for_model(weights.config, shard.world_size, state_rows + 1, pages, device,
-            speculative_tokens=config.draft_tokens, storage=package_storage, maximum_pages=total_memory // page_bytes(weights.config),
+            speculative_tokens=config.draft_tokens, context_ranks=context_ranks, storage=package_storage,
+            maximum_pages=total_memory // page_bytes(weights.config, context_ranks),
             maximum_rows=total_memory // layout.row_bytes, backed_slots=min(state_rows + 1, 1 + 2 * slots))
         vocabulary = weights.config.vocabulary
         requests = DeviceRequestState.allocate(device, vocab_size=vocabulary, capacity=slots)
@@ -298,7 +300,8 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
             latent=mla_output.flatten()[:text_shape[0] * 576].view(text_shape[0], 576))
         speculation = SpeculativePreparation(weights, pool, requests, inputs, decode_storage,
             records=records, frame=frame, sequence=sequence, session=session, workspace=arena,
-            collectives=collectives, decoder_buffers=decoder_buffers, context_buffers=context_buffers)
+            collectives=collectives, decoder_buffers=decoder_buffers, context_buffers=context_buffers,
+            page_tokens=config.page_tokens)
     modes = (True, False) if drafting else (False,)
     count = (len(modes) * (len(prefill_sizes) + 4 * len(batch_sizes)) + len(batch_sizes)
              + len(config.speculative_shapes) + len(patches))
@@ -429,8 +432,8 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         mapped_host_bytes=0, offloaded_bytes=0, continuation_bytes=pool.backing.nbytes, state_rows=state_rows,
         preparation_state_rows=int(pool.memory_capacity[0].item()),
         preparation_state_bytes=int(pool.memory_capacity[0].item()) * layout.row_bytes,
-        pages=pages, page_bytes=page_bytes(weights.config), page_tokens=config.page_tokens,
-        kv_bytes=pages * page_bytes(weights.config), operator_scratch_bytes=arena.nbytes, graphs=len(graphs),
+        pages=pages, page_bytes=page_bytes(weights.config, context_ranks), page_tokens=config.page_tokens,
+        kv_bytes=pages * page_bytes(weights.config, context_ranks), operator_scratch_bytes=arena.nbytes, graphs=len(graphs),
         prefill_capacities=prefill_sizes, free_device_bytes=free, total_device_bytes=total,
         headroom_bytes=config.headroom_bytes, tuning=tuning, compiled_decoder=config.compile_decoder)
     if drafting:
