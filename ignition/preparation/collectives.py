@@ -80,6 +80,14 @@ def create_all_gather_runtime(group, device, *, max_rows, columns, ipc=None):
         max_batch_size=max_rows, total_heads=columns // 64, head_dim=64, stream_affine=False, ipc=ipc)
 
 
+def create_vocabulary_argmax_runtime(group, device, *, local_vocab_size, max_rows, ipc=None):
+    """Allocate b12x exchange slabs for exact greedy tokens over vocabulary shards (TP8, TP12 or TP16)."""
+    from b12x.comm.pcie.pcie_vocab_argmax import PCIeVocabParallelArgmax
+
+    return PCIeVocabParallelArgmax.from_exchange_group(exchange_group=group, device=device,
+        local_vocab_size=local_vocab_size, max_batch_size=max_rows, ipc=ipc)
+
+
 def create_dma_all_reduce_runtime(group, device, *, max_tokens, hidden_size, ipc=None, element_bytes=2):
     """Allocate a b12x copy-engine ring for prefill reductions in caller-owned shared storage."""
     from b12x.comm.pcie import DmaAllReduce
@@ -91,15 +99,20 @@ def create_dma_all_reduce_runtime(group, device, *, max_tokens, hidden_size, ipc
     return DmaAllReduce(exchange_group=group, device=device, max_bytes=max_tokens * hidden_size * element_bytes, ipc=ipc)
 
 
-def create_head_exchange(group, device, *, max_rows, heads, head_dim, ipc=None):
-    """Allocate b12x staging for all-gathering head shards and LSE-combining partial attention."""
+def create_head_exchange(group, device, *, max_rows, heads, head_dim, query_head_dim=None, ipc=None):
+    """Allocate b12x staging for all-gathering head shards and LSE-combining partial attention.
+
+    Queries may be wider than the combined values: latent attention gathers absorbed queries of
+    `query_head_dim` and combines `head_dim` outputs.
+    """
     from b12x.comm.pcie import DcpAllToAll
 
     world_size = dist.get_world_size(group)
-    if world_size < 2 or max_rows <= 0 or heads % world_size or head_dim % 8:
+    query_head_dim = head_dim if query_head_dim is None else query_head_dim
+    if world_size < 2 or max_rows <= 0 or heads % world_size or head_dim % 8 or query_head_dim % 8:
         raise ValueError("head exchanges require multiple equal head shards and positive capacity")
-    return DcpAllToAll.from_exchange_group(exchange_group=group, device=device,
-        max_batch_size=max_rows, total_heads=heads, head_dim=head_dim, stream_affine=False, ipc=ipc)
+    return DcpAllToAll.from_exchange_group(exchange_group=group, device=device, max_batch_size=max_rows,
+        total_heads=heads, head_dim=head_dim, query_head_dim=query_head_dim, stream_affine=False, ipc=ipc)
 
 
 def _winners(contributions):

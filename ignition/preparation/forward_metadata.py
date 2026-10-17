@@ -83,6 +83,7 @@ class _ForwardPickler(pickle.Pickler):
         from torch._dynamo.aot_compile_types import _deserialize_triton_kernel, _serialize_triton_kernel
         from .device_binding import restore_device, restore_prepared_device
         from .package_storage import PackageStorage
+        from .peer_storage import PeerStorage
 
         if isinstance(value, PreparationSession):
             return _Unavailable, ("b12x preparation session",)
@@ -122,8 +123,9 @@ class _ForwardPickler(pickle.Pickler):
                               ctypes._CFuncPtr, ctypes.Structure, ctypes.Array, ctypes._SimpleCData,
                               CompiledKernel, JitCompiledFunction, CompiledCuTeProgram, local,
                               DeferredCuTeKernel, DeferredTritonKernel, PreparationSession, PackageStorage,
-                              *_LOCK_TYPES)):
-            # Preparation sessions and allocators retain process-local contexts, not forward metadata.
+                              PeerStorage, *_LOCK_TYPES)):
+            # Preparation sessions, allocators and peer storage retain process-local contexts, not forward
+            # metadata; collective runtimes keep peer storage for teardown.
             return _Unavailable, (f'{type(value).__module__}.{type(value).__qualname__}',)
         if not isinstance(value, type) and (hasattr(type(value), '__del__')
                 or type(value).__module__.startswith('cutlass._mlir.')):

@@ -47,7 +47,10 @@ class PreparedParallelDraftRound:
     """Prepare verification and optionally its draft generator.
 
     A verification-only round receives retained drafts from PreparedDraftVerification;
-    it allocates no draft decoder, Markov projection, or proposal samplers.
+    it allocates no draft decoder, Markov projection, or proposal samplers. An owner
+    whose ``draft_argmax`` names a vocabulary-parallel argmax runtime proposes greedy
+    drafts from the draft head's and Markov bias's vocabulary shards without gathering
+    them; each proposal distribution is then one-hot, so verification stays exact.
     """
 
     @staticmethod
@@ -142,6 +145,15 @@ class PreparedParallelDraftRound:
         self.active = torch.zeros(b, dtype=torch.bool, device=device)
         self.candidates = torch.zeros((b, w), dtype=torch.int64, device=device)
         self.drafts = torch.zeros((b, w - 1), dtype=torch.int64, device=device)
+        self.argmax = None
+        if self.draft is not None and getattr(o, "draft_argmax", None) is not None:
+            from .collectives import PreparedVocabularyArgmax
+
+            self.greedy_tokens = torch.zeros(b, dtype=torch.int64, device=device)
+            self.local_logits = self.draft.local_logits.view(b, block, -1)
+            self.argmax = PreparedVocabularyArgmax(self.local_logits[:, o.logit_offset], self.markov.local_bias,
+                self.greedy_tokens, runtime=o.draft_argmax, session=o.session,
+                coordinator=o.collectives["coordinator"], name=name + ".draft_argmax")
         from ignition.preparation.scratch import bind_scratch
 
         layout = self.storage_layout(b, w, o.requests.vocab_size)
@@ -177,7 +189,7 @@ class PreparedParallelDraftRound:
                 sampled=self.sampled,
                 workspace=self.sampling_scratch.get("proposal"),
             )
-            for i in range(w - 1 if self.generate_proposals else 0)
+            for i in range(w - 1 if self.generate_proposals and self.argmax is None else 0)
         )
         if target is not None:
             target.prepare()
@@ -250,6 +262,16 @@ class PreparedParallelDraftRound:
             )
             self.draft()
             self.markov_token.copy_(torch.where(self.active, self.candidates[:, 0], 0))
+            if self.argmax is not None:
+                # Greedy drafts: each position's shard logits plus its Markov bias, from the previous draft.
+                for i in range(w - 1):
+                    self.markov()
+                    self.argmax(self.local_logits[:, i + o.logit_offset], self.markov.local_bias, self.greedy_tokens)
+                    self.drafts[:, i].copy_(self.greedy_tokens)
+                    self.valid[:, i].copy_(self.active & (i < limits - 1))
+                    self.markov_token.copy_(self.greedy_tokens)
+                self.probabilities.zero_()
+                self.probabilities.scatter_(2, self.drafts[:, :, None], 1.0)
             for i, proposal in enumerate(proposals):
                 self.logits[:, 0].copy_(
                     self.draft.scratch.logits.view(b, block, -1)[:, i + o.logit_offset].float()
