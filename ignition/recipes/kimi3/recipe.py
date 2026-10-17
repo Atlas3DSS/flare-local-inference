@@ -33,7 +33,8 @@ def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress, retain_
         snapshot_budget_bytes=plan.snapshots * plan.costs.state_row_bytes,
         headroom_bytes=plan.headroom_bytes + plan.reserve_bytes, compile_decoder=compile_forwards,
         retain_graphs=retain_graphs, kernel_cache=kernel_cache, online_mxfp8=plan.online_mxfp8,
-        stream_overlap=plan.stream_overlap, context_parallel=plan.context_parallel, **drafting)
+        stream_overlap=plan.stream_overlap, context_parallel=plan.context_parallel,
+        vision=not plan.language_model_only, **drafting)
     if plan.world_size == 1:
         return prepare_rank(snapshot, config, rank=0, group=None, progress=progress, package_storage=package_storage)
     return prepare_group(snapshot, config, prepare_rank, progress=progress, package_storage=package_storage,
@@ -72,6 +73,8 @@ RECIPE = Recipe(
     online_mxfp8=True,
     # Decode and verification run each MoE layer's shared experts beside its routing and routed experts.
     stream_overlap=True,
+    # Text-only plans, as vLLM serves Kimi K3 with --language-model-only, leave the MoonViT encoder unloaded.
+    language_model_only=True,
     # E4M3 latent pages, as vLLM serves Kimi K3 (--kv-cache-dtype fp8). DFlash2 attends its own E4M3 pages over
     # whole context, so each rank keeps its context whole; without a draft, decode context parallelism spreads
     # each page's positions over the sixteen ranks.

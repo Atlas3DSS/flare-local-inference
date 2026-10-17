@@ -53,7 +53,7 @@ def _server_options(configuration, model, plan) -> dict:
         "reserve_bytes": plan.reserve_bytes,
         "api_key": configuration.get("server.api_key").value,
         "queue_capacity": 4 * plan.concurrency, "frontend_workers": plan.concurrency,
-        "max_body_bytes": recipe.max_images * recipe.image_bytes + recipe.context * _BODY_BYTES_PER_TOKEN,
+        "max_body_bytes": plan.max_images * recipe.image_bytes + recipe.context * _BODY_BYTES_PER_TOKEN,
         "context_hint": "context is limited by the checkpoint and available cache capacity",
         "capacity_hint": "--max-concurrency sets the request limit; a lower [memory] reserve leaves more KV pages",
     }
@@ -100,7 +100,7 @@ def run(args) -> int:
                   context_parallel=context_parallel(args, model), stream_overlap=stream_overlap(args, model),
                   roce_ring=args.roce_ring,
                   mixed_prefill=args.mixed_prefill, expert_scale_compression=args.expert_scale_compression,
-                  online_mxfp8=args.online_mxfp8)
+                  online_mxfp8=args.online_mxfp8, language_model_only=args.language_model_only)
     runtime = binary()
     host = configuration.get("server.host", args.host).value
     port = configuration.get("server.port", args.port).value
@@ -197,7 +197,7 @@ def _export_hosts(args, *, export_path) -> int:
                          context_parallel=context_parallel(args, model), stream_overlap=stream_overlap(args, model),
                          roce_ring=args.roce_ring,
                          mixed_prefill=args.mixed_prefill, expert_scale_compression=args.expert_scale_compression,
-                         online_mxfp8=args.online_mxfp8)
+                         online_mxfp8=args.online_mxfp8, language_model_only=args.language_model_only)
     plan = replace(plan, compile_workers=compiler_workers(configuration, args.compile_workers), hub_cache=hub_cache)
     environment.apply(configuration, local)
     options = _server_options(configuration, model, plan)
@@ -263,7 +263,7 @@ def _prepare(args, *, export_path) -> int:
                       context_parallel=context_parallel(args, model), stream_overlap=stream_overlap(args, model),
                       roce_ring=args.roce_ring,
                       mixed_prefill=args.mixed_prefill, expert_scale_compression=args.expert_scale_compression,
-                      online_mxfp8=args.online_mxfp8)
+                      online_mxfp8=args.online_mxfp8, language_model_only=args.language_model_only)
         indices = planning.format_gpus(gpu.index for gpu in plan.gpus)
         # A caller's restriction changes which GPU each index names.
         restricted = "" if host.restriction is None else f" of CUDA_VISIBLE_DEVICES={host.restriction}"
@@ -277,6 +277,7 @@ def _prepare(args, *, export_path) -> int:
                      f" · mixed prefill {'on' if plan.mixed_prefill else 'off'}"
                      f" · expert scales {plan.expert_scale_compression or 'native'}"
                      f"{' · online MXFP8' if plan.online_mxfp8 else ''}"
+                     f"{' · language model only' if plan.language_model_only else ''}"
                      f" · compile workers {plan.compile_workers or 'auto'} per host{tuning}")
     if args.config is None and not configuration.exists:
         configuration.write_initial(model.checkpoint.alias, concurrency.value)
@@ -410,7 +411,8 @@ def serve(args) -> int:
                          context_parallel=context_parallel(args, model), stream_overlap=stream_overlap(args, model),
                          roce_ring=args.roce_ring,
                          cache_states=args.prefix_cache_states, mixed_prefill=args.mixed_prefill,
-                         expert_scale_compression=args.expert_scale_compression, online_mxfp8=args.online_mxfp8)
+                         expert_scale_compression=args.expert_scale_compression, online_mxfp8=args.online_mxfp8,
+                         language_model_only=args.language_model_only)
     plan = replace(plan, compile_workers=compiler_workers(configuration, args.compile_workers), hub_cache=hub_cache)
     if rendezvous is None:
         plan = tuning_devices(plan, host, args.tuning_gpus)

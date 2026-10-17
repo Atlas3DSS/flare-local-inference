@@ -134,6 +134,8 @@ class Recipe:
     auxiliary stream, which a plan can serialize onto the main stream.
     `online_mxfp8` states that the recipe names BF16 projections a plan may store as
     MXFP8 while loading, trading checkpoint precision for decode bandwidth.
+    `language_model_only` states that a plan may prepare the recipe without its vision
+    encoder, rejecting images and leaving the encoder's memory to KV pages.
     """
 
     name: str
@@ -158,6 +160,7 @@ class Recipe:
     stream_overlap: bool = False
     mixed_prefill: bool = False
     online_mxfp8: bool = False
+    language_model_only: bool = False
 
     def mixed_shapes(self, concurrency, chunk, speculation):
         from ignition.components.capacity import mixed_shapes

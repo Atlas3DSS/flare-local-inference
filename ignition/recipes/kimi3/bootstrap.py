@@ -72,6 +72,8 @@ class PreparationConfig:
     stream_overlap: bool = True
     # Ranks share each page's context (decode context parallel over every rank, KV interleave 1).
     context_parallel: bool = True
+    # The MoonViT encoder and its graphs prepare beside the text model unless the plan serves text only.
+    vision: bool = True
 
     def __post_init__(self):
         from ignition.components.capacity import image_capacity
@@ -134,7 +136,8 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
     with package_storage.transient():
         peers = None if group is None or package_storage.peer_storage is None else (group, package_storage.peer_storage)
         weights = ModelWeights.load(manifest, device, shard=shard, progress=progress, online_mxfp8=config.online_mxfp8,
-                                    draft_checkpoint=config.draft_checkpoint, dspark=config.dspark, peers=peers)
+                                    draft_checkpoint=config.draft_checkpoint, dspark=config.dspark, peers=peers,
+                                    vision=config.vision)
         del manifest
         release_unused()
     transient = contextlib.ExitStack()
@@ -226,15 +229,16 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                 draft = weights.config.draft
                 layers = draft.auxiliary_layers if config.dspark else draft.target_layers
                 text_shapes += ((text_shape[0], len(layers) * text_shape[1]),)
+            patches = PATCH_CAPACITIES if config.vision else ()
             cursor = graph_buffers.cursor()
-            shared_scratch = cursor.zeros((max(PATCH_CAPACITIES[-1] * 3 * weights.config.vision["qkv_hidden_size"],
+            shared_scratch = cursor.zeros((max(max(patches, default=0) * 3 * weights.config.vision["qkv_hidden_size"],
                 sum(rows * columns for rows, columns in text_shapes)),), torch.bfloat16)
             activation, total, kda_output, mla_output, moe_output, *auxiliary = scratch_views(shared_scratch, text_shapes)
             prefill_storage = Scratch.allocate(config.prefill_chunk_size, 1, weights.config, shard.world_size, device,
                                                activations=activation[:config.prefill_chunk_size], buffers=cursor)
             decode_storage = Scratch.allocate(config.decode_tokens, config.decode_tokens, weights.config, shard.world_size,
                                               device, buffers=cursor)
-            vision_inputs = VisionInputs.allocate(device)
+            vision_inputs = VisionInputs.allocate(device) if patches else None
             vision_storage = {}
             if context is not None:
                 from .dcp import CONTEXT_WINDOW, RECORD_BYTES
@@ -244,10 +248,13 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                 window = min(CONTEXT_WINDOW, config.context)
                 context = replace(context, window=window, slab=torch.zeros(
                     (window + config.prefill_chunk_size, RECORD_BYTES), dtype=torch.float8_e4m3fn, device=device))
-        vision_prefill = PrefillVisionInputs.allocate(config.prefill_chunk_size, device)
-        vision_state = VisionState(inputs, vision_prefill, requests, image_slots=config.image_concurrency, image_token=163605,
-                                   features=FEATURES, hidden=HIDDEN // shard.world_size)
-        buffers = dict(inputs.buffers(), **vision_inputs.buffers(), **vision_prefill.buffers(), **commands.buffers(),
+        vision_prefill = vision_state = None
+        if patches:
+            vision_prefill = PrefillVisionInputs.allocate(config.prefill_chunk_size, device)
+            vision_state = VisionState(inputs, vision_prefill, requests, image_slots=config.image_concurrency,
+                                       image_token=163605, features=FEATURES, hidden=HIDDEN // shard.world_size)
+        vision_buffers = {} if not patches else {**vision_inputs.buffers(), **vision_prefill.buffers()}
+        buffers = dict(inputs.buffers(), **vision_buffers, **commands.buffers(),
             **{name: getattr(admission, name) for name in admission.__dataclass_fields__},
             state_pool=pool.backing, memory_capacity=pool.memory_capacity,
             request_pending_token=requests.pending_token,
@@ -282,7 +289,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
             collectives=collectives, decoder_buffers=decoder_buffers, context_buffers=context_buffers)
     modes = (True, False) if drafting else (False,)
     count = (len(modes) * (len(prefill_sizes) + 4 * len(batch_sizes)) + len(batch_sizes)
-             + len(config.speculative_shapes) + len(PATCH_CAPACITIES))
+             + len(config.speculative_shapes) + len(patches))
     with phase(progress, "Construct graph catalog", total=count) as stage:
         def add(name, forward, kind, rows, tokens, fields, *, enabled=None):
             forwards[name] = forward
@@ -303,7 +310,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                     decoder = PreparedDecoder(mode_weights, scratch, m, pool, mode=mode,
                         session=session, name=name, workspace=arena, buffers=decoder_buffers, **collectives)
                     batch = PreparedBatch(inputs, requests, m, mode=mode, shard=weights.shard, pool=pool,
-                        validate_prefill=vision_state.validate_prefill if mode == "prefill" else None,
+                        validate_prefill=vision_state.validate_prefill if mode == "prefill" and patches else None,
                         page_tokens=config.page_tokens)
                     # DSpark's plain graphs keep no draft context; DFlash2's keep it current for later rounds.
                     forward = PreparedGeneration(decoder, batch, records, frame, sequence, runtime=collective,
@@ -311,7 +318,8 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                         context_factory=(None if speculation is None or config.dspark and not enabled
                                          else speculation.forwards.context))
                     add(name, forward, mode, rows, capacity if mode == "prefill" else 1,
-                        (*forward_inputs, *(vision_prefill.buffers() if mode == "prefill" else ())), enabled=enabled)
+                        (*forward_inputs, *(vision_prefill.buffers() if mode == "prefill" and patches else ())),
+                        enabled=enabled)
         if speculation is not None:
             from ignition.components.parallel_draft import PreparedParallelDraftRound
 
@@ -323,7 +331,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                 forward.prepare()
                 add(name, forward, "speculative", batch, width, (*inputs.buffers(), "sampling_grammar_mask"), enabled=True)
 
-        for capacity in reversed(PATCH_CAPACITIES):
+        for capacity in reversed(patches):
             name = f"vision{capacity}"
             with scratch_pool:
                 cursor = graph_buffers.cursor()
@@ -364,11 +372,12 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
             # In-process serving admits and snapshots into every declared row; native loading backs them itself.
             package_storage.grow("STATE_ROWS", state_rows + 1)
             pool.memory_capacity[0] = state_rows + 1
-        vision_inputs.vision_slot.fill_(-1)
+        if vision_inputs is not None:
+            vision_inputs.vision_slot.fill_(-1)
         pool.clear_for_preparation()
 
     # Large vision allocations must precede smaller text allocations in the shared graph pool.
-    vision_names = tuple(f"vision{capacity}" for capacity in reversed(PATCH_CAPACITIES))
+    vision_names = tuple(f"vision{capacity}" for capacity in reversed(patches))
     capture_order = (*vision_names, *(name for name in forwards if name not in vision_names))
     capture_catalog = {name: forwards[name] for name in capture_order}
     try:
@@ -394,7 +403,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
               for role, file in (("tokenizer", "tokenizer.json"), ("chat_template", "chat_template.jinja"))}
     eos = weights.config.text["eos_token_id"]
     eos_ids = list(dict.fromkeys([*(eos if isinstance(eos, list) else [eos]), 163586]))
-    frontend = prepare_frontend(snapshot, eos_token_ids=eos_ids, image_profile="moonvit")
+    frontend = prepare_frontend(snapshot, eos_token_ids=eos_ids, image_profile="moonvit" if patches else None)
     frontend["template_encoding"] = 1
     server_config = dict(identity=identity, model_id=snapshot.name, max_sequence_tokens=config.context,
         prefill_chunk_size=config.prefill_chunk_size, pages=pages, state_rows=state_rows, snapshots=snapshots,
@@ -402,7 +411,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         sampling_defaults=RECIPE.sampling_defaults.as_dict(), assets=assets,
         model_contract=prepare_contract(signatures, buffers, pool, image_slots=config.image_concurrency,
                                         vocabulary=vocabulary, page_tokens=config.page_tokens,
-                                        draft_lag=0 if drafting else None))
+                                        draft_lag=0 if drafting else None, vision=bool(patches)))
     free, total = torch.cuda.mem_get_info(device)
     memory = dict(rank=rank, world_size=shard.world_size, device=config.devices[rank], weights_bytes=weights.allocated_bytes,
         mapped_host_bytes=0, offloaded_bytes=0, continuation_bytes=pool.backing.nbytes, state_rows=state_rows,
@@ -422,10 +431,11 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         speculation.kda_records.corrections, speculation.kda_records.keys_and_gates]
     return PreparedModel(device=config.devices[rank], graphs=graphs, buffers=buffers, signatures=signatures,
         max_active=config.max_active, session=session, server_config=server_config, memory_report=memory,
-        export_zero_ranges=storage_ranges([prefill_storage, decode_storage, vision_storage, graph_buffers.chunks,
+        export_zero_ranges=storage_ranges([prefill_storage, decode_storage, graph_buffers.chunks,
             None if speculation is None else speculation.sampling_buffers.chunks, arena.tensor, metadata,
                                            *(() if context is None else (context.slab,)),
-                                           decoder_buffers.scratch_tensors(), vision_state.arena, *draft_disposable]),
+                                           *(() if not patches else (vision_storage, vision_state.arena)),
+                                           decoder_buffers.scratch_tensors(), *draft_disposable]),
         resources=(weights, pool, requests, inputs, admission, commands, arena, forwards, prefill_storage, context,
                    decode_storage, metadata, compiled, stream, graph_pool, session, coordinator, collective,
                    vocabulary_collective, embedding_collective, router_collective, route_collective, frontend_assets,

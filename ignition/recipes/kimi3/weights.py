@@ -32,10 +32,11 @@ class ModelWeights:
 
     @classmethod
     def load(cls, manifest, device, *, shard, progress=None, draft_checkpoint=None, online_mxfp8=False, dspark=False,
-             peers=None):
+             peers=None, vision=True):
         """``peers``, a host's Gloo group and peer storage, reads column-sharded projections once per host.
 
         ``dspark`` loads the checkpoint's Red Hat DSpark draft; ``draft_checkpoint`` loads DFlash2 instead.
+        Without ``vision``, the vision encoder stays on disk.
         """
         before = torch.cuda.memory_allocated(device)
         with KimiWeightLoader(manifest, device, shard=shard, progress=progress, online_mxfp8=online_mxfp8,
@@ -47,8 +48,11 @@ class ModelWeights:
             head = loader.load_tensor("language_model.lm_head.weight",
                 extent=slice(*shard.partition(config.vocabulary, alignment=64)))
             layers = tuple(loader.load_layer(i) for i in range(len(config.layers)))
-        from .vision import VisionWeights
-        vision = VisionWeights.load(manifest, device, progress=progress)
+        if vision:
+            from .vision import VisionWeights
+            vision = VisionWeights.load(manifest, device, progress=progress)
+        else:
+            vision = None
         draft = None
         if dspark:
             if config.draft is None:
