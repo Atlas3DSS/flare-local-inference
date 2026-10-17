@@ -44,6 +44,20 @@ def quantize_bf16_linear_as_mxfp8(weight):
     return MXFP8LinearWeight(quantize_mxfp8_rows_torch(source), columns, padded, rows)
 
 
+def _read_mode():
+    """Checkpoint transport for a rank process that allocates only on its own GPU.
+
+    Without the nvidia-fs driver, cuFile only emulates direct reads through host
+    memory, yet still retains a context and bounce buffers on every visible GPU,
+    about 0.5 GiB each. With many ranks per host those claims can exhaust a GPU
+    before its weights fit. The bounce reader performs the same reads on its own
+    device only.
+    """
+    import os
+
+    return "auto" if os.path.exists("/proc/driver/nvidia-fs") else "bounce"
+
+
 def _release_unused_contexts(device):
     """Destroy primary contexts that checkpoint reads opened on other visible GPUs.
 
@@ -213,7 +227,8 @@ class DirectWeightLoader:
             # Scalar calibration checks do not amortize intra-op thread dispatch.
             stack.callback(torch.set_num_threads, torch.get_num_threads())
             torch.set_num_threads(1)
-            self._session = stack.enter_context(DirectWeightSession(device=self.device.index))
+            self._session = stack.enter_context(DirectWeightSession(device=self.device.index,
+                                                                    read_mode=_read_mode()))
             selected = self._selected_names()
             shards = {self.manifest.tensors[name].shard for name in selected}
             if self._display is not None:
