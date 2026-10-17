@@ -222,7 +222,7 @@ Switched-fabric results do not establish physical-ring performance.
 
 ## Protocol model and runtime checks
 
-The [RoCEnante protocol models in FlashInfer](https://github.com/local-inference-lab/flashinfer/tree/73714d176fcc7d373320effb1766f1919483620c/tests/experimental/b12x/comm/formal)
+The [RoCEnante protocol models in FlashInfer](https://github.com/local-inference-lab/flashinfer/tree/f4ca6f08b7f697da521c212b5b02187a4d82e352/tests/experimental/b12x/comm/formal)
 cover GPU staging, proxy posting, NIC payload reads, completion observation,
 and relay acknowledgments as separate transitions. FlashInfer owns these models
 because its GPU kernels and C proxy define the protocol. Flare uses the same C
@@ -255,6 +255,11 @@ checks use finite configurations and explicit progress assumptions described
 with each model. They do not establish CPU/GPU/NIC cache coherence, unbounded
 sequence-number behavior, fault recovery, or full-model serving correctness.
 The RDMA validator and GPU replay tests exercise the implementation on hardware.
+The four-origin, two-rail source-ownership check enumerates all protocol prefixes
+through six transitions, including polls, with a finite TLC wrapper. Its 5,077
+states satisfy source ownership. Exhaustive smaller configurations separately
+check finite queue accounting, deadlock freedom, and fair completion. The
+bounded wrapper does not establish larger-world progress.
 
 The shared proxy accepts collective generations 1 through 2,147,483,647.
 An exhausted sequence fails before another transfer is posted and reports
