@@ -225,10 +225,14 @@ Switched-fabric results do not establish physical-ring performance.
 The [RoCEnante protocol models in FlashInfer](https://github.com/local-inference-lab/flashinfer/tree/f4ca6f08b7f697da521c212b5b02187a4d82e352/tests/experimental/b12x/comm/formal)
 cover GPU staging, proxy posting, NIC payload reads, completion observation,
 and relay acknowledgments as separate transitions. FlashInfer owns these models
-because its GPU kernels and C proxy define the protocol. Flare uses the same C
-proxy, vendored in `helios/native/roce_proxy.c`, and pins the preparation
-dependency in `pyproject.toml` and `uv.lock`. Keep the vendored source identical
-to that dependency after its provenance header when changing the protocol.
+because its GPU kernels and C proxy define the protocol. Flare vendors that
+revision's sequence-limited serving proxy in `helios/native/roce_proxy.c`.
+The preparation dependency in `pyproject.toml` and `uv.lock` currently pins
+FlashInfer main at `969eaf9f3`, which includes the W4A16 lookup fix but lacks
+the separate RoCE sequence-limit guard and protocol verification additions.
+Proxy ABI 9 and the GPU collective kernels are unchanged. Restore source parity
+after upstream main includes both changes; keep the vendored source identical
+to the dependency after its provenance header when changing the protocol.
 
 Flare enforces three boundaries around the protocol:
 
@@ -261,13 +265,14 @@ states satisfy source ownership. Exhaustive smaller configurations separately
 check finite queue accounting, deadlock freedom, and fair completion. The
 bounded wrapper does not establish larger-world progress.
 
-The shared proxy accepts collective generations 1 through 2,147,483,647.
+The serving proxy accepts collective generations 1 through 2,147,483,647.
 An exhausted sequence fails before another transfer is posted and reports
 `RoCE sequence space exhausted`; restart every rank to create fresh transports.
 The limit keeps zero-initialized chunk-ready words distinct from staged data
 and reserves zero as the healthy error sentinel. It applies to mesh and ring
 routing, independently of the number of model steps or requests. Sequence wrap
 is unsupported; restarting the proxy thread alone does not reset the runtime.
+The currently pinned preparation proxy does not enforce this limit.
 
 ## Failures
 
