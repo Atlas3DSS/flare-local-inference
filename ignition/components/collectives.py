@@ -125,6 +125,34 @@ class PreparedAllReduce:
         return self.output
 
 
+class PreparedChunkedAllReduce:
+    """A row-major reduction larger than its PCIe runtime's capacity, reduced in row chunks the runtime accepts.
+
+    Each chunk is a PreparedAllReduce over contiguous row views of the source and output, so a channel sized
+    for decode can also reduce prefill activations; the chunks run in order on one stream.
+    """
+
+    def __init__(self, source, output, *, runtime, session, coordinator, name):
+        rows = source.shape[0]
+        step = rows
+        if runtime is not None and not _roce(runtime):
+            # One-shot pools answer through their stream channel; hierarchical runtimes directly.
+            accepts = (runtime.for_stream().should_allreduce if runtime.algorithm == "oneshot"
+                       else runtime.should_allreduce)
+            while step > 1 and not accepts(source[:step]):
+                step = (step + 1) // 2
+        self.bounds = [(start, min(start + step, rows)) for start in range(0, rows, step)]
+        self.parts = [PreparedAllReduce(source[begin:end], output[begin:end], runtime=runtime, session=session,
+                                        coordinator=coordinator, name=name if len(self.bounds) == 1 else f"{name}.{index}")
+                      for index, (begin, end) in enumerate(self.bounds)]
+        self.output = output
+
+    def __call__(self, source):
+        for (begin, end), part in zip(self.bounds, self.parts, strict=True):
+            part(source[begin:end])
+        return self.output
+
+
 @torch.library.custom_op("flare::pcie_all_reduce_rmsnorm", mutates_args=("residual", "output"))
 def _all_reduce_rmsnorm(source: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor,
                        output: torch.Tensor, handle: int) -> None:

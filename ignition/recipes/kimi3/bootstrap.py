@@ -45,6 +45,10 @@ from .vision_state import PreparedVisionGeneration
 from ignition.components.vision_state import PrefillVisionInputs, VisionState
 
 
+# Most rows of one all-reduce; larger prefill reductions run in chunks of this many rows.
+REDUCE_ROWS = 1024
+
+
 @dataclass(frozen=True)
 class PreparationConfig:
     image_concurrency: int | None = None
@@ -167,7 +171,10 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         sequence = torch.zeros(1, dtype=torch.int64, device=device)
         records = torch.zeros((2, slots, 24 if drafting else 8), dtype=torch.int64, device=device)
         coordinator = CollectivePreparation(group)
-        collective = create_all_reduce_runtime(group, device, max_tokens=max_tokens,
+        # Prefill activations reduce in chunks of the rows decode and verification already need a channel for: a
+        # channel sized for whole prefill chunks would stage 448 MiB per rank for 4096 rows.
+        collective = create_all_reduce_runtime(group, device,
+            max_tokens=max(min(max_tokens, REDUCE_ROWS), config.decode_tokens, draft_rows),
             hidden_size=weights.config.hidden, ipc=package_storage.peer_storage)
         vocabulary_collective = create_all_gather_runtime(group, device,
             max_rows=max(config.decode_tokens, draft_rows, slots * (config.draft_tokens or 1)),

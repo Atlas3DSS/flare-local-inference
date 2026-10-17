@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import torch
 import triton
 
-from ignition.components.collectives import PreparedAllGather, PreparedAllReduce
+from ignition.components.collectives import PreparedAllGather, PreparedChunkedAllReduce
 from ignition.components.embedding import PreparedShardedEmbedding
 from ignition.components.linear import UnquantizedProjection
 from ignition.components.moe import PreparedRouter, PreparedRoutedExperts, RouterScratch
@@ -148,8 +148,8 @@ class PreparedLatentMoE:
                                        session=session, name=name + ".latent_up")
         # Each rank normalizes the full latent row and keeps the columns its up-projection shard reads.
         self.latent_norm, self.eps = weights["latent_norm"], c["rms_norm_eps"]
-        self.expert_reduce = PreparedAllReduce(self.expert_output, self.latent_sum, runtime=runtime,
-                                              coordinator=coordinator, session=session, name=name + ".expert_reduce")
+        self.expert_reduce = PreparedChunkedAllReduce(self.expert_output, self.latent_sum, runtime=runtime,
+                                                     coordinator=coordinator, session=session, name=name + ".expert_reduce")
         local_logits = buffer("local_router", weights["router"].shape[0], torch.float32)
         self.router_projection = UnquantizedProjection(source, weights["router"], local_logits, session=session, name=name + ".router")
         if "routes" not in buffers:
@@ -166,8 +166,8 @@ class PreparedLatentMoE:
         else:
             self.down = UnquantizedProjection(self.source, weights["latent_down"], buffer("down", latent),
                                              session=session, name=name + ".latent_down")
-            self.down_reduce = PreparedAllReduce(self.down.output, self.latent, runtime=runtime, coordinator=coordinator,
-                                                session=session, name=name + ".down_reduce")
+            self.down_reduce = PreparedChunkedAllReduce(self.down.output, self.latent, runtime=runtime,
+                                                       coordinator=coordinator, session=session, name=name + ".down_reduce")
             logits = buffer("router", c["num_experts"], torch.float32)
             self.router_logits = logits
             local_experts = local_logits.shape[1]
@@ -267,8 +267,8 @@ class PreparedDecoder:
             if "total" not in self.buffers:
                 self.buffers["total"] = torch.zeros_like(source)
             total = self.buffers["total"][:source.shape[0]]
-            reduce = PreparedAllReduce(source, total, runtime=runtime, coordinator=coordinator,
-                                       session=session, name=prefix + ".reduce")
+            reduce = PreparedChunkedAllReduce(source, total, runtime=runtime, coordinator=coordinator,
+                                              session=session, name=prefix + ".reduce")
             self.layers.append((w, attention, mlp, reduce))
         # The running block sum and committed blocks persist through one forward; every forward
         # rewrites them from its embeddings before reading them.
