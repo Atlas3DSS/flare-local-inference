@@ -140,8 +140,10 @@ class PreparedLatentMoE:
         self.source = buffer("source", hidden // shard.world_size)
         self.hidden_columns, self.latent_begin = storage.hidden_columns, storage.latent_begin
         self.latent = buffer("latent", latent)
-        self.expert_output = buffer("expert_output", latent)
-        self.latent_sum = buffer("latent_sum", latent)
+        # The routed experts write where prefill reduces the latent down-projection from, and their sum
+        # replaces the latent rows they consumed.
+        self.expert_output = buffer("down", latent)
+        self.latent_sum = self.latent
         self.up_input = buffer("up_input", latent // shard.world_size)
         self.output = buffer("output", hidden)
         self.up = UnquantizedProjection(self.up_input, weights["latent_up"], self.output,
@@ -258,9 +260,16 @@ class PreparedDecoder:
                                          latent_runtimes[-1] if latent_runtimes else None),
                             **kwargs))
             if "mlp" in w:
-                mlp = PreparedMLP(w["mlp"], source, session=session, name=prefix + ".mlp",
-                                  buffers=self.buffers.setdefault("dense", {}))
+                # The dense MLP writes the MoE layers' output, which its reduction consumes before the next mixture.
+                dense = self.buffers.setdefault("dense", {})
+                if "output" in self.buffers.get("moe", {}):
+                    dense.setdefault("output", self.buffers["moe"]["output"])
+                mlp = PreparedMLP(w["mlp"], source, session=session, name=prefix + ".mlp", buffers=dense)
             else:
+                # Shared experts write the sum buffer, which the preceding mixture consumed and the MoE
+                # reduction overwrites only after their output is added.
+                if "total" in self.buffers:
+                    self.buffers.setdefault("moe", {}).setdefault("shared", {}).setdefault("output", self.buffers["total"])
                 mlp = PreparedLatentMoE(w, source, config, weights.shard, runtime=runtime,
                     router_runtime=router_runtime, route_runtime=route_runtime if mode != "prefill" else None,
                     coordinator=coordinator, session=session, name=prefix + ".moe", workspace=workspace,
@@ -277,10 +286,13 @@ class PreparedDecoder:
         tokens, hidden = source.shape
         if "residual" not in self.buffers:
             committed = -(-len(weights.layers) // config.text["attn_res_block_size"])
-            self.buffers["residual"] = dict(prefix=torch.zeros_like(source), normalized=torch.zeros_like(source),
+            self.buffers["residual"] = dict(prefix=torch.zeros_like(source),
                 blocks=torch.zeros((tokens, committed, hidden), dtype=source.dtype, device=source.device))
         r = self.buffers["residual"]
-        self.residual = ResidualStream(r["prefix"][:tokens], r["blocks"][:tokens], r["normalized"][:tokens])
+        # The normalized mixture entering attention takes the MoE output, which the previous reduction
+        # consumed; the one entering the MLP takes the attention output, which its reduction consumed.
+        self.mlp_input = self.buffers["kda"]["output"][:tokens]
+        self.residual = ResidualStream(r["prefix"][:tokens], r["blocks"][:tokens], self.buffers["moe"]["output"][:tokens])
         self.head = PreparedVocabularyProjection(scratch.hidden, weights.head, scratch.local_logits, scratch.logits,
             runtime=vocabulary_runtime, coordinator=coordinator, session=session, name=name + ".head")
         # DSpark's context: the AttnRes mixture each auxiliary layer receives, before its input norm. Plans
@@ -346,7 +358,8 @@ class PreparedDecoder:
             self.capture(index - 1)
             attended = reduce(attention(hidden))
             hidden = self.residual.mix(attended, REPLACE if boundary else ADD, sources=committed + boundary, write=-1,
-                score=w["mlp_res_score"], norm=w["post_attention_layernorm"], eps=eps, output_eps=eps)
+                score=w["mlp_res_score"], norm=w["post_attention_layernorm"], eps=eps, output_eps=eps,
+                output=self.mlp_input)
             delta, mode = reduce(mlp(hidden)), ADD
         hidden = self.residual.mix(delta, mode, sources=-(-len(self.layers) // size), write=-1,
             score=self.weights.output_res_score, norm=self.weights.norm, eps=eps, output_eps=eps)

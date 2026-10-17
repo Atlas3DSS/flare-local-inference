@@ -79,22 +79,26 @@ class ResidualStream:
             raise ValueError("residual stream tensors must be BF16 with contiguous rows")
         self.prefix, self.blocks, self.output = prefix, blocks, output
 
-    def mix(self, delta, mode, *, sources, write, score, norm, eps, output_eps, mixture=None):
+    def mix(self, delta, mode, *, sources, write, score, norm, eps, output_eps, mixture=None, output=None):
         """Apply ``mode`` with ``delta``, commit block ``write`` (or none for -1), and normalize the mixture
-        of the first ``sources`` committed blocks and the running sum; ``mixture`` also receives it unnormalized."""
+        of the first ``sources`` committed blocks and the running sum into ``output`` (by default the stream's);
+        ``mixture`` also receives it unnormalized."""
         if not 0 <= sources <= self.blocks.shape[1] or not -1 <= write < self.blocks.shape[1] or write >= 0 and write < sources:
             raise ValueError("residual mixing reads only committed blocks and never overwrites one")
         if delta is not None and (delta.shape != self.prefix.shape or delta.stride(-1) != 1):
             raise ValueError("residual delta must match the running sum")
         if mixture is not None and (mixture.shape != self.prefix.shape or mixture.stride(-1) != 1):
             raise ValueError("residual mixture output must match the running sum")
+        output = self.output if output is None else output
+        if output.shape != self.prefix.shape or output.stride(-1) != 1 or output.dtype != torch.bfloat16:
+            raise ValueError("residual output must be BF16 rows matching the running sum")
         rows, hidden = self.prefix.shape
         delta = self.prefix if delta is None else delta
         tile, warps = TILES[min(sources, len(TILES) - 1)]
         torch.library.wrap_triton(_mix)[(rows,)](
-            self.prefix, delta, self.blocks, score, norm, self.output, self.output if mixture is None else mixture,
+            self.prefix, delta, self.blocks, score, norm, output, output if mixture is None else mixture,
             self.prefix.stride(0), delta.stride(0), self.blocks.stride(0), self.blocks.stride(1),
-            self.output.stride(0), (self.output if mixture is None else mixture).stride(0), float(eps),
+            output.stride(0), (output if mixture is None else mixture).stride(0), float(eps),
             float(output_eps), hidden, sources, write, mode, mixture is not None, triton.next_power_of_2(hidden),
             tile, num_warps=warps)
-        return self.output
+        return output
