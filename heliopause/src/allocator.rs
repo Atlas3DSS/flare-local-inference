@@ -44,6 +44,46 @@ struct Arena {
 static ARENA: Mutex<Option<Arena>> = Mutex::new(None);
 static ERROR: Mutex<Option<CString>> = Mutex::new(None);
 
+pub(crate) struct MemoryInventory {
+    pub device: i32,
+    pub free: usize,
+    pub total: usize,
+    pub mappings: Vec<(u64, usize)>,
+}
+
+pub(crate) fn memory_inventory() -> Result<MemoryInventory> {
+    let arena = ARENA.lock().unwrap_or_else(|e| e.into_inner());
+    let a = arena
+        .as_ref()
+        .ok_or_else(|| invalid("native package allocator is uninitialized"))?;
+    let (_, device) = crate::current_context()?;
+    if device != a.device {
+        return Err(invalid(
+            "memory inventory requires the package rank's CUDA context",
+        ));
+    }
+    let (mut free, mut total) = (0, 0);
+    // SAFETY: Preparation retains the current context and both outputs are valid.
+    unsafe {
+        a.driver
+            .check("cuCtxSynchronize", (a.driver.context_sync)())?;
+        a.driver.check(
+            "cuMemGetInfo_v2",
+            (a.driver.memory_info)(&mut free, &mut total),
+        )?;
+    }
+    Ok(MemoryInventory {
+        device,
+        free,
+        total,
+        mappings: a
+            .mappings
+            .iter()
+            .map(|(&address, &size)| (address, size))
+            .collect(),
+    })
+}
+
 fn properties(device: i32, gpudirect: bool) -> AllocationProperties {
     AllocationProperties {
         kind: 1,

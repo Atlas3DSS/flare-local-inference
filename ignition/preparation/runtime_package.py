@@ -424,6 +424,7 @@ class RuntimePackage:
                 serialized_graphs.append(write_graph(description, stage / f"graph-{index}.bin"))
                 del description
             modules = []
+            self.module_globals = []
             for index, (name, image) in enumerate(self.modules.items()):
                 from .module_images import global_symbols, strip_debug, strip_global_source
 
@@ -436,6 +437,7 @@ class RuntimePackage:
                 for symbol in global_symbols(image):
                     address, size = C.c_uint64(), C.c_size_t()
                     cuda.call("cuModuleGetGlobal_v2", C.byref(address), C.byref(size), module, C.c_char_p(symbol.encode()))
+                    self.module_globals.append((address.value, size.value, f"{name}.{symbol}"))
                     data_file = f"module-{index}-global-{len(globals)}.bin"
                     data = strip_global_source(symbol, cuda.download(address.value, size.value))
                     if self.reachability is not None:
@@ -853,4 +855,9 @@ def export_model(prepared, images, storage, path, *, options, progress=None, pub
     server = None if bundle_only else {**prepared.server_config, **options}
     package.write(path, prepared.graphs, execution=execution, server=server, progress=progress,
                   package_data=None if bundle_only else prepared.package_data, publisher=publisher)
+    from .memory_inventory import collect_inventory, print_inventory
+
+    package.memory_inventory = collect_inventory(prepared, storage, package, external=outside)
+    if publisher is not None:
+        print_inventory([package.memory_inventory], console=getattr(progress, "console", None))
     return package

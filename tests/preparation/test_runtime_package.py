@@ -154,7 +154,9 @@ def test_peer_export_keeps_shared_frontend_only_on_rank_zero(tmp_path, monkeypat
     import hashlib
     from types import SimpleNamespace
 
-    from ignition.preparation import runtime_package
+    from ignition.preparation import memory_inventory, runtime_package
+
+    monkeypatch.setattr(memory_inventory, "collect_inventory", lambda *args, **kwargs: {})
     from ignition.preparation.package_file import extend_cluster, read_index
     from ignition.recipes.declaration import SamplingDefaults
 
@@ -229,7 +231,8 @@ def test_external_allocations_share_pages_without_reading_unallocated_bytes():
 @pytest.mark.parametrize("dependency", ["unused", "direct", "indirect"])
 def test_export_rejects_reachable_storage_below_the_address_floor(tmp_path, monkeypatch, dependency):
     from types import SimpleNamespace
-    from ignition.preparation import module_images, runtime_package, tensor_metadata
+    from ignition.preparation import memory_inventory, module_images, runtime_package, tensor_metadata
+    monkeypatch.setattr(memory_inventory, "collect_inventory", lambda *args, **kwargs: {})
     from ignition.preparation.package_file import read_index
 
     low, high, floor = 0x1208400000, 0x40000000000, 0x4000000000

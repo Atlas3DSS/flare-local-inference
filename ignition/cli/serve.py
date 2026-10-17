@@ -324,7 +324,7 @@ def _prepare(args, *, export_path) -> int:
                 try:
                     options.pop("api_key")
                     export_package(prepared, recorder, storage, export_path, options=options, publisher=publisher,
-                                 progress=progress if args.verbose else None)
+                                 progress=progress if args.verbose else None, console=progress.console)
                 except Exception as error:
                     if args.verbose:
                         traceback.print_exc()

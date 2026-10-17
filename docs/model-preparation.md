@@ -369,6 +369,24 @@ override sampling defaults. Preserve assistant reasoning in conversation history
 
 ## Storage and graph capacities
 
+Every model export prints a VRAM inventory for each rank after final publication,
+including exports without `--verbose`. Heliopause measures device usage and package
+allocator mappings; Ignition attributes retained ranges to checkpoint tensors,
+scratch pools, graph temporaries, I/O and persistent state, communication buffers,
+kernel globals, and allocator slack. Owner fields and defining source locations
+identify the largest consumers in each category. Aliased ranges count once;
+shared scratch displays representative tensor owners.
+
+Preparation-only storage is separate from fixed package storage. Cache figures
+count physically backed pages, not their virtual serving capacity. Mapped host
+storage and imported peer mappings are listed outside local VRAM totals. PyTorch
+allocated and reserved bytes overlap the attributed storage. Cubin data sizes are
+not resident code sizes: graph executable overhead, kernel code, other driver
+allocations, and other processes remain in the unattributed device-usage remainder.
+The returned `RuntimePackage.memory_inventory` contains every attributed source
+group; console output shows the largest five per category. Source locations name
+owning classes or closures, not allocation stack traces.
+
 Ignition commands accept `--config PATH`; the default configuration is
 `~/.config/flare/config.toml`. Storage locations are configured with
 `[paths] hub_cache`, `kernel_cache`, and `package_cache`; `[memory] reserve`

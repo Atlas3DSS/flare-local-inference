@@ -576,11 +576,13 @@ class HostRankGroup:
         for control in self.controls:
             send_object(control, ("export", options))
 
+        inventories = []
         def peer_files():
             for rank, control in enumerate(self.controls, 1):
                 reply = receive_object(control)
                 if "exported" not in reply:
                     raise RuntimeError(f"rank {rank} export failed: {reply}")
+                inventories.append(reply["memory_inventory"])
                 stream = _Received(control, reply["exported"])
                 yield stream
                 if stream.remaining:
@@ -588,7 +590,7 @@ class HostRankGroup:
 
         export_cluster_package(self.model, images, storage, path, peer_files=peer_files(), options=options,
                                export_id=export_id, world=self.rendezvous.world, publisher=publisher,
-                               progress=progress)
+                               peer_inventories=inventories, progress=progress)
 
     def start_server(self, *, bind="127.0.0.1:8000", template_defaults=None, options=None):
         if self._started or self._closed:
@@ -731,9 +733,10 @@ def serve_peer(control, executor, rank, world, *, hub_cache, progress=None):
                 path = directory / f"rank-{rank}.safetensors"
                 if progress is not None:
                     progress(f"exporting rank {rank}")
-                export_model(model, recorder, storage, path, options=options, bundle_only=True)
+                package = export_model(model, recorder, storage, path, options=options, bundle_only=True)
                 # Rank zero appends this file to its package as it arrives.
-                send_object(control, {"exported": path.stat().st_size})
+                send_object(control, {"exported": path.stat().st_size,
+                                      "memory_inventory": package.memory_inventory})
                 with path.open("rb") as source:
                     control.sendfile(source)
             finally:
