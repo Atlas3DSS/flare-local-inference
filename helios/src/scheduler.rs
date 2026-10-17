@@ -160,6 +160,7 @@ struct BoundaryCapture {
 }
 
 pub struct LiveRequest {
+    pub image_slot: Option<usize>,
     epoch: u64,
     acceptance: speculation::AcceptanceProfile,
     accounting: RequestAccounting,
@@ -378,6 +379,7 @@ pub struct GeneratedToken {
 }
 
 struct RetiredRequest {
+    image_slot: Option<usize>,
     pages: Vec<PageId>,
     snapshots: [Option<SnapshotId>; 3],
     slot: usize,
@@ -443,6 +445,7 @@ pub struct RequestScheduler {
     cache: PrefixCheckpointCache,
     slots: Vec<Slot>,
     free_pages: BTreeSet<PageId>,
+    free_image_slots: BTreeSet<usize>,
     free_snapshots: BTreeSet<SnapshotId>,
     snapshot_pages: Vec<std::ops::Range<u32>>,
     page_snapshot_refs: Vec<u32>,
@@ -501,6 +504,7 @@ impl RequestScheduler {
         Ok(Self {
             plan_owner: Arc::new(()),
             limits,
+            free_image_slots: (0..capabilities.vision.feature_slots).collect(),
             capabilities,
             identity,
             cache,
@@ -801,6 +805,9 @@ impl RequestScheduler {
         self.slots.iter().any(|slot| {
             slot.request.is_none() && !slot.retiring && slot.generation < i64::MAX as u64
         })
+    }
+    pub fn has_available_image_slot(&self) -> bool {
+        !self.free_image_slots.is_empty()
     }
     pub fn request(&self, handle: RequestHandle) -> Result<&LiveRequest> {
         self.slots
@@ -1201,6 +1208,7 @@ impl RequestScheduler {
         };
         self.slots[slot].generation = generation;
         self.slots[slot].request = Some(LiveRequest {
+            image_slot: None,
             epoch: 0,
             acceptance: speculation::AcceptanceProfile::default(),
             accounting: self.accounting(),
@@ -1439,6 +1447,8 @@ impl RequestScheduler {
         let request = self.request_mut(handle)?;
         if request.last_use != Fence(0)
             || !request.vision_patches.is_empty()
+            || request.image_slot.is_some()
+            || patches.is_empty()
             || patches.len() > maximum_images
             || patches
                 .iter()
@@ -1446,6 +1456,10 @@ impl RequestScheduler {
         {
             return Err("vision images must be assigned once before request initialization".into());
         }
+        let slot = self.free_image_slots.pop_first().ok_or_else(|| crate::Error::admission(
+            crate::AdmissionError::Capacity, "image feature slots are occupied or awaiting GPU retirement"))?;
+        let request = self.request_mut(handle)?;
+        request.image_slot = Some(slot);
         request.vision_patches.extend(patches.iter().copied());
         Ok(())
     }
@@ -1918,6 +1932,9 @@ impl RequestScheduler {
         let mut waiting = Vec::new();
         for retired in std::mem::take(&mut self.retired) {
             if retired.through <= fence {
+                if let Some(slot) = retired.image_slot {
+                    self.free_image_slots.insert(slot);
+                }
                 self.free_pages.extend(retired.pages);
                 for snapshot in retired.snapshots.into_iter().flatten() {
                     self.release_snapshot(snapshot);
@@ -2018,6 +2035,7 @@ impl RequestScheduler {
         self.slots[handle.slot as usize].retiring = true;
         request.private_pages.extend(request.reserved_pages);
         self.retired.push(RetiredRequest {
+            image_slot: request.image_slot,
             pages: request.private_pages,
             snapshots: [snapshot, request.system_snapshot, request.prompt_snapshot],
             slot: handle.slot as usize,

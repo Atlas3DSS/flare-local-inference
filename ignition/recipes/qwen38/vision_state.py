@@ -34,13 +34,18 @@ class VisionFeatureState:
     arena: torch.Tensor
     generation: torch.Tensor
     count: torch.Tensor
+    feature_slot: torch.Tensor
 
     @classmethod
-    def allocate(cls, device, *, capacity=4):
+    def allocate(cls, device, *, capacity=4, image_slots=None, feature_slot=None):
+        from ignition.components.capacity import image_capacity
+
+        slots = image_capacity(capacity, image_slots)
         return cls(
-            torch.empty((capacity, FEATURES, WIDTH), dtype=torch.bfloat16, device=device),
+            torch.empty((slots, FEATURES, WIDTH), dtype=torch.bfloat16, device=device),
             torch.zeros(capacity, dtype=torch.int64, device=device),
             torch.zeros(capacity, dtype=torch.int32, device=device),
+            torch.full((1,), -1, dtype=torch.int32, device=device) if feature_slot is None else feature_slot,
         )
 
 
@@ -106,10 +111,12 @@ def _vision_validate(
     Status,
     FeatureGeneration,
     FeatureCount,
+    FeatureSlot,
     Errors,
     CAPACITY: tl.constexpr,
     BLOCK: tl.constexpr,
     SLOTS: tl.constexpr = 4,
+    FEATURE_SLOTS: tl.constexpr = 4,
 ):
     index = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     slot, epoch, count, offset = (
@@ -124,7 +131,9 @@ def _vision_validate(
         tl.load(Generation + slot, slot_valid, other=0) == epoch
     )
     running = tl.load(Status + slot, slot_valid, other=0) == 1
-    error = tl.where(active & ~slot_valid, 1, 0)
+    feature_slot = tl.load(FeatureSlot)
+    feature_valid = (feature_slot >= 0) & (feature_slot < FEATURE_SLOTS)
+    error = tl.where(active & (~slot_valid | ~feature_valid), 1, 0)
     error |= tl.where(active & (~epoch_valid | ~running), 2, 0)
     geometry = (count > 0) & (count <= CAPACITY) & (count % 4 == 0)
     geometry &= (tl.load(Cu) == 0) & (tl.load(Cu + 1) == count)
@@ -294,6 +303,7 @@ class PreparedVisionHandoff:
         frame_index,
         submission_sequence,
         *,
+        pixels,
         buffers=None,
     ):
         device = features.arena.device
@@ -306,16 +316,20 @@ class PreparedVisionHandoff:
             )
         _require(
             features.arena,
-            (requests.capacity, FEATURES, WIDTH),
+            (features.arena.shape[0], FEATURES, WIDTH),
             torch.bfloat16,
             device,
             "feature arena",
         )
+        if not 1 <= features.arena.shape[0] <= requests.capacity:
+            raise ValueError("feature slots must fit within request capacity")
+        _require(features.feature_slot, (1,), torch.int32, device, "feature slot")
         _require(features.generation, (requests.capacity,), torch.int64, device, "feature generation")
         _require(features.count, (requests.capacity,), torch.int32, device, "feature count")
         _require(
             output, (capacity // 4, WIDTH), torch.bfloat16, device, "vision output"
         )
+        _require(pixels, (capacity, 1536), torch.bfloat16, device, "vision patch staging")
         shapes = (
             ((PATCHES, 1536), torch.float32),
             ((PATCHES, 4), torch.int64),
@@ -347,7 +361,7 @@ class PreparedVisionHandoff:
         def zeros(shape, dtype):
             return (torch.zeros(shape, dtype=dtype, device=device) if buffers is None
                     else buffers.zeros(shape, dtype))
-        self.pixels = zeros((capacity, 1536), torch.float32)
+        self.pixels = pixels
         self.errors = zeros((1,), torch.int32)
         self._prepared = False
         i, m, f, r = inputs, self.metadata, features, requests
@@ -369,6 +383,7 @@ class PreparedVisionHandoff:
                     r.status,
                     f.generation,
                     f.count,
+                    f.feature_slot,
                     self.errors,
                     capacity,
                     1024,
@@ -406,7 +421,7 @@ class PreparedVisionHandoff:
                     output,
                     f.arena,
                     i.vision_num_patches,
-                    i.vision_slot,
+                    f.feature_slot,
                     i.vision_feature_offset,
                     self.errors,
                     capacity,
@@ -440,8 +455,9 @@ class PreparedVisionHandoff:
         ]
 
     def prepare(self):
-        self._calls = tuple(_compile(kernel, (*args, self.requests.capacity)
-            if kernel in (_vision_validate, _feature_copy, _vision_finish) else args, grid)
+        self._calls = tuple(_compile(kernel, (*args, self.requests.capacity, self.features.arena.shape[0]) if kernel is _vision_validate
+            else (*args, self.features.arena.shape[0]) if kernel is _feature_copy
+            else (*args, self.requests.capacity) if kernel is _vision_finish else args, grid)
             for kernel, args, grid in self._kernels)
         self._prepared = True
 
@@ -459,6 +475,16 @@ class PreparedVisionHandoff:
             call()
 
 
+class PreparedVisionGeneration:
+    def __init__(self, handoff, encoder):
+        self.handoff, self.encoder = handoff, encoder
+
+    def __call__(self):
+        self.handoff.begin()
+        self.encoder(self.handoff.pixels)
+        self.handoff.finish()
+
+
 @triton.jit
 def _injection_validate(
     Indices,
@@ -471,10 +497,12 @@ def _injection_validate(
     StateError,
     FeatureGeneration,
     FeatureCount,
+    FeatureSlot,
     Errors,
     TOKENS: tl.constexpr,
     BLOCK: tl.constexpr,
     SLOTS: tl.constexpr = 4,
+    FEATURE_SLOTS: tl.constexpr = 4,
 ):
     slot, epoch, length, live = (
         tl.load(Slots),
@@ -498,7 +526,9 @@ def _injection_validate(
     count = tl.load(FeatureCount + slot, physical, other=0)
     same_epoch = tl.load(FeatureGeneration + slot, physical, other=0) == epoch
     invalid = rows & (feature < -1)
-    invalid |= visual & ((feature >= _JIT_FEATURES) | (feature >= count) | ~same_epoch)
+    feature_slot = tl.load(FeatureSlot)
+    invalid |= visual & ((feature >= _JIT_FEATURES) | (feature >= count) | ~same_epoch
+                         | (feature_slot < 0) | (feature_slot >= FEATURE_SLOTS))
     error = tl.where(active & ~geometry, 1, 0)
     error |= tl.where(tl.sum(invalid.to(tl.int32), 0) > 0, 2, 0)
     tl.store(Errors, error)
@@ -520,10 +550,12 @@ def _inject(
     Status,
     FeatureGeneration,
     FeatureCount,
+    FeatureSlot,
     Errors,
     TOKENS: tl.constexpr,
     BLOCK: tl.constexpr,
     SLOTS: tl.constexpr = 4,
+    FEATURE_SLOTS: tl.constexpr = 4,
 ):
     row, tile = tl.program_id(0), tl.program_id(1)
     slot, epoch = tl.load(Slots), tl.load(Epochs)
@@ -543,10 +575,12 @@ def _inject(
         & (feature < tl.load(FeatureCount + slot, physical, other=0))
         & (feature < _JIT_FEATURES)
     )
+    feature_slot = tl.load(FeatureSlot)
+    valid &= (feature_slot >= 0) & (feature_slot < FEATURE_SLOTS)
     channel = tile * BLOCK + tl.arange(0, BLOCK)
     value = tl.load(
         Arena
-        + (slot.to(tl.int64) * _JIT_FEATURES + feature.to(tl.int64)) * _JIT_WIDTH
+        + (feature_slot.to(tl.int64) * _JIT_FEATURES + feature.to(tl.int64)) * _JIT_WIDTH
         + channel,
         valid & (channel < _JIT_WIDTH),
         other=0,
@@ -621,10 +655,12 @@ class PreparedEmbeddingInjection:
             r.error_code,
             f.generation,
             f.count,
+            f.feature_slot,
             self.errors,
             tokens,
             triton.next_power_of_2(tokens),
             requests.capacity,
+            f.arena.shape[0],
         )
         self._inject_args = (
             embedding,
@@ -638,10 +674,12 @@ class PreparedEmbeddingInjection:
             r.status,
             f.generation,
             f.count,
+            f.feature_slot,
             self.errors,
             tokens,
             512,
             requests.capacity,
+            f.arena.shape[0],
         )
         self._grid = (tokens, triton.cdiv(WIDTH, 512), 1)
 

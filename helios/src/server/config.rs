@@ -380,6 +380,7 @@ mod tests {
             (1024, 4, 16384, 4096),
         ] {
             let vision = VisionCapabilities {
+                feature_slots: 4,
                 features_per_request: features,
                 max_images: 4,
                 patches_per_feature: merge,

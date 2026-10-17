@@ -41,6 +41,7 @@ class PreparedVisionGeneration:
             active = torch.arange(capacity // divisor, device=count.device) < count // divisor
             source = source[:capacity // divisor]
             valid &= (~active[:, None] | ((source >= -1) & (source < count // (divisor // 4)))).all()
+        valid &= (s.feature_slot >= 0) & (s.feature_slot < s.arena.shape[0])
         self.errors.copy_(~valid)
         e.scratch.patches.copy_(torch.where(valid & live[:, None], i.vision_pixel_values[:capacity], 0))
         e.positions.copy_(torch.where(valid & live[:, None], positions, 0))

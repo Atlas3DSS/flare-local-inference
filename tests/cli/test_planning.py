@@ -84,6 +84,24 @@ def test_pages_take_all_remaining_supply():
     assert whole.supply_bytes - whole.page_bytes - whole.fixed_bytes < 2 * MIB
 
 
+def test_image_concurrency_defaults_and_explicit_capacity():
+    vision = replace(SOLO, max_images=4)
+    settings = dict(concurrency=32, reserve_bytes=0, speculation=None, selected=None)
+    def image_plan(value=None, model=vision, **overrides):
+        return planning.plan(model, model.checkpoints[0], (gpu(0, 95),),
+                             **(settings | overrides), image_concurrency=value)
+    assert image_plan().image_concurrency == 4
+    assert image_plan(concurrency=2).image_concurrency == 2
+    assert image_plan(1).image_concurrency == 1
+    assert image_plan(32).to_dict()["image_concurrency"] == 32
+    assert image_plan(model=SOLO).image_concurrency == 0
+    for invalid in (0, -1, 33, True):
+        with pytest.raises(UsageError, match="image-concurrency"):
+            image_plan(invalid)
+    with pytest.raises(UsageError, match="vision model"):
+        image_plan(1, model=SOLO)
+
+
 def test_expert_scale_compression_changes_weight_budget_and_preserves_native_default():
     import pickle
 

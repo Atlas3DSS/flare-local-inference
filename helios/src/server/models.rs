@@ -183,6 +183,7 @@ mod tests {
 
         model.limits.max_sequence_tokens = 4096;
         model.contract.vision = VisionCapabilities {
+            feature_slots: 4,
             max_images: 4,
             features_per_request: 256,
             patches_per_feature: 4,

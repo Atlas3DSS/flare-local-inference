@@ -93,6 +93,7 @@ message ModelContract {
   FrontendContract frontend = 7;
 }
 message VisionCapacity {
+  uint64 feature_slots = 5;
   uint64 features_per_request = 1;
   uint64 max_images = 2;
   uint64 patches_per_feature = 3;
@@ -160,6 +161,7 @@ enum ValueSource {
   COPY_GRAMMAR_MASK = 35;
   COPY_GRAMMAR_COUNT = 36;
   IMAGE_TENSOR = 37;
+  IMAGE_FEATURE_SLOT = 38;
 }
 enum InputIndexing {
   INDEXING_UNSPECIFIED = 0;

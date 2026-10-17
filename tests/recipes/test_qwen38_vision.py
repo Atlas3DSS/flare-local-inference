@@ -171,9 +171,98 @@ def test_actual_vision_encoder_native_replay(manifest, record_property):
 
 
 @CUDA
-@pytest.mark.parametrize("capacity", [256, 16384])
 @torch.no_grad()
-def test_pooled_vision_native_replay_matches_unpooled_after_poisoning(manifest, capacity):
+def test_vision_generation_compiles_in_worker_and_replays_after_poisoning(manifest, tmp_path):
+    from b12x.preparation import PreparationSession
+    from ignition.preparation.compile_pool import CompilePool
+    from ignition.preparation.scratch import ScratchArena
+    from ignition.recipes.qwen38.sampling import DeviceRequestState
+    from ignition.recipes.qwen38.vision_state import (
+        PreparedVisionGeneration, PreparedVisionHandoff, VisionFeatureState, VisionInputs,
+    )
+    from transformers.vision_utils import get_vision_position_ids, get_vision_interpolation_indices_and_weights
+
+    device = torch.device("cuda", 0)
+    torch.cuda.set_device(device)
+    module = _module(manifest)
+    with QwenWeightLoader(manifest, device, prefixes=("model.visual.",)) as loader:
+        weights = VisionWeights.load(module, loader)
+    pool, arena = GraphBufferPool(device, chunk_bytes=2 << 20), ScratchArena(device)
+    cursor = pool.cursor()
+    scratch = VisionScratch.allocate(256, device, buffers=cursor)
+    inputs, features = VisionInputs.allocate(device), VisionFeatureState.allocate(device, capacity=1)
+    requests = DeviceRequestState.allocate(device, capacity=1)
+    requests.generation.fill_(7)
+    requests.status.fill_(1)
+    records = torch.zeros((2, 1, 8), dtype=torch.int64, device=device)
+    frame = torch.zeros(1, dtype=torch.int32, device=device)
+    sequence = torch.ones(1, dtype=torch.int64, device=device)
+    handoff = PreparedVisionHandoff(inputs, features, requests, scratch.output, records, frame, sequence,
+                                   pixels=scratch.patches, buffers=cursor)
+    handoff.prepare()
+    with PreparationSession(device=device, autotune=False, compile_workers=0) as session:
+        encoder = PreparedVision(module, scratch, handoff.metadata, weights, session=session,
+                                 projection_workspace=arena, attention_workspace=arena)
+        session.freeze()
+        forward = PreparedVisionGeneration(handoff, encoder)
+        path = tmp_path / "vision.pt2"
+        with CompilePool(device, compile_workers=1) as compilers:
+            compilers.submit(forward, path).result()
+        with path.open("rb") as file:
+            compiled = torch.compiler.load_compiled_function(file)
+        grid = torch.tensor([[1, 16, 16]], device=device)
+        indices, factors = get_vision_interpolation_indices_and_weights(
+            grid, num_grid_per_side=48, mode="bilinear", align_corners=True, spatial_merge_size=2)
+        inputs.vision_interpolation_indices[:256].copy_(indices)
+        inputs.vision_interpolation_weights[:256].copy_(factors)
+        inputs.vision_position_ids[:256].copy_(get_vision_position_ids(grid, 2))
+        inputs.vision_cu_seqlens[1] = 256
+        inputs.vision_num_patches.fill_(256)
+        inputs.vision_slot.zero_()
+        inputs.vision_generation.fill_(7)
+        features.feature_slot.zero_()
+        inputs.vision_pixel_values[:256].normal_()
+        def reset():
+            features.count.zero_()
+            features.generation.zero_()
+            requests.status.fill_(1)
+
+        reset()
+        forward()
+        expected = features.arena[0, :64].clone()
+        reset()
+        compiled(forward)
+        reset()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            compiled(forward)
+        worker = PreparedGraphBundle(device=0, graphs={"vision": graph}, buffers={},
+            resources=(forward, compiled, pool, arena, session)).start_worker()
+        try:
+            for _ in range(2):
+                for chunks in pool.chunks.values():
+                    for tensor in chunks:
+                        tensor.fill_(float("nan") if tensor.is_floating_point() else -37)
+                reset()
+                features.arena.fill_(float("nan"))
+                torch.cuda.synchronize()
+                allocations = torch.cuda.memory_stats()["allocation.all.allocated"]
+                ticket = worker.submit(0)
+                result = worker.poll(timeout_ms=30000)
+                assert result is not None and result.ticket == ticket and result.error is None
+                assert torch.cuda.memory_stats()["allocation.all.allocated"] == allocations
+                assert handoff.errors.item() == 0
+                assert features.count.item() == 64
+                torch.testing.assert_close(features.arena[0, :64], expected, rtol=0, atol=0)
+        finally:
+            worker.close()
+
+
+@CUDA
+@pytest.mark.parametrize("capacity", [256, 16384])
+@pytest.mark.parametrize("compiled", [False, True])
+@torch.no_grad()
+def test_pooled_vision_native_replay_matches_unpooled_after_poisoning(manifest, capacity, compiled):
     from b12x.preparation import PreparationSession
     from transformers.vision_utils import get_vision_position_ids, get_vision_interpolation_indices_and_weights
 
@@ -201,16 +290,28 @@ def test_pooled_vision_native_replay_matches_unpooled_after_poisoning(manifest, 
         stream = torch.cuda.Stream(device=device)
         stream.wait_stream(torch.cuda.current_stream(device))
         graphs = {}
-        for index, forward in enumerate(prepared):
+        owners = []
+        for index, encoder in enumerate(prepared):
+            forward = lambda encoder=encoder: encoder(pixels)
+            if compiled and index == 1:
+                import io
+                from ignition.preparation.aot import aot_forward
+
+                artifact = aot_forward(forward)
+                artifact(forward)
+                data = type(artifact).serialize(artifact).serialized_data
+                restored = torch.compiler.load_compiled_function(io.BytesIO(data))
+                owners.extend((forward, artifact, restored))
+                forward = lambda owner=forward, restored=restored: restored(owner)
             with torch.cuda.stream(stream):
-                forward(pixels)
+                forward()
             stream.synchronize()
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph, stream=stream):
-                forward(pixels)
+                forward()
             graphs[str(index)] = graph
         worker = PreparedGraphBundle(device=0, graphs=graphs, buffers={"pixels": pixels},
-            resources=(*prepared, weights, session, stream, pool)).start_worker()
+            resources=(*prepared, *owners, weights, session, stream, pool)).start_worker()
         try:
             for seed in (31, 72):
                 pixels.normal_(generator=torch.Generator(device=device).manual_seed(seed))

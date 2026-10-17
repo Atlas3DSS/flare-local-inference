@@ -154,13 +154,25 @@ class DecoderScratch:
             return (torch.zeros(shape, dtype=torch.bfloat16, device=device) if buffers is None
                     else buffers.zeros(shape, torch.bfloat16))
 
-        return cls(zeros(tokens, 2560), zeros(tokens, 10240), zeros(tokens, 2560),
-            zeros(sample_rows, 2560), zeros(sample_rows, 248320), HyperconnectionScratch.allocate(tokens, device, buffers=buffers),
-            GDNScratch.allocate(tokens, device, world_size=world_size, buffers=buffers),
-            QSAScratch.allocate(tokens, device, world_size=world_size, buffers=buffers),
-            PLEScratch.allocate(tokens, device, buffers=buffers),
-            QwenMoeScratch.allocate(tokens, device, intermediate=640 // world_size, buffers=buffers),
-            zeros(sample_rows, 248320 // world_size) if world_size > 1 else None)
+        if buffers is None:
+            from ignition.preparation.scratch import GraphBufferPool
+
+            buffers = GraphBufferPool(device, chunk_bytes=2 << 20).cursor()
+        embedding, residual, hidden = zeros(tokens, 2560), zeros(tokens, 10240), zeros(tokens, 2560)
+        sample_hidden, logits = zeros(sample_rows, 2560), zeros(sample_rows, 248320)
+        local_logits = zeros(sample_rows, 248320 // world_size) if world_size > 1 else None
+        block_input, block_output, projected = zeros(tokens, 2560), zeros(tokens, 2560), zeros(tokens, 336)
+        stages = [buffers.fork() for _ in range(5)]
+        # Reserve PLE's wide buffers before other stages divide the shared chunks.
+        ple = PLEScratch.allocate(tokens, device, buffers=stages[2])
+        gdn = GDNScratch.allocate(tokens, device, world_size=world_size, buffers=stages[0], output=block_output)
+        qsa = QSAScratch.allocate(tokens, device, world_size=world_size, buffers=stages[1], output=block_output)
+        moe = QwenMoeScratch.allocate(tokens, device, intermediate=640 // world_size,
+                                    buffers=stages[3], output=block_output)
+        hc = HyperconnectionScratch.allocate(tokens, device, buffers=stages[4],
+                                            projected=projected, block_input=block_input)
+        buffers.join(*stages)
+        return cls(embedding, residual, hidden, sample_hidden, logits, hc, gdn, qsa, ple, moe, local_logits)
 
     def rows(self, tokens: int, sequences: int):
         if (type(tokens) is not int or type(sequences) is not int

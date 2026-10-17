@@ -131,6 +131,7 @@ def test_checkpoint_vision(monkeypatch, tmp_path, n, h, w):
         inputs.vision_cu_seqlens.copy_(encoder.cu)
         inputs.vision_num_patches.fill_(n)
         inputs.vision_num_features.fill_(n//4)
+        state.feature_slot.fill_(1)
         inputs.vision_slot.fill_(1)
         inputs.vision_generation.fill_(12)
         requests.status[1] = 1

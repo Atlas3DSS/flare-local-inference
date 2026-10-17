@@ -258,6 +258,7 @@ fn large_prefill_uploads_preserve_token_position_and_image_indices_without_tail_
         assert_eq!(bytes("token_ids"), tokens);
         assert_eq!(bytes("prefill_positions"), positions);
         assert_eq!(bytes("vision_token_indices"), image_indices);
+        assert_eq!(bytes("vision_feature_slot"), (-1i32).to_le_bytes());
         records[handle.slot as usize] = CompletionRecord {
             generation: handle.generation as i64,
             submission_sequence: sequence as i64,
@@ -926,6 +927,7 @@ fn mixed_native_uploads_pack_prompt_after_the_decode_extent_and_sample_only_elig
                 .collect::<Vec<_>>()
         };
         assert_eq!(integers("prefill_row"), [1]);
+        assert_eq!(integers("vision_feature_slot"), [-1]);
         assert_eq!(integers("query_lengths"), [width as i32, 64, 0, 0]);
         assert_eq!(integers("sample_enabled"), [1, 0, 0, 0]);
         assert_eq!(

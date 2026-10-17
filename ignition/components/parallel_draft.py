@@ -15,11 +15,11 @@ from .state import save_hidden
 
 
 def prepare_sampling_scratch(batch, width, vocab, device, *, buffers=None, proposal=True, verification=True):
-    """Share sequential shapes while keeping target probabilities live through verification.
+    """Share sequential sampling stages and retain target results through verification.
 
     Proposal probabilities must be copied to retained storage before the next
-    proposal position. Target filtering and verification have separate workspaces
-    because verification still reads the filtered target distribution.
+    proposal position. Target probabilities and validity stay disjoint from the
+    verification workspace; filtering intermediates are dead before verification.
     """
     from ignition.preparation.scratch import bind_scratch
 
@@ -29,7 +29,18 @@ def prepare_sampling_scratch(batch, width, vocab, device, *, buffers=None, propo
     if verification:
         layouts["target"] = PreparedSpeculativeDistributions.scratch_layout(batch, width, vocab)
         layouts["verify"] = PreparedStochasticVerification.scratch_layout(batch, width, vocab)
-    return {name: bind_scratch(layout, device=device, workspace=buffers) for name, layout in layouts.items()}
+    if buffers is None:
+        return {name: bind_scratch(layout, device=device) for name, layout in layouts.items()}
+    proposal_buffers = buffers.fork()
+    retained = (bind_scratch({key: layouts["target"].pop(key) for key in ("probabilities", "valid")},
+                            device=device, workspace=buffers) if verification else {})
+    cursors = {name: proposal_buffers if name == "proposal" else buffers.fork() for name in layouts}
+    result = {name: bind_scratch(layout, device=device, workspace=cursors[name])
+              for name, layout in reversed(tuple(layouts.items()))}
+    if verification:
+        result["target"].update(retained)
+    buffers.join(*cursors.values())
+    return result
 
 
 class PreparedParallelDraftRound:

@@ -236,7 +236,7 @@ def _install_boundaries(monkeypatch, checkpoint):
     from b12x.preparation.types import DeviceIdentity
     from triton.runtime.jit import JITFunction
 
-    from ignition.components import gated_delta
+    from ignition.components import gated_delta, varlen_attention
     from ignition.preparation import tuning
     from ignition.recipes.qwen38 import (
         attention,
@@ -384,7 +384,7 @@ def _install_boundaries(monkeypatch, checkpoint):
         gated_delta.gdn_decode,
         moe.fused_moe,
         ple.ple_embedding,
-        vision.varlen,
+        varlen_attention.varlen,
         mtp.mtp_feedback,
     ):
         if hasattr(op, "bind"):

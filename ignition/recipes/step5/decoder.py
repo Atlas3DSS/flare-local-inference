@@ -37,20 +37,28 @@ class Scratch:
 
     @classmethod
     def allocate(cls, config, shard, tokens, samples, context, device, *, buffers=None):
+        from ignition.preparation.scratch import GraphBufferPool
+
         c = config.text
-        def zeros(rows, columns, dtype=torch.bfloat16):
-            return (torch.zeros((rows, columns), dtype=dtype, device=device) if buffers is None
-                    else buffers.zeros((rows, columns), dtype))
+        if buffers is None:
+            buffers = GraphBufferPool(device, chunk_bytes=2 << 20).cursor()
+        def zeros(rows, columns, dtype=torch.bfloat16, *, cursor=buffers):
+            return cursor.zeros((rows, columns), dtype)
         width = config.vocabulary_partition(shard)[2]
-        return cls(zeros(tokens, config.hidden), zeros(tokens, config.hidden // shard.world_size),
-            zeros(tokens, config.hidden), zeros(tokens, config.hidden, torch.float32),
-            AttentionScratch.allocate(config, shard, tokens, context, device, requests=samples, buffers=buffers),
-            MLPScratch.allocate(tokens, config.hidden, c["intermediate_size"] // shard.world_size, device, buffers=buffers),
-            MLPScratch.allocate(tokens, config.hidden, c["share_expert_dim"] // shard.world_size, device, buffers=buffers),
-            zeros(tokens, c["moe_num_experts"], torch.float32),
-            RouterScratch.allocate(tokens, device, experts=c["moe_num_experts"], top_k=c["moe_top_k"], buffers=buffers),
-            zeros(tokens, config.hidden), zeros(tokens, config.hidden, torch.float32),
-            zeros(tokens, config.hidden, torch.float32), zeros(samples, config.hidden),
+        embedding, local_embedding = zeros(tokens, config.hidden), zeros(tokens, config.hidden // shard.world_size)
+        normalized, residual = zeros(tokens, config.hidden), zeros(tokens, config.hidden, torch.float32)
+        reduced = zeros(tokens, config.hidden, torch.float32)
+        attn, dense_stage, routed_stage = (buffers.fork() for _ in range(3))
+        attention = AttentionScratch.allocate(config, shard, tokens, context, device, requests=samples, buffers=attn)
+        dense = MLPScratch.allocate(tokens, config.hidden, c["intermediate_size"] // shard.world_size, device, buffers=dense_stage)
+        shared = MLPScratch.allocate(tokens, config.hidden, c["share_expert_dim"] // shard.world_size, device, buffers=routed_stage)
+        router_logits = zeros(tokens, c["moe_num_experts"], torch.float32, cursor=routed_stage)
+        router = RouterScratch.allocate(tokens, device, experts=c["moe_num_experts"], top_k=c["moe_top_k"], buffers=routed_stage)
+        experts = zeros(tokens, config.hidden, cursor=routed_stage)
+        partial = zeros(tokens, config.hidden, torch.float32, cursor=routed_stage)
+        buffers.join(attn, dense_stage, routed_stage)
+        return cls(embedding, local_embedding, normalized, residual, attention, dense, shared,
+            router_logits, router, experts, partial, reduced, zeros(samples, config.hidden),
             zeros(samples, width), zeros(samples, config.vocabulary))
 
     def rows(self, tokens, samples):

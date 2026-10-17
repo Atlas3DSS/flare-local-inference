@@ -75,31 +75,29 @@ class Scratch:
 
     @classmethod
     def allocate(cls, tokens, samples, world, device, *, blocks=8192, experts=256, top_k=6, buffers=None):
-        def zeros(*shape, dtype=torch.bfloat16):
-            return (torch.zeros(shape, dtype=dtype, device=device) if buffers is None
-                    else buffers.zeros(shape, dtype))
+        if buffers is None:
+            buffers = GraphBufferPool(device, chunk_bytes=2 << 20).cursor()
+        def zeros(*shape, dtype=torch.bfloat16, cursor=buffers):
+            return cursor.zeros(shape, dtype)
 
-        return cls(
-            zeros(tokens, 4096),
-            zeros(tokens, 4, 4096),
-            MHCScratch.allocate(tokens, 4096, device, buffers=buffers),
-            MHCScratch.allocate(tokens, 4096, device, buffers=buffers),
-            AttentionScratch.allocate(tokens, world, device, blocks=blocks, buffers=buffers),
-            zeros(tokens, 4096),
-            MLPScratch.allocate(tokens, 4096, 2048 // world, device, buffers=buffers),
-            zeros(tokens, experts, dtype=torch.float32),
-            RouterScratch.allocate(tokens, device, experts=experts, top_k=top_k, buffers=buffers),
-            zeros(tokens, 4096),
-            zeros(tokens, 4096),
-            zeros(tokens, 4096),
-            zeros(samples, 4, 4096),
-            zeros(samples, 4096),
-            zeros(samples, 4096),
-            zeros(samples, 129280 // world),
-            zeros(samples, 129280),
+        embedding, residual = zeros(tokens, 4096), zeros(tokens, 4, 4096)
+        attention_hc = MHCScratch.allocate(tokens, 4096, device, buffers=buffers)
+        ffn_hc = MHCScratch.allocate(tokens, 4096, device, buffers=buffers)
+        attention_output, mlp_output = zeros(tokens, 4096), zeros(tokens, 4096)
+        attn, ffn = buffers.fork(), buffers.fork()
+        attention = AttentionScratch.allocate(tokens, world, device, blocks=blocks, buffers=attn)
+        shared = MLPScratch.allocate(tokens, 4096, 2048 // world, device, buffers=ffn)
+        router_logits = zeros(tokens, experts, dtype=torch.float32, cursor=ffn)
+        router = RouterScratch.allocate(tokens, device, experts=experts, top_k=top_k, buffers=ffn)
+        routed, partial = zeros(tokens, 4096, cursor=ffn), zeros(tokens, 4096, cursor=ffn)
+        buffers.join(attn, ffn)
+        return cls(embedding, residual, attention_hc, ffn_hc, attention, attention_output,
+            shared, router_logits, router, routed, partial, mlp_output,
+            zeros(samples, 4, 4096), zeros(samples, 4096), zeros(samples, 4096),
+            zeros(samples, 129280 // world), zeros(samples, 129280),
             GraphBufferPool(device, chunk_bytes=min(64 << 20, max(1 << 20, tokens << 14))),
-            GraphBufferPool(device, chunk_bytes=min(64 << 20, max(1 << 20, tokens << 14))),
-        )
+            GraphBufferPool(device, chunk_bytes=min(64 << 20, max(1 << 20, tokens << 14))))
+
 
 
 class PreparedRouting:

@@ -14,6 +14,7 @@ class PrefillVisionInputs:
     vision_token_indices: torch.Tensor
     vision_left: torch.Tensor
     vision_right: torch.Tensor
+    vision_feature_slot: torch.Tensor
 
     @classmethod
     def allocate(cls, tokens, device):
@@ -21,6 +22,7 @@ class PrefillVisionInputs:
             torch.full((tokens,), -1, dtype=torch.int32, device=device),
             torch.zeros(tokens, dtype=torch.int32, device=device),
             torch.zeros(tokens, dtype=torch.int32, device=device),
+            torch.full((1,), -1, dtype=torch.int32, device=device),
         )
 
     def buffers(self):
@@ -28,10 +30,14 @@ class PrefillVisionInputs:
 
 
 class VisionState:
-    def __init__(self, weights, inputs, prefill, requests):
+    def __init__(self, weights, inputs, prefill, requests, *, image_slots=None):
         self.inputs, self.prefill, self.requests = inputs, prefill, requests
         device = inputs.token_ids.device
-        self.arena = torch.zeros((requests.capacity, FEATURES, HIDDEN), dtype=torch.bfloat16, device=device)
+        from ignition.components.capacity import image_capacity
+
+        self.feature_slot = prefill.vision_feature_slot
+        self.arena = torch.zeros((image_capacity(requests.capacity, image_slots), FEATURES, HIDDEN),
+                                 dtype=torch.bfloat16, device=device)
         self.generation = torch.zeros(requests.capacity, dtype=torch.int64, device=device)
         self.count = torch.zeros(requests.capacity, dtype=torch.int32, device=device)
         self.sentinels = torch.stack(
@@ -58,10 +64,11 @@ class VisionState:
         )
         valid &= (~feature & (index == -1)) | (feature & (index >= 0) & (index < self.count[slot]))
         valid &= ~image | (self.generation[slot] == b.row_generations[0])
+        valid &= ~image | ((self.feature_slot >= 0) & (self.feature_slot < self.arena.shape[0]))
         return (~live | valid).all()
 
     def inject(self, metadata, embedding):
-        slot = self.inputs.row_slot_ids[:1].long().clamp(0, self.requests.capacity - 1)
+        slot = self.feature_slot.long().clamp(0, self.arena.shape[0] - 1)
         tokens = metadata.token_ids
         index = self.prefill.vision_token_indices[: tokens.numel()].long().clamp(0, FEATURES - 1)
         value = torch.where(
@@ -102,6 +109,7 @@ class PreparedVisionGeneration:
             ~patch_live[:, None]
             | ((i.vision_position_ids[:capacity] >= 0) & (i.vision_position_ids[:capacity] < capacity))
         ).all()
+        valid &= (s.feature_slot >= 0) & (s.feature_slot < s.arena.shape[0])
         self.errors.copy_(~valid)
         e.scratch.patches.copy_(torch.where(valid & patch_live[:, None], i.vision_pixel_values[:capacity], 0))
         e.positions.copy_(torch.where(valid & patch_live[:, None], i.vision_position_ids[:capacity], 0))

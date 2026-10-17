@@ -37,6 +37,21 @@ def tensors(value):
             yield member
 
 
+def test_mixer_and_layer_temporaries_preserve_live_residual_and_output():
+    scratch = DecoderScratch.allocate(128, "cpu", sample_rows=4)
+    hc = scratch.hyperconnection
+    assert scratch.gdn.output.data_ptr() == scratch.qsa.output.data_ptr() == scratch.moe.output.data_ptr()
+    live = (scratch.residual, hc.block_input, hc.down_and_injection, scratch.gdn.output)
+    for index, tensor in enumerate(live, 1):
+        tensor.fill_(index)
+    for transient in (hc.normalized, hc.bottleneck, hc.gate_workspace,
+                      scratch.gdn.projected_qkvz, scratch.gdn.convolved_qkv, scratch.gdn.gated,
+                      scratch.qsa.projected_qkv, scratch.qsa.attended, scratch.moe.routed_output):
+        transient.fill_(-37)
+        for index, tensor in enumerate(live, 1):
+            assert tensor.eq(index).all()
+
+
 @pytest.mark.parametrize("tokens", [3072, 4096, 8192])
 def test_large_scratch_shapes_and_smaller_views_share_storage(tokens):
     scratch = DecoderScratch.allocate(tokens, "meta")

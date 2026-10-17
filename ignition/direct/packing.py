@@ -16,7 +16,7 @@ def pack(layout, step):
             if array.size:
                 uploads.append((name, offset * array.itemsize, array.tobytes()))
         if indexing == p.SCALAR:
-            value = len(step.lanes) if source == p.LIVE_ROWS else 0 if source == p.CONSTANT else None
+            value = len(step.lanes) if source == p.LIVE_ROWS else 0 if source == p.CONSTANT else -1 if source == p.IMAGE_FEATURE_SLOT else None
             if value is None:
                 raise ValueError(f"direct text execution cannot produce scalar source {source}")
             put(0, [value + binding["value_offset"]])

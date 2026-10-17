@@ -17,7 +17,7 @@ FRONTEND = c.frontend(tools=p.QWEN_CODER, terminal_markers=["<tool_call>"],
 FRONTEND["tools"]["wrapping_newlines"] = 1
 
 
-def prepare(signatures, buffers, pool, *, vocabulary, draft_lag=None):
+def prepare(signatures, buffers, pool, *, image_slots=4, vocabulary, draft_lag=None):
     inputs = {kind: c.text_inputs(kind) for kind in {s.kind for s in signatures.values()} if kind != "vision"}
     inputs["vision"] = c.vision_inputs({field for s in signatures.values() if s.kind == "vision" for field in s.inputs})
     continuation = c.state_view("state_pool", pool.layout.row_bytes)
@@ -30,4 +30,4 @@ def prepare(signatures, buffers, pool, *, vocabulary, draft_lag=None):
         page_tables=[dict(buffer="page_tables", page_offset=0)],
         regions=[dict(kind=p.CONTINUATION_STATE, storage=continuation, tokens_per_record=1, window_tokens=0), *regions],
         graphs=c.graph_contracts(signatures, inputs, continuation=continuation,
-                                 pending=c.state_view("request_pending_token", 8), cursor=cursor), vision=VISION, frontend=FRONTEND)
+                                 pending=c.state_view("request_pending_token", 8), cursor=cursor), vision={**VISION, "feature_slots": image_slots}, frontend=FRONTEND)

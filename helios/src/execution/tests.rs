@@ -1,6 +1,25 @@
 use super::*;
 
 #[test]
+fn fp8_cache_buffers_use_single_byte_elements() {
+    let mut value = manifest();
+    let dtype = Dtype::try_from("float8_e4m3fn").unwrap();
+    assert_eq!(dtype, Dtype::Float8E4m3fn);
+    assert_eq!(dtype.size(), 1);
+    value.buffers.push(BufferDescriptor {
+        name: "kv_pages".into(),
+        address: 0x10000,
+        nbytes: 1024,
+        dtype,
+        shape: vec![4, 64, 4],
+        strides: vec![256, 4, 1],
+    });
+    value.validate().unwrap();
+    value.buffers.last_mut().unwrap().nbytes *= 2;
+    assert!(value.validate().is_err());
+}
+
+#[test]
 fn tensor_parallel_capacity_rejects_more_than_sixteen_ranks() {
     let pairs: Vec<_> = (0..16)
         .map(|_| {

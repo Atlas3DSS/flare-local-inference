@@ -547,6 +547,7 @@ Configuration assigns each decision to one owner:
 | Checkpoint and revision | `MODEL`, including a local directory or `org/name@revision` |
 | GPUs and TP size | `--gpus`; rank count follows the selected list |
 | Concurrent requests | `--max-concurrency` |
+| Active image requests and feature slots | `--image-concurrency`, then model/default configuration, otherwise `min(4, max_concurrency)` for vision recipes |
 | Listener | Ignition and native Flare `--host` and `--port` |
 | Context limit | Checkpoint maximum; admission still requires sufficient shared cache capacity |
 | KV pages and GPU prefix-cache rows | Derived from available memory, graph cost, and concurrency |
@@ -585,6 +586,7 @@ disk settings require the implementation and measurements defined there.
 | Prefix cache | Up to eight snapshot slots per `--max-concurrency` request, acquired on demand from shared KV backing and evicted under pressure |
 | Live state | One null row plus the recipe's execution rows per active request slot; GLM verification commits into one live row |
 | Decode graph capacities | 1 through `--max-concurrency`, rounded to the recipe's captured set |
+| Image feature arena | Prepared image concurrency times per-request feature capacity and embedding width; slots remain owned through request retirement |
 | Prefill chunk | The recipe's chunk, 4,096 tokens for Qwen, GLM, and DeepSeek; `--prefill-chunk-size` overrides |
 | Speculative catalog and draft counts | Recipe, overridden by `--no-mtp` and the `--mtp-*` flags; the draft count adapts from measured rounds unless fixed |
 | Kernel selections | Autotuned during preparation; cached by checkpoint revision, recipe version, GPU, and settings |

@@ -30,6 +30,7 @@ pub use prompt::{prepare_input, prepare_output, system_boundary};
 )]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VisionCapabilities {
+    pub feature_slots: usize,
     pub features_per_request: usize,
     pub max_images: usize,
     pub patches_per_feature: usize,
@@ -39,6 +40,7 @@ pub struct VisionCapabilities {
 impl VisionCapabilities {
     pub fn disabled() -> Self {
         Self {
+            feature_slots: 0,
             features_per_request: 0,
             max_images: 0,
             patches_per_feature: 0,
@@ -54,7 +56,9 @@ impl VisionCapabilities {
         if self == &Self::disabled() {
             return Ok(());
         }
-        if self.patches_per_feature == 0
+        if self.feature_slots == 0
+            || self.feature_slots > crate::execution::REQUEST_LANES
+            || self.patches_per_feature == 0
             || self.max_images == 0
             || self.features_per_request == 0
             || self.patch_capacities.is_empty()

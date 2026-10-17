@@ -582,6 +582,7 @@ class Scenario:
         h["query_lengths"].zero_()
         h["sample_enabled"].fill_(1)
         h["vision_token_indices"].fill_(-1)
+        h["vision_feature_slot"].fill_(-1)
         for row, slot in enumerate(slots):
             request = self.requests[slot]
             h["row_slot_ids"][row] = slot
@@ -607,6 +608,7 @@ class Scenario:
             else torch.arange(begin, end)[:, None].expand(-1, 3))
         if vision:
             h["vision_token_indices"][:length] = self.image["token_indices"][begin:end]
+            h["vision_feature_slot"].fill_(0)
         name = f"prefill{capacity}"
         self.emit(name, [slot], sample=sample, length=length,
             note=f"consume [{begin},{end}) with {'image' if vision else 'text'} positions")
@@ -689,6 +691,7 @@ class Scenario:
                 self.host[name].zero_()
                 self.host[name].reshape(-1)[:value.numel()].copy_(value.reshape(-1))
             self.host["vision_slot"].fill_(3)
+            self.host["vision_feature_slot"].fill_(0)
             self.host["vision_generation"].fill_(epoch)
             self.host["vision_feature_offset"].zero_()
             self.emit(f"vision{capacity}", [3], note="same pinned 256-patch fixture at this graph capacity")

@@ -98,6 +98,8 @@ impl Inputs {
                                 graph.kind == GraphKind::Vision && binding.indexing == Scalar
                             }
                             LiveRows | PrefillRow => binding.indexing == Scalar,
+                            ImageFeatureSlot => binding.indexing == Scalar && elements == 1
+                                && matches!(graph.kind, GraphKind::Vision | GraphKind::Prefill | GraphKind::Mixed),
                             PageTable | LiveStateRows => binding.indexing == RequestRow,
                             PromptToken
                             | PromptAndPendingToken
@@ -250,6 +252,7 @@ impl Inputs {
         step: &crate::scheduler::ScheduledStep,
         config: &ModelConfig,
         handle: crate::scheduler::RequestHandle,
+        image_slot: usize,
         images: &crate::frontend::images::ProcessedImages,
         image: usize,
     ) -> Result<()> {
@@ -269,6 +272,12 @@ impl Inputs {
                 }
                 ValueSource::RequestGeneration => {
                     write_integers(&mut self.staging, input, 0, &[handle.generation as i64])?
+                }
+                ValueSource::ImageFeatureSlot => {
+                    if image_slot >= config.contract.vision.feature_slots {
+                        return Err("image feature slot exceeds the prepared arena".into());
+                    }
+                    write_integers(&mut self.staging, input, 0, &[image_slot as i64])?
                 }
                 ValueSource::ImageTensor => {
                     let tensor = tensors
@@ -347,6 +356,13 @@ impl Inputs {
                     match binding.source {
                         ValueSource::Constant => 0,
                         ValueSource::LiveRows => frame.step.lanes.len() as i64,
+                        ValueSource::ImageFeatureSlot => {
+                            match frame.step.lanes.iter().enumerate().find(|(row, _)|
+                                frame.step.lane_kind(*row) == GraphKind::Prefill) {
+                                Some((_, lane)) => frame.scheduler.request(lane.request)?.image_slot.map_or(-1, |slot| slot as i64),
+                                None => -1,
+                            }
+                        }
                         ValueSource::PrefillRow => frame
                             .step
                             .mixed

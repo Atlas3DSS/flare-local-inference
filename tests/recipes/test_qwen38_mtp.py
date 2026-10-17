@@ -23,7 +23,10 @@ def test_persistent_views_keep_full_residual_and_bounded_logits_separate():
     assert view.residual.data_ptr() == scratch.residual.data_ptr()
     assert view.logits.data_ptr() == scratch.logits.data_ptr()
     outputs = (view.embedding, view.residual, view.hidden, view.selected_hidden, view.logits)
-    assert len({x.untyped_storage().data_ptr() for x in outputs}) == len(outputs)
+    for index, tensor in enumerate(outputs):
+        tensor.fill_(index + 1)
+    for index, tensor in enumerate(outputs):
+        assert tensor.eq(index + 1).all()
     with pytest.raises(ValueError, match="exceeds"):
         scratch.rows(17, 2)
 
@@ -195,3 +198,14 @@ def test_shared_bf16_expert_uses_bf16_projections_without_activation_quantizatio
     monkeypatch.setattr(mlp.hyperconnection, "plan", lambda *args, **kwargs: plan)
     moe.PreparedSharedExpert(source, weights, session=SimpleNamespace(prepare=lambda _: None), name="mtp.shared")
     assert [kw["name"] for _, kw in calls] == ["mtp.shared.gate_up", "mtp.shared.down", "mtp.shared.shared_gate"]
+
+
+@pytest.mark.parametrize("offset", [0, 1])
+def test_feedback_rejects_overlapping_residual_bytes(offset):
+    scratch = mtp.MTPScratch.allocate(8, 1, "cpu")
+    view = scratch.rows(7, 1)
+    with pytest.raises(ValueError, match="must not alias"):
+        mtp.PreparedMTP(None, view, torch.zeros(7, dtype=torch.int64),
+            scratch.residual[offset:offset + 7], None,
+            SimpleNamespace(request_ids=torch.zeros(7, dtype=torch.int32)), None, None,
+            output_indices=torch.zeros(1, dtype=torch.int64), session=None, name="overlap")

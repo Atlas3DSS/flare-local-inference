@@ -153,7 +153,7 @@ class QSAScratch:
     partial_lse: torch.Tensor
 
     @classmethod
-    def allocate(cls, tokens: int, device: torch.device, *, world_size=1, buffers=None) -> QSAScratch:
+    def allocate(cls, tokens: int, device: torch.device, *, world_size=1, buffers=None, output=None) -> QSAScratch:
         if tokens <= 0:
             raise ValueError("QSA token capacity must be positive")
         def zeros(*shape, dtype=torch.bfloat16):
@@ -167,7 +167,7 @@ class QSAScratch:
                    zeros(tokens, 640), zeros(tokens, q_heads, 256), zeros(tokens, kv_heads, 256),
                    zeros(tokens, q_heads, 256),
                    zeros(tokens, 2051, dtype=torch.int32).fill_(-1),
-                   zeros(tokens, q_heads * 256), zeros(tokens, 2560), qkv,
+                   zeros(tokens, q_heads * 256), zeros(tokens, 2560) if output is None else output, qkv,
                    zeros(partial_rows, q_heads, 256, dtype=torch.float32),
                    zeros(partial_rows, q_heads, dtype=torch.float32))
 

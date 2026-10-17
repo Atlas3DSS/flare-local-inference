@@ -23,7 +23,7 @@ def test_mutable_reset_retains_complete_arena_once(registered_view):
     arena.tensor.copy_(torch.arange(arena.nbytes, dtype=torch.int64).to(torch.uint8))
     arena.freeze()
     features = VisionFeatureState(torch.empty(4, 2, 3), torch.zeros(4, dtype=torch.int64),
-                                  torch.zeros(4, dtype=torch.int32))
+                                  torch.zeros(4, dtype=torch.int32), torch.full((1,), -1, dtype=torch.int32))
     buffers = {"scratch_alias": arena.tensor[512:513]} if registered_view else {}
     model = SimpleNamespace(_resources=[features, arena], buffers=buffers)
     state = SimpleNamespace(backing=torch.empty((2, 16), dtype=torch.uint8))
@@ -43,7 +43,7 @@ def test_mutable_reset_retains_complete_arena_once(registered_view):
 
 def test_mutable_reset_retains_single_sampler_storage_for_decoder_and_resume():
     features = VisionFeatureState(torch.empty(4, 2, 3), torch.zeros(4, dtype=torch.int64),
-                                  torch.zeros(4, dtype=torch.int32))
+                                  torch.zeros(4, dtype=torch.int32), torch.full((1,), -1, dtype=torch.int32))
     model = SimpleNamespace(_resources=[features], buffers={})
     state = SimpleNamespace(backing=torch.empty((2, 16), dtype=torch.uint8))
     request = RequestFixture(torch.zeros(4, dtype=torch.int64))

@@ -82,7 +82,7 @@ class PreparedMixedRound:
             # The speculative round requires a callable exposing only its verification logits.
             def speculative_decoder(*args, **kwargs):
                 view = decoder_factory(*args, **kwargs)
-                return DecodeTarget(view.scratch, view.forward)
+                return DecodeTarget(view.scratch, view.forward, self.prompt_sampler)
             self.round = PreparedSpeculativeRound(decode_owner, batch, width, name,
                 decoder_factory=speculative_decoder, residual_output=scratch.decode_residual[:batch * width])
             self.round.prepare()
@@ -111,7 +111,7 @@ class PreparedMixedRound:
         else:
             self.decoder()
             self.decode_sampler()
-        self.prompt_sampler()
+            self.prompt_sampler()
         if self.absorb is not None:
             self.absorb.finish()
         prompt = self.slots == self.prompt_inputs.row_slot_ids[0]
@@ -121,10 +121,11 @@ class PreparedMixedRound:
 
 
 class DecodeTarget:
-    """Expose the verification rows of a mixed target to shared acceptance machinery."""
+    """Consume prompt logits before MTP absorption reuses target scratch."""
 
-    def __init__(self, scratch, forward):
-        self.scratch, self.forward = scratch, forward
+    def __init__(self, scratch, forward, prompt_sampler):
+        self.scratch, self.forward, self.prompt_sampler = scratch, forward, prompt_sampler
 
     def __call__(self):
         self.forward()
+        self.prompt_sampler()

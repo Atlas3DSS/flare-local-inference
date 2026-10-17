@@ -59,6 +59,7 @@ from .vision import PreparedVision, VisionScratch
 
 @dataclass(frozen=True)
 class PreparationConfig:
+    image_concurrency: int | None = None
     compile_workers: int | None = None
     tuning_replica: TuningReplica | None = None
     device: int = 0
@@ -87,6 +88,9 @@ class PreparationConfig:
     stream_overlap: bool = True
 
     def __post_init__(self):
+        from ignition.components.capacity import image_capacity
+
+        object.__setattr__(self, "image_concurrency", image_capacity(self.max_active, self.image_concurrency))
         if self.roce_ring and (self.hosts is None or not 2 <= len(self.hosts) <= 16):
             raise ValueError("RoCE ring requires 2..16 ranks on separate hosts")
         if self.devices is not None and (
@@ -217,6 +221,7 @@ def _prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, t
 
     from .vision_state import (
         PreparedEmbeddingInjection,
+        PreparedVisionGeneration,
         PreparedVisionHandoff,
         VisionFeatureState,
         VisionInputs,
@@ -311,7 +316,8 @@ def _prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, t
             sequence = torch.zeros(1, dtype=torch.int64, device=device)
             table.sequence = sequence
             completion = torch.zeros((2, slots, 24 if config.mtp or config.mixed_shapes else 8), dtype=torch.int64, device=device)
-            features = VisionFeatureState.allocate(device, capacity=slots)
+            features = VisionFeatureState.allocate(device, capacity=slots, image_slots=config.image_concurrency,
+                feature_slot=inputs.vision_feature_slot)
             vision_inputs = VisionInputs.allocate(device)
             vision_scratch = {}
             buffers = {**inputs.buffers(), **table.buffers(), **{name: getattr(admission, name) for name in admission.__dataclass_fields__},
@@ -330,7 +336,7 @@ def _prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, t
                     frame=frame, sequence=sequence, context=config.context,
                     prefill_capacity=config.token_capacity, max_cache_pages=planned_pages,
                     proposal_source=config.speculative_proposal_source,
-                    sampling_workspace=sampling_workspace,
+                    sampling_workspace=sampling_workspace, graph_buffers=graph_buffers,
                     verification_width=max(config.speculative_widths), **collectives)
                 buffers.update(speculation.buffers())
         serving_modes = (True, False) if config.mtp else (False,)
@@ -344,12 +350,12 @@ def _prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, t
                                                   prefill_capacity=prefill_capacity)
                 stage.update(advance=1)
 
-            vision_fields = tuple(vision_inputs.__dataclass_fields__)
+            vision_fields = (*vision_inputs.__dataclass_fields__, "vision_feature_slot")
             for capacity in (16384, 4096, 1024, 256):
                 cursor = graph_buffers.cursor()
                 s = vision_scratch[capacity] = VisionScratch.allocate(capacity, device, buffers=cursor)
                 handoff = PreparedVisionHandoff(vision_inputs, features, requests, s.output, completion, frame, sequence,
-                                               buffers=cursor)
+                                               pixels=s.patches, buffers=cursor)
                 handoff.prepare()
                 with torch.device("meta"):
                     module = Qwen4ExpVisionModel(weights.tree.config.vision_config)
@@ -357,11 +363,7 @@ def _prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, t
                 encoder = PreparedVision(module, s, handoff.metadata, weights.vision, session=session,
                     name=f"vision{capacity}", projection_workspace=workspaces,
                     attention_workspace=workspaces)
-                def vision(handoff=handoff, encoder=encoder):
-                    handoff.begin()
-                    encoder(handoff.pixels)
-                    handoff.finish()
-                add(f"vision{capacity}", vision, "vision", 1, capacity, vision_fields)
+                add(f"vision{capacity}", PreparedVisionGeneration(handoff, encoder), "vision", 1, capacity, vision_fields)
                 owners.extend((handoff, encoder))
 
             for enabled in serving_modes:
@@ -549,7 +551,7 @@ def _prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, t
             "pages": page_capacity, "state_rows": state_rows, "snapshots": snapshots, "page_tokens": 64,
             "frontend": prepare_frontend(manifest.snapshot, eos_token_ids=[248046, 248044], image_profile="qwen"),
             "sampling_defaults": RECIPE.sampling_defaults.as_dict(),
-            "model_contract": prepare_contract(signatures, buffers, state, page_tokens=64, draft_lag=1 if has_mtp else None, embedding_tables=(0,), regions=cache_regions),
+            "model_contract": prepare_contract(signatures, buffers, state, image_slots=config.image_concurrency, page_tokens=64, draft_lag=1 if has_mtp else None, embedding_tables=(0,), regions=cache_regions),
             "assets": {name: {"path": str((manifest.snapshot / filename).resolve()), "sha256": digest}
                        for name, (filename, digest) in hashes.items()}}
         if speculation is not None:

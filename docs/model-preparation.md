@@ -169,6 +169,21 @@ Export Qwen with up to five MTP draft tokens per round:
 Qwen defaults to five MTP draft tokens, with explicit flags taking precedence.
 Changing this default does not change an already exported package.
 
+Vision recipes accept `--image-concurrency N`, independently of
+`--max-concurrency`. It defaults to `min(4, max_concurrency)` and can also be set
+as `image_concurrency` in `[defaults]` or a model's configuration section.
+Explicit flags override configuration. Text-only recipes ignore the configured
+image default and reject an explicit image-concurrency flag.
+Helios queues image requests when their feature slots are occupied and admits
+eligible text requests from the queue. An image request retains its slot until
+request retirement, including completion of outstanding GPU work after cancellation.
+The limit counts requests containing images; it does not change images per request
+or the prepared patch capacities. Changing it requires exporting the package again.
+Packages with vision require the prepared feature-slot capacity and binding.
+
+For Qwen, each feature slot holds 16,384 BF16 vectors of width 2,560: 80 MiB per
+rank. Four image slots therefore reserve 320 MiB even with 32 active request slots.
+
 N-gram tables use indirect delivery exclusively: every graph consumes compact
 GPU row buffers filled by Helios. Qwen PLE tables are stored once in the package.
 Helios reads the 26.8 GiB table from disk by default on every GPU;

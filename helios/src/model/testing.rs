@@ -175,6 +175,7 @@ pub fn metadata() -> PreparedContract {
                         binding("token_ids", PromptToken, PackedToken, 0, 0),
                         binding("prefill_positions", PromptPosition, PackedToken, 0, 0),
                         binding("vision_token_indices", ImageFeatureIndex, PackedToken, 0, 0),
+                        binding("vision_feature_slot", ImageFeatureSlot, Scalar, 0, -1),
                     ]);
                 }
                 graphs.push(GraphContract {
@@ -273,7 +274,7 @@ pub fn manifest(config: &ModelConfig) -> ExecutionManifest {
                 }
                 CopyTokenCount | CopyGrammarMask | CopyGrammarCount | QueryLength | LiveRows
                 | SampleEnabled | SamplingTopK | EosCount | PromptHistogram | GrammarMask
-                | GrammarEnabled | ImageFeatureIndex | PageTable => Dtype::Int32,
+                | GrammarEnabled | ImageFeatureIndex | ImageFeatureSlot | PageTable => Dtype::Int32,
                 Constant
                     if matches!(
                         b.buffer.as_str(),

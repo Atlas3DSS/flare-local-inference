@@ -73,6 +73,7 @@ def test_pooled_encoder_publication_matches_unpooled_after_poisoning(weights, ca
                 session=session, workspace=arena, name=f"vision-{pooled}", buffers=buffers)
             state = VisionState(batch, PrefillVisionInputs.allocate(capacity, device), requests,
                 image_token=config["image_token_id"], features=FEATURES, hidden=HIDDEN)
+            state.feature_slot.fill_(0)
             operation = PreparedVisionGeneration(encoder, state, records, frame, sequence, buffers=buffers)
             states.append(state)
             owners.append(operation)

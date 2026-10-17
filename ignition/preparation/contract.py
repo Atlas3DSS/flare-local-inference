@@ -30,6 +30,7 @@ def text_inputs(kind):
         values += [b("token_ids", p.PROMPT_AND_PENDING_TOKEN if kind == "mixed" else p.PROMPT_TOKEN, p.PACKED_TOKEN),
                    b("prefill_positions", p.PROMPT_POSITION, p.PACKED_TOKEN),
                    b("vision_token_indices", p.IMAGE_FEATURE_INDEX, p.PACKED_TOKEN),
+                   b("vision_feature_slot", p.IMAGE_FEATURE_SLOT, p.SCALAR, padding=-1),
                    b("vision_left", p.IMAGE_LEFT_CONTEXT, p.PACKED_TOKEN),
                    b("vision_right", p.IMAGE_RIGHT_CONTEXT, p.PACKED_TOKEN)]
     if kind in ("decode", "speculative", "proposal", "verification"):
@@ -101,13 +102,14 @@ def prefix_boundary(roles, *, append_role=None, minimum_messages=1, required_sta
 def model_contract(*, vocabulary, input_vocabulary=None, vision=None, page_tokens, page_tables, graphs, frontend,
                    regions):
     return dict(version=1, vocabulary=vocabulary, input_vocabulary=input_vocabulary or vocabulary,
-        vision=vision or dict(features_per_request=0, max_images=0, patches_per_feature=0, patch_capacities=[]),
+        vision={"feature_slots": 0, **(vision or dict(features_per_request=0, max_images=0, patches_per_feature=0, patch_capacities=[]))},
         cache=dict(page_tokens=page_tokens, page_tables=page_tables, regions=regions), graphs=graphs, frontend=frontend)
 
 
 def vision_inputs(fields):
     return {name: binding(name, p.REQUEST_SLOT if name == "vision_slot" else
-                         p.REQUEST_GENERATION if name == "vision_generation" else p.IMAGE_TENSOR,
+                         p.REQUEST_GENERATION if name == "vision_generation" else
+                         p.IMAGE_FEATURE_SLOT if name == "vision_feature_slot" else p.IMAGE_TENSOR,
                          p.SCALAR, tensor=name) for name in fields}
 
 

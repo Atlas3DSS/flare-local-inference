@@ -29,17 +29,24 @@ class Scratch:
 
     @classmethod
     def allocate(cls, config, shard, tokens, samples, device, *, buffers=None):
+        from ignition.preparation.scratch import GraphBufferPool
+
         c = config.text
-        def zeros(rows, columns, dtype=torch.bfloat16):
-            return (torch.zeros((rows, columns), dtype=dtype, device=device) if buffers is None
-                    else buffers.zeros((rows, columns), dtype))
-        return cls(zeros(tokens, c["hidden_size"]), zeros(tokens, c["hidden_size"]),
-            AttentionScratch.allocate(config, shard, tokens, device, requests=samples, buffers=buffers),
-            MLPScratch.allocate(tokens, c["hidden_size"], c["intermediate_size"] // shard.world_size, device, buffers=buffers),
-            zeros(tokens, c["n_routed_experts"], torch.float32),
-            RouterScratch.allocate(tokens, device, experts=c["n_routed_experts"], top_k=c["num_experts_per_tok"], buffers=buffers),
-            zeros(tokens, c["hidden_size"]), zeros(samples, c["hidden_size"]),
-            zeros(samples, c["vocab_size"] // shard.world_size), zeros(samples, c["vocab_size"]))
+        if buffers is None:
+            buffers = GraphBufferPool(device, chunk_bytes=2 << 20).cursor()
+        def zeros(rows, columns, dtype=torch.bfloat16, *, cursor=buffers):
+            return cursor.zeros((rows, columns), dtype)
+        embedding, normalized = zeros(tokens, c["hidden_size"]), zeros(tokens, c["hidden_size"])
+        reduced = zeros(tokens, c["hidden_size"])
+        attn, ffn = buffers.fork(), buffers.fork()
+        attention = AttentionScratch.allocate(config, shard, tokens, device, requests=samples, buffers=attn)
+        dense = MLPScratch.allocate(tokens, c["hidden_size"], c["intermediate_size"] // shard.world_size, device, buffers=ffn)
+        router_logits = zeros(tokens, c["n_routed_experts"], torch.float32, cursor=ffn)
+        router = RouterScratch.allocate(tokens, device, experts=c["n_routed_experts"], top_k=c["num_experts_per_tok"], buffers=ffn)
+        buffers.join(attn, ffn)
+        return cls(embedding, normalized, attention, dense, router_logits, router, reduced,
+            zeros(samples, c["hidden_size"]), zeros(samples, c["vocab_size"] // shard.world_size),
+            zeros(samples, c["vocab_size"]))
 
     def rows(self, tokens, samples):
         return type(self)(self.embedding[:tokens], self.normalized[:tokens], self.attention.rows(tokens),

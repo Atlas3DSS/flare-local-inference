@@ -63,6 +63,29 @@ def test_graph_cursor_reuses_space_skipped_by_larger_buffers_without_moving_live
     assert torch.all(large == 17) and torch.all(small == 23) and torch.all(tail == 23)
 
 
+def test_sequential_stage_cursors_preserve_live_values_and_concurrent_branches():
+    pool = GraphBufferPool("cpu", chunk_bytes=1024)
+    graph = pool.cursor()
+    live = graph.full(256, 7, torch.uint8)
+    attention, experts = graph.fork(), graph.fork()
+    attended = attention.zeros(512, torch.uint8)
+    shared = experts.zeros(256, torch.uint8)
+    routed = experts.zeros(512, torch.uint8)
+    assert attended.data_ptr() == shared.data_ptr()
+    assert routed.data_ptr() == shared.data_ptr() + 256
+    graph.join(attention, experts)
+    retained = graph.full(256, 11, torch.uint8)
+    attended.fill_(13)
+    assert torch.all(live == 7) and torch.all(retained == 11)
+    shared.fill_(17)
+    routed.fill_(19)
+    assert torch.all(shared == 17) and torch.all(routed == 19)
+    assert torch.all(live == 7) and torch.all(retained == 11)
+    assert pool.nbytes == 2048
+    with pytest.raises(ValueError, match="share a pool"):
+        graph.join(GraphBufferPool("cpu").cursor())
+
+
 def test_rank_scratch_finalization_preserves_shared_offsets(monkeypatch):
     import torch.distributed as dist
 

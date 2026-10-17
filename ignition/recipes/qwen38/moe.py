@@ -95,14 +95,15 @@ class QwenMoeScratch:
     shared: SharedExpertScratch
 
     @classmethod
-    def allocate(cls, tokens: int, device, *, intermediate=640, buffers=None) -> QwenMoeScratch:
+    def allocate(cls, tokens: int, device, *, intermediate=640, buffers=None, output=None) -> QwenMoeScratch:
         if tokens <= 0:
             raise ValueError("MoE capacity must be positive")
         def zeros(width):
             return (torch.zeros((tokens, width), dtype=torch.bfloat16, device=device) if buffers is None
                     else buffers.zeros((tokens, width), torch.bfloat16))
         return cls(zeros(512), RouterScratch.allocate(tokens, device, experts=512, top_k=10, buffers=buffers),
-            zeros(2560), zeros(2560), SharedExpertScratch.allocate(tokens, device, intermediate=intermediate, buffers=buffers))
+            zeros(2560), zeros(2560) if output is None else output,
+            SharedExpertScratch.allocate(tokens, device, intermediate=intermediate, buffers=buffers))
 
     def rows(self, tokens: int) -> QwenMoeScratch:
         if not 0 < tokens <= self.router_logits.shape[0]:

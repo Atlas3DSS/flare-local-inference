@@ -14,6 +14,7 @@ pub const BATCH_CAPACITIES: [usize; 7] = [1, 2, 4, 8, 16, 32, 64];
 pub enum Dtype {
     Bool,
     Uint8,
+    Float8E4m3fn,
     Int32,
     Int64,
     Float32,
@@ -24,7 +25,7 @@ pub enum Dtype {
 impl Dtype {
     pub fn size(self) -> usize {
         match self {
-            Self::Bool | Self::Uint8 => 1,
+            Self::Bool | Self::Uint8 | Self::Float8E4m3fn => 1,
             Self::Float16 | Self::Bfloat16 => 2,
             Self::Int32 | Self::Float32 => 4,
             Self::Int64 => 8,
@@ -38,6 +39,7 @@ impl TryFrom<&str> for Dtype {
         match value {
             "bool" => Ok(Self::Bool),
             "uint8" => Ok(Self::Uint8),
+            "float8_e4m3fn" => Ok(Self::Float8E4m3fn),
             "int32" => Ok(Self::Int32),
             "int64" => Ok(Self::Int64),
             "float32" => Ok(Self::Float32),

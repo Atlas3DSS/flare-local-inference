@@ -56,6 +56,7 @@ from .weights import ModelWeights
 
 @dataclass(frozen=True)
 class PreparationConfig:
+    image_concurrency: int | None = None
     compile_workers: int | None = None
     tuning_replica: TuningReplica | None = None
     devices: tuple[int, ...] = tuple(range(8))
@@ -73,6 +74,9 @@ class PreparationConfig:
     speculative_token_capacity: int | None = None
 
     def __post_init__(self):
+        from ignition.components.capacity import image_capacity
+
+        object.__setattr__(self, "image_concurrency", image_capacity(self.max_active, self.image_concurrency))
         if (
             len(self.devices) not in (2, 4, 8)
             or len(set(self.devices)) != len(self.devices)
@@ -215,7 +219,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         )
         vision_inputs = VisionInputs.allocate(device)
         vision_prefill = PrefillVisionInputs.allocate(config.prefill_chunk_size, device)
-        vision_state = VisionState(inputs, vision_prefill, requests, image_token=weights.config.text["image_token_id"],
+        vision_state = VisionState(inputs, vision_prefill, requests, image_slots=config.image_concurrency, image_token=weights.config.text["image_token_id"],
                                    features=FEATURES, hidden=HIDDEN)
         vision_storage = {}
         environment = DecoderEnvironment.load(snapshot, vision_state)
@@ -357,7 +361,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                 buffers=cursor,
             )
             forward = PreparedVisionGeneration(encoder, vision_state, records, frame, sequence, buffers=cursor)
-            add(name, forward, "vision", 1, capacity, vision_inputs.buffers())
+            add(name, forward, "vision", 1, capacity, (*vision_inputs.buffers(), "vision_feature_slot"))
         row_inputs = ("request_state_rows", "row_slot_ids", "row_generations", "live_rows")
         for enabled in modes:
             suffix = "-no-mtp" if config.dflash and not enabled else ""
@@ -484,7 +488,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
             image_profile="mimo"),
         "sampling_defaults": RECIPE.sampling_defaults.as_dict(),
         "assets": assets,
-        "model_contract": prepare_contract(signatures, buffers, pool, page_tokens=PAGE_TOKENS, draft_lag=0 if config.dflash else None, regions=cache_regions),
+        "model_contract": prepare_contract(signatures, buffers, pool, image_slots=config.image_concurrency, page_tokens=PAGE_TOKENS, draft_lag=0 if config.dflash else None, regions=cache_regions),
     }
     memory = {
         "rank": rank,

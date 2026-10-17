@@ -830,9 +830,13 @@ impl<'a> Worker<'a> {
             }
         }
         while self.scheduler.has_available_slot() {
-            let (incoming, parked) = match self.parked.pop_front() {
+            let images_available = self.scheduler.has_available_image_slot();
+            let parked = self.parked.iter().position(|(incoming, _)|
+                images_available || incoming.prompt.images.is_none());
+            let (incoming, parked) = match parked.and_then(|index| self.parked.remove(index)) {
                 Some((incoming, parked)) => (incoming, Some(parked)),
-                None => match self.pending.pop_front() {
+                None => match self.pending.iter().position(|incoming|
+                    images_available || incoming.prompt.images.is_none()).and_then(|index| self.pending.remove(index)) {
                     Some(incoming) => (incoming, None),
                     None => break,
                 },
@@ -1384,6 +1388,8 @@ impl<'a> Worker<'a> {
                 step,
                 self.config,
                 request.request,
+                self.scheduler.request(request.request)?.image_slot
+                    .ok_or("vision request lacks an image feature slot")?,
                 request
                     .incoming
                     .prompt
@@ -1872,6 +1878,7 @@ mod tests {
                 vocabulary: 248320,
                 page_tokens: 64,
                 vision: crate::model::VisionCapabilities {
+                    feature_slots: 4,
                     features_per_request: 16384,
                     max_images: 4,
                     patches_per_feature: 4,
@@ -2542,6 +2549,7 @@ mod tests {
                 vocabulary: 248320,
                 page_tokens: 64,
                 vision: crate::model::VisionCapabilities {
+                    feature_slots: 4,
                     features_per_request: 16384,
                     max_images: 4,
                     patches_per_feature: 4,

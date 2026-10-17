@@ -19,6 +19,7 @@ fn scheduler_with_pages(snapshots: u32, mtp: bool, page_tokens: usize) -> Reques
             vocabulary: 248320,
             page_tokens,
             vision: crate::model::VisionCapabilities {
+                feature_slots: 4,
                 features_per_request: 16384,
                 max_images: 4,
                 patches_per_feature: 4,

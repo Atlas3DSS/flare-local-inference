@@ -11,6 +11,16 @@ def request_capacity(concurrency: int) -> int:
     return 1 << (concurrency - 1).bit_length()
 
 
+def image_capacity(concurrency: int, capacity: int | None = None) -> int:
+    """Reserve independent feature slots for concurrently active image requests."""
+    request_capacity(concurrency)
+    if capacity is None:
+        return min(4, concurrency)
+    if type(capacity) is not int or not 1 <= capacity <= concurrency:
+        raise ValueError("image concurrency must be an integer from 1 through max_active")
+    return capacity
+
+
 def prefill_capacities(chunk_size: int) -> tuple[int, ...]:
     """Token capacities offered to Helios for prompt chunk scheduling.
 

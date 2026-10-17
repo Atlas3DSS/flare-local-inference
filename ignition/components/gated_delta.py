@@ -68,7 +68,8 @@ class GDNScratch:
     prefill_beta: torch.Tensor
 
     @classmethod
-    def allocate(cls, tokens: int, device: torch.device, *, world_size=1, hidden_size=2560, buffers=None) -> GDNScratch:
+    def allocate(cls, tokens: int, device: torch.device, *, world_size=1, hidden_size=2560, buffers=None,
+                 output=None) -> GDNScratch:
         if type(tokens) is not int or tokens <= 0:
             raise ValueError("GDN token capacity must be positive")
         def zeros(width):
@@ -76,10 +77,12 @@ class GDNScratch:
                     else buffers.zeros((tokens, width), torch.bfloat16))
         qkvz = zeros(16384 // world_size)
         ba = zeros(96 // world_size)
-        convolved, recurrence, gated, output = (
+        convolved, recurrence, gated = (
             zeros(width)
-            for width in (10240 // world_size, 6144 // world_size, 6144 // world_size, hidden_size))
-        prefill = PrefillBuffers.allocate(tokens, device, key_heads=16 // world_size, value_heads=48 // world_size,
+            for width in (10240 // world_size, 6144 // world_size, 6144 // world_size))
+        output = zeros(hidden_size) if output is None else output
+        prefill = PrefillBuffers.allocate(tokens if sm103.is_sm103(device) else 0, device,
+                                         key_heads=16 // world_size, value_heads=48 // world_size,
                                          buffers=buffers)
         return cls(qkvz[:, :10240 // world_size], convolved, qkvz[:, 10240 // world_size:], ba[:, 48 // world_size:], ba[:, :48 // world_size],
                    recurrence, gated, output, qkvz, ba, prefill.query, prefill.key, prefill.value, prefill.decay,

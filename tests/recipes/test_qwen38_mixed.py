@@ -59,6 +59,24 @@ def test_mixed_capture_defaults_off_without_changing_speculation():
         assert config.token_capacity == config.prefill_chunk_size
 
 
+def test_prompt_sampling_precedes_draft_scratch_reuse():
+    from ignition.recipes.qwen38.mixed_model import DecodeTarget
+
+    logits = torch.empty((3, 4))
+    scratch = SimpleNamespace(logits=logits[:2])
+    sampled = []
+
+    def target():
+        logits.fill_(0)
+        logits[-1, 2] = 1
+
+    decoder = DecodeTarget(scratch, target, lambda: sampled.append(int(logits[-1].argmax())))
+    decoder()
+    logits.fill_(float("nan"))
+    assert sampled == [2]
+    assert decoder.scratch.logits.shape == (2, 4)
+
+
 @pytest.mark.parametrize("prompt_row", [-1, 0, 1, 2, 3])
 @pytest.mark.parametrize("width", [1, 3, 6])
 def test_packing_preserves_native_row_order_and_physical_slots(prompt_row, width):

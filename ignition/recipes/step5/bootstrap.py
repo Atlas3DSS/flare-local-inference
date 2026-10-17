@@ -66,6 +66,7 @@ from .weights import ModelWeights
 
 @dataclass(frozen=True)
 class PreparationConfig:
+    image_concurrency: int | None = None
     compile_workers: int | None = None
     tuning_replica: TuningReplica | None = None
     devices: tuple[int, ...] = tuple(range(8))
@@ -85,6 +86,9 @@ class PreparationConfig:
     expert_scale_compression: str | None = None
 
     def __post_init__(self):
+        from ignition.components.capacity import image_capacity
+
+        object.__setattr__(self, "image_concurrency", image_capacity(self.max_active, self.image_concurrency))
         if self.expert_scale_compression not in (None, "csf"):
             raise ValueError("Step-5 expert scale compression must be None or 'csf'")
         if len(self.devices) not in (4, 8, 16) or len(set(self.devices)) != len(self.devices) or any(d < 0 for d in self.devices):
@@ -185,7 +189,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
             draft_storage = (Scratch.allocate(weights.config, shard, draft_tokens, draft_tokens, config.context,
                                              device, buffers=graph_buffers.cursor()) if config.mtp else None)
         vision_prefill = PrefillVisionInputs.allocate(config.prefill_chunk_size, device)
-        vision_state = VisionState(inputs, vision_prefill, requests, image_token=128001,
+        vision_state = VisionState(inputs, vision_prefill, requests, image_slots=config.image_concurrency, image_token=128001,
                                    features=FEATURES, hidden=weights.config.hidden // shard.world_size)
         buffers = dict(inputs.buffers(), **vision_inputs.buffers(), **vision_prefill.buffers(), **commands.buffers(),
             **{name: getattr(admission, name) for name in admission.__dataclass_fields__},
@@ -244,7 +248,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
             encoder = PreparedVision(weights.vision, vision_storage.rows(capacity), vision_inputs, runtime=vision_collective,
                 coordinator=coordinator, session=session, workspace=arena, name=name, buffers=private)
             add(name, PreparedVisionGeneration(encoder, vision_state, records, frame, sequence, buffers=private),
-                "vision", 1, capacity, vision_inputs.buffers())
+                "vision", 1, capacity, (*vision_inputs.buffers(), "vision_feature_slot"))
         row_inputs = ("request_state_rows", "row_slot_ids", "row_generations", "live_rows")
         for enabled in modes:
             suffix = "-no-mtp" if config.mtp and not enabled else ""
@@ -297,7 +301,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
     server_config = {"identity": identity, "model_id": snapshot.name, "max_sequence_tokens": config.context,
         "prefill_chunk_size": config.prefill_chunk_size, "pages": pages, "state_rows": state_rows, "snapshots": snapshots,
         "page_tokens": PAGE_TOKENS, "frontend": frontend, "sampling_defaults": RECIPE.sampling_defaults.as_dict(), "assets": assets,
-        "model_contract": prepare_contract(signatures, buffers, pool, vocabulary=vocabulary, mtp=config.mtp)}
+        "model_contract": prepare_contract(signatures, buffers, pool, image_slots=config.image_concurrency, vocabulary=vocabulary, mtp=config.mtp)}
     if config.mtp:
         server_config.update(speculative_widths=config.speculative_widths,
             speculative_fixed_width=config.speculative_fixed_width,

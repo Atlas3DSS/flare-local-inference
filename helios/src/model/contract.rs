@@ -50,7 +50,7 @@ contract_enum!(ValueSource {
     EosTokenIds = 26, EosCount = 27, PromptHistogram = 28, GrammarMask = 29,
     GrammarEnabled = 30, CopyTokenIds = 31, CopyTokenCount = 32,
     CopyConsumedTokens = 33, CopyGeneration = 34, CopyGrammarMask = 35,
-    CopyGrammarCount = 36, ImageTensor = 37,
+    CopyGrammarCount = 36, ImageTensor = 37, ImageFeatureSlot = 38,
 });
 contract_enum!(InputIndexing { Scalar = 1, SubmissionRow = 2, RequestRow = 3, PackedToken = 4, ActiveRow = 5 });
 contract_enum!(StateAccessKind { Read = 1, Write = 2, ReadWrite = 3 });

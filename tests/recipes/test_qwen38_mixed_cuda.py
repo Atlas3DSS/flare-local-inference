@@ -99,6 +99,7 @@ def test_mixed_metadata_and_committed_endpoints(enabled, width, compiled, live):
                 inputs.prefill_row.fill_(prompt_row)
                 inputs.token_ids.copy_(torch.arange(tokens, device=device) + 1000)
                 inputs.vision_token_indices.fill_(-1)
+                features.feature_slot.fill_(-1)
                 embedding.fill_(-4)
                 inputs.prefill_positions.copy_((torch.arange(tokens, device=device) + 20)[:, None].expand(-1, 3))
                 stale_row = (prompt_row + 1) % 4
@@ -113,6 +114,7 @@ def test_mixed_metadata_and_committed_endpoints(enabled, width, compiled, live):
                 starts = [sum(lengths[:r]) for r in range(4)]
                 if prompt_row >= 0:
                     inputs.vision_token_indices[starts[prompt_row] + 17] = 0
+                    features.feature_slot.fill_(0)
                 torch.cuda.synchronize()
                 before = torch.cuda.memory_stats()["allocation.all.allocated"]
                 ticket = worker.submit(0)

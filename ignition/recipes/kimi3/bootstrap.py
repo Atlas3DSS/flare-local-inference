@@ -44,6 +44,7 @@ from ignition.components.vision_state import PrefillVisionInputs, VisionState
 
 @dataclass(frozen=True)
 class PreparationConfig:
+    image_concurrency: int | None = None
     compile_workers: int | None = None
     tuning_replica: TuningReplica | None = None
     devices: tuple[int, ...] = tuple(range(16))
@@ -70,6 +71,9 @@ class PreparationConfig:
         return max((b * w for b, w in self.speculative_shapes), default=request_capacity(self.max_active))
 
     def __post_init__(self):
+        from ignition.components.capacity import image_capacity
+
+        object.__setattr__(self, "image_concurrency", image_capacity(self.max_active, self.image_concurrency))
         if len(self.devices) != 16 or len(set(self.devices)) != 16 or any(d < 0 for d in self.devices):
             raise ValueError("Kimi K3 preparation requires sixteen distinct GPUs")
         request_capacity(self.max_active)
@@ -167,7 +171,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
             vision_inputs = VisionInputs.allocate(device)
             vision_storage = {}
         vision_prefill = PrefillVisionInputs.allocate(config.prefill_chunk_size, device)
-        vision_state = VisionState(inputs, vision_prefill, requests, image_token=163605,
+        vision_state = VisionState(inputs, vision_prefill, requests, image_slots=config.image_concurrency, image_token=163605,
                                    features=FEATURES, hidden=HIDDEN // shard.world_size)
         buffers = dict(inputs.buffers(), **vision_inputs.buffers(), **vision_prefill.buffers(), **commands.buffers(),
             **{name: getattr(admission, name) for name in admission.__dataclass_fields__},
@@ -242,7 +246,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                 session=session, workspace=arena, name=name, buffers=cursor)
             forward = PreparedVisionGeneration(encoder, vision_state, records, frame, sequence,
                                                 feature_range=shard.partition(HIDDEN), buffers=cursor)
-            add(name, forward, "vision", 1, capacity, vision_inputs.buffers())
+            add(name, forward, "vision", 1, capacity, (*vision_inputs.buffers(), "vision_feature_slot"))
         row_inputs = ("request_state_rows", "row_slot_ids", "row_generations", "live_rows")
         for enabled in modes:
             mode_weights = weights if enabled else replace(weights, draft=None)
@@ -304,7 +308,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         prefill_chunk_size=config.prefill_chunk_size, pages=pages, state_rows=state_rows, snapshots=snapshots,
         page_tokens=PAGE_TOKENS, frontend=frontend,
         sampling_defaults=RECIPE.sampling_defaults.as_dict(), assets=assets,
-        model_contract=prepare_contract(signatures, buffers, pool, vocabulary=vocabulary, draft_lag=0 if drafting else None))
+        model_contract=prepare_contract(signatures, buffers, pool, image_slots=config.image_concurrency, vocabulary=vocabulary, draft_lag=0 if drafting else None))
     free, total = torch.cuda.mem_get_info(device)
     memory = dict(rank=rank, world_size=shard.world_size, device=config.devices[rank], weights_bytes=weights.allocated_bytes,
         mapped_host_bytes=0, offloaded_bytes=0, continuation_bytes=pool.backing.nbytes, state_rows=state_rows,

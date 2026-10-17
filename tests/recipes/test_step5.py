@@ -122,15 +122,25 @@ def test_vision_text_and_draft_scratch_share_storage(checkpoint_config):
     for execution in (vision, text, decode, draft):
         values = list(tensors(execution))
         footprints.append(sum(t.nbytes for t in values))
-        intervals = {}
-        for tensor in values:
-            key = tensor.untyped_storage()._cdata
-            assert key in owners
-            start = tensor.storage_offset() * tensor.element_size()
-            intervals.setdefault(key, []).append((start, start + tensor.nbytes))
-        for ranges in intervals.values():
-            ordered = sorted(ranges)
-            assert all(left[1] <= right[0] for left, right in zip(ordered, ordered[1:]))
+        assert all(t.untyped_storage()._cdata in owners for t in values)
+        if execution is vision:
+            stages = [values]
+        else:
+            private = {"attention", "dense", "shared", "router_logits", "router", "experts", "partial"}
+            persistent = [t for field in fields(execution) if field.name not in private
+                          for t in tensors(getattr(execution, field.name))]
+            stages = [persistent + list(tensors(execution.attention)),
+                      persistent + list(tensors(execution.dense)),
+                      persistent + [t for field in private - {"attention", "dense"}
+                                    for t in tensors(getattr(execution, field))]]
+        for stage in stages:
+            intervals = {}
+            for tensor in stage:
+                start = tensor.storage_offset() * tensor.element_size()
+                intervals.setdefault(tensor.untyped_storage()._cdata, []).append((start, start + tensor.nbytes))
+            for ranges in intervals.values():
+                ordered = sorted(ranges)
+                assert all(left[1] <= right[0] for left, right in zip(ordered, ordered[1:]))
     assert vision.patches.untyped_storage()._cdata == text.embedding.untyped_storage()._cdata
     assert (text.embedding.untyped_storage()._cdata == decode.embedding.untyped_storage()._cdata
             == draft.embedding.untyped_storage()._cdata)

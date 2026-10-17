@@ -50,13 +50,17 @@ class HyperconnectionScratch:
     down_and_injection: torch.Tensor
 
     @classmethod
-    def allocate(cls, tokens: int, device: torch.device, *, buffers=None) -> HyperconnectionScratch:
+    def allocate(cls, tokens: int, device: torch.device, *, buffers=None, projected=None,
+                 block_input=None) -> HyperconnectionScratch:
         if tokens <= 0:
             raise ValueError("hyperconnection token capacity must be positive")
-        normalized, projected, bottleneck, gate_workspace, block_input = (
-            (torch.zeros((tokens, width), device=device, dtype=torch.bfloat16) if buffers is None
-             else buffers.zeros((tokens, width), torch.bfloat16))
-            for width in (10240, 336, 320, 10240, 2560))
+        def zeros(width):
+            return (torch.zeros((tokens, width), device=device, dtype=torch.bfloat16) if buffers is None
+                    else buffers.zeros((tokens, width), torch.bfloat16))
+        normalized = zeros(10240)
+        projected = zeros(336) if projected is None else projected
+        bottleneck, gate_workspace = zeros(320), zeros(10240)
+        block_input = zeros(2560) if block_input is None else block_input
         return cls(normalized, projected[:, :320], bottleneck, gate_workspace,
                    projected[:, 320:324], block_input, projected)
 

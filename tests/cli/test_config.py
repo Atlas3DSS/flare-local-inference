@@ -77,6 +77,22 @@ def test_recipe_supplies_concurrency_when_the_file_is_silent(tmp_path):
     assert configuration.max_concurrency("qwen3.8-flash", 4) == Setting(4, "recipe")
 
 
+def test_image_concurrency_configuration_is_scoped_to_vision_and_flags_win(tmp_path):
+    from types import SimpleNamespace
+    from ignition.cli.preparation import image_capacity_setting
+
+    config = load(tmp_path, '[defaults]\nimage_concurrency = 4\n[models."vision"]\nimage_concurrency = 2\n')
+    def model(alias, images):
+        return SimpleNamespace(checkpoint=SimpleNamespace(alias=alias), recipe=SimpleNamespace(max_images=images))
+    assert image_capacity_setting(config, model("vision", 4)) == 2
+    assert image_capacity_setting(config, model("vision", 4), 1) == 1
+    assert image_capacity_setting(config, model("another-vision", 4)) == 4
+    assert image_capacity_setting(config, model("text", 0)) is None
+    assert image_capacity_setting(config, model("text", 0), 1) == 1
+    with pytest.raises(UsageError, match="at least 1"):
+        load(tmp_path, '[defaults]\nimage_concurrency = 0\n')
+
+
 def test_compiler_worker_flag_overrides_configured_host_budget(tmp_path):
     from ignition.cli.preparation import compiler_workers
 

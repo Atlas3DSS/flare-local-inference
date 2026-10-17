@@ -69,17 +69,28 @@ class VisionScratch:
 
     @classmethod
     def allocate(cls, patches, shard, device, *, buffers=None):
-        def zeros(*shape):
-            return (torch.zeros(shape, dtype=torch.bfloat16, device=device) if buffers is None
-                    else buffers.zeros(shape, torch.bfloat16))
+        def zeros(cursor, *shape):
+            return (torch.zeros(shape, dtype=torch.bfloat16, device=device) if cursor is None
+                    else cursor.zeros(shape, torch.bfloat16))
         world = shard.world_size
         heads = 16 // world
-        return cls(zeros(patches, 588), zeros(patches, 1536), zeros(patches, 1536),
-            zeros(patches, 3 * heads * 96), *(zeros(patches, heads, 96) for _ in range(4)),
-            zeros(patches, 1536), zeros(patches, 1536), zeros(patches, 8960 // world), zeros(patches, 8960 // world),
-            zeros(patches // 4, 1536 * 9), zeros(patches // 4, 3072 // world),
-            zeros(patches // 16, 3072 // world * 9), zeros(patches // 16, 6144), zeros(patches // 16, 6144),
-            zeros(patches // 16, 4096 // world))
+        pixels = zeros(buffers, patches, 588)
+        hidden, normalized, projected, reduced = (zeros(buffers, patches, 1536) for _ in range(4))
+        stages = [buffers.fork() for _ in range(3)] if buffers is not None else [None] * 3
+        attention, feedforward, merger = stages
+        mlp_up, activated = (zeros(feedforward, patches, 8960 // world) for _ in range(2))
+        qkv = zeros(attention, patches, 3 * heads * 96)
+        query, key, value, attended = (zeros(attention, patches, heads, 96) for _ in range(4))
+        first_input = zeros(merger, patches // 4, 1536 * 9)
+        first_output = zeros(merger, patches // 4, 3072 // world)
+        second_input = zeros(merger, patches // 16, 3072 // world * 9)
+        second_output, second_reduced = (zeros(merger, patches // 16, 6144) for _ in range(2))
+        output = zeros(merger, patches // 16, 4096 // world)
+        if buffers is not None:
+            buffers.join(*stages)
+        return cls(pixels, hidden, normalized, qkv, query, key, value, attended, projected,
+                   reduced, mlp_up, activated, first_input, first_output, second_input,
+                   second_output, second_reduced, output)
 
     def rows(self, patches):
         def divisor(name):
