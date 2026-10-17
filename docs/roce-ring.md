@@ -14,8 +14,9 @@ runtime compilation, or steady-state GPU allocation.
 
 The ring can run over a switch or hosts cabled directly to their neighbors.
 Forwarding runs on host CPUs; ConnectX hardware hairpin forwarding is not
-implemented. Four-Spark transport checks pass on a switched fabric. Physical
-ring cabling and full-model ring serving remain unqualified.
+implemented. Four-Spark native transport and GPU graph replay checks pass on a
+switched fabric. Physical ring cabling and full-model ring serving remain
+unqualified.
 
 ## Rank order and routes
 
@@ -191,19 +192,77 @@ on all four commands. The default HCA names and GID index match the switched
 Spark lab. Other fabrics must supply their own `--hca-names` and `--gid-index`.
 Add `--mesh` on every rank to validate ordinary direct routing.
 
-The vendored Flare proxy passes 120 mixed operations per rank in ring mode and
-60 in mesh mode on the four Sparks, each with sender skew and byte-exact output
-checks. Ring counters report two connected neighbors per rank and forwarded
-packets; mesh counters report three connected peers and no forwarded packets.
-Route-planning unit tests cover physical and switched endpoint layouts through
-16 ranks.
+On the switched Spark fabric with two rails, the shared proxy passes native
+RDMA ring checks with 120 mixed operations per rank across four physical
+hosts and 90 per rank across six logical ranks on three hosts. Contributions
+match byte for byte with sender delays of up to 3 ms. Every ring rank connects
+only its two neighbors and forwards packets; mesh checks use direct peer
+connections without forwarding. Route-planning unit tests cover physical and
+switched endpoint layouts through 16 ranks.
 
-These checks establish native transport progress and byte integrity on the
-switched fabric. Physical ring cabling, full-model CUDA graph serving, relay
-faults during GPU replay, and ring throughput remain unqualified. CPU relay
-work, extra RDMA hops, and per-packet acknowledgments add costs that require
-complete graph and serving measurements. Switched-fabric timings do not
-establish physical-ring performance.
+Four-rank GPU qualification of proxy ABI 9 at FlashInfer revision `c46a0b5`
+reports 109 passing cases and one capacity skip per rank. The graph stress cases
+exercise mesh and ring transport with changing two-shot sizes from 2 through
+16 MiB, plus mixed one-shot, variable-length, and
+two-shot operations. They check changed inputs and contribution counts across
+18 or 20 replays, with rotating 25 ms proxy pauses and rank-dependent submission
+delays. Two-rank qualification of the guarded proxy reports 110 passing cases
+and one capacity skip per rank, including successful execution at the last
+accepted generation and explicit failure on the following generation in both
+mesh and ring modes.
+
+Removing the GPU wait for `pipe_done` from a copied source produces a data
+integrity failure in the four-rank ring stress graph when message sizes change.
+The shared GPU suites also exercise stopped-proxy timeouts and invalid
+variable-length counts. Permanent relay failure under arbitrary schedules,
+physical ring cabling, full-model serving, and ring throughput remain
+unqualified. CPU relays, extra RDMA hops, and per-packet acknowledgments require
+complete graph and serving measurements before making performance claims.
+Switched-fabric results do not establish physical-ring performance.
+
+## Protocol model and runtime checks
+
+The [RoCEnante protocol models in FlashInfer](https://github.com/local-inference-lab/flashinfer/tree/73714d176fcc7d373320effb1766f1919483620c/tests/experimental/b12x/comm/formal)
+cover GPU staging, proxy posting, NIC payload reads, completion observation,
+and relay acknowledgments as separate transitions. FlashInfer owns these models
+because its GPU kernels and C proxy define the protocol. Flare uses the same C
+proxy, vendored in `helios/native/roce_proxy.c`, and pins the preparation
+dependency in `pyproject.toml` and `uv.lock`. Keep the vendored source identical
+to that dependency after its provenance header when changing the protocol.
+
+Flare enforces three boundaries around the protocol:
+
+- Before replay, the native transport checks the package's proxy ABI, collective
+  region layout, and routing table. Rank zero waits for every rank to connect.
+- After CUDA reports a frame complete, the executor checks transport health
+  before publishing its completion records. A proxy failure or GPU control
+  error poisons the executor; a kernel timeout is a failed operation.
+- At shutdown, the runtime drains replay streams while retaining the transport
+  and package. The proxy stops and destroys queue pairs before memory
+  registrations and package storage are released. An unconfirmed replay drain
+  retains those resource owners until process exit.
+
+The native conformance tests exercise the ABI, preflight rejection, and GPU
+control-error interpretation without opening an RDMA device or CUDA context:
+
+```sh
+cargo test --manifest-path helios/Cargo.toml --features roce \
+  --lib execution::roce::tests
+```
+
+This command requires a C compiler and libibverbs development files. Formal
+checks use finite configurations and explicit progress assumptions described
+with each model. They do not establish CPU/GPU/NIC cache coherence, unbounded
+sequence-number behavior, fault recovery, or full-model serving correctness.
+The RDMA validator and GPU replay tests exercise the implementation on hardware.
+
+The shared proxy accepts collective generations 1 through 2,147,483,647.
+An exhausted sequence fails before another transfer is posted and reports
+`RoCE sequence space exhausted`; restart every rank to create fresh transports.
+The limit keeps zero-initialized chunk-ready words distinct from staged data
+and reserves zero as the healthy error sentinel. It applies to mesh and ring
+routing, independently of the number of model steps or requests. Sequence wrap
+is unsupported; restarting the proxy thread alone does not reset the runtime.
 
 ## Failures
 
