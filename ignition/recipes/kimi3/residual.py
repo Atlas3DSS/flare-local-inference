@@ -16,9 +16,9 @@ TILES = ((2, 4), (2, 4), (4, 8), (4, 8), (8, 8), (8, 8), (8, 8), (8, 8), (4, 8))
 
 
 @triton.jit
-def _mix(Prefix, Delta, Blocks, Score, Norm, Output, prefix_stride, delta_stride, block_row_stride, block_stride,
-         output_stride, eps, output_eps, HIDDEN: tl.constexpr, SOURCES: tl.constexpr, WRITE: tl.constexpr,
-         DELTA: tl.constexpr, BLOCK: tl.constexpr, TILE: tl.constexpr):
+def _mix(Prefix, Delta, Blocks, Score, Norm, Output, Mixture, prefix_stride, delta_stride, block_row_stride,
+         block_stride, output_stride, mixture_stride, eps, output_eps, HIDDEN: tl.constexpr, SOURCES: tl.constexpr,
+         WRITE: tl.constexpr, DELTA: tl.constexpr, MIXTURE: tl.constexpr, BLOCK: tl.constexpr, TILE: tl.constexpr):
     row = tl.program_id(0).to(tl.int64)
     columns = tl.arange(0, BLOCK)
     valid = columns < HIDDEN
@@ -56,6 +56,8 @@ def _mix(Prefix, Delta, Blocks, Score, Norm, Output, prefix_stride, delta_stride
             accumulated = accumulated * rescale + tl.sum(exponentials[:, None] * values, axis=0)
             maximum = peak
         mixed = (accumulated / total).to(Prefix.dtype.element_ty).to(tl.float32)
+    if MIXTURE:
+        tl.store(Mixture + row * mixture_stride + columns, mixed.to(Mixture.dtype.element_ty), valid)
     normalized = (mixed * tl.rsqrt(tl.sum(mixed * mixed) / HIDDEN + output_eps)).to(Prefix.dtype.element_ty)
     output = tl.load(Norm + columns, valid, other=0.).to(tl.float32) * normalized.to(tl.float32)
     tl.store(Output + row * output_stride + columns, output.to(Output.dtype.element_ty), valid)
@@ -77,18 +79,22 @@ class ResidualStream:
             raise ValueError("residual stream tensors must be BF16 with contiguous rows")
         self.prefix, self.blocks, self.output = prefix, blocks, output
 
-    def mix(self, delta, mode, *, sources, write, score, norm, eps, output_eps):
+    def mix(self, delta, mode, *, sources, write, score, norm, eps, output_eps, mixture=None):
         """Apply ``mode`` with ``delta``, commit block ``write`` (or none for -1), and normalize the mixture
-        of the first ``sources`` committed blocks and the running sum."""
+        of the first ``sources`` committed blocks and the running sum; ``mixture`` also receives it unnormalized."""
         if not 0 <= sources <= self.blocks.shape[1] or not -1 <= write < self.blocks.shape[1] or write >= 0 and write < sources:
             raise ValueError("residual mixing reads only committed blocks and never overwrites one")
         if delta is not None and (delta.shape != self.prefix.shape or delta.stride(-1) != 1):
             raise ValueError("residual delta must match the running sum")
+        if mixture is not None and (mixture.shape != self.prefix.shape or mixture.stride(-1) != 1):
+            raise ValueError("residual mixture output must match the running sum")
         rows, hidden = self.prefix.shape
         delta = self.prefix if delta is None else delta
         tile, warps = TILES[min(sources, len(TILES) - 1)]
         torch.library.wrap_triton(_mix)[(rows,)](
-            self.prefix, delta, self.blocks, score, norm, self.output, self.prefix.stride(0), delta.stride(0),
-            self.blocks.stride(0), self.blocks.stride(1), self.output.stride(0), float(eps), float(output_eps),
-            hidden, sources, write, mode, triton.next_power_of_2(hidden), tile, num_warps=warps)
+            self.prefix, delta, self.blocks, score, norm, self.output, self.output if mixture is None else mixture,
+            self.prefix.stride(0), delta.stride(0), self.blocks.stride(0), self.blocks.stride(1),
+            self.output.stride(0), (self.output if mixture is None else mixture).stride(0), float(eps),
+            float(output_eps), hidden, sources, write, mode, mixture is not None, triton.next_power_of_2(hidden),
+            tile, num_warps=warps)
         return self.output

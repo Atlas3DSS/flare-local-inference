@@ -20,17 +20,21 @@ FRONTEND["reasoning"] = dict(kind=p.XTML_THINK, open="<|open|>think<|sep|>", clo
                              wrapping_newlines=0, terminal_markers=[])
 
 
-def prepare(signatures, buffers, pool, *, image_slots=4, vocabulary, draft_lag=None):
+def prepare(signatures, buffers, pool, *, image_slots=4, vocabulary, page_tokens=PAGE_TOKENS, draft_lag=None):
     inputs = {kind: c.text_inputs(kind) for kind in {s.kind for s in signatures.values()} if kind != "vision"}
     inputs["vision"] = c.vision_inputs({field for s in signatures.values() if s.kind == "vision" for field in s.inputs})
     continuation = c.state_view("state_pool", pool.layout.row_bytes)
+    consumed = pool.layout.region("consumed_tokens")
+    # Speculative continuations draft from every accepted position: the draft context trails consumption by draft_lag.
+    cursor = None if draft_lag is None else dict(state=c.state_view("state_pool", pool.layout.row_bytes,
+        offset=consumed.offset, nbytes=consumed.nbytes), lag_tokens=draft_lag)
     pending = c.state_view("request_pending_token", 8)
     consumed = pool.layout.region("consumed_tokens")
     cursor = None if draft_lag is None else dict(state=c.state_view("state_pool", pool.layout.row_bytes,
         offset=consumed.offset, nbytes=consumed.nbytes), lag_tokens=draft_lag)
     regions = [c.history_region(buffers, f"cache.{name}", tensor, p.PAGED_LATENT)
                for name, tensor in pool.pages.items()]
-    return c.model_contract(vocabulary=vocabulary, page_tokens=PAGE_TOKENS,
+    return c.model_contract(vocabulary=vocabulary, page_tokens=page_tokens,
         page_tables=[dict(buffer="page_tables", page_offset=0)],
         regions=[dict(kind=p.CONTINUATION_STATE, storage=continuation, tokens_per_record=1, window_tokens=0), *regions],
         graphs=c.graph_contracts(signatures, inputs, continuation=continuation, pending=pending, cursor=cursor),

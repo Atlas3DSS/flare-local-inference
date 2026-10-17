@@ -49,9 +49,10 @@ class PreparedRouteGather:
         expected = ((local_down, (rows, 3584 // world), torch.bfloat16), (local_router, (rows, 896 // world), torch.float32),
                     (correction_bias, (896,), torch.float32), (latent, (rows, 3584), torch.bfloat16),
                     (weights, (rows, 16), torch.float32), (ids, (rows, 16), torch.int32))
-        if not 1 <= rows <= MAX_ROWS or any(t.shape != shape or t.dtype != dtype or not t.is_contiguous()
-                                            for t, shape, dtype in expected):
-            raise ValueError("K3 route gather requires contiguous 1-8 row latent, router and route tensors")
+        wrong = [(tuple(t.shape), t.dtype, t.is_contiguous(), shape, dtype) for t, shape, dtype in expected
+                 if t.shape != shape or t.dtype != dtype or not t.is_contiguous()]
+        if not 1 <= rows <= MAX_ROWS or wrong:
+            raise ValueError(f"K3 route gather requires contiguous 1-8 row latent, router and route tensors: {wrong}")
         self.runtime, self.rows = runtime, rows
         self.local_down, self.local_router, self.correction_bias = local_down, local_router, correction_bias
         self.latent, self.weights, self.ids = latent, weights, ids

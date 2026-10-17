@@ -197,7 +197,7 @@ class Plan:
 
     @property
     def costs(self):
-        return self.recipe.costs(self.world_size, self.speculation)
+        return self.recipe.costs(self.world_size, self.speculation, self.checkpoint)
 
     @property
     def live_rows(self) -> int:
@@ -317,7 +317,7 @@ def fit(recipe: Recipe, checkpoint: Checkpoint, gpus: tuple[Gpu, ...], *, concur
     if expert_scale_compression is not None and expert_scale_compression not in checkpoint.scale_compressed_device_bytes:
         raise UsageError(f"--expert-scale-compression {expert_scale_compression}: {checkpoint.alias}"
                          " does not prepare this scale encoding")
-    costs = recipe.costs(len(gpus), speculation)
+    costs = recipe.costs(len(gpus), speculation, checkpoint)
     plan = Plan(recipe, checkpoint, gpus, concurrency, recipe.prefill_chunk if prefill_chunk is None else prefill_chunk,
                 speculation, 0, 0, 0, reserve_bytes,
                 recipe.weights_bytes(checkpoint, len(gpus), speculation, expert_scale_compression), costs.graph_bytes,

@@ -55,6 +55,10 @@ class Checkpoint:
     expansion_bytes: int = 0
     # Estimated resident device weights after optional lossless expert-scale compression.
     scale_compressed_device_bytes: Mapping[str, int] = field(default_factory=dict)
+    # Per-rank costs replacing the recipe's `ranks` and `plain_ranks` when this checkpoint's draft or state
+    # layout differs, such as a draft model that only this checkpoint carries.
+    ranks: Mapping[int, "RankCosts"] | None = None
+    plain_ranks: Mapping[int, "RankCosts"] | None = None
 
 
 @dataclass(frozen=True)
@@ -168,16 +172,22 @@ class Recipe:
     def __post_init__(self):
         if self.speculation is not None and set(self.plain_ranks) != set(self.ranks):
             raise ValueError("a recipe that speculates declares its costs without speculation for every rank count")
+        for checkpoint in self.checkpoints:
+            if any(costs is not None and set(costs) != set(self.ranks)
+                   for costs in (checkpoint.ranks, checkpoint.plain_ranks)):
+                raise ValueError(f"{checkpoint.alias} declares costs for other tensor-parallel sizes than its recipe")
 
     @property
     def tensor_parallel(self) -> tuple[int, ...]:
         return tuple(sorted(self.ranks))
 
-    def costs(self, world_size: int, speculation: Speculation | None) -> RankCosts:
-        """Return one rank's costs under the given speculation settings."""
+    def costs(self, world_size: int, speculation: Speculation | None, checkpoint: Checkpoint | None = None) -> RankCosts:
+        """Return one rank's costs under the given speculation settings, for `checkpoint` when it declares its own."""
+        ranks = self.ranks if checkpoint is None or checkpoint.ranks is None else checkpoint.ranks
+        plain = self.plain_ranks if checkpoint is None or checkpoint.plain_ranks is None else checkpoint.plain_ranks
         if speculation is None:
-            return (self.plain_ranks or self.ranks)[world_size]
-        costs = self.ranks[world_size]
+            return (plain or ranks)[world_size]
+        costs = ranks[world_size]
         return costs if speculation.learned else replace(
             costs, page_bytes=costs.page_bytes - costs.draft_page_bytes, draft_page_bytes=0)
 

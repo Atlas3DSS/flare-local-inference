@@ -14,10 +14,45 @@ from ignition.components.vocabulary import PreparedVocabularyProjection
 from ignition.components.kda_speculation import PreparedKDAReplay
 
 from .attention import PreparedMLA
+from .config import DSparkConfig
 from .kda import PreparedKDA
 from .pointwise import rms_norm_columns, situ
 from .residual import ADD, REPLACE, ResidualStream
 from .routing import MAX_ROWS as ROUTE_ROWS, PreparedRouteGather
+
+
+# A concurrent shared-expert MLP forks onto the auxiliary stream after its input is written and joins before its
+# output is added; the explicit mutated outputs order both against the routed branch through compilation.
+@torch.library.custom_op("flare::kimi3_start_shared_expert", mutates_args=("outputs",))
+def _start_shared_expert(source: torch.Tensor, weights: list[torch.Tensor], outputs: list[torch.Tensor],
+                         plans: list[int], auxiliary_stream: int) -> None:
+    from ignition.components.sm103_projection import bf16_out
+
+    main = torch.cuda.current_stream(source.device)
+    auxiliary = torch.cuda.ExternalStream(auxiliary_stream, device=source.device)
+    auxiliary.wait_stream(main)
+    gate_up, intermediate, projected = outputs
+    with torch.cuda.stream(auxiliary):
+        bf16_out(source, weights[0], gate_up, plans[0])
+        situ(gate_up, intermediate)
+        bf16_out(intermediate, weights[1], projected, plans[1])
+
+
+@_start_shared_expert.register_fake
+def _fake_start_shared_expert(source, weights, outputs, plans, auxiliary_stream) -> None:
+    pass
+
+
+@torch.library.custom_op("flare::kimi3_join_shared_expert", mutates_args=("outputs",))
+def _join_shared_expert(source: torch.Tensor, routed: torch.Tensor, outputs: list[torch.Tensor],
+                        auxiliary_stream: int) -> None:
+    main = torch.cuda.current_stream(source.device)
+    main.wait_stream(torch.cuda.ExternalStream(auxiliary_stream, device=source.device))
+
+
+@_join_shared_expert.register_fake
+def _fake_join_shared_expert(source, routed, outputs, auxiliary_stream) -> None:
+    pass
 
 
 @dataclass(frozen=True)
@@ -56,7 +91,9 @@ class Scratch:
 
 
 class PreparedMLP:
-    def __init__(self, weights, source, *, session, name, buffers):
+    """A SiTU MLP; with an overlapping workspace, ``start`` and ``finish`` run it on the auxiliary stream."""
+
+    def __init__(self, weights, source, *, session, name, buffers, workspace=None):
         rows, device = source.shape[0], source.device
         def buffer(field, width):
             if field not in buffers or buffers[field].shape[0] < rows:
@@ -67,10 +104,24 @@ class PreparedMLP:
                                             session=session, name=name + ".gate_up")
         self.down = UnquantizedProjection(self.input, weights["down"], buffer("output", source.shape[1]),
                                          session=session, name=name + ".down")
+        self.concurrent = workspace is not None and workspace.overlap
+        if self.concurrent:
+            # BF16 GEMVs and SiTU use no arena scratch, so the branch cannot alias main-stream workspaces.
+            self.stream_handle = workspace.auxiliary_stream.cuda_stream
+            self.weights = [weights["gate_up"], weights["down"]]
+            self.outputs = [self.gate_up.output, self.input, self.down.output]
 
     def __call__(self, source):
         situ(self.gate_up(source), self.input)
         return self.down(self.input)
+
+    def start(self, source):
+        _start_shared_expert(source, self.weights, self.outputs, [self.gate_up.plan.handle, self.down.plan.handle],
+                             self.stream_handle)
+
+    def finish(self, source, routed):
+        _join_shared_expert(source, routed, self.outputs, self.stream_handle)
+        return self.down.output
 
 
 class PreparedLatentMoE:
@@ -81,8 +132,9 @@ class PreparedLatentMoE:
         latent = c["routed_expert_hidden_size"]
 
         def buffer(field, width, dtype=torch.bfloat16):
+            # Decode-only fields first appear in a decoder of any row count, so each holds every route row.
             if field not in buffers or buffers[field].shape[0] < tokens:
-                buffers[field] = torch.zeros((tokens, width), dtype=dtype, device=device)
+                buffers[field] = torch.zeros((max(tokens, ROUTE_ROWS), width), dtype=dtype, device=device)
             return buffers[field][:tokens]
 
         self.source = buffer("source", hidden // shard.world_size)
@@ -131,10 +183,14 @@ class PreparedLatentMoE:
                 renormalize=True, routed_scaling_factor=c["routed_scaling_factor"], session=session, name=name + ".route")
         self.experts = PreparedRoutedExperts(self.latent, weights["experts"], routes.ids, routes.weights,
             self.expert_output, workspace=workspace, session=session, name=name + ".experts")
+        # Decode and verification rows run the shared experts beside routing and the routed experts.
         self.shared = PreparedMLP(weights["shared"], source, session=session, name=name + ".shared",
-                                  buffers=buffers.setdefault("shared", {}))
+                                  buffers=buffers.setdefault("shared", {}),
+                                  workspace=workspace if self.route_gather is not None else None)
 
     def __call__(self, source):
+        if self.shared.concurrent:
+            self.shared.start(source)
         logits = self.router_projection(source)
         if self.route_gather is not None:
             self.down(source)
@@ -149,13 +205,25 @@ class PreparedLatentMoE:
         self.expert_reduce(self.experts())
         rms_norm_columns(self.latent_sum, self.latent_norm, self.up_input, self.eps, begin=self.latent_begin)
         self.up(self.up_input)
-        self.output.add_(self.shared(source))
+        shared = self.shared.finish(source, self.output) if self.shared.concurrent else self.shared(source)
+        self.output.add_(shared)
         return self.output
 
 
 class PreparedDecoder:
+    """Kimi K3's decoder over packed rows.
+
+    ``verify`` rows are speculative candidates: KDA layers record them without advancing committed states
+    until ``commit`` replays each request's accepted prefix. With a draft model, every forward also keeps
+    the draft's context features in ``auxiliary``: DSpark's AttnRes mixtures entering its auxiliary layers,
+    or DFlash2's running sums after its target layers.
+    """
+
     def __init__(self, weights, scratch, metadata, pool, *, mode, runtime, vocabulary_runtime, embedding_runtime, router_runtime, vision_state,
-                 coordinator, session, name, workspace, buffers, kda_records=None, route_runtime=None):
+                 coordinator, session, name, workspace, buffers, kda_records=None, route_runtime=None, context=None):
+        # Verification records its candidate rows; other modes ignore records, which DFlash2 rounds always pass.
+        if mode not in ("prefill", "decode", "verify") or mode == "verify" and kda_records is None:
+            raise ValueError("Kimi K3 verification decodes recorded candidate rows")
         self.weights, self.scratch, self.metadata, self.pool = weights, scratch, metadata, pool
         self.vision_state = vision_state if mode == "prefill" else None
         config, source = weights.config, scratch.activations
@@ -166,7 +234,8 @@ class PreparedDecoder:
         self.delta = DeltaMetadata.allocate(metadata.starts.numel(), source.device,
             verification_columns=8 if mode == "verify" else 1)
         self.buffers, self.layers = buffers.scratch, []
-        self.target_layers = () if weights.draft is None else config.draft.target_layers
+        self.target_layers = (() if weights.draft is None or isinstance(config.draft, DSparkConfig)
+                              else config.draft.target_layers)
         self.auxiliary = None
         if self.target_layers:
             if "auxiliary" not in self.buffers:
@@ -181,13 +250,14 @@ class PreparedDecoder:
             attention = (PreparedKDA(w["attention"], source, pool.recurrent(index), self.delta,
                 eps=config.text["rms_norm_eps"], records=kda_records.layer(index) if mode == "verify" else None,
                 **kwargs) if kind == "kda" else
-                PreparedMLA(w["attention"], source, metadata, pool.attention(index), **kwargs))
+                PreparedMLA(w["attention"], source, metadata, pool.attention(index), context=context,
+                            peers=None if context is None else context.peers[index], **kwargs))
             if "mlp" in w:
                 mlp = PreparedMLP(w["mlp"], source, session=session, name=prefix + ".mlp",
                                   buffers=self.buffers.setdefault("dense", {}))
             else:
                 mlp = PreparedLatentMoE(w, source, config, weights.shard, runtime=runtime,
-                    router_runtime=router_runtime, route_runtime=route_runtime if mode == "decode" else None,
+                    router_runtime=router_runtime, route_runtime=route_runtime if mode != "prefill" else None,
                     coordinator=coordinator, session=session, name=prefix + ".moe", workspace=workspace,
                     buffers=self.buffers.setdefault("moe", {}), storage=buffers)
             # The sum buffer is consumed before the next attention or MLP reduction.
@@ -208,6 +278,15 @@ class PreparedDecoder:
         self.residual = ResidualStream(r["prefix"][:tokens], r["blocks"][:tokens], r["normalized"][:tokens])
         self.head = PreparedVocabularyProjection(scratch.hidden, weights.head, scratch.local_logits, scratch.logits,
             runtime=vocabulary_runtime, coordinator=coordinator, session=session, name=name + ".head")
+        # DSpark's context: the AttnRes mixture each auxiliary layer receives, before its input norm. Plans
+        # without the draft keep none.
+        self.auxiliary_layers = (config.draft.auxiliary_layers
+                                 if weights.draft is not None and isinstance(config.draft, DSparkConfig) else ())
+        if self.auxiliary_layers:
+            if "auxiliary" not in self.buffers:
+                self.buffers["auxiliary"] = torch.zeros((tokens, len(self.auxiliary_layers) * hidden),
+                                                        dtype=source.dtype, device=source.device)
+            self.auxiliary = self.buffers["auxiliary"][:tokens]
         self.replay = None
         if mode == "verify":
             indices = kda_records.layers
@@ -252,8 +331,12 @@ class PreparedDecoder:
         delta, mode = self.embedding.gather(local), REPLACE
         for index, (w, attention, mlp, reduce) in enumerate(self.layers):
             committed, boundary = -(-index // size), index % size == 0
+            mixture = None
+            if index in self.auxiliary_layers:
+                column = self.auxiliary_layers.index(index) * self.residual.prefix.shape[1]
+                mixture = self.auxiliary[:, column:column + self.residual.prefix.shape[1]]
             hidden = self.residual.mix(delta, mode, sources=committed, write=index // size if boundary else -1,
-                score=w["attention_res_score"], norm=w["input_layernorm"], eps=eps, output_eps=eps)
+                score=w["attention_res_score"], norm=w["input_layernorm"], eps=eps, output_eps=eps, mixture=mixture)
             # The running sum now includes the previous layer's MLP output.
             self.capture(index - 1)
             attended = reduce(attention(hidden))

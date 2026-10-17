@@ -182,6 +182,11 @@ def resolve(model: str, hub_cache: Path | None = None) -> ResolvedModel:
         except (OSError, ValueError) as error:
             raise UsageError(f"{directory} has an unreadable checkpoint manifest: {error}") from error
         metadata = directory if container is None else directory / "metadata"
+        for recipe in recipes():
+            for checkpoint in recipe.checkpoints:
+                # A directory that a recipe declares keeps its declared placement.
+                if Path(checkpoint.repository).is_absolute() and Path(checkpoint.repository).resolve() == directory:
+                    return ResolvedModel(recipe, checkpoint, directory)
         recipe, qualified = _supporting(metadata / "config.json", str(directory))
         # The directory's path identifies its measurements on this host.
         revision = hashlib.sha256(str(directory).encode()).hexdigest()[:40]

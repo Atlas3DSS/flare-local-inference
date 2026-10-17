@@ -8,17 +8,106 @@ import re
 from ignition.components.parallel import TensorParallelShard
 
 PAGE_TOKENS = 128
+# Draft checkpoints live beside the target's files, as a speculators-format directory.
+DRAFT_DIRECTORY = "dspark"
+
+
+@dataclass(frozen=True)
+class DSparkConfig:
+    """A speculators-format DSpark draft: a Qwen3 sliding-window stack over Kimi K3 auxiliary states.
+
+    The block's anchor predicts the first draft (``sample_from_anchor``), every later block position holds
+    the mask token, and a rank-``markov_rank`` transition bias from the previous token joins each
+    position's logits while drafts are sampled left to right.
+    """
+
+    raw: dict
+
+    @classmethod
+    def from_dict(cls, raw, target):
+        layer = raw.get("transformer_layer_config", {})
+        aux = raw.get("aux_hidden_state_layer_ids", ())
+        rope = layer.get("rope_parameters", {})
+        if (raw.get("architectures") != ["DSparkDraftModel"] or raw.get("speculators_model_type") != "dspark"
+                or layer.get("model_type") != "qwen3" or layer.get("hidden_act") != "silu"
+                or layer.get("attention_bias") or layer.get("hidden_size") != target["hidden_size"]
+                or layer.get("vocab_size") != target["vocab_size"]
+                or raw.get("draft_vocab_size") != target["vocab_size"]
+                or layer.get("layer_types") != ["sliding_attention"] * layer.get("num_hidden_layers", 0)
+                or not 0 < layer.get("sliding_window", 0) or layer.get("sliding_window") % PAGE_TOKENS
+                or raw.get("sliding_window_non_causal") is not False or raw.get("sample_from_anchor") is not True
+                or rope.get("rope_type") != "default" or set(rope) != {"rope_type", "rope_theta"}
+                or layer.get("num_attention_heads", 0) % max(1, layer.get("num_key_value_heads", 0))
+                or raw.get("markov_head_type") != "vanilla" or not 0 < raw.get("markov_rank", 0)
+                or not 0 <= raw.get("mask_token_id", -1) < target["vocab_size"]
+                or not aux or list(aux) != sorted(set(aux))
+                or any(not 0 < i < target["num_hidden_layers"] for i in aux)):
+            raise ValueError("unsupported Kimi K3 DSpark draft geometry")
+        return cls(raw)
+
+    @property
+    def text(self):
+        return self.raw["transformer_layer_config"]
+
+    @property
+    def auxiliary_layers(self):
+        """Decoder layers whose AttnRes input the draft reads; each follows the preceding layer's output."""
+        return tuple(self.raw["aux_hidden_state_layer_ids"])
+
+    @property
+    def noise_token(self):
+        return self.raw["mask_token_id"]
+
+    @property
+    def markov_rank(self):
+        return self.raw["markov_rank"]
+
+    @property
+    def layers(self):
+        return self.text["num_hidden_layers"]
+
+    @property
+    def heads(self):
+        return self.text["num_attention_heads"]
+
+    @property
+    def kv_heads(self):
+        return self.text["num_key_value_heads"]
+
+    @property
+    def head_dim(self):
+        return self.text["head_dim"]
+
+    @property
+    def window(self):
+        return self.text["sliding_window"]
+
+    @property
+    def theta(self):
+        return self.text["rope_parameters"]["rope_theta"]
+
+    def validate_shard(self, shard: TensorParallelShard):
+        shard.partition(self.heads)
+        shard.partition(self.kv_heads)
+        shard.partition(self.text["intermediate_size"], alignment=32)
+        shard.partition(self.text["hidden_size"], alignment=8)
 
 
 @dataclass(frozen=True)
 class ModelConfig:
     text: dict
     vision: dict
+    # The checkpoint's DSpark draft (DSparkConfig, from its dspark directory) or a DFlash2 DraftConfig.
     draft: object = None
 
     @classmethod
     def load(cls, snapshot):
-        return cls.from_dict(json.loads((Path(snapshot) / "config.json").read_text()))
+        snapshot = Path(snapshot)
+        config = cls.from_dict(json.loads((snapshot / "config.json").read_text()))
+        draft = snapshot / DRAFT_DIRECTORY / "config.json"
+        if not draft.is_file():
+            return config
+        return cls(config.text, config.vision, DSparkConfig.from_dict(json.loads(draft.read_text()), config.text))
 
     @classmethod
     def from_dict(cls, raw):

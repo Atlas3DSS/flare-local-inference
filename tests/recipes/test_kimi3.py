@@ -31,6 +31,7 @@ def test_checkpoint_geometry(config):
     assert config.layers[0] == "kda" and config.layers[3] == "mla"
     layout = continuation_layout(config, 16)
     assert layout.region("layer0.recurrent").shape == (6, 128, 128)
+    # E4M3 latent records, as vLLM serves Kimi K3 with an FP8 KV cache.
     assert page_bytes(config) == 24 * 128 * 576
 
 
@@ -201,3 +202,58 @@ def test_checkpoint_mla(config, mode, tokens):
         graph.replay()
         torch.cuda.synchronize(device)
         torch.testing.assert_close(replayed, output, rtol=0, atol=0)
+
+
+DRAFT = Path("/root/.cache/huggingface/hub/models--RedHatAI--Kimi-K3-speculator.dspark/snapshots/"
+             "38a88101e0d46bb22134b9da340f381b954d40d4")
+
+
+def test_dspark_draft_geometry(config):
+    import json
+
+    import torch
+    from ignition.components.parallel import TensorParallelShard
+    from ignition.recipes.kimi3.config import DSparkConfig, ModelConfig
+    from ignition.recipes.kimi3.pool import continuation_layout
+
+    if not DRAFT.is_dir():
+        pytest.skip("Kimi K3 DSpark draft is not installed")
+    raw = json.loads((DRAFT / "config.json").read_text())
+    draft = DSparkConfig.from_dict(raw, config.text)
+    draft.validate_shard(TensorParallelShard(0, 16))
+    assert draft.auxiliary_layers == (24, 48, 72, 88, 92) and draft.noise_token == 163837
+    assert (draft.layers, draft.heads, draft.kv_heads, draft.head_dim, draft.window) == (5, 96, 16, 64, 2048)
+    speculative = ModelConfig(config.text, config.vision, draft)
+    plain, widened = continuation_layout(speculative, 16), continuation_layout(speculative, 16, speculative_tokens=7)
+    assert widened.region("layer1.convolution").shape == (2304, 10)
+    assert widened.region("draft4.value").shape == (2048, 1, 64) and widened.region("draft4.value").dtype == torch.bfloat16
+    assert widened.row_bytes > plain.row_bytes
+    for name, value in (("aux_hidden_state_layer_ids", [0, 93]), ("sample_from_anchor", False),
+                        ("sliding_window_non_causal", True)):
+        with pytest.raises(ValueError, match="DSpark"):
+            DSparkConfig.from_dict({**raw, name: value}, config.text)
+
+
+def test_context_shards_place_interleaved_positions_on_their_owners():
+    import torch
+
+    from ignition.recipes.kimi3.config import PAGE_TOKENS
+    from ignition.recipes.kimi3.dcp import ContextShards
+
+    world, pages = 16, torch.tensor([[7, 3, -1]], dtype=torch.int32)
+    positions = torch.tensor([-1, 0, 1, 15, 16, 17, PAGE_TOKENS * world + 5, PAGE_TOKENS * world * 2 + 1])
+    tables = pages.expand(positions.numel(), -1)
+    owned = {}
+    for rank in range(world):
+        shards = ContextShards.on(rank, world, "cpu")
+        slots = shards.token_slots(positions, tables)
+        for position, slot in zip(positions.tolist(), slots.tolist()):
+            if slot >= 0:
+                assert position % world == rank and position not in owned
+                owned[position] = slot
+        # Each rank holds its share of every prefix, interleaved one position at a time as vLLM's DCP stores it.
+        lengths = torch.arange(0, 3 * world + 1)
+        assert shards.local_tokens(lengths).tolist() == [sum(p % world == rank for p in range(n)) for n in range(len(lengths))]
+    # Position t lives at local record t // 16 of its page; a third page without a table entry stores nothing.
+    assert owned == {0: 7 * PAGE_TOKENS, 1: 7 * PAGE_TOKENS, 15: 7 * PAGE_TOKENS, 16: 7 * PAGE_TOKENS + 1,
+                     17: 7 * PAGE_TOKENS + 1, PAGE_TOKENS * world + 5: 3 * PAGE_TOKENS}
