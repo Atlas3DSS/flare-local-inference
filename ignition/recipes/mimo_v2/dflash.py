@@ -98,13 +98,14 @@ class DraftScratch:
         heads, kv_heads = a.local(shard)
         rows = tokens // config.block_size
         pages = rows * ((a.window + config.block_size + 127) // 128)
-        def zeros(*shape):
-            return torch.zeros(shape, dtype=torch.bfloat16, device=device)
+        def zeros(*shape, dtype=torch.bfloat16):
+            return torch.zeros(shape, dtype=dtype, device=device)
         hidden = c["hidden_size"]
         return cls(zeros(tokens, hidden), zeros(tokens, heads * a.key_dim + kv_heads * (a.key_dim + a.value_dim)),
             zeros(tokens, heads, a.key_dim), zeros(tokens, kv_heads, a.key_dim), zeros(tokens, kv_heads, a.value_dim),
             zeros(tokens, heads, a.value_dim), zeros(tokens, hidden), zeros(tokens, hidden),
-            zeros(pages, 128, kv_heads, a.key_dim), zeros(pages, 128, kv_heads, a.value_dim),
+            zeros(pages, 128, kv_heads, a.key_dim, dtype=torch.float8_e4m3fn),
+            zeros(pages, 128, kv_heads, a.value_dim, dtype=torch.float8_e4m3fn),
             MLPScratch.allocate(tokens, hidden, c["intermediate_size"] // shard.world_size, device),
             zeros(tokens, hidden), zeros(tokens, c["vocab_size"] // shard.world_size), zeros(tokens, c["vocab_size"]))
 

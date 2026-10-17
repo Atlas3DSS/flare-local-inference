@@ -25,13 +25,16 @@ def stage_windows(history, values, output, metadata, *, counts=None, first_posit
     offsets = torch.arange(capacity, device=values.device)[None, :]
     first = (m.starts - window).clamp_min(first_position)[:, None]
     positions = first + offsets
-    previous = history[m.state_rows[:, None], positions.remainder(window)]
+    previous = history[m.state_rows[:, None], positions.remainder(window)].to(values.dtype)
     indices = (m.query_start_loc[:-1, None] + positions - m.starts[:, None]).clamp(0, values.shape[0] - 1)
     current = values[indices]
     counts = m.lengths if counts is None else counts
     valid = (m.lengths[:, None] > 0) & (positions < (m.starts + counts)[:, None])
-    output.view(rows, capacity, *values.shape[1:]).copy_(torch.where(valid[:, :, None, None],
-        torch.where((positions < m.starts[:, None])[:, :, None, None], previous, current), 0))
+    staged = torch.where(valid[:, :, None, None],
+        torch.where((positions < m.starts[:, None])[:, :, None, None], previous, current), 0)
+    if output.dtype == torch.float8_e4m3fn:
+        staged = staged.clamp(-448, 448)
+    output.view(rows, capacity, *values.shape[1:]).copy_(staged)
 
 
 @dataclass(frozen=True)

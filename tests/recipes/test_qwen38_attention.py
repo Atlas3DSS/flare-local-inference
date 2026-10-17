@@ -58,6 +58,8 @@ def test_qsa_metadata_and_state_geometry():
     state = QSAState.allocate(pages=3, slots=2, device=torch.device("cpu"))
     metadata = QSAMetadata.allocate(tokens=8, batch=2, context=128, device=torch.device("cpu"))
     assert state.main_k_cache.shape == (3, 64, 2, 256)
+    assert state.main_k_cache.dtype == state.main_v_cache.dtype == torch.float8_e4m3fn
+    assert state.compressed_k_cache.dtype == state.raw_k_ring.dtype == torch.bfloat16
     assert state.compressed_k_cache.shape == (3, 16, 128)
     assert state.raw_k_ring.shape == (2, 4, 128)
     assert state.raw_rope_positions.shape == (2, 4, 3)
@@ -93,6 +95,14 @@ class ReferenceProjection(torch.nn.Module):
             a16 = torch.tensor([mode == "a16" for mode in self.activation_modes])
             value = torch.where(a16[:, None], source.float(), value)
         return (value @ self.weight.T).bfloat16()
+
+
+class FP8ReferenceCache:
+    def update_indexer(self, keys, layer):
+        return keys
+
+    def update(self, key, value, layer):
+        return tuple(tensor.to(torch.float8_e4m3fn).to(tensor.dtype) for tensor in (key, value))
 
 
 def _load_reference(manifest):
@@ -228,9 +238,12 @@ def test_checkpoint_qsa_chunked_prefill_native_decode(manifest, compiled):
                     value = histories[request][:total][None]
                     rope = reference_rotary(value, positions[request][:total].T[:, None])
                     mask = torch.full((total, total), torch.finfo(torch.bfloat16).min, dtype=torch.bfloat16).triu(1)[None, None]
-                    expected, _ = reference(value, rope, mask)
+                    unquantized, _ = reference(value, rope, mask)
+                    expected, _ = reference(value, rope, mask, past_key_values=FP8ReferenceCache())
                     expected = expected[0, -length:].float()
                     actual = scratch[label].output[offset:offset + length].float().cpu()
+                    baseline = unquantized[0, -length:].float()
+                    assert (actual - baseline).norm() / baseline.norm().clamp_min(1e-12) < .08
                     relative = (actual - expected).norm() / expected.norm().clamp_min(1e-12)
                     assert relative < .02, f"{label} request {request} at {total}: relative L2 {relative}"
                     torch.testing.assert_close(actual, expected, rtol=.035, atol=float(expected.abs().max()) * .02)

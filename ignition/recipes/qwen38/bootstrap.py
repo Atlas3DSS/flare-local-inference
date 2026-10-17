@@ -183,7 +183,7 @@ def _identity(manifest, world_size=1):
     sources.update({f"components/{path.name}": hashlib.sha256(path.read_bytes()).hexdigest()
                     for path in sorted(components.glob("*.py"))})
     value = {"checkpoint": REVISION, "headers": manifest.headers_sha256,
-             "config": manifest.metadata_sha256["config.json"], "recipe": sources, "kv_dtype": "bfloat16", "page_size": 64, "world_size": world_size}
+             "config": manifest.metadata_sha256["config.json"], "recipe": sources, "kv_dtype": "float8_e4m3fn", "page_size": 64, "world_size": world_size}
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 

@@ -12,10 +12,10 @@ from .config import PAGE_TOKENS
 def page_specs(config):
     for index, kind in enumerate(config.layers):
         if kind == "mla":
-            yield f"layer{index}.latent", (PAGE_TOKENS * 576 * 2,)
+            yield f"layer{index}.latent", (PAGE_TOKENS * 576,)
     if config.draft is not None:
         for index in range(config.draft.layers):
-            yield f"draft{index}.latent", (PAGE_TOKENS * 576 * 2,)
+            yield f"draft{index}.latent", (PAGE_TOKENS * 576,)
 
 
 def page_bytes(config):
@@ -44,7 +44,7 @@ class ContinuationPool(PagedStateStorage):
         return DeltaState(self.reserved_region(f"layer{layer}.convolution"), self.reserved_region(f"layer{layer}.recurrent"))
 
     def attention(self, layer):
-        return self.pages[f"layer{layer}.latent"].view(torch.bfloat16).view(-1, PAGE_TOKENS, 576)
+        return self.pages[f"layer{layer}.latent"].view(torch.float8_e4m3fn).view(-1, PAGE_TOKENS, 576)
 
     def draft_attention(self, layer):
-        return self.pages[f"draft{layer}.latent"].view(torch.bfloat16).view(-1, PAGE_TOKENS, 576)
+        return self.pages[f"draft{layer}.latent"].view(torch.float8_e4m3fn).view(-1, PAGE_TOKENS, 576)

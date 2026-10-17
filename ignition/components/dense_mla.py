@@ -11,24 +11,31 @@ from ignition.preparation.tuning import benchmark_resource, declare, register_fi
 @torch.library.custom_op("flare::dense_mla", mutates_args=("output", "scratch", "lse"))
 def _attend(q: torch.Tensor, cache: torch.Tensor, output: torch.Tensor, pages: torch.Tensor,
             lengths: torch.Tensor, starts: torch.Tensor, scratch: list[torch.Tensor], handle: int, scale: float,
-            lse: torch.Tensor | None) -> None:
+            lse: torch.Tensor | None, kv_scale: torch.Tensor | None, q_scale: torch.Tensor | None) -> None:
     plan = plan_from_handle(handle)
     binding = dense_mla.bind(plan, q=q, kv_cache=cache, output=output, page_table=pages,
-        cache_seqlens=lengths, cu_seqlens_q=starts, scratch=scratch, sm_scale=scale)
+        cache_seqlens=lengths, cu_seqlens_q=starts, scratch=scratch, sm_scale=scale,
+        kv_scale=kv_scale, q_scale=q_scale)
     _, logsumexp = dense_mla.run(binding=binding)
     if lse is not None:
         lse.copy_(logsumexp)
 
 
 @_attend.register_fake
-def _fake_attend(q, cache, output, pages, lengths, starts, scratch, handle, scale, lse):
+def _fake_attend(q, cache, output, pages, lengths, starts, scratch, handle, scale, lse, kv_scale, q_scale):
     pass
 
 
 class PreparedDenseMLA:
-    def __init__(self, query, cache, output, page_table, lengths, starts, *, caps, scale, session, name, workspace, lse=None):
+    def __init__(self, query, cache, output, page_table, lengths, starts, *, caps, scale, session, name, workspace,
+                 lse=None, kv_scale=None, q_scale=None):
+        if cache.dtype == torch.float8_e4m3fn:
+            if kv_scale is None:
+                kv_scale = torch.ones(1, dtype=torch.float32, device=cache.device)
+            if q_scale is None:
+                q_scale = torch.ones(1, dtype=torch.float32, device=query.device)
         self.arguments = dict(q=query, kv_cache=cache, output=output, page_table=page_table,
-                              cache_seqlens=lengths, cu_seqlens_q=starts)
+                              cache_seqlens=lengths, cu_seqlens_q=starts, kv_scale=kv_scale, q_scale=q_scale)
         self.plan = dense_mla.plan(caps, invocation=dense_mla.invocation_from_tensors(caps, **self.arguments))
         self.output, self.scale = output, float(scale)
         self.lse = lse
@@ -52,8 +59,8 @@ class PreparedDenseMLA:
                 arguments["cache_seqlens"].fill_(min(max(4096, query.shape[0]), caps.max_cache_tokens))
                 arguments["cu_seqlens_q"].copy_(torch.arange(starts.numel(), device=query.device,
                     dtype=starts.dtype) * (query.shape[0] // lengths.numel()))
-                cache_seed = torch.randn(cache[0].shape, dtype=cache.dtype, device=cache.device,
-                                         generator=generator) * .2
+                cache_seed = (torch.randn(cache[0].shape, dtype=query.dtype, device=cache.device,
+                                          generator=generator) * .2).to(cache.dtype)
                 return arguments, arguments["q"].clone(), cache_seed
 
             arguments, query_seed, cache_seed = benchmark_resource(session, ("dense_mla", name), inputs)
@@ -79,5 +86,6 @@ class PreparedDenseMLA:
     def __call__(self):
         a = self.arguments
         _attend(a["q"], a["kv_cache"], a["output"], a["page_table"], a["cache_seqlens"],
-                a["cu_seqlens_q"], self.scratch, self.plan.handle, self.scale, self.lse)
+                a["cu_seqlens_q"], self.scratch, self.plan.handle, self.scale, self.lse,
+                a["kv_scale"], a["q_scale"])
         return self.output

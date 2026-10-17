@@ -45,6 +45,6 @@ RECIPE = Recipe(
     speculation=Speculation(draft_tokens=7), max_draft_tokens=7, verification_rows=0,
     max_images=4, image_bytes=32 << 20,
     stream_overlap=True,
-    ranks=MappingProxyType({1: RankCosts(109_986_560, 524_288, 4 << 30)}),
+    ranks=MappingProxyType({1: RankCosts(107_365_120, 524_288, 4 << 30)}),
     plain_ranks=MappingProxyType({1: RankCosts(86_876_416, 524_288, 4 << 30)}),
 )

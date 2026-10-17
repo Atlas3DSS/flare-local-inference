@@ -19,6 +19,7 @@ COPY = Speculation(3, proposal_source="copy")
 
 @pytest.mark.parametrize("world_size", [1, 2, 4])
 def test_qwen_state_rows_and_pages_match_the_prepared_layouts(world_size):
+    import torch
     from b12x.attention import qsa
 
     from ignition.recipes.qwen38.state import HybridStateLayout
@@ -30,9 +31,10 @@ def test_qwen_state_rows_and_pages_match_the_prepared_layouts(world_size):
     def layer(speculative_tokens):
         geometry = qsa.cache_requirements(main_page_size=recipe.page_tokens, position_axes=3,
                                           kv_heads=max(1, 2 // world_size),
-                                          max_speculative_tokens=speculative_tokens)
-        return sum(math.prod(shape) * 2 for shape in (
-            geometry.main_k_page_shape, geometry.main_v_page_shape, geometry.compressed_page_shape))
+                                          max_speculative_tokens=speculative_tokens, kv_dtype=torch.float8_e4m3fn)
+        return sum(math.prod(shape) * dtype.itemsize for shape, dtype in (
+            (geometry.main_k_page_shape, geometry.kv_dtype), (geometry.main_v_page_shape, geometry.kv_dtype),
+            (geometry.compressed_page_shape, torch.bfloat16)))
 
     # Layers 3, 7, ..., 47 each own one page pool; learned drafts add the draft layer's.
     target = len(range(3, 48, 4))
@@ -41,6 +43,51 @@ def test_qwen_state_rows_and_pages_match_the_prepared_layouts(world_size):
         assert costs.state_row_bytes == HybridStateLayout.build(
             speculative_tokens=tokens, world_size=world_size).row_bytes
         assert costs.page_bytes == layers * layer(tokens)
+
+
+@pytest.mark.parametrize("alias,world_size", [("qwen3.8-27b", 1), ("kimi-k3-mxfp4-csf", 16),
+    ("mimo-v2.6-pro-mopd", 2), ("mimo-v2.6-pro-mopd", 4), ("mimo-v2.6-pro-mopd", 8), ("nemotron-bolt-24gb", 1)])
+@pytest.mark.parametrize("drafting", [False, True])
+def test_fp8_cache_views_and_planned_bytes(alias, world_size, drafting):
+    from dataclasses import replace
+    from importlib import import_module
+
+    import torch
+    from ignition.components.parallel import TensorParallelShard
+
+    model = resolve(alias)
+    if drafting and model.recipe.speculation is None:
+        pytest.skip("recipe has no learned draft")
+    snapshot = model.snapshot(HUB)
+    if not (snapshot / "config.json").is_file():
+        pytest.skip("checkpoint metadata is not installed")
+    prefix = f"ignition.recipes.{model.recipe.name}"
+    config = import_module(prefix + ".config").ModelConfig.load(snapshot)
+    if drafting and model.recipe.name in ("kimi3", "nemotron_h"):
+        draft = import_module(prefix + ".draft_config")
+        if not (Path(draft.CHECKPOINT) / "config.json").is_file():
+            pytest.skip("draft checkpoint metadata is not installed")
+        config = replace(config, draft=draft.DraftConfig.load(draft.CHECKPOINT, config))
+    module = import_module(prefix + ".pool")
+    if model.recipe.name == "mimo_v2":
+        shard = TensorParallelShard(0, world_size)
+        pool = module.ContinuationPool.allocate(config, shard, 2, 3, "meta", dflash=drafting)
+        caches = [pool.cache(layer, kind) for layer in range(config.layers) for kind in ("key", "value")]
+    elif model.recipe.name == "kimi3":
+        pool = module.ContinuationPool.for_model(config, world_size, 2, 3, "meta")
+        caches = [pool.attention(layer) for layer, kind in enumerate(config.layers) if kind == "mla"]
+        if drafting:
+            caches.extend(pool.draft_attention(layer) for layer in range(config.draft.layers))
+    else:
+        pool = module.ContinuationPool.for_model(config, 2, 3, "meta")
+        caches = [cache for layer, kind in enumerate(config.layers) if kind in ("attention", "full_attention")
+                  for cache in pool.attention(layer, config)]
+    caches.extend(pool.reserved_region(region.name) for region in pool.layout.regions
+                  if region.name.startswith("draft") and region.name.endswith((".key", ".value")))
+    assert caches and all(cache.dtype == torch.float8_e4m3fn for cache in caches)
+    costs = model.recipe.costs(world_size, model.recipe.speculation if drafting else None)
+    assert pool.layout.row_bytes == costs.state_row_bytes
+    assert sum(page[0].nbytes for page in pool.pages.values()) == costs.page_bytes
 
 
 @pytest.mark.parametrize("world_size", [2, 4])

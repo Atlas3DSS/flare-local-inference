@@ -10,14 +10,15 @@ pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
 
 
 @pytest.mark.parametrize("rows", [1, 6, 24, 96, 160])
-def test_attends_selected_causal_positions_and_zeroes_empty_rows(rows):
+@pytest.mark.parametrize("cache_dtype", [torch.bfloat16, torch.float8_e4m3fn])
+def test_attends_selected_causal_positions_and_zeroes_empty_rows(rows, cache_dtype):
     """Up to 128 rows split their selection across programs; more rows attend in one pass."""
     from ignition.components.sm103_sparse_attention import PARTIAL_ROWS, PreparedSparseAttention, splits_for
 
     generator = torch.Generator(device="cuda").manual_seed(2051)
     pages, width, context = 40, 2051, 2048
     query = torch.randn((rows, 24, 256), generator=generator, device="cuda").bfloat16()
-    keys, values = (torch.randn((pages, 64, 2, 256), generator=generator, device="cuda").bfloat16() for _ in range(2))
+    keys, values = (torch.randn((pages, 64, 2, 256), generator=generator, device="cuda").to(cache_dtype) for _ in range(2))
     table = torch.randperm(pages, generator=generator, device="cuda")[:context // 64].int().view(1, -1).repeat(2, 1)
     table[1, 3] = -1
     requests = torch.zeros(rows, dtype=torch.int64, device="cuda")

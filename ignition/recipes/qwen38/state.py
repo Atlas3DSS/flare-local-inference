@@ -52,14 +52,14 @@ class HybridStateLayout(StateLayout):
         from b12x.attention import qsa
 
         geometry = qsa.cache_requirements(main_page_size=64, position_axes=3, kv_heads=max(1, 2 // world_size),
-                                         max_speculative_tokens=speculative_tokens)
+                                         max_speculative_tokens=speculative_tokens, kv_dtype=torch.float8_e4m3fn)
         for layer in QSA_LAYERS:
             add(f"qsa.{layer}.raw_keys", geometry.raw_k_ring_shape, torch.bfloat16)
             add(f"qsa.{layer}.raw_positions", geometry.raw_logical_positions_shape, torch.int64)
             add(f"qsa.{layer}.raw_rope", geometry.raw_rope_positions_shape, torch.int64)
             add(f"qsa.{layer}.raw_anchor", (1,), torch.int64)
-            add(f"qsa.{layer}.boundary_key", geometry.main_k_page_shape, torch.bfloat16)
-            add(f"qsa.{layer}.boundary_value", geometry.main_v_page_shape, torch.bfloat16)
+            add(f"qsa.{layer}.boundary_key", geometry.main_k_page_shape, geometry.kv_dtype)
+            add(f"qsa.{layer}.boundary_value", geometry.main_v_page_shape, geometry.kv_dtype)
             add(f"qsa.{layer}.boundary_selector", geometry.compressed_page_shape, torch.bfloat16)
         ring = 0
         if speculative_tokens:
@@ -70,11 +70,11 @@ class HybridStateLayout(StateLayout):
             add("draft_raw_positions", geometry.raw_logical_positions_shape, torch.int64)
             add("draft_raw_rope", geometry.raw_rope_positions_shape, torch.int64)
             add("draft_raw_anchor", (1,), torch.int64)
-            add("draft_boundary_key", geometry.main_k_page_shape, torch.bfloat16)
-            add("draft_boundary_value", geometry.main_v_page_shape, torch.bfloat16)
+            add("draft_boundary_key", geometry.main_k_page_shape, geometry.kv_dtype)
+            add("draft_boundary_value", geometry.main_v_page_shape, geometry.kv_dtype)
             add("draft_boundary_selector", geometry.compressed_page_shape, torch.bfloat16)
-            add("draft_boundary_key_extra", geometry.main_k_page_shape, torch.bfloat16)
-            add("draft_boundary_value_extra", geometry.main_v_page_shape, torch.bfloat16)
+            add("draft_boundary_key_extra", geometry.main_k_page_shape, geometry.kv_dtype)
+            add("draft_boundary_value_extra", geometry.main_v_page_shape, geometry.kv_dtype)
             add("draft_boundary_selector_extra", geometry.compressed_page_shape, torch.bfloat16)
         layout = StateLayout.from_specs(specifications)
         return cls(layout.regions, layout.row_bytes, speculative_tokens, ring)
@@ -592,16 +592,16 @@ def _checkpoint_pages(Pointers, Backing, Tables, Sources, Destinations, Operatio
     slot = tl.load(Requests + command)
     page = tl.load(Tables + slot * TABLE_WIDTH + logical, active, other=-1)
     active &= page >= 0
-    pointer = tl.load(Pointers + layer * 2).to(tl.pointer_type(tl.bfloat16))
+    pointer = tl.load(Pointers + layer * 2).to(tl.pointer_type(tl.uint8))
     offset = tl.load(Pointers + layer * 2 + 1)
     index = tile * BLOCK + tl.arange(0, BLOCK)
     mask = active & (index < ELEMENTS)
     if snapshot:
         value = tl.load(pointer + page * ELEMENTS + index, mask, other=0)
-        saved = (Backing + destination * ROW_BYTES + offset).to(tl.pointer_type(tl.bfloat16))
+        saved = Backing + destination * ROW_BYTES + offset
         tl.store(saved + index, value, mask)
     elif restore:
-        saved = (Backing + source * ROW_BYTES + offset).to(tl.pointer_type(tl.bfloat16))
+        saved = Backing + source * ROW_BYTES + offset
         value = tl.load(saved + index, mask, other=0)
         tl.store(pointer + page * ELEMENTS + index, value, mask)
 
@@ -705,7 +705,7 @@ class PreparedCheckpointCaches:
                         pointers.append((value.data_ptr(), region.offset))
                     pointer = torch.tensor(pointers, device=pool.backing.device, dtype=torch.int64)
                     self.pointers.append(pointer)
-                    size = value[0].numel()
+                    size = value[0].nbytes
                     self.operations.append(compile_kernel(_checkpoint_pages,
                         (pointer, pool.backing, self.draft_tables if draft else tables, metadata.source_slots,
                          metadata.destination_slots, metadata.operation, metadata.expected_consumed,

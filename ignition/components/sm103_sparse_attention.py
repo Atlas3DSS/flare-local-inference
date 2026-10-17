@@ -75,9 +75,9 @@ def _sparse_paged_gqa(Query, KeyCache, ValueCache, Selected, BlockTable, Request
         page = tl.maximum(page, 0)
         offset = (safe % PAGE_SIZE).to(tl.int64)
         keys = tl.load(KeyCache + page[None, :] * key_page_stride + offset[None, :] * key_token_stride
-                       + kv_head * KV_HEAD_STRIDE + dims[:, None], mask=valid[None, :], other=0.0)
+                       + kv_head * KV_HEAD_STRIDE + dims[:, None], mask=valid[None, :], other=0.0).to(query.dtype)
         values = tl.load(ValueCache + page[:, None] * value_page_stride + offset[:, None] * value_token_stride
-                         + kv_head * KV_HEAD_STRIDE + dims[None, :], mask=valid[:, None], other=0.0)
+                         + kv_head * KV_HEAD_STRIDE + dims[None, :], mask=valid[:, None], other=0.0).to(query.dtype)
         scores = tl.dot(query, keys) * SCALE_LOG2
         scores = tl.where(valid[None, :], scores, -1.0e20)
         following = tl.maximum(maximum, tl.max(scores, axis=1))
@@ -127,9 +127,9 @@ def _sparse_paged_gqa_split(Query, KeyCache, ValueCache, Selected, BlockTable, R
         page = tl.maximum(page, 0)
         offset = (safe % PAGE_SIZE).to(tl.int64)
         keys = tl.load(KeyCache + page[None, :] * key_page_stride + offset[None, :] * key_token_stride
-                       + kv_head * KV_HEAD_STRIDE + dims[:, None], mask=valid[None, :], other=0.0)
+                       + kv_head * KV_HEAD_STRIDE + dims[:, None], mask=valid[None, :], other=0.0).to(query.dtype)
         values = tl.load(ValueCache + page[:, None] * value_page_stride + offset[:, None] * value_token_stride
-                         + kv_head * KV_HEAD_STRIDE + dims[None, :], mask=valid[:, None], other=0.0)
+                         + kv_head * KV_HEAD_STRIDE + dims[None, :], mask=valid[:, None], other=0.0).to(query.dtype)
         scores = tl.dot(query, keys) * SCALE_LOG2
         scores = tl.where(valid[None, :], scores, -1.0e20)
         following = tl.maximum(maximum, tl.max(scores, axis=1))
@@ -168,7 +168,7 @@ def _merge_splits(PartialOut, PartialLse, Output, output_row_stride, HEAD_DIM: t
 
 
 class PreparedSparseAttention:
-    """Attend [rows, q_heads, dim] BF16 queries over QSA-selected positions of paged BF16 K/V.
+    """Attend BF16 queries over QSA-selected positions of BF16 or unit-scaled FP8 K/V.
 
     Positions after a row's query position are ignored. Rows without a request,
     or without a valid selected position, are written as zeros. Up to
@@ -183,12 +183,14 @@ class PreparedSparseAttention:
         if (cache_dim != dim or value_cache.shape != key_cache.shape or q_heads % kv_heads
                 or output.shape != query.shape or selected.shape[0] != rows or requests.shape != (rows,)
                 or positions.shape != (rows,)
-                or any(t.dtype != torch.bfloat16 for t in (query, key_cache, value_cache, output))
+                or any(t.dtype != torch.bfloat16 for t in (query, output))
+                or key_cache.dtype not in (torch.bfloat16, torch.float8_e4m3fn)
+                or value_cache.dtype != key_cache.dtype
                 or selected.dtype != torch.int32 or block_table.dtype != torch.int32
                 or query.stride()[1:] != (dim, 1) or output.stride()[1:] != (dim, 1)
                 or key_cache.stride()[2:] != (dim, 1) or value_cache.stride()[2:] != (dim, 1)
                 or selected.stride(1) != 1 or block_table.stride(1) != 1):
-            raise ValueError("sparse attention requires BF16 [rows,heads,dim] queries, paged BF16 K/V with "
+            raise ValueError("sparse attention requires BF16 [rows,heads,dim] queries, paged BF16 or FP8 K/V with "
                              "contiguous heads, and int32 selections and block table")
         self.query, self.selected, self.block_table = query, selected, block_table
         self.requests, self.positions, self.output = requests, positions, output

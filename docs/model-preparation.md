@@ -19,6 +19,15 @@ Unsigned rank staging is private to preparation and cannot load in Helios.
 Flare loads the file without Python. Helios is a Rust library;
 `flare_heliopause` is a CPython extension imported by Ignition.
 
+Every recipe defaults to FP8 E4M3 KV storage, including learned draft-model
+caches. Qwen Flash retains BF16 selector keys; GLM and DeepSeek retain their
+packed latent formats, including scale metadata and any BF16 rotary fields.
+Recurrent state, compressor accumulators, and hidden activations retain their
+model-specific precision. Cache writers and attention readers use matching
+scales, and memory planning includes FP8 pages and partial-page snapshots.
+Export a package to use these cache layouts; existing packages retain the
+layouts captured when they were prepared.
+
 ## Environment setup
 
 Set up the preparation environment and build the native CLI:
@@ -132,7 +141,7 @@ For concurrency 32 with seven draft tokens per request, use
 
 `qwen3.8-27b` prepares `nvidia/Qwen3.8-27B-NVFP4` for text generation on one GPU.
 It uses the canonical Qwen3.5 dense decoder with tensor-scaled FP8 attention
-projections and NVFP4 MLP and vocabulary weights. KV pages and Gated DeltaNet
+projections and NVFP4 MLP and vocabulary weights. FP8 KV pages and Gated DeltaNet
 continuations reside in device memory; the recipe has no host-mapped tables,
 vision graphs, or learned draft model. Prepare on the same GPU architecture
 as the serving device:
@@ -356,7 +365,8 @@ and KDA verification records replay the accepted prefix into committed state.
 Loading with `--mtp-draft-tokens 0` selects ordinary execution; exporting with
 `--no-mtp` excludes draft weights and state.
 
-MLA latent records occupy 128-token pages. Continuation rows preserve KDA
+FP8 MLA latent records occupy 128-token pages in both the target and DFlash2.
+Continuation rows preserve KDA
 convolution and recurrent state, partial latent pages, and the normalized
 last hidden state. The MoonViT encoder accepts a combined 65,536 image patches
 per request and publishes hidden-column-sharded features for causal text

@@ -40,8 +40,8 @@ class AttentionScratch:
         return cls(zeros(tokens, heads, geometry.key_dim), zeros(tokens, kv_heads, geometry.key_dim),
             zeros(tokens, kv_heads, geometry.value_dim), zeros(tokens, heads, geometry.value_dim),
             zeros(tokens, config.text["hidden_size"]), zeros(tokens, config.text["hidden_size"]),
-            zeros(pages, PAGE_TOKENS, kv_heads, geometry.key_dim),
-            zeros(pages, PAGE_TOKENS, kv_heads, geometry.value_dim))
+            zeros(pages, PAGE_TOKENS, kv_heads, geometry.key_dim, dtype=torch.float8_e4m3fn),
+            zeros(pages, PAGE_TOKENS, kv_heads, geometry.value_dim, dtype=torch.float8_e4m3fn))
 
     def rows(self, tokens):
         return type(self)(*(getattr(self, name) if name.startswith("window_") else getattr(self, name)[:tokens]
@@ -53,11 +53,14 @@ def stage_window(history, values, output, row, start, length):
     window = history.shape[1]
     indices = torch.arange(output.shape[0] * output.shape[1], device=values.device)
     prefix = start.clamp(max=window)
-    previous = history[row.expand_as(indices), (start - prefix + indices).remainder(window)]
+    previous = history[row.expand_as(indices), (start - prefix + indices).remainder(window)].to(values.dtype)
     current = values[(indices - prefix).clamp(0, values.shape[0] - 1)]
     valid = indices < prefix + length
-    output.view(-1, *values.shape[1:]).copy_(torch.where(valid[:, None, None],
-        torch.where((indices < prefix)[:, None, None], previous, current), 0))
+    staged = torch.where(valid[:, None, None],
+        torch.where((indices < prefix)[:, None, None], previous, current), 0)
+    if output.dtype == torch.float8_e4m3fn:
+        staged = staged.clamp(-448, 448)
+    output.view(-1, *values.shape[1:]).copy_(staged)
 
 
 def commit_window(history, values, row, start, length):
@@ -67,8 +70,11 @@ def commit_window(history, values, row, start, length):
     positions = end - 1 - (end - 1 - offsets).remainder(history.shape[1])
     current = values[(positions - start).clamp(0, values.shape[0] - 1)]
     rows = row.expand_as(offsets)
-    previous = history[rows, offsets]
-    history[rows, offsets] = torch.where(((positions >= start) & (positions < end))[:, None, None], current, previous)
+    previous = history[rows, offsets].to(values.dtype)
+    committed = torch.where(((positions >= start) & (positions < end))[:, None, None], current, previous)
+    if history.dtype == torch.float8_e4m3fn:
+        committed = committed.clamp(-448, 448)
+    history[rows, offsets] = committed.to(history.dtype)
 
 
 def partial_rotary(values, positions, inverse):

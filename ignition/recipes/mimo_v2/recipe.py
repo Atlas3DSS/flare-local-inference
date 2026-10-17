@@ -40,8 +40,8 @@ RECIPE = Recipe(
     context=1048576, page_tokens=128, concurrency=4, max_concurrency=64, prefill_chunk=4096,
     speculation=Speculation(draft_tokens=7), max_draft_tokens=7, max_images=4, image_bytes=32 << 20,
     verification_rows=0,
-    ranks=MappingProxyType({world: RankCosts(67_633_152 // world, 6_553_600 // world, 8 << 30)
+    ranks=MappingProxyType({world: RankCosts(33_816_576 // world, 3_276_800 // world, 8 << 30)
                             for world in (2, 4, 8)}),
-    plain_ranks=MappingProxyType({world: RankCosts(46_399_488 // world, 6_553_600 // world, 8 << 30)
+    plain_ranks=MappingProxyType({world: RankCosts(23_199_744 // world, 3_276_800 // world, 8 << 30)
                                   for world in (2, 4, 8)}),
 )

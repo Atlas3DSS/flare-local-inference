@@ -28,7 +28,8 @@ def launch(kernel, grid, args, device):
 def endpoint_case(endpoint, device):
     """Use real cache page shapes with private restored pages and retained shared pages."""
     from b12x.attention import qsa
-    geometry = qsa.cache_requirements(main_page_size=64, position_axes=3, max_speculative_tokens=7)
+    geometry = qsa.cache_requirements(main_page_size=64, position_axes=3, max_speculative_tokens=7,
+                                      kv_dtype=torch.float8_e4m3fn)
     ring = geometry.raw_ring_capacity
     fields = (("raw_keys", geometry.raw_k_ring_shape, torch.bfloat16),
               ("raw_positions", (ring,), torch.int64),
@@ -81,16 +82,18 @@ def endpoint_case(endpoint, device):
         # Snapshot physical slot2; restore physical slot1, distinct private pages.
         if required:
             tables[2, logical], tables[1, logical] = 1, 3
-        for shape in (geometry.main_k_page_shape, geometry.main_v_page_shape, geometry.compressed_page_shape):
-            size = torch.tensor(shape).prod().item()
-            cache = torch.arange(6, dtype=torch.bfloat16, device=device).view(6, *([1] * len(shape))).expand(6, *shape).contiguous()
+        for shape, dtype in ((geometry.main_k_page_shape, geometry.kv_dtype),
+                             (geometry.main_v_page_shape, geometry.kv_dtype),
+                             (geometry.compressed_page_shape, torch.bfloat16)):
+            size = torch.tensor(shape).prod().item() * dtype.itemsize
+            cache = torch.arange(6, device=device).to(dtype).view(6, *([1] * len(shape))).expand(6, *shape).contiguous()
             pointers = torch.tensor([[cache.data_ptr(), offset]], dtype=torch.int64, device=device)
             args = (pointers, backing, tables, sources, destinations, operations, expected, count, errors, requests, raw_slots,
                     row_bytes, size, 4, part, 1024)
             all_args.append((module._checkpoint_pages, (1, 1, triton.cdiv(size, 1024)), args))
             page_expectations.append((cache, required, offset, size))
             owned.extend((cache, tables, pointers))
-            offset += (size * 2 + 255) // 256 * 256
+            offset += (size + 255) // 256 * 256
     assert offset <= row_bytes
 
     def invoke():
@@ -102,8 +105,8 @@ def endpoint_case(endpoint, device):
         actual = backing[5, start:start + size * dtype.itemsize].view(dtype).view_as(wanted)
         assert torch.equal(actual, wanted)
     for cache, required, start, size in page_expectations:
-        saved = backing[5, start:start + size * 2]
-        assert saved.view(torch.bfloat16).eq(1).all() if required else saved.eq(0xA5).all()
+        saved = backing[5, start:start + size]
+        assert saved.view(cache.dtype).float().eq(1).all() if required else saved.eq(0xA5).all()
     immutable = backing[5].clone()
     for value, _, _, _, _ in outputs:
         value[2].fill_(77)
@@ -127,6 +130,7 @@ def endpoint_case(endpoint, device):
     for value, wanted, *_ in outputs:
         assert torch.equal(value[2].reshape_as(wanted), wanted)
     for cache, required, *_ in page_expectations:
+        cache = cache.float()
         assert cache[3].eq(1 if required else 3).all()
         assert cache[0].eq(0).all() and cache[1].eq(1).all() and cache[2].eq(2).all()
         assert cache[4].eq(4).all() and cache[5].eq(5).all()
@@ -141,7 +145,8 @@ def endpoint_case(endpoint, device):
     invoke()
     for index, (value, _, _, _, _) in enumerate(outputs):
         assert value[2].eq(0 if index % 4 == 0 else -1).all()
-    assert all(torch.equal(cache, prior) for (cache, *_), prior in zip(page_expectations, before_pages, strict=True))
+    assert all(torch.equal(cache.view(torch.uint8), prior.view(torch.uint8))
+               for (cache, *_), prior in zip(page_expectations, before_pages, strict=True))
     assert torch.equal(backing[5], immutable)
 
 

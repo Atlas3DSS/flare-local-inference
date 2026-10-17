@@ -39,6 +39,11 @@ def _fake_attend(q, key, value, pages, lengths, cu, sink, output, scratch, k_des
 class PreparedPagedAttention:
     def __init__(self, q, key, value, pages, lengths, cu, output, *, sink=None, mode,
                  window=-1, width=1, causal=True, k_descale=None, v_descale=None, session, workspace, name):
+        if key.dtype == torch.float8_e4m3fn:
+            if k_descale is None:
+                k_descale = torch.ones(1, dtype=torch.float32, device=key.device)
+            if v_descale is None:
+                v_descale = torch.ones(1, dtype=torch.float32, device=value.device)
         self.decode = mode in ("decode", "verify") and paged_decode.supports(
             num_q_heads=q.shape[1], num_kv_heads=key.shape[2], head_dim_qk=q.shape[2],
             head_dim_vo=value.shape[3], page_size=key.shape[1], kv_dtype=key.dtype,
@@ -122,6 +127,11 @@ class PreparedPagedAttention:
 
 class PreparedPagedKVWriter:
     def __init__(self, key, value, key_cache, value_cache, slots, *, session, name, k_scale=None, v_scale=None):
+        if key_cache.dtype == torch.float8_e4m3fn:
+            if k_scale is None:
+                k_scale = torch.ones(1, dtype=torch.float32, device=key.device)
+            if v_scale is None:
+                v_scale = torch.ones(1, dtype=torch.float32, device=value.device)
         self.arguments = dict(key=key, value=value, k_cache=key_cache, v_cache=value_cache, slot_mapping=slots,
                               k_scale=k_scale, v_scale=v_scale)
         self.plan = paged_kv_write.plan(paged_kv_write.Caps(device=key.device, num_kv_heads=key.shape[1],
