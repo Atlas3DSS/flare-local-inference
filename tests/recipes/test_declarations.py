@@ -287,3 +287,27 @@ def test_adapters_carry_stream_overlap_into_the_preparation_config(monkeypatch, 
         assert plan.stream_overlap is overlap
         assert model.recipe.prepare(tmp_path, plan, compile_forwards=True, kernel_cache=None, progress=None) == "group"
         assert seen.pop().stream_overlap is overlap
+
+
+@pytest.mark.parametrize("compression", [None, "csf"])
+@pytest.mark.parametrize("drafting", [False, True])
+def test_deepseek41_native_checkpoint_and_scale_compression(monkeypatch, tmp_path, compression, drafting):
+    from ignition.recipes.deepseek41.bootstrap import PreparationConfig
+
+    model = resolve("deepseek-v4.1-flash")
+    assert model.checkpoint.repository == "DeepSeek-AI/DeepSeek-V4.1-Flash-1017"
+    assert resolve(model.checkpoint.repository).checkpoint is model.checkpoint
+    assert model.recipe.sampling_defaults.as_dict() == {
+        "temperature": 1., "top_p": 1., "top_k": -1, "seed": 0, "min_p": 0.,
+        "repetition_penalty": 1., "presence_penalty": 0., "frequency_penalty": 0.}
+    speculation = model.recipe.speculation if drafting else None
+    native = fitted(model, 4, speculation=speculation)
+    plan = fitted(model, 4, speculation=speculation, expert_scale_compression=compression)
+    assert plan.expert_scale_compression == compression
+    assert (plan.weights_bytes < native.weights_bytes) == (compression == "csf")
+    monkeypatch.setattr("ignition.preparation.rank_group.prepare_group",
+                        lambda snapshot, config, prepare, **options: config)
+    config = model.recipe.prepare(tmp_path, plan, compile_forwards=True, kernel_cache=None, progress=None)
+    assert config.expert_scale_compression == compression and config.dspark == drafting
+    with pytest.raises(ValueError, match="scale compression"):
+        PreparationConfig(expert_scale_compression="zip")

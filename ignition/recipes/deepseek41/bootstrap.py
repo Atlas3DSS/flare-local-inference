@@ -68,12 +68,15 @@ class PreparationConfig:
     speculative_token_capacity: int | None = None
     # Run single-row decode's shared expert on an auxiliary stream; without overlap it runs serially.
     stream_overlap: bool = True
+    expert_scale_compression: str | None = None
     # Separate proposal and verification graphs for native confidence-prefix scheduling.
     split_speculation: bool = False
     # Additional combined graphs for exact qualification; omit when measuring service memory.
     speculation_reference_graphs: bool = False
 
     def __post_init__(self):
+        if self.expert_scale_compression not in (None, "csf"):
+            raise ValueError("DeepSeek V4.1 expert scale compression must be None or 'csf'")
         if self.speculation_reference_graphs and not self.split_speculation:
             raise ValueError("speculation reference graphs require split speculation")
         if self.split_speculation and (not self.dspark or self.draft_tokens < 1):
@@ -136,7 +139,8 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
     transient = contextlib.ExitStack()
     transient.enter_context(package_storage.transient())
     weights = ModelWeights.load(manifest, device, shard=shard, progress=progress, dspark=config.dspark,
-                                confidence=config.split_speculation)
+                                confidence=config.split_speculation,
+                                expert_scale_compression=config.expert_scale_compression)
     release_unused()
     if progress is not None:
         progress(f"Resident model tensors: {weights.allocated_bytes / (1 << 30):.3f} GiB per rank")
@@ -358,6 +362,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
     memory = {"rank": rank, "world_size": shard.world_size, "device": config.devices[rank],
         "catalog_operand_bytes": catalog_bytes,
         "weights_bytes": weights.allocated_bytes, "mapped_host_bytes": 0,
+        "expert_scale_compression": config.expert_scale_compression,
         "offloaded_bytes": sum(source.nbytes for pair in tables.sources.values() for source in pair),
         "continuation_bytes": pool.backing.nbytes, "state_rows": state_rows,
         "preparation_state_rows": int(pool.memory_capacity[0].item()),

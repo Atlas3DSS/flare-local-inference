@@ -141,7 +141,7 @@ explicit flags take precedence.
 |---|---|---|
 | `--prefill-chunk-size N` | Most prompt tokens processed in one prefill step, a multiple of 64. A larger chunk reaches a long prompt's first token sooner; while it runs, other active requests wait for their next token. Command line only. | The recipe's chunk |
 | `--mixed-prefill` | Capture mixed prompt/decode graphs alongside separate graphs. Supported by Qwen with concurrency of at least two, with or without speculation. Command line only; existing packages retain their captured catalog. | Disabled |
-| `--expert-scale-compression [MODE]` | Losslessly compress Step-5 routed-expert NVFP4 block scales, including BF16 experts converted to W4A16. `csf` is a compressed scale encoding expanded during execution, reducing resident GPU weight storage by an estimated 6%; actual savings depend on encoded scales. A bare flag selects `csf`; `--expert-scale-compression csf` also works. Retain compressed scales and share expansion scratch across serial layers. Selects a separate cached package. | Native scales |
+| `--expert-scale-compression [MODE]` | Losslessly compress routed-expert scales: DeepSeek V4.1 backbone and DSpark MXFP4 scales, or Step-5 NVFP4 scales including BF16 experts converted to W4A16. `csf` is a compressed scale encoding expanded during execution. Estimated resident GPU weight savings are 3% for DeepSeek V4.1 and 6% for Step-5; actual savings depend on encoded scales. A bare flag selects `csf`; `--expert-scale-compression csf` also works. Retain compressed scales and share expansion scratch across serial layers. Selects a separate cached package. | Native scales |
 | `--no-mtp` | Disable multi-token speculation: load no draft model, keep no verification rows, and decode one token per step. | Speculation on |
 | `--mtp-draft-tokens N` | Most draft tokens verified in one round; see `MODEL --help` for its limit. Graphs are captured for every count from 0 through `N` within the speculative token capacity, and verification adapts using measured cost and historical acceptance or native proposal confidence. Zero retains draft state with width-one execution; `--no-mtp` excludes draft weights and state. | Recipe declaration |
 | `--speculative-token-capacity N` | Maximum target-token rows in wider speculative graphs; width one covers every request bucket. Applies to every speculative recipe. | Larger of padded concurrency and maximum verification width |
@@ -213,10 +213,12 @@ changes require preparation again but no Rust rebuild. Validate the chosen
 configuration through an exported package before publishing native-serving
 performance results.
 
-The `deepseek-v4-flash` and `deepseek-v4.1-flash` aliases select the lossless
-MXFP4-CSF checkpoints from `local-inference-lab/DeepSeek-V4-Flash-Vision-Exp-lossless-CSF`
-and `local-inference-lab/DeepSeek-V4.1-Flash-lossless-CSF`, respectively. Compressed
-routed-expert scales remain in GPU memory. Serialized layers reuse one pair of scale buffers;
+The `deepseek-v4-flash` alias selects the lossless MXFP4-CSF checkpoint
+`local-inference-lab/DeepSeek-V4-Flash-Vision-Exp-lossless-CSF`.
+The `deepseek-v4.1-flash` alias selects `DeepSeek-AI/DeepSeek-V4.1-Flash-1017`,
+with native MXFP4 expert scales by default. `--expert-scale-compression csf`
+compresses its backbone and DSpark expert scales during preparation.
+Compressed routed-expert scales remain in GPU memory. Serialized layers reuse scale buffers by expert geometry;
 b12x prepares the scales needed by its selected MoE kernel before execution.
 Kernel autotuning remains enabled across the supported execution plans.
 

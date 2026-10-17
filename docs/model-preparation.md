@@ -178,7 +178,15 @@ use the same prepared model graphs; the flag selects table storage only.
 
 ## DeepSeek V4.1 Flash
 
-DeepSeek V4.1 Flash supports TP4 text generation, reasoning, and DSML tool calls.
+The `deepseek-v4.1-flash` alias selects `DeepSeek-AI/DeepSeek-V4.1-Flash-1017`
+and supports TP4 text generation, reasoning, and DSML tool calls.
+Sampling defaults are temperature 1.0 and top-p 1.0, following the
+[model card](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017#minimal-inference).
+Add `--expert-scale-compression csf` to losslessly compress backbone and DSpark
+MXFP4 expert scales during loading. Compressed scales stay resident, with shared
+expansion buffers reused by serial expert layers. Planning conservatively estimates
+3% less resident weight storage; loading measures the actual allocation. Omitting
+the flag preserves native scales.
 DSpark is its learned draft method, defaulting to five draft tokens per round
 with separate proposal and verification graphs, using native conditional
 confidence and measured execution cost for adaptive verification;
@@ -194,10 +202,11 @@ GPUs explicitly:
 ```sh
 .venv/bin/python -m ignition export deepseek-v4.1-flash --gpus 0,4,6,8 \
   --max-concurrency 4 --mtp-draft-tokens 5 --prefill-chunk-size 4096 \
-  --output /data/flare-runtime/deepseek-v41-flash-tp4-c4-dspark5.safetensors --verbose
+  --expert-scale-compression csf \
+  --output /data/flare-runtime/deepseek-v41-flash-1017-csf-tp4-c4-dspark5.safetensors --verbose
 
 ./flare/target/release/flare run \
-  /data/flare-runtime/deepseek-v41-flash-tp4-c4-dspark5.safetensors \
+  /data/flare-runtime/deepseek-v41-flash-1017-csf-tp4-c4-dspark5.safetensors \
   --gpus 0,4,6,8 --host 127.0.0.1 --port 8001
 ```
 
