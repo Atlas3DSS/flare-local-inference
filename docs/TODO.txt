@@ -1,3 +1,7 @@
+[ ] Restore preparation/serving RoCE proxy parity once FlashInfer main includes
+    the sequence-limit guard and protocol verification additions.
+    See roce-ring.md#protocol-model-and-runtime-checks.
+
 [ ] Review scratch-memory lifetimes and sharing across every supported recipe
     and shared component, including Qwen, GLM, DeepSeek, MiMo, Kimi, Step, and
     Nemotron. Review contiguous-buffer placement within typed pools and weight
