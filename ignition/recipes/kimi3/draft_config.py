@@ -6,7 +6,6 @@ from pathlib import Path
 
 REPOSITORY = "lightseekorg/kimi-k3-dflash2"
 REVISION = "e77935fb4804e17eb55085bffd045eae1d779769"
-CHECKPOINT = Path("/data/models/Kimi-K3-DFlash2")
 
 
 @dataclass(frozen=True)

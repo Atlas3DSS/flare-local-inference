@@ -194,7 +194,7 @@ def _export_hosts(args, *, export_path) -> int:
                          context_parallel=context_parallel(args, model), stream_overlap=stream_overlap(args, model),
                          roce_ring=args.roce_ring,
                          mixed_prefill=args.mixed_prefill, expert_scale_compression=args.expert_scale_compression)
-    plan = replace(plan, compile_workers=compiler_workers(configuration, args.compile_workers))
+    plan = replace(plan, compile_workers=compiler_workers(configuration, args.compile_workers), hub_cache=hub_cache)
     environment.apply(configuration, local)
     options = _server_options(configuration, model, plan)
     options.pop("api_key")
@@ -402,7 +402,7 @@ def serve(args) -> int:
                          roce_ring=args.roce_ring,
                          cache_states=args.prefix_cache_states, mixed_prefill=args.mixed_prefill,
                          expert_scale_compression=args.expert_scale_compression)
-    plan = replace(plan, compile_workers=compiler_workers(configuration, args.compile_workers))
+    plan = replace(plan, compile_workers=compiler_workers(configuration, args.compile_workers), hub_cache=hub_cache)
     if rendezvous is None:
         plan = tuning_devices(plan, host, args.tuning_gpus)
         local = plan.gpus

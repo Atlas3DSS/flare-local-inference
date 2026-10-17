@@ -50,7 +50,7 @@ def derive(configuration: Configuration, model: ResolvedModel, host: Host, *, gp
         concurrency=concurrency.value, reserve_bytes=configuration.reserve_bytes, speculation=speculation,
         prefill_chunk=prefill_chunk, context_parallel=context_parallel, stream_overlap=stream_overlap, roce_ring=roce_ring,
         mixed_prefill=mixed_prefill, expert_scale_compression=expert_scale_compression)
-    result = replace(result, compile_workers=workers)
+    result = replace(result, compile_workers=workers, hub_cache=configuration.directory("hub_cache"))
     return tuning_devices(result, host, tuning_gpus)
 
 

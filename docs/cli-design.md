@@ -740,9 +740,10 @@ The hub cache follows the Hugging Face hub library's convention unless
 `[paths].hub_cache` is set. A hub alias downloads its pinned revision. A local
 alias resolves its directory directly and fails if it is absent.
 `kimi-k3-mxfp4-csf` names `/data/models/Kimi-K3-MXFP4-CSF`.
-Its DFlash2 draft checkpoint, `lightseekorg/kimi-k3-dflash2` at revision
-`e77935fb4804e17eb55085bffd045eae1d779769`, is downloaded to
-`/data/models/Kimi-K3-DFlash2` during preparation. Seven draft tokens and adaptive
+External draft checkpoints use the same hub cache as target checkpoints.
+Kimi's DFlash2 draft checkpoint, `lightseekorg/kimi-k3-dflash2` at revision
+`e77935fb4804e17eb55085bffd045eae1d779769`, is downloaded there during preparation.
+Seven draft tokens and adaptive
 verification are the defaults. `--no-mtp` prepares ordinary execution without
 downloading or loading the draft checkpoint.
 
