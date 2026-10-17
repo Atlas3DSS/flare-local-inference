@@ -5,7 +5,7 @@ interleaved tokens: global position t belongs to rank t % W at local index t // 
 its local records through the shared page tables: a page holds PAGE_TOKENS local records, which cover
 PAGE_TOKENS * W global positions. Decode and verification gather every rank's query heads, attend over
 local records and combine the partial outputs by their log-sum-exp; prefill copies the request's earlier
-context from every rank's cache into a slab and attends with this rank's heads only.
+context from every rank's cache into a slab one window at a time and attends with this rank's heads only.
 """
 
 from dataclasses import dataclass
@@ -18,6 +18,8 @@ from .config import PAGE_TOKENS
 
 # One E4M3 latent record: 512 normalized latent values and 64 unrotated key values.
 RECORD_BYTES = 576
+# Earlier context positions a prefill layer gathers from every rank at once.
+CONTEXT_WINDOW = 131072
 
 
 @dataclass(frozen=True)
@@ -64,23 +66,24 @@ class ContextShards:
 
 
 @triton.jit
-def _pull_context(Addresses, Table, End, Slab, columns, WORLD: tl.constexpr, PAGE: tl.constexpr,
+def _pull_context(Addresses, Table, Window, Slab, columns, WORLD: tl.constexpr, PAGE: tl.constexpr,
                   TOKENS: tl.constexpr, WORDS: tl.constexpr, WORD_BLOCK: tl.constexpr):
-    # Copy the records of global positions below End into the slab at their positions, reading each from its
-    # owner's cache: this rank's own memory or a peer's through CUDA IPC.
+    # Copy the records of global positions in [Window[0], Window[1]) into the slab from its first row, reading
+    # each from its owner's cache: this rank's own memory or a peer's through CUDA IPC.
     first = tl.program_id(0) * TOKENS
-    end = tl.load(End).to(tl.int64)
-    if first < end:
+    begin = tl.load(Window).to(tl.int64)
+    end = tl.load(Window + 1).to(tl.int64)
+    if begin + first < end:
         word = tl.arange(0, WORD_BLOCK)
         for offset in tl.range(0, TOKENS):
-            token = first + offset
+            token = begin + first + offset
             if token < end:
                 owner = token % WORLD
                 local = token // WORLD
                 page = tl.load(Table + tl.minimum(local // PAGE, columns - 1)).to(tl.int64)
                 source = tl.load(Addresses + owner).to(tl.pointer_type(tl.int32))
                 values = tl.load(source + (page * PAGE + local % PAGE) * WORDS + word, mask=word < WORDS)
-                tl.store(Slab + token * WORDS + word, values, mask=word < WORDS)
+                tl.store(Slab + (first + offset) * WORDS + word, values, mask=word < WORDS)
 
 
 @triton.jit
@@ -107,10 +110,11 @@ def _launch(kernel, grid, args, **meta):
 _PULL_TOKENS = 16
 
 
-def pull_context(addresses, table, end, slab, shards):
-    """Copy every rank's records of the positions before `end` into the slab [positions, 144] int32 words."""
+def pull_context(addresses, table, window, slab, shards):
+    """Copy every rank's records of the positions in `window`, a [begin, end) int64 pair no wider than the slab,
+    into the slab [rows, 144] int32 words from its first row."""
     rows = slab.shape[0]
-    _launch(_pull_context, (triton.cdiv(rows, _PULL_TOKENS),), (addresses, table, end, slab, table.shape[0]),
+    _launch(_pull_context, (triton.cdiv(rows, _PULL_TOKENS),), (addresses, table, window, slab, table.shape[0]),
             WORLD=shards.world, PAGE=PAGE_TOKENS, TOKENS=_PULL_TOKENS, WORDS=RECORD_BYTES // 4, WORD_BLOCK=256,
             num_warps=4)
 
@@ -126,10 +130,12 @@ def write_records(latent, indices, table):
 class ContextParallel:
     """Decode context parallel resources shared by every MLA layer of a rank: its shards, the b12x head
     exchange (DcpAllToAll), the collective coordinator, every rank's address of each layer's page pool
-    ({layer: [world] int64}) and the prefill slab [context, 576] E4M3 that serial prefill layers reuse."""
+    ({layer: [world] int64}) and the prefill slab [window + chunk, 576] E4M3 that serial prefill layers reuse:
+    one window of earlier context, then the chunk's own records."""
 
     shards: ContextShards
     heads: object
     coordinator: object
     peers: dict
     slab: torch.Tensor
+    window: int = CONTEXT_WINDOW

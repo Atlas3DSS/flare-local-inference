@@ -88,21 +88,8 @@ class PreparedMLA:
                 metadata.query_start_loc, caps=caps, scale=scale, session=session, name=name + ".attention",
                 workspace=workspace)
         elif mode == "prefill":
-            # One packed request: its earlier context arrives from every rank, the chunk's records from this rank.
-            slab = context.slab
-            pages = slab.shape[0] // PAGE_TOKENS
-            if peers is None or peers.shape != (world,) or slab.shape[0] % PAGE_TOKENS or pages < width * world:
-                raise ValueError("context-parallel prefill requires every rank's cache address and a context slab")
-            self.slab = slab
-            self.slab_table = torch.arange(pages, dtype=torch.int32, device=device)[None]
-            self.end = torch.zeros(1, dtype=torch.int64, device=device)
-            self.lengths = torch.zeros_like(metadata.lengths)
-            caps = dense_mla.Caps(mode="extend", q_dtype=torch.bfloat16, num_q_heads=heads, max_total_q=tokens,
-                max_batch=1, max_cache_tokens=pages * PAGE_TOKENS, max_page_table_width=pages,
-                num_cache_pages=pages, **common)
-            self.attention = PreparedDenseMLA(self.absorbed, slab.view(pages, PAGE_TOKENS, RECORD_BYTES),
-                self.attended, self.slab_table, self.lengths, metadata.query_start_loc, caps=caps, scale=scale,
-                session=session, name=name + ".attention", workspace=workspace)
+            self.prefill = PreparedContextPrefill(self.absorbed, self.attended, metadata, context, peers,
+                session=session, name=name, workspace=workspace, buffer=buffer, scale=scale, common=common)
         else:
             # Each query row attends to the records this rank owns at or before its position, as its own sequence.
             total, rows = heads * world, context.heads.max_batch_size
@@ -152,13 +139,7 @@ class PreparedMLA:
             self.lengths.copy_(torch.where(m.lengths > 0, m.starts + m.lengths, 0))
             self.attention()
         elif self.mode == "prefill":
-            # Earlier chunks' records were written before this forward's collectives ordered the ranks.
-            self.end.copy_(m.starts[:1])
-            pull_context(self.peers, m.page_table[0], self.end, self.slab.view(torch.uint8).view(torch.int32).view(
-                self.slab.shape[0], RECORD_BYTES // 4), shards)
-            write_records(self.latent, m.positions, self.slab)
-            self.lengths.copy_(torch.where(m.lengths > 0, m.starts + m.lengths, 0))
-            self.attention()
+            self.prefill(self.latent)
         else:
             tokens = self.absorbed.shape[0]
             self.quantized.copy_(self.absorbed.float().clamp(-448., 448.).to(FP8))
@@ -170,3 +151,86 @@ class PreparedMLA:
         self.expanded.copy_(torch.bmm(self.attended.transpose(0, 1), self.weights["value"]).transpose(0, 1).flatten(1))
         sigmoid_gate(self.expanded, self.gate)
         return p["output"](self.expanded)
+
+
+class PreparedContextPrefill:
+    """One packed prefill request's attention with this rank's heads over its whole context, whose positions
+    every rank of the decode context group shares.
+
+    Earlier positions arrive from every rank's cache one window at a time, back from the chunk: the latest
+    window and the chunk's own records attend causally, each earlier window without a mask, and the partial
+    outputs combine by their log-sum-exp, as vLLM's chunked MLA prefill does. Earlier chunks' records were
+    written before this forward's collectives ordered the ranks.
+    """
+
+    def __init__(self, absorbed, attended, metadata, context, peers, *, session, name, workspace, buffer, scale,
+                 common):
+        tokens, heads = absorbed.shape[:2]
+        device, world, width = absorbed.device, context.shards.world, metadata.page_table.shape[1]
+        slab, window = context.slab, context.window
+        pages = slab.shape[0] // PAGE_TOKENS
+        if (peers is None or peers.shape != (world,) or slab.shape[0] % PAGE_TOKENS or window % PAGE_TOKENS
+                or slab.shape[0] < window + tokens):
+            raise ValueError("context-parallel prefill requires every rank's cache address and a context slab")
+        self.metadata, self.peers, self.shards, self.attended = metadata, peers, context.shards, attended
+        self.slab, self.window = slab, window
+        self.words = slab.view(torch.uint8).view(torch.int32).view(slab.shape[0], RECORD_BYTES // 4)[:window]
+        self.windows = -(-width * PAGE_TOKENS * world // window)
+        self.offsets = torch.arange(self.windows, dtype=torch.int64, device=device) * window
+        self.bounds = torch.zeros((self.windows, 2), dtype=torch.int64, device=device)
+        self.records = torch.full((tokens,), -1, dtype=torch.int64, device=device)
+        self.lengths = torch.zeros_like(metadata.lengths)
+        self.lse = buffer("prefill_lse", heads, dtype=torch.float32)
+        cache = slab.view(pages, PAGE_TOKENS, RECORD_BYTES)
+        caps = dense_mla.Caps(mode="extend", q_dtype=torch.bfloat16, num_q_heads=heads, max_total_q=tokens,
+            max_batch=1, max_cache_tokens=pages * PAGE_TOKENS, max_page_table_width=pages, num_cache_pages=pages,
+            **common)
+        self.table = torch.arange(pages, dtype=torch.int32, device=device)[None]
+        self.attention = PreparedDenseMLA(absorbed, cache, attended, self.table, self.lengths,
+            metadata.query_start_loc, caps=caps, scale=scale, session=session, name=name + ".attention",
+            workspace=workspace, lse=self.lse)
+        self.context_attention = None
+        if self.windows > 1:
+            columns = window // PAGE_TOKENS
+            self.merged = buffer("merged", heads, 512, dtype=torch.float32)
+            self.window_lengths = torch.zeros_like(metadata.lengths)
+            self.window_lse = buffer("window_lse", heads, dtype=torch.float32)
+            self.window_attended = buffer("window_attended", heads, 512)
+            self.window_table = torch.arange(columns, dtype=torch.int32, device=device)[None]
+            caps = dense_mla.Caps(mode="extend", causal=False, q_dtype=torch.bfloat16, num_q_heads=heads,
+                max_total_q=tokens, max_batch=1, max_cache_tokens=window, max_page_table_width=columns,
+                num_cache_pages=pages, **common)
+            self.context_attention = PreparedDenseMLA(absorbed, cache, self.window_attended, self.window_table,
+                self.window_lengths, metadata.query_start_loc, caps=caps, scale=scale, session=session,
+                name=name + ".context_attention", workspace=workspace, lse=self.window_lse)
+
+    def __call__(self, latent):
+        m, table = self.metadata, self.metadata.page_table[0]
+        ends = m.starts[:1].to(torch.int64) - self.offsets
+        self.bounds.copy_(torch.stack(((ends - self.window).clamp(min=0), ends.clamp(min=0)), -1))
+        pull_context(self.peers, table, self.bounds[0], self.words, self.shards)
+        # The chunk's records follow the latest window in the slab.
+        latest = self.bounds[0, 0]
+        self.records.copy_(torch.where(m.positions >= 0, m.positions - latest, -1))
+        write_records(latent, self.records, self.slab)
+        self.lengths.copy_(torch.where(m.lengths > 0, m.starts - latest + m.lengths, 0))
+        self.attention()
+        if self.context_attention is None:
+            return self.attended
+        self.merged.copy_(self.attended.float())
+        for index in range(1, self.windows):
+            bounds = self.bounds[index]
+            pull_context(self.peers, table, bounds, self.words, self.shards)
+            present = bounds[1] > bounds[0]
+            self.window_lengths.copy_((bounds[1] - bounds[0]).to(self.window_lengths.dtype).expand_as(
+                self.window_lengths))
+            self.context_attention()
+            # An empty window contributes nothing; a query row without positions keeps a zero output.
+            peak = torch.maximum(self.lse, torch.where(present, self.window_lse, -torch.inf)).clamp(min=-1e30)
+            kept = torch.exp(self.lse - peak)
+            added = torch.where(present, torch.exp(self.window_lse - peak), 0.)
+            total = (kept + added).clamp(min=1e-30)
+            self.merged.copy_((self.merged * kept[..., None] + torch.where(present, self.window_attended.float(),
+                                                                           0.) * added[..., None]) / total[..., None])
+            self.lse.copy_(peak + torch.log(total))
+        return self.attended.copy_(self.merged)

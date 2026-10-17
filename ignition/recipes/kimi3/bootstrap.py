@@ -237,11 +237,13 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
             vision_inputs = VisionInputs.allocate(device)
             vision_storage = {}
             if context is not None:
-                from .dcp import RECORD_BYTES
+                from .dcp import CONTEXT_WINDOW, RECORD_BYTES
 
-                # Serial prefill layers gather their context into one slab, released while forwards compile.
-                context = replace(context, slab=torch.zeros((config.context, RECORD_BYTES),
-                                                            dtype=torch.float8_e4m3fn, device=device))
+                # Serial prefill layers gather their context one window at a time into one slab beside the chunk's
+                # own records; it is released while forwards compile.
+                window = min(CONTEXT_WINDOW, config.context)
+                context = replace(context, window=window, slab=torch.zeros(
+                    (window + config.prefill_chunk_size, RECORD_BYTES), dtype=torch.float8_e4m3fn, device=device))
         vision_prefill = PrefillVisionInputs.allocate(config.prefill_chunk_size, device)
         vision_state = VisionState(inputs, vision_prefill, requests, image_slots=config.image_concurrency, image_token=163605,
                                    features=FEATURES, hidden=HIDDEN // shard.world_size)
