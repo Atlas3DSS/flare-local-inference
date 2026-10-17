@@ -63,7 +63,8 @@ RECIPE = Recipe(
         Checkpoint(alias="kimi-k3-dspark", repository="/data/kimi-k3-dspark", revision="local",
         architecture="KimiK3ForConditionalGeneration", stored_bytes=1_570_350_125_826,
         device_bytes=1_498_926_420_236, draft_bytes=7_900_000_000,
-        ranks=MappingProxyType({16: RankCosts(state_row_bytes=34_716_928, page_bytes=1_769_472, graph_bytes=6 << 30,
+        # Language-only DSpark serving measured 4.1 GiB per rank beside weights and KV pages.
+        ranks=MappingProxyType({16: RankCosts(state_row_bytes=34_716_928, page_bytes=1_769_472, graph_bytes=9 << 29,
                                               page_tokens=128 * 16)}))),
     context=1048576, page_tokens=128, concurrency=4, max_concurrency=64, prefill_chunk=4096,
     speculation=Speculation(draft_tokens=7), max_draft_tokens=7, max_images=4, image_bytes=32 << 20,
@@ -80,6 +81,6 @@ RECIPE = Recipe(
     # each page's positions over the sixteen ranks.
     ranks=MappingProxyType({16: RankCosts(state_row_bytes=32_464_128, page_bytes=2_138_112,
                                         draft_page_bytes=368_640, graph_bytes=5 << 30)}),
-    plain_ranks=MappingProxyType({16: RankCosts(state_row_bytes=29_869_824, page_bytes=1_769_472, graph_bytes=6 << 30,
+    plain_ranks=MappingProxyType({16: RankCosts(state_row_bytes=29_869_824, page_bytes=1_769_472, graph_bytes=9 << 29,
                                               page_tokens=128 * 16)}),
 )
