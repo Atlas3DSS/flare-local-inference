@@ -35,6 +35,22 @@ the public deployment surface. Ignition and heliopause are internal preparation
 tools. Dependency direction is `flare → Helios` and `heliopause → Helios`;
 Helios has no dependency on either preparation tool.
 
+### Distribution builds
+
+From the repository root, build public executables with:
+
+```sh
+cargo build --locked --release --manifest-path flare/Cargo.toml
+```
+
+The executable is `flare/target/release/flare` (`flare.exe` on Windows). Docker and
+native-serving CI use this build. The release profile strips symbols and retains
+Rust panic messages, source locations, and unwinding behavior. Builds use the
+stable toolchain without unstable compiler flags. Source paths, required dynamic
+imports, API routes, metrics, and operational errors remain observable. Publisher
+stamping through `python -m ignition.release` preserves the embedded
+verification-profile section.
+
 ## 2. The preparation boundary
 
 Ignition records four things while preparing a model, and refuses to

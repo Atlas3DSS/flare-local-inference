@@ -302,18 +302,20 @@ impl Frontend {
         environment.set_lstrip_blocks(true);
         environment
             .set_unknown_method_callback(minijinja_contrib::pycompat::unknown_method_callback);
-        environment.add_filter("tojson", json::tojson);
-        environment.add_test("iterable", |value: &Value| {
-            !value.is_none() && value.try_iter().is_ok()
-        });
+        // Function pointers keep internal function-item names out of template diagnostics.
+        environment.add_filter("tojson", json::tojson as fn(_, _) -> _);
+        environment.add_test(
+            "iterable",
+            (|value: &Value| !value.is_none() && value.try_iter().is_ok()) as fn(&Value) -> bool,
+        );
         environment.add_function(
             "raise_exception",
-            |message: Value| -> std::result::Result<Value, TemplateError> {
+            (|message: Value| -> std::result::Result<Value, TemplateError> {
                 Err(TemplateError::new(
                     ErrorKind::InvalidOperation,
                     message.to_string(),
                 ))
-            },
+            }) as fn(Value) -> std::result::Result<Value, TemplateError>,
         );
         environment
             .add_template_owned("chat", template_source.clone())

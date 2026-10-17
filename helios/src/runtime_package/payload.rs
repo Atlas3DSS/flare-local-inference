@@ -171,7 +171,7 @@ pub(super) unsafe fn load(
             let (available, chunks, buffers, ready) =
                 (available.clone(), &chunks, &buffers, ready.clone());
             thread::Builder::new()
-                .name(format!("helios-reader-{index}"))
+                .name(format!("flare-reader-{index}"))
                 .spawn_scoped(scope, move || {
                     loop {
                         let Ok((slot, index)) = available.lock().unwrap().recv() else {
