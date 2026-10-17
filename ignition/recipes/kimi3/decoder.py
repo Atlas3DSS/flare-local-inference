@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import torch
 import triton
 
-from ignition.components.collectives import PreparedAllGather, PreparedChunkedAllReduce
+from ignition.components.collectives import PreparedChunkedAllGather, PreparedChunkedAllReduce
 from ignition.components.embedding import PreparedShardedEmbedding
 from ignition.components.linear import UnquantizedProjection
 from ignition.components.moe import PreparedRouter, PreparedRoutedExperts, RouterScratch
@@ -177,7 +177,7 @@ class PreparedLatentMoE:
             self.router_columns = self.gathered_logits.view(tokens, shard.world_size, router_width)[:, :, :local_experts]
             self.router_output = logits.view(tokens, shard.world_size, local_experts)
             # Gathering BF16 views transports the FP32 logits without conversion or arithmetic.
-            self.router_gather = PreparedAllGather(self.router_input.view(torch.bfloat16), self.gathered_logits.view(torch.bfloat16),
+            self.router_gather = PreparedChunkedAllGather(self.router_input.view(torch.bfloat16), self.gathered_logits.view(torch.bfloat16),
                 runtime=router_runtime, coordinator=coordinator, session=session, name=name + ".router_gather")
             self.router = PreparedRouter(logits, routes, score_func="sigmoid", correction_bias=weights["correction"],
                 renormalize=True, routed_scaling_factor=c["routed_scaling_factor"], session=session, name=name + ".route")
@@ -253,7 +253,9 @@ class PreparedDecoder:
                 **kwargs) if kind == "kda" else
                 PreparedMLA(w["attention"], source, metadata, pool.attention(index), context=context,
                             peers=None if context is None else context.peers[index], coordinator=coordinator,
-                            latents=next((r for r in latent_runtimes if source.shape[0] <= r.max_batch_size), None),
+                            # The smallest latent exchange that carries the step, else the largest in chunks.
+                            latents=next((r for r in latent_runtimes if source.shape[0] <= r.max_batch_size),
+                                         latent_runtimes[-1] if latent_runtimes else None),
                             **kwargs))
             if "mlp" in w:
                 mlp = PreparedMLP(w["mlp"], source, session=session, name=prefix + ".mlp",

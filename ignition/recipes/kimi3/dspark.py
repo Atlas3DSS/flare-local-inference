@@ -12,7 +12,7 @@ from functools import partial
 import torch
 from transformers.models.qwen3.modeling_qwen3 import Qwen3DecoderLayer, Qwen3RMSNorm
 
-from ignition.components.collectives import PreparedAllGather, PreparedAllReduce
+from ignition.components.collectives import PreparedAllGather, PreparedAllReduce, PreparedChunkedAllGather
 from ignition.components.embedding import PreparedShardedEmbedding
 from ignition.components.linear import QuantizedProjection, UnquantizedProjection
 from ignition.components.mlp import MLPScratch, PreparedMLP
@@ -102,7 +102,7 @@ class PreparedContext:
         self.normalized = buffer("normalized", hidden)
         self.project = projection(auxiliary, draft.projection, self.local, session=session, name=name + ".project",
                                   workspace=workspace)
-        self.gather = PreparedAllGather(self.local, self.projected, runtime=runtime, coordinator=coordinator,
+        self.gather = PreparedChunkedAllGather(self.local, self.projected, runtime=runtime, coordinator=coordinator,
                                         session=session, name=name + ".gather")
         self.hidden_norm = draft.hidden_norm
         self.kv = buffer("kv", draft.context_kv.shape[0])

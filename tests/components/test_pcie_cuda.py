@@ -177,3 +177,45 @@ def test_chunked_all_reduce_reduces_rows_beyond_the_channel_capacity(world_size,
         pytest.skip(f"requires {world_size} assigned GPUs")
     mp.spawn(_chunked_rank, args=(world_size, (tmp_path / "rendezvous").as_uri(), 64, 16),
              nprocs=world_size, join=True)
+
+
+def _chunked_gather_rank(rank, world_size, rendezvous, rows, capacity):
+    from ignition.components.collectives import PreparedChunkedAllGather
+    from ignition.preparation.collectives import CollectivePreparation, create_all_gather_runtime
+    from ignition.preparation.tuning import RecordedPreparationSession
+
+    torch.cuda.set_device(rank)
+    device = torch.device("cuda", rank)
+    dist.init_process_group("gloo", init_method=rendezvous, rank=rank,
+                            world_size=world_size, timeout=timedelta(minutes=2))
+    group = dist.group.WORLD
+    coordinator = CollectivePreparation(group)
+    columns = 64 * world_size
+    source = (torch.arange(rows, device=device, dtype=torch.float32)[:, None] * 8 + rank).expand(rows, 64).bfloat16()
+    output = torch.empty((rows, columns), dtype=torch.bfloat16, device=device)
+    runtime = create_all_gather_runtime(group, device, max_rows=capacity, columns=columns)
+    try:
+        with RecordedPreparationSession(device=device, checkpoint="collective-test",
+                workload_schema="chunked-gather-v1", numerical_policy="default", coordinator=coordinator) as session:
+            gather = PreparedChunkedAllGather(source.contiguous(), output, runtime=runtime, session=session,
+                                              coordinator=coordinator, name=f"gather{rows}")
+            session.tune()
+        # A channel for `capacity` rows gathers the larger source in row chunks it accepts.
+        assert len(gather.parts) == -(-rows // capacity)
+        gather(source.contiguous())
+        torch.cuda.synchronize(device)
+        for peer in range(world_size):
+            expected = (torch.arange(rows, device=device, dtype=torch.float32)[:, None] * 8 + peer).expand(rows, 64)
+            torch.testing.assert_close(output[:, peer * 64:(peer + 1) * 64], expected.bfloat16(), rtol=0, atol=0)
+    finally:
+        runtime.close()
+        dist.destroy_process_group()
+
+
+@pytest.mark.parametrize("world_size", [2, 4])
+def test_chunked_all_gather_gathers_rows_beyond_the_channel_capacity(world_size, tmp_path):
+    assert os.environ.get("CUDA_VISIBLE_DEVICES")
+    if torch.cuda.device_count() < world_size:
+        pytest.skip(f"requires {world_size} assigned GPUs")
+    mp.spawn(_chunked_gather_rank, args=(world_size, (tmp_path / "rendezvous").as_uri(), 64, 16),
+             nprocs=world_size, join=True)

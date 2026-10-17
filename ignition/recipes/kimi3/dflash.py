@@ -8,7 +8,7 @@ import torch
 from b12x.attention import dense_mla
 
 from ignition.components.candidate_selector import PreparedCandidateSelector
-from ignition.components.collectives import PreparedAllGather, PreparedAllReduce
+from ignition.components.collectives import PreparedAllReduce, PreparedChunkedAllGather
 from ignition.components.dense_mla import PreparedDenseMLA
 from ignition.components.embedding import PreparedShardedEmbedding
 from ignition.components.grouped_convolution import PreparedGroupedConvolution
@@ -60,7 +60,7 @@ class PreparedContext:
         self.latent = buffer("latent", 576)
         self.project = UnquantizedProjection(auxiliary, weights.draft.projection, self.local,
                                              session=session, name=name + ".project")
-        self.gather = PreparedAllGather(self.local, self.hidden, runtime=runtime, coordinator=coordinator,
+        self.gather = PreparedChunkedAllGather(self.local, self.hidden, runtime=runtime, coordinator=coordinator,
                                        session=session, name=name + ".gather")
         self.norm = rms_norm(weights.draft.hidden_norm, c["rms_norm_eps"])
         self.rotary = DraftRotary(weights.config.draft, device)

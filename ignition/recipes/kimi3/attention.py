@@ -12,7 +12,7 @@ a slab beside the chunk's own records and attends with this rank's heads.
 import torch
 from b12x.attention import dense_mla
 
-from ignition.components.collectives import PreparedAllGather, PreparedLseReduceScatter
+from ignition.components.collectives import PreparedAllGather, PreparedChunkedAllGather, PreparedLseReduceScatter
 from ignition.components.dense_mla import PreparedDenseMLA
 from ignition.components.linear import UnquantizedProjection
 
@@ -56,8 +56,6 @@ class PreparedMLA:
             self.gate = self.local[:, latent_width:]
         else:
             rows, width = latents.max_batch_size, latents.query_head_dim
-            if not tokens <= rows:
-                raise ValueError("the latent exchange must carry every row of the step")
             self.input = buffer("input", latent_width)
             self.local = buffer("local", weights["latent_gate"].shape[0], rows=rows)
             self.gate = self.local[:, width:]
@@ -65,7 +63,7 @@ class PreparedMLA:
             self.staged = tokens > 1
             self.send = buffer("send", width, rows=rows) if self.staged else self.local[:, :width]
             self.gathered_latents = buffer("gathered_latents", latents.world_size * width, rows=rows)
-            self.latent_gather = PreparedAllGather(self.send, self.gathered_latents, runtime=latents,
+            self.latent_gather = PreparedChunkedAllGather(self.send, self.gathered_latents, runtime=latents,
                 session=session, coordinator=coordinator, name=name + ".gather_latents")
         self.projections = {key: UnquantizedProjection(x, weights[key], y, session=session, name=name + "." + key)
             for key, x, y in (("latent_gate", source, self.local), ("q_b", self.query_norm, self.query.view(tokens, -1)),

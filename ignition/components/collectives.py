@@ -125,6 +125,34 @@ class PreparedAllReduce:
         return self.output
 
 
+class PreparedChunkedAllGather:
+    """Column gathers of more rows than the channel's batch capacity, gathered in row chunks it accepts.
+
+    Each chunk is a PreparedAllGather over contiguous row views of the source and output, so a channel sized
+    for decode can also gather prefill activations; the chunks run in order on one stream.
+    """
+
+    def __init__(self, source, output, *, runtime, session, coordinator, name):
+        rows = source.shape[0]
+        step = rows if runtime is None or _roce(runtime) else max(1, min(rows, runtime.max_batch_size))
+        self.bounds = [(start, min(start + step, rows)) for start in range(0, rows, step)]
+        self.parts = [PreparedAllGather(source[begin:end], output[begin:end], runtime=runtime, session=session,
+                                        coordinator=coordinator, name=name if len(self.bounds) == 1 else f"{name}.{index}")
+                      for index, (begin, end) in enumerate(self.bounds)]
+        self.output = output
+
+    def __call__(self, source):
+        for (begin, end), part in zip(self.bounds, self.parts, strict=True):
+            part(source[begin:end])
+        return self.output
+
+    def run_eager(self, source):
+        """Gather on the current stream from inside another eager operation."""
+        for (begin, end), part in zip(self.bounds, self.parts, strict=True):
+            part.run_eager(source[begin:end])
+        return self.output
+
+
 class PreparedChunkedAllReduce:
     """A row-major reduction larger than its PCIe runtime's capacity, reduced in row chunks the runtime accepts.
 

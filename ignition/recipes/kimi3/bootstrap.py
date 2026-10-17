@@ -173,24 +173,25 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         coordinator = CollectivePreparation(group)
         # Prefill activations reduce in chunks of the rows decode and verification already need a channel for: a
         # channel sized for whole prefill chunks would stage 448 MiB per rank for 4096 rows.
-        collective = create_all_reduce_runtime(group, device,
-            max_tokens=max(min(max_tokens, REDUCE_ROWS), config.decode_tokens, draft_rows),
+        channel_rows = max(min(max_tokens, REDUCE_ROWS), config.decode_tokens, draft_rows)
+        collective = create_all_reduce_runtime(group, device, max_tokens=channel_rows,
             hidden_size=weights.config.hidden, ipc=package_storage.peer_storage)
         vocabulary_collective = create_all_gather_runtime(group, device,
             max_rows=max(config.decode_tokens, draft_rows, slots * (config.draft_tokens or 1)),
             columns=weights.config.vocabulary, ipc=package_storage.peer_storage)
         context_collective = draft_argmax = None
         if config.dspark:
-            context_collective = create_all_gather_runtime(group, device, max_rows=max_tokens,
+            context_collective = create_all_gather_runtime(group, device, max_rows=channel_rows,
                 columns=weights.config.hidden, ipc=package_storage.peer_storage)
             # DSpark drafts greedily: each position's head and Markov shards meet in one vocabulary-parallel
             # argmax, as vLLM's Kimi K3 DSpark does, instead of gathering both distributions.
             draft_argmax = create_vocabulary_argmax_runtime(group, device,
                 local_vocab_size=weights.config.vocabulary // shard.world_size, max_rows=slots,
                 ipc=package_storage.peer_storage)
-        embedding_collective = create_all_gather_runtime(group, device, max_rows=max_tokens,
+        # Prefill rows beyond a channel's capacity gather in chunks, as they reduce.
+        embedding_collective = create_all_gather_runtime(group, device, max_rows=channel_rows,
             columns=weights.config.hidden, ipc=package_storage.peer_storage)
-        router_collective = create_all_gather_runtime(group, device, max_rows=max_tokens,
+        router_collective = create_all_gather_runtime(group, device, max_rows=channel_rows,
             columns=2 * shard.world_size * ((weights.config.text["num_experts"] // shard.world_size + 31) // 32 * 32),
             ipc=package_storage.peer_storage)
         route_collective = (create_route_runtime(group, device, ipc=package_storage.peer_storage)
@@ -206,12 +207,12 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                                            query_head_dim=RECORD_BYTES, ipc=package_storage.peer_storage),
                 coordinator=coordinator, peers=pool.share_pages(package_storage, group), slab=None)
         # Every MLA step gathers each rank's query and KV latent rows, padded to 16 bytes: one exchange for up to
-        # eight rows, as vLLM's b12x latent transport carries, and one for prefill-sized steps.
+        # eight rows, as vLLM's b12x latent transport carries, and one that prefill steps use in chunks.
         text = weights.config.text
         latent = (text["q_lora_rank"] + text["kv_lora_rank"] + text["qk_rope_head_dim"]) // shard.world_size
         latent_runtimes = tuple(create_head_exchange(group, device, max_rows=rows, heads=shard.world_size,
                                                      head_dim=-(-latent // 8) * 8, ipc=package_storage.peer_storage)
-                                for rows in sorted({min(8, max_tokens), max_tokens}))
+                                for rows in sorted({min(8, max_tokens), channel_rows}))
         identity = hashlib.sha256(json.dumps({
             "config": weights.config.text, "headers": headers, "vision": weights.config.vision,
             "draft": None if not drafting else weights.config.draft.raw if config.dspark else weights.config.draft.text,
@@ -230,7 +231,10 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         with package_storage.scratch_pool() as scratch_pool:
             # Vision and text graphs execute serially and share disposable workspace.
             text_shape = (max(config.prefill_chunk_size, config.decode_tokens), weights.config.hidden)
-            text_shapes = (text_shape,) * 5
+            # A layer attends with either KDA or MLA, so both write one attention output; DFlash2's context injection
+            # uses the two as separate buffers.
+            separate = drafting and not config.dspark
+            text_shapes = (text_shape,) * (5 if separate else 4)
             if drafting:
                 # The draft's context features: DSpark's auxiliary mixtures or DFlash2's target-layer sums.
                 draft = weights.config.draft
@@ -240,7 +244,8 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
             cursor = graph_buffers.cursor()
             shared_scratch = cursor.zeros((max(max(patches, default=0) * 3 * weights.config.vision["qkv_hidden_size"],
                 sum(rows * columns for rows, columns in text_shapes)),), torch.bfloat16)
-            activation, total, kda_output, mla_output, moe_output, *auxiliary = scratch_views(shared_scratch, text_shapes)
+            activation, total, kda_output, *views = scratch_views(shared_scratch, text_shapes)
+            mla_output, moe_output, *auxiliary = views if separate else (kda_output, *views)
             prefill_storage = Scratch.allocate(config.prefill_chunk_size, 1, weights.config, shard.world_size, device,
                                                activations=activation[:config.prefill_chunk_size], buffers=cursor)
             decode_storage = Scratch.allocate(config.decode_tokens, config.decode_tokens, weights.config, shard.world_size,
