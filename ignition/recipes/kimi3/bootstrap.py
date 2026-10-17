@@ -29,6 +29,7 @@ from ignition.preparation.host_memory import release_unused
 from ignition.preparation.model import PreparedModel
 from ignition.preparation.scratch import ScratchArena, scratch_views
 from ignition.preparation.tuning import RecordedPreparationSession
+from ignition.preparation.tuning_replicas import TuningReplica
 from ignition.progress import phase
 
 from .config import PAGE_TOKENS
@@ -43,6 +44,8 @@ from ignition.components.vision_state import PrefillVisionInputs, VisionState
 
 @dataclass(frozen=True)
 class PreparationConfig:
+    compile_workers: int | None = None
+    tuning_replica: TuningReplica | None = None
     devices: tuple[int, ...] = tuple(range(16))
     context: int = 1048576
     prefill_chunk_size: int = 4096
@@ -136,7 +139,9 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         identity = hashlib.sha256(json.dumps({
             "config": weights.config.text, "headers": headers,
             "vision": weights.config.vision, "draft": None if not drafting else weights.config.draft.text, "world_size": shard.world_size, "contract": "kimi3.graph-inputs.v1"}, sort_keys=True).encode()).hexdigest()
-        session = RecordedPreparationSession(device=device, checkpoint=identity,
+        session = RecordedPreparationSession(
+            compile_workers=config.compile_workers, tuning_replica=config.tuning_replica,
+            device=device, checkpoint=identity,
             workload_schema="kimi3", numerical_policy="default", coordinator=coordinator,
             headroom_bytes=config.headroom_bytes, benchmark_storage=package_storage)
         session.__enter__()

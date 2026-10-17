@@ -24,6 +24,18 @@ def test_compiler_concurrency_accounts_for_shared_device_ram(monkeypatch, integr
     assert pool.options["compile_threads"] == threads
 
 
+def test_forward_compiler_uses_explicit_host_budget_without_eight_worker_cap(monkeypatch):
+    from ignition.preparation import compile_pool, host_memory
+
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (96 << 30, 96 << 30))
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda device: SimpleNamespace(is_integrated=False))
+    monkeypatch.setattr(host_memory, "available_bytes", lambda: 128 << 30)
+    assert compile_pool.CompilePool("cuda:0", compile_workers=32).workers == 32
+    assert compile_pool.CompilePool("cuda:0", compile_workers=32, pools=4).workers == 8
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (12 << 30, 96 << 30))
+    assert compile_pool.CompilePool("cuda:0", compile_workers=32, headroom_bytes=2 << 30).workers == 5
+
+
 def test_metadata_preserves_tensor_aliases_and_offsets():
     storage = torch.empty(1024, dtype=torch.uint8)
     original = SimpleNamespace(storage=storage, part=storage.view(torch.float32)[16:48],
@@ -158,15 +170,16 @@ def test_integrated_compile_threads_fit_the_ram_workers_leave(available_gib, thr
     assert compile_threads(16, workers=1, available=available_gib << 30, device_bytes=2 << 30) == threads
 
 
-@pytest.mark.parametrize(("free_gib", "workers", "threads"), [(95, 8, 2), (3, 1, 16)])
-def test_compile_pool_sizes_workers_from_free_device_memory(monkeypatch, free_gib, workers, threads):
+@pytest.mark.parametrize(("requested", "free_gib", "workers", "threads"),
+                         [(None, 95, 8, 2), (None, 3, 1, 16), (32, 95, 32, 1), (32, 3, 1, 1)])
+def test_compile_pool_sizes_workers_from_free_device_memory(monkeypatch, requested, free_gib, workers, threads):
     from ignition.preparation import compile_pool
 
     monkeypatch.setitem(compile_pool._OPTIONS, "compile_threads", 16)
     monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (free_gib << 30, 96 << 30))
     monkeypatch.setattr(torch.cuda, "get_device_properties", lambda device: SimpleNamespace(is_integrated=False))
     monkeypatch.setattr("ignition.preparation.host_memory.available_bytes", lambda: 128 << 30)
-    pool = compile_pool.CompilePool("cuda:0")
+    pool = compile_pool.CompilePool("cuda:0", compile_workers=requested)
     assert (pool.workers, pool.options["compile_threads"]) == (workers, threads)
 
 

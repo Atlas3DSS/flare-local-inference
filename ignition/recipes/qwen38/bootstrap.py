@@ -10,6 +10,8 @@ from pathlib import Path
 
 import torch
 
+from ignition.preparation.tuning_replicas import TuningReplica
+
 from ignition.components.parallel import TensorParallelShard
 from ignition.preparation.collectives import (
     CollectivePreparation,
@@ -57,6 +59,8 @@ from .vision import PreparedVision, VisionScratch
 
 @dataclass(frozen=True)
 class PreparationConfig:
+    compile_workers: int | None = None
+    tuning_replica: TuningReplica | None = None
     device: int = 0
     devices: tuple[int, ...] | None = None
     # Each rank's host when ranks run on separate hosts; devices are then host-local ordinals.
@@ -264,7 +268,9 @@ def _prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, t
         collective = create_all_reduce_runtime(group, device, max_tokens=config.token_capacity, hidden_size=2560, ipc=ipc)
         vocabulary_collective = create_all_gather_runtime(group, device, max_rows=sample_rows, columns=248320, ipc=ipc)
     collectives = dict(runtime=collective, vocabulary_runtime=vocabulary_collective, coordinator=coordinator)
-    session = preparation_session(device=device, checkpoint=REVISION, coordinator=coordinator,
+    session = preparation_session(
+        compile_workers=config.compile_workers, tuning_replica=config.tuning_replica,
+        device=device, checkpoint=REVISION, coordinator=coordinator,
         namespace={"config": manifest.metadata_sha256["config.json"], "headers": manifest.headers_sha256, "world_size": shard.world_size},
         headroom_bytes=config.headroom_bytes, benchmark_storage=package_storage)
     session.__enter__()

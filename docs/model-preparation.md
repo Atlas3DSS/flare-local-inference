@@ -62,6 +62,25 @@ indices refer to the exposed device list. Each tensor-parallel size requires a
 separately prepared package; a TP2 package cannot be loaded as TP1. Qwen TP1 and TP2 and
 GLM TP4 have been exercised end to end; Qwen TP4 still requires model validation.
 
+## Preparation resources
+
+`--compile-workers N` sets the CPU compiler process budget per host. Memory
+limits can reduce it; local preparation ranks share the budget. Set
+`[preparation] compile_workers = N` for a persistent default. Omitting the
+setting retains automatic sizing, including shared-memory limits on DGX Spark.
+
+`--tuning-gpus LIST` adds local GPU replicas for benchmarking b12x candidates.
+The list begins with `--gpus` and continues in complete TP groups: for example,
+`--gpus 0 --tuning-gpus 0-3 --compile-workers 24` prepares a TP1 package with
+four tuning GPUs. Each replica needs memory for its model and preparation
+storage. Helpers release their resources after tuning; serving ranks then
+compile and capture their forwards. Kernel compilation runs in CPU workers,
+independently of the number of tuning GPUs.
+
+Multi-host `--ranks` preparation retains its existing sharding and transport;
+`--tuning-gpus` is local-only and cannot be combined with it. An explicit
+`--compile-workers` budget applies separately on each host.
+
 ## Exporting runtime packages
 
 Choose an unused output filename; export appends `.safetensors` if needed and
@@ -106,6 +125,8 @@ scaled NVFP4 gate and up projections also overlap. Prepare with
 `--no-stream-overlap` to place those projections and expert branches on the main stream.
 Routing excludes padded target rows using the packed batch's valid-token count.
 The 64-row speculative capacity covers eight requests with seven draft tokens each.
+For concurrency 32 with seven draft tokens per request, use
+`--max-concurrency 32 --speculative-token-capacity 256`.
 
 ## Qwen3.8 27B
 

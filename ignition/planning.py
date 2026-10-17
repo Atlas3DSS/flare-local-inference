@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 
 from ignition.errors import CapacityError, UsageError
+from ignition.preparation.tuning_replicas import TuningReplica
 from ignition.recipes.declaration import Checkpoint, Recipe, Speculation
 
 # Free memory kept after the final KV allocation during preparation. Headroom
@@ -175,6 +176,9 @@ class Plan:
     mixed_prefill: bool = False
     expert_scale_compression: str | None = None
     roce_ring: bool = False
+    compile_workers: int | None = None
+    tuning_gpus: tuple[Gpu, ...] = ()
+    tuning_replica: TuningReplica | None = None
 
     @property
     def world_size(self) -> int:
@@ -272,6 +276,8 @@ class Plan:
             "stream_overlap": self.stream_overlap,
             "mixed_prefill": self.mixed_prefill,
             "expert_scale_compression": self.expert_scale_compression,
+            "compile_workers": self.compile_workers,
+            "tuning_gpus": [gpu.index for gpu in self.tuning_gpus],
             "speculative_token_capacity": self.speculative_token_capacity,
             "speculation": None if self.speculation is None else {
                 "draft_tokens": self.speculation.draft_tokens, "adaptive": self.speculation.adaptive,

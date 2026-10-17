@@ -459,12 +459,13 @@ def _share_artifacts(owned, group, ranks):
 class ForwardCache:
     """Load complete compiled forwards before tracing the serving catalog."""
 
-    def __init__(self, *, namespace, device, root=None, headroom_bytes=0, options=None):
+    def __init__(self, *, namespace, device, root=None, headroom_bytes=0, options=None, compile_workers=None):
         import flashinfer
         from torch._inductor.codecache import torch_key
 
         self.device = torch.device(device)
         self.headroom_bytes = headroom_bytes
+        self.compile_workers = compile_workers
         self.options = MappingProxyType(dict(_OPTIONS if options is None else options))
         properties = torch.cuda.get_device_properties(device)
         options = {name: value for name, value in self.options.items() if name != 'compile_threads'}
@@ -537,7 +538,8 @@ class ForwardCache:
             return self._prepare_ranks(functions, signatures, coordinator, progress=progress,
                                        materialize=materialize, warmup=warmup)
         compiled, paths, pending = {}, {}, []
-        with phase(progress, "Compile model forwards", total=len(functions)) as stage, CompilePool(self.device, headroom_bytes=self.headroom_bytes, options=self.options) as compiler:
+        with phase(progress, "Compile model forwards", total=len(functions)) as stage, CompilePool(self.device,
+                headroom_bytes=self.headroom_bytes, options=self.options, compile_workers=self.compile_workers) as compiler:
             def finish():
                 name, bound, path = _completed(pending)
                 try:
@@ -604,7 +606,7 @@ class ForwardCache:
             pending, paths = [], {}
             with phase(progress, "Compile model forwards", total=len(work)) as stage, CompilePool(
                     self.device, headroom_bytes=self.headroom_bytes, pools=coordinator.local_ranks,
-                    options=self.options) as compiler:
+                    options=self.options, compile_workers=self.compile_workers) as compiler:
                 def finish():
                     name, variant, bound, path = _completed(pending)
                     if bound.pending is not None:

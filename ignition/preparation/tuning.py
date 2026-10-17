@@ -14,7 +14,7 @@ from b12x.preparation import MemoryRequirements, PreparationDisplay, Preparation
 from b12x.preparation.session import _declaration_key
 
 from .scratch import ScratchArena
-from .host_memory import tuning_limits
+from .host_memory import cpu_workers, tuning_limits
 
 
 # Requests per tuning job on an integrated GPU: collective declarations with a coordinator,
@@ -34,7 +34,8 @@ class RecordedPreparationSession(PreparationSession):
 
     def __init__(self, *, device, checkpoint: str, workload_schema: str,
                  numerical_policy: str, search_limits=None, namespace=None, race_budget=None,
-                 coordinator=None, headroom_bytes=0, benchmark_storage=None):
+                 coordinator=None, headroom_bytes=0, benchmark_storage=None, compile_workers=None,
+                 tuning_replica=None):
         if not isinstance(checkpoint, str) or not checkpoint:
             raise ValueError("tuning requires an exact checkpoint revision")
         if any(not isinstance(value, str) or not value for value in (workload_schema, numerical_policy)):
@@ -51,6 +52,10 @@ class RecordedPreparationSession(PreparationSession):
         if type(headroom_bytes) is not int or headroom_bytes < 0:
             raise ValueError("headroom_bytes must be a nonnegative byte count")
         self.headroom_bytes = headroom_bytes
+        cpu_workers(compile_workers)
+        self.requested_compile_workers = compile_workers
+        self.tuning_replica = tuning_replica
+        self._replica_coordinator = None
         self._coordinator = coordinator
         self._recorded_requests = {}
         self._finalizers = []
@@ -127,6 +132,8 @@ class RecordedPreparationSession(PreparationSession):
         return tuple(tuple(job) for job in jobs if job)
 
     def _prepare_job(self, requests, *, progress, autotune):
+        if self._replica_coordinator is not None:
+            return self._replica_coordinator.prepare(self, requests, progress=progress, autotune=autotune)
         if self._coordinator is None or not self._sharded and not any(
                 request.collective is not None for request in requests):
             return super().prepare(requests, progress=progress, autotune=autotune)
@@ -237,6 +244,20 @@ class RecordedPreparationSession(PreparationSession):
             if self._stop.is_set():
                 raise RuntimeError("full serving preparation requires enabled, uncancelled b12x tuning")
             requests = tuple(self._recorded_requests.values())
+            if self.tuning_replica is not None:
+                import torch.distributed as dist
+                from .tuning_replicas import ReplicaPreparation
+
+                if self._coordinator is not None and self._coordinator.spans_hosts:
+                    raise ValueError("local tuning replicas cannot replace multi-host sharding")
+                ranks = (0,) if self._coordinator is None else self._coordinator.ranks
+                rank = 0 if self._coordinator is None else ranks.index(dist.get_rank())
+                self._replica_coordinator = ReplicaPreparation(self.tuning_replica, rank, ranks=ranks)
+                identities = self._replica_coordinator.gather(self.device.identity)
+                corresponding = identities[rank::self.tuning_replica.tensor_parallel]
+                if any(identity != corresponding[0] for identity in corresponding[1:]):
+                    raise ValueError("corresponding tuning GPUs must have identical hardware geometry")
+                self.configure_tuning_shard(self.tuning_replica.index, tuple(range(self.tuning_replica.replicas)))
             if self._coordinator is not None and self._coordinator.spans_hosts:
                 import torch.distributed as dist
 
@@ -250,9 +271,13 @@ class RecordedPreparationSession(PreparationSession):
                 else:
                     self._coordinator.share_selections(self._selection_cache())
             scratch_arena = self._reserve_scratch(requests)
-            self.configure_compile_workers(None)
             # Compiler pools share the memory and CPUs of ranks on this host only.
             pools = 1 if self._coordinator is None else self._coordinator.local_ranks
+            if self.tuning_replica is not None:
+                pools = self.tuning_replica.processes
+            preserve_default = self.requested_compile_workers is None and self.tuning_replica is None
+            self.configure_compile_workers(None if preserve_default else
+                cpu_workers(self.requested_compile_workers, pools=pools))
             bounded, self.race_budget = tuning_limits(self.device.ordinal, self.compile_workers,
                 pools=pools, headroom_bytes=self.headroom_bytes, race_budget=self.race_budget)
             if self._integrated and self.compile_workers:
@@ -311,6 +336,7 @@ class RecordedPreparationSession(PreparationSession):
             self.tuning_report = {
                 "workload_schema": self._workload_schema, "namespace": self.namespace.to_dict(),
                 "requests": len(requests), "compile_workers": self.compile_workers,
+                "tuning_replicas": 1 if self.tuning_replica is None else self.tuning_replica.replicas,
                 "race_budget_bytes": self.race_budget, "headroom_bytes": self.headroom_bytes,
                 "cache_hits": sum(result.cache_hits for result in results),
                 "benchmarked_candidates": sum(result.benchmarked_candidates for result in results),
@@ -375,6 +401,14 @@ class RecordedPreparationSession(PreparationSession):
                 except BaseException:
                     self._tune_status = "failed"
                     raise
+            self._replica_coordinator = None
+            if self._tune_status == "ready" and self.tuning_replica is not None and self.tuning_replica.index:
+                from .tuning_replicas import TuningComplete
+
+                if self._coordinator is not None:
+                    self._coordinator.barrier("tuning_complete", self._coordinator.ranks)
+                self.close()
+                raise TuningComplete()
 
     @contextmanager
     def capture(self):

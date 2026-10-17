@@ -1,7 +1,7 @@
 """Model resolution, memory planning, and downloads for preparation commands."""
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from ignition import planning
 from ignition.errors import FetchError, UsageError
@@ -41,13 +41,50 @@ def resolve_model(configuration: Configuration, name: str | None) -> ResolvedMod
 def derive(configuration: Configuration, model: ResolvedModel, host: Host, *, gpus: str | None,
            concurrency: Setting, speculation: Speculation | None, prefill_chunk: int | None = None,
            context_parallel: bool = True, stream_overlap: bool = True, roce_ring: bool = False,
-           mixed_prefill: bool = False, expert_scale_compression: str | None = None) -> planning.Plan:
+           mixed_prefill: bool = False, expert_scale_compression: str | None = None,
+           compile_workers: int | None = None, tuning_gpus: str | None = None) -> planning.Plan:
     """Select GPUs and estimate memory for one checkpoint from the configuration and command-line intent."""
-    return planning.plan(
+    workers = compiler_workers(configuration, compile_workers)
+    result = planning.plan(
         model.recipe, model.checkpoint, host.gpus, selected=None if gpus is None else planning.parse_gpus(gpus),
         concurrency=concurrency.value, reserve_bytes=configuration.reserve_bytes, speculation=speculation,
         prefill_chunk=prefill_chunk, context_parallel=context_parallel, stream_overlap=stream_overlap, roce_ring=roce_ring,
         mixed_prefill=mixed_prefill, expert_scale_compression=expert_scale_compression)
+    result = replace(result, compile_workers=workers)
+    return tuning_devices(result, host, tuning_gpus)
+
+
+def compiler_workers(configuration, flag=None):
+    value = configuration.get("preparation.compile_workers", flag).value
+    if type(value) is not int or value < 0 or flag == 0:
+        raise UsageError("--compile-workers must be a positive integer")
+    return value or None
+
+
+def tuning_devices(plan, host, flag):
+    if plan.compile_workers is not None and plan.compile_workers < plan.world_size:
+        raise UsageError("--compile-workers must provide at least one process per local serving rank")
+    if flag is None:
+        return plan
+    indices = planning.parse_gpus(flag)
+    available = {gpu.index: gpu for gpu in host.gpus}
+    if any(index not in available for index in indices):
+        raise UsageError("--tuning-gpus names a GPU outside the visible device list")
+    count = plan.world_size
+    if indices[:count] != tuple(gpu.index for gpu in plan.gpus) or len(indices) % count:
+        raise UsageError("--tuning-gpus must start with the serving GPUs and contain complete TP replicas")
+    if plan.compile_workers is not None and plan.compile_workers < len(indices):
+        raise UsageError("--compile-workers must provide at least one process per local tuning rank")
+    selected = tuple(available[index] for index in indices)
+    for position, gpu in enumerate(selected[count:], start=count):
+        owner = plan.gpus[position % count]
+        if (gpu.name, gpu.capability) != (owner.name, owner.capability):
+            raise UsageError("each tuning replica must match its corresponding serving GPU model and architecture")
+        minimum = (plan.fixed_bytes + plan.headroom_bytes + plan.reserve_bytes
+                   + plan.minimum_pages * plan.costs.page_bytes)
+        if gpu.free_bytes < minimum:
+            raise UsageError(f"tuning GPU {gpu.index} needs at least {minimum >> 20} MiB free for a model replica")
+    return replace(plan, tuning_gpus=selected if len(selected) > count else ())
 
 
 def context_parallel(args, model: ResolvedModel) -> bool:

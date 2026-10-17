@@ -164,6 +164,12 @@ def _preparation_arguments(running):
     speculative.add_argument("--history-drafts", action="store_true",
                           help="also draft continuations copied from the request's own history")
     advanced = running.add_argument_group("advanced options")
+    advanced.add_argument("--compile-workers", type=int, metavar="N",
+                          help="CPU compiler process budget per host, shared by local preparation ranks;"
+                               " bounded by available RAM and device memory (default: automatic)")
+    advanced.add_argument("--tuning-gpus", metavar="LIST",
+                          help="local GPUs for kernel tuning, starting with --gpus and followed by complete"
+                               " TP replicas; serving TP size is unchanged (default: serving GPUs)")
     advanced.add_argument("--no-context-parallel", action="store_true",
                           help="keep each rank's attention context whole instead of sharding it across"
                                " tensor-parallel ranks; fewer cached tokens (default: the recipe's)")

@@ -542,3 +542,52 @@ def test_parallel_forward_preparation_captures_and_restores_without_workers(tmp_
         restored_graphs[name].replay()
         expected = forward.source + 19.25
         torch.testing.assert_close(forward.output, -expected if forward.negate else expected)
+
+
+@torch.no_grad()
+def test_explicit_worker_budget_compiles_and_replays_a_catalog(tmp_path, monkeypatch):
+    from ignition.preparation import compile_pool
+    from ignition.preparation.execution import GraphSignature
+
+    workers, submitted = [], []
+    initialize = compile_pool.CompilePool.__init__
+    submit = compile_pool.CompilePool.submit
+
+    def record(self, *args, **kwargs):
+        initialize(self, *args, **kwargs)
+        workers.append((self.workers, self.options['compile_threads']))
+
+    def dispatch(self, forward, path):
+        assert not path.exists()
+        submitted.append(path)
+        return submit(self, forward, path)
+
+    monkeypatch.setattr(compile_pool.CompilePool, '__init__', record)
+    monkeypatch.setattr(compile_pool.CompilePool, 'submit', dispatch)
+    functions = {}
+    for rows in range(1, 10):
+        forward = ElementwiseForward()
+        forward.source = torch.randn(rows * 1024, device='cuda')
+        forward.output = torch.empty_like(forward.source)
+        functions[f'rows{rows}'] = forward
+    signatures = {name: GraphSignature('prefill', 1, forward.source.numel())
+                  for name, forward in functions.items()}
+    cache = ForwardCache(namespace={'model': 'worker-catalog'}, device='cuda:0',
+                         root=tmp_path, compile_workers=9)
+    compiled = cache.prepare_many(functions, signatures, materialize=lambda: None)
+    assert workers == [(9, 1)]
+    assert len(submitted) == len(functions)
+    assert all(path.is_file() for path in submitted)
+    graph = torch.cuda.CUDAGraph()
+    for name, forward in functions.items():
+        with torch.cuda.graph(graph):
+            compiled[name]()
+        for _ in range(3):
+            forward.source.normal_()
+            forward.output.fill_(float('nan'))
+            allocated = torch.cuda.memory_stats()['allocation.all.allocated']
+            graph.replay()
+            torch.cuda.synchronize()
+            assert torch.cuda.memory_stats()['allocation.all.allocated'] == allocated
+            torch.testing.assert_close(forward.output, forward.source.sin() * forward.source)
+        graph.reset()

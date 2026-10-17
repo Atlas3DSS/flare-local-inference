@@ -77,6 +77,20 @@ def test_recipe_supplies_concurrency_when_the_file_is_silent(tmp_path):
     assert configuration.max_concurrency("qwen3.8-flash", 4) == Setting(4, "recipe")
 
 
+def test_compiler_worker_flag_overrides_configured_host_budget(tmp_path):
+    from ignition.cli.preparation import compiler_workers
+
+    config = load(tmp_path, "[preparation]\ncompile_workers = 24\n")
+    assert compiler_workers(config) == 24
+    assert compiler_workers(config, 32) == 32
+    assert compiler_workers(load(tmp_path, "")) is None
+    for value in (0, -1):
+        with pytest.raises(UsageError, match="positive integer"):
+            compiler_workers(config, value)
+    with pytest.raises(UsageError, match="at least 1"):
+        load(tmp_path, "[preparation]\ncompile_workers = 0\n")
+
+
 @pytest.mark.parametrize("text, message", [
     ("[memory]\nfraction = 0.9\n", "unknown key fraction"),
     ("[engine]\npages = 4\n", "unknown section"),

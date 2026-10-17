@@ -356,10 +356,20 @@ def test_worker_budget_accounts_for_all_preparing_ranks(backend, monkeypatch):
     assert report["compile_workers"] == 2
 
 
+def test_explicit_cpu_budget_reaches_b12x_without_environment_switch(backend):
+    events, _ = backend
+    session = make_session(device=0, checkpoint="revision", compile_workers=24)
+    session.declare((declaration("op"),))
+    report = session.tune()
+    assert report["compile_workers"] == 24
+    assert ("workers", 24) in events
+
+
 
 
 @pytest.mark.parametrize("identical", [True, False])
-def test_ranks_on_separate_hosts_shard_tuning_only_across_identical_gpus(backend, monkeypatch, identical):
+@pytest.mark.parametrize("workers", [None, 4])
+def test_ranks_on_separate_hosts_shard_tuning_only_across_identical_gpus(backend, monkeypatch, identical, workers):
     import torch.distributed as dist
 
     monkeypatch.setattr(torch.cuda, "get_device_properties",
@@ -377,9 +387,10 @@ def test_ranks_on_separate_hosts_shard_tuning_only_across_identical_gpus(backend
     coordinator = SimpleNamespace(ranks=(0, 1), barrier=lambda: None, local_ranks=1, spans_hosts=True,
         same_on_every_rank=lambda value: identical and value == "NVIDIA GB10",
         share_selections=shared.append, agree_selections=lambda selections: None, prepare=prepare)
-    session = make_session(device=0, checkpoint="revision", coordinator=coordinator)
+    session = make_session(device=0, checkpoint="revision", coordinator=coordinator, compile_workers=workers)
     session.declare((declaration("op"),))
-    session.tune()
+    report = session.tune()
+    assert report["compile_workers"] == (8 if workers is None else workers)
     # Sharded races exchange results through the coordinator even in jobs without collectives.
     assert (shards, shared, coordinated) == (([(1, (0, 1))], [], [("op",)]) if identical
                                              else ([], ["rank cache"], []))

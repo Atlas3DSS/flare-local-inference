@@ -7,12 +7,14 @@ import socket
 import sys
 import tempfile
 import traceback
+from dataclasses import replace
 
 from ignition import planning
 from ignition.errors import CapacityError, FlareError, PreparationError, UsageError
 
 from . import display, environment
-from .preparation import Host, context_parallel, derive, fetch, resolve_model, speculation, stream_overlap
+from .preparation import (Host, compiler_workers, context_parallel, derive, fetch, resolve_model, speculation,
+                          stream_overlap, tuning_devices)
 from .config import Configuration
 
 # Request bytes allowed per context token: JSON-escaped text (a \uXXXX escape takes six bytes per
@@ -92,6 +94,7 @@ def run(args) -> int:
     concurrency = configuration.max_concurrency(model.checkpoint.alias, model.recipe.concurrency,
                                                 args.max_concurrency)
     plan = derive(configuration, model, Host.discover(), gpus=args.gpus, concurrency=concurrency,
+                  compile_workers=args.compile_workers, tuning_gpus=args.tuning_gpus,
                   speculation=speculation(args, model, configuration), prefill_chunk=args.prefill_chunk_size,
                   context_parallel=context_parallel(args, model), stream_overlap=stream_overlap(args, model),
                   roce_ring=args.roce_ring,
@@ -145,6 +148,8 @@ def export(args) -> int:
         raise UsageError(f"export destination already exists: {args.output}")
     if args.roce_ring and args.ranks < 2:
         raise UsageError("--roce-ring requires at least two hosts")
+    if args.ranks > 1 and args.tuning_gpus is not None:
+        raise UsageError("--tuning-gpus applies to local preparation; multi-host ranks retain their sharding")
     if args.ranks > 1:
         return _export_hosts(args, export_path=args.output)
     return _prepare(args, export_path=args.output)
@@ -189,6 +194,7 @@ def _export_hosts(args, *, export_path) -> int:
                          context_parallel=context_parallel(args, model), stream_overlap=stream_overlap(args, model),
                          roce_ring=args.roce_ring,
                          mixed_prefill=args.mixed_prefill, expert_scale_compression=args.expert_scale_compression)
+    plan = replace(plan, compile_workers=compiler_workers(configuration, args.compile_workers))
     environment.apply(configuration, local)
     options = _server_options(configuration, model, plan)
     options.pop("api_key")
@@ -247,6 +253,7 @@ def _prepare(args, *, export_path) -> int:
                                                     args.max_concurrency)
         host = Host.discover()
         plan = derive(configuration, model, host, gpus=args.gpus, concurrency=concurrency,
+                      compile_workers=args.compile_workers, tuning_gpus=args.tuning_gpus,
                       speculation=speculation(args, model, configuration), prefill_chunk=args.prefill_chunk_size,
                       context_parallel=context_parallel(args, model), stream_overlap=stream_overlap(args, model),
                       roce_ring=args.roce_ring,
@@ -256,12 +263,14 @@ def _prepare(args, *, export_path) -> int:
         restricted = "" if host.restriction is None else f" of CUDA_VISIBLE_DEVICES={host.restriction}"
         serial = "" if plan.stream_overlap or not plan.recipe.stream_overlap else " · branches serialized"
         capacity = "" if plan.speculation is None else f" · speculative token capacity {plan.speculative_token_capacity}"
+        tuning = "" if not plan.tuning_gpus else " · tuning GPUs " + planning.format_gpus(gpu.index for gpu in plan.tuning_gpus)
         if plan.roce_ring:
             serial += " · experimental RoCE ring (native neighbor relays)"
         stage.update(f"GPU{'s' if plan.world_size > 1 else ''} {indices}{restricted}"
                      f" · concurrency {plan.concurrency} · {display.speculation(plan.speculation, brief=True)}{capacity}{serial}"
                      f" · mixed prefill {'on' if plan.mixed_prefill else 'off'}"
-                     f" · expert scales {plan.expert_scale_compression or 'native'}")
+                     f" · expert scales {plan.expert_scale_compression or 'native'}"
+                     f" · compile workers {plan.compile_workers or 'auto'} per host{tuning}")
     if args.config is None and not configuration.exists:
         configuration.write_initial(model.checkpoint.alias, concurrency.value)
     if not cached:
@@ -280,6 +289,7 @@ def _prepare(args, *, export_path) -> int:
     try:
         try:
             from ignition.preparation.module_images import ModuleImages
+            from ignition.preparation.tuning_replicas import prepare_recipe
 
             recorder = ModuleImages()
             preparation_options = {"retain_graphs": True}
@@ -291,7 +301,7 @@ def _prepare(args, *, export_path) -> int:
                 storage = PackageStorage(world=plan.world_size)
                 preparation_options["package_storage"] = storage
                 with storage:
-                    prepared = model.recipe.prepare(
+                    prepared = prepare_recipe(model.recipe.prepare,
                         model.snapshot(hub_cache), plan, compile_forwards=not args.no_compile,
                         kernel_cache=configuration.directory("kernel_cache"), progress=progress,
                         **preparation_options)
@@ -347,6 +357,8 @@ def serve(args) -> int:
 
     if args.roce_ring and args.ranks < 2:
         raise UsageError("--roce-ring requires at least two hosts")
+    if args.ranks > 1 and args.tuning_gpus is not None:
+        raise UsageError("--tuning-gpus applies to local preparation; multi-host ranks retain their sharding")
     if args.eager and not args.direct:
         raise UsageError("--eager applies only to --direct execution")
     if args.graph_times is not None and not args.direct:
@@ -390,7 +402,9 @@ def serve(args) -> int:
                          roce_ring=args.roce_ring,
                          cache_states=args.prefix_cache_states, mixed_prefill=args.mixed_prefill,
                          expert_scale_compression=args.expert_scale_compression)
+    plan = replace(plan, compile_workers=compiler_workers(configuration, args.compile_workers))
     if rendezvous is None:
+        plan = tuning_devices(plan, host, args.tuning_gpus)
         local = plan.gpus
     environment.apply(configuration, local)
     options = _server_options(configuration, model, plan)
@@ -407,9 +421,10 @@ def serve(args) -> int:
     elif rendezvous is not None:
         preparation_options["ranks"] = rendezvous
     from contextlib import nullcontext
+    from ignition.preparation.tuning_replicas import prepare_recipe
 
     with storage if storage is not None else nullcontext():
-        prepared = model.recipe.prepare(
+        prepared = prepare_recipe(model.recipe.prepare,
             model.snapshot(hub_cache), plan, compile_forwards=not args.no_compile,
             kernel_cache=configuration.directory("kernel_cache"), progress=progress,
             **preparation_options)

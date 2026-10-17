@@ -26,6 +26,7 @@ from ignition.preparation.model import PreparedModel
 from ignition.preparation.rank_group import minimum_across_ranks
 from ignition.preparation.scratch import ScratchArena
 from ignition.preparation.tuning import RecordedPreparationSession
+from ignition.preparation.tuning_replicas import TuningReplica
 from ignition.progress import phase
 
 from ignition.components.paged_batch import BatchInputs, Metadata, PreparedBatch
@@ -47,6 +48,8 @@ _CONTEXT = partial(PreparedContext, compact_prefill=True)
 
 @dataclass(frozen=True)
 class PreparationConfig:
+    compile_workers: int | None = None
+    tuning_replica: TuningReplica | None = None
     devices: tuple[int, ...] = (0, 1, 2, 3)
     context: int = 1048576
     prefill_chunk_size: int = 4096
@@ -176,7 +179,9 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         identity = hashlib.sha256(json.dumps({"config": json.loads((metadata_path / "config.json").read_text()),
             "headers": [s.header_sha256 for s in manifest.shards], "world_size": shard.world_size,
             "contract": "deepseek41.graph-inputs.v1"}, sort_keys=True).encode()).hexdigest()
-        session = RecordedPreparationSession(device=device, checkpoint=identity,
+        session = RecordedPreparationSession(
+            compile_workers=config.compile_workers, tuning_replica=config.tuning_replica,
+            device=device, checkpoint=identity,
             workload_schema="deepseek41-text", numerical_policy="default", coordinator=coordinator,
             headroom_bytes=config.headroom_bytes, benchmark_storage=package_storage)
         session.__enter__()

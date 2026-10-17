@@ -20,7 +20,8 @@ def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress, retain_
                                   allow_patterns=("config.json", "model.safetensors"))
         drafting = dict(draft_checkpoint=draft, speculative_widths=plan.speculation.widths,
             speculative_fixed_width=plan.speculation.fixed_width, speculative_token_capacity=plan.speculative_token_capacity)
-    config = PreparationConfig(max_active=plan.concurrency, context=plan.context,
+    config = PreparationConfig(compile_workers=plan.compile_workers, tuning_replica=plan.tuning_replica,
+        max_active=plan.concurrency, context=plan.context,
         stream_overlap=plan.stream_overlap,
         prefill_chunk_size=plan.prefill_chunk, snapshot_budget_bytes=plan.snapshots * plan.costs.state_row_bytes,
         headroom_bytes=plan.headroom_bytes + plan.reserve_bytes, compile_decoder=compile_forwards,

@@ -13,6 +13,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 
 from ignition.progress import phase
+from .tuning_replicas import TuningComplete
 
 
 # Peers wait here while rank zero compiles the complete serving catalog.
@@ -101,6 +102,13 @@ def _peer(parent, snapshot, config, rank, rendezvous, connection, control, prepa
         if storage is not None:
             for region in storage.host_regions:
                 region.close()
+        dist.destroy_process_group()
+    except TuningComplete:
+        control.send("tuning_complete")
+        if control.recv() != "close":
+            os._exit(1)
+        control.close()
+        connection.close()
         dist.destroy_process_group()
     except BaseException:  # noqa: BLE001 - Never unwind CUDA resources around a stranded collective.
         traceback.print_exc()
@@ -268,6 +276,21 @@ def prepare_group(snapshot, config, prepare, *, progress=None, package_storage=N
                 stage.update(advance=1)
         return PreparedRankGroup(model, processes, connections, controls, supervisor, rendezvous, reports,
                                  progress=progress)
+    except TuningComplete:
+        supervisor.begin_shutdown(60000)
+        for control in controls:
+            if control.recv() != "tuning_complete":
+                supervisor.abort("tuning replica did not confirm completion")
+            control.send("close")
+            control.close()
+        dist.destroy_process_group()
+        supervisor.finish_shutdown()
+        for process in processes:
+            process.join()
+        for connection in connections:
+            connection.close()
+        rendezvous.cleanup()
+        raise
     except BaseException:  # noqa: BLE001 - Preparation interruption must terminate every rank.
         traceback.print_exc()
         supervisor.abort("tensor-parallel preparation failed")

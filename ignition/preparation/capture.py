@@ -27,7 +27,8 @@ def capture_forwards(functions, signatures, *, session, device, stream, pool,
     warmup = nullcontext if warmup_storage is None else warmup_storage.transient
     if compile_decoder:
         cache = ForwardCache(namespace=session.namespace.to_dict(), device=device, root=cache_root,
-                             headroom_bytes=getattr(session, "headroom_bytes", 0))
+                             headroom_bytes=getattr(session, "headroom_bytes", 0),
+                             compile_workers=getattr(session, "requested_compile_workers", None))
         forwards = {name: function for name, function in functions.items()
                     if signatures[name].kind in compile_kinds}
         stream.wait_stream(torch.cuda.current_stream(device))

@@ -25,6 +25,7 @@ from ignition.preparation.host_memory import release_unused
 from ignition.preparation.model import PreparedModel
 from ignition.preparation.scratch import ScratchArena
 from ignition.preparation.tuning import RecordedPreparationSession
+from ignition.preparation.tuning_replicas import TuningReplica
 from ignition.progress import phase
 
 from .config import PAGE_TOKENS
@@ -36,6 +37,8 @@ from .weights import ModelWeights
 
 @dataclass(frozen=True)
 class PreparationConfig:
+    compile_workers: int | None = None
+    tuning_replica: TuningReplica | None = None
     device: int = 0
     context: int = 262144
     prefill_chunk_size: int = 4096
@@ -93,7 +96,9 @@ def prepare(snapshot, config, *, progress=None, package_storage):
         identity = hashlib.sha256(json.dumps({
             "config": weights.config.text, "headers": [s.header_sha256 for s in manifest.shards],
             "contract": "qwen38-dense.graph-inputs.v1"}, sort_keys=True).encode()).hexdigest()
-        session = RecordedPreparationSession(device=device, checkpoint=identity,
+        session = RecordedPreparationSession(
+            compile_workers=config.compile_workers, tuning_replica=config.tuning_replica,
+            device=device, checkpoint=identity,
             workload_schema="qwen38-dense", numerical_policy="default", coordinator=coordinator,
             headroom_bytes=config.headroom_bytes, benchmark_storage=package_storage)
         session.__enter__()

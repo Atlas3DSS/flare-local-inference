@@ -35,6 +35,7 @@ from ignition.preparation.rank_group import minimum_across_ranks
 from ignition.preparation.scratch import ScratchArena
 from ignition.progress import phase
 from ignition.preparation.tuning import RecordedPreparationSession
+from ignition.preparation.tuning_replicas import TuningReplica
 
 from .recipe import RECIPE
 from .batch import BatchInputs, PreparedBatch
@@ -56,6 +57,8 @@ _KV_ALLOCATION_MARGIN = 64 << 20
 
 @dataclass(frozen=True)
 class PreparationConfig:
+    compile_workers: int | None = None
+    tuning_replica: TuningReplica | None = None
     devices: tuple[int, ...] = (0, 1)
     # Each rank's host when ranks run on separate hosts; devices are then host-local ordinals.
     hosts: tuple[str, ...] | None = None
@@ -319,7 +322,9 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
         identity = hashlib.sha256(json.dumps({"config": json.loads((snapshot / "config.json").read_text()),
             "headers": [s.header_sha256 for s in manifest.shards], "world_size": shard.world_size,
             "contract": "glm5next.graph-inputs.v2"}, sort_keys=True).encode()).hexdigest()
-        session = RecordedPreparationSession(device=device, checkpoint=identity, workload_schema="glm-text-stack-tp-v1",
+        session = RecordedPreparationSession(
+            compile_workers=config.compile_workers, tuning_replica=config.tuning_replica,
+            device=device, checkpoint=identity, workload_schema="glm-text-stack-tp-v1",
             numerical_policy="default", coordinator=coordinator,
             headroom_bytes=config.headroom_bytes, benchmark_storage=package_storage)
         session.__enter__()
