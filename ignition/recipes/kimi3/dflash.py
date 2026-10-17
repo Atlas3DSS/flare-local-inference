@@ -237,13 +237,17 @@ class SpeculativePreparation:
         self.weights, self.tables, self.pool = weights, None, pool
         self.requests, self.inputs, self.scratch = requests, inputs, scratch
         self.records, self.frame, self.sequence = records, frame, sequence
-        self.session, self.workspace, self.collectives = session, workspace, collectives
+        self.session, self.workspace = session, workspace
+        # The target decoder takes every collective; DFlash2's draft modules take the shared reductions and gathers.
+        target = {key: collectives[key] for key in ("route_runtime", "context", "latent_runtimes") if key in collectives}
+        self.collectives = {key: value for key, value in collectives.items() if key not in target}
         self.markov_runtime = None
         self.context_buffers = context_buffers
         kda_layers = {i: w["attention"] for i, w in enumerate(weights.layers) if weights.config.layers[i] == "kda"}
         heads = weights.config.text["linear_attn_config"]["num_heads"] // weights.shard.world_size
         self.kda_records = KDARecords.allocate(kda_layers, requests.capacity + 1, heads, pool.backing.device)
-        self.forwards = DraftForwards(partial(target_decoder, buffers=decoder_buffers, kda_records=self.kda_records),
+        self.forwards = DraftForwards(partial(target_decoder, buffers=decoder_buffers, kda_records=self.kda_records,
+                                              **target),
             partial(PreparedContext, runtime=collectives["embedding_runtime"], coordinator=collectives["coordinator"],
                     buffers=self.context_buffers))
         self.rng = SpeculativeRngState.allocate(pool.backing.device, capacity=requests.capacity)

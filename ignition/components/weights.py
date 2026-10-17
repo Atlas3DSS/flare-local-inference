@@ -506,11 +506,14 @@ class DirectWeightLoader:
                          intermediate_range=None, scale_vectors=None, swiglu_limit=None,
                          swiglu_clamp_after_silu=False,
                          scale_compression=None, scale_scratch=None,
-                         projection_names=("up_proj", "gate_proj", "down_proj"), scale_name="weight_scale"):
+                         projection_names=("up_proj", "gate_proj", "down_proj"), scale_name="weight_scale",
+                         weight_name="weight", activation="silu", w13_layout="w13"):
         """Prepare NVFP4 or MXFP4 experts, optionally compressing their block scales.
 
-        CSF compression requires two caller-owned expansion buffers. Serial
-        routed layers may share those buffers; overlapping calls must not.
+        The first two projection names fill the first and second w13 halves in that
+        order; ``w13_layout`` declares which halves hold up and gate. CSF compression
+        requires two caller-owned expansion buffers. Serial routed layers may share
+        those buffers; overlapping calls must not.
         """
         import torch
         from b12x.moe import fused_moe as moe
@@ -541,7 +544,7 @@ class DirectWeightLoader:
                 (gate_name, w13[index, local:], s13[index, local:]),
                 (down_name, w2[index], s2[index]),
             ):
-                source = self._sources[f"{prefix}.{projection}.weight"]
+                source = self._sources[f"{prefix}.{projection}.{weight_name}"]
                 scale = self._sources[f"{prefix}.{projection}.{scale_name}"]
                 if format == "mxfp4":
                     if source.dtype == torch.int8:
@@ -591,8 +594,9 @@ class DirectWeightLoader:
             return _sm103_fp4_experts(w13, s13, w2, s2, vectors, format=format,
                                       activation_mode=activation_mode, swiglu_limit=swiglu_limit)
         plan = moe.plan_weights(
-            source=moe.PackedSource(format="modelopt_nvfp4" if format == "nvfp4" else "fp4_e8m0_k32", w13_layout="w13"),
-            activation=moe.ActivationSpec(mode=activation_mode, nonlinearity="silu", io_dtype=torch.bfloat16,
+            source=moe.PackedSource(format="modelopt_nvfp4" if format == "nvfp4" else "fp4_e8m0_k32",
+                                    w13_layout=w13_layout),
+            activation=moe.ActivationSpec(mode=activation_mode, nonlinearity=activation, io_dtype=torch.bfloat16,
                                           swiglu_limit=swiglu_limit,
                                           swiglu_clamp_after_silu=swiglu_clamp_after_silu),
             geometry=moe.MoEGeometry(num_experts=count, hidden_size=hidden_size, intermediate_size=local),
@@ -653,13 +657,14 @@ class DirectWeightLoader:
         self, prefixes, *, hidden_size, intermediate_size, scale_scratch,
         intermediate_range=None, swiglu_limit=None,
         projection_names=("gate_proj", "up_proj", "down_proj"), scale_name="weight_scale",
-        weight_name="weight", activation="silu",
+        weight_name="weight", activation="silu", activation_mode="a8",
     ):
         """Keep lossless MXFP4 scales compressed and expand into shared native scratch.
 
         Gate and up weights use b12x's w31 source order. The caller may share
         scale scratch between serialized expert layers, retaining both buffers
-        until every captured graph using those layers has drained.
+        until every captured graph using those layers has drained. Activations
+        are quantized to MXFP8 (``a8``) or kept in BF16 (``a16``).
         """
         import torch
         from b12x.moe import fused_moe as moe
@@ -705,7 +710,7 @@ class DirectWeightLoader:
         self._session.flush()
         plan = moe.plan_weights(
             source=moe.PackedSource(format="fp4_e8m0_k32", w13_layout="w31"),
-            activation=moe.ActivationSpec(mode="a8", nonlinearity=activation, io_dtype=torch.bfloat16,
+            activation=moe.ActivationSpec(mode=activation_mode, nonlinearity=activation, io_dtype=torch.bfloat16,
                                           swiglu_limit=swiglu_limit),
             geometry=moe.MoEGeometry(num_experts=count, hidden_size=hidden_size, intermediate_size=local))
         return moe.prepare_weights(plan=plan, weights=moe.Mxfp4CsfWeights(

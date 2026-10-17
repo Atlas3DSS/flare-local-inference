@@ -18,6 +18,7 @@ from ignition.components.paged_resume import PreparedResume
 from ignition.components.sampling import AdmissionBuffers, DeviceRequestState
 from ignition.components.state_transfer import StateCommands
 from ignition.preparation.collectives import CollectivePreparation, create_all_gather_runtime, create_all_reduce_runtime
+from .routing import create_route_runtime
 from ignition.preparation.rank_group import minimum_across_ranks
 from ignition.preparation.capture import capture_forwards
 from ignition.preparation.checkpoint import inspect_indexed_checkpoint
@@ -69,6 +70,8 @@ class PreparationConfig:
     @property
     def decode_tokens(self):
         return max((b * w for b, w in self.speculative_shapes), default=request_capacity(self.max_active))
+    # Store KDA input projections as MXFP8 instead of the checkpoint's BF16.
+    online_mxfp8: bool = False
 
     def __post_init__(self):
         from ignition.components.capacity import image_capacity
@@ -102,7 +105,8 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         manifest = inspect_indexed_checkpoint(snapshot)
         headers = [shard.header_sha256 for shard in manifest.shards]
     with package_storage.transient():
-        weights = ModelWeights.load(manifest, device, shard=shard, progress=progress, draft_checkpoint=config.draft_checkpoint)
+        weights = ModelWeights.load(manifest, device, shard=shard, progress=progress,
+                                    draft_checkpoint=config.draft_checkpoint, online_mxfp8=config.online_mxfp8)
         del manifest
         release_unused()
     transient = contextlib.ExitStack()
@@ -140,6 +144,8 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         router_collective = create_all_gather_runtime(group, device, max_rows=max_tokens,
             columns=2 * shard.world_size * ((weights.config.text["num_experts"] // shard.world_size + 31) // 32 * 32),
             ipc=package_storage.peer_storage)
+        route_collective = (create_route_runtime(group, device, ipc=package_storage.peer_storage)
+                            if shard.world_size > 1 else None)
         identity = hashlib.sha256(json.dumps({
             "config": weights.config.text, "headers": headers,
             "vision": weights.config.vision, "draft": None if not drafting else weights.config.draft.text, "world_size": shard.world_size, "contract": "kimi3.graph-inputs.v1"}, sort_keys=True).encode()).hexdigest()
@@ -186,6 +192,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         **({"auxiliary": auxiliary[0]} if drafting else {})})
     prefill_sizes, batch_sizes = prefill_capacities(config.prefill_chunk_size), batch_capacities(config.max_active)
     collectives = dict(runtime=collective, embedding_runtime=embedding_collective, router_runtime=router_collective,
+        route_runtime=route_collective,
         vocabulary_runtime=vocabulary_collective, coordinator=coordinator, vision_state=vision_state)
     speculation = None
     if drafting:
@@ -272,6 +279,10 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
 
     def materialize():
         scratch_pool.materialize()
+        if config.retain_graphs:
+            # In-process serving admits and snapshots into every declared row; native loading backs them itself.
+            package_storage.grow("STATE_ROWS", state_rows + 1)
+            pool.memory_capacity[0] = state_rows + 1
         vision_inputs.vision_slot.fill_(-1)
         pool.clear_for_preparation()
 
@@ -332,5 +343,5 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                                            decoder_buffers.scratch_tensors(), vision_state.arena, *draft_disposable]),
         resources=(weights, pool, requests, inputs, admission, commands, arena, forwards, prefill_storage,
                    decode_storage, metadata, compiled, stream, graph_pool, session, coordinator, collective,
-                   vocabulary_collective, embedding_collective, router_collective, frontend_assets,
+                   vocabulary_collective, embedding_collective, router_collective, route_collective, frontend_assets,
                    vision_inputs, vision_prefill, vision_state, vision_storage, scratch_pool, shared_scratch, graph_buffers, speculation))

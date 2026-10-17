@@ -181,6 +181,8 @@ class Plan:
     tuning_gpus: tuple[Gpu, ...] = ()
     tuning_replica: TuningReplica | None = None
     image_concurrency: int = 0
+    # The recipe's eligible BF16 projections load as MXFP8 when the plan asks for it.
+    online_mxfp8: bool = False
 
     @property
     def world_size(self) -> int:
@@ -282,6 +284,7 @@ class Plan:
             "compile_workers": self.compile_workers,
             "tuning_gpus": [gpu.index for gpu in self.tuning_gpus],
             "speculative_token_capacity": self.speculative_token_capacity,
+            "online_mxfp8": self.online_mxfp8,
             "speculation": None if self.speculation is None else {
                 "draft_tokens": self.speculation.draft_tokens, "adaptive": self.speculation.adaptive,
                 "proposal_source": self.speculation.proposal_source,
@@ -305,7 +308,7 @@ def fit(recipe: Recipe, checkpoint: Checkpoint, gpus: tuple[Gpu, ...], *, concur
         speculation: Speculation | None, prefill_chunk: int | None = None,
         context_parallel: bool = True, stream_overlap: bool = True, cache_states: int | None = None,
         mixed_prefill: bool = False, expert_scale_compression: str | None = None, roce_ring: bool = False,
-        image_concurrency: int | None = None) -> Plan:
+        image_concurrency: int | None = None, online_mxfp8: bool = False) -> Plan:
     """Size pages and the prefix cache to the supply; the result may not fit.
 
     Weights come from the checkpoint's stored tensors and graphs and scratch from
@@ -322,7 +325,7 @@ def fit(recipe: Recipe, checkpoint: Checkpoint, gpus: tuple[Gpu, ...], *, concur
                 stream_overlap=stream_overlap and recipe.stream_overlap, mixed_prefill=mixed_prefill,
                 expert_scale_compression=expert_scale_compression, roce_ring=roce_ring,
                 image_concurrency=(min(4, concurrency) if recipe.max_images else 0)
-                    if image_concurrency is None else image_concurrency)
+                    if image_concurrency is None else image_concurrency, online_mxfp8=online_mxfp8)
     available = plan.supply_bytes - plan.fixed_bytes
     target = min(CACHE_STATES_PER_REQUEST * concurrency, max(1, available // costs.state_row_bytes))
     if cache_states is not None:
@@ -360,7 +363,7 @@ def plan(recipe: Recipe, checkpoint: Checkpoint, gpus: tuple[Gpu, ...], *, selec
          prefill_chunk: int | None = None, context_parallel: bool = True, stream_overlap: bool = True,
          cache_states: int | None = None, mixed_prefill: bool = False,
          expert_scale_compression: str | None = None, roce_ring: bool = False,
-         image_concurrency: int | None = None) -> Plan:
+         image_concurrency: int | None = None, online_mxfp8: bool = False) -> Plan:
     """Select GPUs and size the plan, or raise a capacity error that lists working settings.
 
     Without `selected`, the plan uses the smallest supported tensor-parallel size
@@ -372,6 +375,8 @@ def plan(recipe: Recipe, checkpoint: Checkpoint, gpus: tuple[Gpu, ...], *, selec
     """
     if mixed_prefill and not recipe.mixed_prefill:
         raise UsageError(f"--mixed-prefill: {checkpoint.alias} does not capture mixed prefill/decode graphs")
+    if online_mxfp8 and not recipe.online_mxfp8:
+        raise UsageError(f"--online-mxfp8: {checkpoint.alias} names no projections to store as MXFP8")
     if not 1 <= concurrency <= recipe.max_concurrency:
         raise UsageError(f"--max-concurrency for {checkpoint.alias} must be 1 through {recipe.max_concurrency}")
     if image_concurrency is not None and (not recipe.max_images or type(image_concurrency) is not int
@@ -405,7 +410,8 @@ def plan(recipe: Recipe, checkpoint: Checkpoint, gpus: tuple[Gpu, ...], *, selec
                    speculation=speculation, prefill_chunk=chunk, context_parallel=context_parallel,
                    stream_overlap=stream_overlap, cache_states=cache_states, mixed_prefill=mixed_prefill,
                    expert_scale_compression=expert_scale_compression, roce_ring=roce_ring,
-                   image_concurrency=None if image_concurrency is None else min(image_concurrency, concurrency))
+                   image_concurrency=None if image_concurrency is None else min(image_concurrency, concurrency),
+                   online_mxfp8=online_mxfp8)
 
     def automatic(world_size, **settings):
         """Plan the first GPUs that each fit, else the GPUs with the most free memory."""

@@ -8,7 +8,7 @@ from ignition.components.linear import UnquantizedProjection
 from ignition.components.paged_attention import PreparedPagedKVWriter
 
 from .config import PAGE_TOKENS
-from .model import rms_norm
+from .pointwise import rms_norm_columns, sigmoid_gate
 
 
 class PreparedMLA:
@@ -33,8 +33,6 @@ class PreparedMLA:
         self.projections = {key: UnquantizedProjection(x, weights[key], y, session=session, name=name + "." + key)
             for key, x, y in (("input", source, self.input), ("q_b", self.query_norm, self.query.view(tokens, -1)),
                              ("gate", source, self.gate), ("output", self.expanded, buffer("output", hidden)))}
-        self.query_normalize = rms_norm(weights["query_norm"], 1e-6)
-        self.kv_normalize = rms_norm(weights["kv_norm"], 1e-6)
         self.slots = torch.full((tokens,), -1, dtype=torch.int64, device=source.device)
         self.lengths = torch.zeros_like(metadata.lengths)
         self.writer = PreparedPagedKVWriter(self.latent[:, None, :512], self.latent[:, None, 512:],
@@ -51,8 +49,8 @@ class PreparedMLA:
     def __call__(self, source):
         p, m = self.projections, self.metadata
         p["input"](source)
-        self.query_norm.copy_(self.query_normalize(self.input[:, :-576]))
-        self.latent[:, :512].copy_(self.kv_normalize(self.input[:, -576:-64]))
+        rms_norm_columns(self.input[:, :-576], self.weights["query_norm"], self.query_norm, 1e-6)
+        rms_norm_columns(self.input[:, -576:-64], self.weights["kv_norm"], self.latent[:, :512], 1e-6)
         self.latent[:, 512:].copy_(self.input[:, -64:])
         p["q_b"](self.query_norm)
         self.absorbed[:, :, :512].copy_(torch.bmm(self.query[:, :, :128].transpose(0, 1), self.weights["key"]).transpose(0, 1))
@@ -64,5 +62,5 @@ class PreparedMLA:
         self.attention()
         self.expanded.copy_(torch.bmm(self.attended.transpose(0, 1), self.weights["value"]).transpose(0, 1).flatten(1))
         p["gate"](source)
-        self.expanded.mul_(self.gate.sigmoid())
+        sigmoid_gate(self.expanded, self.gate)
         return p["output"](self.expanded)

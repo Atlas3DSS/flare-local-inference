@@ -54,8 +54,8 @@ class ModelConfig:
         q = c["quantization_config"]
         if (q.get("quant_method") != "compressed-tensors" or q.get("format") != "mxfp4-pack-quantized"
                 or q.get("quantization_status") != "compressed" or q.get("kv_cache_scheme") is not None
-                or q.get("weight_scale_encoding") != "csf_32x2_v1"):
-            raise ValueError("Kimi K3 requires compressed-tensors MXFP4 with csf_32x2_v1 scales")
+                or q.get("weight_scale_encoding") not in (None, "csf_32x2_v1")):
+            raise ValueError("Kimi K3 requires compressed-tensors MXFP4 with native or csf_32x2_v1 scales")
         groups = list(q.get("config_groups", {}).values())
         if len(groups) != 1:
             raise ValueError("Kimi K3 requires one MXFP4 quantization group")
@@ -104,7 +104,7 @@ class ModelConfig:
             shard.partition(extent, alignment=alignment)
 
     def projection_format(self, name):
-        ignore = self.text["quantization_config"]["ignore"]
-        if any(re.search(pattern[3:], name) if pattern.startswith("re:") else pattern == name for pattern in ignore):
+        q = self.text["quantization_config"]
+        if any(re.search(pattern[3:], name) if pattern.startswith("re:") else pattern == name for pattern in q["ignore"]):
             return "bf16"
-        return "mxfp4_csf"
+        return "mxfp4" if q.get("weight_scale_encoding") is None else "mxfp4_csf"

@@ -128,6 +128,8 @@ class Recipe:
     of extra rows. `history_copy` states that drafts can be copied from request history.
     `stream_overlap` states that captured graphs run independent branches on an
     auxiliary stream, which a plan can serialize onto the main stream.
+    `online_mxfp8` states that the recipe names BF16 projections a plan may store as
+    MXFP8 while loading, trading checkpoint precision for decode bandwidth.
     """
 
     name: str
@@ -151,6 +153,7 @@ class Recipe:
     verification_rows: int | None = None
     stream_overlap: bool = False
     mixed_prefill: bool = False
+    online_mxfp8: bool = False
 
     def mixed_shapes(self, concurrency, chunk, speculation):
         from ignition.components.capacity import mixed_shapes

@@ -26,7 +26,7 @@ def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress, retain_
         max_active=plan.concurrency, image_concurrency=plan.image_concurrency, prefill_chunk_size=plan.prefill_chunk,
         snapshot_budget_bytes=plan.snapshots * plan.costs.state_row_bytes,
         headroom_bytes=plan.headroom_bytes + plan.reserve_bytes, compile_decoder=compile_forwards,
-        retain_graphs=retain_graphs, kernel_cache=kernel_cache, **drafting)
+        retain_graphs=retain_graphs, kernel_cache=kernel_cache, online_mxfp8=plan.online_mxfp8, **drafting)
     if plan.world_size == 1:
         return prepare_rank(snapshot, config, rank=0, group=None, progress=progress, package_storage=package_storage)
     return prepare_group(snapshot, config, prepare_rank, progress=progress, package_storage=package_storage,
@@ -44,10 +44,16 @@ RECIPE = Recipe(
     sampling_defaults=SamplingDefaults(temperature=1., top_p=1., top_k=-1),
     checkpoints=(Checkpoint(alias="kimi-k3-mxfp4-csf", repository="/data/models/Kimi-K3-MXFP4-CSF",
         revision="local", architecture="KimiK3ForConditionalGeneration",
-        stored_bytes=1_491_026_420_236, device_bytes=1_505_431_429_644, draft_bytes=14_405_009_408),),
+        stored_bytes=1_491_026_420_236, device_bytes=1_505_431_429_644, draft_bytes=14_405_009_408),
+        # The native checkpoint's block scales are compressed while loading, as resident as the CSF copy's.
+        Checkpoint(alias="kimi-k3", repository="moonshotai/Kimi-K3",
+        revision="2496450e92e425c886db095102a52a6682ca3970", architecture="KimiK3ForConditionalGeneration",
+        stored_bytes=1_560_860_324_864, device_bytes=1_505_431_429_644, draft_bytes=14_405_009_408)),
     context=1048576, page_tokens=128, concurrency=4, max_concurrency=64, prefill_chunk=4096,
     speculation=Speculation(draft_tokens=7), max_draft_tokens=7, max_images=4, image_bytes=32 << 20,
     verification_rows=0,
+    # KDA's fused input projection (query, key, value, gates and beta) may load as MXFP8.
+    online_mxfp8=True,
     ranks=MappingProxyType({16: RankCosts(state_row_bytes=32_464_128, page_bytes=2_138_112,
                                         draft_page_bytes=368_640, graph_bytes=5 << 30)}),
     plain_ranks=MappingProxyType({16: RankCosts(state_row_bytes=29_869_824, page_bytes=1_769_472, graph_bytes=5 << 30)}),

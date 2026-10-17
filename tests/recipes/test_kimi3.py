@@ -6,7 +6,10 @@ from pathlib import Path
 
 import pytest
 
-CHECKPOINT = Path("/data/models/Kimi-K3-MXFP4-CSF")
+# The CSF and native checkpoints share configuration and BF16 attention weights.
+CHECKPOINT = next((path for path in (Path("/data/models/Kimi-K3-MXFP4-CSF"), Path(
+    "/data/models--moonshotai--Kimi-K3/snapshots/2496450e92e425c886db095102a52a6682ca3970")) if path.is_dir()),
+    Path("/data/models/Kimi-K3-MXFP4-CSF"))
 
 
 @pytest.fixture
@@ -46,16 +49,10 @@ def test_quantization_and_layer_partition_rejected(config):
         ModelConfig.from_dict(raw)
 
 
-def test_attention_residual_and_situ():
+def test_situ():
     import torch
-    from ignition.recipes.kimi3.model import attention_residual, situ
+    from ignition.recipes.kimi3.model import situ
 
-    generator = torch.Generator().manual_seed(41)
-    prefix, a, b = (torch.randn((3, 32), generator=generator).bfloat16() for _ in range(3))
-    weight = torch.ones(32, dtype=torch.bfloat16)
-    projection = torch.zeros((1, 32), dtype=torch.bfloat16)
-    expected = torch.stack((a, b, prefix), 1).float().mean(1).bfloat16()
-    torch.testing.assert_close(attention_residual(prefix, (a, b), weight, projection, 1e-5), expected)
     x = torch.tensor([[100., -100., 0., 100., 100., 100.]], dtype=torch.bfloat16)
     y = situ(x)
     assert torch.isfinite(y).all() and y[0, 0] == 100 and y[0, 2] == 0
@@ -108,7 +105,7 @@ def test_checkpoint_kda(config, mode, tokens):
 
         w = weights["attention"]
         projected = F.linear(source, w["input"])
-        qkv, beta, forget = projected.split((2304, 6, 128), -1)
+        qkv, forget, gate, beta, _ = projected.split((2304, 128, 768, 6, 2), -1)
         convolution = F.conv1d(F.pad(qkv.T.float()[None], (3, 0)),
                                w["convolution"][:, None], groups=2304).bfloat16()
         q, k, v = F.silu(convolution)[0].T.reshape(tokens, 3, 6, 128).unbind(1)
@@ -117,7 +114,7 @@ def test_checkpoint_kda(config, mode, tokens):
             w["A_log"], w["dt_bias"].view(6, 128), lower_bound=-5.,
             initial_state=torch.zeros_like(expected_state))
         normalized = recurrent.float() * torch.rsqrt(recurrent.float().square().mean(-1, keepdim=True) + 1e-5)
-        gate = F.linear(source, w["gate"]).view(tokens, 6, 128).float().sigmoid()
+        gate = gate.reshape(tokens, 6, 128).float().sigmoid()
         reference = F.linear((normalized * w["norm"] * gate).bfloat16().flatten(1), w["output"])
         for actual, expected in ((output, reference), (expected_state, reference_state)):
             relative_rms = (actual.float() - expected.float()).square().mean().sqrt() / expected.float().square().mean().sqrt()
