@@ -177,9 +177,10 @@ def test_peer_export_keeps_shared_frontend_only_on_rank_zero(tmp_path, monkeypat
     monkeypatch.setattr(runtime_package, "_Cuda", lambda: cuda)
     monkeypatch.setattr(RuntimePackage, "_graph", lambda self, cuda, name, graph:
                         {"name": name, "nodes": [], "edges": []})
-    from ignition.preparation import module_images
+    from ignition.preparation import cubin, module_images
 
     monkeypatch.setattr(module_images, "strip_debug", lambda image: image)
+    monkeypatch.setattr(cubin, "redact_symbols", lambda image: (image, {"fixture": "_f0"}))
     monkeypatch.setattr(module_images, "global_symbols", lambda image: [])
     assets = {}
     for name in ("tokenizer", "chat_template"):
@@ -262,6 +263,8 @@ def test_export_rejects_reachable_storage_below_the_address_floor(tmp_path, monk
     monkeypatch.setattr(RuntimePackage, "_graph", lambda self, cuda, name, graph:
                         {"name": name, "nodes": [], "edges": []})
     monkeypatch.setattr(module_images, "strip_debug", lambda image: image)
+    from ignition.preparation import cubin
+    monkeypatch.setattr(cubin, "redact_symbols", lambda image: (image, {"fixture": "_f0"}))
     monkeypatch.setattr(module_images, "global_symbols", lambda image: [])
     monkeypatch.setattr(tensor_metadata, "live_metadata", lambda *args: ([], {}))
     graph = SimpleNamespace(raw_cuda_graph=lambda: 1, raw_cuda_graph_exec=lambda: 1)
@@ -461,8 +464,15 @@ def test_package_replays_without_python(tmp_path, fixture, binary, expected, exe
     for module in document.modules:
         assert b".py\0" not in contents(module.file)
         for symbol in module.globals:
-            if symbol.symbol.startswith("assertFile_"):
-                assert contents(symbol.file).rstrip(b"\0") == b"kernel"
+            assert b"/preparation/internal/kernel.py" not in contents(symbol.file)
+    assert all(function.symbol.startswith("_f") for function in document.functions)
+    if fixture == "fixed_package_fixture.py":
+        assert any(contents(symbol.file).rstrip(b"\0") == b"kernel"
+                   for module in document.modules for symbol in module.globals)
+        for name in (b"numeric_argument", b"integer_pointer_argument", b"pointer_table_argument",
+                     b"transform", b"no_arguments", b"assertFile_0"):
+            assert name not in document.SerializeToString()
+            assert all(name + b"\0" not in contents(module.file) for module in document.modules)
     if not exec_handover:
         result = subprocess.run([executable, str(tmp_path)],
                                 cwd=root, text=True, capture_output=True, timeout=60)

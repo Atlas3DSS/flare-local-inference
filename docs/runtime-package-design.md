@@ -308,10 +308,20 @@ each function's parameter layout from `cuFuncGetParamInfo` and its dynamic
 shared-memory, carveout, and cluster attributes. ELF symbol enumeration and
 `cuModuleGetGlobal` capture initialized module globals and constants; native
 loading restores their contents after loading each cubin.
-Source-bearing debug sections and embedded PTX are erased without changing
-CUDA section or symbol indices. Assertion filename globals are replaced with
-`kernel`; assertion conditions and messages remain intact. Kernel symbols are
-retained for lookup, so packages do not conceal the compiler that emitted them.
+Source-bearing debug sections, embedded PTX, compiler comments, and ELF source-file
+names are erased without changing CUDA section or symbol indices. Assertion
+filename globals are replaced with `kernel`; assertion conditions and messages
+remain intact. Defined function and global symbols receive module-local opaque
+names. Section names and package lookup names use the same aliases; undefined
+imports and CUDA-reserved symbols retain their driver-facing names. String tables
+are rebuilt and their original bytes cleared. Instructions, relocation indices,
+CUDA metadata, and initialized model data retain their executable layout.
+
+These transformations remove descriptive metadata, not executable semantics.
+Cubins remain disassemblable, and instruction patterns, required CUDA metadata,
+and remaining runtime diagnostics can identify compiler and kernel families.
+Package signatures authenticate the publisher. Executable-resource encryption
+does not provide confidentiality against an operator controlling the runtime.
 
 **Graphs.** Capture keeps the graph templates alive, and the walker records
 each template node by node: kernel nodes with grid, block, shared memory,

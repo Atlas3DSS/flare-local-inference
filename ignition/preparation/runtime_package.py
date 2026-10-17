@@ -427,9 +427,14 @@ class RuntimePackage:
             self.module_globals = []
             for index, (name, image) in enumerate(self.modules.items()):
                 from .module_images import global_symbols, strip_debug, strip_global_source
+                from .cubin import redact_symbols
 
                 file = f"module-{index}.cubin"
-                (stage / file).write_bytes(strip_debug(image))
+                exported, symbols = redact_symbols(strip_debug(image))
+                (stage / file).write_bytes(exported)
+                for function in functions:
+                    if function["module"] == name:
+                        function["symbol"] = symbols.get(function["symbol"], function["symbol"])
                 kernel = next(kernel for kernel in self.kernels.values() if kernel.module == name)
                 module = C.c_void_p()
                 cuda.call("cuFuncGetModule", C.byref(module), C.c_void_p(kernel.function))
@@ -443,7 +448,8 @@ class RuntimePackage:
                     if self.reachability is not None:
                         self.reachability.blob(data)
                     (stage / data_file).write_bytes(data)
-                    globals.append({"symbol": symbol, "file": data_file, "nbytes": size.value, "relocations": []})
+                    globals.append({"symbol": symbols.get(symbol, symbol), "file": data_file,
+                                    "nbytes": size.value, "relocations": []})
                 modules.append({"name": name, "file": file, "globals": globals})
             allocations = []
             selected = (self.allocations if self.reachability is None
