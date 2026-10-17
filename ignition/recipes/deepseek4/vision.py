@@ -68,26 +68,24 @@ class VisionScratch:
 
     @classmethod
     def allocate(cls, patches, device, *, buffers=None):
-        def zeros(*shape):
-            return (torch.zeros(shape, dtype=torch.bfloat16, device=device) if buffers is None
-                    else buffers.zeros(shape, torch.bfloat16))
+        def zeros(cursor, *shape):
+            return (torch.zeros(shape, dtype=torch.bfloat16, device=device) if cursor is None
+                    else cursor.zeros(shape, torch.bfloat16))
 
-        return cls(
-            zeros(patches, 588),
-            zeros(patches, 1024),
-            zeros(patches, 1024),
-            zeros(patches, 3072),
-            zeros(patches, 16, 64),
-            zeros(patches, 16, 64),
-            zeros(patches, 16, 64),
-            zeros(patches, 1024),
-            zeros(patches, 1024),
-            MLPScratch.allocate(patches, 1024, 2816, device, buffers=buffers),
-            zeros(patches // 9, 9216),
-            zeros(patches // 9, 4096),
-            zeros(patches // 9, 4096),
-            zeros(patches // 9, 4096),
-        )
+        pixels = zeros(buffers, patches, 588)
+        residual, normalized, projected = (zeros(buffers, patches, 1024) for _ in range(3))
+        stages = [buffers.fork() for _ in range(3)] if buffers is not None else [None] * 3
+        attention, feedforward, merger = stages
+        mlp = MLPScratch.allocate(patches, 1024, 2816, device, buffers=feedforward)
+        qkv = zeros(attention, patches, 3072)
+        query, key, value = (zeros(attention, patches, 16, 64) for _ in range(3))
+        attended = zeros(attention, patches, 1024)
+        merged = zeros(merger, patches // 9, 9216)
+        aligned, activated, output = (zeros(merger, patches // 9, 4096) for _ in range(3))
+        if buffers is not None:
+            buffers.join(*stages)
+        return cls(pixels, residual, normalized, qkv, query, key, value, attended, projected,
+                   mlp, merged, aligned, activated, output)
 
     def rows(self, patches):
         return type(self)(

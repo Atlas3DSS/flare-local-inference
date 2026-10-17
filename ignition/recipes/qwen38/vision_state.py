@@ -303,6 +303,7 @@ class PreparedVisionHandoff:
         frame_index,
         submission_sequence,
         *,
+        pixels,
         buffers=None,
     ):
         device = features.arena.device
@@ -328,6 +329,7 @@ class PreparedVisionHandoff:
         _require(
             output, (capacity // 4, WIDTH), torch.bfloat16, device, "vision output"
         )
+        _require(pixels, (capacity, 1536), torch.bfloat16, device, "vision patch staging")
         shapes = (
             ((PATCHES, 1536), torch.float32),
             ((PATCHES, 4), torch.int64),
@@ -359,7 +361,7 @@ class PreparedVisionHandoff:
         def zeros(shape, dtype):
             return (torch.zeros(shape, dtype=dtype, device=device) if buffers is None
                     else buffers.zeros(shape, dtype))
-        self.pixels = zeros((capacity, 1536), torch.float32)
+        self.pixels = pixels
         self.errors = zeros((1,), torch.int32)
         self._prepared = False
         i, m, f, r = inputs, self.metadata, features, requests
@@ -471,6 +473,16 @@ class PreparedVisionHandoff:
             raise RuntimeError("vision handoff prepare() must complete before capture")
         for call in self._calls[2:]:
             call()
+
+
+class PreparedVisionGeneration:
+    def __init__(self, handoff, encoder):
+        self.handoff, self.encoder = handoff, encoder
+
+    def __call__(self):
+        self.handoff.begin()
+        self.encoder(self.handoff.pixels)
+        self.handoff.finish()
 
 
 @triton.jit

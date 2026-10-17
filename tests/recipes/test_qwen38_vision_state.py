@@ -71,8 +71,10 @@ def test_native_vision_handoff_append_epoch_validation_and_completion(compiled):
     frame = torch.zeros(1, dtype=torch.int32, device=device)
     sequence = torch.ones(1, dtype=torch.int64, device=device)
     pool = GraphBufferPool(device, chunk_bytes=2 << 20)
+    buffers = pool.cursor()
+    pixels = buffers.zeros((256, 1536), torch.bfloat16)
     operation = PreparedVisionHandoff(
-        inputs, features, requests, output, records, frame, sequence, buffers=pool.cursor()
+        inputs, features, requests, output, records, frame, sequence, pixels=pixels, buffers=buffers
     )
     operation.prepare()
     def forward():
@@ -103,7 +105,7 @@ def test_native_vision_handoff_append_epoch_validation_and_completion(compiled):
         inputs.vision_generation.fill_(17)
         inputs.vision_num_patches.fill_(16)
         inputs.vision_cu_seqlens[1] = 16
-        inputs.vision_pixel_values[:16].fill_(0.25)
+        inputs.vision_pixel_values[:16].normal_()
         for chunks in pool.chunks.values():
             for chunk in chunks:
                 chunk.fill_(37)
@@ -118,7 +120,7 @@ def test_native_vision_handoff_append_epoch_validation_and_completion(compiled):
         assert records[0, 0].tolist() == [0, 0, 0, 0, -1, 0, 0, 0]
         for name, before in requests_before.items():
             assert torch.equal(getattr(requests, name), before), name
-        assert torch.all(operation.pixels[:16] == 0.25)
+        torch.testing.assert_close(operation.pixels[:16], inputs.vision_pixel_values[:16].bfloat16(), rtol=0, atol=0)
         assert torch.count_nonzero(operation.pixels[16:]) == 0
         inputs.vision_feature_offset.fill_(4)
         inputs.vision_num_patches.fill_(8)

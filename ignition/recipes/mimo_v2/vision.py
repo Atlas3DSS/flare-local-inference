@@ -62,16 +62,25 @@ class VisionScratch:
     @classmethod
     def allocate(cls, patches, shard, device, *, buffers=None):
         heads, kv_heads = 32 // shard.world_size, 8 // shard.world_size
-        def zeros(*shape):
-            return (torch.zeros(shape, dtype=torch.bfloat16, device=device) if buffers is None
-                    else buffers.zeros(shape, torch.bfloat16))
-        return cls(zeros(patches, 1536), zeros(patches, 1280), zeros(patches, 1280),
-            zeros(patches, (heads + 2 * kv_heads) * 64), zeros(patches, heads, 64),
-            zeros(patches, kv_heads, 64), zeros(patches, kv_heads, 64), zeros(patches, heads * 64),
-            zeros(patches, 1280), zeros(patches, 1280),
-            MLPScratch.allocate(patches, 1280, 4608 // shard.world_size, device, buffers=buffers),
-            zeros(patches // 4, 5120), zeros(patches // 4, 5120 // shard.world_size),
-            zeros(patches // 4, HIDDEN), zeros(patches // 4, HIDDEN))
+        def zeros(cursor, *shape):
+            return (torch.zeros(shape, dtype=torch.bfloat16, device=device) if cursor is None
+                    else cursor.zeros(shape, torch.bfloat16))
+        pixels = zeros(buffers, patches, 1536)
+        residual, normalized, projected, reduced = (zeros(buffers, patches, 1280) for _ in range(4))
+        stages = [buffers.fork() for _ in range(3)] if buffers is not None else [None] * 3
+        attention, feedforward, merger = stages
+        mlp = MLPScratch.allocate(patches, 1280, 4608 // shard.world_size, device, buffers=feedforward)
+        qkv = zeros(attention, patches, (heads + 2 * kv_heads) * 64)
+        query = zeros(attention, patches, heads, 64)
+        key, value = (zeros(attention, patches, kv_heads, 64) for _ in range(2))
+        attended = zeros(attention, patches, heads * 64)
+        merged = zeros(merger, patches // 4, 5120)
+        activated = zeros(merger, patches // 4, 5120 // shard.world_size)
+        partial, output = (zeros(merger, patches // 4, HIDDEN) for _ in range(2))
+        if buffers is not None:
+            buffers.join(*stages)
+        return cls(pixels, residual, normalized, qkv, query, key, value, attended, projected,
+                   reduced, mlp, merged, activated, partial, output)
 
     def rows(self, patches):
         return type(self)(*(self.mlp.rows(patches) if field == "mlp"

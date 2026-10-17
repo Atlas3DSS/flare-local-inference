@@ -55,9 +55,18 @@ def test_qwen_decoder_and_vision_share_pool_with_disjoint_live_operands():
     vision = VisionScratch.allocate(256, "cpu", buffers=cursor)
     metadata = VisionMetadata.allocate(256, 1, "cpu", buffers=cursor)
     assert decoder_storage & {t.untyped_storage()._cdata for t in tensors(vision)}
-    intervals = sorted((t.data_ptr(), t.data_ptr() + t.nbytes) for obj in (vision, metadata) for t in tensors(obj))
-    assert all(left[1] <= right[0] for left, right in zip(intervals, intervals[1:]))
-    for index, t in enumerate(tensors(vision), 1):
-        t.fill_(index)
-    for index, t in enumerate(tensors(vision), 1):
-        assert torch.all(t == index)
+    common = (vision.hidden, vision.projected, *tensors(metadata))
+    for stage in ((vision.patches,), (vision.qkv, vision.query, vision.key, vision.value),
+                  (vision.query, vision.key, vision.value, vision.attention),
+                  (vision.intermediate,), (vision.merger_intermediate, vision.output)):
+        live = (*common, *stage)
+        intervals = sorted((t.data_ptr(), t.data_ptr() + t.nbytes) for t in live)
+        assert all(left[1] <= right[0] for left, right in zip(intervals, intervals[1:]))
+        for index, t in enumerate(live, 1):
+            t.fill_(index)
+        for index, t in enumerate(live, 1):
+            assert torch.all(t == index)
+    from ignition.preparation.tensor_metadata import merge_ranges
+
+    occupied = merge_ranges((t.data_ptr(), t.data_ptr() + t.nbytes) for t in tensors(vision))
+    assert sum(end - start for start, end in occupied) < sum(t.nbytes for t in tensors(vision))

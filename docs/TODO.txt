@@ -1,6 +1,7 @@
 [ ] Review scratch-memory lifetimes and sharing across every supported recipe
     and shared component, including Qwen, GLM, DeepSeek, MiMo, Kimi, Step, and
-    Nemotron.
+    Nemotron. Review contiguous-buffer placement within typed pools and weight
+    allocation padding; nonoverlapping lifetimes alone do not eliminate gaps.
     See performance-work.md#cross-model-scratch-planning for scope and checks.
 
 [ ] Validate pooled vision and speculative scratch in complete exported packages

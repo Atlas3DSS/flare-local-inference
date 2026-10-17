@@ -5,17 +5,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import torch
-from b12x.attention import varlen
-from b12x.preparation import PreparationSession, PreparedCall
+from b12x.preparation import PreparationSession
 from transformers.models.qwen4_exp.modeling_qwen4_exp import (
     Qwen4ExpVisionRotaryEmbedding,
     apply_rotary_pos_emb_vision,
 )
 
 from ignition.components.linear import QuantizedProjection, UnquantizedProjection
-from ignition.preparation.fixtures import varlen_attention as attention_fixtures
-from ignition.preparation.scratch import ScratchArena, planned_scratch, prime_owners
-from ignition.preparation.tuning import declare, register_finalizer
+from ignition.components.varlen_attention import PreparedVarlenAttention
+from ignition.preparation.scratch import ScratchArena
+from ignition.preparation.tuning import register_finalizer
 
 
 @dataclass(frozen=True)
@@ -56,13 +55,28 @@ class VisionScratch:
     def allocate(cls, patches: int, device: torch.device, *, buffers=None) -> VisionScratch:
         if patches <= 0 or patches % 4:
             raise ValueError("vision patch capacity must be positive and divisible by four")
-        def zeros(*shape):
-            return (torch.zeros(shape, device=device, dtype=torch.bfloat16) if buffers is None
-                    else buffers.zeros(shape, torch.bfloat16))
-        return cls(zeros(patches, 1536), zeros(patches, 1152), zeros(patches, 3456),
-                   zeros(patches, 16, 72), zeros(patches, 16, 72), zeros(patches, 16, 72),
-                   zeros(patches, 1152), zeros(patches, 1152), zeros(patches, 4304),
-                   zeros(patches // 4, 4608), zeros(patches // 4, 2560))
+        def zeros(cursor, *shape):
+            return (torch.zeros(shape, device=device, dtype=torch.bfloat16) if cursor is None
+                    else cursor.zeros(shape, torch.bfloat16))
+        hidden, projected = (zeros(buffers, patches, 1152) for _ in range(2))
+        stages = [buffers.fork() for _ in range(4)] if buffers is not None else [None] * 4
+        attention, mlp, patch, merger = stages
+        query, key, value = (zeros(attention, patches, 16, 72) for _ in range(3))
+        projection = attention.fork() if attention is not None else None
+        attended = attention.fork() if attention is not None else None
+        qkv = zeros(projection, patches, 3456)
+        output = zeros(attended, patches, 1152)
+        if attention is not None:
+            # QKV is consumed by the rotary and value copies before attention writes its output.
+            attention.join(projection, attended)
+        intermediate = zeros(mlp, patches, 4304)
+        pixels = zeros(patch, patches, 1536)
+        merger_intermediate = zeros(merger, patches // 4, 4608)
+        features = zeros(merger, patches // 4, 2560)
+        if buffers is not None:
+            buffers.join(*stages)
+        return cls(pixels, hidden, qkv, query, key, value, output, projected,
+                   intermediate, merger_intermediate, features)
 
     def rows(self, patches: int) -> VisionScratch:
         if patches <= 0 or patches % 4 or patches > self.patches.shape[0]:
@@ -113,41 +127,10 @@ class _Attention(torch.nn.Module):
             session=session, name=f"{name}.qkv", bias=module.qkv.bias, workspace=projection_workspace)
         self.proj = QuantizedProjection(scratch.attention, weights["proj"], scratch.projected,
             session=session, name=f"{name}.proj", bias=module.proj.bias, workspace=projection_workspace)
-        if shared is not None:
-            def refresh_alias():
-                self.workspace, self.binding = shared.workspace, shared.binding
-
-            register_finalizer(session, refresh_alias, workspace=attention_workspace)
-            return
-        capacity = scratch.hidden.shape[0]
-        arithmetic = {} if attention_math_mode == "flash" else {"math_mode": attention_math_mode}
-        declaration = varlen.plan(scratch.query, scratch.key, scratch.value, metadata.cu_seqlens,
-                                 max_seqlen_q=capacity, max_seqlen_k=capacity, causal=False,
-                                 **arithmetic)
-        kwargs = dict(q=scratch.query, k=scratch.key, v=scratch.value,
-                      cu_seqlens_q=metadata.cu_seqlens, max_seqlen_q=capacity, max_seqlen_k=capacity,
-                      softmax_scale=module.scaling, causal=False)
-        self.workspace = attention_workspace
-
-        def prepare(state):
-            workspace = planned_scratch(state.scratch_plan.scratch_specs(), attention_workspace)
-            binding = state.bind(scratch=workspace, **kwargs)
-            self.workspace = workspace
-            return PreparedCall(run=lambda: state.run(binding), owners=prime_owners(attention_workspace, workspace, binding))
-
-        def benchmark(state):
-            return attention_fixtures.benchmark_call(
-                state, arguments=kwargs, session=session, workspace=attention_workspace,
-            )
-
-        declare(session, (declaration.request(name=name, prepare_call=prepare,
-                                             benchmark_call=benchmark),))
-
-        def refresh():
-            self.workspace = planned_scratch(declaration.scratch_specs(), attention_workspace)
-            self.binding = varlen.bind(declaration, scratch=self.workspace, **kwargs)
-
-        register_finalizer(session, refresh, workspace=attention_workspace)
+        self.attention = shared.attention if shared is not None else PreparedVarlenAttention(
+            scratch.query, scratch.key, scratch.value, metadata.cu_seqlens,
+            scratch.attention.view_as(scratch.query), session=session, workspace=attention_workspace,
+            name=name, math_mode=attention_math_mode)
 
     def forward(self, hidden_states, cu_seqlens, position_embeddings=None, **kwargs):
         s = self.scratch
@@ -156,8 +139,7 @@ class _Attention(torch.nn.Module):
         s.query.copy_(query)
         s.key.copy_(key)
         s.value.copy_(projected[:, 2])
-        output, _ = varlen.run(self.binding)
-        s.attention.copy_(output.flatten(1))
+        self.attention()
         return self.proj(s.attention)
 
 
@@ -218,7 +200,7 @@ class PreparedVision:
                 name=f"{name}.merger.{key}", activation_mode="a16", bias=original.bias,
                 workspace=projection_workspace)))
         def refresh_attention_workspace():
-            self.attention_workspace = module.blocks[0].attn.workspace
+            self.attention_workspace = module.blocks[0].attn.attention.scratch
 
         register_finalizer(session, refresh_attention_workspace, workspace=attention_workspace)
         self.output_rows = torch.arange(capacity // 4, device=device)

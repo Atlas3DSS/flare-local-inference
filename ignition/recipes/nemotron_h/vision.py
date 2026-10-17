@@ -117,14 +117,23 @@ class VisionScratch:
     @classmethod
     def allocate(cls, patches, device, *, buffers=None):
         buffers = GraphBufferPool(device).cursor() if buffers is None else buffers
-        def zeros(*shape):
-            return buffers.zeros(shape, torch.bfloat16)
+        def zeros(cursor, *shape):
+            return cursor.zeros(shape, torch.bfloat16)
         rows = patches + REGISTER_TOKENS
-        return cls(zeros(patches, PIXEL_WIDTH), zeros(patches, VISION_HIDDEN), zeros(rows, VISION_HIDDEN),
-                   zeros(rows, 3 * VISION_HIDDEN), zeros(rows, 16, 80), zeros(rows, 16, 80),
-                   zeros(rows, 16, 80), zeros(rows, VISION_HIDDEN), zeros(rows, VISION_HIDDEN),
-                   zeros(rows, 4 * VISION_HIDDEN), zeros(patches // 4, 4 * VISION_HIDDEN),
-                   zeros(patches // 4, 20480), zeros(patches // 4, HIDDEN))
+        pixels = zeros(buffers, patches, PIXEL_WIDTH)
+        patch_hidden = zeros(buffers, patches, VISION_HIDDEN)
+        hidden, projected = (zeros(buffers, rows, VISION_HIDDEN) for _ in range(2))
+        attention, feedforward, merger = (buffers.fork() for _ in range(3))
+        mlp_up = zeros(feedforward, rows, 4 * VISION_HIDDEN)
+        qkv = zeros(attention, rows, 3 * VISION_HIDDEN)
+        query, key, value = (zeros(attention, rows, 16, 80) for _ in range(3))
+        attended = zeros(attention, rows, VISION_HIDDEN)
+        merged = zeros(merger, patches // 4, 4 * VISION_HIDDEN)
+        activated = zeros(merger, patches // 4, 20480)
+        output = zeros(merger, patches // 4, HIDDEN)
+        buffers.join(attention, feedforward, merger)
+        return cls(pixels, patch_hidden, hidden, qkv, query, key, value, attended, projected,
+                   mlp_up, merged, activated, output)
 
 
 class _Projection(nn.Module):

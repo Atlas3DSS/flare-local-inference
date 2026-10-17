@@ -56,7 +56,8 @@ functionalization, using byte storage for mixed-dtype aliases and typed
 storage for aliases of one dtype.
 
 Complete text forwards include MTP absorption, speculative verification, and
-commit. Vision and maintenance graphs capture their prepared operations
+commit. Vision encoders compile their canonical tensor operations around prepared
+projections and attention. Maintenance graphs capture their prepared operations
 directly. Chain verification exposes token and acceptance-counter mutations.
 Conditional penalty histograms include only preceding candidate IDs, bounded
 by verification width and the conditional-prefix offset.
@@ -140,6 +141,16 @@ Speculative graphs allocate filtering and retained-probability buffers for their
 actual batch and width, sharing backing across serialized variants and proposal
 steps. Proposal-only graphs omit target and verification workspaces. Graph-buffer
 cursors reuse available space in earlier chunks without moving existing views.
+Proposal filtering, target filtering, and verification reuse sequential-stage
+intermediates. Target probabilities and validity retain separate storage through
+verification, as do retained draft probabilities.
+
+Qwen, DeepSeek V4, MiMo, Nemotron, and Step vision encoders reuse storage across
+attention, feedforward, and merger stages. Qwen also reuses patch staging and
+consumed QKV storage. Kimi reuses its fused-projection workspace across these
+stages. Residuals, shared projection outputs, metadata, and live projection
+operands stay disjoint. Qwen validates FP32 upload pixels before sanitizing them
+directly into the encoder's BF16 patch buffer.
 
 Cursors for sequential stages reuse storage beyond the buffers retained
 throughout a forward. Qwen's GDN, QSA, PLE, MoE, and hyperconnection temporaries share this

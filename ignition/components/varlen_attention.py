@@ -45,15 +45,17 @@ def _fake_attention(q, k, v, cu, out, scratch, sink, handle, max_seqlen):
 
 
 class PreparedVarlenAttention:
-    def __init__(self, q, k, v, cu, out, *, session, workspace, name, window=None, sink=None, max_seqlen=None):
+    def __init__(self, q, k, v, cu, out, *, session, workspace, name, window=None, sink=None, max_seqlen=None,
+                 math_mode="flash"):
         self.q, self.k, self.v, self.cu, self.out = q, k, v, cu, out
         self.workspace = workspace
         self.sink = sink
         self.max_seqlen = q.shape[0] if max_seqlen is None else max_seqlen
         if type(self.max_seqlen) is not int or not 0 < self.max_seqlen <= q.shape[0]:
             raise ValueError("maximum attention sequence must fit the prepared query capacity")
+        arithmetic = {} if math_mode == "flash" else {"math_mode": math_mode}
         self.plan = varlen.plan(q, k, v, cu, max_seqlen_q=self.max_seqlen, max_seqlen_k=self.max_seqlen,
-                               causal=False, window_size=window, attention_sink_bias=sink)
+                               causal=False, window_size=window, attention_sink_bias=sink, **arithmetic)
         arguments = {
             "q": q,
             "k": k,

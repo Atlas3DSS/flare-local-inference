@@ -221,6 +221,7 @@ def _prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, t
 
     from .vision_state import (
         PreparedEmbeddingInjection,
+        PreparedVisionGeneration,
         PreparedVisionHandoff,
         VisionFeatureState,
         VisionInputs,
@@ -354,7 +355,7 @@ def _prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, t
                 cursor = graph_buffers.cursor()
                 s = vision_scratch[capacity] = VisionScratch.allocate(capacity, device, buffers=cursor)
                 handoff = PreparedVisionHandoff(vision_inputs, features, requests, s.output, completion, frame, sequence,
-                                               buffers=cursor)
+                                               pixels=s.patches, buffers=cursor)
                 handoff.prepare()
                 with torch.device("meta"):
                     module = Qwen4ExpVisionModel(weights.tree.config.vision_config)
@@ -362,11 +363,7 @@ def _prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, t
                 encoder = PreparedVision(module, s, handoff.metadata, weights.vision, session=session,
                     name=f"vision{capacity}", projection_workspace=workspaces,
                     attention_workspace=workspaces)
-                def vision(handoff=handoff, encoder=encoder):
-                    handoff.begin()
-                    encoder(handoff.pixels)
-                    handoff.finish()
-                add(f"vision{capacity}", vision, "vision", 1, capacity, vision_fields)
+                add(f"vision{capacity}", PreparedVisionGeneration(handoff, encoder), "vision", 1, capacity, vision_fields)
                 owners.extend((handoff, encoder))
 
             for enabled in serving_modes:

@@ -176,7 +176,7 @@ def collect_inventory(prepared, storage, package, *, external=()):
         for block in segment["blocks"]:
             start, size = block["address"], block["size"]
             if graph_pool:
-                claims.append(Claim(start, start + size, "Graph compiler pool", "shared CUDA graph pool",
+                claims.append(Claim(start, start + size, "Graph capture pool", "shared CUDA graph pool",
                                     "ignition/preparation/capture.py", 70))
                 # Capture pools can retain graph-live blocks marked inactive by PyTorch.
                 continue

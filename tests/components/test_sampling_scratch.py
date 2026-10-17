@@ -19,13 +19,17 @@ def test_sampling_allocates_only_executed_operations(width, proposal, verificati
     work = prepare_sampling_scratch(4, width, 64, "cpu", buffers=pool.cursor(),
                                    proposal=proposal, verification=verification)
     assert work.keys() == keys
-    tensors = [tensor for layout in work.values() for tensor in layout.values() if tensor.numel()]
-    spans = sorted((t.data_ptr(), t.data_ptr() + t.nbytes) for t in tensors)
-    assert all(a[1] <= b[0] for a, b in zip(spans, spans[1:]))
-    for index, tensor in enumerate(tensors, 1):
-        tensor.fill_(bool(index % 2) if tensor.dtype == torch.bool else index)
-    for index, tensor in enumerate(tensors, 1):
-        assert torch.all(tensor == (bool(index % 2) if tensor.dtype == torch.bool else index))
+    for name, layout in work.items():
+        live = list(layout.values())
+        if name == "verify":
+            live.extend(work["target"][key] for key in ("probabilities", "valid"))
+        tensors = [tensor for tensor in live if tensor.numel()]
+        spans = sorted((t.data_ptr(), t.data_ptr() + t.nbytes) for t in tensors)
+        assert all(a[1] <= b[0] for a, b in zip(spans, spans[1:]))
+        for index, tensor in enumerate(tensors, 1):
+            tensor.fill_(bool(index % 2) if tensor.dtype == torch.bool else index)
+        for index, tensor in enumerate(tensors, 1):
+            assert torch.all(tensor == (bool(index % 2) if tensor.dtype == torch.bool else index))
 
 
 def test_qwen_sampling_catalog_fits_bounded_shared_backing():
