@@ -220,7 +220,8 @@ class PreparedDecoder:
     """
 
     def __init__(self, weights, scratch, metadata, pool, *, mode, runtime, vocabulary_runtime, embedding_runtime, router_runtime, vision_state,
-                 coordinator, session, name, workspace, buffers, kda_records=None, route_runtime=None, context=None):
+                 coordinator, session, name, workspace, buffers, kda_records=None, route_runtime=None, context=None,
+                 latent_runtimes=()):
         # Verification records its candidate rows; other modes ignore records, which DFlash2 rounds always pass.
         if mode not in ("prefill", "decode", "verify") or mode == "verify" and kda_records is None:
             raise ValueError("Kimi K3 verification decodes recorded candidate rows")
@@ -251,7 +252,9 @@ class PreparedDecoder:
                 eps=config.text["rms_norm_eps"], records=kda_records.layer(index) if mode == "verify" else None,
                 **kwargs) if kind == "kda" else
                 PreparedMLA(w["attention"], source, metadata, pool.attention(index), context=context,
-                            peers=None if context is None else context.peers[index], **kwargs))
+                            peers=None if context is None else context.peers[index], coordinator=coordinator,
+                            latents=next((r for r in latent_runtimes if source.shape[0] <= r.max_batch_size), None),
+                            **kwargs))
             if "mlp" in w:
                 mlp = PreparedMLP(w["mlp"], source, session=session, name=prefix + ".mlp",
                                   buffers=self.buffers.setdefault("dense", {}))

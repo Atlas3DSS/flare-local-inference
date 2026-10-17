@@ -150,7 +150,6 @@ class KimiWeightLoader(DirectWeightLoader):
             attention["dt_bias"] = self.load_tensor(a + ".dt_bias", extent=slice(*head_rows))
             attention["norm"] = self.load_tensor(a + ".o_norm.weight")
         else:
-            attention["input"] = self.fused([a + ".q_a_proj", a + ".kv_a_proj_with_mqa"], [None, None])
             attention["q_b"] = self.linear(a + ".q_b_proj", rows=(h0 * 192, h1 * 192))
             kv = self.linear(a + ".kv_b_proj", rows=(h0 * 256, h1 * 256)).view(h1 - h0, 256, 512)
             attention["key"] = kv[:, :128].contiguous()
@@ -158,7 +157,14 @@ class KimiWeightLoader(DirectWeightLoader):
             attention["query_norm"] = self.load_tensor(a + ".q_a_layernorm.weight")
             attention["kv_norm"] = self.load_tensor(a + ".kv_a_layernorm.weight")
         if self.config.layers[index] != "kda":
-            attention["gate"] = self.linear(a + ".g_proj", rows=head_rows)
+            # This rank's query and KV latent rows beside its output gate; the ranks gather the latents, as
+            # vLLM's VLLM_KIMI_SHARD_QKV_A does. Zero rows pad the latent shard to the exchange's 16-byte width.
+            latent = (self.linear(a + ".q_a_proj", rows=shard.partition(c["q_lora_rank"])),
+                      self.linear(a + ".kv_a_proj_with_mqa",
+                                  rows=shard.partition(c["kv_lora_rank"] + c["qk_rope_head_dim"])))
+            gate = self.linear(a + ".g_proj", rows=head_rows)
+            width = sum(x.shape[0] for x in latent)
+            attention["latent_gate"] = torch.cat((*latent, gate.new_zeros((-width % 8, gate.shape[1])), gate))
         attention["output"] = self.linear(a + ".o_proj", columns=head_rows)
         return attention
 

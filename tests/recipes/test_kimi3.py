@@ -150,7 +150,8 @@ def test_checkpoint_mla(config, mode, tokens):
     device = torch.device("cuda:0")
     torch.cuda.set_device(device)
     manifest = inspect_indexed_checkpoint(CHECKPOINT)
-    with KimiWeightLoader(manifest, device, shard=TensorParallelShard(0, 16),
+    # One rank projects every latent row itself; tensor-parallel ranks gather them through b12x.
+    with KimiWeightLoader(manifest, device, shard=TensorParallelShard(0, 1),
                          prefixes=("language_model.model.layers.3.self_attn.",)) as loader:
         weights = loader.load_attention(3)
     with RecordedPreparationSession(device=device, checkpoint=str(CHECKPOINT),
@@ -169,29 +170,33 @@ def test_checkpoint_mla(config, mode, tokens):
         metadata.lengths.fill_(tokens)
         metadata.page_table.copy_(torch.arange(pages, device=device)[None])
         metadata.positions.copy_(torch.arange(tokens, device=device))
+        metadata.token_page_table.copy_(metadata.page_table.expand(tokens, -1))
         output = op(source).clone()
         w = weights
-        projected = F.linear(source, w["input"])
+        projected = F.linear(source, w["latent_gate"][:2112])
         def norm(x, weight):
             return (x.float() * torch.rsqrt(x.float().square().mean(-1, keepdim=True) + 1e-6)).to(x.dtype) * weight
-        query = F.linear(norm(projected[:, :1536], w["query_norm"]), w["q_b"]).view(tokens, 6, 192)
+        heads = w["key"].shape[0]
+        query = F.linear(norm(projected[:, :1536], w["query_norm"]), w["q_b"]).view(tokens, heads, 192)
         latent = norm(projected[:, 1536:-64], w["kv_norm"])
+        gate = F.linear(source, w["latent_gate"][2112:]).sigmoid()
         keys = torch.einsum("tk,hdk->thd", latent.float(), w["key"].float()).bfloat16()
-        keys = torch.cat((keys, projected[:, None, -64:].expand(-1, 6, -1)), -1)
+        keys = torch.cat((keys, projected[:, None, -64:].expand(-1, heads, -1)), -1)
         values = torch.einsum("tk,hkd->thd", latent.float(), w["value"].float()).bfloat16()
         expected = F.scaled_dot_product_attention(query.transpose(0, 1)[None], keys.transpose(0, 1)[None],
             values.transpose(0, 1)[None], is_causal=True).squeeze(0).transpose(0, 1).flatten(1)
-        expected = F.linear(expected * F.linear(source, w["gate"]).sigmoid(), w["output"])
+        expected = F.linear(expected * gate, w["output"])
         error = (output.float() - expected.float()).square().mean().sqrt() / expected.float().square().mean().sqrt()
         assert error.item() < .06
-        # Compare implementation error separately from FP8 query/cache quantization.
+        # Compare implementation error separately from quantization: E4M3 records with a unit scale, and the
+        # absorbed query that b12x quantizes to E4M3 the same way.
         absorbed = torch.cat((torch.bmm(query[:, :, :128].transpose(0, 1), w["key"]).transpose(0, 1),
-                              query[:, :, 128:]), -1).to(torch.float8_e4m3fn).float()
+                              query[:, :, 128:]), -1).float().clamp(-448., 448.).to(torch.float8_e4m3fn).float()
         records = torch.cat((latent, projected[:, -64:]), -1).to(torch.float8_e4m3fn).float()
         attended = F.scaled_dot_product_attention(absorbed.transpose(0, 1)[None], records[None, None],
             records[None, None, :, :512], is_causal=True, scale=192 ** -.5).squeeze(0).transpose(0, 1).bfloat16()
         expanded = torch.bmm(attended.transpose(0, 1), w["value"]).transpose(0, 1).flatten(1)
-        quantized_reference = F.linear(expanded * F.linear(source, w["gate"]).sigmoid(), w["output"])
+        quantized_reference = F.linear(expanded * gate, w["output"])
         error = (output.float() - quantized_reference.float()).norm() / quantized_reference.float().norm()
         assert error.item() < .02
         stream = torch.cuda.Stream(device=device)

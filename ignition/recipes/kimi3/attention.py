@@ -24,8 +24,8 @@ FP8 = torch.float8_e4m3fn
 
 
 class PreparedMLA:
-    def __init__(self, weights, source, metadata, cache, *, mode, session, name, workspace, buffers, context=None,
-                 peers=None):
+    def __init__(self, weights, source, metadata, cache, *, mode, session, name, workspace, buffers, latents=None,
+                 coordinator=None, context=None, peers=None):
         tokens, hidden = source.shape
         heads = weights["key"].shape[0]
         device = source.device
@@ -38,18 +38,38 @@ class PreparedMLA:
                                            dtype=source.dtype if dtype is None else dtype, device=device)
             return buffers[key][:tokens]
 
-        self.input = buffer("input", weights["input"].shape[0])
-        self.query_norm = buffer("query_norm", self.input.shape[1] - RECORD_BYTES)
+        latent_width = weights["query_norm"].shape[0] + RECORD_BYTES
+        self.query_norm = buffer("query_norm", latent_width - RECORD_BYTES)
         self.query = buffer("query", heads * 192).view(tokens, heads, 192)
         self.latent = buffer("latent", RECORD_BYTES)
         self.absorbed = buffer("absorbed", heads, RECORD_BYTES)
         self.attended = buffer("attended", heads, 512)
         self.expanded = buffer("expanded", heads * 128)
-        self.gate = buffer("gate", heads * 128)
         self.weights, self.metadata, self.mode, self.cache = weights, metadata, mode, cache
+        # Each rank projects only its query and KV latent rows beside its output gate, and the ranks gather the
+        # latents, as vLLM's VLLM_KIMI_SHARD_QKV_A does: every rank keeps and reads a sixteenth of the latent
+        # projection. A single rank (``latents`` None) projects every latent row itself.
+        self.latent_gather = None
+        if latents is None:
+            self.local = buffer("local", weights["latent_gate"].shape[0])
+            self.input = self.local[:, :latent_width]
+            self.gate = self.local[:, latent_width:]
+        else:
+            rows, width = latents.max_batch_size, latents.query_head_dim
+            if not tokens <= rows:
+                raise ValueError("the latent exchange must carry every row of the step")
+            self.input = buffer("input", latent_width)
+            self.local = buffer("local", weights["latent_gate"].shape[0], rows=rows)
+            self.gate = self.local[:, width:]
+            # The exchange reads contiguous rows, which a single row's latent columns already are.
+            self.staged = tokens > 1
+            self.send = buffer("send", width, rows=rows) if self.staged else self.local[:, :width]
+            self.gathered_latents = buffer("gathered_latents", latents.world_size * width, rows=rows)
+            self.latent_gather = PreparedAllGather(self.send, self.gathered_latents, runtime=latents,
+                session=session, coordinator=coordinator, name=name + ".gather_latents")
         self.projections = {key: UnquantizedProjection(x, weights[key], y, session=session, name=name + "." + key)
-            for key, x, y in (("input", source, self.input), ("q_b", self.query_norm, self.query.view(tokens, -1)),
-                             ("gate", source, self.gate), ("output", self.expanded, buffer("output", hidden)))}
+            for key, x, y in (("latent_gate", source, self.local), ("q_b", self.query_norm, self.query.view(tokens, -1)),
+                             ("output", self.expanded, buffer("output", hidden)))}
         self.shards = ContextShards() if context is None else context.shards
         self.peers = peers
         self.slots = torch.full((tokens,), -1, dtype=torch.int64, device=device)
@@ -106,7 +126,19 @@ class PreparedMLA:
 
     def __call__(self, source):
         p, m, shards = self.projections, self.metadata, self.shards
-        p["input"](source)
+        p["latent_gate"](source)
+        if self.latent_gather is not None:
+            tokens, width = self.send.shape
+            if self.staged:
+                self.send.copy_(self.local[:, :width])
+            self.latent_gather(self.send)
+            # Rank-major latent shards back into the query and KV latents they partition.
+            world = self.gathered_latents.shape[1] // width
+            gathered = self.gathered_latents.view(tokens, world, width)
+            query = self.input.shape[1] - RECORD_BYTES
+            q, kv = query // world, RECORD_BYTES // world
+            self.input[:, :query].view(tokens, world, q).copy_(gathered[:, :, :q])
+            self.input[:, query:].view(tokens, world, kv).copy_(gathered[:, :, q:q + kv])
         rms_norm_columns(self.input[:, :-RECORD_BYTES], self.weights["query_norm"], self.query_norm, 1e-6)
         rms_norm_columns(self.input[:, -RECORD_BYTES:-64], self.weights["kv_norm"], self.latent[:, :512], 1e-6)
         self.latent[:, 512:].copy_(self.input[:, -64:])
@@ -136,6 +168,5 @@ class PreparedMLA:
             self.attention()
             self.combine(self.partial, self.lse)
         self.expanded.copy_(torch.bmm(self.attended.transpose(0, 1), self.weights["value"]).transpose(0, 1).flatten(1))
-        p["gate"](source)
         sigmoid_gate(self.expanded, self.gate)
         return p["output"](self.expanded)

@@ -195,6 +195,13 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                 heads=create_head_exchange(group, device, max_rows=config.decode_tokens, heads=heads, head_dim=512,
                                            query_head_dim=RECORD_BYTES, ipc=package_storage.peer_storage),
                 coordinator=coordinator, peers=pool.share_pages(package_storage, group), slab=None)
+        # Every MLA step gathers each rank's query and KV latent rows, padded to 16 bytes: one exchange for up to
+        # eight rows, as vLLM's b12x latent transport carries, and one for prefill-sized steps.
+        text = weights.config.text
+        latent = (text["q_lora_rank"] + text["kv_lora_rank"] + text["qk_rope_head_dim"]) // shard.world_size
+        latent_runtimes = tuple(create_head_exchange(group, device, max_rows=rows, heads=shard.world_size,
+                                                     head_dim=-(-latent // 8) * 8, ipc=package_storage.peer_storage)
+                                for rows in sorted({min(8, max_tokens), max_tokens}))
         identity = hashlib.sha256(json.dumps({
             "config": weights.config.text, "headers": headers, "vision": weights.config.vision,
             "draft": None if not drafting else weights.config.draft.raw if config.dspark else weights.config.draft.text,
@@ -252,7 +259,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
     prefill_sizes, batch_sizes = prefill_capacities(config.prefill_chunk_size), batch_capacities(config.max_active)
     collectives = dict(runtime=collective, embedding_runtime=embedding_collective, router_runtime=router_collective,
         route_runtime=route_collective, vocabulary_runtime=vocabulary_collective, coordinator=coordinator,
-        vision_state=vision_state, context=context)
+        vision_state=vision_state, context=context, latent_runtimes=latent_runtimes)
     speculation = None
     if config.dspark:
         from .dspark import SpeculativePreparation
@@ -421,4 +428,4 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                    decode_storage, metadata, compiled, stream, graph_pool, session, coordinator, collective,
                    vocabulary_collective, embedding_collective, router_collective, route_collective, frontend_assets,
                    vision_inputs, vision_prefill, vision_state, vision_storage, scratch_pool, shared_scratch, graph_buffers,
-                   speculation, context_collective, draft_argmax))
+                   speculation, context_collective, draft_argmax, latent_runtimes))
