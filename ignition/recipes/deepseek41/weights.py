@@ -60,10 +60,12 @@ class ModelWeights:
     allocated_bytes: int
 
     @classmethod
-    def load(cls, manifest, device, *, shard, progress=None, dspark=False, confidence=False):
+    def load(cls, manifest, device, *, shard, progress=None, dspark=False, confidence=False,
+             expert_scale_compression=None):
         config = ModelConfig.load(manifest.metadata_path)
         before = torch.cuda.memory_allocated(device)
-        with DeepSeekWeightLoader(manifest, device, shard=shard, progress=progress, dspark=dspark) as loader:
+        with DeepSeekWeightLoader(manifest, device, shard=shard, progress=progress, dspark=dspark,
+                                 expert_scale_compression=expert_scale_compression) as loader:
             embedding, norm = loader.load_tensors(("embed.weight", "norm.weight"))
             head = loader.load_tensor("head.weight", extent=slice(*shard.partition(129280, alignment=64)))
             layers = tuple(loader.load_layer(i) for i in range(config.layers))
@@ -73,8 +75,12 @@ class ModelWeights:
 
 
 class DeepSeekWeightLoader(BlockFP8WeightLoader):
-    def __init__(self, manifest, device, *, shard, progress=None, prefixes=None, dspark=False):
+    def __init__(self, manifest, device, *, shard, progress=None, prefixes=None, dspark=False,
+                 expert_scale_compression=None):
+        if expert_scale_compression not in (None, "csf"):
+            raise ValueError("DeepSeek V4.1 expert scale compression must be None or 'csf'")
         self.dspark = dspark
+        self.expert_scale_compression = expert_scale_compression
         super().__init__(manifest, device, progress=progress, prefixes=prefixes)
         self.config = ModelConfig.load(manifest.metadata_path)
         self.shard = shard
@@ -85,7 +91,7 @@ class DeepSeekWeightLoader(BlockFP8WeightLoader):
         return self.load_mxfp4_experts(prefixes, hidden_size=text["hidden_size"],
             intermediate_size=text["moe_intermediate_size"], intermediate_range=interval,
             swiglu_limit=text["swiglu_limit"], scale_name="scale", projection_names=("w3", "w1", "w2"),
-            scale_scratch=self._expert_scale_scratch)
+            scale_compression=self.expert_scale_compression, scale_scratch=self._expert_scale_scratch)
 
     def _selected_names(self):
         return {name for name in super()._selected_names()

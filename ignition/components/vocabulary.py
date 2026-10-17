@@ -52,7 +52,7 @@ def nvfp4_draft_head(weight: torch.Tensor, *, rows_per_chunk: int = 8192):
     proposal distribution only has to be the q that generated it, so verification
     keeps the BF16 head and stays exact.
     """
-    from b12x._lib.intrinsics import swizzle_block_scale
+    from b12x._lib.intrinsics.reference import swizzle_block_scale
     from b12x.gemm.blockscaled import pack_weight
 
     rows, columns = weight.shape

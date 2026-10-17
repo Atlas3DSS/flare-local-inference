@@ -42,9 +42,10 @@ class Scratch:
     logits: torch.Tensor
 
     @classmethod
-    def allocate(cls, tokens, rows, config, world_size, device, *, activations=None):
+    def allocate(cls, tokens, rows, config, world_size, device, *, activations=None, buffers=None):
         def zeros(shape):
-            return torch.zeros(shape, dtype=torch.bfloat16, device=device)
+            return (torch.zeros(shape, dtype=torch.bfloat16, device=device) if buffers is None
+                    else buffers.zeros(shape, torch.bfloat16))
         return cls(zeros((tokens, config.hidden)) if activations is None else activations, zeros((rows, config.hidden)),
                    zeros((rows, config.vocabulary // world_size)), zeros((rows, config.vocabulary)))
 

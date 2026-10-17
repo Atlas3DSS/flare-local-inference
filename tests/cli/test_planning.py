@@ -372,3 +372,62 @@ def test_unified_memory_gpus_plan_from_their_reported_free_memory():
     # The PLE table reaches the GPU through compact row delivery, so no mapped table is subtracted.
     discrete, unified = derive(gpus=(gpu(0, 95),)), derive(gpus=(spark(0, 95),))
     assert discrete.free_bytes == unified.free_bytes == 95 * GIB
+
+
+def test_tuning_devices_keep_serving_capacity_and_tensor_parallel_size():
+    from types import SimpleNamespace
+    from ignition.cli.preparation import tuning_devices
+
+    devices = tuple(gpu(index, 95) for index in range(6))
+    host = SimpleNamespace(gpus=devices)
+    for model, count in ((SOLO, 1), (PAIR, 2)):
+        plan = derive(model, devices, selected=tuple(range(count)))
+        assert tuning_devices(plan, host, None) is plan
+        assert tuning_devices(plan, host, ','.join(str(i) for i in range(count))) == plan
+        expanded = tuning_devices(plan, host, '0-5')
+        assert expanded.world_size == count
+        assert expanded.tuning_gpus == devices
+        assert replace(expanded, tuning_gpus=()) == plan
+        assert expanded.to_dict()['tuning_gpus'] == list(range(6))
+
+
+@pytest.mark.parametrize('selection,message', [
+    ('1,0', 'start with the serving GPUs'),
+    ('0-2', 'complete TP replicas'),
+    ('0,1,6,7', 'outside the visible device list'),
+])
+def test_tuning_devices_reject_invalid_replica_groups(selection, message):
+    from types import SimpleNamespace
+    from ignition.cli.preparation import tuning_devices
+
+    devices = tuple(gpu(index, 95) for index in range(4))
+    with pytest.raises(UsageError, match=message):
+        tuning_devices(derive(PAIR, devices), SimpleNamespace(gpus=devices), selection)
+
+
+@pytest.mark.parametrize('helper,message', [
+    (gpu(1, 95, (12, 1)), 'model and architecture'),
+    (replace(gpu(1, 95), name='another GPU'), 'model and architecture'),
+    (gpu(1, 68), 'needs at least'),
+])
+def test_tuning_devices_require_matching_hardware_and_memory(helper, message):
+    from types import SimpleNamespace
+    from ignition.cli.preparation import tuning_devices
+
+    plan = derive(reserve=4)
+    with pytest.raises(UsageError, match=message):
+        tuning_devices(plan, SimpleNamespace(gpus=(plan.gpus[0], helper)), '0,1')
+
+
+@pytest.mark.parametrize('model,workers,selection,message', [
+    (PAIR, 1, None, 'local serving rank'),
+    (SOLO, 1, '0,1', 'local tuning rank'),
+])
+def test_compiler_budget_rejects_more_local_ranks_than_workers(model, workers, selection, message):
+    from types import SimpleNamespace
+    from ignition.cli.preparation import tuning_devices
+
+    devices = (gpu(0, 95), gpu(1, 95))
+    plan = replace(derive(model, devices), compile_workers=workers)
+    with pytest.raises(UsageError, match=message):
+        tuning_devices(plan, SimpleNamespace(gpus=devices), selection)

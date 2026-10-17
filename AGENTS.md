@@ -63,6 +63,26 @@ indices refer to the exposed device list. A package's TP size and GPU architectu
 must match serving. Choose unused export filenames; do not delete packages merely
 to reuse their names.
 
+Scale Ignition preparation with two independent controls:
+
+- `--compile-workers N` sets a positive CPU compiler process budget per host,
+  shared by local preparation ranks and bounded by available RAM and device
+  memory. It applies to b12x kernel compilation and complete-forward compilation,
+  and overrides `[preparation] compile_workers` in the configuration file.
+- `--tuning-gpus LIST` adds local GPUs for benchmarking disjoint b12x candidate
+  subsets. Start the list with `--gpus`, then append complete replicas of that
+  TP group. Corresponding GPUs must match in model and architecture and have
+  enough free memory for the model and preparation storage. Helpers exit after
+  tuning; serving TP size and capture devices stay fixed. Both lists use
+  `CUDA_VISIBLE_DEVICES` ordinals.
+
+For example, `--gpus 0 --tuning-gpus 0-3 --compile-workers 24` prepares a TP1
+package using four tuning GPUs. Omitting these settings preserves automatic
+worker sizing, including DGX Spark's shared-memory limits. Multi-host `--ranks`
+preparation keeps its existing sharding and transport: `--compile-workers`
+applies separately on each host, while `--tuning-gpus` cannot be combined with
+multi-host preparation. See [preparation resources](docs/model-preparation.md#preparation-resources).
+
 For serving-only Rust changes, rebuild Flare and load a compatible package.
 Re-export after changing prepared kernels, capacities, or the package format.
 `ignition run` finds `flare` on `PATH` before `flare/target/release/flare`; check
@@ -249,6 +269,10 @@ architectural boundary before committing the change.
 
 ## Optimize the serving path
 
+- When a potential correctness, memory, or performance deficiency appears in
+  one model, inspect the shared components and equivalent paths in every
+  supported recipe before scoping the fix. Track follow-up work across all
+  affected models; distinguish confirmed findings from untested paths.
 - Apply the recipe requirements below during implementation. Inspect the
   model's fusion boundaries, precision, sharding, overlap, and selected kernel
   plans. Reuse FlashInfer/b12x mechanisms directly.

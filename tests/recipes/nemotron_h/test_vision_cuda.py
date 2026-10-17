@@ -104,7 +104,7 @@ def reference_project(weights, features, h, w):
 def test_checkpoint_image_encoder_compiled_replay(models, capacity, grids, tmp_path):
     from b12x.preparation import PreparationSession
     from ignition.preparation.compile_pool import CompilePool
-    from ignition.preparation.scratch import ScratchArena
+    from ignition.preparation.scratch import GraphBufferPool, ScratchArena
     from ignition.recipes.nemotron_h.vision import PreparedVision, VisionInputs, VisionScratch
 
     weights, reference = models
@@ -113,8 +113,10 @@ def test_checkpoint_image_encoder_compiled_replay(models, capacity, grids, tmp_p
     expected = [reference_project(weights, reference(x).features[0], x.shape[-2] // 16, x.shape[-1] // 16) for x in pixels]
     with PreparationSession(device="cuda:0", autotune=False) as session:
         arena = ScratchArena("cuda:0")
-        encoder = PreparedVision(weights, VisionScratch.allocate(capacity, "cuda:0"), VisionInputs.allocate("cuda:0"),
-                                 session=session, workspace=arena, name="radio")
+        pool = GraphBufferPool("cuda:0", chunk_bytes=2 << 20)
+        buffers = pool.cursor()
+        encoder = PreparedVision(weights, VisionScratch.allocate(capacity, "cuda:0", buffers=buffers), VisionInputs.allocate("cuda:0"),
+                                 session=session, workspace=arena, name="radio", buffers=buffers)
         arena.finalize()
         artifact_path = tmp_path / "radio.bin"
         with CompilePool(pixels[0].device) as compiler:
@@ -129,6 +131,9 @@ def test_checkpoint_image_encoder_compiled_replay(models, capacity, grids, tmp_p
         with session.capture(), torch.cuda.graph(graph):
             run()
         for index in (0, 1, 0):
+            for chunks in pool.chunks.values():
+                for tensor in chunks:
+                    tensor.fill_(float("nan") if tensor.is_floating_point() else -37)
             count = set_inputs(encoder, pixels[index])
             torch.cuda.synchronize()
             allocated = torch.cuda.memory_stats()["allocation.all.allocated"]

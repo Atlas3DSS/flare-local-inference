@@ -1,5 +1,6 @@
 """Lossless DeepSeek expert loading and compressed-scale replay with shared scratch."""
 
+import json
 import os
 from pathlib import Path
 
@@ -7,6 +8,7 @@ import numpy as np
 import pytest
 import torch
 from safetensors import safe_open
+from safetensors.torch import save_file
 
 from ignition.components.weights import DirectWeightLoader
 from ignition.preparation.checkpoint import inspect_indexed_checkpoint
@@ -28,15 +30,37 @@ def expanded_scale(read, name, rows, columns):
 
 @pytest.fixture(scope="module", params=[("deepseek-v4-flash", 4096, 2048, 2),
                                        ("deepseek-v4-flash", 4096, 2048, 4),
-                                       ("deepseek-v4.1-flash", 5120, 2304, 4)])
-def experts(request):
+                                       ("deepseek-v4.1-flash", 5120, 2304, 4),
+                                       pytest.param((None, 5120, 2304, 4), id="native-conversion-tp4")])
+def experts(request, tmp_path_factory):
     from b12x.moe import fused_moe as moe
 
     alias, h, full, world = request.param
-    checkpoint = resolve(alias).checkpoint
-    root = Path.home() / ".cache/huggingface/hub" / ("models--" + checkpoint.repository.replace("/", "--")) / "snapshots" / checkpoint.revision
-    if not root.is_dir():
-        pytest.skip(f"{alias} lossless CSF checkpoint is unavailable")
+    if alias is None:
+        root = tmp_path_factory.mktemp("native-mxfp4")
+        gen = torch.Generator().manual_seed(192)
+        tensors = {}
+        for layer in (0, 1):
+            for expert in (0, 1):
+                for projection in ("w1", "w3", "w2"):
+                    rows, columns = (h, full) if projection == "w2" else (full, h)
+                    prefix = f"layers.{layer}.ffn.experts.{expert}.{projection}"
+                    tensors[prefix + ".weight"] = torch.randint(-128, 128, (rows, columns // 2),
+                        dtype=torch.int8, generator=gen)
+                    tensors[prefix + ".scale"] = torch.randint(121, 125, (rows, columns // 32),
+                        dtype=torch.uint8, generator=gen).view(torch.float8_e8m0fnu)
+        save_file(tensors, str(root / "weights.safetensors"))
+        (root / "model.safetensors.index.json").write_text(json.dumps({
+            "metadata": {"total_size": sum(t.numel() * t.element_size() for t in tensors.values())},
+            "weight_map": {name: "weights.safetensors" for name in tensors}}))
+        (root / "config.json").write_text("{}")
+        del tensors
+    else:
+        model = resolve(alias)
+        hub = Path.home() / ".cache/huggingface/hub"
+        root = model.snapshot(hub)
+        if not model.cached(hub):
+            pytest.skip(f"{alias} checkpoint is unavailable")
     manifest = inspect_indexed_checkpoint(root)
     e, n = 2, full // world
     first, last = n, 2 * n
@@ -46,7 +70,7 @@ def experts(request):
         prefixes = [f"layers.{layer}.ffn.experts.{i}" for i in range(e)]
         with DirectWeightLoader(manifest, "cuda:0", prefixes=tuple(p + "." for p in prefixes)) as loader:
             compressed = loader.load_mxfp4_experts(prefixes, hidden_size=h, intermediate_size=full,
-                intermediate_range=(first, last), scale_scratch=shared,
+                intermediate_range=(first, last), scale_scratch=shared, scale_compression="csf",
                 projection_names=("w3", "w1", "w2"), scale_name="scale", swiglu_limit=10.)
             assert loader._session.torch_copy_bytes == 0
         buffers = shared[(e, h, n)]
@@ -54,14 +78,19 @@ def experts(request):
         assert compressed._impl.w1_blockscale.data_ptr() == buffers[0].data_ptr()
         assert compressed._impl.w2_blockscale.data_ptr() == buffers[1].data_ptr()
         w13, w2, s13, s2 = [], [], [], []
+        order = ("w1", "w3") if compressed.plan.source.w13_layout.value == "w31" else ("w3", "w1")
         for prefix in prefixes:
             path = root / manifest.tensors[prefix + ".w1.weight"].shard
             with safe_open(path, framework="pt", device="cpu") as reader:
                 read = reader.get_tensor
-                w13.append(torch.cat([read(prefix + f".{p}.weight")[first:last].view(torch.uint8) for p in ("w1", "w3")]))
+                def scales(name, rows, columns):
+                    return (expanded_scale(read, name, rows, columns)
+                            if name in getattr(manifest, "compressed_scales", ())
+                            else read(name).view(torch.uint8))
+                w13.append(torch.cat([read(prefix + f".{p}.weight")[first:last].view(torch.uint8) for p in order]))
                 w2.append(read(prefix + ".w2.weight")[:, first // 2:last // 2].view(torch.uint8))
-                s13.append(torch.cat([expanded_scale(read, prefix + f".{p}.scale", full, h // 32)[first:last] for p in ("w1", "w3")]))
-                s2.append(expanded_scale(read, prefix + ".w2.scale", h, full // 32)[:, first // 32:last // 32])
+                s13.append(torch.cat([scales(prefix + f".{p}.scale", full, h // 32)[first:last] for p in order]))
+                s2.append(scales(prefix + ".w2.scale", h, full // 32)[:, first // 32:last // 32])
         one = torch.ones(e, device="cuda:0")
         ordinary_plan = moe.plan_weights(source=compressed.plan.source, activation=compressed.plan.activation,
                                          geometry=compressed.plan.geometry)

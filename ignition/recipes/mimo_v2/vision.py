@@ -60,15 +60,16 @@ class VisionScratch:
     output: torch.Tensor
 
     @classmethod
-    def allocate(cls, patches, shard, device):
+    def allocate(cls, patches, shard, device, *, buffers=None):
         heads, kv_heads = 32 // shard.world_size, 8 // shard.world_size
         def zeros(*shape):
-            return torch.zeros(shape, dtype=torch.bfloat16, device=device)
+            return (torch.zeros(shape, dtype=torch.bfloat16, device=device) if buffers is None
+                    else buffers.zeros(shape, torch.bfloat16))
         return cls(zeros(patches, 1536), zeros(patches, 1280), zeros(patches, 1280),
             zeros(patches, (heads + 2 * kv_heads) * 64), zeros(patches, heads, 64),
             zeros(patches, kv_heads, 64), zeros(patches, kv_heads, 64), zeros(patches, heads * 64),
             zeros(patches, 1280), zeros(patches, 1280),
-            MLPScratch.allocate(patches, 1280, 4608 // shard.world_size, device),
+            MLPScratch.allocate(patches, 1280, 4608 // shard.world_size, device, buffers=buffers),
             zeros(patches // 4, 5120), zeros(patches // 4, 5120 // shard.world_size),
             zeros(patches // 4, HIDDEN), zeros(patches // 4, HIDDEN))
 
@@ -79,16 +80,20 @@ class VisionScratch:
 
 
 class PreparedVision:
-    def __init__(self, weights, scratch, inputs, *, runtime, coordinator, session, workspace, name):
+    def __init__(self, weights, scratch, inputs, *, runtime, coordinator, session, workspace, name, buffers=None):
         self.scratch, self.inputs, self.config = scratch, inputs, weights.config
         c, s = weights.config, scratch
         tokens, device = s.patches.shape[0], s.patches.device
         self.frequencies = 10000 ** (-torch.arange(0, 32, 2, dtype=torch.float32, device=device) / 32)
-        self.positions = torch.zeros((tokens, 2), dtype=torch.int64, device=device)
-        self.columns = torch.arange(tokens // 4, dtype=torch.int32, device=device)
-        self.rows = torch.arange(tokens // 4, dtype=torch.int32, device=device)
-        self.cu = torch.zeros(2, dtype=torch.int32, device=device)
-        self.num_patches, self.num_features = (torch.zeros(1, dtype=torch.int32, device=device) for _ in range(2))
+        def zeros(shape, dtype=torch.int32):
+            return (torch.zeros(shape, dtype=dtype, device=device) if buffers is None
+                    else buffers.zeros(shape, dtype))
+        self.positions = zeros((tokens, 2), torch.int64)
+        self.columns, self.rows = zeros((tokens // 4,)), zeros((tokens // 4,))
+        self.columns.copy_(torch.arange(tokens // 4, dtype=torch.int32, device=device))
+        self.rows.copy_(self.columns)
+        self.cu = zeros((2,))
+        self.num_patches, self.num_features = zeros((1,)), zeros((1,))
         self.patch = UnquantizedProjection(s.patches, weights.patch, s.residual, session=session, name=name + ".patch")
         self.blocks = []
         for index, w in enumerate(weights.layers):

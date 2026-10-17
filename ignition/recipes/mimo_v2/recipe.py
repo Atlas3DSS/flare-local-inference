@@ -13,7 +13,8 @@ def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress, retain_
     speculation = plan.speculation
     drafting = {} if speculation is None else {
         "speculative_widths": speculation.widths, "speculative_token_capacity": plan.speculative_token_capacity, "speculative_fixed_width": speculation.fixed_width}
-    config = PreparationConfig(devices=tuple(range(plan.world_size)), compile_decoder=compile_forwards,
+    config = PreparationConfig(compile_workers=plan.compile_workers, tuning_replica=plan.tuning_replica,
+        devices=tuple(range(plan.world_size)), compile_decoder=compile_forwards,
         retain_graphs=retain_graphs, max_active=plan.concurrency, context=plan.context,
         prefill_chunk_size=plan.prefill_chunk,
         snapshot_budget_bytes=plan.snapshots * plan.costs.state_row_bytes,
@@ -39,8 +40,8 @@ RECIPE = Recipe(
     context=1048576, page_tokens=128, concurrency=4, max_concurrency=64, prefill_chunk=4096,
     speculation=Speculation(draft_tokens=7), max_draft_tokens=7, max_images=4, image_bytes=32 << 20,
     verification_rows=0,
-    ranks=MappingProxyType({world: RankCosts(67_633_152 // world, 6_553_600 // world, 8 << 30)
+    ranks=MappingProxyType({world: RankCosts(33_816_576 // world, 3_276_800 // world, 8 << 30)
                             for world in (2, 4, 8)}),
-    plain_ranks=MappingProxyType({world: RankCosts(46_399_488 // world, 6_553_600 // world, 8 << 30)
+    plain_ranks=MappingProxyType({world: RankCosts(23_199_744 // world, 3_276_800 // world, 8 << 30)
                                   for world in (2, 4, 8)}),
 )

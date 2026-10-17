@@ -13,6 +13,7 @@ from ignition.components.speculation import (
     PreparedStochasticVerification, SpeculativeRngState,
 )
 from ignition.components.state import gather_rows, save_hidden
+from ignition.preparation.scratch import GraphBufferPool
 from ignition.components.kda_speculation import PreparedKDAReplay as PreparedRecordedKDAReplay
 
 from .batch import PreparedBatch
@@ -92,6 +93,7 @@ class SpeculativePreparation:
         self.max_cache_pages, self.context = max_cache_pages, context
         self.shards = ContextShards() if context is None else context.shards
         blocks, device = inputs.page_tables.shape[1], pool.backing.device
+        self.sampling_buffers = GraphBufferPool(device, chunk_bytes=2 << 20)
         self.draft_scratch = {}
         if prefill_tokens:
             self.draft_scratch["prefill"] = MTPScratch.absorbing(
@@ -161,6 +163,10 @@ class PreparedRound:
         self.owner, self.batch, self.width = owner, batch, width
         o, b, w = owner, batch, width
         device, blocks = o.pool.backing.device, o.inputs.page_tables.shape[1]
+        from ignition.components.parallel_draft import prepare_sampling_scratch
+
+        buffers = o.sampling_buffers.cursor()
+        self.sampling_scratch = prepare_sampling_scratch(b, w, o.requests.vocab_size, device, buffers=buffers)
         self.rows, self.columns = torch.arange(b, device=device), torch.arange(w, device=device)
         self.offsets = torch.arange(b * w, device=device)
         self.state_columns = torch.arange(8, device=device)
@@ -184,7 +190,8 @@ class PreparedRound:
             session=o.session, workspace=o.workspace)
         self.draft_metadata = DraftMetadata(b, b, blocks, device, shards=o.shards)
         self.draft = o.draft(self.draft_metadata, f"{name}.draft") if w > 1 else None
-        self.draft_logits = torch.empty_like(self.draft.logits) if self.draft is not None else None
+        self.draft_logits = (buffers.zeros(self.draft.logits.shape, self.draft.logits.dtype)
+                             if self.draft is not None else None)
         self.absorb_metadata = DraftMetadata(b * w, b, blocks, device, shards=o.shards)
         self.absorb = o.draft(self.absorb_metadata, f"{name}.absorb", cache_only=True)
         self.before = torch.zeros(b, dtype=torch.int64, device=device)
@@ -193,7 +200,7 @@ class PreparedRound:
         self.active = torch.zeros(b, dtype=torch.bool, device=device)
         self.candidates = torch.zeros((b, w), dtype=torch.int64, device=device)
         self.drafts = torch.zeros((b, w - 1), dtype=torch.int64, device=device)
-        self.probabilities = torch.zeros((b, w - 1, o.requests.vocab_size), dtype=torch.float32, device=device)
+        self.probabilities = buffers.zeros((b, w - 1, o.requests.vocab_size), torch.float32)
         self.valid = torch.zeros((b, w - 1), dtype=torch.bool, device=device)
         self.seed, self.offset, self.base_offset, self.sampled = (torch.zeros_like(self.before) for _ in range(4))
         self.tail_backup = torch.empty_like(o.pool.draft.index.tail[:b])
@@ -204,16 +211,18 @@ class PreparedRound:
             return
         o, b, w = self.owner, self.batch, self.width
         args = (o.requests, o.inputs.row_slot_ids[:b], o.inputs.row_generations[:b], o.inputs.live_rows)
-        target = PreparedSpeculativeDistributions(self.decoder.scratch.logits.view(b, w, -1), *args, self.drafts)
+        target = PreparedSpeculativeDistributions(self.decoder.scratch.logits.view(b, w, -1), *args, self.drafts,
+                                                 workspace=self.sampling_scratch["target"])
         proposals = tuple(PreparedDraftDistribution(self.draft_logits.view(b, 1, -1), *args,
-            self.drafts, prefix_offset=i, seed=self.seed, offset=self.offset, sampled=self.sampled)
+            self.drafts, prefix_offset=i, seed=self.seed, offset=self.offset, sampled=self.sampled,
+            workspace=self.sampling_scratch["proposal"])
             for i in range(w - 1))
         target.prepare()
         for proposal in proposals:
             proposal.prepare()
         verify = PreparedStochasticVerification(self.probabilities, self.drafts, target.probabilities,
             *args, rng=o.rng, draft_valid=self.valid, target_valid=target.valid,
-            token_limits=o.inputs.query_lengths[:b])
+            token_limits=o.inputs.query_lengths[:b], workspace=self.sampling_scratch["verify"])
         verify.prepare()
         commit = PreparedSpeculativeCommit(o.requests, verify.output, self.candidates,
             o.inputs.row_slot_ids[:b], o.inputs.row_generations[:b], o.inputs.live_rows,

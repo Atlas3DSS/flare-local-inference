@@ -28,7 +28,7 @@ def test_checkpoint_geometry(config):
     assert config.layers[0] == "kda" and config.layers[3] == "mla"
     layout = continuation_layout(config, 16)
     assert layout.region("layer0.recurrent").shape == (6, 128, 128)
-    assert page_bytes(config) == 24 * 128 * 576 * 2
+    assert page_bytes(config) == 24 * 128 * 576
 
 
 def test_quantization_and_layer_partition_rejected(config):
@@ -137,7 +137,7 @@ def test_checkpoint_kda(config, mode, tokens):
 
 
 @pytest.mark.skipif(os.getenv("FLARE_RUN_CUDA_TESTS") != "1", reason="requires CUDA checkpoint tests")
-@pytest.mark.parametrize("mode,tokens", [("decode", 1), ("prefill", 65)])
+@pytest.mark.parametrize("mode,tokens", [("decode", 1), ("prefill", 65), ("prefill", 4096)])
 def test_checkpoint_mla(config, mode, tokens):
     import torch
     from torch.nn import functional as F
@@ -159,8 +159,9 @@ def test_checkpoint_mla(config, mode, tokens):
             workload_schema="kimi3-mla", numerical_policy="default") as session:
         arena = ScratchArena(device)
         session.register_scratch(arena)
-        metadata = Metadata.allocate(tokens, 1, 2, device)
-        cache = torch.zeros((2, 128, 576), dtype=torch.bfloat16, device=device)
+        pages = max(2, -(-tokens // 128))
+        metadata = Metadata.allocate(tokens, 1, pages, device)
+        cache = torch.zeros((pages, 128, 576), dtype=torch.float8_e4m3fn, device=device)
         torch.manual_seed(41)
         source = torch.randn((tokens, 7168), device=device, dtype=torch.bfloat16)
         op = PreparedMLA(weights, source, metadata, cache, mode=mode, session=session,
@@ -168,7 +169,7 @@ def test_checkpoint_mla(config, mode, tokens):
         session.tune(show_progress=False)
         metadata.query_start_loc[1] = tokens
         metadata.lengths.fill_(tokens)
-        metadata.page_table.copy_(torch.tensor([[0, 1]], device=device))
+        metadata.page_table.copy_(torch.arange(pages, device=device)[None])
         metadata.positions.copy_(torch.arange(tokens, device=device))
         output = op(source).clone()
         w = weights
@@ -184,6 +185,16 @@ def test_checkpoint_mla(config, mode, tokens):
             values.transpose(0, 1)[None], is_causal=True).squeeze(0).transpose(0, 1).flatten(1)
         expected = F.linear(expected * F.linear(source, w["gate"]).sigmoid(), w["output"])
         error = (output.float() - expected.float()).square().mean().sqrt() / expected.float().square().mean().sqrt()
+        assert error.item() < .06
+        # Compare implementation error separately from FP8 query/cache quantization.
+        absorbed = torch.cat((torch.bmm(query[:, :, :128].transpose(0, 1), w["key"]).transpose(0, 1),
+                              query[:, :, 128:]), -1).to(torch.float8_e4m3fn).float()
+        records = torch.cat((latent, projected[:, -64:]), -1).to(torch.float8_e4m3fn).float()
+        attended = F.scaled_dot_product_attention(absorbed.transpose(0, 1)[None], records[None, None],
+            records[None, None, :, :512], is_causal=True, scale=192 ** -.5).squeeze(0).transpose(0, 1).bfloat16()
+        expanded = torch.bmm(attended.transpose(0, 1), w["value"]).transpose(0, 1).flatten(1)
+        quantized_reference = F.linear(expanded * F.linear(source, w["gate"]).sigmoid(), w["output"])
+        error = (output.float() - quantized_reference.float()).norm() / quantized_reference.float().norm()
         assert error.item() < .02
         stream = torch.cuda.Stream(device=device)
         stream.wait_stream(torch.cuda.current_stream(device))

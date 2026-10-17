@@ -35,6 +35,22 @@ the public deployment surface. Ignition and heliopause are internal preparation
 tools. Dependency direction is `flare → Helios` and `heliopause → Helios`;
 Helios has no dependency on either preparation tool.
 
+### Distribution builds
+
+From the repository root, build public executables with:
+
+```sh
+cargo build --locked --release --manifest-path flare/Cargo.toml
+```
+
+The executable is `flare/target/release/flare` (`flare.exe` on Windows). Docker and
+native-serving CI use this build. The release profile strips symbols and retains
+Rust panic messages, source locations, and unwinding behavior. Builds use the
+stable toolchain without unstable compiler flags. Source paths, required dynamic
+imports, API routes, metrics, and operational errors remain observable. Publisher
+stamping through `python -m ignition.release` preserves the embedded
+verification-profile section.
+
 ## 2. The preparation boundary
 
 Ignition records four things while preparing a model, and refuses to
@@ -292,10 +308,20 @@ each function's parameter layout from `cuFuncGetParamInfo` and its dynamic
 shared-memory, carveout, and cluster attributes. ELF symbol enumeration and
 `cuModuleGetGlobal` capture initialized module globals and constants; native
 loading restores their contents after loading each cubin.
-Source-bearing debug sections and embedded PTX are erased without changing
-CUDA section or symbol indices. Assertion filename globals are replaced with
-`kernel`; assertion conditions and messages remain intact. Kernel symbols are
-retained for lookup, so packages do not conceal the compiler that emitted them.
+Source-bearing debug sections, embedded PTX, compiler comments, and ELF source-file
+names are erased without changing CUDA section or symbol indices. Assertion
+filename globals are replaced with `kernel`; assertion conditions and messages
+remain intact. Defined function and global symbols receive module-local opaque
+names. Section names and package lookup names use the same aliases; undefined
+imports and CUDA-reserved symbols retain their driver-facing names. String tables
+are rebuilt and their original bytes cleared. Instructions, relocation indices,
+CUDA metadata, and initialized model data retain their executable layout.
+
+These transformations remove descriptive metadata, not executable semantics.
+Cubins remain disassemblable, and instruction patterns, required CUDA metadata,
+and remaining runtime diagnostics can identify compiler and kernel families.
+Package signatures authenticate the publisher. Executable-resource encryption
+does not provide confidentiality against an operator controlling the runtime.
 
 **Graphs.** Capture keeps the graph templates alive, and the walker records
 each template node by node: kernel nodes with grid, block, shared memory,

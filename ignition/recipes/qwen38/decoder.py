@@ -139,7 +139,7 @@ class DecoderScratch:
     local_logits: torch.Tensor | None = None
 
     @classmethod
-    def allocate(cls, tokens: int, device, *, sample_rows: int = 4, world_size: int = 1):
+    def allocate(cls, tokens: int, device, *, sample_rows: int = 4, world_size: int = 1, buffers=None):
         if type(tokens) is not int or tokens <= 0:
             raise ValueError("decoder token capacity must be a positive integer")
         if type(sample_rows) is not int or sample_rows <= 0:
@@ -151,12 +151,15 @@ class DecoderScratch:
         from .ple import PLEScratch
 
         def zeros(*shape):
-            return torch.zeros(shape, dtype=torch.bfloat16, device=device)
+            return (torch.zeros(shape, dtype=torch.bfloat16, device=device) if buffers is None
+                    else buffers.zeros(shape, torch.bfloat16))
 
         return cls(zeros(tokens, 2560), zeros(tokens, 10240), zeros(tokens, 2560),
-            zeros(sample_rows, 2560), zeros(sample_rows, 248320), HyperconnectionScratch.allocate(tokens, device),
-            GDNScratch.allocate(tokens, device, world_size=world_size), QSAScratch.allocate(tokens, device, world_size=world_size),
-            PLEScratch.allocate(tokens, device), QwenMoeScratch.allocate(tokens, device, intermediate=640 // world_size),
+            zeros(sample_rows, 2560), zeros(sample_rows, 248320), HyperconnectionScratch.allocate(tokens, device, buffers=buffers),
+            GDNScratch.allocate(tokens, device, world_size=world_size, buffers=buffers),
+            QSAScratch.allocate(tokens, device, world_size=world_size, buffers=buffers),
+            PLEScratch.allocate(tokens, device, buffers=buffers),
+            QwenMoeScratch.allocate(tokens, device, intermediate=640 // world_size, buffers=buffers),
             zeros(sample_rows, 248320 // world_size) if world_size > 1 else None)
 
     def rows(self, tokens: int, sequences: int):

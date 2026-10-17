@@ -141,7 +141,7 @@ explicit flags take precedence.
 |---|---|---|
 | `--prefill-chunk-size N` | Most prompt tokens processed in one prefill step, a multiple of 64. A larger chunk reaches a long prompt's first token sooner; while it runs, other active requests wait for their next token. Command line only. | The recipe's chunk |
 | `--mixed-prefill` | Capture mixed prompt/decode graphs alongside separate graphs. Supported by Qwen with concurrency of at least two, with or without speculation. Command line only; existing packages retain their captured catalog. | Disabled |
-| `--expert-scale-compression [MODE]` | Losslessly compress Step-5 routed-expert NVFP4 block scales, including BF16 experts converted to W4A16. `csf` is a compressed scale encoding expanded during execution, reducing resident GPU weight storage by an estimated 6%; actual savings depend on encoded scales. A bare flag selects `csf`; `--expert-scale-compression csf` also works. Retain compressed scales and share expansion scratch across serial layers. Selects a separate cached package. | Native scales |
+| `--expert-scale-compression [MODE]` | Losslessly compress routed-expert scales: DeepSeek V4.1 backbone and DSpark MXFP4 scales, or Step-5 NVFP4 scales including BF16 experts converted to W4A16. `csf` is a compressed scale encoding expanded during execution. Estimated resident GPU weight savings are 3% for DeepSeek V4.1 and 6% for Step-5; actual savings depend on encoded scales. A bare flag selects `csf`; `--expert-scale-compression csf` also works. Retain compressed scales and share expansion scratch across serial layers. Selects a separate cached package. | Native scales |
 | `--no-mtp` | Disable multi-token speculation: load no draft model, keep no verification rows, and decode one token per step. | Speculation on |
 | `--mtp-draft-tokens N` | Most draft tokens verified in one round; see `MODEL --help` for its limit. Graphs are captured for every count from 0 through `N` within the speculative token capacity, and verification adapts using measured cost and historical acceptance or native proposal confidence. Zero retains draft state with width-one execution; `--no-mtp` excludes draft weights and state. | Recipe declaration |
 | `--speculative-token-capacity N` | Maximum target-token rows in wider speculative graphs; width one covers every request bucket. Applies to every speculative recipe. | Larger of padded concurrency and maximum verification width |
@@ -149,6 +149,8 @@ explicit flags take precedence.
 | `--mtp-proposal-source {mtp,copy}` | Where drafts come from: the checkpoint's MTP module, or `copy` for continuations of the request's own history, which loads no draft model. Qwen only. | `mtp` |
 | `--history-drafts` | Also draft continuations copied from the request's own history. Qwen only. | off |
 | `--no-stream-overlap` | Run every concurrent branch (shared experts, projection chains, query chains) serially on the main stream with the same kernels, to diagnose scheduling-dependent faults. Slower. Recipes that run no branches concurrently reject it. | Overlap |
+| `--compile-workers N` | CPU compiler process budget per host, divided among local preparation ranks and bounded by available RAM and device memory. Applies to b12x kernel compilation and complete-forward compilation. Overrides `[preparation] compile_workers`. | Automatic |
+| `--tuning-gpus LIST` | Local kernel-tuning GPUs. Start with the serving GPU list, then append complete replicas of that TP group on matching hardware. Serving TP size stays fixed. Command line only; cannot be combined with multi-host `--ranks`. | Serving GPUs |
 | `--no-compile` | Development only: capture graphs without compiling forwards. A recipe never sets it. | off |
 
 The speculation flags exist on the command line only. `--no-mtp` excludes the
@@ -157,6 +159,28 @@ N draft tokens` while verification adapts, `exactly N draft tokens` when it is
 fixed, and `branches serialized` under `--no-stream-overlap`. That flag is also
 recorded in the plan and the package cache key; it changes graph scheduling,
 not kernel selection, so its packages share tuned kernels with overlapped ones.
+
+CPU compilation and GPU tuning have independent controls. For a TP1 package,
+`--gpus 0 --tuning-gpus 0-3 --compile-workers 24` uses four GPUs to benchmark
+disjoint candidate subsets and at most six CPU compiler processes per tuning
+replica. Each replica loads the model and its preparation storage; only the
+serving GPU captures graphs. Helpers exit after tuning, allowing forward
+compilation to use the full host CPU budget, bounded by memory. Compiler
+processes dispatch b12x compilation without opening CUDA contexts; complete
+forward workers also use the owning rank's GPU for Inductor preparation.
+
+For TP2, `--gpus 0,1 --tuning-gpus 0-5` creates three independent TP2 groups.
+Corresponding ranks share candidate results while collectives stay within each
+replica. The resulting package still contains two ranks. Additional GPUs must
+match the corresponding serving GPU model and have enough free memory for a
+replica. Both GPU lists use `CUDA_VISIBLE_DEVICES` ordinals.
+
+Without these flags, preparation retains automatic worker sizing and its
+existing local or multi-host sharding. On integrated GPUs such as DGX Spark,
+CPU and GPU allocations share one memory budget. Multi-host preparation keeps
+its rank coordination, candidate sharing, and compiled-forward distribution;
+`--compile-workers` sets a separate budget on each host. Local tuning replicas
+are selected only by `--tuning-gpus`.
 
 Both Ignition commands accept `--config`.
 
@@ -189,10 +213,12 @@ changes require preparation again but no Rust rebuild. Validate the chosen
 configuration through an exported package before publishing native-serving
 performance results.
 
-The `deepseek-v4-flash` and `deepseek-v4.1-flash` aliases select the lossless
-MXFP4-CSF checkpoints from `local-inference-lab/DeepSeek-V4-Flash-Vision-Exp-lossless-CSF`
-and `local-inference-lab/DeepSeek-V4.1-Flash-lossless-CSF`, respectively. Compressed
-routed-expert scales remain in GPU memory. Serialized layers reuse one pair of scale buffers;
+The `deepseek-v4-flash` alias selects the lossless MXFP4-CSF checkpoint
+`local-inference-lab/DeepSeek-V4-Flash-Vision-Exp-lossless-CSF`.
+The `deepseek-v4.1-flash` alias selects `DeepSeek-AI/DeepSeek-V4.1-Flash-1017`,
+with native MXFP4 expert scales by default. `--expert-scale-compression csf`
+compresses its backbone and DSpark expert scales during preparation.
+Compressed routed-expert scales remain in GPU memory. Serialized layers reuse scale buffers by expert geometry;
 b12x prepares the scales needed by its selected MoE kernel before execution.
 Kernel autotuning remains enabled across the supported execution plans.
 
@@ -468,6 +494,9 @@ api_key = ""                      # Empty: no authentication.
 model = "qwen3.8-flash"
 max_concurrency = 4
 
+[preparation]
+# compile_workers = 24           # Optional CPU process budget per host.
+
 [memory]
 reserve = "0"                     # GPU memory left for processes started later.
 
@@ -530,7 +559,8 @@ Configuration assigns each decision to one owner:
 | Branch overlap | Recipe declaration, serialized by `--no-stream-overlap` |
 | Weight format, KV precision, page geometry, kernel plans | Checkpoint metadata and recipe preparation |
 | Queue, frontend workers, event capacity, body limit | Concurrency and recipe image limits |
-| Compiler workers | Host CPU capacity |
+| Compiler workers | Automatic memory-bounded sizing; `[preparation] compile_workers` or `--compile-workers` overrides |
+| Local tuning replicas | `--tuning-gpus`; independent of serving TP size |
 | CUDA toolkit | Installed packages, then `[paths] cuda` |
 | Served names | Recipe alias and repository ID, exposed through `/v1/models` |
 | API key | Ignition configuration or native `--api-key-file`; excluded from packages |
@@ -559,7 +589,7 @@ disk settings require the implementation and measurements defined there.
 | Speculative catalog and draft counts | Recipe, overridden by `--no-mtp` and the `--mtp-*` flags; the draft count adapts from measured rounds unless fixed |
 | Kernel selections | Autotuned during preparation; cached by checkpoint revision, recipe version, GPU, and settings |
 | HTTP queue, workers, event capacity, body limit | `--max-concurrency` and the recipe's image limits |
-| Compile workers | CPU count |
+| Compile workers | Automatic or explicit host process budget, divided among local ranks and bounded by host RAM and device memory |
 | Sampling defaults | Complete Ignition recipe declaration, manually verified against the model card and exported in typed Protobuf fields |
 | Template defaults | The checkpoint template's own defaults, pending the same mechanism |
 | Served names | Recipe alias and repository id |

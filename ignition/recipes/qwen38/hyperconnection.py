@@ -50,11 +50,12 @@ class HyperconnectionScratch:
     down_and_injection: torch.Tensor
 
     @classmethod
-    def allocate(cls, tokens: int, device: torch.device) -> HyperconnectionScratch:
+    def allocate(cls, tokens: int, device: torch.device, *, buffers=None) -> HyperconnectionScratch:
         if tokens <= 0:
             raise ValueError("hyperconnection token capacity must be positive")
         normalized, projected, bottleneck, gate_workspace, block_input = (
-            torch.zeros((tokens, width), device=device, dtype=torch.bfloat16)
+            (torch.zeros((tokens, width), device=device, dtype=torch.bfloat16) if buffers is None
+             else buffers.zeros((tokens, width), torch.bfloat16))
             for width in (10240, 336, 320, 10240, 2560))
         return cls(normalized, projected[:, :320], bottleneck, gate_workspace,
                    projected[:, 320:324], block_input, projected)
@@ -70,9 +71,11 @@ class HyperconnectionScratch:
                 or source.dtype != torch.bfloat16 or source.device != self.normalized.device
                 or not source.is_contiguous()):
             raise ValueError("hyperconnection priming source must match normalized shape, stride, dtype and device")
-        source_storage = source.untyped_storage().data_ptr()
-        if any(source_storage == getattr(self, field).untyped_storage().data_ptr()
-               for field in self.__dataclass_fields__):
+        start, end = source.data_ptr(), source.data_ptr() + source.nbytes
+        def overlaps(tensor):
+            extent = (1 + sum((n - 1) * stride for n, stride in zip(tensor.shape, tensor.stride()))) * tensor.element_size()
+            return tensor.numel() > 0 and start < tensor.data_ptr() + extent and tensor.data_ptr() < end
+        if any(overlaps(getattr(self, field)) for field in self.__dataclass_fields__):
             raise ValueError("hyperconnection priming source requires storage separate from scratch outputs")
         return {
             "grouped_rmsnorm": (source, norm_gain, self.normalized),

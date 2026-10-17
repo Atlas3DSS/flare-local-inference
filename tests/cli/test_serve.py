@@ -107,7 +107,7 @@ def host(monkeypatch, tmp_path):
         str((plan.concurrency, plan.prefill_chunk, plan.speculation, plan.stream_overlap,
              plan.mixed_prefill, plan.expert_scale_compression, no_compile)))
 
-    def export_model(prepared, images, storage, path, *, options, publisher, progress):
+    def export_model(prepared, images, storage, path, *, options, publisher, progress, console):
         assert prepared is calls["prepared"] and not prepared.closed
         assert isinstance(images, Scope) and isinstance(storage, Scope)
         assert "api_key" not in options
@@ -473,3 +473,12 @@ def test_run_approves_only_its_export_signer_and_namespace(host):
     profile = json.loads(Path(args[args.index("--publisher-keys") + 1]).read_text())[0]
     assert bytes(profile["public_key"]) == signer.public_key
     assert profile["namespace"] == signer.namespace
+
+
+@pytest.mark.parametrize('command', ['export', 'serve'])
+def test_local_tuning_gpus_cannot_change_multihost_sharding(tmp_path, capsys, command):
+    arguments = [command, 'qwen3.8-flash', '--ranks', '2', '--tuning-gpus', '0,1']
+    if command == 'export':
+        arguments += ['--output', str(tmp_path / 'unused.safetensors')]
+    assert main(arguments) != 0
+    assert 'multi-host ranks retain their sharding' in capsys.readouterr().err

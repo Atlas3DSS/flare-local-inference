@@ -10,7 +10,7 @@ from .config import PAGE_TOKENS
 
 
 def page_specs(config):
-    size = PAGE_TOKENS * config.text["num_key_value_heads"] * config.text["head_dim"] * 2
+    size = PAGE_TOKENS * config.text["num_key_value_heads"] * config.text["head_dim"]
     for index, kind in enumerate(config.layers):
         if kind == "full_attention":
             for field in ("key", "value"):
@@ -44,5 +44,5 @@ class ContinuationPool(PagedStateStorage):
 
     def attention(self, layer, config):
         shape = (-1, PAGE_TOKENS, config.text["num_key_value_heads"], config.text["head_dim"])
-        return tuple(self.pages[f"layer{layer}.{field}"].view(torch.bfloat16).view(shape)
+        return tuple(self.pages[f"layer{layer}.{field}"].view(torch.float8_e4m3fn).view(shape)
                      for field in ("key", "value"))

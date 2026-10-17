@@ -15,14 +15,16 @@ pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
 
 
 @pytest.mark.parametrize("mode,tokens", [("decode", 4), ("prefill", 64), ("prefill", 4096)])
-@pytest.mark.parametrize("dimension,value_dimension,heads", [(192, 128, 16), (192, 192, 8), (256, 256, 6)])
-def test_gqa_strided_pages_and_sinks(mode, tokens, dimension, value_dimension, heads):
+@pytest.mark.parametrize("dimension,value_dimension,heads,cache_dtype", [
+    (192, 128, 16, torch.bfloat16), (192, 192, 8, torch.bfloat16), (256, 256, 6, torch.bfloat16),
+    (192, 128, 16, torch.float8_e4m3fn), (256, 256, 6, torch.float8_e4m3fn)])
+def test_gqa_strided_pages_and_sinks(mode, tokens, dimension, value_dimension, heads, cache_dtype):
     device = torch.device("cuda", 0)
     rows = tokens if mode == "decode" else 1
     pages = max(2, (tokens + 127) // 128)
     key_size, value_size = 128 * dimension, 128 * value_dimension
     padding = 16384 if dimension == 256 else 12288 if value_dimension == 192 else 8192
-    backing = torch.randn((pages, key_size + value_size + padding), device=device, dtype=torch.bfloat16) * .1
+    backing = (torch.randn((pages, key_size + value_size + padding), device=device, dtype=torch.bfloat16) * .1).to(cache_dtype)
     key = backing[:, :key_size].view(pages, 128, 1, dimension)
     value = backing[:, key_size:key_size + value_size].view(pages, 128, 1, value_dimension)
     if mode == "prefill":
@@ -70,11 +72,12 @@ def test_gqa_strided_pages_and_sinks(mode, tokens, dimension, value_dimension, h
 
 
 @pytest.mark.parametrize('dimension,window,causal', [(192, 128, True), (128, 1024, False)])
-def test_parallel_verification_has_per_query_windows(dimension, window, causal):
+@pytest.mark.parametrize("cache_dtype", [torch.bfloat16, torch.float8_e4m3fn])
+def test_parallel_verification_has_per_query_windows(dimension, window, causal, cache_dtype):
     device = torch.device('cuda', 0)
     pages_per_row = (window + 8 + 127) // 128
-    key = torch.randn((4 * pages_per_row, 128, 1, dimension), device=device).bfloat16() * .1
-    value = torch.randn((4 * pages_per_row, 128, 1, 128), device=device).bfloat16() * .1
+    key = (torch.randn((4 * pages_per_row, 128, 1, dimension), device=device).bfloat16() * .1).to(cache_dtype)
+    value = (torch.randn((4 * pages_per_row, 128, 1, 128), device=device).bfloat16() * .1).to(cache_dtype)
     query = torch.randn((32, 16, dimension), device=device).bfloat16() * .1
     output = torch.empty((32, 16, 128), dtype=torch.bfloat16, device=device)
     table = torch.arange(4 * pages_per_row, dtype=torch.int32, device=device).view(4, pages_per_row)

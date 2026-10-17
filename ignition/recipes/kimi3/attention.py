@@ -1,4 +1,4 @@
-"""Gated NoPE MLA with compressed BF16 latent pages."""
+"""Gated NoPE MLA with compressed FP8 latent pages."""
 
 import torch
 from b12x.attention import dense_mla
@@ -40,7 +40,7 @@ class PreparedMLA:
         self.writer = PreparedPagedKVWriter(self.latent[:, None, :512], self.latent[:, None, 512:],
             cache[:, :, None, :512], cache[:, :, None, 512:], self.slots, session=session, name=name + ".write")
         caps = dense_mla.Caps(device=source.device, mode="decode" if mode == "decode" else "extend",
-            kv_dtype=torch.bfloat16, num_q_heads=heads, page_size=PAGE_TOKENS, max_total_q=tokens,
+            kv_dtype=cache.dtype, q_dtype=self.absorbed.dtype, num_q_heads=heads, page_size=PAGE_TOKENS, max_total_q=tokens,
             max_batch=metadata.lengths.numel(), max_cache_tokens=metadata.page_table.shape[1] * PAGE_TOKENS,
             max_page_table_width=metadata.page_table.shape[1], num_cache_pages=cache.shape[0], use_cuda_graph=True,
             partial_dtype=torch.float32)

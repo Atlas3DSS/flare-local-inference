@@ -32,7 +32,7 @@ def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress, retain_
     drafting = {} if speculation is None else {
         "speculative_widths": speculation.widths, "speculative_token_capacity": plan.speculative_token_capacity, "speculative_fixed_width": speculation.fixed_width,
         "speculative_proposal_source": speculation.proposal_source, "history_drafts": speculation.history_drafts}
-    config = PreparationConfig(
+    config = PreparationConfig(compile_workers=plan.compile_workers, tuning_replica=plan.tuning_replica,
         devices=tuple(range(plan.world_size)) if ranks is None else (0,) * plan.world_size,
         hosts=None if ranks is None else ranks.hosts, compile_decoder=compile_forwards, retain_graphs=retain_graphs,
         max_active=plan.concurrency, roce_ring=plan.roce_ring, stream_overlap=plan.stream_overlap,
@@ -78,14 +78,14 @@ RECIPE = Recipe(
     # on an auxiliary stream.
     stream_overlap=True,
     ranks=MappingProxyType({
-        1: _costs(122_932_224, 135_168, _GRAPH_BYTES[1], speculating=True),
-        2: _costs(61_705_216, 69_632, _GRAPH_BYTES[2], speculating=True),
-        4: _costs(31_550_464, 69_632, _GRAPH_BYTES[4], speculating=True),
+        1: _costs(122_014_720, 69_632, _GRAPH_BYTES[1], speculating=True),
+        2: _costs(61_246_464, 36_864, _GRAPH_BYTES[2], speculating=True),
+        4: _costs(31_091_712, 36_864, _GRAPH_BYTES[4], speculating=True),
     }),
     plain_ranks=MappingProxyType({
-        1: _costs(117_291_776, 135_168, _GRAPH_BYTES[1], speculating=False),
-        2: _costs(58_776_320, 69_632, _GRAPH_BYTES[2], speculating=False),
-        4: _costs(29_911_808, 69_632, _GRAPH_BYTES[4], speculating=False),
+        1: _costs(116_505_344, 69_632, _GRAPH_BYTES[1], speculating=False),
+        2: _costs(58_383_104, 36_864, _GRAPH_BYTES[2], speculating=False),
+        4: _costs(29_518_592, 36_864, _GRAPH_BYTES[4], speculating=False),
     }),
     max_images=4, image_bytes=32 << 20, mixed_prefill=True,
 )

@@ -21,7 +21,8 @@ def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress, retain_
                                   allow_patterns=("config.json", "model.safetensors"))
         drafting = dict(draft_checkpoint=draft, speculative_widths=plan.speculation.widths,
             speculative_fixed_width=plan.speculation.fixed_width, speculative_token_capacity=plan.speculative_token_capacity)
-    config = PreparationConfig(devices=tuple(range(plan.world_size)), context=plan.context,
+    config = PreparationConfig(compile_workers=plan.compile_workers, tuning_replica=plan.tuning_replica,
+        devices=tuple(range(plan.world_size)), context=plan.context,
         max_active=plan.concurrency, prefill_chunk_size=plan.prefill_chunk,
         snapshot_budget_bytes=plan.snapshots * plan.costs.state_row_bytes,
         headroom_bytes=plan.headroom_bytes + plan.reserve_bytes, compile_decoder=compile_forwards,
@@ -47,7 +48,7 @@ RECIPE = Recipe(
     context=1048576, page_tokens=128, concurrency=4, max_concurrency=64, prefill_chunk=4096,
     speculation=Speculation(draft_tokens=7), max_draft_tokens=7, max_images=4, image_bytes=32 << 20,
     verification_rows=0,
-    ranks=MappingProxyType({16: RankCosts(state_row_bytes=34_602_240, page_bytes=4_276_224,
-                                        draft_page_bytes=737_280, graph_bytes=5 << 30)}),
-    plain_ranks=MappingProxyType({16: RankCosts(state_row_bytes=31_639_296, page_bytes=3_538_944, graph_bytes=5 << 30)}),
+    ranks=MappingProxyType({16: RankCosts(state_row_bytes=32_464_128, page_bytes=2_138_112,
+                                        draft_page_bytes=368_640, graph_bytes=5 << 30)}),
+    plain_ranks=MappingProxyType({16: RankCosts(state_row_bytes=29_869_824, page_bytes=1_769_472, graph_bytes=5 << 30)}),
 )

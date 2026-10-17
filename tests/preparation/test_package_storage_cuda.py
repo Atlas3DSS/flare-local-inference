@@ -19,8 +19,12 @@ def test_export_keeps_host_mailbox_and_omits_unused_library_storage(tmp_path):
     assert os.environ.get("CUDA_VISIBLE_DEVICES")
     root = Path(__file__).resolve().parents[2]
     output = tmp_path / "mailbox"
-    subprocess.run([sys.executable, str(root / "helios/tests/engram_package_fixture.py"), str(output)],
-                   check=True, cwd=root, timeout=180)
+    result = subprocess.run([sys.executable, str(root / "helios/tests/engram_package_fixture.py"), str(output)],
+                            check=True, cwd=root, timeout=180, capture_output=True, text=True)
+    assert "VRAM inventory at export" in result.stderr
+    assert "Rank 0 / CUDA 0" in result.stderr
+    assert "Graph I/O / persistent state" in result.stderr
+    assert "not resident VRAM" in result.stderr
     index, _ = read_index(output / "package")
     allocations = index.ranks[0].allocations
     host, = (allocation for allocation in allocations if allocation.memory == proto.MAPPED_HOST)

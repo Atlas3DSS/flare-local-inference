@@ -11,6 +11,7 @@ from ignition.recipes.qwen38 import hyperconnection
 from ignition.recipes.qwen38.hyperconnection import HyperconnectionScratch
 from ignition.preparation.fixtures.hyperconnection import HyperconnectionBenchmarkInputs, benchmark_call
 from ignition.preparation.fixtures.hyperconnection_gate import HyperconnectionGateInputs
+from ignition.preparation.scratch import GraphBufferPool
 
 
 def test_packed_projection_preserves_canonical_weights_without_duplicate_storage():
@@ -177,6 +178,20 @@ def test_combine_priming_reuses_disjoint_existing_storage():
         assert pointers[0] == source.untyped_storage().data_ptr()
         arguments[-1].fill_(19)
         assert all(not tensor.count_nonzero() for tensor in arguments[:-1])
+
+
+def test_priming_accepts_disjoint_views_of_one_pool_chunk():
+    pool = GraphBufferPool("cpu", chunk_bytes=2 << 20)
+    buffers = pool.cursor()
+    source = buffers.zeros((4, 10240), torch.bfloat16)
+    scratch = HyperconnectionScratch.allocate(4, torch.device("cpu"), buffers=buffers)
+    assert source.untyped_storage().data_ptr() == scratch.normalized.untyped_storage().data_ptr()
+    arguments = scratch.priming_arguments(source, torch.ones(10240))
+    for operands in arguments.values():
+        operands[-1].fill_(17)
+    assert not source.count_nonzero()
+    with pytest.raises(ValueError, match="priming source"):
+        scratch.priming_arguments(scratch.normalized, torch.ones(10240))
 
 
 def test_combine_norm_fixture_retains_fp32_gain_and_owns_both_outputs():

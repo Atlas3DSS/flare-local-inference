@@ -392,7 +392,8 @@ def test_vision_encoder(checkpoint):
     with torch.device("meta"):
         ref = reference.Step5VisionEncoder(reference.Step5VisionConfig(**weights.config))
     ref = load_reference(ref, "vision_model.", manifest)
-    scratch = VisionScratch.allocate(4096, shard, device)
+    buffers = GraphBufferPool(device, chunk_bytes=2 << 20).cursor()
+    scratch = VisionScratch.allocate(4096, shard, device, buffers=buffers)
     arena = ScratchArena(device)
     torch.manual_seed(912)
     images = [torch.randn(1, 3, side, side, dtype=torch.bfloat16, device=device) for side in (504, 728)]
@@ -407,7 +408,7 @@ def test_vision_encoder(checkpoint):
                                     numerical_policy="default") as session:
         session.register_scratch(arena)
         encoder = PreparedVision(weights, scratch, VisionInputs.allocate(device), runtime=None, coordinator=None,
-                                 session=session, workspace=arena, name="vision")
+                                 session=session, workspace=arena, name="vision", buffers=buffers)
         session.tune()
         base = first_base = second_base = 0
         cu = [0]

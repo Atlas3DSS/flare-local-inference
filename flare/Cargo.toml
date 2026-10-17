@@ -6,6 +6,9 @@ edition = "2024"
 rust-version = "1.87"
 publish = false
 
+[profile.release]
+strip = "symbols"
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"

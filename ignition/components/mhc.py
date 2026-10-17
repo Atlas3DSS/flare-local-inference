@@ -29,13 +29,14 @@ class MHCScratch:
     normalized: torch.Tensor
 
     @classmethod
-    def allocate(cls, tokens, hidden, device):
+    def allocate(cls, tokens, hidden, device, *, buffers=None):
         if type(tokens) is not int or tokens <= 0 or hidden not in (4096, 5120, 7168):
             raise ValueError("mHC requires positive token capacity and a supported hidden size")
-        return cls(torch.empty((tokens, 4, hidden), dtype=torch.bfloat16, device=device),
-                   torch.empty((tokens, 4), dtype=torch.float32, device=device),
-                   torch.empty((tokens, 4, 4), dtype=torch.float32, device=device),
-                   torch.empty((tokens, hidden), dtype=torch.bfloat16, device=device))
+        def empty(shape, dtype):
+            return (torch.empty(shape, dtype=dtype, device=device) if buffers is None
+                    else buffers.zeros(shape, dtype))
+        return cls(empty((tokens, 4, hidden), torch.bfloat16), empty((tokens, 4), torch.float32),
+                   empty((tokens, 4, 4), torch.float32), empty((tokens, hidden), torch.bfloat16))
 
     def bind_args(self):
         return {"out": self.residual, "post": self.post, "comb": self.comb, "y": self.normalized}

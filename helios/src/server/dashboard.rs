@@ -80,7 +80,7 @@ impl Dashboard {
         }
         let (stop, receiver) = mpsc::channel();
         let thread = thread::Builder::new()
-            .name("helios-dashboard".into())
+            .name("flare-dashboard".into())
             .spawn(move || {
                 // Linux priorities are per-thread; rendering yields to serving under CPU pressure.
                 #[cfg(target_os = "linux")]
@@ -141,7 +141,7 @@ impl Dashboard {
                     }
                 })();
                 if let Err(error) = result {
-                    eprintln!("Helios dashboard stopped: {error}");
+                    eprintln!("Flare dashboard stopped: {error}");
                 }
             });
         match thread {

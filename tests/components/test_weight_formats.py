@@ -59,7 +59,8 @@ def test_mxfp4_csf_loader_preserves_packed_partitions_and_activation(
         loader.load_mxfp4_csf_experts(prefixes, **options)
 
 
-def test_mxfp4_storage_selection_preserves_projection_order_and_shared_scale_lifetime(monkeypatch):
+@pytest.mark.parametrize("compression", [None, "csf"])
+def test_mxfp4_storage_selection_preserves_projection_order_and_shared_scale_lifetime(monkeypatch, compression):
     names = [f"layer{layer}.expert{expert}" for layer in (0, 1) for expert in (0, 1)]
     compressed = {f"{name}.{projection}.scale" for name in names for projection in ("w1", "w3", "w2")}
     loader = DirectWeightLoader(SimpleNamespace(compressed_scales=compressed), "cpu")
@@ -68,7 +69,8 @@ def test_mxfp4_storage_selection_preserves_projection_order_and_shared_scale_lif
     monkeypatch.setattr(loader, "load_fp4_experts", lambda prefixes, **kwargs: kwargs)
     scratch = {}
     options = dict(hidden_size=128, intermediate_size=64, intermediate_range=(32, 64),
-                   scale_scratch=scratch, projection_names=("w3", "w1", "w2"), scale_name="scale")
+                   scale_scratch=scratch, scale_compression=compression,
+                   projection_names=("w3", "w1", "w2"), scale_name="scale")
     first = loader.load_mxfp4_experts(names[:2], **options)
     second = loader.load_mxfp4_experts(names[2:], **options)
     assert first["projection_names"] == ("w1", "w3", "w2")
@@ -77,9 +79,19 @@ def test_mxfp4_storage_selection_preserves_projection_order_and_shared_scale_lif
     ordinary = loader.load_mxfp4_experts(["draft.expert0"], **options)
     assert ordinary["projection_names"] == ("w3", "w1", "w2")
     assert ordinary["format"] == "mxfp4" and ordinary["activation_mode"] == "a8"
-    assert "scale_scratch" not in ordinary and len(scratch) == 1
+    if compression is None:
+        assert "scale_scratch" not in ordinary and len(scratch) == 1
+    else:
+        assert ordinary["scale_compression"] == "csf" and len(scratch) == 2
+        other_draft = loader.load_mxfp4_experts(["draft.expert1"], **options)
+        assert ordinary["scale_scratch"] is other_draft["scale_scratch"]
+        assert ordinary["scale_scratch"] is not first["scale_scratch"]
+        converted = loader.load_mxfp4_experts(["native.expert0", "native.expert1"], **options)
+        assert converted["scale_scratch"] is first["scale_scratch"]
     with pytest.raises(ValueError, match="complete MXFP4 scale encoding"):
         loader.load_mxfp4_experts([names[0], "draft.expert0"], **options)
+    with pytest.raises(ValueError, match="scale compression"):
+        loader.load_mxfp4_experts(names[:2], **(options | {"scale_compression": "zip"}))
 
 
 @pytest.mark.parametrize("loader_type", [DirectWeightLoader, QwenWeightLoader])

@@ -672,7 +672,7 @@ impl NativeModel {
                 let operation = &operation;
                 workers.push(
                     thread::Builder::new()
-                        .name(format!("helios-load-{index}"))
+                        .name(format!("flare-load-{index}"))
                         .spawn_scoped(scope, move || {
                             operation(rank, package, archive)
                                 .map_err(|error| invalid(format!("rank {index}: {error}")))

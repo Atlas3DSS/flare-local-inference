@@ -115,7 +115,8 @@ def test_checkpoint_context_and_backbone(checkpoint_weights, batch, tmp_path):
     auxiliary = torch.randn((tokens, 6 * c.hidden), device="cuda", dtype=torch.bfloat16) * .1
     for i in range(c.draft.layers):
         for field in ("key", "value"):
-            pool.reserved_region(f"draft{i}.{field}").normal_(std=.1)
+            history = pool.reserved_region(f"draft{i}.{field}")
+            history.copy_(torch.randn(history.shape, dtype=torch.bfloat16, device=history.device) * .1)
     initial = pool.backing.clone()
     buffers, layers = GraphBufferPool("cuda:0"), GraphBufferPool("cuda:0")
     cursor = buffers.cursor()
@@ -165,11 +166,13 @@ def test_checkpoint_context_and_backbone(checkpoint_weights, batch, tmp_path):
                 offsets = (starts[row] + torch.arange(n, device="cuda")) % 1024
                 for field, expected in (("key", key), ("value", value)):
                     actual = pool.reserved_region(f"draft{i}.{field}")[rows[row], offsets]
-                    target = expected[row * 8:row * 8 + n].float()
+                    target = expected[row * 8:row * 8 + n].to(actual.dtype).float()
                     if n:
                         difference = actual.float() - target
                         assert difference.norm() / target.norm() < .01
-                        assert difference.abs().max() < .02 * target.abs().max()
+                        # Projection error and FP8 bin-boundary rounding both contribute.
+                        ulp = torch.exp2(torch.floor(torch.log2(target.abs().clamp_min(2 ** -6))) - 3)
+                        assert (difference.abs() <= .02 * target.abs().max() + ulp).all()
         starts += counts
         lengths = torch.where(counts > 0, 8, 0)
         m.set(starts, lengths, rows, table, ids, live)
@@ -197,8 +200,10 @@ def test_checkpoint_context_and_backbone(checkpoint_weights, batch, tmp_path):
                 start = starts[row].item()
                 positions = torch.arange(max(0, start - 1024), start + 8, device="cuda")
                 past = positions[positions < start] % 1024
-                key = torch.cat((pool.reserved_region(f"draft{i}.key")[rows[row], past], k[row * 8:(row + 1) * 8]))
-                value = torch.cat((pool.reserved_region(f"draft{i}.value")[rows[row], past], v[row * 8:(row + 1) * 8]))
+                key = torch.cat((pool.reserved_region(f"draft{i}.key")[rows[row], past].bfloat16(),
+                                  k[row * 8:(row + 1) * 8].to(torch.float8_e4m3fn).bfloat16()))
+                value = torch.cat((pool.reserved_region(f"draft{i}.value")[rows[row], past].bfloat16(),
+                                    v[row * 8:(row + 1) * 8].to(torch.float8_e4m3fn).bfloat16()))
                 key, value = (t.repeat_interleave(16, 1).transpose(0, 1).float() for t in (key, value))
                 scores = torch.matmul(q[row * 8:(row + 1) * 8].transpose(0, 1).float(), key.transpose(1, 2)) / 128 ** .5
                 scores.masked_fill_(positions[None, None] < (start + torch.arange(8, device="cuda"))[None, :, None] - 1023, -torch.inf)

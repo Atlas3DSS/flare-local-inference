@@ -17,6 +17,19 @@ _COMPILE_THREAD_BYTES = 512 << 20
 COMPILED_FORWARD_BYTES = 80 << 20
 
 
+def cpu_workers(requested=None, *, pools=1):
+    """Divide a host's compiler process budget among its preparation ranks."""
+    if requested is not None and (type(requested) is not int or requested < 1):
+        raise ValueError("compile workers must be a positive integer")
+    if type(pools) is not int or pools < 1:
+        raise ValueError("compiler pool count must be positive")
+    available = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count() or 1
+    budget = available if requested is None else requested
+    if requested is not None and budget < pools:
+        raise ValueError(f"compile workers must provide at least one process for each of {pools} local ranks")
+    return max(1, budget // pools)
+
+
 def release_unused():
     """Collect preparation objects and release unused glibc arenas on Linux."""
     gc.collect()

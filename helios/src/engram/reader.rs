@@ -172,7 +172,7 @@ impl Resident {
             for reader in 0..LOAD_READERS.min(extent.div_ceil(LOAD_CHUNK)) {
                 workers.push(
                     std::thread::Builder::new()
-                        .name(format!("helios-table-loader-{reader}"))
+                        .name(format!("flare-table-loader-{reader}"))
                         .spawn_scoped(scope, move || -> Result<()> {
                             for begin in (reader * LOAD_CHUNK..extent)
                                 .step_by(LOAD_READERS * LOAD_CHUNK)

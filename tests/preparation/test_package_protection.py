@@ -115,6 +115,7 @@ def test_multichunk_export_is_read_and_authenticated_by_rust(native, tmp_path):
 
 def cluster_package(tmp_path, monkeypatch):
     from ignition.preparation import model_package
+    from types import SimpleNamespace
 
     def export(rank, path):
         index = proto.ModelIndex(version=4, ranks=[proto.BundleIndex()])
@@ -129,15 +130,21 @@ def cluster_package(tmp_path, monkeypatch):
             bundle.resources[name].CopyFrom(proto.Span(offset=offset, nbytes=source.stat().st_size))
             payload.append((offset, source, 0, source.stat().st_size))
         publish(path, index, payload)
+        return SimpleNamespace(memory_inventory={'rank': rank})
 
     peer = tmp_path / 'peer.safetensors'
     export(1, peer)
     monkeypatch.setattr(model_package, 'export_model',
                         lambda prepared, images, storage, path, **kwargs: export(0, path))
     path = tmp_path / 'cluster.safetensors'
+    def inventory(reports, **kwargs):
+        assert path.is_file()
+        assert reports == [{'rank': 0}, {'rank': 1}]
+    monkeypatch.setattr(model_package, 'print_inventory', inventory)
     with peer.open('rb') as stream:
         model_package.export_cluster_package(None, None, None, path, peer_files=[stream], options={},
-                                             export_id='cluster-test', world=2, publisher=publisher())
+                                             export_id='cluster-test', world=2, publisher=publisher(),
+                                             peer_inventories=[{'rank': 1}])
     return path
 
 

@@ -220,12 +220,13 @@ class PLEScratch:
     output: torch.Tensor
 
     @classmethod
-    def allocate(cls, tokens: int, device) -> PLEScratch:
+    def allocate(cls, tokens: int, device, *, buffers=None) -> PLEScratch:
         if type(tokens) is not int or tokens <= 0:
             raise ValueError("PLE token capacity must be positive")
         return cls(
             *(
-                torch.zeros((tokens, width), dtype=torch.bfloat16, device=device)
+                (torch.zeros((tokens, width), dtype=torch.bfloat16, device=device) if buffers is None
+                 else buffers.zeros((tokens, width), torch.bfloat16))
                 for width in (2560, 10240, 2560, 10240, 10240, 10240, 10240)
             )
         )

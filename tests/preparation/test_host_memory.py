@@ -7,6 +7,27 @@ from ignition.preparation import host_memory
 from ignition.preparation.host_memory import worker_limit
 
 
+def test_cpu_worker_budget_uses_affinity_and_is_shared_by_local_ranks(monkeypatch):
+    monkeypatch.setattr(host_memory, "os", SimpleNamespace(sched_getaffinity=lambda _: set(range(48))))
+    assert host_memory.cpu_workers() == 48
+    assert host_memory.cpu_workers(pools=4) == 12
+    assert host_memory.cpu_workers(24, pools=4) == 6
+    assert host_memory.cpu_workers(80, pools=4) == 20
+    with pytest.raises(ValueError, match="one process"):
+        host_memory.cpu_workers(2, pools=4)
+
+
+@pytest.mark.parametrize("count", [0, -1, True, 1.5])
+def test_invalid_cpu_worker_budgets_are_rejected(count):
+    with pytest.raises(ValueError, match="positive integer"):
+        host_memory.cpu_workers(count)
+
+
+def test_cpu_worker_budget_without_affinity_uses_cpu_count(monkeypatch):
+    monkeypatch.setattr(host_memory, "os", SimpleNamespace(cpu_count=lambda: 24))
+    assert host_memory.cpu_workers(pools=2) == 12
+
+
 @pytest.mark.parametrize("pools", [1, 2, 4])
 @pytest.mark.parametrize("gib", [16, 24, 64, 128])
 def test_compiler_pools_leave_host_headroom(pools, gib):

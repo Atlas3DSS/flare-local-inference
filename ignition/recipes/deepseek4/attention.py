@@ -148,9 +148,10 @@ class AttentionScratch:
     index_weights: torch.Tensor
 
     @classmethod
-    def allocate(cls, tokens, world, device, *, blocks=8192):
+    def allocate(cls, tokens, world, device, *, blocks=8192, buffers=None):
         def zeros(shape, dtype=torch.bfloat16):
-            return torch.zeros(shape, dtype=dtype, device=device)
+            return (torch.zeros(shape, dtype=dtype, device=device) if buffers is None
+                    else buffers.zeros(shape, dtype))
 
         return cls(
             zeros((tokens, 1536)),
@@ -160,8 +161,8 @@ class AttentionScratch:
             zeros((tokens, 512)),
             zeros((tokens, 64 // world, 512)),
             zeros((tokens, 4096)),
-            zeros((tokens, 512), torch.int32) - 1,
-            zeros((tokens, blocks * (PAGE_TOKENS // 128)), torch.int32) - 1,
+            zeros((tokens, 512), torch.int32).fill_(-1),
+            zeros((tokens, blocks * (PAGE_TOKENS // 128)), torch.int32).fill_(-1),
             zeros((tokens, 64, 128)),
             zeros((tokens, 64)),
         )

@@ -94,7 +94,7 @@ def test_checkpoint_draft_attention_context_and_noncausal_block(draft_weights, w
     device = torch.device("cuda:0")
     torch.manual_seed(171)
     source = torch.randn((8, 7168), dtype=torch.bfloat16, device=device) * .2
-    cache = torch.randn((34, 128, 576), dtype=source.dtype, device=device) * .2
+    cache = (torch.randn((34, 128, 576), dtype=source.dtype, device=device) * .2).to(torch.float8_e4m3fn)
     metadata = Metadata.allocate(8, 1, 34, device, samples=8)
     with RecordedPreparationSession(device=device, checkpoint="kimi-dflash2-attention",
             workload_schema="kimi-dflash2-attention", numerical_policy="default") as session:
@@ -114,7 +114,7 @@ def test_checkpoint_draft_attention_context_and_noncausal_block(draft_weights, w
                 torch.zeros((1, 8), dtype=torch.int64, device=device), torch.ones(1, device=device))
             graph.replay()
             torch.cuda.synchronize()
-            latent = torch.cat((cache.flatten(0, 1)[:length], attention.latent))
+            latent = torch.cat((cache.flatten(0, 1)[:length].to(source.dtype), attention.latent))
             query = attention.query
             keys = torch.einsum("tk,hdk->thd", latent[:, :512].float(), w["key"].float())
             keys = torch.cat((keys, latent[:, None, 512:].expand(-1, 4, -1).float()), -1)
@@ -243,7 +243,7 @@ def test_complete_draft_and_context_replay_with_checkpoint_weights(batch):
     with DirectWeightLoader(inspect_indexed_checkpoint(TARGET), device, prefixes=names) as loader:
         embedding, head = loader.load_tensors(names)
     weights = SimpleNamespace(config=c, draft=draft, shard=shard, embedding=embedding, head=head)
-    cache = [torch.zeros((2, 128, 576), dtype=torch.bfloat16, device=device) for _ in range(5)]
+    cache = [torch.zeros((2, 128, 576), dtype=torch.float8_e4m3fn, device=device) for _ in range(5)]
     pool = SimpleNamespace(draft_attention=lambda i: cache[i])
     work = torch.empty(129 * 7168 * 10, dtype=torch.bfloat16, device=device)
     activation, total, kda, mla, moe, auxiliary = scratch_views(work, ((129, 7168),) * 5 + ((129, 5 * 7168),))

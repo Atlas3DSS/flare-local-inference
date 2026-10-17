@@ -19,16 +19,18 @@ def test_publication_contains_one_bundle_per_rank(monkeypatch, tmp_path, world):
     monkeypatch.setattr(dist, 'barrier', lambda: None)
     exported = []
     closed = []
+    printed = []
     def export(prepared, images, storage, path, **kwargs):
         publish(path, ModelIndex(version=4, ranks=[BundleIndex()]), [])
         exported.append(path.name)
+        return SimpleNamespace(memory_inventory={'rank': 0})
     monkeypatch.setattr(model_package, 'export_model', export)
     class Control:
         def send(self, command):
             assert command[0] == 'export'
             export(None, None, None, command[1])
         def recv(self):
-            return {'peer_memory': [(0x210000000000, 65536)]}
+            return {'peer_memory': [(0x210000000000, 65536)], 'memory_inventory': {'rank': 1}}
     prepared = SimpleNamespace(model=object(), controls=[Control()] if world == 2 else [],
                                close=lambda: closed.append('model'))
     storage = SimpleNamespace(world=world, peer_storage=SimpleNamespace(
@@ -40,12 +42,17 @@ def test_publication_contains_one_bundle_per_rank(monkeypatch, tmp_path, world):
         combine(*args, **kwargs)
     monkeypatch.setattr(model_package, 'combine', assemble)
     output = tmp_path / 'model'
+    def inventory(reports, **kwargs):
+        assert output.is_file() and closed == ['model', 'host']
+        printed.extend(reports)
+    monkeypatch.setattr(model_package, 'print_inventory', inventory)
     model_package.export_package(prepared, None, storage, output, options={}, publisher=publisher())
     descriptor, start = read_index(output)
     assert descriptor.version == 4
     assert len(descriptor.ranks) == world
     assert sorted(exported) == [f'rank-{rank}.safetensors' for rank in range(world)]
     assert output.is_file()
+    assert printed == [{'rank': rank} for rank in range(world)]
     assert len(descriptor.peer_memory) == (2 if world == 2 else 0)
     for owner, peer in enumerate(descriptor.peer_memory):
         assert peer.owner == owner and list(peer.readers) == list(range(world))

@@ -1,5 +1,6 @@
 """Captured MoonViT projections and attention against the checkpoint forward."""
 import json
+from copy import deepcopy
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,7 +22,7 @@ def test_checkpoint_vision(monkeypatch, tmp_path, n, h, w):
     from transformers.utils.output_capturing import OutputRecorder
     from transformers.dynamic_module_utils import get_class_from_dynamic_module
     from ignition.preparation.checkpoint import inspect_indexed_checkpoint
-    from ignition.preparation.scratch import ScratchArena, scratch_views
+    from ignition.preparation.scratch import GraphBufferPool, ScratchArena, scratch_views
     from ignition.preparation.tuning import RecordedPreparationSession
     from ignition.preparation.compilation import compile_forward
     from ignition.recipes.kimi3.vision import VisionWeights, VisionInputs, VisionScratch, PreparedVision
@@ -45,13 +46,15 @@ def test_checkpoint_vision(monkeypatch, tmp_path, n, h, w):
     reference.load_state_dict({n.removeprefix('vision_tower.'): v for n,v in weights.tensors.items() if n.startswith('vision_tower.')}, assign=True)
     projector.load_state_dict({n.removeprefix('mm_projector.'): v for n,v in weights.tensors.items() if n.startswith('mm_projector.')}, assign=True)
     reference.eval(); projector.eval()
-    shared = torch.zeros(max(n * 4608, 5 * 4096 * 7168), dtype=torch.bfloat16, device=device)
+    pool = GraphBufferPool(device, chunk_bytes=2 << 20)
+    buffers = pool.cursor()
+    shared = buffers.zeros((max(n * 4608, 5 * 4096 * 7168),), torch.bfloat16)
     text_scratch = scratch_views(shared, ((4096, 7168),) * 5)
-    inputs, scratch = VisionInputs.allocate(device), VisionScratch.allocate(n, device, work=shared)
+    inputs, scratch = VisionInputs.allocate(device), VisionScratch.allocate(n, device, work=shared, buffers=buffers)
     with RecordedPreparationSession(device=device, checkpoint=str(CHECKPOINT), workload_schema='kimi3-vision', numerical_policy='default') as session:
         arena = ScratchArena(device)
         session.register_scratch(arena)
-        encoder = PreparedVision(weights, scratch, inputs, session=session, workspace=arena, name='vision')
+        encoder = PreparedVision(weights, scratch, inputs, session=session, workspace=arena, name='vision', buffers=buffers)
         session.tune(show_progress=False)
         encoder.positions.copy_(torch.tensor([[y,x] for y in range(h) for x in range(w)], device=device))
         indices, factors = [], []
@@ -116,7 +119,9 @@ def test_checkpoint_vision(monkeypatch, tmp_path, n, h, w):
         records = torch.zeros((2,2,8), dtype=torch.int64, device=device)
         frame = torch.zeros(1, dtype=torch.int32, device=device)
         sequence = torch.ones(1, dtype=torch.int64, device=device)
-        publication = PreparedVisionGeneration(encoder, state, records, frame, sequence, feature_range=(448,896))
+        # TP ranks bind publication scratch at identical offsets after encoder buffers.
+        publication_buffers = deepcopy(buffers, {id(pool): pool})
+        publication = PreparedVisionGeneration(encoder, state, records, frame, sequence, feature_range=(448,896), buffers=buffers)
         inputs.vision_pixel_values[:n].copy_(source.flatten(1))
         for target, value in ((inputs.vision_position_ids, encoder.positions),
                               (inputs.vision_interpolation_indices, encoder.interpolation_indices),
@@ -147,8 +152,9 @@ def test_checkpoint_vision(monkeypatch, tmp_path, n, h, w):
         torch.testing.assert_close(state.arena[1,:n//4], actual[:,448:896], atol=0, rtol=0)
         assert state.count.tolist() == [0,n//4]
         assert state.generation.tolist() == [0,12]
-        for view in text_scratch:
-            view.fill_(float('nan'))
+        for chunks in pool.chunks.values():
+            for tensor in chunks:
+                tensor.fill_(float('nan') if tensor.is_floating_point() else -37)
         graph.replay()
         torch.cuda.synchronize()
         torch.testing.assert_close(state.arena[1,:n//4], actual[:,448:896], atol=0, rtol=0)
@@ -159,7 +165,7 @@ def test_checkpoint_vision(monkeypatch, tmp_path, n, h, w):
             assert state.count.tolist() == [0,n//2]
             torch.testing.assert_close(state.arena[1,n//4:n//2], actual[:,448:896], atol=0, rtol=0)
         graph.reset()
-        publication = PreparedVisionGeneration(encoder, state, records, frame, sequence, feature_range=(6720,7168))
+        publication = PreparedVisionGeneration(encoder, state, records, frame, sequence, feature_range=(6720,7168), buffers=publication_buffers)
         with artifact.open('rb') as file:
             restored = torch.compiler.load_compiled_function(file)
         inputs.vision_feature_offset.zero_()

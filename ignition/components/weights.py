@@ -106,7 +106,7 @@ class DirectWeightLoader:
 
     def _load_nvfp4_linear(self, prefix, *, rows=None, columns=None):
         import torch
-        from b12x._lib.intrinsics import swizzle_block_scale
+        from b12x._lib.intrinsics.reference import swizzle_block_scale
         from b12x.gemm.blockscaled import pack_weight
 
         source = self._sources[f"{prefix}.weight"]
@@ -376,7 +376,7 @@ class DirectWeightLoader:
             offset = end
         self._session.flush()
         if fp4:
-            from b12x._lib.intrinsics import swizzle_block_scale
+            from b12x._lib.intrinsics.reference import swizzle_block_scale
 
             return replace(pack_weight(values, swizzle_block_scale(scales), recipe="mxfp4"),
                            in_features=columns)
@@ -514,7 +514,7 @@ class DirectWeightLoader:
         """
         import torch
         from b12x.moe import fused_moe as moe
-        from b12x._lib.intrinsics import swizzle_block_scale
+        from b12x._lib.intrinsics.reference import swizzle_block_scale
         from .sm103 import is_sm103
 
         self._require_open()
@@ -609,10 +609,10 @@ class DirectWeightLoader:
 
     def load_mxfp4_experts(
         self, prefixes, *, hidden_size, intermediate_size, scale_scratch,
-        intermediate_range=None, swiglu_limit=None,
+        intermediate_range=None, swiglu_limit=None, scale_compression=None,
         projection_names=("up_proj", "gate_proj", "down_proj"), scale_name="weight_scale",
     ):
-        """Select native or compressed MXFP4 storage from the checkpoint inventory.
+        """Load MXFP4 storage, optionally compressing native scales losslessly.
 
         ``scale_scratch`` is a caller-owned dictionary keyed by expert geometry.
         Sharing it between calls requires serialized routed-expert execution;
@@ -621,6 +621,8 @@ class DirectWeightLoader:
         import torch
 
         self._require_open()
+        if scale_compression not in (None, "csf"):
+            raise ValueError("MXFP4 expert scale compression must be None or 'csf'")
         prefixes = tuple(prefixes)
         compressed = getattr(self.manifest, "compressed_scales", frozenset())
         encoded = [f"{prefix}.{projection}.{scale_name}" in compressed
@@ -628,10 +630,10 @@ class DirectWeightLoader:
         geometry = dict(hidden_size=hidden_size, intermediate_size=intermediate_size,
                         intermediate_range=intermediate_range, swiglu_limit=swiglu_limit,
                         scale_name=scale_name)
-        if not any(encoded):
+        if not any(encoded) and scale_compression is None:
             return self.load_fp4_experts(prefixes, **geometry, format="mxfp4", activation_mode="a8",
                                          projection_names=projection_names)
-        if not all(encoded):
+        if any(encoded) and not all(encoded):
             raise ValueError("each routed expert group must use one complete MXFP4 scale encoding")
         first, last = _aligned_range(intermediate_range, intermediate_size, 32)
         local, count = last - first, len(prefixes)
@@ -639,6 +641,10 @@ class DirectWeightLoader:
         if key not in scale_scratch:
             scale_scratch[key] = tuple(torch.empty(shape, dtype=torch.uint8, device=self.device)
                 for shape in ((count, hidden_size // 32, 2 * local), (count, local // 32, hidden_size)))
+        if not any(encoded):
+            return self.load_fp4_experts(prefixes, **geometry, format="mxfp4", activation_mode="a8",
+                projection_names=projection_names, scale_compression=scale_compression,
+                scale_scratch=scale_scratch[key])
         up, gate, down = projection_names
         return self.load_mxfp4_csf_experts(prefixes, **geometry,
             scale_scratch=scale_scratch[key], projection_names=(gate, up, down))

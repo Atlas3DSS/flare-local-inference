@@ -19,6 +19,15 @@ Unsigned rank staging is private to preparation and cannot load in Helios.
 Flare loads the file without Python. Helios is a Rust library;
 `flare_heliopause` is a CPython extension imported by Ignition.
 
+Every recipe defaults to FP8 E4M3 KV storage, including learned draft-model
+caches. Qwen Flash retains BF16 selector keys; GLM and DeepSeek retain their
+packed latent formats, including scale metadata and any BF16 rotary fields.
+Recurrent state, compressor accumulators, and hidden activations retain their
+model-specific precision. Cache writers and attention readers use matching
+scales, and memory planning includes FP8 pages and partial-page snapshots.
+Export a package to use these cache layouts; existing packages retain the
+layouts captured when they were prepared.
+
 ## Environment setup
 
 Set up the preparation environment and build the native CLI:
@@ -61,6 +70,25 @@ available GPUs explicitly on shared hosts. `--gpus 2` means one rank on GPU 2;
 indices refer to the exposed device list. Each tensor-parallel size requires a
 separately prepared package; a TP2 package cannot be loaded as TP1. Qwen TP1 and TP2 and
 GLM TP4 have been exercised end to end; Qwen TP4 still requires model validation.
+
+## Preparation resources
+
+`--compile-workers N` sets the CPU compiler process budget per host. Memory
+limits can reduce it; local preparation ranks share the budget. Set
+`[preparation] compile_workers = N` for a persistent default. Omitting the
+setting retains automatic sizing, including shared-memory limits on DGX Spark.
+
+`--tuning-gpus LIST` adds local GPU replicas for benchmarking b12x candidates.
+The list begins with `--gpus` and continues in complete TP groups: for example,
+`--gpus 0 --tuning-gpus 0-3 --compile-workers 24` prepares a TP1 package with
+four tuning GPUs. Each replica needs memory for its model and preparation
+storage. Helpers release their resources after tuning; serving ranks then
+compile and capture their forwards. Kernel compilation runs in CPU workers,
+independently of the number of tuning GPUs.
+
+Multi-host `--ranks` preparation retains its existing sharding and transport;
+`--tuning-gpus` is local-only and cannot be combined with it. An explicit
+`--compile-workers` budget applies separately on each host.
 
 ## Exporting runtime packages
 
@@ -106,12 +134,14 @@ scaled NVFP4 gate and up projections also overlap. Prepare with
 `--no-stream-overlap` to place those projections and expert branches on the main stream.
 Routing excludes padded target rows using the packed batch's valid-token count.
 The 64-row speculative capacity covers eight requests with seven draft tokens each.
+For concurrency 32 with seven draft tokens per request, use
+`--max-concurrency 32 --speculative-token-capacity 256`.
 
 ## Qwen3.8 27B
 
 `qwen3.8-27b` prepares `nvidia/Qwen3.8-27B-NVFP4` for text generation on one GPU.
 It uses the canonical Qwen3.5 dense decoder with tensor-scaled FP8 attention
-projections and NVFP4 MLP and vocabulary weights. KV pages and Gated DeltaNet
+projections and NVFP4 MLP and vocabulary weights. FP8 KV pages and Gated DeltaNet
 continuations reside in device memory; the recipe has no host-mapped tables,
 vision graphs, or learned draft model. Prepare on the same GPU architecture
 as the serving device:
@@ -148,7 +178,15 @@ use the same prepared model graphs; the flag selects table storage only.
 
 ## DeepSeek V4.1 Flash
 
-DeepSeek V4.1 Flash supports TP4 text generation, reasoning, and DSML tool calls.
+The `deepseek-v4.1-flash` alias selects `DeepSeek-AI/DeepSeek-V4.1-Flash-1017`
+and supports TP4 text generation, reasoning, and DSML tool calls.
+Sampling defaults are temperature 1.0 and top-p 1.0, following the
+[model card](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017#minimal-inference).
+Add `--expert-scale-compression csf` to losslessly compress backbone and DSpark
+MXFP4 expert scales during loading. Compressed scales stay resident, with shared
+expansion buffers reused by serial expert layers. Planning conservatively estimates
+3% less resident weight storage; loading measures the actual allocation. Omitting
+the flag preserves native scales.
 DSpark is its learned draft method, defaulting to five draft tokens per round
 with separate proposal and verification graphs, using native conditional
 confidence and measured execution cost for adaptive verification;
@@ -164,10 +202,11 @@ GPUs explicitly:
 ```sh
 .venv/bin/python -m ignition export deepseek-v4.1-flash --gpus 0,4,6,8 \
   --max-concurrency 4 --mtp-draft-tokens 5 --prefill-chunk-size 4096 \
-  --output /data/flare-runtime/deepseek-v41-flash-tp4-c4-dspark5.safetensors --verbose
+  --expert-scale-compression csf \
+  --output /data/flare-runtime/deepseek-v41-flash-1017-csf-tp4-c4-dspark5.safetensors --verbose
 
 ./flare/target/release/flare run \
-  /data/flare-runtime/deepseek-v41-flash-tp4-c4-dspark5.safetensors \
+  /data/flare-runtime/deepseek-v41-flash-1017-csf-tp4-c4-dspark5.safetensors \
   --gpus 0,4,6,8 --host 127.0.0.1 --port 8001
 ```
 
@@ -335,7 +374,8 @@ and KDA verification records replay the accepted prefix into committed state.
 Loading with `--mtp-draft-tokens 0` selects ordinary execution; exporting with
 `--no-mtp` excludes draft weights and state.
 
-MLA latent records occupy 128-token pages. Continuation rows preserve KDA
+FP8 MLA latent records occupy 128-token pages in both the target and DFlash2.
+Continuation rows preserve KDA
 convolution and recurrent state, partial latent pages, and the normalized
 last hidden state. The MoonViT encoder accepts a combined 65,536 image patches
 per request and publishes hidden-column-sharded features for causal text
@@ -347,6 +387,24 @@ Effort defaults to `max`; requests can select `low`, `high`, or `max` and
 override sampling defaults. Preserve assistant reasoning in conversation history.
 
 ## Storage and graph capacities
+
+Every model export prints a VRAM inventory for each rank after final publication,
+including exports without `--verbose`. Heliopause measures device usage and package
+allocator mappings; Ignition attributes retained ranges to checkpoint tensors,
+scratch pools, graph temporaries, I/O and persistent state, communication buffers,
+kernel globals, and allocator slack. Owner fields and defining source locations
+identify the largest consumers in each category. Aliased ranges count once;
+shared scratch displays representative tensor owners.
+
+Preparation-only storage is separate from fixed package storage. Cache figures
+count physically backed pages, not their virtual serving capacity. Mapped host
+storage and imported peer mappings are listed outside local VRAM totals. PyTorch
+allocated and reserved bytes overlap the attributed storage. Cubin data sizes are
+not resident code sizes: graph executable overhead, kernel code, other driver
+allocations, and other processes remain in the unattributed device-usage remainder.
+The returned `RuntimePackage.memory_inventory` contains every attributed source
+group; console output shows the largest five per category. Source locations name
+owning classes or closures, not allocation stack traces.
 
 Ignition commands accept `--config PATH`; the default configuration is
 `~/.config/flare/config.toml`. Storage locations are configured with

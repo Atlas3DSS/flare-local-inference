@@ -74,20 +74,21 @@ class Scratch:
         )
 
     @classmethod
-    def allocate(cls, tokens, samples, world, device, *, blocks=8192, experts=256, top_k=6):
+    def allocate(cls, tokens, samples, world, device, *, blocks=8192, experts=256, top_k=6, buffers=None):
         def zeros(*shape, dtype=torch.bfloat16):
-            return torch.zeros(shape, dtype=dtype, device=device)
+            return (torch.zeros(shape, dtype=dtype, device=device) if buffers is None
+                    else buffers.zeros(shape, dtype))
 
         return cls(
             zeros(tokens, 4096),
             zeros(tokens, 4, 4096),
-            MHCScratch.allocate(tokens, 4096, device),
-            MHCScratch.allocate(tokens, 4096, device),
-            AttentionScratch.allocate(tokens, world, device, blocks=blocks),
+            MHCScratch.allocate(tokens, 4096, device, buffers=buffers),
+            MHCScratch.allocate(tokens, 4096, device, buffers=buffers),
+            AttentionScratch.allocate(tokens, world, device, blocks=blocks, buffers=buffers),
             zeros(tokens, 4096),
-            MLPScratch.allocate(tokens, 4096, 2048 // world, device),
+            MLPScratch.allocate(tokens, 4096, 2048 // world, device, buffers=buffers),
             zeros(tokens, experts, dtype=torch.float32),
-            RouterScratch.allocate(tokens, device, experts=experts, top_k=top_k),
+            RouterScratch.allocate(tokens, device, experts=experts, top_k=top_k, buffers=buffers),
             zeros(tokens, 4096),
             zeros(tokens, 4096),
             zeros(tokens, 4096),

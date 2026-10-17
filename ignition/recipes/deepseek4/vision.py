@@ -67,9 +67,10 @@ class VisionScratch:
     output: torch.Tensor
 
     @classmethod
-    def allocate(cls, patches, device):
+    def allocate(cls, patches, device, *, buffers=None):
         def zeros(*shape):
-            return torch.zeros(shape, dtype=torch.bfloat16, device=device)
+            return (torch.zeros(shape, dtype=torch.bfloat16, device=device) if buffers is None
+                    else buffers.zeros(shape, torch.bfloat16))
 
         return cls(
             zeros(patches, 588),
@@ -81,7 +82,7 @@ class VisionScratch:
             zeros(patches, 16, 64),
             zeros(patches, 1024),
             zeros(patches, 1024),
-            MLPScratch.allocate(patches, 1024, 2816, device),
+            MLPScratch.allocate(patches, 1024, 2816, device, buffers=buffers),
             zeros(patches // 9, 9216),
             zeros(patches // 9, 4096),
             zeros(patches // 9, 4096),
@@ -102,15 +103,17 @@ class VisionScratch:
 
 
 class PreparedVision:
-    def __init__(self, weights, scratch, inputs, *, session, workspace, name):
+    def __init__(self, weights, scratch, inputs, *, session, workspace, name, buffers=None):
         self.scratch, self.inputs = scratch, inputs
         tokens, device = scratch.patches.shape[0], scratch.patches.device
         self.frequencies = 10000 ** (-torch.arange(0, 32, 2, dtype=torch.float32, device=device) / 32)
-        self.positions = torch.zeros((tokens, 2), dtype=torch.int64, device=device)
-        self.cu = torch.zeros(2, dtype=torch.int32, device=device)
-        self.indices = torch.full((tokens // 9, 9), -1, dtype=torch.int32, device=device)
-        self.num_patches = torch.zeros(1, dtype=torch.int32, device=device)
-        self.num_features = torch.zeros(1, dtype=torch.int32, device=device)
+        def zeros(shape, dtype=torch.int32):
+            return (torch.zeros(shape, dtype=dtype, device=device) if buffers is None
+                    else buffers.zeros(shape, dtype))
+        self.positions = zeros((tokens, 2), torch.int64)
+        self.cu = zeros((2,))
+        self.indices = zeros((tokens // 9, 9)).fill_(-1)
+        self.num_patches, self.num_features = zeros((1,)), zeros((1,))
 
         def project(key, source, out):
             return UnquantizedProjection(

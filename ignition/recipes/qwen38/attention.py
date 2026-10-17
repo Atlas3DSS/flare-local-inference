@@ -71,13 +71,13 @@ class QSAState:
         if pages <= 0 or slots <= 0:
             raise ValueError("QSA page and state capacities must be positive")
         geometry = qsa.cache_requirements(main_page_size=page_size, position_axes=3, kv_heads=kv_heads,
-                                         max_speculative_tokens=draft_tokens)
-        def zeros(shape):
-            return torch.zeros(shape, device=device, dtype=torch.bfloat16)
+                                         max_speculative_tokens=draft_tokens, kv_dtype=torch.float8_e4m3fn)
+        def zeros(shape, dtype=torch.bfloat16):
+            return torch.zeros(shape, device=device, dtype=dtype)
         def invalid(shape):
             return torch.full(shape, -1, device=device, dtype=torch.int64)
-        return cls(zeros((pages, *geometry.main_k_page_shape)),
-                   zeros((pages, *geometry.main_v_page_shape)),
+        return cls(zeros((pages, *geometry.main_k_page_shape), geometry.kv_dtype),
+                   zeros((pages, *geometry.main_v_page_shape), geometry.kv_dtype),
                    zeros((pages, *geometry.compressed_page_shape)),
                    zeros((slots, *geometry.raw_k_ring_shape)),
                    invalid((slots, *geometry.raw_logical_positions_shape)),
@@ -153,11 +153,12 @@ class QSAScratch:
     partial_lse: torch.Tensor
 
     @classmethod
-    def allocate(cls, tokens: int, device: torch.device, *, world_size=1) -> QSAScratch:
+    def allocate(cls, tokens: int, device: torch.device, *, world_size=1, buffers=None) -> QSAScratch:
         if tokens <= 0:
             raise ValueError("QSA token capacity must be positive")
-        def zeros(*shape):
-            return torch.zeros(shape, device=device, dtype=torch.bfloat16)
+        def zeros(*shape, dtype=torch.bfloat16):
+            return (torch.zeros(shape, device=device, dtype=dtype) if buffers is None
+                    else buffers.zeros(shape, dtype))
         q_heads, kv_heads = 24 // world_size, max(1, 2 // world_size)
         q_width, kv_width = q_heads * 512, kv_heads * 256
         qkv = zeros(tokens, q_width + 2 * kv_width)
@@ -165,10 +166,10 @@ class QSAScratch:
         return cls(qkv[:, :q_width], qkv[:, q_width:q_width + kv_width], qkv[:, q_width + kv_width:],
                    zeros(tokens, 640), zeros(tokens, q_heads, 256), zeros(tokens, kv_heads, 256),
                    zeros(tokens, q_heads, 256),
-                   torch.full((tokens, 2051), -1, device=device, dtype=torch.int32),
+                   zeros(tokens, 2051, dtype=torch.int32).fill_(-1),
                    zeros(tokens, q_heads * 256), zeros(tokens, 2560), qkv,
-                   torch.zeros((partial_rows, q_heads, 256), device=device, dtype=torch.float32),
-                   torch.zeros((partial_rows, q_heads), device=device, dtype=torch.float32))
+                   zeros(partial_rows, q_heads, 256, dtype=torch.float32),
+                   zeros(partial_rows, q_heads, dtype=torch.float32))
 
     def rows(self, tokens: int) -> QSAScratch:
         whole = ("partial", "partial_lse")
@@ -210,7 +211,7 @@ class PreparedAttention:
         # On SM103 one score workspace covers every representative group of a
         # prefill chunk, so selection makes a single pass instead of one per 128 MiB.
         score_workspace = self.tokens * (context // 4) * 4 if sm103.is_sm103(source.device) else None
-        caps = qsa.Caps(device=source.device, max_batch=batch,
+        caps = qsa.Caps(device=source.device, max_batch=batch, kv_dtype=state.main_k_cache.dtype,
                         max_raw_state_slots=state.raw_k_ring.shape[0], max_q_rows=self.tokens,
                         max_seq_len=context, num_main_cache_pages=cache_pages,
                         num_compressed_cache_pages=cache_pages,
@@ -248,7 +249,9 @@ class PreparedAttention:
                     "rope_positions": metadata.rope_positions, "index_query": self.index_query,
                     "raw_index_key": self.index_key}
         self.plan = qsa.plan(caps, invocation=qsa.invocation_from_tensors(caps, **operands))
-        self.binding_kwargs.update(output=scratch.attended, selected_positions=scratch.selected_positions)
+        self.binding_kwargs.update(output=scratch.attended, selected_positions=scratch.selected_positions,
+            k_descale=torch.ones(1, dtype=torch.float32, device=source.device),
+            v_descale=torch.ones(1, dtype=torch.float32, device=source.device))
         self.workspace = workspace
 
         def prepare(materialized):
@@ -265,10 +268,13 @@ class PreparedAttention:
 
         register_finalizer(session, refresh, workspace=workspace)
         self.writer = paged_kv_write.plan(paged_kv_write.Caps(device=source.device,
-            num_kv_heads=self.kv_heads, head_dim_k=256, head_dim_v=256, page_size=page_size))
+            num_kv_heads=self.kv_heads, head_dim_k=256, head_dim_v=256, page_size=page_size,
+            kv_dtype=state.main_k_cache.dtype))
         self.write_kwargs = {"key": scratch.key, "value": scratch.projected_v.view(self.tokens, self.kv_heads, 256),
                              "k_cache": state.main_k_cache, "v_cache": state.main_v_cache,
-                             "slot_mapping": metadata.slot_mapping}
+                             "slot_mapping": metadata.slot_mapping,
+                             "k_scale": self.binding_kwargs["k_descale"],
+                             "v_scale": self.binding_kwargs["v_descale"]}
         declare(session, (self.writer.request(name=f"{name}.kv_write", prepare_call=lambda materialized:
             PreparedCall(run=lambda: materialized.run(**self.write_kwargs))),))
         concurrent = (not cache_only and self.tokens <= 16 and source.is_cuda and isinstance(workspace, ScratchArena)

@@ -26,6 +26,7 @@ from ignition.preparation.model import PreparedModel
 from ignition.preparation.rank_group import minimum_across_ranks
 from ignition.preparation.scratch import ScratchArena
 from ignition.preparation.tuning import RecordedPreparationSession
+from ignition.preparation.tuning_replicas import TuningReplica
 from ignition.progress import phase
 
 from ignition.components.paged_batch import BatchInputs, Metadata, PreparedBatch
@@ -47,6 +48,8 @@ _CONTEXT = partial(PreparedContext, compact_prefill=True)
 
 @dataclass(frozen=True)
 class PreparationConfig:
+    compile_workers: int | None = None
+    tuning_replica: TuningReplica | None = None
     devices: tuple[int, ...] = (0, 1, 2, 3)
     context: int = 1048576
     prefill_chunk_size: int = 4096
@@ -65,12 +68,15 @@ class PreparationConfig:
     speculative_token_capacity: int | None = None
     # Run single-row decode's shared expert on an auxiliary stream; without overlap it runs serially.
     stream_overlap: bool = True
+    expert_scale_compression: str | None = None
     # Separate proposal and verification graphs for native confidence-prefix scheduling.
     split_speculation: bool = False
     # Additional combined graphs for exact qualification; omit when measuring service memory.
     speculation_reference_graphs: bool = False
 
     def __post_init__(self):
+        if self.expert_scale_compression not in (None, "csf"):
+            raise ValueError("DeepSeek V4.1 expert scale compression must be None or 'csf'")
         if self.speculation_reference_graphs and not self.split_speculation:
             raise ValueError("speculation reference graphs require split speculation")
         if self.split_speculation and (not self.dspark or self.draft_tokens < 1):
@@ -133,7 +139,8 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
     transient = contextlib.ExitStack()
     transient.enter_context(package_storage.transient())
     weights = ModelWeights.load(manifest, device, shard=shard, progress=progress, dspark=config.dspark,
-                                confidence=config.split_speculation)
+                                confidence=config.split_speculation,
+                                expert_scale_compression=config.expert_scale_compression)
     release_unused()
     if progress is not None:
         progress(f"Resident model tensors: {weights.allocated_bytes / (1 << 30):.3f} GiB per rank")
@@ -176,7 +183,9 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         identity = hashlib.sha256(json.dumps({"config": json.loads((metadata_path / "config.json").read_text()),
             "headers": [s.header_sha256 for s in manifest.shards], "world_size": shard.world_size,
             "contract": "deepseek41.graph-inputs.v1"}, sort_keys=True).encode()).hexdigest()
-        session = RecordedPreparationSession(device=device, checkpoint=identity,
+        session = RecordedPreparationSession(
+            compile_workers=config.compile_workers, tuning_replica=config.tuning_replica,
+            device=device, checkpoint=identity,
             workload_schema="deepseek41-text", numerical_policy="default", coordinator=coordinator,
             headroom_bytes=config.headroom_bytes, benchmark_storage=package_storage)
         session.__enter__()
@@ -248,15 +257,10 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                     add(name, forward, mode, rows, capacity if mode == "prefill" else 1, forward_inputs, enabled=enabled)
         split = None
         if speculation is not None:
-            from ignition.components.parallel_draft import PreparedParallelDraftRound, prepare_sampling_scratch
+            from ignition.components.parallel_draft import PreparedParallelDraftRound
+            from ignition.preparation.scratch import GraphBufferPool
 
-            from ignition.preparation.scratch import bind_scratch
-
-            sampling_scratch = prepare_sampling_scratch(slots, max(config.speculative_widths), requests.vocab_size, device)
-            # Sequential graphs share scratch; retained proposals have request-owned storage.
-            round_storage = bind_scratch(
-                PreparedParallelDraftRound.storage_layout(slots, max(config.speculative_widths), requests.vocab_size),
-                device=device)
+            speculation.sampling_buffers = GraphBufferPool(device, chunk_bytes=2 << 20)
             if config.split_speculation:
                 from copy import copy
                 from ignition.components.capacity import proposal_shapes
@@ -268,27 +272,27 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                 split = PreparedProposalStorage(speculation, config.draft_tokens)
                 buffers.update(split.buffers())
                 proposals = {}
-                for batch, depth in proposal_shapes(config.max_active, config.draft_tokens):
+                for batch, depth in sorted(proposal_shapes(config.max_active, config.draft_tokens), reverse=True):
                     owner = copy(speculation)
                     owner.block_size = depth
                     name = f"proposal{batch}x{depth + 1}"
                     source = PreparedParallelDraftRound(owner, batch, depth + 1, name,
-                        sampling_scratch=sampling_scratch, round_storage=round_storage, proposal_only=True)
+                        buffers=speculation.sampling_buffers.cursor(), proposal_only=True)
                     source.prepare()
                     proposal = PreparedDraftProposal(source, confidence.device_view, split)
                     proposals[batch, depth] = proposal
                     add(name, proposal, "proposal", batch, depth + 1, forward_inputs, enabled=True)
-                for batch, width in config.speculative_shapes:
+                for batch, width in sorted(config.speculative_shapes, key=lambda shape: shape[0] * shape[1], reverse=True):
                     name = f"verification{batch}x{width}"
                     target = PreparedParallelDraftRound(speculation, batch, width, name,
-                        generate_proposals=False, sampling_scratch=sampling_scratch, round_storage=round_storage)
+                        generate_proposals=False, buffers=speculation.sampling_buffers.cursor())
                     target.prepare()
                     verification = PreparedDraftVerification(split, target)
                     add(name, verification, "verification", batch, width, forward_inputs, enabled=True)
                     if width == 1:
                         # No proposal is needed to decode while retaining draft context.
                         decode = PreparedParallelDraftRound(speculation, batch, 1, f"speculative{batch}x1",
-                            sampling_scratch=sampling_scratch, round_storage=round_storage)
+                            buffers=speculation.sampling_buffers.cursor())
                         decode.prepare()
                         add(f"speculative{batch}x1", decode, "speculative", batch, 1, forward_inputs, enabled=True)
                     if config.speculation_reference_graphs:
@@ -296,10 +300,10 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                             proposals[batch, config.draft_tokens], verification),
                             "speculative", batch, width, forward_inputs, enabled=True)
             else:
-                for batch, width in config.speculative_shapes:
+                for batch, width in sorted(config.speculative_shapes, key=lambda shape: shape[0] * shape[1], reverse=True):
                     name = f"speculative{batch}x{width}"
                     forward = PreparedParallelDraftRound(speculation, batch, width, name,
-                        sampling_scratch=sampling_scratch, round_storage=round_storage)
+                        buffers=speculation.sampling_buffers.cursor())
                     forward.prepare()
                     add(name, forward, "speculative", batch, width, forward_inputs, enabled=True)
         row_inputs = ("request_state_rows", "row_slot_ids", "row_generations", "live_rows")
@@ -358,6 +362,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
     memory = {"rank": rank, "world_size": shard.world_size, "device": config.devices[rank],
         "catalog_operand_bytes": catalog_bytes,
         "weights_bytes": weights.allocated_bytes, "mapped_host_bytes": 0,
+        "expert_scale_compression": config.expert_scale_compression,
         "offloaded_bytes": sum(source.nbytes for pair in tables.sources.values() for source in pair),
         "continuation_bytes": pool.backing.nbytes, "state_rows": state_rows,
         "preparation_state_rows": int(pool.memory_capacity[0].item()),
@@ -378,6 +383,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
     disposable = [prefill_storage, decoder_storage, arena.tensor, metadata, tables.buffers()]
     if speculation is not None:
         disposable.append(speculation.draft_scratch)
+        disposable.append(speculation.sampling_buffers.chunks)
     if split is not None:
         disposable.append(split.buffers())
     for forward in forwards.values():

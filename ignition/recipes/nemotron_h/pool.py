@@ -41,7 +41,7 @@ def continuation_layout(config):
         for index in range(config.draft.layers):
             for field in ("key", "value"):
                 regions.append((f"draft{index}.{field}",
-                    (draft["sliding_window"], draft["num_key_value_heads"], draft["head_dim"]), torch.bfloat16))
+                    (draft["sliding_window"], draft["num_key_value_heads"], draft["head_dim"]), torch.float8_e4m3fn))
     regions.extend((name, shape, torch.uint8) for name, shape in page_specs(config))
     regions.extend((("last_hidden", (config.hidden,), torch.bfloat16), ("consumed_tokens", (1,), torch.int64)))
     return StateLayout.from_specs(regions)

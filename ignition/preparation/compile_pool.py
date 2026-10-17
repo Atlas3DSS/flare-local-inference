@@ -10,7 +10,7 @@ import torch
 
 from . import host_memory
 from .compilation import _OPTIONS, _defer_full_collection
-from .host_memory import compile_threads, device_memory_info, worker_limit
+from .host_memory import compile_threads, cpu_workers, device_memory_info, worker_limit
 
 # Device memory one compiler worker can hold: its CUDA context plus Inductor's constant folding.
 _WORKER_DEVICE_BYTES = 2 << 30
@@ -38,7 +38,7 @@ def _compile_forward(payload, device, options, path, num_threads, grad_enabled):
 
 
 class CompilePool:
-    def __init__(self, device, *, headroom_bytes=0, pools=1, options=None):
+    def __init__(self, device, *, headroom_bytes=0, pools=1, options=None, compile_workers=None):
         """Size workers for `device`, beside `pools - 1` other ranks' pools compiling on this host."""
         self.device = torch.device(device)
         self.pool = None
@@ -47,11 +47,12 @@ class CompilePool:
             raise ValueError("headroom_bytes must be a nonnegative byte count")
         if type(pools) is not int or pools < 1:
             raise ValueError("pools must be a positive count")
-        # Ranks sharing this host share its compile threads.
-        budget = max(1, options['compile_threads'] // pools)
+        budget = cpu_workers(compile_workers, pools=pools)
         # Workers open contexts on the owning device; a nearly full device compiles with fewer of them.
         free = device_memory_info(self.device)[0]
         shared = torch.cuda.get_device_properties(self.device).is_integrated
+        if compile_workers is None:
+            budget = max(1, options['compile_threads'] // pools)
         if shared and os.name == "nt":
             free = min(free, host_memory.available_bytes())
         capacity = (free - headroom_bytes) // _WORKER_DEVICE_BYTES
@@ -59,14 +60,17 @@ class CompilePool:
             raise MemoryError("forward compilation requires memory for a CUDA worker beyond preparation headroom "
                               f"({free >> 20} MiB free, {headroom_bytes >> 20} MiB headroom, "
                               f"{_WORKER_DEVICE_BYTES >> 20} MiB per worker)")
-        self.workers = worker_limit(min(8, budget, capacity), pools=pools, available=free if shared else None,
+        limit = min(8, budget) if compile_workers is None else budget
+        self.workers = worker_limit(min(limit, capacity), pools=pools, available=free if shared else None,
                                    device_bytes=_WORKER_DEVICE_BYTES if shared else 0,
                                    headroom_bytes=headroom_bytes if shared else 0)
-        threads = max(1, budget // self.workers)
-        if shared:
-            # Each compile thread is an Inductor subprocess in the worker's shared memory.
-            threads = min(threads, compile_threads(threads, workers=pools * self.workers, available=free,
-                                                   device_bytes=_WORKER_DEVICE_BYTES, headroom_bytes=headroom_bytes))
+        # Each process compiles one forward; nested pools would multiply the host budget.
+        threads = 1
+        if compile_workers is None:
+            threads = max(1, budget // self.workers)
+            if shared:
+                threads = compile_threads(threads, workers=pools * self.workers, available=free,
+                    device_bytes=_WORKER_DEVICE_BYTES, headroom_bytes=headroom_bytes)
         self.options = dict(options, compile_threads=threads)
 
     def submit(self, forward, path):

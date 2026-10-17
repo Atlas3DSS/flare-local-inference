@@ -317,7 +317,7 @@ class GraphBufferPool:
 
     A rank replays one captured graph at a time, so a buffer that each launch writes
     before reading it need not outlive the launch. Every graph allocates through its
-    own `cursor()`: cursors walk the same chunks from the start, so different graphs
+    own `cursor()`: cursors fill available space in the same chunks, so different graphs
     share memory while one graph's buffers stay disjoint. Graphs constructed largest
     first leave later cursors within the chunks the first one created. Each dtype has
     its own chunks because compiled graphs cannot reinterpret aliased inputs across
@@ -361,11 +361,14 @@ class GraphBuffers:
         count = prod(shape)
         aligned = (count * dtype.itemsize + 255) // 256 * 256
         chunks = self.pool.chunks.setdefault(dtype, [])
-        index, offset = self.positions.get(dtype, (0, 0))
-        while index < len(chunks) and offset + aligned > chunks[index].nbytes:
-            index, offset = index + 1, 0
-        if index == len(chunks):
+        offsets = self.positions.setdefault(dtype, {})
+        for index, chunk in enumerate(chunks):
+            offset = offsets.get(index, 0)
+            if offset + aligned <= chunk.nbytes:
+                break
+        else:
+            index, offset = len(chunks), 0
             chunks.append(torch.empty(max(aligned, self.pool.chunk_bytes) // dtype.itemsize, dtype=dtype,
                                       device=self.pool.device))
-        self.positions[dtype] = index, offset + aligned
+        offsets[index] = offset + aligned
         return chunks[index].narrow(0, offset // dtype.itemsize, count).view(shape)

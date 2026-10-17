@@ -27,6 +27,7 @@ from ignition.preparation.host_memory import release_unused
 from ignition.preparation.model import PreparedModel
 from ignition.preparation.scratch import GraphBufferPool, ScratchArena
 from ignition.preparation.tuning import RecordedPreparationSession
+from ignition.preparation.tuning_replicas import TuningReplica
 from ignition.progress import phase
 
 from .config import PAGE_TOKENS
@@ -41,6 +42,8 @@ from ignition.components.vision_state import PrefillVisionInputs, VisionState
 
 @dataclass(frozen=True)
 class PreparationConfig:
+    compile_workers: int | None = None
+    tuning_replica: TuningReplica | None = None
     device: int = 0
     context: int = 262144
     prefill_chunk_size: int = 4096
@@ -122,7 +125,9 @@ def prepare(snapshot, config, *, progress=None, package_storage):
             "config": weights.config.text, "draft": weights.config.draft.text if drafting else None,
             "headers": [s.header_sha256 for s in manifest.shards],
             "contract": "nemotron-h.graph-inputs.v1"}, sort_keys=True).encode()).hexdigest()
-        session = RecordedPreparationSession(device=device, checkpoint=identity,
+        session = RecordedPreparationSession(
+            compile_workers=config.compile_workers, tuning_replica=config.tuning_replica,
+            device=device, checkpoint=identity,
             workload_schema="nemotron-h", numerical_policy="default", coordinator=coordinator,
             headroom_bytes=config.headroom_bytes, benchmark_storage=package_storage)
         session.__enter__()
@@ -162,10 +167,11 @@ def prepare(snapshot, config, *, progress=None, package_storage):
         for capacity in reversed(PATCH_CAPACITIES):
             name = f"vision{capacity}"
             with scratch_pool:
-                scratch = VisionScratch.allocate(capacity, device, buffers=graph_buffers.cursor())
+                cursor = graph_buffers.cursor()
+                scratch = VisionScratch.allocate(capacity, device, buffers=cursor)
             encoder = PreparedVision(weights.vision, scratch, vision_inputs,
-                                     session=session, workspace=arena, name=name)
-            forward = PreparedVisionGeneration(encoder, vision_state, records, frame, sequence)
+                                     session=session, workspace=arena, name=name, buffers=cursor)
+            forward = PreparedVisionGeneration(encoder, vision_state, records, frame, sequence, buffers=cursor)
             add(name, forward, "vision", 1, capacity, vision_inputs.buffers())
         for enabled in modes:
             mode_weights = weights if enabled else replace(weights, draft=None)
@@ -189,17 +195,13 @@ def prepare(snapshot, config, *, progress=None, package_storage):
                     add(name, forward, mode, rows, capacity if mode == "prefill" else 1,
                         (*inputs.buffers(), "sampling_grammar_mask", *(vision_prefill.buffers() if mode == "prefill" else ())), enabled=enabled)
         if speculation is not None:
-            from ignition.components.parallel_draft import PreparedParallelDraftRound, prepare_sampling_scratch
-            from ignition.preparation.scratch import bind_scratch
+            from ignition.components.parallel_draft import PreparedParallelDraftRound
 
             for batch, width in sorted(config.speculative_shapes, reverse=True):
                 name = f"speculative{batch}x{width}"
                 speculation.begin(batch, width)
-                sampling = prepare_sampling_scratch(batch, width, vocabulary, device, buffers=speculation.cursor)
-                retained = bind_scratch(PreparedParallelDraftRound.storage_layout(batch, width, vocabulary),
-                                       device=device, workspace=speculation.cursor)
                 forward = PreparedParallelDraftRound(speculation, batch, width, name,
-                    sampling_scratch=sampling, round_storage=retained)
+                                                     buffers=speculation.cursor)
                 forward.prepare()
                 add(name, forward, "speculative", batch, width, (*inputs.buffers(), "sampling_grammar_mask"), enabled=True)
         row_inputs = ("request_state_rows", "row_slot_ids", "row_generations", "live_rows")

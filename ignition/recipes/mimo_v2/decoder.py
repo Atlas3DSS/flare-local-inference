@@ -28,15 +28,16 @@ class Scratch:
     logits: torch.Tensor
 
     @classmethod
-    def allocate(cls, config, shard, tokens, samples, device):
+    def allocate(cls, config, shard, tokens, samples, device, *, buffers=None):
         c = config.text
         def zeros(rows, columns, dtype=torch.bfloat16):
-            return torch.zeros((rows, columns), dtype=dtype, device=device)
+            return (torch.zeros((rows, columns), dtype=dtype, device=device) if buffers is None
+                    else buffers.zeros((rows, columns), dtype))
         return cls(zeros(tokens, c["hidden_size"]), zeros(tokens, c["hidden_size"]),
-            AttentionScratch.allocate(config, shard, tokens, device, requests=samples),
-            MLPScratch.allocate(tokens, c["hidden_size"], c["intermediate_size"] // shard.world_size, device),
+            AttentionScratch.allocate(config, shard, tokens, device, requests=samples, buffers=buffers),
+            MLPScratch.allocate(tokens, c["hidden_size"], c["intermediate_size"] // shard.world_size, device, buffers=buffers),
             zeros(tokens, c["n_routed_experts"], torch.float32),
-            RouterScratch.allocate(tokens, device, experts=c["n_routed_experts"], top_k=c["num_experts_per_tok"]),
+            RouterScratch.allocate(tokens, device, experts=c["n_routed_experts"], top_k=c["num_experts_per_tok"], buffers=buffers),
             zeros(tokens, c["hidden_size"]), zeros(samples, c["hidden_size"]),
             zeros(samples, c["vocab_size"] // shard.world_size), zeros(samples, c["vocab_size"]))
 

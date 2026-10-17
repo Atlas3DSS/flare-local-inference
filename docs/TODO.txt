@@ -1,6 +1,22 @@
-[ ] Review scratch-memory lifetimes and sharing across Qwen, GLM, DeepSeek,
-    MiMo, and Kimi recipes.
+[ ] Review scratch-memory lifetimes and sharing across every supported recipe
+    and shared component, including Qwen, GLM, DeepSeek, MiMo, Kimi, Step, and
+    Nemotron.
     See performance-work.md#cross-model-scratch-planning for scope and checks.
+
+[ ] Add an explicit image-concurrency limit independent of total request
+    concurrency. Carry it through Ignition configuration, prepared feature
+    storage, and Helios admission/scheduling; bound image-feature slots and
+    preserve their lifetimes through prefill, cancellation, and preemption.
+
+[ ] Validate pooled vision and speculative scratch in complete exported packages
+    across Qwen, GLM, DeepSeek V4/V4.1, MiMo, Kimi, Step, and Nemotron. Measure
+    fixed memory and KV capacity with full catalogs and tensor parallelism;
+    exercise alternating text/image graphs, proposal/verification, and rollback.
+    See performance-work.md#cross-model-scratch-planning.
+
+[ ] Investigate Qwen vision's canonical-reference accuracy failure in
+    test_actual_vision_encoder_native_replay: relative L2 0.078 exceeds 0.03
+    with standalone scratch. Pooled and standalone native replay are exact.
 
 [ ] Check DeepSeek V4/V4.1 continuation-row requirements during speculation.
     parallel_draft.py consumes request_state_rows[:, 0], while their graph

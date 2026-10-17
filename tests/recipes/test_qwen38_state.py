@@ -26,7 +26,7 @@ CUDA = pytest.mark.skipif(
 
 def test_exact_hybrid_state_layout_and_snapshot_budget():
     layout = HybridStateLayout.build()
-    assert layout.row_bytes == 117291776
+    assert layout.row_bytes == 116505344
     assert layout.row_bytes % 256 == 0
     assert layout.snapshot_capacity(4 << 30) == 36
     assert len(layout.regions) == 161
@@ -48,7 +48,7 @@ def test_exact_hybrid_state_layout_and_snapshot_budget():
 
 def test_typed_views_share_exact_real_geometry_backing():
     pool = HybridStatePool.allocate(2, "cpu")
-    assert pool.backing.shape == (2, 117291776)
+    assert pool.backing.shape == (2, 116505344)
     assert pool.consumed_tokens.shape == (2, 1)
     assert pool.ple_history.shape == (2, 2)
     assert torch.count_nonzero(pool.backing[0]) == 0

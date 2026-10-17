@@ -523,10 +523,28 @@ fn flare_heliopause(module: &Bound<'_, PyModule>) -> PyResult<()> {
     #[cfg(all(feature = "server", feature = "qualification"))]
     module.add_class::<NativeServer>()?;
     module.add_function(wrap_pyfunction!(current_context, module)?)?;
+    module.add_function(wrap_pyfunction!(memory_inventory, module)?)?;
     module.add_function(wrap_pyfunction!(serve_tensor_parallel_rank, module)?)?;
     #[cfg(target_os = "linux")]
     module.add_function(wrap_pyfunction!(bind_parent_lifetime, module)?)?;
     Ok(())
+}
+
+/// Snapshot device-wide usage and the package allocator's physical mappings.
+///
+/// Call after preparation has materialized scratch. Imported peer mappings,
+/// dynamically backed caches, and allocations outside this allocator are not
+/// included in `mappings`. Device-wide usage includes other CUDA processes.
+#[pyfunction]
+fn memory_inventory(py: Python<'_>) -> PyResult<Bound<'_, pyo3::types::PyDict>> {
+    let inventory = crate::allocator::memory_inventory()
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    let result = pyo3::types::PyDict::new(py);
+    result.set_item("device", inventory.device)?;
+    result.set_item("free_bytes", inventory.free)?;
+    result.set_item("total_bytes", inventory.total)?;
+    result.set_item("mappings", inventory.mappings)?;
+    Ok(result)
 }
 
 #[cfg(test)]

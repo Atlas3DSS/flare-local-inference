@@ -293,7 +293,7 @@ impl Shared {
             let cancelled = Arc::new(AtomicBool::new(false));
             let stop = cancelled.clone();
             let worker = thread::Builder::new()
-                .name(format!("helios-{}", table.event))
+                .name(format!("flare-{}", table.event))
                 .spawn(move || {
                     while let Ok(job) = receiver.recv() {
                         // A single reader owns these bytes. Every rank completes the previous

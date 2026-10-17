@@ -424,11 +424,17 @@ class RuntimePackage:
                 serialized_graphs.append(write_graph(description, stage / f"graph-{index}.bin"))
                 del description
             modules = []
+            self.module_globals = []
             for index, (name, image) in enumerate(self.modules.items()):
                 from .module_images import global_symbols, strip_debug, strip_global_source
+                from .cubin import redact_symbols
 
                 file = f"module-{index}.cubin"
-                (stage / file).write_bytes(strip_debug(image))
+                exported, symbols = redact_symbols(strip_debug(image))
+                (stage / file).write_bytes(exported)
+                for function in functions:
+                    if function["module"] == name:
+                        function["symbol"] = symbols.get(function["symbol"], function["symbol"])
                 kernel = next(kernel for kernel in self.kernels.values() if kernel.module == name)
                 module = C.c_void_p()
                 cuda.call("cuFuncGetModule", C.byref(module), C.c_void_p(kernel.function))
@@ -436,12 +442,14 @@ class RuntimePackage:
                 for symbol in global_symbols(image):
                     address, size = C.c_uint64(), C.c_size_t()
                     cuda.call("cuModuleGetGlobal_v2", C.byref(address), C.byref(size), module, C.c_char_p(symbol.encode()))
+                    self.module_globals.append((address.value, size.value, f"{name}.{symbol}"))
                     data_file = f"module-{index}-global-{len(globals)}.bin"
                     data = strip_global_source(symbol, cuda.download(address.value, size.value))
                     if self.reachability is not None:
                         self.reachability.blob(data)
                     (stage / data_file).write_bytes(data)
-                    globals.append({"symbol": symbol, "file": data_file, "nbytes": size.value, "relocations": []})
+                    globals.append({"symbol": symbols.get(symbol, symbol), "file": data_file,
+                                    "nbytes": size.value, "relocations": []})
                 modules.append({"name": name, "file": file, "globals": globals})
             allocations = []
             selected = (self.allocations if self.reachability is None
@@ -853,4 +861,9 @@ def export_model(prepared, images, storage, path, *, options, progress=None, pub
     server = None if bundle_only else {**prepared.server_config, **options}
     package.write(path, prepared.graphs, execution=execution, server=server, progress=progress,
                   package_data=None if bundle_only else prepared.package_data, publisher=publisher)
+    from .memory_inventory import collect_inventory, print_inventory
+
+    package.memory_inventory = collect_inventory(prepared, storage, package, external=outside)
+    if publisher is not None:
+        print_inventory([package.memory_inventory], console=getattr(progress, "console", None))
     return package

@@ -11,6 +11,7 @@ import torch
 
 from ignition.preparation import inspect_qwen38_checkpoint
 from ignition.preparation.graphs import PreparedGraphBundle
+from ignition.preparation.scratch import GraphBufferPool
 from ignition.recipes.qwen38.vision import PreparedVision, VisionMetadata, VisionScratch, VisionWeights
 from ignition.recipes.qwen38.weights import QwenWeightLoader
 from ignition.reference.qwen38_quant import (
@@ -167,3 +168,68 @@ def test_actual_vision_encoder_native_replay(manifest, record_property):
         finally:
             worker.close()
         record_property("numerical_errors", json.dumps(errors))
+
+
+@CUDA
+@pytest.mark.parametrize("capacity", [256, 16384])
+@torch.no_grad()
+def test_pooled_vision_native_replay_matches_unpooled_after_poisoning(manifest, capacity):
+    from b12x.preparation import PreparationSession
+    from transformers.vision_utils import get_vision_position_ids, get_vision_interpolation_indices_and_weights
+
+    assert os.environ.get("CUDA_VISIBLE_DEVICES")
+    device = torch.device("cuda", 0)
+    torch.cuda.set_device(device)
+    modules = [_module(manifest), _module(manifest)]
+    with QwenWeightLoader(manifest, device, prefixes=("model.visual.",)) as loader:
+        weights = VisionWeights.load(modules[0], loader)
+    pool = GraphBufferPool(device, chunk_bytes=2 << 20)
+    cursor = pool.cursor()
+    scratch = [VisionScratch.allocate(capacity, device), VisionScratch.allocate(capacity, device, buffers=cursor)]
+    metadata = [VisionMetadata.allocate(capacity, 1, device),
+                VisionMetadata.allocate(capacity, 1, device, buffers=cursor)]
+    pixels = torch.zeros((capacity, 1536), dtype=torch.float32, device=device)
+    side = int(capacity ** .5)
+    grid = torch.tensor([[1, side, side]], device=device)
+    indices, factors = get_vision_interpolation_indices_and_weights(
+        grid, num_grid_per_side=48, mode="bilinear", align_corners=True, spatial_merge_size=2)
+    positions = get_vision_position_ids(grid, 2)
+    with PreparationSession(device=device, autotune=False, compile_workers=0) as session:
+        prepared = [PreparedVision(module, s, m, weights, session=session, name=f"vision{i}")
+                    for i, (module, s, m) in enumerate(zip(modules, scratch, metadata, strict=True))]
+        session.freeze()
+        stream = torch.cuda.Stream(device=device)
+        stream.wait_stream(torch.cuda.current_stream(device))
+        graphs = {}
+        for index, forward in enumerate(prepared):
+            with torch.cuda.stream(stream):
+                forward(pixels)
+            stream.synchronize()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, stream=stream):
+                forward(pixels)
+            graphs[str(index)] = graph
+        worker = PreparedGraphBundle(device=0, graphs=graphs, buffers={"pixels": pixels},
+            resources=(*prepared, weights, session, stream, pool)).start_worker()
+        try:
+            for seed in (31, 72):
+                pixels.normal_(generator=torch.Generator(device=device).manual_seed(seed))
+                for chunks in pool.chunks.values():
+                    for chunk in chunks:
+                        chunk.fill_(float("nan") if chunk.is_floating_point() else -37)
+                for m in metadata:
+                    m.interpolation_indices.copy_(indices)
+                    m.interpolation_weights.copy_(factors)
+                    m.position_ids.copy_(positions)
+                    m.cu_seqlens.copy_(torch.tensor([0, capacity], dtype=torch.int32, device=device))
+                    m.num_patches.fill_(capacity)
+                torch.cuda.synchronize(device)
+                allocations = torch.cuda.memory_stats(device)["allocation.all.allocated"]
+                for index in (0, 1):
+                    ticket = worker.submit(index)
+                    result = worker.poll(timeout_ms=30000)
+                    assert result is not None and result.ticket == ticket and result.error is None
+                assert torch.cuda.memory_stats(device)["allocation.all.allocated"] == allocations
+                torch.testing.assert_close(scratch[1].output, scratch[0].output, rtol=0, atol=0)
+        finally:
+            worker.close()

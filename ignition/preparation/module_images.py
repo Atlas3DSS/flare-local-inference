@@ -69,7 +69,7 @@ def strip_debug(image):
     debug = set()
     for i, section in enumerate(sections):
         name = strings[section[0]:strings.index(b"\0", section[0])]
-        if b".debug" in name or b".nv_debug" in name:
+        if b".debug" in name or b".zdebug" in name or b".nv_debug" in name or name == b".comment":
             debug.add(i)
     result = bytearray(image)
     for i in debug:

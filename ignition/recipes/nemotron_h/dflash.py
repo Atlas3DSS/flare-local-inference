@@ -97,7 +97,8 @@ class DraftAttention:
         self.rotary = Rotary(config, source.device)
         self.history = tuple(pool.reserved_region(f"draft{index}.{field}") for field in ("key", "value"))
         rows, pages = metadata.lengths.numel(), (self.window + config.block_size + PAGE_TOKENS - 1) // PAGE_TOKENS
-        self.staged = tuple(buffers.zeros((rows * pages, PAGE_TOKENS, kh, dim), torch.bfloat16) for _ in range(2))
+        self.staged = tuple(buffers.zeros((rows * pages, PAGE_TOKENS, kh, dim), history.dtype)
+                            for history in self.history)
         self.pages = torch.arange(rows * pages, device=source.device, dtype=torch.int32).view(rows, pages)
         self.lengths = buffers.zeros((rows,), torch.int32)
         self.attention = PreparedPagedAttention(self.query, *self.staged, self.pages, self.lengths,

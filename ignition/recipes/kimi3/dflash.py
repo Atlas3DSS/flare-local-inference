@@ -132,7 +132,7 @@ class DraftAttention:
         self.block = config.block_size
         # The context cache ends before the block. Right-aligned window bounds
         # therefore subtract the block width from the model's left window.
-        caps = dense_mla.Caps(device=source.device, mode="decode", kv_dtype=torch.bfloat16,
+        caps = dense_mla.Caps(device=source.device, mode="decode", kv_dtype=cache.dtype, q_dtype=self.absorbed.dtype,
             num_q_heads=heads, page_size=PAGE_TOKENS, max_total_q=tokens, max_batch=metadata.lengths.numel(),
             max_cache_tokens=metadata.page_table.shape[1] * PAGE_TOKENS,
             max_page_table_width=metadata.page_table.shape[1], num_cache_pages=cache.shape[0],
