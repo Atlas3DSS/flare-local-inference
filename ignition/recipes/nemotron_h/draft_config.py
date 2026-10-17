@@ -6,7 +6,6 @@ from pathlib import Path
 
 REPOSITORY = "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr"
 REVISION = "abd478065678ee83a93821c4b3f512da24e4cecb"
-CHECKPOINT = Path("/data/models/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr")
 
 
 @dataclass(frozen=True)

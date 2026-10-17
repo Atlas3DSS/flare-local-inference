@@ -15,9 +15,9 @@ def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress, retain_
     drafting = {}
     if plan.speculation is not None:
         from huggingface_hub import snapshot_download
-        from .draft_config import CHECKPOINT, REPOSITORY, REVISION
+        from .draft_config import REPOSITORY, REVISION
 
-        draft = snapshot_download(REPOSITORY, revision=REVISION, local_dir=CHECKPOINT,
+        draft = snapshot_download(REPOSITORY, revision=REVISION, cache_dir=plan.hub_cache,
                                   allow_patterns=("config.json", "model.safetensors"))
         drafting = dict(draft_checkpoint=draft, speculative_widths=plan.speculation.widths,
             speculative_fixed_width=plan.speculation.fixed_width, speculative_token_capacity=plan.speculative_token_capacity)

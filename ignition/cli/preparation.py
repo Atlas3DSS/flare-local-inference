@@ -52,7 +52,7 @@ def derive(configuration: Configuration, model: ResolvedModel, host: Host, *, gp
         prefill_chunk=prefill_chunk, context_parallel=context_parallel, stream_overlap=stream_overlap, roce_ring=roce_ring,
         mixed_prefill=mixed_prefill, expert_scale_compression=expert_scale_compression,
         image_concurrency=image_capacity_setting(configuration, model, image_concurrency))
-    result = replace(result, compile_workers=workers)
+    result = replace(result, compile_workers=workers, hub_cache=configuration.directory("hub_cache"))
     return tuning_devices(result, host, tuning_gpus)
 
 

@@ -48,9 +48,9 @@ The JPEG decoder builds its bundled libjpeg-turbo source. Preparation requires
 the CUDA toolkit, including `nvcc` and CUPTI; configure `[paths] cuda` when it
 is not supplied by the Python environment.
 
-The preparation dependency tracks the `main` branch of `local-inference-lab/flashinfer`
-in `pyproject.toml`; `uv.lock` records the resolved commit. To refresh it, run
-`uv lock --upgrade-package flashinfer-python`, then sync the environment.
+The preparation dependency pins a Git revision of `local-inference-lab/flashinfer`
+in `pyproject.toml`; `uv.lock` records the same commit. To change it, update the
+revision, run `uv lock --upgrade-package flashinfer-python`, then sync the environment.
 For local FlashInfer development, install the sibling
 checkout explicitly with `uv pip install --python .venv/bin/python --no-deps -e ../flashinfer`;
 `uv sync --locked --extra prepare --extra test` restores the Git dependency.
@@ -107,7 +107,8 @@ Compilation is enabled by default; `--no-compile` is for development.
 The recipe includes the C-RADIO image encoder and accepts up to four still
 images per request. Video is not prepared. LiLiCorr uses the matching
 `NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr` checkpoint and defaults to
-seven draft tokens with adaptive verification.
+seven draft tokens with adaptive verification. Both checkpoints use the standard
+Hugging Face hub cache (`~/.cache/huggingface/hub`), or `[paths].hub_cache` when configured.
 
 ```sh
 .venv/bin/python -m ignition export nemotron-bolt-24gb --gpus 0 \
@@ -368,8 +369,8 @@ with compressed scales, BF16 projections, and FP32 KDA recurrent state.
 Its 93-layer decoder combines KDA, unrotated latent attention, attention
 residuals, and latent SiTU experts. DFlash2 uses
 `lightseekorg/kimi-k3-dflash2` revision
-`e77935fb4804e17eb55085bffd045eae1d779769`, downloaded to
-`/data/models/Kimi-K3-DFlash2`, and defaults to seven draft tokens per round.
+`e77935fb4804e17eb55085bffd045eae1d779769`, downloaded to the Hugging Face hub
+cache (or `[paths].hub_cache`), and defaults to seven draft tokens per round.
 
 ```sh
 .venv/bin/python -m ignition export /data/models/Kimi-K3-MXFP4-CSF --gpus 0-15 \

@@ -177,6 +177,7 @@ class Plan:
     expert_scale_compression: str | None = None
     roce_ring: bool = False
     compile_workers: int | None = None
+    hub_cache: Path | None = None
     tuning_gpus: tuple[Gpu, ...] = ()
     tuning_replica: TuningReplica | None = None
     image_concurrency: int = 0

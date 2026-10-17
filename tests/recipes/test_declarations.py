@@ -65,9 +65,10 @@ def test_fp8_cache_views_and_planned_bytes(alias, world_size, drafting):
     config = import_module(prefix + ".config").ModelConfig.load(snapshot)
     if drafting and model.recipe.name in ("kimi3", "nemotron_h"):
         draft = import_module(prefix + ".draft_config")
-        if not (Path(draft.CHECKPOINT) / "config.json").is_file():
+        draft_snapshot = HUB / f"models--{draft.REPOSITORY.replace('/', '--')}" / "snapshots" / draft.REVISION
+        if not (draft_snapshot / "config.json").is_file():
             pytest.skip("draft checkpoint metadata is not installed")
-        config = replace(config, draft=draft.DraftConfig.load(draft.CHECKPOINT, config))
+        config = replace(config, draft=draft.DraftConfig.load(draft_snapshot, config))
     module = import_module(prefix + ".pool")
     if model.recipe.name == "mimo_v2":
         shard = TensorParallelShard(0, world_size)
