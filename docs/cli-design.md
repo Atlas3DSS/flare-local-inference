@@ -507,6 +507,7 @@ max_concurrency = 2
 hub_cache = "~/.cache/huggingface/hub"
 kernel_cache = "~/.cache/flare/kernels"
 package_cache = "~/.cache/flare/packages"
+export_staging = ""               # Rank files an export assembles from; empty: beside the package.
 cuda = "/opt/cuda"                # Used when installed packages provide no toolkit.
 ```
 

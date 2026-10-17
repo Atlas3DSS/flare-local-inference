@@ -85,7 +85,7 @@ def _peer(parent, snapshot, config, rank, rendezvous, connection, control, prepa
             storage.peer_storage.reset()
             torch.cuda.synchronize()
             dist.barrier()
-            package = export_model(model, recorder, storage, path, options=options)
+            package = export_model(model, recorder, storage, path, options=options, sources=True)
             control.send({"peer_memory": list(storage.peer_storage.owned.items()),
                           "memory_inventory": package.memory_inventory})
             command = control.recv()

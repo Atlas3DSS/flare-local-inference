@@ -1,5 +1,6 @@
 """Publisher authentication and consent-bound executable resource encryption."""
 
+from bisect import bisect_right
 from dataclasses import dataclass
 import hashlib
 import os
@@ -117,6 +118,41 @@ def resource_roles(index):
     return resources
 
 
+def _read_at(contents, position, length, error):
+    block = os.pread(contents.fileno(), length, position)
+    if len(block) != length:
+        raise ValueError(error)
+    return block
+
+
+def _encrypt(cipher, package_id, offset, source, source_offset, size, encrypted):
+    """Encrypt a resource chunk by chunk into `encrypted`; returns each ciphertext chunk's SHA-256.
+
+    Sources are read by position, so jobs sharing an open source (a package being re-signed) do not race.
+    """
+    from .package_file import _open_source
+
+    digests = []
+    with _open_source(source) as contents, encrypted.open('xb') as output:
+        for counter, start in enumerate(range(0, size, CHUNK)):
+            block = _read_at(contents, source_offset + start, min(CHUNK, size - start), 'truncated executable resource')
+            ciphertext = cipher.encrypt(counter.to_bytes(12, 'big'), block, chunk_aad(package_id, offset, size, counter))
+            digests.append(hashlib.sha256(ciphertext).digest())
+            output.write(ciphertext)
+    return digests
+
+
+def _digest(source, source_offset, size):
+    from .package_file import _open_source
+
+    digest = hashlib.sha256()
+    with _open_source(source) as contents:
+        for start in range(0, size, CHUNK):
+            digest.update(_read_at(contents, source_offset + start, min(CHUNK, size - start),
+                                   'truncated supporting resource'))
+    return [digest.digest()]
+
+
 class Protection:
     """Transform a final rank assembly and build its signed envelope.
 
@@ -126,7 +162,8 @@ class Protection:
     """
 
     def __init__(self, index, payload, publisher, stage, *, expected_stored=None):
-        from .package_file import _open_source, align
+        from concurrent.futures import ThreadPoolExecutor
+        from .package_file import COPY_THREADS, align
         self.publisher = publisher
         self.expected_stored = expected_stored
         self.package_id = os.urandom(32)
@@ -137,65 +174,67 @@ class Protection:
         self.support = {owner: proto.ResourceCatalog() for owner in parts}
         roles = resource_roles(index)
         by_offset = {span.offset: (kind, owner, span) for kind, owner, span in roles}
-        if set(by_offset) != {entry[0] for entry in payload}:
-            raise ValueError('publication ranges differ from classified resources')
+        # Stored data may arrive as adjacent ranges of several files, such as a table read from
+        # several checkpoint shards; every other resource is one range.
+        starts = sorted(by_offset)
+        ranges = {offset: [] for offset in starts}
+        for entry in sorted(payload, key=lambda entry: entry[0]):
+            ranges[starts[max(bisect_right(starts, entry[0]) - 1, 0)]].append(entry)
+        for offset, entries in ranges.items():
+            kind, _, span = by_offset[offset]
+            ends = [destination + size for destination, _, _, size in entries]
+            if [entry[0] for entry in entries] != [offset, *ends[:-1]] or kind != 4 and len(entries) != 1:
+                raise ValueError('publication ranges differ from classified resources')
+            if ends[-1] - offset != span.nbytes:
+                raise ValueError('resource length differs from publication range')
 
-        def order(entry):
-            kind, owner, _ = by_offset[entry[0]]
-            return (kind != 4, parts.index(owner) if kind == 4 else 0, entry[0])
+        def order(offset):
+            kind, owner, _ = by_offset[offset]
+            return (kind != 4, parts.index(owner) if kind == 4 else 0, offset)
 
         self.payload = []
         cursor = 0
         data_end = 0
         firsts = {}
+        # Executables encrypt and supporting resources hash on several threads once laid out.
+        jobs = []
         # Stored data precedes execution and frontend resources, each part's contiguous.
-        for destination, source, source_offset, size in sorted(payload, key=order):
-            kind, owner, span = by_offset[destination]
-            if size != span.nbytes:
-                raise ValueError('resource length differs from publication range')
+        for offset in sorted(ranges, key=order):
+            kind, owner, span = by_offset[offset]
+            entries = ranges[offset]
             cursor = align(cursor)
             span.offset = cursor
             if kind == 4:
                 firsts.setdefault(owner, cursor)
+            else:
+                ((_, source, source_offset, size),) = entries
             if kind == 2:
                 encrypted = Path(stage) / f'executable-{cursor}'
                 resource = self.code[owner].resources.add(offset=cursor, plain_bytes=size)
                 cipher = AESGCM(resource_key(publisher.public_key, self.package_id, cursor, publisher.namespace))
-                with _open_source(source) as contents, encrypted.open('xb') as output:
-                    contents.seek(source_offset)
-                    remaining = size
-                    counter = 0
-                    while remaining:
-                        block = contents.read(min(CHUNK, remaining))
-                        if len(block) != min(CHUNK, remaining):
-                            raise ValueError('truncated executable resource')
-                        ciphertext = cipher.encrypt(counter.to_bytes(12, 'big'), block,
-                            chunk_aad(self.package_id, cursor, size, counter))
-                        resource.sha256.append(hashlib.sha256(ciphertext).digest())
-                        output.write(ciphertext)
-                        counter += 1
-                        remaining -= len(block)
-                size = encrypted.stat().st_size
+                jobs.append((resource, encrypted, _encrypt, (cipher, self.package_id, cursor, source, source_offset,
+                                                             size, encrypted)))
+                # Each chunk's ciphertext carries a 16-byte tag.
+                size += 16 * -(-size // CHUNK)
                 resource.stored_bytes = size
-                source, source_offset = encrypted, 0
+                entries = [(offset, encrypted, 0, size)]
                 span.nbytes = size
             elif kind == 3:
-                digest = hashlib.sha256()
-                with _open_source(source) as contents:
-                    contents.seek(source_offset)
-                    remaining = size
-                    while remaining:
-                        block = contents.read(min(CHUNK, remaining))
-                        if not block:
-                            raise ValueError('truncated supporting resource')
-                        digest.update(block)
-                        remaining -= len(block)
-                self.support[owner].resources.add(offset=cursor, plain_bytes=size,
-                                                  stored_bytes=size, sha256=[digest.digest()])
-            self.payload.append((cursor, source, source_offset, size))
-            cursor += size
+                resource = self.support[owner].resources.add(offset=cursor, plain_bytes=size, stored_bytes=size)
+                jobs.append((resource, None, _digest, (source, source_offset, size)))
+            for _, source, source_offset, size in entries:
+                self.payload.append((cursor, source, source_offset, size))
+                cursor += size
             if kind == 4:
                 data_end = cursor
+        if jobs:
+            with ThreadPoolExecutor(COPY_THREADS) as pool:
+                futures = [(resource, encrypted, pool.submit(work, *arguments))
+                           for resource, encrypted, work, arguments in jobs]
+                for resource, encrypted, future in futures:
+                    resource.sha256.extend(future.result())
+                    if encrypted is not None and encrypted.stat().st_size != resource.stored_bytes:
+                        raise ValueError('encrypted executable size differs from its layout')
         # Include alignment padding up to the first non-data resource.
         self.data_end = min((s.offset for k, _, s in roles if k != 4), default=data_end)
         # Each part's stored data runs from its first byte to the next part's, or the end of stored data.
@@ -207,13 +246,6 @@ class Protection:
         if expected_stored is not None and (set(expected_stored) != set(self.ranges)
                 or any(self.ranges[owner] != (data.offset, data.nbytes) for owner, data in expected_stored.items())):
             raise ValueError('re-signing must preserve the signed stored-data ranges')
-
-    def absorb(self, position, block):
-        """Hash payload bytes written at `position`, in order, into the stored-data part holding them."""
-        for owner, (start, nbytes) in self.ranges.items():
-            low, high = max(start, position), min(start + nbytes, position + len(block))
-            if low < high:
-                self.hashes[owner].update(block[low - position:high - position])
 
     def envelope(self, final=False):
         """The signed envelope; before every payload byte is absorbed, one of the same size."""

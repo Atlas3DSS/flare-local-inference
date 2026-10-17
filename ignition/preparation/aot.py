@@ -400,6 +400,8 @@ def _completed(pending):
 
 # Command-line, planning, display, and diagnostic direct-execution sources do not change compiled forwards.
 _COMMAND_SOURCES = ('cli', 'direct', 'errors.py', 'planning.py', 'progress.py')
+# Nor does writing and signing the package file after preparation.
+_PUBLICATION_SOURCES = ('preparation/model_package.py', 'preparation/package_file.py', 'preparation/protection.py')
 
 
 def _variant_compilers(selections):
@@ -474,7 +476,8 @@ class ForwardCache:
         for source in (Path(__file__).resolve().parents[1], Path(flashinfer.__file__).resolve().parent):
             for path in sorted(source.rglob('*.py')):
                 if source.name == 'ignition' and (path.name == '__main__.py'
-                                               or path.relative_to(source).parts[0] in _COMMAND_SOURCES):
+                                               or path.relative_to(source).parts[0] in _COMMAND_SOURCES
+                                               or path.relative_to(source).as_posix() in _PUBLICATION_SOURCES):
                     continue
                 key.update(str(path.relative_to(source)).encode())
                 key.update(path.read_bytes())

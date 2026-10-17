@@ -1,5 +1,6 @@
 """Safetensors containers with an opaque payload and an authoritative protobuf index."""
 
+import base64
 import json
 from contextlib import nullcontext
 import os
@@ -14,6 +15,10 @@ from . import runtime_package_pb2 as proto
 ALIGNMENT = 4096
 MAX_HEADER_BYTES = 64 << 10
 MAX_INDEX_BYTES = 128 << 20
+# Payload copies run on several threads; hashlib and positional reads and writes release the GIL.
+COPY_BLOCK = 16 << 20
+COPY_THREADS = 16
+_ZEROS = bytes(4 << 20)
 
 
 def _open_source(source):
@@ -143,28 +148,8 @@ def _publish(path, index, payload, protection=None):
     try:
         with os.fdopen(descriptor, "wb") as output:
             output.write(struct.pack("<Q", len(header)) + header)
-            written = 0
-            zeros = bytes(4 << 20)
-            for destination, source, offset, size in payload:
-                if protection is not None:
-                    # Stored-data hashes cover the zero padding between ranges.
-                    while written < min(destination, protection.data_end):
-                        block = zeros[:min(destination, protection.data_end) - written]
-                        protection.absorb(written, block)
-                        written += len(block)
-                output.seek(data_start + destination)
-                with _open_source(source) as contents:
-                    contents.seek(offset)
-                    remaining = size
-                    while remaining:
-                        block = contents.read(min(remaining, 4 << 20))
-                        if not block:
-                            raise ValueError(f"truncated package resource: {source}")
-                        output.write(block)
-                        if protection is not None:
-                            protection.absorb(destination + size - remaining, block)
-                        remaining -= len(block)
-                written = destination + size
+            output.flush()
+            _copy_payload(output.fileno(), data_start, payload, protection)
             if protection is not None:
                 signed = protection.envelope(final=True)
                 if len(signed) != len(encoded):
@@ -179,19 +164,157 @@ def _publish(path, index, payload, protection=None):
         Path(temporary).unlink(missing_ok=True)
 
 
+def _write_all(fd, data, position):
+    view = memoryview(data)
+    while view:
+        written = os.pwrite(fd, view, position)
+        view, position = view[written:], position + written
+
+
+def _absorb_zeros(digest, count):
+    while count > 0:
+        block = _ZEROS[:min(count, len(_ZEROS))]
+        digest.update(block)
+        count -= len(block)
+
+
+def _copy_payload(fd, data_start, payload, protection):
+    """Copy every payload range into `fd` at `data_start` onward, in parallel.
+
+    Each part's stored data is contiguous and hashed in order, padding included, so parts hash on
+    separate threads; ranges outside stored data copy as independent jobs.
+    """
+    from bisect import bisect_right
+    from concurrent.futures import ThreadPoolExecutor
+
+    parts, starts = {}, []
+    if protection is not None:
+        starts = sorted((start, owner) for owner, (start, nbytes) in protection.ranges.items() if nbytes)
+    positions = [start for start, _ in starts]
+    jobs = []
+    for entry in payload:
+        destination = entry[0]
+        index = bisect_right(positions, destination) - 1
+        if protection is not None and destination < protection.data_end and index >= 0:
+            # What every rank shares is the part owned by None.
+            owner = starts[index][1]
+            if owner not in parts:
+                parts[owner] = []
+                jobs.append((protection.hashes[owner], protection.ranges[owner], parts[owner]))
+            parts[owner].append(entry)
+        else:
+            jobs.append((None, None, [entry]))
+
+    def copy(digest, stored, entries):
+        if digest is not None:
+            cursor, nbytes = stored
+            end = cursor + nbytes
+        for destination, source, offset, size in entries:
+            if digest is not None:
+                # Stored-data hashes cover the zero padding between ranges.
+                _absorb_zeros(digest, destination - cursor)
+            # Open sources (a signed package being re-signed) are read by position, so threads share them.
+            with _open_source(source) as contents:
+                copied = 0
+                while copied < size:
+                    length = min(COPY_BLOCK, size - copied)
+                    block = os.pread(contents.fileno(), length, offset + copied)
+                    if len(block) != length:
+                        raise ValueError(f"truncated package resource: {source}")
+                    _write_all(fd, block, data_start + destination + copied)
+                    if digest is not None:
+                        digest.update(block)
+                    copied += length
+            if digest is not None:
+                cursor = destination + size
+        if digest is not None:
+            _absorb_zeros(digest, end - cursor)
+
+    if not jobs:
+        return
+    with ThreadPoolExecutor(min(COPY_THREADS, len(jobs))) as pool:
+        for future in [pool.submit(copy, *job) for job in jobs]:
+            future.result()
+
+
+def write_sources(path, index, payload):
+    """Record a rank export as its index and the files holding each payload range, without copying.
+
+    `combine` reads the ranges from those files, which must remain until it returns.
+    """
+    payload = [(destination, str(source), offset, size) for destination, source, offset, size in payload]
+    length = 0
+    for destination, _, offset, size in payload:
+        if destination < length or offset < 0 or size < 0:
+            raise ValueError("package payload ranges must be ordered and disjoint")
+        length = destination + size
+    _validate_spans(index, length)
+    document = {"index": base64.b64encode(index.SerializeToString(deterministic=True)).decode(), "payload": payload}
+    with Path(path).open("x") as output:
+        json.dump(document, output, separators=(",", ":"))
+
+
+def read_sources(path):
+    """Read a rank export recorded by `write_sources`.
+
+    Returns its index and a function mapping a span to the files and offsets holding its bytes:
+    one piece per recorded range it covers, such as a table assembled from several checkpoint
+    shards. The ranges a span covers must be adjacent.
+    """
+    from bisect import bisect_right
+
+    document = json.loads(Path(path).read_text(), object_pairs_hook=_unique_fields)
+    if set(document) != {"index", "payload"}:
+        raise ValueError("invalid rank export sources")
+    index = proto.ModelIndex.FromString(base64.b64decode(document["index"], validate=True))
+    payload, length = [], 0
+    for destination, source, offset, size in document["payload"]:
+        if destination < length or offset < 0 or size < 0:
+            raise ValueError("package payload ranges must be ordered and disjoint")
+        if size:
+            payload.append((destination, Path(source), offset, size))
+        length = destination + size
+    _validate_spans(index, length)
+    starts = [entry[0] for entry in payload]
+
+    def locate(span):
+        position = bisect_right(starts, span.offset) - 1
+        if not span.nbytes:
+            # An empty span keeps a zero-size piece of the range it starts in, so it stays addressable.
+            if position < 0 or span.offset > sum(payload[position][::3]):
+                raise ValueError("rank export resource lies outside its recorded sources")
+            destination, source, offset, _ = payload[position]
+            return ((source, offset + span.offset - destination, 0),)
+        pieces, cursor, end = [], span.offset, span.offset + span.nbytes
+        while cursor < end:
+            if not 0 <= position < len(payload) or not payload[position][0] <= cursor < sum(payload[position][::3]):
+                raise ValueError("rank export resource lies outside its recorded sources")
+            destination, source, offset, size = payload[position]
+            nbytes = min(end, destination + size) - cursor
+            pieces.append((source, offset + cursor - destination, nbytes))
+            cursor, position = cursor + nbytes, position + 1
+        return tuple(pieces)
+
+    return index, locate
+
+
 def combine(path, ranks, peer_memory, *, publisher=None):
-    """Place every rank's tensor storage before execution resources and the index."""
+    """Place every rank's tensor storage before execution resources and the index.
+
+    `ranks` names each rank's export recorded by `write_sources`; ranges copy directly from the
+    files it names.
+    """
     result = proto.ModelIndex(version=4, peer_memory=peer_memory)
     storage, execution = [], []
-    for rank, source in enumerate(ranks):
-        index, start = read_index(source)
+    for rank, recorded in enumerate(ranks):
+        index, source = read_sources(recorded)
         if len(index.ranks) != 1:
             raise ValueError("rank export must contain one resource bundle")
         bundle = result.ranks.add()
         bundle.CopyFrom(index.ranks[0])
         stored = {allocation.file for allocation in bundle.allocations if allocation.HasField("file")}
         for name, span in sorted(bundle.resources.items()):
-            (storage if name in stored else execution).append((span, source, start + span.offset))
+            (storage if name in stored else execution).append((span, source(span)))
         if rank == 0:
             result.contract.CopyFrom(index.contract)
             if index.HasField("sampling_defaults"):
@@ -202,19 +325,20 @@ def combine(path, ranks, peer_memory, *, publisher=None):
                 result.engram.CopyFrom(index.engram)
                 for table in result.engram.tables:
                     for span in (table.weights, table.scales):
-                        storage.append((span, source, start + span.offset))
+                        storage.append((span, source(span)))
             for asset in index.assets:
                 copied = result.assets.add()
                 copied.CopyFrom(asset)
-                execution.append((copied.payload, source, start + copied.payload.offset))
+                execution.append((copied.payload, source(copied.payload)))
         elif index.HasField("engram"):
             raise ValueError("offloaded Engram tables must be stored once on rank zero")
     payload, cursor = [], 0
-    for span, source, offset in chain(storage, execution):
+    for span, pieces in chain(storage, execution):
         cursor = align(cursor)
         span.offset = cursor
-        payload.append((cursor, source, offset, span.nbytes))
-        cursor += span.nbytes
+        for source, offset, nbytes in pieces:
+            payload.append((cursor, source, offset, nbytes))
+            cursor += nbytes
     publish(path, result, payload, publisher=publisher)
 
 

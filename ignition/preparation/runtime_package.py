@@ -232,13 +232,20 @@ def _write_allocation(cuda, allocation, path, *, visit=None):
                 indices = np.flatnonzero(occupied).tolist()
                 if full < size and any(data[full:]):
                     indices.append(full // block)
+                # Consecutive nonzero blocks write as one range.
+                runs = []
                 for index in indices:
-                    begin, length = offset + index * block, min(block, size - index * block)
-                    output.write(memoryview(data)[index * block:index * block + length])
-                    if stored and stored[-1][0] + stored[-1][1] == begin:
-                        stored[-1][1] += length
+                    if runs and runs[-1][1] == index:
+                        runs[-1][1] = index + 1
                     else:
-                        stored.append([begin, length])
+                        runs.append([index, index + 1])
+                for first, last in runs:
+                    begin, end = first * block, min(last * block, size)
+                    output.write(memoryview(data)[begin:end])
+                    if stored and stored[-1][0] + stored[-1][1] == offset + begin:
+                        stored[-1][1] += end - begin
+                    else:
+                        stored.append([offset + begin, end - begin])
         _write_back(output)
     if not stored:
         path.unlink()
@@ -363,11 +370,18 @@ class RuntimePackage:
                 if C.string_at(aligned, 128) != original:
                     raise ValueError(f"tensor-map binding does not match {relocation.target}")
 
-    def write(self, path, graphs, *, execution=None, server=None, progress=None, package_data=None, publisher=None):
-        """Synchronize and publish an indexed model file without overwriting."""
+    def write(self, path, graphs, *, execution=None, server=None, progress=None, package_data=None, publisher=None,
+              sources=False):
+        """Synchronize and publish an indexed model file without overwriting.
+
+        With `sources`, `path` records the index and the staged files holding each range instead
+        (`package_file.write_sources`); those files stay beside it for the caller to remove.
+        """
         path = Path(path)
         if path.exists():
             raise FileExistsError(path)
+        if sources and publisher is not None:
+            raise ValueError("a signed package cannot reference staged sources")
         if not graphs or any(not name for name in graphs):
             raise ValueError("named graph templates are required")
         cuda = _Cuda()
@@ -405,9 +419,10 @@ class RuntimePackage:
                               "attributes": attributes})
         path.parent.mkdir(parents=True, exist_ok=True)
         stage = Path(tempfile.mkdtemp(prefix=f".{path.name}-", dir=path.parent))
+        staged = False
         try:
             from .package_proto import bundle, write_graph
-            from .package_file import align, publish
+            from .package_file import align, publish, write_sources
             from .runtime_package_pb2 import ModelIndex
 
             serialized_graphs = []
@@ -506,7 +521,6 @@ class RuntimePackage:
                     shutil.copyfile(source, stage / destination)
                     asset_files[destination] = (name, asset["sha256"])
             payload, cursor = [], 0
-            sources = sorted(stage.iterdir())
             storage_files = {allocation["file"] for allocation in allocations if allocation["file"]}
 
             def append_file(source):
@@ -522,17 +536,22 @@ class RuntimePackage:
                 payload.append((cursor, source, 0, size))
                 cursor += size
 
-            for source in sources:
+            files = sorted(stage.iterdir())
+            for source in files:
                 if source.name in storage_files:
                     append_file(source)
             if package_data is not None:
                 cursor = package_data.append(index, payload, cursor)
-            for source in sources:
+            for source in files:
                 if source.name not in storage_files:
                     append_file(source)
-            publish(path, index, payload, publisher=publisher)
+            if sources:
+                write_sources(path, index, payload)
+                staged = True
+            else:
+                publish(path, index, payload, publisher=publisher)
         finally:
-            if stage.exists():
+            if stage.exists() and not staged:
                 shutil.rmtree(stage)
 
     def _graph(self, cuda, name, graph):
@@ -688,11 +707,13 @@ def _roce_transport(message, transport):
     message.ctrl_offset = transport["ctrl_offset"]
 
 
-def export_model(prepared, images, storage, path, *, options, progress=None, publisher=None, bundle_only=False):
+def export_model(prepared, images, storage, path, *, options, progress=None, publisher=None, bundle_only=False,
+                 sources=False):
     """Export one rank's graphs and storage with recorded virtual addresses.
 
     With `bundle_only`, a multi-host peer's export omits frontend assets and package-level
-    tables: rank zero's package already holds them once for every host.
+    tables: rank zero's package already holds them once for every host. With `sources`, `path`
+    records the staged files instead of a copy of them (`RuntimePackage.write`).
     """
     cuda = _Cuda()
     cuda.call("cuCtxSynchronize")
@@ -860,7 +881,8 @@ def export_model(prepared, images, storage, path, *, options, progress=None, pub
             graph["verify_tokens"] = graph["token_capacity"]
     server = None if bundle_only else {**prepared.server_config, **options}
     package.write(path, prepared.graphs, execution=execution, server=server, progress=progress,
-                  package_data=None if bundle_only else prepared.package_data, publisher=publisher)
+                  package_data=None if bundle_only else prepared.package_data, publisher=publisher,
+                  sources=sources)
     from .memory_inventory import collect_inventory, print_inventory
 
     package.memory_inventory = collect_inventory(prepared, storage, package, external=outside)

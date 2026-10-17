@@ -9,7 +9,7 @@ from safetensors import safe_open
 
 from ignition.preparation import runtime_package_pb2 as proto
 from ignition.preparation.package_file import (
-    ALIGNMENT, MAX_HEADER_BYTES, MAX_INDEX_BYTES, align, combine, publish, read_index,
+    ALIGNMENT, MAX_HEADER_BYTES, MAX_INDEX_BYTES, align, combine, publish, read_index, write_sources,
 )
 
 
@@ -71,8 +71,8 @@ def test_tp8_kernel_catalogs_fit_the_combined_index(tmp_path):
         description = index()
         for function in range(8192):
             description.ranks[0].functions.add(module="kernels", symbol=f"kernel_{function}_" + "x" * 384)
-        path = tmp_path / f"rank-{rank}.safetensors"
-        publish(path, description, [])
+        path = tmp_path / f"rank-{rank}.json"
+        write_sources(path, description, [])
         ranks.append(path)
     combined = tmp_path / "model.safetensors"
     combine(combined, ranks, [])
@@ -126,8 +126,8 @@ def test_tp_weights_and_tables_precede_all_execution_data(tmp_path, world):
             if rank == 0:
                 table = description.engram.tables.add(layer=1)
                 table.weights.CopyFrom(proto.Span(offset=cursor, nbytes=len(contents[2])))
-            path = tmp_path / f"rank-{generation}-{rank}.safetensors"
-            publish(path, description, [(0, source, 0, source.stat().st_size)])
+            path = tmp_path / f"rank-{generation}-{rank}.json"
+            write_sources(path, description, [(0, source, 0, source.stat().st_size)])
             ranks.append(path)
         output = tmp_path / f"model-{generation}.safetensors"
         combine(output, ranks, [])
@@ -148,6 +148,43 @@ def test_tp_weights_and_tables_precede_all_execution_data(tmp_path, world):
         with safe_open(output, framework="numpy") as tensors:
             assert tensors.get_slice("flare.payload").get_shape()[0] >= graphs[-1].offset + graphs[-1].nbytes
     assert outputs[0] == outputs[1]
+
+
+def test_combined_tables_copy_every_recorded_shard_of_one_span(tmp_path):
+    shards = [tmp_path / f"shard-{part}" for part in range(3)]
+    for part, shard in enumerate(shards):
+        shard.write_bytes(b"x" * part + f"table-part-{part}".encode())
+    weights = tmp_path / "weights"
+    weights.write_bytes(b"rank-weights")
+    description = index()
+    bundle = description.ranks[0]
+    bundle.allocations.add(name="weights", file="storage.bin")
+    bundle.resources["storage.bin"].CopyFrom(proto.Span(offset=0, nbytes=12))
+    parts = [f"table-part-{part}".encode() for part in range(3)]
+    table = description.engram.tables.add(layer=1)
+    table.weights.CopyFrom(proto.Span(offset=12, nbytes=sum(map(len, parts))))
+    payload, cursor = [(0, weights, 0, 12)], 12
+    for number, part in enumerate(parts):
+        payload.append((cursor, shards[number], number, len(part)))
+        cursor += len(part)
+    recorded = tmp_path / "rank.json"
+    write_sources(recorded, description, payload)
+    output = tmp_path / "model.safetensors"
+    combine(output, [recorded], [])
+    combined, start = read_index(output)
+    span = combined.engram.tables[0].weights
+    with output.open("rb") as source:
+        source.seek(start + span.offset)
+        assert source.read(span.nbytes) == b"".join(parts)
+    # A span over a gap between its recorded ranges is rejected.
+    gapped = index()
+    gapped.ranks[0].CopyFrom(description.ranks[0])
+    gapped.engram.CopyFrom(description.engram)
+    gapped.engram.tables[0].weights.CopyFrom(proto.Span(offset=12, nbytes=len(parts[0]) + 2))
+    path = tmp_path / "gapped.json"
+    write_sources(path, gapped, [payload[0], payload[1], (13 + len(parts[0]), *payload[2][1:])])
+    with pytest.raises(ValueError, match="outside its recorded sources"):
+        combine(tmp_path / "gapped.safetensors", [path], [])
 
 
 @pytest.mark.parametrize("field,value", [

@@ -107,7 +107,7 @@ def host(monkeypatch, tmp_path):
         str((plan.concurrency, plan.prefill_chunk, plan.speculation, plan.stream_overlap,
              plan.mixed_prefill, plan.expert_scale_compression, no_compile)))
 
-    def export_model(prepared, images, storage, path, *, options, publisher, progress, console):
+    def export_model(prepared, images, storage, path, *, options, publisher, progress, console, staging):
         assert prepared is calls["prepared"] and not prepared.closed
         assert isinstance(images, Scope) and isinstance(storage, Scope)
         assert "api_key" not in options

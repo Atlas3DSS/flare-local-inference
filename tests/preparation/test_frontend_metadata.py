@@ -7,7 +7,7 @@ from google.protobuf.json_format import MessageToDict, ParseError
 import pytest
 
 from ignition.preparation.frontend import image_settings, prepare_frontend, tokenizer_settings
-from ignition.preparation.package_file import combine, publish, read_index
+from ignition.preparation.package_file import combine, read_index, write_sources
 from ignition.preparation.package_proto import serving
 from ignition.preparation.runtime_package_pb2 import BundleIndex, ModelIndex
 from ignition.recipes import recipes
@@ -97,8 +97,8 @@ def test_typed_settings_survive_publication_and_tensor_parallel_assembly(tmp_pat
         assert index.contract.frontend_workers == 4
         assert index.HasField("sampling_defaults") and index.sampling_defaults.HasField("seed")
         assert index.frontend.image.WhichOneof("profile") == "mimo"
-        path = tmp_path / f"rank-{rank}.safetensors"
-        publish(path, index, [])
+        path = tmp_path / f"rank-{rank}.json"
+        write_sources(path, index, [])
         paths.append(path)
     result = tmp_path / "model.safetensors"
     combine(result, paths, [])
