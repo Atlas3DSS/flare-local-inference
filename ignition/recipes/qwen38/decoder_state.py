@@ -61,6 +61,7 @@ class DecoderInputs:
     sample_enabled: torch.Tensor
     vision_token_indices: torch.Tensor
     prefill_row: torch.Tensor
+    vision_feature_slot: torch.Tensor
 
     @classmethod
     def allocate(cls, device, *, context: int, tokens: int = 512, capacity: int = 4):
@@ -79,6 +80,7 @@ class DecoderInputs:
             torch.full((capacity, context // 64), -1, dtype=torch.int32, device=device),
             torch.zeros(capacity, dtype=torch.int32, device=device),
             torch.full((tokens,), -1, dtype=torch.int32, device=device),
+            torch.full((1,), -1, dtype=torch.int32, device=device),
             torch.full((1,), -1, dtype=torch.int32, device=device),
         )
 

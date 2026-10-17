@@ -15,7 +15,7 @@ FRONTEND = c.frontend(tools=p.QWEN_CODER, terminal_markers=["<tool_call>"],
 FRONTEND["tools"]["wrapping_newlines"] = 1
 
 
-def prepare(signatures, buffers, pool, *, vocabulary, mtp):
+def prepare(signatures, buffers, pool, *, image_slots=4, vocabulary, mtp):
     inputs = {kind: c.text_inputs(kind) for kind in {s.kind for s in signatures.values()} if kind != "vision"}
     inputs["vision"] = c.vision_inputs({field for s in signatures.values() if s.kind == "vision" for field in s.inputs})
     continuation = c.state_view("state_pool", pool.layout.row_bytes)
@@ -30,5 +30,5 @@ def prepare(signatures, buffers, pool, *, vocabulary, mtp):
         regions=[{"kind": p.CONTINUATION_STATE, "storage": continuation, "tokens_per_record": 1, "window_tokens": 0}, *regions],
         graphs=c.graph_contracts(signatures, inputs, continuation=continuation,
                                  pending=c.state_view("request_pending_token", 8), cursor=cursor),
-        vision={"features_per_request": FEATURES, "max_images": 4, "patches_per_feature": 16,
+        vision={"feature_slots": image_slots, "features_per_request": FEATURES, "max_images": 4, "patches_per_feature": 16,
                     "patch_capacities": list(PATCH_CAPACITIES)}, frontend=FRONTEND)

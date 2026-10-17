@@ -29,7 +29,7 @@ def prepare(
         devices=tuple(range(plan.world_size)),
         compile_decoder=compile_forwards,
         retain_graphs=retain_graphs,
-        max_active=plan.concurrency,
+        max_active=plan.concurrency, image_concurrency=plan.image_concurrency,
         context=plan.context,
         prefill_chunk_size=plan.prefill_chunk,
         snapshot_budget_bytes=plan.snapshots * plan.costs.state_row_bytes,

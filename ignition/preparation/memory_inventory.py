@@ -13,7 +13,7 @@ from types import FunctionType, MethodType, ModuleType
 from .tensor_metadata import merge_ranges, subtract_ranges, tensor_ranges
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Claim:
     start: int
     end: int
@@ -44,19 +44,23 @@ def owner_claims(prepared):
 
     Tensor claims cover elements rather than entire backing storages. Pool claims
     cover their full allocations, including unused chunk capacity. Object identity
-    bounds traversal; aliased tensor objects can still supply several field names.
+    bounds traversal; identical tensor views use their first owning field.
     """
     import torch
     from .scratch import GraphBufferPool, ScratchArena
 
     pending = deque((value, f"resources[{index}]", "") for index, value in enumerate(prepared.resources))
     pending.append((prepared.buffers, "buffers", ""))
-    seen, result = set(), []
+    seen, tensor_views, result = set(), set(), []
     while pending:
         value, path, source = pending.popleft()
         if isinstance(value, torch.Tensor):
             if (value.device.type == "cuda" and value.device.index == prepared.device
                     and value.untyped_storage().device.type != "meta"):
+                view = (value.data_ptr(), tuple(value.shape), value.stride(), value.element_size())
+                if view in tensor_views:
+                    continue
+                tensor_views.add(view)
                 result.extend(Claim(start, end, "", path, source, tensor=True)
                               for start, end in tensor_ranges(value))
             continue
@@ -272,6 +276,7 @@ def format_inventory(reports):
     lines.append("Graph executable overhead, resident kernel code, untracked driver/library allocations, and other "
                  "processes are included in device usage but cannot be separated by this snapshot.")
     lines.append("Shared scratch lists representative tensor owners; source lines identify owning classes or closures.")
+    lines.append("Scratch totals count reserved storage, including chunk padding; they do not measure a peak of live values.")
     return "\n".join(lines)
 
 

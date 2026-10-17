@@ -42,16 +42,24 @@ def derive(configuration: Configuration, model: ResolvedModel, host: Host, *, gp
            concurrency: Setting, speculation: Speculation | None, prefill_chunk: int | None = None,
            context_parallel: bool = True, stream_overlap: bool = True, roce_ring: bool = False,
            mixed_prefill: bool = False, expert_scale_compression: str | None = None,
-           compile_workers: int | None = None, tuning_gpus: str | None = None) -> planning.Plan:
+           compile_workers: int | None = None, tuning_gpus: str | None = None,
+           image_concurrency: int | None = None) -> planning.Plan:
     """Select GPUs and estimate memory for one checkpoint from the configuration and command-line intent."""
     workers = compiler_workers(configuration, compile_workers)
     result = planning.plan(
         model.recipe, model.checkpoint, host.gpus, selected=None if gpus is None else planning.parse_gpus(gpus),
         concurrency=concurrency.value, reserve_bytes=configuration.reserve_bytes, speculation=speculation,
         prefill_chunk=prefill_chunk, context_parallel=context_parallel, stream_overlap=stream_overlap, roce_ring=roce_ring,
-        mixed_prefill=mixed_prefill, expert_scale_compression=expert_scale_compression)
+        mixed_prefill=mixed_prefill, expert_scale_compression=expert_scale_compression,
+        image_concurrency=image_capacity_setting(configuration, model, image_concurrency))
     result = replace(result, compile_workers=workers)
     return tuning_devices(result, host, tuning_gpus)
+
+
+def image_capacity_setting(configuration, model, flag=None):
+    if not model.recipe.max_images and flag is None:
+        return None
+    return configuration.model_setting(model.checkpoint.alias, "image_concurrency", None, flag).value
 
 
 def compiler_workers(configuration, flag=None):

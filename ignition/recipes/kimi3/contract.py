@@ -20,7 +20,7 @@ FRONTEND["reasoning"] = dict(kind=p.XTML_THINK, open="<|open|>think<|sep|>", clo
                              wrapping_newlines=0, terminal_markers=[])
 
 
-def prepare(signatures, buffers, pool, *, vocabulary, draft_lag=None):
+def prepare(signatures, buffers, pool, *, image_slots=4, vocabulary, draft_lag=None):
     inputs = {kind: c.text_inputs(kind) for kind in {s.kind for s in signatures.values()} if kind != "vision"}
     inputs["vision"] = c.vision_inputs({field for s in signatures.values() if s.kind == "vision" for field in s.inputs})
     continuation = c.state_view("state_pool", pool.layout.row_bytes)
@@ -34,4 +34,4 @@ def prepare(signatures, buffers, pool, *, vocabulary, draft_lag=None):
         page_tables=[dict(buffer="page_tables", page_offset=0)],
         regions=[dict(kind=p.CONTINUATION_STATE, storage=continuation, tokens_per_record=1, window_tokens=0), *regions],
         graphs=c.graph_contracts(signatures, inputs, continuation=continuation, pending=pending, cursor=cursor),
-        vision=VISION, frontend=FRONTEND)
+        vision={**VISION, "feature_slots": image_slots}, frontend=FRONTEND)

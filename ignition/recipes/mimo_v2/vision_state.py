@@ -35,6 +35,7 @@ class PreparedVisionGeneration:
         valid &= (~patch_live[:, None] | torch.isfinite(i.vision_pixel_values[:capacity])).all()
         positions = i.vision_position_ids[:capacity]
         valid &= (~patch_live[:, None] | ((positions >= 0) & (positions < capacity))).all()
+        valid &= (s.feature_slot >= 0) & (s.feature_slot < s.arena.shape[0])
         self.errors.copy_(~valid)
         e.scratch.patches.copy_(torch.where(valid & patch_live[:, None], i.vision_pixel_values[:capacity], 0))
         e.positions.copy_(torch.where(valid & patch_live[:, None], positions, 0))

@@ -141,6 +141,28 @@ actual batch and width, sharing backing across serialized variants and proposal
 steps. Proposal-only graphs omit target and verification workspaces. Graph-buffer
 cursors reuse available space in earlier chunks without moving existing views.
 
+Cursors for sequential stages reuse storage beyond the buffers retained
+throughout a forward. Qwen's GDN, QSA, PLE, MoE, and hyperconnection temporaries share this
+storage. Block inputs, outputs, residuals, and injection coefficients remain
+disjoint from these temporaries. Target and MTP share a pool. Prefill retains the
+target residual until feedback packing; MTP feedback reuses normalized-activation
+storage and is consumed before the mixer overwrites it. Verification residuals
+and acceptance state retain independent storage. GDN's chunked-prefill operands are
+allocated only for the SM103 execution path that consumes them.
+DeepSeek V4, MiMo, and Step share attention and FFN intermediates. Concurrent
+shared/routed expert branches allocate from one cursor to retain disjoint views.
+GLM's mHC carry, DeepSeek V4.1's replay boundary, and Kimi's named private buffers
+still require a stage-lifetime review. Nemotron reuses a cursor across serialized
+heterogeneous blocks.
+MiMo and Kimi draft-context projections retain dedicated intermediate tensors;
+review their consumption and history updates before sharing decoder storage.
+
+Allocated scratch bytes are an upper bound, not a measurement of simultaneously
+live values. Typed chunk rounding, tensor views, graph-created temporaries,
+operator workspaces, retained speculative results, and upload storage all affect
+the allocation total. Derive a live-memory peak from read/write lifetimes and
+stream dependencies before describing an allocation inventory as that peak.
+
 Use the shared scratch planner where the lifetime contract fits. Validate
 numerical correctness, allocation stability, and native replay across decode,
 chunked prefill, vision, and supported speculative capacities. Record fixed

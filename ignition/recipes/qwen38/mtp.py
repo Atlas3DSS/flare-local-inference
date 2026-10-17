@@ -36,20 +36,31 @@ class MTPScratch:
     local_logits: torch.Tensor | None = None
 
     @classmethod
-    def allocate(cls, tokens: int, output_rows: int, device, *, world_size=1):
+    def allocate(cls, tokens: int, output_rows: int, device, *, world_size=1, buffers=None):
         if (type(tokens) is not int or type(output_rows) is not int
                 or not 0 < output_rows <= tokens):
             raise ValueError("MTP requires positive output rows no greater than token capacity")
 
-        def zeros(rows, width):
-            return torch.zeros((rows, width), dtype=torch.bfloat16, device=device)
+        if buffers is None:
+            from ignition.preparation.scratch import GraphBufferPool
 
-        return cls(torch.zeros(tokens, dtype=torch.int64, device=device),
-            zeros(tokens, 2560), zeros(tokens, 10240), zeros(tokens, 2560),
-            zeros(output_rows, 2560), zeros(output_rows, 248320),
-            HyperconnectionScratch.allocate(tokens, device), QSAScratch.allocate(tokens, device, world_size=world_size),
-            QwenMoeScratch.allocate(tokens, device, intermediate=640 // world_size),
-            zeros(output_rows, 248320 // world_size) if world_size > 1 else None)
+            buffers = GraphBufferPool(device, chunk_bytes=2 << 20).cursor()
+        def zeros(rows, width):
+            return buffers.zeros((rows, width), torch.bfloat16)
+
+        ids = buffers.zeros(tokens, torch.int64)
+        embedding, residual, hidden = zeros(tokens, 2560), zeros(tokens, 10240), zeros(tokens, 2560)
+        selected, logits = zeros(output_rows, 2560), zeros(output_rows, 248320)
+        local_logits = zeros(output_rows, 248320 // world_size) if world_size > 1 else None
+        block_input, block_output, projected = zeros(tokens, 2560), zeros(tokens, 2560), zeros(tokens, 336)
+        attention, experts, mixer = buffers.fork(), buffers.fork(), buffers.fork()
+        qsa = QSAScratch.allocate(tokens, device, world_size=world_size, buffers=attention, output=block_output)
+        moe = QwenMoeScratch.allocate(tokens, device, intermediate=640 // world_size,
+                                    buffers=experts, output=block_output)
+        hc = HyperconnectionScratch.allocate(tokens, device, buffers=mixer,
+                                            projected=projected, block_input=block_input)
+        buffers.join(attention, experts, mixer)
+        return cls(ids, embedding, residual, hidden, selected, logits, hc, qsa, moe, local_logits)
 
     def rows(self, tokens: int, output_rows: int):
         if (type(tokens) is not int or type(output_rows) is not int
@@ -144,7 +155,8 @@ class PreparedMTP:
             raise ValueError("MTP output indices require contiguous int64 [output_rows]")
         if metadata.request_ids.shape != (tokens,) or metadata.request_ids.device != device:
             raise ValueError("MTP QSA row metadata must match feedback capacity and device")
-        if torch._C._overlaps(target_hidden, scratch.residual):
+        source, output = target_hidden.data_ptr(), scratch.residual.data_ptr()
+        if source < output + scratch.residual.nbytes and output < source + target_hidden.nbytes:
             raise ValueError("MTP feedback input must not alias its residual output")
         self.cache_only = cache_only
         self.weights, self.scratch, self.token_ids = weights, scratch, token_ids

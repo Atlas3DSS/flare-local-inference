@@ -104,6 +104,10 @@ fn verification_catalog_covers_all_prepared_concurrencies_through_64() {
 }
 
 pub(super) fn scheduler(active: usize, pages: u32, snapshots: u32) -> RequestScheduler {
+    scheduler_with_geometry(active, pages, snapshots, 64, 4)
+}
+
+fn scheduler_with_geometry(active: usize, pages: u32, snapshots: u32, page_tokens: usize, image_slots: usize) -> RequestScheduler {
     let mut scheduler = RequestScheduler::new(
         [9; 32],
         SchedulerLimits {
@@ -116,8 +120,9 @@ pub(super) fn scheduler(active: usize, pages: u32, snapshots: u32) -> RequestSch
         },
         SchedulerCapabilities {
             vocabulary: 248320,
-            page_tokens: 64,
+            page_tokens,
             vision: crate::model::VisionCapabilities {
+                feature_slots: image_slots,
                 features_per_request: 16384,
                 max_images: 4,
                 patches_per_feature: 4,
@@ -466,6 +471,7 @@ fn configured_prefill_chunks_and_tails_preserve_alignment_and_live_page_extents(
                 vocabulary: 248320,
                 page_tokens: 64,
                 vision: crate::model::VisionCapabilities {
+                    feature_slots: 4,
                     features_per_request: 16384,
                     max_images: 4,
                     patches_per_feature: 4,
@@ -543,6 +549,7 @@ fn invalid_prefill_limits_reject_before_request_resources_are_created() {
                 vocabulary: 248320,
                 page_tokens: 64,
                 vision: crate::model::VisionCapabilities {
+                    feature_slots: 4,
                     features_per_request: 16384,
                     max_images: 4,
                     patches_per_feature: 4,
@@ -1874,6 +1881,7 @@ fn declared_model_capabilities_drive_state_slots_vision_buckets_and_copy_validat
         vocabulary: 32,
         page_tokens: 64,
         vision: crate::model::VisionCapabilities {
+            feature_slots: 4,
             features_per_request: 16,
             max_images: 2,
             patches_per_feature: 2,
@@ -3061,4 +3069,36 @@ fn requests_that_cannot_grow_keep_their_reservation_and_are_never_preempted() {
     }
     assert!(!scheduler.request(reserved).unwrap().preempted());
     assert_eq!(scheduler.stats().preemptions, 1);
+}
+
+#[test]
+fn image_slots_are_independent_and_retire_after_the_last_gpu_use() {
+    for page_tokens in [64, 128, 256] {
+        let mut scheduler = scheduler_with_geometry(4, 64, 8, page_tokens, 1);
+        let text = scheduler.admit(spec(8, 2)).unwrap();
+        let image = scheduler.admit(spec(8, 2)).unwrap();
+        scheduler.set_vision_images(image, &[256]).unwrap();
+        assert_eq!(image.slot, 1);
+        assert_eq!(scheduler.request(image).unwrap().image_slot, Some(0));
+        assert_eq!(scheduler.request(text).unwrap().image_slot, None);
+        let waiting = scheduler.admit(spec(8, 2)).unwrap();
+        assert!(matches!(scheduler.set_vision_images(waiting, &[256]),
+                         Err(crate::Error::Admission(crate::AdmissionError::Capacity(_)))));
+        init(&mut scheduler, 1);
+        scheduler.cancel(text).unwrap();
+        scheduler.cancel(waiting).unwrap();
+        let step = scheduler.plan().unwrap();
+        assert_eq!(step.kind, GraphKind::Vision);
+        scheduler.commit(&step, Fence(2)).unwrap();
+        scheduler.cancel(image).unwrap();
+        assert!(!scheduler.has_available_image_slot());
+        scheduler.complete(Fence(2), &records(image, 2, 0, 0, -1, 1), Default::default()).unwrap();
+        assert!(scheduler.has_available_image_slot());
+        let replacement = scheduler.admit(spec(8, 2)).unwrap();
+        scheduler.set_vision_images(replacement, &[256]).unwrap();
+        assert_eq!(scheduler.request(replacement).unwrap().image_slot, Some(0));
+        assert!(scheduler.set_vision_images(replacement, &[256]).is_err());
+        scheduler.cancel(replacement).unwrap();
+        assert!(scheduler.has_available_image_slot());
+    }
 }

@@ -13,7 +13,7 @@ from ignition import planning
 from ignition.errors import CapacityError, FlareError, PreparationError, UsageError
 
 from . import display, environment
-from .preparation import (Host, compiler_workers, context_parallel, derive, fetch, resolve_model, speculation,
+from .preparation import (Host, compiler_workers, context_parallel, derive, fetch, image_capacity_setting, resolve_model, speculation,
                           stream_overlap, tuning_devices)
 from .config import Configuration
 
@@ -95,6 +95,7 @@ def run(args) -> int:
                                                 args.max_concurrency)
     plan = derive(configuration, model, Host.discover(), gpus=args.gpus, concurrency=concurrency,
                   compile_workers=args.compile_workers, tuning_gpus=args.tuning_gpus,
+                  image_concurrency=args.image_concurrency,
                   speculation=speculation(args, model, configuration), prefill_chunk=args.prefill_chunk_size,
                   context_parallel=context_parallel(args, model), stream_overlap=stream_overlap(args, model),
                   roce_ring=args.roce_ring,
@@ -190,6 +191,7 @@ def _export_hosts(args, *, export_path) -> int:
     gpus = tuple(topology_gpu(topology, index) for index, topology in enumerate(topologies))
     plan = planning.plan(model.recipe, model.checkpoint, gpus, selected=tuple(range(len(gpus))),
                          concurrency=concurrency.value, reserve_bytes=configuration.reserve_bytes,
+                         image_concurrency=image_capacity_setting(configuration, model, args.image_concurrency),
                          speculation=speculation(args, model, configuration), prefill_chunk=args.prefill_chunk_size,
                          context_parallel=context_parallel(args, model), stream_overlap=stream_overlap(args, model),
                          roce_ring=args.roce_ring,
@@ -254,6 +256,7 @@ def _prepare(args, *, export_path) -> int:
         host = Host.discover()
         plan = derive(configuration, model, host, gpus=args.gpus, concurrency=concurrency,
                       compile_workers=args.compile_workers, tuning_gpus=args.tuning_gpus,
+                      image_concurrency=args.image_concurrency,
                       speculation=speculation(args, model, configuration), prefill_chunk=args.prefill_chunk_size,
                       context_parallel=context_parallel(args, model), stream_overlap=stream_overlap(args, model),
                       roce_ring=args.roce_ring,
@@ -267,7 +270,7 @@ def _prepare(args, *, export_path) -> int:
         if plan.roce_ring:
             serial += " · experimental RoCE ring (native neighbor relays)"
         stage.update(f"GPU{'s' if plan.world_size > 1 else ''} {indices}{restricted}"
-                     f" · concurrency {plan.concurrency} · {display.speculation(plan.speculation, brief=True)}{capacity}{serial}"
+                     f" · concurrency {plan.concurrency} · images {plan.image_concurrency} · {display.speculation(plan.speculation, brief=True)}{capacity}{serial}"
                      f" · mixed prefill {'on' if plan.mixed_prefill else 'off'}"
                      f" · expert scales {plan.expert_scale_compression or 'native'}"
                      f" · compile workers {plan.compile_workers or 'auto'} per host{tuning}")
@@ -397,6 +400,7 @@ def serve(args) -> int:
     plan = planning.plan(model.recipe, model.checkpoint, gpus,
                          selected=None if args.ranks == 1 and args.gpus is None else tuple(range(len(gpus))),
                          concurrency=concurrency.value, reserve_bytes=configuration.reserve_bytes,
+                         image_concurrency=image_capacity_setting(configuration, model, args.image_concurrency),
                          speculation=speculation(args, model, configuration), prefill_chunk=args.prefill_chunk_size,
                          context_parallel=context_parallel(args, model), stream_overlap=stream_overlap(args, model),
                          roce_ring=args.roce_ring,

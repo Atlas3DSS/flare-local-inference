@@ -34,6 +34,18 @@ PREFIX = f"{TEXT_PREFIX}.layers.0.linear_attn"
 PROJECTIONS = ("in_proj_qkv", "in_proj_z", "in_proj_a", "in_proj_b", "out_proj")
 
 
+@pytest.mark.parametrize("chunked", [False, True])
+def test_gdn_chunked_prefill_storage_follows_execution_path(monkeypatch, chunked):
+    from ignition.components import sm103
+
+    monkeypatch.setattr(sm103, "is_sm103", lambda device: chunked)
+    scratch = GDNScratch.allocate(4096, torch.device("meta"))
+    assert scratch.prefill_query.shape == (4096 if chunked else 0, 16, 128)
+    assert scratch.prefill_key.shape == scratch.prefill_query.shape
+    assert scratch.prefill_value.shape == (4096 if chunked else 0, 48, 128)
+    assert scratch.prefill_decay.shape == scratch.prefill_beta.shape == (4096 if chunked else 0, 48)
+
+
 def test_gdn_cpu_buffer_contracts():
     state = GDNState.allocate(3, torch.device("cpu"), speculative_tokens=2)
     metadata = DeltaMetadata.allocate(2, torch.device("cpu"), verification_columns=3)
@@ -132,6 +144,9 @@ def _reference_precision(module, prepared):
 
 @pytest.fixture(scope="module")
 def reference_module(manifest):
+    import inspect
+    from transformers.models.qwen4_exp import modeling_qwen4_exp as canonical
+
     module = _module(manifest)
     with CheckpointTensors(manifest, byte_budget=256 << 20) as reader:
         _parameters(module, reader.read)
@@ -145,7 +160,10 @@ def reference_module(manifest):
                     reader.read(prefix + ".weight_scale"),
                 ),
             )
-    return module
+    with pytest.MonkeyPatch.context() as patch:
+        for name in ("torch_chunk_gated_delta_rule", "torch_recurrent_gated_delta_rule"):
+            patch.setattr(canonical, name, inspect.unwrap(getattr(canonical, name)))
+        yield module
 
 
 def _cache():

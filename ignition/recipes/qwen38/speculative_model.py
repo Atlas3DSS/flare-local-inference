@@ -26,7 +26,7 @@ class SpeculativePreparation:
                  workspaces, rotary, cache, table, session, completion, frame, sequence,
                  context, prefill_capacity, max_cache_pages, proposal_source="mtp",
                  runtime=None, vocabulary_runtime=None, coordinator=None, verification_width=8,
-                 sampling_workspace=None):
+                 sampling_workspace=None, graph_buffers=None):
         if proposal_source not in ("mtp", "copy"):
             raise ValueError("speculative proposal source must be mtp or copy")
         self.collectives = dict(runtime=runtime, vocabulary_runtime=vocabulary_runtime, coordinator=coordinator)
@@ -44,9 +44,12 @@ class SpeculativePreparation:
         b, w = requests.capacity, verification_width
         self.sampling_buffers = GraphBufferPool(device, chunk_bytes=2 << 20)
         self.verification_residual = torch.zeros((b * w, 10240), dtype=torch.bfloat16, device=device)
-        self.feedback_hidden = (torch.zeros((prefill_capacity, 10240), dtype=torch.bfloat16, device=device)
-                                if proposal_source == "mtp" else None)
-        self.prefill_residual = torch.zeros_like(self.feedback_hidden) if self.feedback_hidden is not None else None
+        self.mtp_scratch = MTPScratch.allocate(prefill_capacity, requests.capacity, device, world_size=weights.shard.world_size,
+            buffers=None if graph_buffers is None else graph_buffers.cursor()) if proposal_source == "mtp" else None
+        # Feedback is consumed before the MTP mixer writes normalized activations.
+        self.feedback_hidden = (self.mtp_scratch.hyperconnection.normalized
+                                if self.mtp_scratch is not None else None)
+        self.prefill_residual = scratch.residual if self.mtp_scratch is not None else None
         self.raw_backup = ({} if proposal_source == "copy" else
             {name: torch.empty_like(getattr(cache[48], name)) for name in DRAFT_RAW_FIELDS})
         self.previous_accepted = torch.ones(requests.capacity, dtype=torch.int32, device=device)
@@ -63,7 +66,6 @@ class SpeculativePreparation:
         self.rng = SpeculativeRngState.allocate(device, capacity=requests.capacity)
         self.draft_rng_generation = torch.zeros(requests.capacity, dtype=torch.int64, device=device)
         self.draft_rng_offset = torch.zeros(requests.capacity, dtype=torch.int64, device=device)
-        self.mtp_scratch = MTPScratch.allocate(prefill_capacity, requests.capacity, device, world_size=weights.shard.world_size) if proposal_source == "mtp" else None
         # Verification records of every target GDN layer, indexed by model slot.
         heads = next(iter(pool.gdn.values())).recurrent.shape[1] if pool.gdn else 0
         self.gdn_records = (GDNLayerRecords.allocate(pool.gdn, requests.capacity, device,

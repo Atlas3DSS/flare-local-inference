@@ -43,6 +43,22 @@ def test_compiler_fake_tensors_do_not_claim_physical_addresses():
     assert owner_claims(prepared) == []
 
 
+@pytest.mark.skipif(os.environ.get('FLARE_RUN_CUDA_TESTS') != '1', reason='requires an assigned CUDA device')
+def test_repeated_strided_views_have_one_owner_and_preserve_holes():
+    import torch
+
+    backing = torch.empty((4096, 32), device='cuda:0')
+    views = [backing[:, :16] for _ in range(200)]
+    prepared = SimpleNamespace(device=0, resources=tuple(views), buffers={})
+    claims = owner_claims(prepared)
+    assert len(claims) == 4096
+    assert {claim.owner for claim in claims} == {'resources[0]'}
+    start = backing.data_ptr()
+    rows = attribute([(start, start + backing.nbytes)], claims)
+    assert sum(row['nbytes'] for row in rows if row['owner'] == 'resources[0]') == backing.nbytes // 2
+    assert sum(row['nbytes'] for row in rows if row['category'] == 'Unknown storage') == backing.nbytes // 2
+
+
 def test_inventory_separates_physical_cache_host_peers_and_package_alignment(monkeypatch):
     import flare_heliopause
     import torch

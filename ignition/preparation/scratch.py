@@ -348,6 +348,27 @@ class GraphBuffers:
     def __init__(self, pool):
         self.pool, self.positions = pool, {}
 
+    def fork(self):
+        """Allocate a sequential stage after the caller's live buffers.
+
+        Sibling cursors reuse storage. Each stage must consume its outputs before
+        another sibling starts; concurrent branches belong to the same cursor.
+        Join all siblings before allocating values that must coexist with them.
+        """
+        cursor = GraphBuffers(self.pool)
+        cursor.positions = {dtype: dict(offsets) for dtype, offsets in self.positions.items()}
+        return cursor
+
+    def join(self, *cursors):
+        """Reserve the union of stage extents without summing sequential lifetimes."""
+        if any(cursor.pool is not self.pool for cursor in cursors):
+            raise ValueError("graph buffer cursors must share a pool")
+        for cursor in cursors:
+            for dtype, offsets in cursor.positions.items():
+                target = self.positions.setdefault(dtype, {})
+                for index, offset in offsets.items():
+                    target[index] = max(target.get(index, 0), offset)
+
     def zeros(self, shape, dtype):
         return self._take(shape, dtype).zero_()
 

@@ -52,6 +52,7 @@ from .weights import ModelWeights
 
 @dataclass(frozen=True)
 class PreparationConfig:
+    image_concurrency: int | None = None
     compile_workers: int | None = None
     tuning_replica: TuningReplica | None = None
     devices: tuple[int, ...] = (0, 1, 2, 3)
@@ -71,6 +72,9 @@ class PreparationConfig:
     stream_overlap: bool = True
 
     def __post_init__(self):
+        from ignition.components.capacity import image_capacity
+
+        object.__setattr__(self, "image_concurrency", image_capacity(self.max_active, self.image_concurrency))
         if type(self.stream_overlap) is not bool:
             raise TypeError("stream_overlap must be a boolean")
         if (
@@ -213,7 +217,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         )
         vision_inputs = VisionInputs.allocate(device)
         vision_prefill = PrefillVisionInputs.allocate(config.prefill_chunk_size, device)
-        vision_state = VisionState(weights.vision, inputs, vision_prefill, requests)
+        vision_state = VisionState(weights.vision, inputs, vision_prefill, requests, image_slots=config.image_concurrency)
         vision_storage = {}
         buffers = dict(
             inputs.buffers(),
@@ -358,7 +362,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                 buffers=cursor,
             )
             forward = PreparedVisionGeneration(encoder, vision_state, records, frame, sequence, buffers=cursor)
-            add(name, forward, "vision", 1, capacity, vision_inputs.buffers())
+            add(name, forward, "vision", 1, capacity, (*vision_inputs.buffers(), "vision_feature_slot"))
         row_inputs = ("request_state_rows", "row_slot_ids", "row_generations", "live_rows")
         for enabled in modes:
             suffix = "-no-mtp" if config.dspark and not enabled else ""
@@ -483,7 +487,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
             preprocessor=frontend / "preprocessor_config.json"),
         "sampling_defaults": RECIPE.sampling_defaults.as_dict(),
         "assets": assets,
-        "model_contract": prepare_contract(signatures, buffers, pool, page_tokens=PAGE_TOKENS, draft_lag=0 if config.dspark else None, rows=None),
+        "model_contract": prepare_contract(signatures, buffers, pool, image_slots=config.image_concurrency, page_tokens=PAGE_TOKENS, draft_lag=0 if config.dspark else None, rows=None),
     }
     memory = {
         "rank": rank,

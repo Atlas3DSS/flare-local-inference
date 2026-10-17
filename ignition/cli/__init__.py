@@ -130,6 +130,9 @@ def _preparation_arguments(running):
                          help="maximum simultaneously active requests (default: defaults.max_concurrency,"
                               " else the recipe default)")
     running.add_argument("--verbose", action="store_true", help="per-phase detail on stderr")
+    running.add_argument("--image-concurrency", type=int, metavar="N",
+                         help="maximum active image requests; excess requests queue independently of text"
+                              " (default: smaller of 4 and max concurrency)")
     capacity = running.add_argument_group("capacity and compression")
     capacity.add_argument("--expert-scale-compression", choices=("csf",), nargs="?", const="csf", metavar="MODE",
                           help="losslessly compress routed-expert quantization scales to reduce GPU weight memory."

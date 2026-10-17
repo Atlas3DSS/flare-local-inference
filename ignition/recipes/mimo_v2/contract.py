@@ -15,7 +15,7 @@ FRONTEND = c.frontend(tools=p.QWEN_CODER, terminal_markers=["<tool_call>"],
     image_preparation=p.MIMO_IMAGE_PREPARATION, image_layout=p.MIMO_IMAGE_LAYOUT)
 
 
-def prepare(signatures, buffers, pool, *, page_tokens, draft_lag, rows=1, embedding_tables=(), regions=()):
+def prepare(signatures, buffers, pool, *, image_slots=4, page_tokens, draft_lag, rows=1, embedding_tables=(), regions=()):
     inputs = {kind: c.text_inputs(kind) for kind in {s.kind for s in signatures.values()} if kind != "vision"}
     inputs["vision"] = c.vision_inputs({field for s in signatures.values() if s.kind == "vision" for field in s.inputs})
     continuation = c.state_view("state_pool", pool.layout.row_bytes)
@@ -29,4 +29,4 @@ def prepare(signatures, buffers, pool, *, page_tokens, draft_lag, rows=1, embedd
         page_tokens=page_tokens, page_tables=[dict(buffer="page_tables", page_offset=0),
             *([dict(buffer="draft_page_tables", page_offset=1)] if "draft_page_tables" in buffers else [])],
         regions=[dict(kind=p.CONTINUATION_STATE, storage=continuation, tokens_per_record=1, window_tokens=0), *regions],
-        graphs=graphs, vision=VISION, frontend=FRONTEND)
+        graphs=graphs, vision={**VISION, "feature_slots": image_slots}, frontend=FRONTEND)

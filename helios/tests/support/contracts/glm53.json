@@ -3,6 +3,7 @@
   "vocabulary": 154880,
   "input_vocabulary": 154880,
   "vision": {
+    "feature_slots": 0,
     "features_per_request": 0,
     "max_images": 0,
     "patches_per_feature": 0,

@@ -82,7 +82,7 @@ class PreparedFeaturePublication:
         s, i = self.state, self.inputs
         r = s.requests
         torch.library.wrap_triton(_publish)[(triton.cdiv(output.numel(), 1024),)](
-            output, s.arena, i.vision_slot, i.vision_feature_offset, count, errors,
+            output, s.arena, s.feature_slot, i.vision_feature_offset, count, errors,
             s.arena.shape[1], s.arena.shape[2], 1024)
         torch.library.wrap_triton(_finish)[(r.capacity,)](
             i.vision_slot, i.vision_generation, count, i.vision_feature_offset, errors,

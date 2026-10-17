@@ -208,6 +208,55 @@ impl Fixture {
     }
 }
 
+#[test]
+fn image_admission_queues_excess_images_and_admits_text() {
+    use crate::frontend::images::{ImageGeometry, ProcessedImages};
+    let mut fixture = Fixture::new();
+    fixture.config.contract.vision = crate::model::VisionCapabilities {
+        feature_slots: 1,
+        features_per_request: 64,
+        max_images: 1,
+        patches_per_feature: 4,
+        patch_capacities: vec![256],
+    };
+    let vision_contract: crate::model::contract::PreparedContract = serde_json::from_str(
+        include_str!("../../../tests/support/contracts/qwen38.json")).unwrap();
+    fixture.config.contract.frontend = vision_contract.frontend;
+    let (sender, receiver) = mpsc::channel();
+    let mut worker = fixture.worker(receiver);
+    let image = || {
+        let (mut incoming, generation) = fixture.incoming(vec![0, 1], 1);
+        incoming.prompt.images = Some(ProcessedImages {
+            pixel_values: vec![],
+            geometry: vec![ImageGeometry {
+                height: 32, width: 32, grid_thw: [1, 16, 16], patches: 256, tokens: 64,
+            }],
+            position_ids: vec![], interpolation_indices: vec![], interpolation_weights: vec![],
+            cu_seqlens: vec![0, 256],
+        });
+        (incoming, generation)
+    };
+    let (first, first_generation) = image();
+    let (waiting, waiting_generation) = image();
+    let (text, text_generation) = fixture.incoming(vec![2, 3], 1);
+    sender.send(vec![first, waiting, text]).unwrap();
+    assert!(matches!(worker.admit().unwrap(), ControlFlow::Continue(true)));
+    assert_eq!(worker.pending.len(), 1);
+    assert_eq!(worker.active.iter().flatten().count(), 2);
+    assert!(worker.active.iter().flatten().any(|r| r.incoming.prompt.images.is_none()));
+    assert!(!worker.scheduler.has_available_image_slot());
+    first_generation.cancelled.store(true, Ordering::Release);
+    assert!(matches!(worker.admit().unwrap(), ControlFlow::Continue(true)));
+    assert!(worker.pending.is_empty());
+    assert_eq!(worker.active.iter().flatten().count(), 2);
+    assert!(!worker.scheduler.has_available_image_slot());
+    waiting_generation.cancelled.store(true, Ordering::Release);
+    assert!(matches!(worker.admit().unwrap(), ControlFlow::Continue(true)));
+    assert!(worker.scheduler.has_available_image_slot());
+    assert_eq!(worker.active.iter().flatten().count(), 1);
+    drop(text_generation);
+}
+
 fn planned(worker: &mut Worker<'_>, kind: GraphKind, sequence: u64) -> ScheduledPlan {
     let (step, _) = worker.plan(0).unwrap();
     let step = step.unwrap();

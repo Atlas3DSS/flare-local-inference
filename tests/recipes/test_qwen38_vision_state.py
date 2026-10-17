@@ -61,7 +61,7 @@ def test_native_vision_handoff_append_epoch_validation_and_completion(compiled):
 
     device = _device()
     features, inputs = (
-        VisionFeatureState.allocate(device),
+        VisionFeatureState.allocate(device, image_slots=2),
         VisionInputs.allocate(device),
     )
     requests = DeviceRequestState.allocate(device)
@@ -98,6 +98,7 @@ def test_native_vision_handoff_append_epoch_validation_and_completion(compiled):
         requests_before = {
             name: value.clone() for name, value in vars(requests).items()
         }
+        features.feature_slot.fill_(1)
         inputs.vision_slot.fill_(2)
         inputs.vision_generation.fill_(17)
         inputs.vision_num_patches.fill_(16)
@@ -110,9 +111,9 @@ def test_native_vision_handoff_append_epoch_validation_and_completion(compiled):
         assert operation.errors.item() == 0
         assert features.count.tolist() == [0, 0, 4, 0]
         assert features.generation.tolist() == [0, 0, 17, 0]
-        assert torch.equal(features.arena[2, :4], output[:4])
-        assert torch.all(features.arena[2, 4:] == 7)
-        assert torch.all(features.arena[[0, 1, 3]] == 7)
+        assert torch.equal(features.arena[1, :4], output[:4])
+        assert torch.all(features.arena[1, 4:] == 7)
+        assert torch.all(features.arena[0] == 7)
         assert records[0, 2].tolist() == [17, 1, 2, 0, -1, 1, 0, 0]
         assert records[0, 0].tolist() == [0, 0, 0, 0, -1, 0, 0, 0]
         for name, before in requests_before.items():
@@ -126,16 +127,18 @@ def test_native_vision_handoff_append_epoch_validation_and_completion(compiled):
         sequence.fill_(2)
         _replay(worker)
         assert features.count[2].item() == 6
-        assert torch.equal(features.arena[2, 4:6], output[:2])
+        assert torch.equal(features.arena[1, 4:6], output[:2])
         assert records[1, 2].tolist() == [17, 2, 2, 0, -1, 1, 0, 0]
-        saved = features.arena[2].clone()
+        saved = features.arena[1].clone()
         for kind, error in (
             ("offset", 8),
             ("index", 16),
             ("pixel", 32),
             ("output", 64),
             ("epoch", 2),
+            ("feature_slot", 1),
         ):
+            features.feature_slot.fill_(1)
             requests.status[2] = 1
             requests.error_code[2] = 0
             inputs.vision_feature_offset.fill_(6)
@@ -143,6 +146,8 @@ def test_native_vision_handoff_append_epoch_validation_and_completion(compiled):
             inputs.vision_interpolation_indices.zero_()
             inputs.vision_pixel_values.zero_()
             output[0, 0] = 0
+            if kind == "feature_slot":
+                features.feature_slot.fill_(2)
             if kind == "offset":
                 inputs.vision_feature_offset.fill_(7)
             if kind == "index":
@@ -156,8 +161,8 @@ def test_native_vision_handoff_append_epoch_validation_and_completion(compiled):
             _replay(worker)
             assert operation.errors.item() & error
             assert features.count[2].item() == 6
-            assert torch.equal(features.arena[2], saved)
-            assert torch.all(features.arena[[0, 1, 3]] == 7)
+            assert torch.equal(features.arena[1], saved)
+            assert torch.all(features.arena[0] == 7)
             assert records[1, 2, 5].item() == 3
             if kind == "epoch":
                 assert requests.status[2].item() == 1
@@ -183,7 +188,8 @@ def test_native_embedding_injection_precedes_gather_and_model_mutation(capacity,
     from ignition.preparation.graphs import PreparedGraphBundle
 
     device = _device()
-    features = VisionFeatureState.allocate(device)
+    features = VisionFeatureState.allocate(device, image_slots=1)
+    features.feature_slot.fill_(0)
     requests = DeviceRequestState.allocate(device)
     prompt = [1, 2, 3, 4] + [1] * (capacity - 4)
     requests.admit(3, RequestAdmission(27, 5), prompt)
@@ -223,7 +229,7 @@ def test_native_embedding_injection_precedes_gather_and_model_mutation(capacity,
     try:
         features.generation[3] = 27
         features.count[3] = 3
-        features.arena[3, :3].copy_(
+        features.arena[0, :3].copy_(
             torch.arange(3 * 2560, device=device).reshape(3, 2560).bfloat16()
         )
         indices[:4].copy_(
@@ -233,10 +239,10 @@ def test_native_embedding_injection_precedes_gather_and_model_mutation(capacity,
         _replay(worker)
         assert token_state.active.item() == 1
         assert torch.all(embedding[[0, 3]] == 7)
-        assert torch.equal(embedding[1], features.arena[3, 2])
-        assert torch.equal(embedding[2], features.arena[3, 0])
+        assert torch.equal(embedding[1], features.arena[0, 2])
+        assert torch.equal(embedding[2], features.arena[0, 0])
         assert torch.all(embedding[4:-1] == 7)
-        assert torch.equal(embedding[-1], features.arena[3, 1])
+        assert torch.equal(embedding[-1], features.arena[0, 1])
         assert requests.consumed_tokens[3].item() == 0
         for bad_index in (-2, 3, 16384):
             requests.status[3] = 1

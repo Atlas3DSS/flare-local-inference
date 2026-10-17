@@ -103,6 +103,7 @@ def test_compiled_vision_publishes_only_valid_current_generation(compiler):
         for col in range(8)
     ]
     inputs.vision_merge_indices[:64].copy_(torch.tensor(indices, device=device))
+    state.feature_slot.fill_(2)
     inputs.vision_slot.fill_(2)
     inputs.vision_generation.fill_(7)
     requests.generation[2] = 7

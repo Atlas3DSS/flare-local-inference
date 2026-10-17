@@ -179,6 +179,7 @@ class Plan:
     compile_workers: int | None = None
     tuning_gpus: tuple[Gpu, ...] = ()
     tuning_replica: TuningReplica | None = None
+    image_concurrency: int = 0
 
     @property
     def world_size(self) -> int:
@@ -272,6 +273,7 @@ class Plan:
             "gpus": [{"index": gpu.index, "name": gpu.name, "uuid": gpu.uuid, "free_bytes": gpu.free_bytes,
                       "total_bytes": gpu.total_bytes} for gpu in self.gpus],
             "tensor_parallel": self.world_size, "max_concurrency": self.concurrency,
+            "image_concurrency": self.image_concurrency,
             "prefill_chunk": self.prefill_chunk, "roce_ring": self.roce_ring, "context_parallel": self.context_parallel,
             "stream_overlap": self.stream_overlap,
             "mixed_prefill": self.mixed_prefill,
@@ -301,7 +303,8 @@ class Plan:
 def fit(recipe: Recipe, checkpoint: Checkpoint, gpus: tuple[Gpu, ...], *, concurrency: int, reserve_bytes: int,
         speculation: Speculation | None, prefill_chunk: int | None = None,
         context_parallel: bool = True, stream_overlap: bool = True, cache_states: int | None = None,
-        mixed_prefill: bool = False, expert_scale_compression: str | None = None, roce_ring: bool = False) -> Plan:
+        mixed_prefill: bool = False, expert_scale_compression: str | None = None, roce_ring: bool = False,
+        image_concurrency: int | None = None) -> Plan:
     """Size pages and the prefix cache to the supply; the result may not fit.
 
     Weights come from the checkpoint's stored tensors and graphs and scratch from
@@ -316,7 +319,9 @@ def fit(recipe: Recipe, checkpoint: Checkpoint, gpus: tuple[Gpu, ...], *, concur
                 recipe.weights_bytes(checkpoint, len(gpus), speculation, expert_scale_compression), costs.graph_bytes,
                 context_parallel=context_parallel and costs.page_tokens is not None,
                 stream_overlap=stream_overlap and recipe.stream_overlap, mixed_prefill=mixed_prefill,
-                expert_scale_compression=expert_scale_compression, roce_ring=roce_ring)
+                expert_scale_compression=expert_scale_compression, roce_ring=roce_ring,
+                image_concurrency=(min(4, concurrency) if recipe.max_images else 0)
+                    if image_concurrency is None else image_concurrency)
     available = plan.supply_bytes - plan.fixed_bytes
     target = min(CACHE_STATES_PER_REQUEST * concurrency, max(1, available // costs.state_row_bytes))
     if cache_states is not None:
@@ -353,7 +358,8 @@ def plan(recipe: Recipe, checkpoint: Checkpoint, gpus: tuple[Gpu, ...], *, selec
          concurrency: int, reserve_bytes: int, speculation: Speculation | None,
          prefill_chunk: int | None = None, context_parallel: bool = True, stream_overlap: bool = True,
          cache_states: int | None = None, mixed_prefill: bool = False,
-         expert_scale_compression: str | None = None, roce_ring: bool = False) -> Plan:
+         expert_scale_compression: str | None = None, roce_ring: bool = False,
+         image_concurrency: int | None = None) -> Plan:
     """Select GPUs and size the plan, or raise a capacity error that lists working settings.
 
     Without `selected`, the plan uses the smallest supported tensor-parallel size
@@ -367,6 +373,9 @@ def plan(recipe: Recipe, checkpoint: Checkpoint, gpus: tuple[Gpu, ...], *, selec
         raise UsageError(f"--mixed-prefill: {checkpoint.alias} does not capture mixed prefill/decode graphs")
     if not 1 <= concurrency <= recipe.max_concurrency:
         raise UsageError(f"--max-concurrency for {checkpoint.alias} must be 1 through {recipe.max_concurrency}")
+    if image_concurrency is not None and (not recipe.max_images or type(image_concurrency) is not int
+                                         or not 1 <= image_concurrency <= concurrency):
+        raise UsageError("--image-concurrency requires a vision model and must be 1 through max concurrency")
     chunk = recipe.prefill_chunk if prefill_chunk is None else prefill_chunk
     if chunk % 64 or not 64 <= chunk <= recipe.context:
         raise UsageError(f"--prefill-chunk-size for {checkpoint.alias} must be a multiple of 64"
@@ -394,7 +403,8 @@ def plan(recipe: Recipe, checkpoint: Checkpoint, gpus: tuple[Gpu, ...], *, selec
         return fit(recipe, checkpoint, group, concurrency=concurrency, reserve_bytes=reserve_bytes,
                    speculation=speculation, prefill_chunk=chunk, context_parallel=context_parallel,
                    stream_overlap=stream_overlap, cache_states=cache_states, mixed_prefill=mixed_prefill,
-                   expert_scale_compression=expert_scale_compression, roce_ring=roce_ring)
+                   expert_scale_compression=expert_scale_compression, roce_ring=roce_ring,
+                   image_concurrency=None if image_concurrency is None else min(image_concurrency, concurrency))
 
     def automatic(world_size, **settings):
         """Plan the first GPUs that each fit, else the GPUs with the most free memory."""

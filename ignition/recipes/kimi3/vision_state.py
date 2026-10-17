@@ -40,6 +40,7 @@ class PreparedVisionGeneration:
         valid &= (~live[:, None] | (torch.isfinite(weights) & (weights >= 0) & (weights <= 1))).all()
         valid &= (~live | ((weights.sum(-1) - 1).abs() < 1e-5)).all()
         valid &= (~feature_live[:, None] | ((merge >= 0) & (merge < count))).all()
+        valid &= (s.feature_slot >= 0) & (s.feature_slot < s.arena.shape[0])
         self.errors.copy_(~valid)
         e.scratch.patches.copy_(torch.where(valid & live[:, None], i.vision_pixel_values[:capacity], 0))
         e.positions.copy_(torch.where(valid & live[:, None], positions, 0))
