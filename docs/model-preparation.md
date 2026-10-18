@@ -392,11 +392,12 @@ kernel scratch when their execution overlaps.
 
 ```sh
 .venv/bin/python -m ignition export /data/models/Kimi-K3-MXFP4-CSF --gpus 0-15 \
-  --max-concurrency 4 --mtp-draft-tokens 7 --prefill-chunk-size 4096 \
-  --output /data/flare-runtime/kimi-k3-mxfp4-csf-tp16-c4-dflash2-7.safetensors --verbose
+  --max-concurrency 4 --image-concurrency 4 --mtp-draft-tokens 7 \
+  --prefill-chunk-size 4096 --compile-workers 16 --online-mxfp8 \
+  --output /data/flare-runtime/kimi-k3-mxfp4-csf-tp16-c4-dflash2-7-mxfp8.safetensors --verbose
 
 ./flare/target/release/flare run \
-  /data/flare-runtime/kimi-k3-mxfp4-csf-tp16-c4-dflash2-7.safetensors \
+  /data/flare-runtime/kimi-k3-mxfp4-csf-tp16-c4-dflash2-7-mxfp8.safetensors \
   --gpus 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15 --host 127.0.0.1 --port 8001
 ```
 
@@ -409,6 +410,12 @@ Loading with `--mtp-draft-tokens 0` selects ordinary execution; exporting with
 `--no-mtp` excludes draft weights and state.
 
 FP8 MLA latent records occupy 128-token pages in both the target and DFlash2.
+With context parallelism across sixteen ranks, concurrency four, and a
+4096-token prefill chunk, preparation backs ten logical KV pages and nine
+continuation rows: one null row, four live rows, and four snapshot destinations.
+Retaining CUDA graph handles for export does not expand this working set.
+Native package loading sizes serving caches from available device memory;
+in-process diagnostic serving limits admission to physically backed storage.
 Continuation rows preserve KDA
 convolution and recurrent state, partial latent pages, and the normalized
 last hidden state. The MoonViT encoder accepts a combined 65,536 image patches

@@ -70,7 +70,7 @@ class PreparationConfig:
     speculative_widths: tuple[int, ...] = tuple(range(1, 9))
     speculative_fixed_width: int | None = None
     speculative_token_capacity: int | None = None
-    # Store KDA input projections, and DSpark's draft projections, as MXFP8 instead of the checkpoint's BF16.
+    # Store eligible attention, shared-expert, latent MoE, and DSpark projections as MXFP8.
     online_mxfp8: bool = False
     # Shared experts overlap routing and routed experts on an auxiliary stream.
     stream_overlap: bool = True
@@ -393,10 +393,6 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
 
     def materialize():
         scratch_pool.materialize()
-        if config.retain_graphs:
-            # In-process serving admits and snapshots into every declared row; native loading backs them itself.
-            package_storage.grow("STATE_ROWS", state_rows + 1)
-            pool.memory_capacity[0] = state_rows + 1
         if vision_inputs is not None:
             vision_inputs.vision_slot.fill_(-1)
         pool.clear_for_preparation()

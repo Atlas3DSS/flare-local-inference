@@ -231,6 +231,7 @@ def test_diagnostic_startup_failure_retains_undrained_host_storage(host, monkeyp
 @pytest.mark.parametrize("grouped", [False, True])
 @pytest.mark.parametrize("requests,width,snapshots,backed,expected", [
     (64, 6, 512, 449, 64), (1, 6, 512, 8, 1), (4, 1, 16, 21, 16), (3, 6, 512, 33, 8),
+    (4, 1, 32, 9, 4),
 ])
 def test_diagnostic_admission_uses_backed_rows_without_changing_export(
         grouped, requests, width, snapshots, backed, expected):

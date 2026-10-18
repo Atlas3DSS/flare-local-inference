@@ -9,7 +9,7 @@
     See performance-work.md#cross-model-scratch-planning for scope and checks.
 
 [ ] Validate pooled vision and speculative scratch in complete exported packages
-    across Qwen, GLM, DeepSeek V4/V4.1, MiMo, Kimi, Step, and Nemotron. Measure
+    across Qwen, GLM, DeepSeek V4/V4.1, MiMo, Step, and Nemotron. Measure
     fixed memory and KV capacity with full catalogs and tensor parallelism;
     exercise alternating text/image graphs, proposal/verification, and rollback.
     See performance-work.md#cross-model-scratch-planning.
