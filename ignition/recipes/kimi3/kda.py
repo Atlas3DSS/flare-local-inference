@@ -10,7 +10,8 @@ from ignition.components.kda_speculation import _record, register_recording
 
 
 class PreparedKDA:
-    def __init__(self, weights, source, state, metadata, *, mode, eps, session, name, workspace, buffers, records=None):
+    def __init__(self, weights, source, state, metadata, *, mode, eps, session, name, workspace, buffers, records=None,
+                 allocator=None):
         mode = "decode" if mode == "verify" else mode
         self.records, self.state, self.metadata = records, state, metadata
         tokens, hidden = source.shape
@@ -19,7 +20,8 @@ class PreparedKDA:
 
         def buffer(key, channels):
             if key not in buffers or buffers[key].shape[0] < tokens:
-                buffers[key] = torch.zeros((tokens, channels), dtype=torch.bfloat16, device=device)
+                buffers[key] = (torch.zeros((tokens, channels), dtype=torch.bfloat16, device=device) if allocator is None
+                                else allocator.zeros((tokens, channels), torch.bfloat16))
             return buffers[key][:tokens]
 
         self.forget = buffer("forget_input", 128)

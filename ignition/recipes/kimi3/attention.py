@@ -25,7 +25,7 @@ FP8 = torch.float8_e4m3fn
 
 class PreparedMLA:
     def __init__(self, weights, source, metadata, cache, *, mode, session, name, workspace, buffers, latents=None,
-                 coordinator=None, context=None, peers=None):
+                 coordinator=None, context=None, peers=None, allocator=None):
         tokens, hidden = source.shape
         heads = weights["key"].shape[0]
         device = source.device
@@ -34,8 +34,10 @@ class PreparedMLA:
             # Graphs share each buffer at its declared capacity, else their own rows; a larger graph replaces
             # it and earlier graphs keep their bindings.
             if key not in buffers or buffers[key].shape[0] < tokens:
-                buffers[key] = torch.zeros((max(rows or tokens, tokens), *shape),
-                                           dtype=source.dtype if dtype is None else dtype, device=device)
+                shape = (max(rows or tokens, tokens), *shape)
+                dtype = source.dtype if dtype is None else dtype
+                buffers[key] = (torch.zeros(shape, dtype=dtype, device=device) if allocator is None
+                                else allocator.zeros(shape, dtype))
             return buffers[key][:tokens]
 
         latent_width = weights["query_norm"].shape[0] + RECORD_BYTES

@@ -251,6 +251,11 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
             cursor = graph_buffers.cursor()
             shared_scratch = cursor.zeros((max(max(patches, default=0) * 3 * weights.config.vision["qkv_hidden_size"],
                 sum(rows * columns for rows, columns in text_shapes)),), torch.bfloat16)
+            if patches:
+                # Reserve the largest vision slabs before smaller text allocations share their chunks.
+                VisionScratch.allocate(max(patches), device, work=shared_scratch, buffers=cursor)
+                cursor = graph_buffers.cursor()
+                shared_scratch = cursor.zeros(shared_scratch.shape, torch.bfloat16)
             activation, total, kda_output, *views = scratch_views(shared_scratch, text_shapes)
             mla_output, moe_output, *auxiliary = views if separate else (kda_output, *views)
             prefill_storage = Scratch.allocate(config.prefill_chunk_size, 1, weights.config, shard.world_size, device,
@@ -280,7 +285,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
             sampling_grammar_mask=requests.grammar_mask, frame_index=frame,
             submission_sequence=sequence, completion_records=records)
     forwards, signatures, metadata = {}, {}, {}
-    decoder_buffers = DecoderStorage.allocate(weights.config, shard, device, scratch={
+    decoder_buffers = DecoderStorage.allocate(weights.config, shard, device, allocator=cursor, scratch={
         "total": total, "kda": {"output": kda_output},
         "mla": {"output": mla_output}, "moe": {"output": moe_output},
         **({"auxiliary": auxiliary[0]} if drafting else {})})

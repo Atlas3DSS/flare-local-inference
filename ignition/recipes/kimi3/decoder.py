@@ -60,12 +60,14 @@ class DecoderStorage:
     scratch: dict
     hidden_columns: torch.Tensor
     latent_begin: torch.Tensor
+    allocator: object = None
 
     @classmethod
-    def allocate(cls, config, shard, device, *, scratch=None):
+    def allocate(cls, config, shard, device, *, scratch=None, allocator=None):
         # Rank-specific offsets stay in tensors so every rank replays rank zero's compiled forward.
         return cls({} if scratch is None else scratch, torch.arange(*shard.partition(config.hidden), device=device),
-            torch.tensor(shard.partition(config.text["routed_expert_hidden_size"])[:1], dtype=torch.int32, device=device))
+            torch.tensor(shard.partition(config.text["routed_expert_hidden_size"])[:1], dtype=torch.int32, device=device),
+            allocator)
 
     def scratch_tensors(self):
         return tuple(self.scratch.values())
@@ -93,11 +95,12 @@ class Scratch:
 class PreparedMLP:
     """A SiTU MLP; with an overlapping workspace, ``start`` and ``finish`` run it on the auxiliary stream."""
 
-    def __init__(self, weights, source, *, session, name, buffers, workspace=None):
+    def __init__(self, weights, source, *, session, name, buffers, workspace=None, allocator=None):
         rows, device = source.shape[0], source.device
         def buffer(field, width):
             if field not in buffers or buffers[field].shape[0] < rows:
-                buffers[field] = torch.zeros((rows, width), dtype=source.dtype, device=device)
+                buffers[field] = (torch.zeros((rows, width), dtype=source.dtype, device=device) if allocator is None
+                                  else allocator.zeros((rows, width), source.dtype))
             return buffers[field][:rows]
         self.input = buffer("input", weights["gate_up"].shape[0] // 2)
         self.gate_up = UnquantizedProjection(source, weights["gate_up"], buffer("gate_up", 2 * self.input.shape[1]),
@@ -126,7 +129,7 @@ class PreparedMLP:
 
 class PreparedLatentMoE:
     def __init__(self, weights, source, config, shard, *, runtime, router_runtime, coordinator, session, name, workspace, buffers, storage,
-                 route_runtime=None):
+                 route_runtime=None, allocator=None):
         tokens, hidden = source.shape
         c, device = config.text, source.device
         latent = c["routed_expert_hidden_size"]
@@ -134,7 +137,9 @@ class PreparedLatentMoE:
         def buffer(field, width, dtype=torch.bfloat16):
             # Decode-only fields first appear in a decoder of any row count, so each holds every route row.
             if field not in buffers or buffers[field].shape[0] < tokens:
-                buffers[field] = torch.zeros((max(tokens, ROUTE_ROWS), width), dtype=dtype, device=device)
+                shape = (max(tokens, ROUTE_ROWS), width)
+                buffers[field] = (torch.zeros(shape, dtype=dtype, device=device) if allocator is None
+                                  else allocator.zeros(shape, dtype))
             return buffers[field][:tokens]
 
         self.source = buffer("source", hidden // shard.world_size)
@@ -187,7 +192,7 @@ class PreparedLatentMoE:
             self.expert_output, workspace=workspace, session=session, name=name + ".experts")
         # Decode and verification rows run the shared experts beside routing and the routed experts.
         self.shared = PreparedMLP(weights["shared"], source, session=session, name=name + ".shared",
-                                  buffers=buffers.setdefault("shared", {}),
+                                  buffers=buffers.setdefault("shared", {}), allocator=allocator,
                                   workspace=workspace if self.route_gather is not None else None)
 
     def __call__(self, source):
@@ -230,6 +235,7 @@ class PreparedDecoder:
         self.weights, self.scratch, self.metadata, self.pool = weights, scratch, metadata, pool
         self.vision_state = vision_state if mode == "prefill" else None
         config, source = weights.config, scratch.activations
+        allocator = buffers.allocator
         self.local_embedding = torch.zeros((source.shape[0], weights.embedding.shape[1]), dtype=source.dtype, device=source.device)
         self.embedding = PreparedShardedEmbedding(weights.embedding, metadata.token_ids, self.local_embedding, source,
             runtime=embedding_runtime, coordinator=coordinator,
@@ -237,19 +243,27 @@ class PreparedDecoder:
         self.delta = DeltaMetadata.allocate(metadata.starts.numel(), source.device,
             verification_columns=8 if mode == "verify" else 1)
         self.buffers, self.layers = buffers.scratch, []
+        def zeros(shape):
+            return (torch.zeros(shape, dtype=source.dtype, device=source.device) if allocator is None
+                    else allocator.zeros(shape, source.dtype))
+
+        # Residual blocks stay live across layers; reserve them before smaller layer intermediates.
+        tokens, hidden = source.shape
+        if "residual" not in self.buffers:
+            committed = -(-len(weights.layers) // config.text["attn_res_block_size"])
+            self.buffers["residual"] = dict(blocks=zeros((tokens, committed, hidden)), prefix=zeros(source.shape))
         self.target_layers = (() if weights.draft is None or isinstance(config.draft, DSparkConfig)
                               else config.draft.target_layers)
         self.auxiliary = None
         if self.target_layers:
             if "auxiliary" not in self.buffers:
-                self.buffers["auxiliary"] = torch.zeros((source.shape[0], len(self.target_layers) * config.hidden),
-                    dtype=source.dtype, device=source.device)
+                self.buffers["auxiliary"] = zeros((source.shape[0], len(self.target_layers) * config.hidden))
             self.auxiliary = self.buffers["auxiliary"][:source.shape[0]]
         for index, w in enumerate(weights.layers):
             prefix = f"{name}.layer{index}"
             kind = config.layers[index]
             kwargs = dict(mode=mode, session=session, name=prefix + ".attention", workspace=workspace,
-                          buffers=self.buffers.setdefault(kind, {}))
+                          buffers=self.buffers.setdefault(kind, {}), allocator=allocator)
             attention = (PreparedKDA(w["attention"], source, pool.recurrent(index), self.delta,
                 eps=config.text["rms_norm_eps"], records=kda_records.layer(index) if mode == "verify" else None,
                 **kwargs) if kind == "kda" else
@@ -264,7 +278,8 @@ class PreparedDecoder:
                 dense = self.buffers.setdefault("dense", {})
                 if "output" in self.buffers.get("moe", {}):
                     dense.setdefault("output", self.buffers["moe"]["output"])
-                mlp = PreparedMLP(w["mlp"], source, session=session, name=prefix + ".mlp", buffers=dense)
+                mlp = PreparedMLP(w["mlp"], source, session=session, name=prefix + ".mlp", buffers=dense,
+                                  allocator=allocator)
             else:
                 # Shared experts write the sum buffer, which the preceding mixture consumed and the MoE
                 # reduction overwrites only after their output is added.
@@ -273,21 +288,16 @@ class PreparedDecoder:
                 mlp = PreparedLatentMoE(w, source, config, weights.shard, runtime=runtime,
                     router_runtime=router_runtime, route_runtime=route_runtime if mode != "prefill" else None,
                     coordinator=coordinator, session=session, name=prefix + ".moe", workspace=workspace,
-                    buffers=self.buffers.setdefault("moe", {}), storage=buffers)
+                    buffers=self.buffers.setdefault("moe", {}), storage=buffers, allocator=allocator)
             # The sum buffer is consumed before the next attention or MLP reduction.
             if "total" not in self.buffers:
-                self.buffers["total"] = torch.zeros_like(source)
+                self.buffers["total"] = zeros(source.shape)
             total = self.buffers["total"][:source.shape[0]]
             reduce = PreparedChunkedAllReduce(source, total, runtime=runtime, coordinator=coordinator,
                                               session=session, name=prefix + ".reduce")
             self.layers.append((w, attention, mlp, reduce))
         # The running block sum and committed blocks persist through one forward; every forward
         # rewrites them from its embeddings before reading them.
-        tokens, hidden = source.shape
-        if "residual" not in self.buffers:
-            committed = -(-len(weights.layers) // config.text["attn_res_block_size"])
-            self.buffers["residual"] = dict(prefix=torch.zeros_like(source),
-                blocks=torch.zeros((tokens, committed, hidden), dtype=source.dtype, device=source.device))
         r = self.buffers["residual"]
         # The normalized mixture entering attention takes the MoE output, which the previous reduction
         # consumed; the one entering the MLP takes the attention output, which its reduction consumed.
@@ -301,8 +311,7 @@ class PreparedDecoder:
                                  if weights.draft is not None and isinstance(config.draft, DSparkConfig) else ())
         if self.auxiliary_layers:
             if "auxiliary" not in self.buffers:
-                self.buffers["auxiliary"] = torch.zeros((tokens, len(self.auxiliary_layers) * hidden),
-                                                        dtype=source.dtype, device=source.device)
+                self.buffers["auxiliary"] = zeros((tokens, len(self.auxiliary_layers) * hidden))
             self.auxiliary = self.buffers["auxiliary"][:tokens]
         self.replay = None
         if mode == "verify":

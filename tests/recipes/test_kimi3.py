@@ -69,7 +69,7 @@ def test_checkpoint_kda(config, mode, tokens):
     from ignition.recipes.kimi3.weights import KimiWeightLoader
     from ignition.recipes.kimi3.kda import PreparedKDA
     from ignition.components.recurrent import DeltaState, DeltaMetadata
-    from ignition.preparation.scratch import ScratchArena
+    from ignition.preparation.scratch import GraphBufferPool, ScratchArena
     from ignition.preparation.tuning import RecordedPreparationSession
 
     device = torch.device("cuda:0")
@@ -86,8 +86,9 @@ def test_checkpoint_kda(config, mode, tokens):
         metadata = DeltaMetadata.allocate(1, device)
         torch.manual_seed(41)
         source = torch.randn((tokens, 7168), device=device, dtype=torch.bfloat16)
+        graph_buffers = GraphBufferPool(device)
         op = PreparedKDA(weights["attention"], source, state, metadata, mode=mode, eps=1e-5,
-                        session=session, name="kda", workspace=arena, buffers={})
+                        session=session, name="kda", workspace=arena, buffers={}, allocator=graph_buffers.cursor())
         session.tune(show_progress=False)
         metadata.query_start_loc[1] = tokens
         metadata.convolution_slots[0] = 1
@@ -127,6 +128,9 @@ def test_checkpoint_kda(config, mode, tokens):
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph, stream=stream):
             replayed = op(source)
+        for chunks in graph_buffers.chunks.values():
+            for chunk in chunks:
+                chunk.fill_(float("nan"))
         graph.replay()
         torch.cuda.synchronize(device)
         torch.testing.assert_close(replayed, output, rtol=0, atol=0)
@@ -144,7 +148,7 @@ def test_checkpoint_mla(config, mode, tokens):
     from ignition.components.paged_batch import Metadata
     from ignition.recipes.kimi3.weights import KimiWeightLoader
     from ignition.recipes.kimi3.attention import PreparedMLA
-    from ignition.preparation.scratch import ScratchArena
+    from ignition.preparation.scratch import GraphBufferPool, ScratchArena
     from ignition.preparation.tuning import RecordedPreparationSession
 
     device = torch.device("cuda:0")
@@ -163,8 +167,9 @@ def test_checkpoint_mla(config, mode, tokens):
         cache = torch.zeros((pages, 128, 576), dtype=torch.float8_e4m3fn, device=device)
         torch.manual_seed(41)
         source = torch.randn((tokens, 7168), device=device, dtype=torch.bfloat16)
+        graph_buffers = GraphBufferPool(device)
         op = PreparedMLA(weights, source, metadata, cache, mode=mode, session=session,
-                         name="mla", workspace=arena, buffers={})
+                         name="mla", workspace=arena, buffers={}, allocator=graph_buffers.cursor())
         session.tune(show_progress=False)
         metadata.query_start_loc[1] = tokens
         metadata.lengths.fill_(tokens)
@@ -204,6 +209,9 @@ def test_checkpoint_mla(config, mode, tokens):
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph, stream=stream):
             replayed = op(source)
+        for chunks in graph_buffers.chunks.values():
+            for chunk in chunks:
+                chunk.fill_(float("nan") if chunk.is_floating_point() else -1)
         graph.replay()
         torch.cuda.synchronize(device)
         torch.testing.assert_close(replayed, output, rtol=0, atol=0)
