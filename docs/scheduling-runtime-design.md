@@ -56,21 +56,31 @@ draws again.
 For conditional acceptance estimates `p_i`, expected output at width `W` is
 `1 + p_1 + p_1*p_2 + ... + product(p_1..p_(W-1))`. Combined graphs search all
 loaded widths using request-local historical acceptance. A producer supplying
-native confidence uses its previous confidence curve to forecast proposal work,
-with a neutral 0.5 prior before the first proposal; observed acceptance is not
-substituted for that curve.
+native confidence forecasts proposal work from an exponential average of prior
+confidence curves. Every observation contributes one quarter of the request
+estimate and one sixty-fourth of a model-local population estimate. As a request
+generates tokens without a proposal, its estimate approaches the population
+curve with a half-life of 32 output tokens; the population starts at 0.5. Thus a
+pessimistic observation cannot permanently prevent its own replacement. Observed
+acceptance is not substituted for confidence, and fresh retained proposals keep
+their unsmoothed confidence for causal prefix selection.
 
 Rank zero supplies the confidence curve used for the shared scheduling decision.
-Peer probabilities must be finite, within `[0, 1]`, and agree within `1e-5`
-absolute error; replicated floating-point reductions need not be bitwise equal.
-Request identities, completion fences, and consumed-token counts agree exactly.
+Every rank must report finite probabilities within `[0, 1]`; the root's curve is
+preserved without averaging or comparison against peer estimates. Replicated
+floating-point estimates do not select peer execution: every rank receives the
+same root-selected operation. Request identities, completion fences, and
+consumed-token counts still agree exactly.
 
 Fresh confidence is consumed through a causal frontier. After proposal
 completion, the participating retained requests, measured costs, and fairness
 prices are fixed for the decision. Existing finalized widths remain fixed. Each
 new proposal begins at width one; only its next extension is eligible. The
-scheduler admits the improving extension with the greatest utility and repeats
-until no extension improves the shared objective. It cannot use a later
+scheduler scores individual extensions, value-ranked subsets of equal-width
+requests, and the joint immediate frontier across differing widths. It admits
+the improving cohort with the greatest utility and repeats until no tested
+cohort improves the shared objective. Every score includes the complete packing
+cost, so requests can jointly pay a graph-duration increase. It cannot use a later
 confidence to reverse an earlier inclusion. Unknown-cost trials choose their
 width independently of fresh confidence. Fixed mode retains the loaded depth,
 limited by each request's remaining output, context, and sampling restrictions.
