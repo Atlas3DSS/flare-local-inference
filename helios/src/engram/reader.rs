@@ -291,6 +291,29 @@ pub(crate) struct DiskReader {
     stats: Arc<Stats>,
 }
 
+// Accumulate locally so timing does not add atomic operations to each completion.
+// Drop also records completed phases when a gather exits with an I/O error.
+struct DiskTimings<'a> {
+    stats: &'a Stats,
+    plan: u64,
+    submit: u64,
+    wait: u64,
+    complete: u64,
+}
+
+impl Drop for DiskTimings<'_> {
+    fn drop(&mut self) {
+        for (counter, value) in [
+            (&self.stats.disk_plan_ns, self.plan),
+            (&self.stats.disk_submit_ns, self.submit),
+            (&self.stats.disk_wait_ns, self.wait),
+            (&self.stats.disk_complete_ns, self.complete),
+        ] {
+            counter.fetch_add(value, Ordering::Relaxed);
+        }
+    }
+}
+
 impl DiskReader {
     fn from_file(source: &File, stats: Arc<Stats>) -> Result<Self> {
         let file = crate::os::direct_reopen(source)
@@ -326,6 +349,14 @@ impl DiskReader {
     }
 
     pub fn gather(&mut self, planes: &[Plane; 2], ids: &[i64], output: &mut [u8]) -> Result<()> {
+        let mut timing = DiskTimings {
+            stats: &self.stats,
+            plan: 0,
+            submit: 0,
+            wait: 0,
+            complete: 0,
+        };
+        let begin = Instant::now();
         self.fragments.clear();
         let mut base = 0;
         for plane in planes {
@@ -372,8 +403,10 @@ impl DiskReader {
                 });
             }
         }
+        timing.plan = begin.elapsed().as_nanos() as u64;
         #[cfg(unix)]
         for batch in self.reads.chunks(DEPTH) {
+            let begin = Instant::now();
             for (slot, read) in batch.iter().enumerate() {
                 let entry = opcode::ReadFixed::new(
                     types::Fd(self.file.as_raw_fd()),
@@ -394,14 +427,19 @@ impl DiskReader {
                 batch.iter().map(|read| read.nbytes as u64).sum(),
                 Ordering::Relaxed,
             );
+            timing.submit += begin.elapsed().as_nanos() as u64;
             let mut completed = 0;
             let mut failure = None;
             while completed < batch.len() {
-                match self.ring.submit_and_wait(1) {
+                let begin = Instant::now();
+                let result = self.ring.submit_and_wait(1);
+                timing.wait += begin.elapsed().as_nanos() as u64;
+                match result {
                     Ok(_) => {}
                     Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
                     Err(error) => return Err(format!("submit Engram reads: {error}").into()),
                 }
+                let begin = Instant::now();
                 for entry in self.ring.completion() {
                     completed += 1;
                     let slot = entry.user_data() as usize;
@@ -427,6 +465,7 @@ impl DiskReader {
                             .copy_from_slice(source);
                     }
                 }
+                timing.complete += begin.elapsed().as_nanos() as u64;
             }
             if let Some(error) = failure {
                 return Err(error.into());
@@ -434,6 +473,7 @@ impl DiskReader {
         }
         #[cfg(windows)]
         for batch in self.reads.chunks(DEPTH) {
+            let begin = Instant::now();
             let mut failure = None;
             for (slot, read) in batch.iter().enumerate() {
                 if let Err(error) = unsafe {
@@ -455,8 +495,13 @@ impl DiskReader {
                     .disk_bytes
                     .fetch_add(read.nbytes as u64, Ordering::Relaxed);
             }
+            timing.submit += begin.elapsed().as_nanos() as u64;
             while self.ring.pending() != 0 {
-                match self.ring.wait() {
+                let begin = Instant::now();
+                let result = self.ring.wait();
+                timing.wait += begin.elapsed().as_nanos() as u64;
+                let begin = Instant::now();
+                match result {
                     Err(error) => {
                         failure.get_or_insert_with(|| format!("wait for Engram read: {error}"));
                         self.ring.cancel();
@@ -491,6 +536,7 @@ impl DiskReader {
                         }
                     }
                 }
+                timing.complete += begin.elapsed().as_nanos() as u64;
             }
             if let Some(error) = failure {
                 return Err(error.into());

@@ -34,6 +34,10 @@ pub(crate) struct Stats {
     cache_bytes: AtomicU64,
     disk_reads: AtomicU64,
     disk_bytes: AtomicU64,
+    disk_plan_ns: AtomicU64,
+    disk_submit_ns: AtomicU64,
+    disk_wait_ns: AtomicU64,
+    disk_complete_ns: AtomicU64,
 }
 
 impl Stats {
@@ -98,6 +102,30 @@ impl Stats {
                 "counter",
                 "Bytes requested by direct-I/O embedding reads.",
                 &self.disk_bytes,
+            ),
+            (
+                "disk_plan_nanoseconds_total",
+                "counter",
+                "Wall time building, sorting and coalescing disk row reads.",
+                &self.disk_plan_ns,
+            ),
+            (
+                "disk_submit_nanoseconds_total",
+                "counter",
+                "Wall time preparing and issuing disk read batches; Linux kernel submission is included in wait time.",
+                &self.disk_submit_ns,
+            ),
+            (
+                "disk_wait_nanoseconds_total",
+                "counter",
+                "Wall time in disk completion waits, including Linux io_uring submission.",
+                &self.disk_wait_ns,
+            ),
+            (
+                "disk_complete_nanoseconds_total",
+                "counter",
+                "Wall time processing disk completions and copying rows, excluding completion waits.",
+                &self.disk_complete_ns,
             ),
         ] {
             let _ = writeln!(

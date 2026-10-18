@@ -70,7 +70,12 @@ Disk embedding tables and disk prefix caches use unbuffered overlapped I/O with
 bounded completion queues. File offsets, lengths, and buffers retain the package's
 4 KiB alignment; incompatible storage geometry is rejected. RAM embedding tables
 and memory prefix caches retain their existing explicit storage selections.
-The open package handle prevents replacement or writes while it is loaded.
+The retained package handle is also unbuffered and prevents replacement or writes
+while the model is loaded. Buffered package handles are limited to startup:
+retaining one alongside direct readers can severely reduce random-read throughput
+even when the buffered handle is idle. Diagnose table reads separately from graph
+replay using the `flare_engram_disk_{plan,submit,wait,complete}_nanoseconds_total`
+counters; their help text describes platform-specific timing boundaries.
 
 The `ignition serve` development handoff for shared RAM embedding tables uses
 Linux file descriptors. On Windows, export a package and load it with

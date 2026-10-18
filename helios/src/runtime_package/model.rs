@@ -425,8 +425,18 @@ impl NativeModel {
             devices.len(),
             if devices.len() == 1 { "" } else { "s" }
         ));
+        // Windows direct reads can stall while any buffered handle remains open.
+        // Keep the package's write/delete exclusion through an unbuffered guard;
+        // the buffered startup readers close when loading returns.
+        #[cfg(windows)]
+        let package_file = std::sync::Arc::new(
+            crate::os::direct_read_guard(&archive.file)
+                .map_err(|error| invalid(format!("retain read-only package: {error}")))?,
+        );
+        #[cfg(unix)]
+        let package_file = archive.file.clone();
         let mut model = Self {
-            _package_file: Some(archive.file.clone()),
+            _package_file: Some(package_file),
             ranks: Vec::new(),
             server_config,
             engram: None,
