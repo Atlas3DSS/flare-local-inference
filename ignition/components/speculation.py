@@ -341,6 +341,12 @@ class PreparedStochasticVerification:
             _tensor(token_limits, (batch,), torch.int32, device, "token_limits")
         self.token_limits = token_limits
         self._prepared = False
+        self.broadcast = None
+
+    def prepare_broadcast(self, **kwargs):
+        from .collectives import PreparedBroadcast
+
+        self.broadcast = PreparedBroadcast(tuple(vars(self.output).values()), **kwargs)
 
     def prepare(self):
         if self.target_probs.device.type != "cuda":
@@ -396,6 +402,8 @@ class PreparedStochasticVerification:
         out.valid.copy_(valid)
         out.rng_increment.copy_(torch.where(valid, self.draw_reservation, 0))
         out.token_ids.masked_fill_(~valid[:, None], -1)
+        if self.broadcast is not None:
+            self.broadcast()
         return out
 
 

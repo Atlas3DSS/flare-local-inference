@@ -53,6 +53,9 @@ class PreparedGeneration:
             else PreparedCompletion(*args)
         )
         self.completion.prepare()
+        if self.replicated_sampling:
+            self.completion.prepare_broadcast(runtime=decoder.head.gather.runtime, session=session,
+                coordinator=coordinator, name=name + ".sampling", buffers=buffers)
         self.compilation_variant = (
             "sample" if batch.shard.rank == 0 or self.replicated_sampling else "consume"
         )

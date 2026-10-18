@@ -25,6 +25,9 @@ class PreparedResume:
                      records, frame, sequence)
         self.completion = PreparedCompletion(*arguments) if weights.shard.rank != 0 and not replicated_sampling else PreparedSampling(self.logits, *arguments)
         self.completion.prepare()
+        if replicated_sampling:
+            self.completion.prepare_broadcast(runtime=vocabulary_runtime, session=session,
+                coordinator=coordinator, name=name + ".sampling")
         self.compilation_variant = "sample" if weights.shard.rank == 0 or replicated_sampling else "consume"
         self.replicated_sampling = replicated_sampling
 

@@ -1178,6 +1178,14 @@ fork and join execute on replay.
 
 The graph boundary includes sampling.
 
+When tensor-parallel ranks maintain replicated sampling state, rank zero's
+sample and validity determine every rank's update. Captured broadcasts precede
+dependent model work and state commits. Learned draft proposals broadcast both
+the chosen token and its exact FP32 proposal distribution, represented by at
+most 64 token/probability pairs. Verification broadcasts the accepted prefix,
+output tokens, validity, and RNG reservation before cache or request state changes.
+Replicated floating-point arithmetic need not be bit-identical across ranks.
+
 Temperature, top-k, top-p, min-p and penalty controls use one captured
 probability-sampling path built from FlashInfer primitives. Captured operations
 manage penalties, grammar masks and request-state updates. Temperature must be

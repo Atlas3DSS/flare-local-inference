@@ -503,6 +503,13 @@ class PreparedSampling:
             state.eos_token_ids, state.eos_count, completion_records, frame_index, submission_sequence,
             vocab, rows, state.consumed_tokens.stride(0), record_fields, True, state.capacity)
         self._prepared = False
+        self.broadcast = None
+
+    def prepare_broadcast(self, **kwargs):
+        from .collectives import PreparedBroadcast
+
+        self.broadcast = PreparedBroadcast(
+            (self.sampled_tokens, self.sample_valid, self.maximum, self.probability_mass), **kwargs)
 
     def prepare(self) -> None:
         """Compile and warm all operators before CUDA graph capture."""
@@ -556,6 +563,8 @@ class PreparedSampling:
             raise RuntimeError("sampling prepare() must complete before capture")
         self._scores()
         self._filter_scores()
+        if self.broadcast is not None:
+            self.broadcast()
         self._complete()
 
     def record_completion(self) -> None:
