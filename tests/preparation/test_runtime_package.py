@@ -97,6 +97,23 @@ def test_export_never_overwrites_an_existing_directory(tmp_path):
         package().write(tmp_path, {})
 
 
+def test_invalid_serving_metadata_fails_before_cuda_or_weight_copy(tmp_path, monkeypatch):
+    from google.protobuf.json_format import ParseError
+    from ignition.preparation import runtime_package
+
+    def unexpected_cuda():
+        raise AssertionError("invalid metadata must fail before CUDA initialization")
+
+    monkeypatch.setattr(runtime_package, "_Cuda", unexpected_cuda)
+    server = dict(assets={"tokenizer": {}, "chat_template": {}}, frontend={},
+        sampling_defaults=dict(seed=0, temperature=1., top_p=.95, top_k=-1, min_p=0.,
+            repetition_penalty=1., presence_penalty=0., frequency_penalty=0.),
+        scheduler_policy="throughput")
+    with pytest.raises(ParseError, match="scheduler_policy"):
+        package().write(tmp_path / "invalid.safetensors", {"decode": object()}, server=server)
+    assert not list(tmp_path.iterdir())
+
+
 @pytest.mark.parametrize("offset,nbytes,closed,accepted", [
     (0, 2 << 20, False, True),
     (4096, 4096, False, True),

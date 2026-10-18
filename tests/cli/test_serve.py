@@ -89,7 +89,7 @@ def host(monkeypatch, tmp_path):
     class OutOfMemoryError(RuntimeError):
         pass
 
-    monkeypatch.setitem(sys.modules, "flare_heliopause", types.SimpleNamespace(CliSignals=CliSignals))
+    monkeypatch.setitem(sys.modules, "flare_heliopause", types.SimpleNamespace(CliSignals=CliSignals, Server=object))
     monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(
         cuda=types.SimpleNamespace(set_device=lambda _: None), OutOfMemoryError=OutOfMemoryError))
     monkeypatch.setattr(module_images, "ModuleImages", Scope)
@@ -190,6 +190,28 @@ def test_served_model_name_is_forwarded_without_changing_the_package_alias(host)
         assert arguments[arguments.index("--served-model-name") + 1] == alias
         assert arguments[2] == original and host["exports"] == 1
         assert host["options"]["served_names"] == ["qwen3.8-flash"]
+
+
+@pytest.mark.parametrize("extension", [None, types.SimpleNamespace()])
+def test_diagnostic_serving_requires_native_http_before_preparation(host, monkeypatch, capsys, extension):
+    monkeypatch.setitem(sys.modules, "flare_heliopause", extension)
+    assert main(["serve", "qwen3.8-flash", "--gpus", "0", "--port", str(free_port())]) == 2
+    assert "qualification Cargo feature" in capsys.readouterr().err
+    assert "prepared" not in host and "gpus" not in host
+
+
+def test_direct_serving_does_not_require_native_http(host, monkeypatch):
+    monkeypatch.setitem(sys.modules, "flare_heliopause", types.SimpleNamespace())
+    discovered = []
+
+    def discover():
+        discovered.append(True)
+        raise Executed
+
+    monkeypatch.setattr(serve.Host, "discover", discover)
+    assert main(["serve", "qwen3.8-flash", "--direct", "--gpus", "0",
+                 "--port", str(free_port())]) == 0
+    assert discovered == [True] and "prepared" not in host
 
 
 def test_diagnostic_serving_retains_storage_until_native_shutdown(host, monkeypatch):

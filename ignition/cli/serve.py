@@ -402,6 +402,15 @@ def serve(args) -> int:
         raise UsageError("--graph-times applies only to --direct execution")
     if args.eager and args.graph_times is not None and not args.graph_times.is_file():
         raise UsageError(f"--graph-times {args.graph_times} does not exist; graph replay with --graph-times saves it")
+    if not args.direct:
+        requirement = ("ignition serve requires Heliopause's qualification Cargo feature; rebuild ./heliopause "
+                       "with --config-settings 'build-args=--features=qualification'")
+        try:
+            import flare_heliopause
+        except ImportError as error:
+            raise UsageError(requirement) from error
+        if not hasattr(flare_heliopause, "Server"):
+            raise UsageError(requirement)
     progress = _serving_progress(args.verbose)
     configuration = Configuration.load(args.config)
     hub_cache = configuration.directory("hub_cache")
