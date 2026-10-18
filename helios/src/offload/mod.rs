@@ -439,7 +439,10 @@ pub fn open(prepared: Prepared) -> Result<Box<dyn PrefixStore>> {
     let transfers = std::sync::Arc::new(std::sync::Mutex::new(transfer::Transfers::start(
         &contexts,
         geometry.clone(),
-        memory_pool.as_ref().and_then(slab::SlabPool::rank_parts),
+        memory_pool
+            .as_ref()
+            .or(staging_pool.as_ref())
+            .ok_or("prefix transfers require a slab pool")?,
     )?));
     let disk = directory_lock
         .map(|directory| {
@@ -447,7 +450,9 @@ pub fn open(prepared: Prepared) -> Result<Box<dyn PrefixStore>> {
                 std::sync::Arc::new(std::sync::Mutex::new(transfer::Transfers::start(
                     &contexts,
                     geometry.clone(),
-                    None,
+                    staging_pool
+                        .as_ref()
+                        .ok_or("disk transfers require a staging pool")?,
                 )?))
             } else {
                 transfers.clone()

@@ -75,6 +75,17 @@ continue using I/O completion ports. Both paths use unbuffered overlapped I/O wi
 bounded queues. File offsets, lengths, and buffers retain the package's
 4 KiB alignment; incompatible storage geometry is rejected. RAM embedding tables
 and memory prefix caches retain their existing explicit storage selections.
+Registered prefix-cache slabs can have different CPU and GPU addresses under
+WDDM. Disk I/O uses the CPU address; batched CUDA transfers use the device alias
+resolved at registration, with the same offsets and record layout. Treating the
+CPU address as a GPU pointer can fail with `CUDA_ERROR_ILLEGAL_ADDRESS` on the
+first checkpoint copy.
+
+Qwen Flash TP1 on RTX Spark N1X has been exercised with disk-only and combined
+RAM/disk prefix caching: concurrent requests, checkpoint writes, restoration
+after restart, and clean shutdown. Other model cache layouts and tensor-parallel
+Windows offload still require complete-model validation.
+
 Retained package handles are also unbuffered and prevent replacement or writes
 while the model is loaded. Buffered package handles are limited to startup:
 retaining one alongside direct readers can severely reduce random-read throughput

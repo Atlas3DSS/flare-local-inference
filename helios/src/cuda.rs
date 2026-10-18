@@ -287,6 +287,7 @@ pub(crate) fn device_integrated(context: usize) -> Result<bool> {
 pub(crate) struct HostRegistration {
     driver: Arc<Driver>,
     address: usize,
+    device_address: u64,
     nbytes: usize,
 }
 
@@ -296,6 +297,9 @@ impl HostRegistration {
     }
     pub(crate) fn nbytes(&self) -> usize {
         self.nbytes
+    }
+    pub(crate) fn device_address(&self) -> u64 {
+        self.device_address
     }
 }
 
@@ -336,11 +340,28 @@ pub(crate) unsafe fn register_host(
             (driver.host_register)(address as Handle, nbytes, HOST_REGISTER_PORTABLE),
         )?;
     }
-    Ok(HostRegistration {
+    // Own the registration before querying its device alias so a failed query
+    // unregisters the range. Registered memory can have disjoint CPU and GPU
+    // addresses, including on Windows WDDM.
+    let mut registration = HostRegistration {
         driver,
         address,
+        device_address: 0,
         nbytes,
-    })
+    };
+    // SAFETY: The context is still current, the range is registered and live,
+    // and device_address is a valid output pointer.
+    unsafe {
+        registration.driver.check(
+            "cuMemHostGetDevicePointer_v2",
+            (registration.driver.host_pointer)(
+                &mut registration.device_address,
+                address as Handle,
+                0,
+            ),
+        )?;
+    }
+    Ok(registration)
 }
 
 /// Pinned host memory in one reserved address range, split into parts that
@@ -605,9 +626,10 @@ impl Stream {
 
     /// Issue one batched copy of `destinations[i] <- sources[i]` for `sizes[i]`
     /// bytes each, in stream order on both sides. Every address is a device
-    /// address or a registered host address. The batch carries at most
-    /// [`BATCH_BYTES`] and [`BATCH_ENTRIES`]; larger batches are rejected, as
-    /// are empty entries. An empty batch issues nothing.
+    /// address, including the device alias of registered host memory. CPU
+    /// addresses of registrations are not necessarily GPU-accessible. The batch
+    /// carries at most [`BATCH_BYTES`] and [`BATCH_ENTRIES`]; larger batches and
+    /// empty entries are rejected. An empty batch issues nothing.
     ///
     /// # Safety
     /// Every range stays valid and, for host sources, unchanged until the
@@ -1041,7 +1063,6 @@ mod tests {
     #[cfg(feature = "runtime-package")]
     #[test]
     #[ignore = "requires a CUDA device; FLARE_OFFLOAD_TEST_DIR names a directory supporting direct I/O"]
-    #[cfg(unix)]
     fn batched_copies_round_trip_through_registered_memory() {
         use crate::runtime_package::driver::Driver as Loader;
         const BYTES: usize = 8 << 20;
@@ -1070,24 +1091,13 @@ mod tests {
         }
         let stream = Stream::open_lowest_priority(context as usize, 0).unwrap();
         let event = stream.blocking_event().unwrap();
-        // SAFETY: An anonymous private mapping of BYTES, released at the end.
-        let host = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                BYTES,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-                -1,
-                0,
-            )
-        };
-        assert_ne!(host, libc::MAP_FAILED);
-        let host = host.cast::<u8>();
+        let host = crate::os::map_host(BYTES).unwrap() as *mut u8;
         assert_eq!(host as usize % 4096, 0);
         let registration =
             unsafe { register_host(context as usize, host as usize, BYTES) }.unwrap();
         assert_eq!(registration.address(), host as usize);
         assert_eq!(registration.nbytes(), BYTES);
+        let device_host = registration.device_address();
 
         let image_a: Vec<u8> = (0..BYTES).map(pattern).collect();
         let entries = scattered_entries(BYTES);
@@ -1107,7 +1117,7 @@ mod tests {
         }
 
         let sizes: Vec<usize> = entries.iter().map(|entry| entry.2).collect();
-        let to_host: Vec<u64> = entries.iter().map(|e| host as u64 + e.1 as u64).collect();
+        let to_host: Vec<u64> = entries.iter().map(|e| device_host + e.1 as u64).collect();
         let from_a: Vec<u64> = entries.iter().map(|e| a + e.0 as u64).collect();
         unsafe { stream.copy_batch(&to_host, &from_a, &sizes) }.unwrap();
         stream.record(&event).unwrap();
@@ -1134,7 +1144,7 @@ mod tests {
                 .unwrap();
         }
         let to_b: Vec<u64> = entries.iter().map(|e| b + e.0 as u64).collect();
-        let from_host: Vec<u64> = entries.iter().map(|e| host as u64 + e.1 as u64).collect();
+        let from_host: Vec<u64> = entries.iter().map(|e| device_host + e.1 as u64).collect();
         unsafe { stream.copy_batch(&to_b, &from_host, &sizes) }.unwrap();
         stream.record(&event).unwrap();
         event.synchronize().unwrap();
@@ -1159,25 +1169,30 @@ mod tests {
         // enough host-to-device traffic to outlast its issue and compare the
         // thread's CPU time against the wall time of the wait.
         for _ in 0..600 {
-            unsafe { stream.copy_batch(&[b], &[host as u64], &[BYTES]) }.unwrap();
+            unsafe { stream.copy_batch(&[b], &[device_host], &[BYTES]) }.unwrap();
         }
         stream.record(&event).unwrap();
+        #[cfg(unix)]
         let (wall, cpu) = (std::time::Instant::now(), thread_cpu_time());
         event.synchronize().unwrap();
-        let (wall, cpu) = (wall.elapsed(), thread_cpu_time() - cpu);
-        eprintln!("blocking event wait: {wall:?} wall, {cpu:?} thread CPU");
-        if wall >= std::time::Duration::from_millis(40) {
-            assert!(
-                cpu * 4 < wall,
-                "the blocking event wait spun: {cpu:?} CPU over {wall:?}"
-            );
+        #[cfg(unix)]
+        {
+            let (wall, cpu) = (wall.elapsed(), thread_cpu_time() - cpu);
+            eprintln!("blocking event wait: {wall:?} wall, {cpu:?} thread CPU");
+            if wall >= std::time::Duration::from_millis(40) {
+                assert!(
+                    cpu * 4 < wall,
+                    "the blocking event wait spun: {cpu:?} CPU over {wall:?}"
+                );
+            }
         }
 
+        #[cfg(unix)]
         let direct = direct_read_matches(host, BYTES);
 
         drop(registration);
         unsafe {
-            assert_eq!(libc::munmap(host.cast(), BYTES), 0);
+            crate::os::unmap_host(host as usize, BYTES);
         }
         drop(event);
         drop(stream);
@@ -1188,6 +1203,7 @@ mod tests {
                 .check("cuCtxDestroy_v2", (loader.context_destroy)(context))
                 .unwrap();
         }
+        #[cfg(unix)]
         assert!(
             direct || std::env::var_os("FLARE_OFFLOAD_TEST_DIR").is_none(),
             "the configured test directory refused direct I/O"

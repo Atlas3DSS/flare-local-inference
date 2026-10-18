@@ -4,7 +4,7 @@
 //! priority and one blocking event, and receives jobs naming page ids, a state
 //! slot, and slab addresses. The thread expands ids into device and host
 //! addresses from its rank's geometry and the cross-rank [`Layout`], or from
-//! its [`RankPart`] for slabs of a pool split by rank, issues
+//! its [`RankPart`] for the pool's device addresses, issues
 //! batched copies of at most [`BATCH_BYTES`] and [`BATCH_ENTRIES`] per call,
 //! records its event, sleeps until the event completes, and replies. A failure
 //! is reported only after the stream has drained, so destination ids are
@@ -37,7 +37,7 @@ use crate::{
 use super::{
     CacheGeometry, JobId, Layout,
     geometry::{RankLayout, invalid},
-    slab::{RankPart, WINDOW_PAGES},
+    slab::{RankPart, SlabPool, WINDOW_PAGES},
 };
 
 pub use crate::cuda::{BATCH_BYTES, BATCH_ENTRIES};
@@ -124,13 +124,13 @@ pub(crate) struct Descriptor {
 /// capacities, a null slab address, a page id or slab address named twice, or
 /// more than [`WINDOW_PAGES`] pages are rejected without touching the driver.
 ///
-/// A slab of the pool split by rank that `split` describes holds this rank's
-/// part where `split` locates it, with the planes at their offsets relative to
-/// the rank's first plane; any other slab holds a cross-rank record.
+/// `part` resolves a slab identity to this rank's GPU address, with the planes
+/// at their offsets relative to the rank's first plane. Without a part, the
+/// addresses describe an already GPU-addressable cross-rank record.
 pub(crate) fn expand(
     geometry: &CacheGeometry,
     rank: &RankLayout,
-    split: Option<&RankPart>,
+    part: Option<&RankPart>,
     job: &Job,
     descriptors: &mut Vec<Descriptor>,
 ) -> Result<()> {
@@ -157,12 +157,10 @@ pub(crate) fn expand(
                 geometry.page_capacity
             )));
         }
-        let part = match split {
-            Some(split) => split.page(*slab)?,
-            None => None,
-        };
         let record = match part {
-            Some(address) => address,
+            Some(part) => part
+                .page(*slab)?
+                .ok_or_else(|| invalid("page slab is outside the transfer pool"))?,
             None => slab_address(*slab)? + rank.page_offset,
         };
         for (plane, offset) in geometry.planes.iter().zip(&rank.plane_offsets) {
@@ -183,12 +181,10 @@ pub(crate) fn expand(
                 geometry.row_capacity
             )));
         }
-        let part = match split {
-            Some(split) => split.row(slab)?,
-            None => None,
-        };
         let row = match part {
-            Some(address) => address,
+            Some(part) => part
+                .row(slab)?
+                .ok_or_else(|| invalid("row slab is outside the transfer pool"))?,
             None => slab_address(slab)? + rank.row_offset,
         };
         push_unit(
@@ -289,7 +285,7 @@ struct RankWorker {
     rank: usize,
     geometry: CacheGeometry,
     layout: RankLayout,
-    split: Option<RankPart>,
+    part: RankPart,
     stream: Stream,
     event: Event,
     descriptors: Vec<Descriptor>,
@@ -307,7 +303,7 @@ impl RankWorker {
         device: i32,
         geometry: CacheGeometry,
         layout: RankLayout,
-        split: Option<RankPart>,
+        part: RankPart,
     ) -> Result<Self> {
         let stream = Stream::open_lowest_priority(context, device)?;
         let event = stream.blocking_event()?;
@@ -323,7 +319,7 @@ impl RankWorker {
             rank,
             geometry,
             layout,
-            split,
+            part,
             stream,
             event,
             descriptors: Vec::with_capacity(window),
@@ -338,7 +334,7 @@ impl RankWorker {
         expand(
             &self.geometry,
             &self.layout,
-            self.split.as_ref(),
+            Some(&self.part),
             job,
             &mut self.descriptors,
         )?;
@@ -408,12 +404,13 @@ impl RankWorker {
 
 impl Transfers {
     /// Start one thread per rank. `contexts` pairs each rank's CUDA context with
-    /// its device ordinal, in rank order matching `geometry`. `split` holds each
-    /// rank's part of a pool split by rank whose slabs the jobs may name.
+    /// its device ordinal, in rank order matching `geometry`. The pool supplies
+    /// device addresses for registered slabs or storage split by rank, and must
+    /// remain alive until the transfer threads have drained.
     pub fn start(
         contexts: &[(usize, i32)],
         geometry: Vec<CacheGeometry>,
-        split: Option<Vec<RankPart>>,
+        pool: &SlabPool,
     ) -> Result<Self> {
         if contexts.is_empty() || contexts.len() != geometry.len() {
             return Err(invalid(format!(
@@ -422,16 +419,8 @@ impl Transfers {
                 geometry.len()
             )));
         }
-        if split
-            .as_ref()
-            .is_some_and(|parts| parts.len() != contexts.len())
-        {
-            return Err(invalid(
-                "a pool split by rank must have one part per transfer rank",
-            ));
-        }
-        let mut split = split.map(Vec::into_iter);
         let layout = Layout::new(&geometry)?;
+        let parts = pool.device_parts(&layout)?;
         let (reply_sender, receiver) = mpsc::channel();
         let mut transfers = Self {
             layout,
@@ -439,9 +428,10 @@ impl Transfers {
             receiver,
             pending: HashMap::new(),
         };
-        for (rank, (&(context, device), geometry)) in contexts.iter().zip(geometry).enumerate() {
+        for (rank, ((&(context, device), geometry), part)) in
+            contexts.iter().zip(geometry).zip(parts).enumerate()
+        {
             let layout = transfers.layout.ranks[rank].clone();
-            let part = split.as_mut().and_then(Iterator::next);
             let (sender, jobs) = mpsc::sync_channel(QUEUE_DEPTH);
             let (ready_sender, ready) = mpsc::channel();
             let replies = reply_sender.clone();
@@ -751,7 +741,7 @@ mod tests {
     }
 
     #[test]
-    fn expansion_places_split_slabs_in_the_rank_part_and_others_in_the_record() {
+    fn expansion_places_split_slabs_in_the_rank_part_and_rejects_other_pools() {
         let ranks = [
             geometry(64, &[("k", 8192), ("v", 8192), ("sel", 100)], 10_000),
             geometry(64, &[("k", 8192), ("v", 8192), ("sel", 100)], 10_000),
@@ -775,7 +765,10 @@ mod tests {
             id: JobId(4),
             window: 0,
             direction: Direction::Out,
-            pages: vec![(PageId(5), start + 3 * page_record), (PageId(7), 0x10000)],
+            pages: vec![
+                (PageId(5), start + 3 * page_record),
+                (PageId(7), start + 4 * page_record),
+            ],
             row: Some((StateSlotId(3), rows + row_record)),
         };
         let mut descriptors = Vec::new();
@@ -783,7 +776,7 @@ mod tests {
         assert_eq!(descriptors.len(), 7);
         let records = [
             (5u64, (page_base + 3 * page_part) as u64),
-            (7, 0x10000 + rank.page_offset),
+            (7, (page_base + 4 * page_part) as u64),
         ];
         for (page, (id, record)) in records.into_iter().enumerate() {
             for (plane, geometry) in ranks[1].planes.iter().enumerate() {
@@ -817,6 +810,12 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("row slabs"), "{error}");
+        let mut outside = job.clone();
+        outside.pages[1].1 = 0x10000;
+        assert!(expand(&ranks[1], rank, Some(&part), &outside, &mut descriptors).is_err());
+        outside = job;
+        outside.row = Some((StateSlotId(3), 0x10000));
+        assert!(expand(&ranks[1], rank, Some(&part), &outside, &mut descriptors).is_err());
     }
 
     #[test]
@@ -1146,7 +1145,7 @@ mod tests {
     #[ignore = "requires FLARE_OFFLOAD_TEST_PACKAGE naming an exported package and a free GPU 0"]
     fn transfers_round_trip_pages_and_a_row_through_a_loaded_package() {
         use crate::{
-            cuda::{Stream, register_host},
+            cuda::Stream,
             runtime_package::{LoadOptions, NativeModel},
             startup::StartupProgress,
         };
@@ -1226,15 +1225,27 @@ mod tests {
 
         let pages = sources.len() as u64;
         let bytes = (pages * layout.page_record_bytes + layout.row_record_bytes) as usize;
-        // SAFETY: An anonymous private mapping sized for the records, released at the end.
-        let host = crate::os::map_host(bytes).unwrap();
-        let registration = unsafe { register_host(context, host, bytes) }.unwrap();
+        let mut pool = SlabPool::new(
+            layout.page_record_bytes,
+            pages as usize,
+            layout.row_record_bytes,
+            1,
+            false,
+        )
+        .unwrap();
+        pool.register(context).unwrap();
         let page_slabs: Vec<usize> = (0..pages)
-            .map(|index| host + (index * layout.page_record_bytes) as usize)
+            .map(|_| {
+                let slab = pool.allocate_page().unwrap();
+                pool.page_address(slab)
+            })
             .collect();
-        let row_slab = host + (pages * layout.page_record_bytes) as usize;
+        let row = pool.allocate_row().unwrap();
+        let row_slab = pool.row_address(row);
+        let host = page_slabs[0];
 
-        let mut transfers = Transfers::start(&[(context, device)], geometry.clone(), None).unwrap();
+        let mut transfers =
+            Transfers::start(&[(context, device)], geometry.clone(), &pool).unwrap();
         let wait = |transfers: &mut Transfers| -> Reply {
             let deadline = Instant::now() + Duration::from_secs(60);
             let mut replies = Vec::new();
@@ -1372,10 +1383,7 @@ mod tests {
         transfers.close().unwrap();
         assert!(transfers.submit(job(Direction::Out)).is_err());
         drop(transfers);
-        drop(registration);
-        unsafe {
-            crate::os::unmap_host(host, bytes);
-        }
+        drop(pool);
         drop(staging);
         drop(stream);
         drop(model);
@@ -1561,8 +1569,7 @@ mod tests {
             .collect();
         let row = pool.allocate_row().unwrap();
         let row_slab = pool.row_address(row);
-        let mut transfers =
-            Transfers::start(&contexts, geometry.clone(), Some(parts.clone())).unwrap();
+        let mut transfers = Transfers::start(&contexts, geometry.clone(), &pool).unwrap();
         let wait = |transfers: &mut Transfers| -> Reply {
             let deadline = Instant::now() + Duration::from_secs(60);
             let mut replies = Vec::new();
