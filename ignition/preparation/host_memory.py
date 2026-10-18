@@ -70,6 +70,32 @@ def device_memory_info(device):
     return free, total
 
 
+def virtual_device_memory(device, group=None, *, tuning_replica=None):
+    """Use one device-memory extent for corresponding TP and tuning layouts.
+
+    CUDA can report slightly different total bytes on otherwise identical GPUs.
+    Reserve matching virtual cache shapes before constructing kernel declarations;
+    physical preparation backing and runtime cache sizing remain independent.
+    Call once per rank, before allocating its model cache ranges.
+    """
+    from .rank_group import minimum_across_ranks
+
+    total = device_memory_info(device)[1]
+    if tuning_replica is None:
+        return minimum_across_ranks(total, group)
+    from datetime import timedelta
+    import torch.distributed as dist
+
+    role = tuning_replica
+    rank = 0 if group is None else dist.get_rank(group)
+    store = dist.FileStore(role.rendezvous + '.device-memory', role.processes)
+    store.set_timeout(timedelta(minutes=10))
+    store.set(str(role.index * role.tensor_parallel + rank), str(total))
+    keys = [str(member) for member in range(role.processes)]
+    store.wait(keys)
+    return min(int(store.get(key)) for key in keys)
+
+
 def worker_limit(limit, *, pools=1, available=None, device_bytes=0, headroom_bytes=0):
     """Bound worker RAM after the greater of system headroom and the requested reserve."""
     if limit <= 0 or pools <= 0 or device_bytes < 0 or headroom_bytes < 0:

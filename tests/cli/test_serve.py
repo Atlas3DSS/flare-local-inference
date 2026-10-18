@@ -35,6 +35,11 @@ class Prepared:
         self.plan, self.extra, self.pages = plan, extra, pages
         self.closed = False
         self.started = None
+        self.max_active = plan.concurrency
+        self.server_config = {"snapshots": plan.snapshots, "pages": pages or plan.pages,
+            "model_contract": {"graphs": [{"state_rows_per_request": plan.live_rows // plan.concurrency}]}}
+        self.buffers = {"memory_capacity": types.SimpleNamespace(cpu=lambda: types.SimpleNamespace(
+            tolist=lambda: [plan.live_rows + plan.snapshots + 1, pages or plan.pages]))}
 
     def __enter__(self):
         return self
@@ -221,6 +226,36 @@ def test_diagnostic_startup_failure_retains_undrained_host_storage(host, monkeyp
         main(["serve", "qwen3.8-flash", "--gpus", "0", "--port", str(free_port())])
     assert caught.value is original and "native drain was not confirmed" in original.__notes__[0]
     assert released == [] and not host["prepared"].closed
+
+
+@pytest.mark.parametrize("grouped", [False, True])
+@pytest.mark.parametrize("requests,width,snapshots,backed,expected", [
+    (64, 6, 512, 449, 64), (1, 6, 512, 8, 1), (4, 1, 16, 21, 16), (3, 6, 512, 33, 8),
+])
+def test_diagnostic_admission_uses_backed_rows_without_changing_export(
+        grouped, requests, width, snapshots, backed, expected):
+    config = {"snapshots": snapshots, "pages": 1000,
+              "model_contract": {"graphs": [{"state_rows_per_request": 1},
+                                            {"state_rows_per_request": width}]}}
+    model = types.SimpleNamespace(max_active=requests, server_config=config,
+        buffers={"memory_capacity": types.SimpleNamespace(cpu=lambda: types.SimpleNamespace(
+            tolist=lambda: [backed, 160]))})
+    prepared = types.SimpleNamespace(model=model) if grouped else model
+    options = {"bind": "0.0.0.0:8001"}
+    limited = serve._diagnostic_options(prepared, options)
+    assert limited == {**options, "snapshots": expected, "pages": 160}
+    assert requests * width + limited["snapshots"] + 1 <= backed
+    assert config["snapshots"] == snapshots and config["pages"] == 1000
+    assert options == {"bind": "0.0.0.0:8001"}
+
+
+def test_diagnostic_admission_rejects_insufficient_execution_backing():
+    model = types.SimpleNamespace(max_active=4,
+        server_config={"model_contract": {"graphs": [{"state_rows_per_request": 4}]}},
+        buffers={"memory_capacity": types.SimpleNamespace(cpu=lambda: types.SimpleNamespace(
+            tolist=lambda: [16, 160]))})
+    with pytest.raises(serve.PreparationError, match="cannot hold"):
+        serve._diagnostic_options(model, {})
 
 
 def test_preparation_flags_select_distinct_packages(host):

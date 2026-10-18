@@ -8,7 +8,9 @@ from dataclasses import dataclass, replace
 from functools import cached_property
 from math import prod
 import json
+import os
 import sys
+from pathlib import Path
 from time import monotonic
 from typing import TYPE_CHECKING
 
@@ -114,6 +116,22 @@ class SharedColumnReads:
 def fp4_down_staging_bytes(hidden_size, intermediate_size, group):
     """Bytes one whole packed FP4 down projection and its block scales occupy in shared staging."""
     return -(-(hidden_size * (intermediate_size // 2 + intermediate_size // group)) // 4096) * 4096
+
+
+def _checkpoint_read_mode(paths):
+    """Use b12x's pinned-host reader for RAM files that GDS cannot register."""
+    if sys.platform != "linux":
+        return "auto"
+    memory_devices = set()
+    for line in Path('/proc/self/mountinfo').read_text().splitlines():
+        mount, filesystem = line.split(' - ', 1)
+        if filesystem.split()[0] in ('tmpfs', 'ramfs'):
+            memory_devices.add(tuple(map(int, mount.split()[2].split(':'))))
+    for path in paths:
+        device = path.stat().st_dev
+        if (os.major(device), os.minor(device)) in memory_devices:
+            return "bounce"
+    return _read_mode()
 
 
 def quantize_bf16_linear_as_mxfp8(weight):
@@ -316,10 +334,10 @@ class DirectWeightLoader:
             # Scalar calibration checks do not amortize intra-op thread dispatch.
             stack.callback(torch.set_num_threads, torch.get_num_threads())
             torch.set_num_threads(1)
-            self._session = stack.enter_context(DirectWeightSession(device=self.device.index,
-                                                                    read_mode=_read_mode()))
             selected = self._selected_names()
             shards = {self.manifest.tensors[name].shard for name in selected}
+            read_mode = _checkpoint_read_mode(self.manifest.snapshot / shard for shard in shards)
+            self._session = stack.enter_context(DirectWeightSession(device=self.device.index, read_mode=read_mode))
             if self._display is not None:
                 self._display.source(len(shards))
 
@@ -759,6 +777,8 @@ class DirectWeightLoader:
         ``scale_scratch`` is a caller-owned dictionary keyed by expert geometry.
         Sharing it between calls requires serialized routed-expert execution;
         overlapping expert branches must provide separate dictionaries.
+        ``scale_compression="csf"`` losslessly encodes native scales during loading;
+        checkpoints that already contain CSF retain their encoded storage.
         """
         import torch
 

@@ -454,6 +454,22 @@ def serve(args) -> int:
     return code
 
 
+def _diagnostic_options(prepared, options):
+    """Limit diagnostic admission to the physical backing retained by preparation."""
+    from ignition.components.capacity import request_capacity
+
+    model = getattr(prepared, "model", prepared)
+    rows, pages = model.buffers["memory_capacity"].cpu().tolist()
+    graphs = model.server_config["model_contract"]["graphs"]
+    execution_rows = request_capacity(model.max_active) * max(graph["state_rows_per_request"] for graph in graphs)
+    if rows <= execution_rows or pages <= 0:
+        raise PreparationError("diagnostic backing cannot hold the prepared request concurrency")
+    # Row zero is reserved. Export retains the declared capacities; only this
+    # diagnostic server is restricted to the backing that already exists.
+    snapshots = min(model.server_config["snapshots"], rows - 1 - execution_rows)
+    return {**options, "pages": min(model.server_config["pages"], pages), "snapshots": snapshots}
+
+
 def _serve_prepared(prepared, bind, options):
     import signal
 
@@ -461,7 +477,10 @@ def _serve_prepared(prepared, bind, options):
         ranks = [{key: value for key, value in rank.items() if key != "tuning"}
                  for rank in prepared.memory_report.get("ranks", (prepared.memory_report,))]
         print(json.dumps({"memory": ranks}, default=str), file=sys.stderr, flush=True)
-        server = prepared.start_server(bind=bind, options=options)
+        limited = _diagnostic_options(prepared, options)
+        print(json.dumps({"diagnostic_capacity": {key: limited[key] for key in ("pages", "snapshots")}}),
+              file=sys.stderr, flush=True)
+        server = prepared.start_server(bind=bind, options=limited)
         print(f"Listening on {server.address}", flush=True)
 
         def stop(signum, frame):

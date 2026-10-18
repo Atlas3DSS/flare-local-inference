@@ -20,10 +20,9 @@ from ignition.preparation.collectives import (CollectivePreparation, create_all_
     create_all_reduce_runtime, create_dma_all_reduce_runtime)
 from ignition.preparation.disposable import storage_ranges
 from ignition.preparation.execution import GraphSignature
-from ignition.preparation.host_memory import release_unused
+from ignition.preparation.host_memory import release_unused, virtual_device_memory
 from ignition.preparation.frontend import prepare_frontend
 from ignition.preparation.model import PreparedModel
-from ignition.preparation.rank_group import minimum_across_ranks
 from ignition.preparation.scratch import ScratchArena
 from ignition.preparation.tuning import RecordedPreparationSession
 from ignition.preparation.tuning_replicas import TuningReplica
@@ -159,7 +158,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         if config.kv_pages is not None:
             pages = config.kv_pages
         bytes_per_page = page_bytes(weights.config)
-        total_memory = minimum_across_ranks(torch.cuda.mem_get_info(device)[1], group)
+        total_memory = virtual_device_memory(device, group, tuning_replica=config.tuning_replica)
         pool = ContinuationPool.allocate(weights.config, state_rows + 1, pages, device,
             storage=package_storage, maximum_pages=total_memory // bytes_per_page,
             maximum_rows=total_memory // layout.row_bytes,
