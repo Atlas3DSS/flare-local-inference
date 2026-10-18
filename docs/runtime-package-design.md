@@ -506,8 +506,11 @@ intermediate capacities are optional and need not follow a generated sequence.
 Draft count and verification count are independent declaration fields.
 Verification count includes the pending input token. Proposal graphs declare
 only draft count and source; verification graphs declare only verification count.
-A split catalog selects the loaded proposal depth once at every request bucket
-and reuses verification graphs across depths. Combined graphs declare both
+A split catalog in adaptive mode retains every captured proposal depth up to the
+loaded limit. The scheduler chooses the cheapest available proposal shape that
+covers its planned verification prefix and reuses verification graphs across
+depths. Packages containing only the maximum proposal depth remain supported.
+Fixed mode retains the selected proposal depth. Combined graphs declare both
 counts. For a selected combined batch and width, the loader chooses one permitted draft count;
 it never loads duplicate MTP alternatives for that shape. The index lists
 each graph's function dependencies, so kernel selection also precedes graph

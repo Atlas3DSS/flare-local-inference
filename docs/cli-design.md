@@ -261,11 +261,17 @@ token rows is prepared with:
 Proposal captures cover batches 1, 2, and 4 at each draft depth 1 through 7.
 Verification captures cover widths 1–8 at batch one, 1–4 at batch two, and 1–2
 at batch four. Native scheduling uses conditional confidence, measured costs,
-and shared fairness prices to finalize logical prefixes and group them into
+and shared fairness prices to choose proposal depth, finalize logical prefixes, and group them into
 verification calls. Proposal-free width-one graphs serve every batch bucket.
 See [retained proposals](scheduling-runtime-design.md#retained-proposals-and-confidence).
 
 ### 3.2 Native serving flags
+
+`flare run --scheduler-policy balanced` is the default and balances token
+throughput with output cadence. For throughput-oriented serving, use
+`flare run model.safetensors --gpus 0,1,2,3 --scheduler-policy throughput`.
+This preference retains token-service fairness and can produce longer gaps
+between larger output bursts. It uses the package's existing graphs.
 
 `flare run PACKAGE` loads an exported file without the Ignition configuration
 reader. `PACKAGE` can also be a Hugging Face repository ID with an optional

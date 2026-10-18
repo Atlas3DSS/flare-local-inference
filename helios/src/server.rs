@@ -63,6 +63,7 @@ pub struct ServerConfig {
     pub context_hint: String,
     /// Setting that raises request or page capacity, appended to capacity rejections.
     pub capacity_hint: String,
+    pub scheduling_policy: crate::scheduler::PolicyConfig,
 }
 impl Default for ServerConfig {
     fn default() -> Self {
@@ -76,6 +77,7 @@ impl Default for ServerConfig {
             served_names: Vec::new(),
             context_hint: String::new(),
             capacity_hint: String::new(),
+            scheduling_policy: crate::scheduler::PolicyConfig::default(),
         }
     }
 }
@@ -190,6 +192,7 @@ impl Server {
                 config.event_capacity,
                 frontend.clone(),
                 peers,
+                config.scheduling_policy,
             )?
         });
         let state = Arc::new(HttpState {

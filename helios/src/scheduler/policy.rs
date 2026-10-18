@@ -28,6 +28,14 @@ impl Default for PolicyConfig {
     }
 }
 
+impl PolicyConfig {
+    /// Prefer token throughput with token-service fairness, without pricing
+    /// the frequency of output bursts or their age separately.
+    pub fn throughput() -> Self {
+        Self { delivery_fairness: 0.0, decode_age_price: 0.0, ..Self::default() }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RequestAccounting {
     pub arrival_ns: u64,

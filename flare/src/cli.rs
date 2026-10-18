@@ -220,6 +220,11 @@ pub struct Run {
     #[arg(long, value_name = "N", help_heading = "Serving options")]
     pub max_concurrency: Option<NonZeroUsize>,
 
+    /// Favor token throughput or balance it with output cadence; both retain token-service fairness.
+    #[arg(long, value_name = "MODE", default_value = "balanced",
+        value_parser = ["balanced", "throughput"], help_heading = "Serving options")]
+    pub scheduler_policy: String,
+
     /// Storage for auxiliary embedding tables (PLE/Engram) [default: disk].
     #[arg(long, value_name = "MODE", help_heading = "Serving options",
         value_parser = PossibleValuesParser::new(["disk", "ram"])
@@ -374,6 +379,7 @@ mod tests {
         let args = run(&["flare", "run", "model.safetensors"]);
         assert_eq!(args.bind_address().to_string(), "127.0.0.1:8000");
         assert_eq!(args.served_model_name, None);
+        assert_eq!(args.scheduler_policy, "balanced");
         let options = args.load_options();
         assert_eq!(options.device_labels, Some(vec![0]));
         assert_eq!(options.embedding_table_storage, None);
@@ -384,6 +390,13 @@ mod tests {
         assert_eq!(options.mtp_draft_tokens, None);
         assert_eq!(options.adaptive_verification, None);
         assert_eq!(options.prefix_cache, PrefixCacheOffload::default());
+    }
+
+    #[test]
+    fn scheduling_preference_is_explicit_and_validated() {
+        assert_eq!(run(&["flare", "run", "model.safetensors", "--scheduler-policy", "throughput"]).scheduler_policy,
+                   "throughput");
+        assert!(Cli::try_parse_from(["flare", "run", "model.safetensors", "--scheduler-policy", "unknown"]).is_err());
     }
 
     #[test]

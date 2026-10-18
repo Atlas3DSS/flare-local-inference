@@ -236,6 +236,7 @@ impl ModelRuntime {
         event_capacity: usize,
         frontend: Arc<crate::frontend::Frontend>,
         peers: Option<crate::execution::RankPeers>,
+        policy: crate::scheduler::PolicyConfig,
     ) -> Result<Self> {
         crate::model::catalog::validate(&config, &manifest)?;
         super::observation::initialize_clock();
@@ -308,6 +309,7 @@ impl ModelRuntime {
                 };
                 if let Err(error) = scheduler
                     .graph_durations(&executor.manifest().graphs)
+                    .and_then(|()| scheduler.configure_policy(policy))
                     .and_then(|()| match &executor.manifest().cache {
                         Some(cache) if !cache.snapshot_pages.is_empty() => {
                             scheduler.share_snapshot_pages(&cache.snapshot_pages)
@@ -361,13 +363,15 @@ impl ModelRuntime {
                         )
                     })
                     .and_then(|()| {
-                        if let Some(proposal) = executor
+                        if let Some(width) = executor
                             .manifest()
                             .graphs
                             .iter()
-                            .find(|g| g.kind == GraphKind::Proposal)
+                            .filter(|g| g.kind == GraphKind::Proposal)
+                            .map(|g| g.token_capacity)
+                            .max()
                         {
-                            scheduler.split_speculation(proposal.token_capacity)?;
+                            scheduler.split_speculation(width)?;
                         }
                         Ok(())
                     })
