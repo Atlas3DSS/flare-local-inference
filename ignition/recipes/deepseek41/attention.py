@@ -250,9 +250,11 @@ class PreparedAttention:
         self.attention = PreparedCompressedMLA(scratch.query, self.window_cache, self.window_indices,
             self.window_lengths, weights["sink"], scratch.attended,
             window_page_size=self.window_page_size,
-            # Small speculative queries retain their staged caches and explicit
-            # indices while using the low-row MLA implementation.
-            mode="decode" if mode == "decode" or (mode in ("verify", "draft") and tokens <= 8) else "extend",
+            # Speculative rows use explicit indices into staged caches. Their
+            # prepared row bound belongs to the decode contract, including
+            # multi-request verification and noncausal draft blocks.
+            mode="decode" if mode in ("decode", "verify", "draft") else "extend",
+            decode_row_capacity=tokens if mode in ("decode", "verify", "draft") else None,
             session=session, name=f"{name}.attention",
             workspace=workspace, **indexed)
 

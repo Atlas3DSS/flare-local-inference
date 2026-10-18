@@ -123,7 +123,8 @@ def test_ratio_two_pending_state_selects_the_last_accepted_target_token(compiled
 
 @pytest.mark.parametrize("block", [5, 7])
 @torch.no_grad()
-def test_noncausal_draft_block_attends_to_future_positions_without_crossing_requests(block):
+@pytest.mark.parametrize("mode", ("extend", "decode"))
+def test_noncausal_draft_block_attends_to_future_positions_without_crossing_requests(block, mode):
     from b12x.attention._shared.mla.compressed_reference import compressed_sparse_mla_reference
 
     device = torch.device("cuda:0")
@@ -142,7 +143,7 @@ def test_noncausal_draft_block_attends_to_future_positions_without_crossing_requ
         writer = PreparedCompressedCacheWriter(values, cache, slots, page_size=span,
             kind="swa", session=session, name="draft_write")
         attention = PreparedCompressedMLA(query, cache, indices, lengths, sink, output,
-            window_page_size=span, mode="extend", session=session, name="draft_attention", workspace=None)
+            window_page_size=span, mode=mode, session=session, name="draft_attention", workspace=None)
         def forward():
             writer(values)
             attention()

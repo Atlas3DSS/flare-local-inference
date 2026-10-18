@@ -24,3 +24,6 @@
     verification, and rollback before reducing the declared execution rows.
 
 [ ] Add Nemotron Bolt video preprocessing, timestamps, and frame-feature pruning.
+
+[ ] Measure DeepSeek V4's sharded Markov projection against replicated weights;
+    DeepSeek V4.1 uses replication to remove per-draft vocabulary gathers.

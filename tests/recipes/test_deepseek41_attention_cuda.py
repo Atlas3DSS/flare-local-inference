@@ -18,24 +18,25 @@ pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
 @pytest.mark.parametrize("ratio", [1, 2])
 @pytest.mark.parametrize("mode", ["decode", "extend"])
 @pytest.mark.parametrize("window_size", [128, 136])
+@pytest.mark.parametrize("rows", [4, 24])
 @torch.no_grad()
-def test_mixed_cache_writers_and_captured_attention(ratio, mode, window_size):
+def test_mixed_cache_writers_and_captured_attention(ratio, mode, window_size, rows):
     device = torch.device("cuda:0")
     torch.manual_seed(4101)
     window_values = torch.randn((window_size, 512), device=device, dtype=torch.bfloat16) * .2
     compressed_values = torch.randn((128 // ratio, 512), device=device, dtype=torch.bfloat16) * .2
-    query = torch.randn((4, 16, 512), device=device, dtype=torch.bfloat16) * .2
+    query = torch.randn((rows, 16, 512), device=device, dtype=torch.bfloat16) * .2
     # The window is a strided view into a complete continuation row.
     backing = torch.zeros((3, window_size * 528 + 1024), device=device, dtype=torch.uint8)
     window = backing[:, :window_size * 528]
     compressed = torch.zeros((2, 128 // ratio * 288), device=device, dtype=torch.uint8)
     window_slots = torch.arange(window_size, device=device) + window_size
     compressed_slots = torch.arange(128 // ratio, device=device) + 128 // ratio
-    window_indices = window_slots.int().repeat(4, 1)
-    compressed_indices = torch.arange(128 // ratio, dtype=torch.int32, device=device).repeat(4, 1)
-    lengths = torch.tensor([128, 83, 1, 0], dtype=torch.int32, device=device)
+    window_indices = window_slots.int().repeat(rows, 1)
+    compressed_indices = torch.arange(128 // ratio, dtype=torch.int32, device=device).repeat(rows, 1)
+    lengths = torch.tensor([128, 83, 1, 0], dtype=torch.int32, device=device).repeat(rows // 4)
     indexed_lengths = lengths // ratio
-    table = torch.ones((4, 1), device=device, dtype=torch.int32)
+    table = torch.ones((rows, 1), device=device, dtype=torch.int32)
     sink = torch.randn(16, device=device)
     output = torch.empty_like(query)
     with PreparationSession(device=device, autotune=False, compile_workers=2) as session:
@@ -46,7 +47,8 @@ def test_mixed_cache_writers_and_captured_attention(ratio, mode, window_size):
         attention = PreparedCompressedMLA(query, window, window_indices, lengths, sink, output,
             indexed=compressed, indexed_indices=compressed_indices, indexed_lengths=indexed_lengths,
             page_table=table, indexed_page_size=128 // ratio, window_page_size=window_size,
-            mode=mode, session=session, name="attention", workspace=None)
+            mode=mode, decode_row_capacity=rows if mode == "decode" else None,
+            session=session, name="attention", workspace=None)
         def forward():
             write_window(window_values)
             write_compressed(compressed_values)
