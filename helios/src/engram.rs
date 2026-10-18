@@ -112,19 +112,19 @@ impl Stats {
             (
                 "disk_submit_nanoseconds_total",
                 "counter",
-                "Wall time preparing and issuing disk read batches; Linux kernel submission is included in wait time.",
+                "Cumulative worker wall time preparing and issuing disk read batches; Linux kernel submission is included in wait time.",
                 &self.disk_submit_ns,
             ),
             (
                 "disk_wait_nanoseconds_total",
                 "counter",
-                "Wall time in disk completion waits, including Linux io_uring submission.",
+                "Cumulative worker wall time in disk completion waits, including Linux io_uring submission.",
                 &self.disk_wait_ns,
             ),
             (
                 "disk_complete_nanoseconds_total",
                 "counter",
-                "Wall time processing disk completions and copying rows, excluding completion waits.",
+                "Cumulative worker wall time processing disk completions and copying rows, excluding completion waits.",
                 &self.disk_complete_ns,
             ),
         ] {
@@ -252,6 +252,7 @@ impl Shared {
         device: i32,
         storage: Storage,
         cache_bytes: u64,
+        workers: usize,
     ) -> Result<Arc<Self>> {
         if storage == Storage::Ram && cache_bytes != 0 {
             return Err("embedding row cache requires disk table storage".into());
@@ -281,6 +282,7 @@ impl Shared {
                     budget,
                     rows,
                     stats.clone(),
+                    workers,
                 )
             })
             .collect::<Result<Vec<_>>>()?;

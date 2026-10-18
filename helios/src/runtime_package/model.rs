@@ -570,6 +570,7 @@ impl NativeModel {
                     devices[0],
                     storage,
                     options.embedding_table_cache_bytes,
+                    options.embedding_table_workers.unwrap_or(1),
                 )?);
                 let label = match storage {
                     crate::engram::Storage::Disk => "disk",

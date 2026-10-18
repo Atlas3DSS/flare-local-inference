@@ -15,6 +15,8 @@ pub struct LoadOptions {
     pub embedding_table_storage: Option<crate::engram::Storage>,
     /// Per-host bytes for disk-backed embedding row caches; zero disables.
     pub embedding_table_cache_bytes: u64,
+    /// Windows disk workers per table; share 128 slots and 8 MiB staging. Defaults to one.
+    pub embedding_table_workers: Option<usize>,
     pub max_concurrency: Option<usize>,
     pub mtp_draft_tokens: Option<usize>,
     pub adaptive_verification: Option<bool>,
@@ -29,6 +31,18 @@ impl LoadOptions {
     pub(super) fn select(&self, packages: &mut [Package], config: &mut Value) -> Result<usize> {
         if let Some(limit) = self.memory_limit {
             limit.validate()?;
+        }
+        if let Some(workers) = self.embedding_table_workers {
+            if !matches!(workers, 1 | 2 | 4) {
+                return Err(invalid("embedding table workers must be 1, 2, or 4"));
+            }
+            if self.embedding_table_storage == Some(crate::engram::Storage::Ram) {
+                return Err(invalid("embedding table workers require disk storage"));
+            }
+            #[cfg(unix)]
+            if workers != 1 {
+                return Err(invalid("parallel embedding disk workers require Windows"));
+            }
         }
         if self.embedding_table_cache_bytes != 0
             && self.embedding_table_storage == Some(crate::engram::Storage::Ram)
@@ -503,6 +517,16 @@ mod tests {
 
     fn config() -> Value {
         serde_json::json!({"speculative_token_capacity": 24, "speculative_widths": [1,2,3,4,5,6], "speculative_fixed_width": null})
+    }
+
+    #[test]
+    fn embedding_worker_options_reject_invalid_counts_and_resident_storage() {
+        for workers in [0, 3, 5] {
+            let options = LoadOptions { embedding_table_workers: Some(workers), ..Default::default() };
+            assert!(options.select(&mut [package()], &mut config()).unwrap_err().to_string().contains("workers must be"));
+        }
+        let options = LoadOptions { embedding_table_workers: Some(2), embedding_table_storage: Some(crate::engram::Storage::Ram), ..Default::default() };
+        assert!(options.select(&mut [package()], &mut config()).unwrap_err().to_string().contains("require disk storage"));
     }
 
     #[test]

@@ -154,10 +154,8 @@ impl Queue {
             }
         }
     }
-}
 
-impl Drop for Queue {
-    fn drop(&mut self) {
+    pub(crate) fn cancel_and_drain(&mut self) {
         self.cancel();
         // Cancellation is only a request. Keep buffers and OVERLAPPED records live until completion.
         while self.pending() != 0 {
@@ -165,6 +163,12 @@ impl Drop for Queue {
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
         }
+    }
+}
+
+impl Drop for Queue {
+    fn drop(&mut self) {
+        self.cancel_and_drain();
         unsafe {
             CloseHandle(self.port);
         }
