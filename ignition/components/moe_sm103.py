@@ -295,12 +295,13 @@ def _w4a16_tactics(query: RoutedExpertsQuery):
 
 
 TRTLLM_CONTRACT = native_contract(component_id="flare.moe.sm103_trtllm_nvfp4",
-                                  query_type=RoutedExpertsQuery, tactics=_trtllm_tactics)
+                                  query_type=RoutedExpertsQuery, tactics=_trtllm_tactics,
+                                  semantic_version=2)
 # Bump a contract's semantic version whenever its tactic space or launch semantics change,
 # so cached selections from earlier spaces are never looked up.
 W4A16_CONTRACT = native_contract(component_id="flare.moe.sm103_cute_w4a16",
                                  query_type=RoutedExpertsQuery, tactics=_w4a16_tactics,
-                                 semantic_version=2)
+                                 semantic_version=3)
 
 
 def _aligned(nbytes):
@@ -579,13 +580,12 @@ def _bind(plan, state, a, topk_ids, topk_weights, output, scratch):
 
 
 def _benchmark_call(state, *, plan, source, experts, top_k, session, name, workspace,
-                    allocate_router, router_weight, router_plan, correction_bias=None):
+                    allocate_router, router_plan):
     from ignition.preparation.fixtures.fused_moe import ExpertBenchmarkInputs
 
     operands = benchmark_resource(session, ("moe_inputs", name),
         lambda: ExpertBenchmarkInputs(source, experts=experts.num_experts, top_k=top_k,
-            allocate_router=allocate_router, router_weight=router_weight, router_plan=router_plan,
-            correction_bias=correction_bias))
+            allocate_router=allocate_router, router_plan=router_plan))
     scratch = planned_scratch(plan.memory_requirements().scratch, workspace)
     binding = _bind(plan, state, operands.source, operands.router.ids, operands.router.weights,
                     operands.output, scratch)
@@ -603,8 +603,8 @@ class Sm103RoutedExperts:
     """
 
     def __init__(self, source, experts: Sm103Experts, ids, weights, output, *, session, name: str,
-                 workspace: ScratchArena | torch.Tensor | None = None, router_weight=None,
-                 router_plan=None, correction_bias=None, a4_prefill=False):
+                 workspace: ScratchArena | torch.Tensor | None = None,
+                 router_plan=None, a4_prefill=False):
         from ignition.components.moe import RouterScratch
 
         if a4_prefill:
@@ -624,8 +624,7 @@ class Sm103RoutedExperts:
         declare(session, (plan.request(name=name, prepare_call=prepare_call,
             benchmark_call=partial(_benchmark_call, plan=plan, source=source, experts=experts,
                 top_k=ids.shape[1], session=session, name=name, workspace=workspace,
-                allocate_router=RouterScratch.allocate, router_weight=router_weight,
-                router_plan=router_plan, correction_bias=correction_bias)),))
+                allocate_router=RouterScratch.allocate, router_plan=router_plan)),))
 
         def finalize():
             self.scratch = planned_scratch(plan.scratch_specs(), workspace)

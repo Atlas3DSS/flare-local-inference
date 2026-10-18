@@ -61,7 +61,7 @@ class PreparedGlmMoe:
             swiglu_limit=module.config.swiglu_limit)
         self.experts = PreparedRoutedExperts(source, weights.experts, scratch.router.ids,
             scratch.router.weights, scratch.routed, session=session, name=f"{name}.experts", workspace=workspace,
-            router_weight=weights.router, router_plan=self.routing.plan, correction_bias=weights.correction,
+            router_plan=self.routing.plan,
             a4_prefill=prefill and weights.experts_a4_prefill)
         self.concurrent_shared = None
         if source.shape[0] <= 256 and workspace.overlap:

@@ -89,7 +89,7 @@ class PreparedFeedForward(torch.nn.Module):
                 correction_bias=weights.correction)
             self.experts = PreparedRoutedExperts(source, weights.experts, scratch.router.ids, scratch.router.weights,
                 scratch.experts, session=session, name=name + ".experts", workspace=workspace,
-                router_weight=weights.router, router_plan=self.router.plan, correction_bias=weights.correction)
+                router_plan=self.router.plan)
             if overlap and source.shape[0] <= 256:
                 self.concurrent = ConcurrentSharedExpert(self.mlp, parallel_plans=(self.router_projection.plan,
                     self.router.plan, self.experts.plan), session=session, workspace=workspace)

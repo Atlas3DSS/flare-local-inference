@@ -139,8 +139,7 @@ class PreparedLayer:
             image_mask=self.image_mask)
         self.experts = PreparedRoutedExperts(s.ffn_hc.normalized, weights.experts.experts, s.router.ids,
             s.router.weights, s.routed, session=session, name=name + ".experts", workspace=workspace,
-            router_weight=weights.experts.router, router_plan=self.router.plan,
-            correction_bias=weights.experts.correction)
+            router_plan=self.router.plan)
         self.shared = PreparedMLP(s.ffn_hc.normalized, weights.experts.shared, s.shared.gate_up,
             s.shared.intermediate, s.shared.output, session=session, name=name + ".shared", workspace=workspace,
             swiglu_limit=text["swiglu_limit"], round_silu=False, activation_mode="auto")

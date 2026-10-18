@@ -191,7 +191,7 @@ class PreparedQwenMoe:
             scratch=scratch.shared, projection_workspace=projection_workspace)
         self.experts = PreparedRoutedExperts(source, weights.experts, self.router.ids,
             self.router.weights, self.routed_output, session=session, name=f"{name}.experts", workspace=workspace,
-            router_weight=weights.router, router_plan=self.routing.plan)
+            router_plan=self.routing.plan)
         self.concurrent_shared = None
         if (source.shape[0] <= 256 and isinstance(workspace, ScratchArena) and workspace is projection_workspace
                 and workspace.overlap):
