@@ -178,11 +178,14 @@ impl TensorParallelExecutor {
         if self.shutdown.is_some() {
             return Err(invalid("tensor-parallel executor is closed"));
         }
-        let result = self.poll_ranks();
-        if let Err(error) = &result {
-            self.poison = Some(error.clone());
+        match self.poll_ranks() {
+            Ok(None) => Ok(None),
+            Ok(Some(completion)) => Ok(Some(completion)),
+            Err(error) => {
+                self.poison = Some(error.clone());
+                Err(error)
+            }
         }
-        result
     }
 
     fn poll_ranks(&mut self) -> Result<Option<FrameCompletion>> {
@@ -193,7 +196,11 @@ impl TensorParallelExecutor {
             return Err(invalid("tensor-parallel graph completion deadline expired"));
         }
         if self.completion.is_none() {
-            self.completion = self.local.poll()?;
+            match self.local.poll() {
+                Ok(None) => {}
+                Ok(Some(completion)) => self.completion = Some(completion),
+                Err(error) => return Err(error),
+            }
         }
         for peer in &mut self.peers {
             if peer.completion.is_some() {
@@ -419,8 +426,10 @@ pub unsafe fn serve_rank(
                 let started = Instant::now();
                 channel.nonblocking(true)?;
                 let completed = loop {
-                    if let Some(completion) = executor.poll()? {
-                        break completion;
+                    match executor.poll() {
+                        Ok(None) => {}
+                        Ok(Some(completion)) => break completion,
+                        Err(error) => return Err(error),
                     }
                     if channel.poll()?.is_some() {
                         return Err(invalid("rank command arrived before graph completion"));

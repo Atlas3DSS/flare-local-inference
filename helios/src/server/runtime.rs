@@ -701,7 +701,12 @@ impl<'a> Worker<'a> {
             let std::ops::ControlFlow::Continue(mut progress) = self.admit()? else {
                 return Ok(());
             };
-            while let Some(completion) = executor.poll()? {
+            loop {
+                let completion = match executor.poll() {
+                    Ok(None) => break,
+                    Ok(Some(completion)) => completion,
+                    Err(error) => return Err(error),
+                };
                 let kind = executor.manifest().graphs[completion.graph_index].kind;
                 self.complete(kind, completion)?;
                 progress = true;
