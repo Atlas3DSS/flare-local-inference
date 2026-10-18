@@ -231,7 +231,7 @@ pub struct Run {
     #[arg(long, value_name = "SIZE", value_parser = parse_size, default_value = "0", help_heading = "Serving options")]
     pub embedding_table_cache_size: u64,
 
-    /// Windows disk workers per embedding table; shares a fixed I/O budget [default: 1].
+    /// Disk workers per embedding table; shares a fixed I/O budget [default: 4 on Windows, 1 elsewhere].
     #[arg(long, value_name = "N", help_heading = "Advanced serving options",
         value_parser = PossibleValuesParser::new(["1", "2", "4", "8"]).map(|value| value.parse::<usize>().unwrap()))]
     pub embedding_table_workers: Option<usize>,
@@ -398,6 +398,7 @@ mod tests {
                 args.load_options().embedding_table_workers,
                 Some(workers.parse().unwrap())
             );
+            assert_eq!(args.load_options().embedding_workers(), workers.parse::<usize>().unwrap());
             assert!(
                 args.rank_options()
                     .windows(2)

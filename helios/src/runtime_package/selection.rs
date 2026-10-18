@@ -15,7 +15,7 @@ pub struct LoadOptions {
     pub embedding_table_storage: Option<crate::engram::Storage>,
     /// Per-host bytes for disk-backed embedding row caches; zero disables.
     pub embedding_table_cache_bytes: u64,
-    /// Windows disk workers per table; share 128 slots and 8 MiB staging. Defaults to one.
+    /// Disk workers per table: four on Windows, one elsewhere. Share 128 slots and 8 MiB staging.
     pub embedding_table_workers: Option<usize>,
     pub max_concurrency: Option<usize>,
     pub mtp_draft_tokens: Option<usize>,
@@ -28,6 +28,12 @@ pub struct LoadOptions {
 }
 
 impl LoadOptions {
+    /// Resolve the disk-reader default without treating it as an explicit storage override.
+    pub fn embedding_workers(&self) -> usize {
+        self.embedding_table_workers
+            .unwrap_or(if cfg!(windows) { 4 } else { 1 })
+    }
+
     pub(super) fn select(&self, packages: &mut [Package], config: &mut Value) -> Result<usize> {
         if let Some(limit) = self.memory_limit {
             limit.validate()?;
@@ -521,6 +527,12 @@ mod tests {
 
     #[test]
     fn embedding_worker_options_reject_invalid_counts_and_resident_storage() {
+        assert_eq!(LoadOptions::default().embedding_workers(), if cfg!(windows) { 4 } else { 1 });
+        let resident = LoadOptions { embedding_table_storage: Some(crate::engram::Storage::Ram), ..Default::default() };
+        resident.select(&mut [package()], &mut config()).unwrap();
+        let single = LoadOptions { embedding_table_workers: Some(1), ..Default::default() };
+        assert_eq!(single.embedding_workers(), 1);
+        single.select(&mut [package()], &mut config()).unwrap();
         for workers in [0, 3, 5] {
             let options = LoadOptions { embedding_table_workers: Some(workers), ..Default::default() };
             assert!(options.select(&mut [package()], &mut config()).unwrap_err().to_string().contains("workers must be"));
