@@ -130,6 +130,24 @@ impl Drop for ResidentMapping {
 const RESIDENT_SEALS: i32 =
     libc::F_SEAL_WRITE | libc::F_SEAL_GROW | libc::F_SEAL_SHRINK | libc::F_SEAL_SEAL;
 
+#[cfg(unix)]
+fn seal_resident(file: &File) -> Result<()> {
+    // The loading threads have joined and their writable mapping is gone.
+    // Kernel-held page references can still make F_SEAL_WRITE temporarily busy.
+    // Publish only after every required seal succeeds; persistent busy state fails.
+    for attempt in 0..4 {
+        if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_ADD_SEALS, RESIDENT_SEALS) } == 0 {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::EBUSY) || attempt == 3 {
+            return Err(format!("seal resident embedding table: {error}").into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    unreachable!()
+}
+
 impl Resident {
     pub(super) fn load(file: &File, plane: Plane) -> Result<Self> {
         let skip = (plane.offset % BLOCK as u64) as usize;
@@ -212,13 +230,7 @@ impl Resident {
         #[cfg(unix)]
         {
             drop(storage);
-            if unsafe { libc::fcntl(backing.as_raw_fd(), libc::F_ADD_SEALS, RESIDENT_SEALS) } < 0 {
-                return Err(format!(
-                    "seal resident embedding table: {}",
-                    std::io::Error::last_os_error()
-                )
-                .into());
-            }
+            seal_resident(&backing)?;
             Self::from_shared(backing, plane)
         }
         #[cfg(windows)]
@@ -758,6 +770,100 @@ impl Reader {
 mod tests {
     use super::*;
     use std::fs::OpenOptions;
+
+    #[cfg(target_os = "linux")]
+    fn unsealed_resident_file() -> File {
+        let descriptor = unsafe {
+            libc::memfd_create(
+                c"helios-resident-seal-test".as_ptr(),
+                libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
+            )
+        };
+        assert!(descriptor >= 0);
+        let file = unsafe { File::from_raw_fd(descriptor) };
+        file.set_len(BLOCK as u64).unwrap();
+        file
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn resident_sealing_waits_for_unmapped_pages_held_by_io() {
+        use std::io::Read;
+        use std::sync::mpsc::{self, RecvTimeoutError};
+        use std::time::Duration;
+
+        let file = unsealed_resident_file();
+        let mapping = ResidentMapping::new(&file, BLOCK, true).unwrap();
+        unsafe { std::ptr::write_bytes(mapping.address as *mut u8, 0x39, BLOCK) };
+        let mut descriptors = [-1; 2];
+        assert_eq!(
+            unsafe { libc::pipe2(descriptors.as_mut_ptr(), libc::O_CLOEXEC) },
+            0
+        );
+        let mut reader = unsafe { File::from_raw_fd(descriptors[0]) };
+        let writer = unsafe { File::from_raw_fd(descriptors[1]) };
+        let vector = libc::iovec {
+            iov_base: mapping.address as *mut libc::c_void,
+            iov_len: BLOCK,
+        };
+        assert_eq!(
+            unsafe { libc::vmsplice(writer.as_raw_fd(), &vector, 1, 0) },
+            BLOCK as isize
+        );
+        drop(mapping);
+        assert_eq!(
+            unsafe { libc::fcntl(file.as_raw_fd(), libc::F_ADD_SEALS, RESIDENT_SEALS) },
+            -1
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::EBUSY)
+        );
+
+        std::thread::scope(|scope| {
+            let (send, receive) = mpsc::channel();
+            let file = &file;
+            scope.spawn(move || send.send(seal_resident(file)).unwrap());
+            // The I/O reference remains live beyond the kernel's initial pin wait.
+            assert!(matches!(
+                receive.recv_timeout(Duration::from_millis(250)),
+                Err(RecvTimeoutError::Timeout)
+            ));
+            let mut bytes = [0; BLOCK];
+            reader.read_exact(&mut bytes).unwrap();
+            assert_eq!(bytes, [0x39; BLOCK]);
+            receive.recv_timeout(Duration::from_secs(2)).unwrap().unwrap();
+        });
+        assert_eq!(
+            unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GET_SEALS) } & RESIDENT_SEALS,
+            RESIDENT_SEALS
+        );
+        assert!(file.set_len(1).is_err());
+        let value = 0u8;
+        assert_eq!(
+            unsafe { libc::pwrite(file.as_raw_fd(), (&value as *const u8).cast(), 1, 0) },
+            -1
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::EPERM)
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn resident_sealing_rejects_a_retained_writable_mapping() {
+        let file = unsealed_resident_file();
+        let initial_seals = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GET_SEALS) };
+        let mapping = ResidentMapping::new(&file, BLOCK, true).unwrap();
+        assert!(seal_resident(&file).is_err());
+        assert_eq!(
+            unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GET_SEALS) },
+            initial_seals
+        );
+        drop(mapping);
+        seal_resident(&file).unwrap();
+    }
 
     #[test]
     #[cfg(unix)]
