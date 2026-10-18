@@ -7,8 +7,6 @@ import torch
 from ignition.components.weights import DirectWeightLoader, MLPWeights
 from ignition.preparation.checkpoint import inspect_indexed_checkpoint
 
-from .config import DRAFT_DIRECTORY
-
 
 @dataclass(frozen=True)
 class DraftLayerWeights:
@@ -56,7 +54,7 @@ class DraftWeights:
         kv_rows = shard.partition(d.kv_heads * d.head_dim, alignment=d.head_dim)
         intermediate = shard.partition(c["intermediate_size"], alignment=32)
         vocabulary = shard.partition(config.vocabulary, alignment=64)
-        manifest = inspect_indexed_checkpoint(snapshot / DRAFT_DIRECTORY)
+        manifest = inspect_indexed_checkpoint(snapshot)
         layers, context = [], []
         with DirectWeightLoader(manifest, device, progress=progress, progress_label="Load draft weights") as loader:
             def matrix(name, rows=None, columns=None):

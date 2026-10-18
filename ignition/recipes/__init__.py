@@ -202,7 +202,7 @@ def resolve(model: str, hub_cache: Path | None = None) -> ResolvedModel:
                     if Path(checkpoint.repository).is_absolute():
                         if not Path(checkpoint.repository).is_dir():
                             raise UsageError(f"checkpoint directory is unavailable: {checkpoint.repository}")
-                        return resolve(checkpoint.repository, hub_cache)
+                        return replace(resolve(checkpoint.repository, hub_cache), recipe=recipe, checkpoint=checkpoint)
                     return ResolvedModel(recipe, checkpoint)
         suggestions = get_close_matches(model, aliases(), n=1, cutoff=0.6)
         hint = f"; did you mean {suggestions[0]!r}?" if suggestions else ""

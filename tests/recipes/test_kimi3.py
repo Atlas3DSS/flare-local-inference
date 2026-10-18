@@ -234,8 +234,9 @@ def test_checkpoint_mla(config, mode, tokens, online_mxfp8):
         torch.testing.assert_close(replayed, output, rtol=0, atol=0)
 
 
-DRAFT = Path("/root/.cache/huggingface/hub/models--RedHatAI--Kimi-K3-speculator.dspark/snapshots/"
-             "38a88101e0d46bb22134b9da340f381b954d40d4")
+DRAFT = Path(os.getenv("FLARE_KIMI3_REDHAT_DSPARK",
+    "/data/cache/huggingface/hub/models--RedHatAI--Kimi-K3-speculator.dspark/snapshots/"
+    "38a88101e0d46bb22134b9da340f381b954d40d4"))
 
 
 def test_dspark_draft_geometry(config):

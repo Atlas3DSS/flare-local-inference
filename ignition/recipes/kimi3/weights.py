@@ -8,7 +8,7 @@ import torch
 from ignition.components.weights import (DirectWeightLoader, SharedColumnReads, fp4_down_staging_bytes,
                                          quantize_bf16_linear_as_mxfp8)
 
-from .config import ModelConfig
+from .config import DSparkConfig, ModelConfig
 from .residual import score_weight
 
 PREFIX = "language_model.model"
@@ -31,11 +31,11 @@ class ModelWeights:
     draft: object = None
 
     @classmethod
-    def load(cls, manifest, device, *, shard, progress=None, draft_checkpoint=None, online_mxfp8=False, dspark=False,
+    def load(cls, manifest, device, *, shard, progress=None, draft_checkpoint=None, online_mxfp8=False,
              peers=None, vision=True):
         """``peers``, a host's Gloo group and peer storage, reads column-sharded projections once per host.
 
-        ``dspark`` loads the checkpoint's Red Hat DSpark draft; ``draft_checkpoint`` loads DFlash2 instead.
+        ``draft_checkpoint`` loads Red Hat DSpark from its checkpoint directory.
         Without ``vision``, the vision encoder stays on disk.
         """
         before = torch.cuda.memory_allocated(device)
@@ -54,19 +54,12 @@ class ModelWeights:
         else:
             vision = None
         draft = None
-        if dspark:
-            if config.draft is None:
-                raise ValueError("DSpark speculation requires the checkpoint's dspark draft directory")
+        if draft_checkpoint is not None:
             from .dspark_weights import DraftWeights
 
-            draft = DraftWeights.load(manifest.snapshot, config, device, shard, target_head=head, progress=progress,
+            config = replace(config, draft=DSparkConfig.load(draft_checkpoint, config))
+            draft = DraftWeights.load(draft_checkpoint, config, device, shard, target_head=head, progress=progress,
                                       online_mxfp8=online_mxfp8)
-        elif draft_checkpoint is not None:
-            from .draft_config import DraftConfig
-            from .draft_weights import DraftWeights
-
-            config = replace(config, draft=DraftConfig.load(draft_checkpoint, config))
-            draft = DraftWeights.load(draft_checkpoint, config.draft, device, shard, progress=progress)
         return cls(config, shard, embedding, norm, head, score_weight(res_norm, res_proj), layers,
                    loader.scale_scratch, torch.cuda.memory_allocated(device) - before, vision=vision, draft=draft)
 

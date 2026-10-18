@@ -191,3 +191,18 @@ def test_local_checkpoint_alias_uses_actual_directory(tmp_path, monkeypatch):
     model = resolve(checkpoint.alias)
     assert model.directory == tmp_path and model.snapshot(HUB) == tmp_path
     assert model.checkpoint.repository == str(tmp_path)
+
+
+def test_alias_preserves_selected_checkpoint_when_directory_is_shared(tmp_path, monkeypatch):
+    from dataclasses import replace
+    import ignition.recipes as catalog
+
+    recipe = next(r for r in recipes() if r.name == "kimi3")
+    checkpoints = tuple(replace(c, repository=str(tmp_path)) for c in recipe.checkpoints[:2])
+    recipe = replace(recipe, checkpoints=checkpoints)
+    monkeypatch.setattr(catalog, "recipes", lambda: (recipe,))
+    for checkpoint in checkpoints:
+        model = resolve(checkpoint.alias)
+        assert model.recipe is recipe and model.checkpoint is checkpoint
+        assert model.directory == tmp_path
+    assert resolve(str(tmp_path)).checkpoint is checkpoints[0]

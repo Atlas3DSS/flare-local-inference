@@ -63,7 +63,14 @@ def test_fp8_cache_views_and_planned_bytes(alias, world_size, drafting):
         pytest.skip("checkpoint metadata is not installed")
     prefix = f"ignition.recipes.{model.recipe.name}"
     config = import_module(prefix + ".config").ModelConfig.load(snapshot)
-    if drafting and model.recipe.name in ("kimi3", "nemotron_h"):
+    if drafting and model.recipe.name == "kimi3":
+        from .test_kimi3 import DRAFT
+        from ignition.recipes.kimi3.config import DSparkConfig
+
+        if not (DRAFT / "config.json").is_file():
+            pytest.skip("Red Hat DSpark checkpoint metadata is not installed")
+        config = replace(config, draft=DSparkConfig.load(DRAFT, config))
+    if drafting and model.recipe.name == "nemotron_h":
         draft = import_module(prefix + ".draft_config")
         draft_snapshot = HUB / f"models--{draft.REPOSITORY.replace('/', '--')}" / "snapshots" / draft.REVISION
         if not (draft_snapshot / "config.json").is_file():
@@ -76,17 +83,20 @@ def test_fp8_cache_views_and_planned_bytes(alias, world_size, drafting):
         caches = [pool.cache(layer, kind) for layer in range(config.layers) for kind in ("key", "value")]
     elif model.recipe.name == "kimi3":
         # Decode context parallelism spreads each page's positions over every rank, as preparation lays it out.
-        pool = module.ContinuationPool.for_model(config, world_size, 2, 3, "meta", context_ranks=world_size,
+        pool = module.ContinuationPool.for_model(config, world_size, 2, 3, "meta",
             speculative_tokens=model.recipe.speculation.draft_tokens if drafting else 0)
         caches = [pool.attention(layer) for layer, kind in enumerate(config.layers) if kind == "mla"]
-        if drafting:
-            caches.extend(pool.draft_attention(layer) for layer in range(config.draft.layers))
     else:
         pool = module.ContinuationPool.for_model(config, 2, 3, "meta")
         caches = [cache for layer, kind in enumerate(config.layers) if kind in ("attention", "full_attention")
                   for cache in pool.attention(layer, config)]
-    caches.extend(pool.reserved_region(region.name) for region in pool.layout.regions
-                  if region.name.startswith("draft") and region.name.endswith((".key", ".value")))
+    draft_caches = [pool.reserved_region(region.name) for region in pool.layout.regions
+                    if region.name.startswith("draft") and region.name.endswith((".key", ".value"))]
+    if model.recipe.name == "kimi3":
+        assert len(draft_caches) == (2 * config.draft.layers if drafting else 0)
+        assert all(cache.dtype == torch.bfloat16 for cache in draft_caches)
+    else:
+        caches.extend(draft_caches)
     assert caches and all(cache.dtype == torch.float8_e4m3fn for cache in caches)
     costs = model.recipe.costs(world_size, model.recipe.speculation if drafting else None)
     assert pool.layout.row_bytes == costs.state_row_bytes

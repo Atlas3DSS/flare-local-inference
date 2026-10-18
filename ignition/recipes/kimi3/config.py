@@ -8,8 +8,10 @@ import re
 from ignition.components.parallel import TensorParallelShard
 
 PAGE_TOKENS = 128
-# Draft checkpoints live beside the target's files, as a speculators-format directory.
+# Optional speculators-format draft directory within a target checkpoint.
 DRAFT_DIRECTORY = "dspark"
+DSPARK_REPOSITORY = "RedHatAI/Kimi-K3-speculator.dspark"
+DSPARK_REVISION = "38a88101e0d46bb22134b9da340f381b954d40d4"
 
 
 @dataclass(frozen=True)
@@ -22,6 +24,10 @@ class DSparkConfig:
     """
 
     raw: dict
+
+    @classmethod
+    def load(cls, snapshot, target):
+        return cls.from_dict(json.loads((Path(snapshot) / "config.json").read_text()), target.text)
 
     @classmethod
     def from_dict(cls, raw, target):
@@ -97,8 +103,7 @@ class DSparkConfig:
 class ModelConfig:
     text: dict
     vision: dict
-    # The checkpoint's DSpark draft (DSparkConfig, from its dspark directory) or a DFlash2 DraftConfig.
-    draft: object = None
+    draft: DSparkConfig | None = None
 
     @classmethod
     def load(cls, snapshot):

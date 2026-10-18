@@ -21,15 +21,15 @@ def pool_factory(recipe):
         from dataclasses import replace
         from ignition.recipes.kimi3.bootstrap import PreparationConfig
         from ignition.recipes.kimi3.config import ModelConfig
-        from ignition.recipes.kimi3.draft_config import DraftConfig
+        from ignition.recipes.kimi3.config import DSparkConfig
         from ignition.recipes.kimi3.pool import ContinuationPool
-        from .test_kimi3_dflash import TARGET, DRAFT
+        from .test_kimi3 import CHECKPOINT as TARGET, DRAFT
 
         if not TARGET.is_dir() or not DRAFT.is_dir():
-            pytest.skip("Kimi target and DFlash2 checkpoints are unavailable")
+            pytest.skip("Kimi target and Red Hat DSpark checkpoints are unavailable")
         config = ModelConfig.load(TARGET)
-        config = replace(config, draft=DraftConfig.load(DRAFT, config))
-        return partial(ContinuationPool.for_model, config, 16, context_ranks=16), PreparationConfig().page_tokens
+        config = replace(config, draft=DSparkConfig.load(DRAFT, config))
+        return partial(ContinuationPool.for_model, config, 16, speculative_tokens=7), PreparationConfig().page_tokens
     if recipe == "deepseek41":
         from ignition.recipes.deepseek41.pool import ContinuationPool, PAGE_TOKENS
         from .test_deepseek41_pool import config
