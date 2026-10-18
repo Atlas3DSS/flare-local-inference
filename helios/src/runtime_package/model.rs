@@ -13,7 +13,7 @@ use std::{collections::HashSet, path::Path, thread};
 
 pub struct NativeModel {
     pub(super) ranks: Vec<NativeResources>,
-    _package_file: Option<std::sync::Arc<std::fs::File>>,
+    _package_files: Vec<std::sync::Arc<std::fs::File>>,
     pub(super) server_config: serde_json::Value,
     engram: Option<std::sync::Arc<crate::engram::Shared>>,
     offload: Option<std::sync::Arc<crate::offload::Shared>>,
@@ -428,8 +428,19 @@ impl NativeModel {
             devices.len(),
             if devices.len() == 1 { "" } else { "s" }
         ));
+        // Windows direct reads can stall while any buffered handle remains open.
+        // Keep every shard's write/delete exclusion through unbuffered guards;
+        // the buffered startup readers close when loading returns.
+        let package_files = archive.files.values().map(|payload| {
+            #[cfg(windows)]
+            let file = std::sync::Arc::new(crate::os::direct_read_guard(&payload.file)
+                .map_err(|error| invalid(format!("retain read-only package: {error}")))?);
+            #[cfg(unix)]
+            let file = payload.file.clone();
+            Ok(file)
+        }).collect::<Result<Vec<_>>>()?;
         let mut model = Self {
-            _package_file: Some(archive.file.clone()),
+            _package_files: package_files,
             ranks: Vec::new(),
             server_config,
             engram: None,
@@ -567,6 +578,7 @@ impl NativeModel {
                     devices[0],
                     storage,
                     options.embedding_table_cache_bytes,
+                    options.embedding_workers(),
                 )?);
                 let label = match storage {
                     crate::engram::Storage::Disk => "disk",
@@ -848,7 +860,7 @@ mod tests {
     fn disabled_offload_needs_no_model_metadata_or_cuda_resources() {
         let progress = StartupProgress::silent();
         let mut model = NativeModel {
-            _package_file: None,
+            _package_files: Vec::new(),
             ranks: Vec::new(),
             server_config: serde_json::Value::Null,
             engram: None,

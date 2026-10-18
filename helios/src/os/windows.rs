@@ -124,11 +124,20 @@ pub(crate) fn direct_file(path: &Path, write: bool) -> io::Result<File> {
 }
 
 pub(crate) fn direct_reopen(file: &File) -> io::Result<File> {
+    reopen_direct(file, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+}
+
+/// Keep a package immutable without retaining a buffered handle alongside its direct readers.
+pub(crate) fn direct_read_guard(file: &File) -> io::Result<File> {
+    reopen_direct(file, FILE_SHARE_READ)
+}
+
+fn reopen_direct(file: &File, sharing: u32) -> io::Result<File> {
     let handle = unsafe {
         ReOpenFile(
             file.as_raw_handle(),
             GENERIC_READ,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            sharing,
             FILE_FLAG_NO_BUFFERING | FILE_FLAG_OVERLAPPED,
         )
     };
@@ -213,6 +222,46 @@ pub(crate) fn free_space(path: &Path) -> io::Result<u64> {
 mod tests {
     use super::*;
     use crate::os::{FileReadAt, completion::Queue};
+
+    #[test]
+    fn direct_package_guard_preserves_immutability_after_buffered_reader_closes() {
+        let path =
+            std::env::temp_dir().join(format!("flare-package-guard-{}.bin", std::process::id()));
+        std::fs::write(&path, [0x39; 4096]).unwrap();
+        let source = OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(&path)
+            .unwrap();
+        let guard = direct_read_guard(&source).unwrap();
+        drop(source);
+        assert_eq!(
+            OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .unwrap_err()
+                .raw_os_error(),
+            Some(ERROR_SHARING_VIOLATION as i32)
+        );
+        assert_eq!(
+            std::fs::remove_file(&path).unwrap_err().raw_os_error(),
+            Some(ERROR_SHARING_VIOLATION as i32)
+        );
+        let reader = direct_reopen(&guard).unwrap();
+        let address = map_host(4096).unwrap();
+        let count = unsafe { read_at_raw(&reader, address as *mut u8, 4096, 0) }.unwrap();
+        assert_eq!(count, 4096);
+        assert!(
+            unsafe { std::slice::from_raw_parts(address as *const u8, 4096) }
+                .iter()
+                .all(|value| *value == 0x39)
+        );
+        unsafe { unmap_host(address, 4096) };
+        drop(reader);
+        drop(guard);
+        drop(OpenOptions::new().write(true).open(&path).unwrap());
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn direct_io_completes_and_cancellation_drains_before_reuse() {

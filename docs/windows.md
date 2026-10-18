@@ -66,11 +66,21 @@ follow the [CLI specification](cli-design.md). The default trust store is
 selects another path. Ctrl-C and Ctrl-Break drain native work before releasing
 CUDA resources.
 
-Disk embedding tables and disk prefix caches use unbuffered overlapped I/O with
-bounded completion queues. File offsets, lengths, and buffers retain the package's
+Disk embedding tables use Windows I/O rings with registered files and buffers.
+All package shards share each worker's ring and staging allocation; file indices
+keep equal offsets in separate shards distinct.
+Each disk-reader worker refills completed slots during the gather; the default
+four workers share 128 slots and 8 MiB of staging per table. Disk prefix caches
+continue using I/O completion ports. Both paths use unbuffered overlapped I/O with
+bounded queues. File offsets, lengths, and buffers retain the package's
 4 KiB alignment; incompatible storage geometry is rejected. RAM embedding tables
 and memory prefix caches retain their existing explicit storage selections.
-The open package handle prevents replacement or writes while it is loaded.
+Retained package handles are also unbuffered and prevent replacement or writes
+while the model is loaded. Buffered package handles are limited to startup:
+retaining one alongside direct readers can severely reduce random-read throughput
+even when the buffered handle is idle. Diagnose table reads separately from graph
+replay using the `flare_engram_disk_{plan,submit,wait,complete}_nanoseconds_total`
+counters; their help text describes platform-specific timing boundaries.
 
 The `ignition serve` development handoff for shared RAM embedding tables uses
 Linux file descriptors. On Windows, export a package and load it with

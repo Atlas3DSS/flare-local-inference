@@ -65,7 +65,8 @@ fn offline_download_and_run_share_the_cached_package_path() {
     let commit = "0123456789012345678901234567890123456789";
     let directory = temp
         .path()
-        .join("models--owner--model/snapshots")
+        .join("models--owner--model")
+        .join("snapshots")
         .join(commit);
     std::fs::create_dir_all(&directory).unwrap();
     let package = directory.join("model.safetensors");
