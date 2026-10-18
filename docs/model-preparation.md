@@ -380,6 +380,16 @@ residuals, and latent SiTU experts. DFlash2 uses
 `e77935fb4804e17eb55085bffd045eae1d779769`, downloaded to the Hugging Face hub
 cache (or `[paths].hub_cache`), and defaults to seven draft tokens per round.
 
+For Kimi K3, `--online-mxfp8` converts KDA input, forget-gate, and output
+projections; MLA latent/gate, query, and output projections; shared
+expert gate/up and down projections; and both tensor-parallel layouts of the
+MoE latent down projection and its latent up projection. Activations remain
+BF16. MLA's batched key/value projections, routers, the first dense MLP,
+embeddings, vocabulary head, vision encoder, and DFlash2 retain checkpoint
+precision. DSpark converts its context projection, attention outputs, and MLPs.
+Shared and routed experts keep disjoint
+kernel scratch when their execution overlaps.
+
 ```sh
 .venv/bin/python -m ignition export /data/models/Kimi-K3-MXFP4-CSF --gpus 0-15 \
   --max-concurrency 4 --mtp-draft-tokens 7 --prefill-chunk-size 4096 \

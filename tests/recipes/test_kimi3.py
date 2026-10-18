@@ -60,9 +60,24 @@ def test_situ():
     assert y[0, 1].abs() < 1e-30
 
 
+def _reference_attention(weights):
+    import torch
+    from b12x.gemm._shared.wo_mxfp8 import dequantize_mxfp8_rows_torch
+
+    result = {}
+    for key, weight in weights.items():
+        if isinstance(weight, torch.Tensor):
+            result[key] = weight
+        else:
+            packed = weight.weight
+            result[key] = dequantize_mxfp8_rows_torch(packed.values, packed.scale_rows)[:, :weight.in_features].bfloat16()
+    return result
+
+
 @pytest.mark.skipif(os.getenv("FLARE_RUN_CUDA_TESTS") != "1", reason="requires CUDA checkpoint tests")
-@pytest.mark.parametrize("mode,tokens", [("decode", 1), ("prefill", 65), ("prefill", 256)])
-def test_checkpoint_kda(config, mode, tokens):
+@pytest.mark.parametrize("online_mxfp8", [False, True])
+@pytest.mark.parametrize("mode,tokens", [("decode", 1), ("prefill", 65), ("prefill", 4096)])
+def test_checkpoint_kda(config, mode, tokens, online_mxfp8):
     import torch
     from ignition.preparation.checkpoint import inspect_indexed_checkpoint
     from ignition.components.parallel import TensorParallelShard
@@ -76,10 +91,11 @@ def test_checkpoint_kda(config, mode, tokens):
     torch.cuda.set_device(device)
     manifest = inspect_indexed_checkpoint(CHECKPOINT)
     with KimiWeightLoader(manifest, device, shard=TensorParallelShard(0, 16),
-                         prefixes=("language_model.model.layers.0.",)) as loader:
+                         prefixes=("language_model.model.layers.0.",), online_mxfp8=online_mxfp8) as loader:
         weights = loader.load_layer(0)
+    assert all(weight.dtype == torch.bfloat16 for weight in weights["mlp"].values())
     with RecordedPreparationSession(device=device, checkpoint=str(CHECKPOINT),
-            workload_schema="kimi3-kda", numerical_policy="default") as session:
+            workload_schema="kimi3-kda", numerical_policy="default", compile_workers=4) as session:
         arena = ScratchArena(device)
         session.register_scratch(arena)
         state = DeltaState.allocate(3, device, heads=6, channels=2304)
@@ -105,7 +121,7 @@ def test_checkpoint_kda(config, mode, tokens):
         from b12x.sequence.kda_prefill.reference import recurrent_kda
         from torch.nn import functional as F
 
-        w = weights["attention"]
+        w = _reference_attention(weights["attention"])
         projected = F.linear(source, w["input"])
         qkv, forget, gate, beta, _ = projected.split((2304, 128, 768, 6, 2), -1)
         convolution = F.conv1d(F.pad(qkv.T.float()[None], (3, 0)),
@@ -139,8 +155,9 @@ def test_checkpoint_kda(config, mode, tokens):
 
 
 @pytest.mark.skipif(os.getenv("FLARE_RUN_CUDA_TESTS") != "1", reason="requires CUDA checkpoint tests")
+@pytest.mark.parametrize("online_mxfp8", [False, True])
 @pytest.mark.parametrize("mode,tokens", [("decode", 1), ("prefill", 65), ("prefill", 4096)])
-def test_checkpoint_mla(config, mode, tokens):
+def test_checkpoint_mla(config, mode, tokens, online_mxfp8):
     import torch
     from torch.nn import functional as F
     from ignition.preparation.checkpoint import inspect_indexed_checkpoint
@@ -156,10 +173,10 @@ def test_checkpoint_mla(config, mode, tokens):
     manifest = inspect_indexed_checkpoint(CHECKPOINT)
     # One rank projects every latent row itself; tensor-parallel ranks gather them through b12x.
     with KimiWeightLoader(manifest, device, shard=TensorParallelShard(0, 1),
-                         prefixes=("language_model.model.layers.3.self_attn.",)) as loader:
+                         prefixes=("language_model.model.layers.3.self_attn.",), online_mxfp8=online_mxfp8) as loader:
         weights = loader.load_attention(3)
     with RecordedPreparationSession(device=device, checkpoint=str(CHECKPOINT),
-            workload_schema="kimi3-mla", numerical_policy="default") as session:
+            workload_schema="kimi3-mla", numerical_policy="default", compile_workers=4) as session:
         arena = ScratchArena(device)
         session.register_scratch(arena)
         pages = max(2, -(-tokens // 128))
@@ -177,7 +194,7 @@ def test_checkpoint_mla(config, mode, tokens):
         metadata.positions.copy_(torch.arange(tokens, device=device))
         metadata.token_page_table.copy_(metadata.page_table.expand(tokens, -1))
         output = op(source).clone()
-        w = weights
+        w = _reference_attention(weights)
         projected = F.linear(source, w["latent_gate"][:2112])
         def norm(x, weight):
             return (x.float() * torch.rsqrt(x.float().square().mean(-1, keepdim=True) + 1e-6)).to(x.dtype) * weight

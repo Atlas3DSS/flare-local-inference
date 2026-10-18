@@ -184,7 +184,8 @@ def _preparation_arguments(running):
                           help="development: capture graphs without compiling forwards")
     advanced.add_argument("--online-mxfp8", action="store_true",
                           help="store the recipe's eligible BF16 projections as MXFP8 while loading; faster"
-                               " decode at reduced precision (Kimi K3 KDA inputs and DSpark draft outputs and MLPs;"
+                               " decode at reduced precision (Kimi K3 KDA, MLA except batched key/value, shared"
+                               " experts, MoE latent projections, and DSpark draft context, outputs and MLPs;"
                                " default: checkpoint precision)")
     advanced.add_argument("--language-model-only", action="store_true",
                           help="prepare no vision encoder and reject images; its weights and scratch become KV"

@@ -4,9 +4,10 @@ import torch
 from b12x.sequence import gdn_decode, kda_prefill, short_conv
 
 from ignition.components.gated_norm import PreparedGatedRMSNorm
-from ignition.components.linear import QuantizedProjection, UnquantizedProjection
 from ignition.components.recurrent import prepare_sequence_binding
 from ignition.components.kda_speculation import _record, register_recording
+
+from .projections import prepare_projection
 
 
 class PreparedKDA:
@@ -32,14 +33,10 @@ class PreparedKDA:
         self.input = buffer("input", columns)
         qkv, self.forget_source, gate, beta, _ = self.input.split(
             (3 * width, 128, width, heads, columns - 4 * width - 128 - heads), dim=-1)
-        packed = not isinstance(weights["input"], torch.Tensor)
-        self.projections = {
-            # MXFP8 input weights keep BF16 activations, matching the precision of the BF16 path's inputs.
-            "input": (QuantizedProjection(source, weights["input"], self.input, session=session, name=name + ".input",
-                                          activation_mode="a16", workspace=workspace) if packed else
-                      UnquantizedProjection(source, weights["input"], self.input, session=session, name=name + ".input")),
-            **{key: UnquantizedProjection(x, weights[key], y, session=session, name=name + "." + key)
-               for key, x, y in (("forget", self.forget, raw_g), ("output", gated, buffer("output", hidden)))}}
+        self.projections = {key: prepare_projection(x, weights[key], y, session=session,
+            name=name + "." + key, workspace=workspace) for key, x, y in (
+                ("input", source, self.input), ("forget", self.forget, raw_g),
+                ("output", gated, buffer("output", hidden)))}
         sequences = metadata.query_start_loc.numel() - 1
         conv_args = dict(x=qkv, conv_weight=weights["convolution"], query_start_loc=metadata.query_start_loc,
             state_slot_ids=metadata.convolution_slots, state_is_fresh=metadata.fresh,
