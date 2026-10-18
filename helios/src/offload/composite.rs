@@ -1199,7 +1199,7 @@ mod tests {
         let mut pool = SlabPool::staging(&Layout::new(geometry).unwrap()).unwrap();
         pool.register(context).unwrap();
         let transfers = Arc::new(Mutex::new(
-            Transfers::start(&[(context, device)], geometry.to_vec(), None).unwrap(),
+            Transfers::start(&[(context, device)], geometry.to_vec(), &pool).unwrap(),
         ));
         Staged::new(
             Some(pool),
@@ -2336,7 +2336,7 @@ mod tests {
         .unwrap();
         pool.register(context).unwrap();
         let transfers = Arc::new(Mutex::new(
-            Transfers::start(&[(context, device)], geometry.clone(), None).unwrap(),
+            Transfers::start(&[(context, device)], geometry.clone(), &pool).unwrap(),
         ));
         let memory = MemoryStore::new_flat(IDENTITY, pool, transfers.clone()).unwrap();
         let disk = DiskStore::new(
@@ -2530,7 +2530,7 @@ mod tests {
         .unwrap();
         pool.register(context).unwrap();
         let transfers = Arc::new(Mutex::new(
-            Transfers::start(&[(context, device)], geometry.clone(), None).unwrap(),
+            Transfers::start(&[(context, device)], geometry.clone(), &pool).unwrap(),
         ));
         let memory = MemoryStore::new_flat(IDENTITY, pool, transfers.clone()).unwrap();
         let disk = DiskStore::new(
@@ -2697,7 +2697,7 @@ mod tests {
         .unwrap();
         pool.register(context).unwrap();
         let transfers = Arc::new(Mutex::new(
-            Transfers::start(&[(context, device)], geometry.clone(), None).unwrap(),
+            Transfers::start(&[(context, device)], geometry.clone(), &pool).unwrap(),
         ));
         let memory = MemoryStore::new_flat(IDENTITY, pool, transfers.clone()).unwrap();
         let disk = DiskStore::new(
@@ -2969,14 +2969,10 @@ mod tests {
             )
             .unwrap();
             pool.register(context).unwrap();
-            let memory = MemoryStore::new_flat(
-                IDENTITY,
-                pool,
-                Arc::new(Mutex::new(
-                    Transfers::start(&[(context, device)], geometry.clone(), None).unwrap(),
-                )),
-            )
-            .unwrap();
+            let transfers = Arc::new(Mutex::new(
+                Transfers::start(&[(context, device)], geometry.clone(), &pool).unwrap(),
+            ));
+            let memory = MemoryStore::new_flat(IDENTITY, pool, transfers).unwrap();
             let mut staging_pool = SlabPool::new(
                 layout.page_record_bytes,
                 3,
@@ -2986,6 +2982,9 @@ mod tests {
             )
             .unwrap();
             staging_pool.register(context).unwrap();
+            let transfers = Arc::new(Mutex::new(
+                Transfers::start(&[(context, device)], geometry.clone(), &staging_pool).unwrap(),
+            ));
             let lock = record::DirectoryLock::acquire(&directory).unwrap();
             let scanned = record::scan(&lock, &IDENTITY, &fingerprint, &geometry).unwrap();
             let disk = DiskStore::new(
@@ -2997,9 +2996,7 @@ mod tests {
                 scanned,
                 Box::new(Staged::new(
                     Some(staging_pool),
-                    Arc::new(Mutex::new(
-                        Transfers::start(&[(context, device)], geometry.clone(), None).unwrap(),
-                    )),
+                    transfers,
                     DiskThread::start("flare-offload-disk").unwrap(),
                 )),
             )

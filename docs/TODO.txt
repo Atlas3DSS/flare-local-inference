@@ -6,6 +6,10 @@
     complete DeepSeek Engram serving; Qwen PLE is exercised. See
     windows.md#serve-a-prepared-package and cli-design.md.
 
+[ ] Validate Windows prefix-cache offload across the other recipes and TP ranks;
+    Qwen Flash TP1 disk-only and RAM/disk round trips pass. See
+    windows.md#serve-a-prepared-package.
+
 [ ] Review scratch-memory lifetimes and sharing across every supported recipe
     and shared component, including Qwen, GLM, DeepSeek, MiMo, Kimi, Step, and
     Nemotron. Review contiguous-buffer placement within typed pools and weight

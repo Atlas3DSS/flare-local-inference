@@ -116,12 +116,14 @@ fn region_bytes(kind: &str, slab_bytes: u64, count: usize) -> Result<usize> {
         })
 }
 
-/// Where one rank's part of every slab of a pool split by rank lives.
+/// Device addresses of one rank's part of every slab.
 ///
-/// Such a pool keeps each rank's part of every page slab, then of every row
+/// A split pool keeps each rank's part of every page slab, then of every row
 /// slab, contiguously in that rank's memory. Slab addresses remain identities:
 /// where each slab would begin if the pool held whole cross-rank records. They
 /// lie inside the pool's reserved range, so they never name another pool's slab.
+/// A registered pool instead uses CPU slab addresses as identities and the
+/// registration's device alias for copies, keeping cross-rank record strides.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RankPart {
     /// The pool's reserved range.
@@ -169,7 +171,7 @@ impl RankPart {
         }
         region.locate(slab).map(Some).ok_or_else(|| {
             invalid(format!(
-                "address {slab:#x} inside a pool split by rank is not one of its {kind} slabs"
+                "address {slab:#x} inside a slab pool is not one of its {kind} slabs"
             ))
         })
     }
@@ -356,6 +358,54 @@ impl SlabPool {
     /// Each rank's part of the slabs, in rank order, for a pool split by rank.
     pub fn rank_parts(&self) -> Option<Vec<RankPart>> {
         self.split.as_ref().map(|split| split.parts.clone())
+    }
+
+    /// Resolve GPU copy addresses once at startup. Disk I/O and CPU slices
+    /// continue to use the host addresses returned by `page_address`/`row_address`.
+    pub fn device_parts(&self, layout: &Layout) -> Result<Vec<RankPart>> {
+        if layout.page_record_bytes != self.page_bytes() as u64
+            || layout.row_record_bytes != self.row_bytes() as u64
+        {
+            return Err(invalid(
+                "slab sizes disagree with the transfer record layout",
+            ));
+        }
+        if let Some(parts) = self.rank_parts() {
+            if parts.len() != layout.ranks.len() {
+                return Err(invalid("a split pool needs one part per transfer rank"));
+            }
+            return Ok(parts);
+        }
+        let registration = self
+            .registration
+            .as_ref()
+            .ok_or_else(|| invalid("transfer slabs must be registered with CUDA"))?;
+        Ok(self.registered_parts(layout, registration.device_address()))
+    }
+
+    fn registered_parts(&self, layout: &Layout, device: u64) -> Vec<RankPart> {
+        layout
+            .ranks
+            .iter()
+            .map(|rank| RankPart {
+                range: self.mapping..self.mapping + self.mapping_bytes,
+                pages: PartRegion {
+                    identity: self.pages.base,
+                    record_bytes: self.page_bytes(),
+                    count: self.page_count(),
+                    base: (device + rank.page_offset) as usize,
+                    part_bytes: self.page_bytes(),
+                },
+                rows: PartRegion {
+                    identity: self.rows.base,
+                    record_bytes: self.row_bytes(),
+                    count: self.row_count(),
+                    base: (device + (self.rows.base - self.mapping) as u64 + rank.row_offset)
+                        as usize,
+                    part_bytes: self.row_bytes(),
+                },
+            })
+            .collect()
     }
 
     /// A non-retaining staging pool of [`STAGING_PAGE_SLABS`] and [`STAGING_ROW_SLABS`].
@@ -589,6 +639,77 @@ pub(crate) mod tests {
     /// One rank with two 4 KiB planes and a 4 KiB row: 8 KiB page records, 4 KiB row records.
     fn layout() -> Layout {
         Layout::new(&[geometry(64, &[("k", 4096), ("v", 4096)], 4096)]).unwrap()
+    }
+
+    #[test]
+    fn registered_parts_use_device_aliases_with_cross_rank_record_strides() {
+        use super::super::{
+            JobId,
+            transfer::{Direction, Job, expand},
+        };
+        use crate::{cache::PageId, scheduler::StateSlotId};
+
+        let ranks = [
+            geometry(64, &[("kv", 8192), ("selector", 100)], 10_000),
+            geometry(64, &[("kv", 4096), ("selector", 200)], 5000),
+        ];
+        let layout = Layout::new(&ranks).unwrap();
+        let mut pool = SlabPool::new(
+            layout.page_record_bytes,
+            3,
+            layout.row_record_bytes,
+            2,
+            false,
+        )
+        .unwrap();
+        assert!(pool.device_parts(&layout).is_err());
+        let device = 0x2_0420_0000;
+        let parts = pool.registered_parts(&layout, device);
+        let pages: Vec<_> = (0..3).map(|_| pool.allocate_page().unwrap()).collect();
+        let rows: Vec<_> = (0..2).map(|_| pool.allocate_row().unwrap()).collect();
+        for (rank, part) in parts.iter().enumerate() {
+            let mut job = Job {
+                id: JobId(1),
+                window: 0,
+                direction: Direction::Out,
+                pages: vec![(PageId(5), pool.page_address(pages[2]))],
+                row: Some((StateSlotId(3), pool.row_address(rows[1]))),
+            };
+            let mut outbound = Vec::new();
+            expand(
+                &ranks[rank],
+                &layout.ranks[rank],
+                Some(part),
+                &job,
+                &mut outbound,
+            )
+            .unwrap();
+            let page = device + 2 * layout.page_record_bytes + layout.ranks[rank].page_offset;
+            let row = device
+                + 3 * layout.page_record_bytes
+                + layout.row_record_bytes
+                + layout.ranks[rank].row_offset;
+            assert_eq!(
+                outbound.iter().map(|d| d.destination).collect::<Vec<_>>(),
+                vec![page, page + ranks[rank].planes[0].padded_bytes(), row]
+            );
+            job.direction = Direction::In;
+            let mut inbound = Vec::new();
+            expand(
+                &ranks[rank],
+                &layout.ranks[rank],
+                Some(part),
+                &job,
+                &mut inbound,
+            )
+            .unwrap();
+            for (out, incoming) in outbound.iter().zip(&inbound) {
+                assert_eq!(
+                    (incoming.source, incoming.destination, incoming.bytes),
+                    (out.destination, out.source, out.bytes)
+                );
+            }
+        }
     }
 
     #[test]

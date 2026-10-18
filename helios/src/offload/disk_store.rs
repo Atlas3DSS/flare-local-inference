@@ -4264,7 +4264,7 @@ mod tests {
             let mut pool = SlabPool::staging(&layout).unwrap();
             pool.register(context).unwrap();
             let transfers = Arc::new(Mutex::new(
-                Transfers::start(&[(context, device)], geometry.clone(), None).unwrap(),
+                Transfers::start(&[(context, device)], geometry.clone(), &pool).unwrap(),
             ));
             let disk = DiskThread::start("flare-offload-disk").unwrap();
             DiskStore::new(
