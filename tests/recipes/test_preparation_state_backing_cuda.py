@@ -17,6 +17,19 @@ pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
 
 
 def pool_factory(recipe):
+    if recipe == "kimi3":
+        from dataclasses import replace
+        from ignition.recipes.kimi3.bootstrap import PreparationConfig
+        from ignition.recipes.kimi3.config import ModelConfig
+        from ignition.recipes.kimi3.draft_config import DraftConfig
+        from ignition.recipes.kimi3.pool import ContinuationPool
+        from .test_kimi3_dflash import TARGET, DRAFT
+
+        if not TARGET.is_dir() or not DRAFT.is_dir():
+            pytest.skip("Kimi target and DFlash2 checkpoints are unavailable")
+        config = ModelConfig.load(TARGET)
+        config = replace(config, draft=DraftConfig.load(DRAFT, config))
+        return partial(ContinuationPool.for_model, config, 16, context_ranks=16), PreparationConfig().page_tokens
     if recipe == "deepseek41":
         from ignition.recipes.deepseek41.pool import ContinuationPool, PAGE_TOKENS
         from .test_deepseek41_pool import config
@@ -51,21 +64,30 @@ def pool_factory(recipe):
     return partial(ContinuationPool.for_model, config, TensorParallelShard(0, 4)), PAGE_TOKENS
 
 
-@pytest.mark.parametrize("recipe", ["step5", "deepseek41", "deepseek4", "mimo_v2", "qwen38_dense"])
+@pytest.mark.parametrize("recipe", ["step5", "deepseek41", "deepseek4", "mimo_v2", "qwen38_dense", "kimi3"])
 @torch.no_grad()
 def test_snapshot_restore_and_growth_with_unbacked_prefix_slots(recipe):
     assert os.environ.get("CUDA_VISIBLE_DEVICES")
     torch.cuda.set_device(0)
     allocate, page_tokens = pool_factory(recipe)
-    capacity, backed, declared = 16, 33, 145
+    capacity = 4 if recipe == "kimi3" else 16
+    backed, declared = 2 * capacity + 1, 145
+    pages = 2 * capacity
+    if recipe == "kimi3":
+        from ignition.recipes.kimi3.bootstrap import PreparationConfig
+
+        pages = PreparationConfig(max_active=capacity).preparation_pages
     storage = VirtualStorage("cuda:0")
     graph = torch.cuda.CUDAGraph()
     try:
-        pool = allocate(declared, 32, "cuda:0", storage=storage,
+        pool = allocate(declared, pages, "cuda:0", storage=storage,
                         maximum_pages=64, maximum_rows=160, backed_slots=backed)
         region = next(r for r in storage.dynamic_regions if r.group == "STATE_ROWS")
         rounded = lambda size: -(-size // storage.granularity) * storage.granularity
         assert region.nbytes == rounded(backed * pool.layout.row_bytes)
+        for cache_region in storage.dynamic_regions:
+            if cache_region.group == "KV_PAGES":
+                assert cache_region.nbytes == rounded(pages * cache_region.unit_bytes)
         assert pool.backing.shape == (declared, pool.layout.row_bytes)
         assert pool.reserved_backing.shape == (160, pool.layout.row_bytes)
         pool.clear_for_preparation()
@@ -75,7 +97,7 @@ def test_snapshot_restore_and_growth_with_unbacked_prefix_slots(recipe):
         rows = torch.arange(1, capacity + 1, device="cuda")
         snapshots = rows + capacity
         states = rows[:, None].expand(-1, 8).contiguous()
-        tables = torch.arange(32, dtype=torch.int32, device="cuda").view(2, capacity).T.contiguous()
+        tables = torch.arange(2 * capacity, dtype=torch.int32, device="cuda").view(2, capacity).T.contiguous()
         transfer = PreparedStateTransfer(pool, commands, tables, pages=pool.partial_pages(),
             page_tokens=page_tokens, state_rows=states, requests=requests)
         transfer.prepare()
@@ -84,17 +106,17 @@ def test_snapshot_restore_and_growth_with_unbacked_prefix_slots(recipe):
             transfer.apply()
 
         endpoint = page_tokens + 1
-        pool.backing[1:17].random_(0, 256)
-        pool.region("consumed_tokens")[1:17].fill_(endpoint)
+        pool.backing[1:capacity + 1].random_(0, 256)
+        pool.region("consumed_tokens")[1:capacity + 1].fill_(endpoint)
         requests.consumed_tokens.fill_(endpoint)
         commands.request_slots.copy_(rows - 1)
         commands.expected_consumed.fill_(endpoint)
         commands.num_ops.fill_(capacity)
-        expected = pool.backing[1:17].clone()
+        expected = pool.backing[1:capacity + 1].clone()
         saved_pages = {}
-        for name, pages in pool.pages.items():
-            pages[:32].random_(0, 256)
-            saved_pages[name] = pages[16:32].clone()
+        for name, cache in pool.pages.items():
+            cache[:2 * capacity].random_(0, 256)
+            saved_pages[name] = cache[capacity:2 * capacity].clone()
             field = pool.layout.region(name)
             expected[:, field.offset:field.offset + field.nbytes].copy_(saved_pages[name])
 
@@ -111,16 +133,26 @@ def test_snapshot_restore_and_growth_with_unbacked_prefix_slots(recipe):
 
         replay(rows, snapshots)
         assert not commands.errors.any()
-        assert torch.equal(pool.backing[17:33], expected)
-        pool.backing[1:17].zero_()
-        for pages in pool.pages.values():
-            pages[:32].zero_()
+        assert torch.equal(pool.backing[capacity + 1:backed], expected)
+        pool.backing[1:capacity + 1].zero_()
+        for cache in pool.pages.values():
+            cache[:2 * capacity].zero_()
         replay(snapshots, rows)
         assert not commands.errors.any()
-        assert torch.equal(pool.backing[1:17], expected)
-        for name, pages in pool.pages.items():
-            assert torch.equal(pages[16:32], saved_pages[name])
-            assert not pages[:16].any()
+        assert torch.equal(pool.backing[1:capacity + 1], expected)
+        for name, cache in pool.pages.items():
+            assert torch.equal(cache[capacity:2 * capacity], saved_pages[name])
+            assert not cache[:capacity].any()
+
+        addresses = {name: cache.data_ptr() for name, cache in pool.pages.items()}
+        storage.grow("KV_PAGES", pages + 1)
+        pool.memory_capacity[1] = pages + 1
+        tables[0, 1] = pages
+        replay(snapshots, rows)
+        assert not commands.errors.any()
+        for name, cache in pool.pages.items():
+            assert cache.data_ptr() == addresses[name]
+            assert torch.equal(cache[pages], saved_pages[name][0])
 
         commands.num_ops.fill_(1)
         destinations = snapshots.clone()

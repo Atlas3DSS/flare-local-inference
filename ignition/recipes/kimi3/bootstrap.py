@@ -111,6 +111,11 @@ class PreparationConfig:
         return PAGE_TOKENS * (len(self.devices) if self.context_parallel else 1)
 
     @property
+    def preparation_pages(self):
+        """Back one prefill chunk and two boundary pages per request row."""
+        return -(-self.prefill_chunk_size // self.page_tokens) + 2 * request_capacity(self.max_active)
+
+    @property
     def speculative_shapes(self):
         return (speculative_shapes(self.max_active, self.speculative_widths, self.speculative_token_capacity)
                 if self.drafting else ())
@@ -157,7 +162,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
     draft_rows = slots * weights.config.draft.block_size if drafting and not config.dspark else 0
     max_tokens = max(config.prefill_chunk_size, config.decode_tokens, draft_rows)
     state_rows = slots + snapshots
-    pages = config.prefill_chunk_size // PAGE_TOKENS + 2 * slots
+    pages = config.preparation_pages
     total_memory = minimum_across_ranks(torch.cuda.mem_get_info(device)[1], group)
     with phase(progress, "Allocate model state"):
         pool = ContinuationPool.for_model(weights.config, shard.world_size, state_rows + 1, pages, device,
