@@ -513,7 +513,9 @@ class ForwardCache:
         """Bind and warm one callable on the caller's preparation stream."""
         with self._publication_lock(), _guard_code_cache(self.root / 'guards'):
             bound, path = self._prepare(forward, name=name, signature=signature, progress=progress)
-            return self._warm(bound, path, name=name, progress=progress)
+            result = self._warm(bound, path, name=name, progress=progress)
+            release_unused()
+            return result
 
     @contextmanager
     def _publication_lock(self, coordinator=None):
@@ -596,6 +598,7 @@ class ForwardCache:
                     finish()
             while pending:
                 finish()
+        release_unused()
         if materialize is not None:
             materialize()
             with phase(progress, "Warm compiled forwards", total=len(functions)) as stage:
@@ -605,6 +608,7 @@ class ForwardCache:
                     with warmup():
                         compiled[name]()
                     stage.update(advance=1)
+        release_unused()
         return compiled
 
     def _prepare_ranks(self, functions, signatures, coordinator, *, progress, materialize, warmup):
@@ -745,6 +749,7 @@ class ForwardCache:
                              group, ranks)
         error = None
         try:
+            release_unused()
             if materialize is not None:
                 materialize()
             with phase(progress, "Load compiled forwards", total=len(functions) - len(selected)) as stage:
@@ -765,6 +770,7 @@ class ForwardCache:
         dist.all_gather_object(errors, error, group=group)
         if any(errors):
             raise RuntimeError(f"compiled forward binding failed: {errors}")
+        release_unused()
         with phase(progress, "Warm compiled forwards", total=len(functions)) as stage:
             for name in functions:
                 try:
@@ -780,7 +786,10 @@ class ForwardCache:
         with bind_device(self.device, freeze_tuning=self.options.get(
                 'triton.autotune_at_compile_time', False)), path.open('rb') as file:
             artifact = torch.compiler.load_compiled_function(file)
-        release_unused()
+        # Bound forwards remain live for the complete catalog. Collect young
+        # deserialization temporaries here; scan the retained heap once at each
+        # preparation phase boundary instead of once per restored forward.
+        release_unused(generation=0)
         if artifact.guard_check(forward):
             return BoundForward(artifact, forward, True)
         if required:
