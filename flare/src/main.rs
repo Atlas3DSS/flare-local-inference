@@ -7,6 +7,7 @@ mod cluster;
 mod environment;
 mod hardware;
 mod hub;
+mod identity;
 #[cfg(unix)]
 mod launch;
 mod trust;
@@ -20,7 +21,7 @@ use std::{
 
 use clap::Parser;
 use flare_helios::{
-    runtime_package::{NativeModel, VerifiedPackage},
+    runtime_package::NativeModel,
     server::{Bootstrap, Server},
     startup::StartupProgress,
 };
@@ -77,18 +78,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let bind = args.bind_address();
     environment::configure(&args.gpus)?;
+    // The repository a package came from, compared against the source its publisher signed.
+    let mut origin = None;
     let package = if hub::is_repository(&args.package) {
-        hub::download(
-            args.package.to_str().ok_or("repository must be UTF-8")?,
-            &args.hub,
-            args.gpus.len(),
-        )?
+        let text = args.package.to_str().ok_or("repository must be UTF-8")?;
+        origin = Some(hub::repository(text)?.0.to_owned());
+        hub::download(text, &args.hub, args.gpus.len())?
     } else {
+        // --offline and --token-file also govern the publisher identity check of a local package.
         if args.hub.revision.is_some()
             || args.hub.filename.is_some()
             || args.hub.cache_dir.is_some()
-            || args.hub.token_file.is_some()
-            || args.hub.offline
         {
             return Err(
                 "download options apply to Hugging Face repositories, not local package paths"
@@ -116,17 +116,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let devices = &args.gpus;
     let local_devices: Vec<i32> = (0..devices.len() as i32).collect();
     let mut progress = StartupProgress::stderr();
-    let phase = progress.phase("Verify package", None);
-    // A peer of a multi-host package holds only its rank's bytes, so it verifies that rank alone.
-    let package = VerifiedPackage::open(
-        &root,
-        &trust::publishers(&args.publisher_keys)?,
-        args.rank.filter(|&rank| rank != 0),
-    )?;
-    #[cfg(unix)]
-    let publisher = package.publisher().clone();
-    phase.finish("signatures");
-    let authorized = trust::authorize(package, &args, &mut progress)?;
+    let (authorized, publisher) = trust::load(&root, &args, &mut progress, origin.as_deref())?;
+    #[cfg(windows)]
+    let _ = &publisher;
     if roce_ring
         && flare_helios::runtime_package::package_cluster(&authorized)
             .is_none_or(|(world, _)| !(2..=16).contains(&world))
@@ -234,6 +226,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let phase = progress.phase("Read model configuration", None);
     let mut config = owner.server_config().clone();
     config["bind"] = bind.to_string().into();
+    config["scheduler_policy"] = args.scheduler_policy.into();
     if let Some(name) = args.served_model_name {
         config["served_names"] = serde_json::json!([name]);
     }
@@ -268,7 +261,11 @@ fn serve_peer(
     if !shutdown.drained {
         std::mem::forget(joined.transport);
         std::mem::forget(owner);
-        return Err("native replay did not drain".into());
+        return Err(match shutdown.error {
+            Some(error) => format!("native replay did not drain: {error}"),
+            None => "native replay did not drain".into(),
+        }
+        .into());
     }
     // The proxy stops before the package releases the region it posts from.
     drop(joined.transport);
@@ -355,7 +352,11 @@ fn serve(
     if !shutdown.drained {
         std::mem::forget(transport);
         std::mem::forget(owner);
-        return Err("native replay did not drain".into());
+        return Err(match shutdown.error {
+            Some(error) => format!("native replay did not drain: {error}"),
+            None => "native replay did not drain".into(),
+        }
+        .into());
     }
     if let Some(error) = shutdown.error {
         return Err(error.into());

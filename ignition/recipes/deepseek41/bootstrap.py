@@ -183,8 +183,6 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
             max_tokens=config.prefill_chunk_size, hidden_size=5120, ipc=ipc)
         vocabulary_collective = create_all_gather_runtime(group, device,
             max_rows=max(config.decode_tokens, slots * config.draft_tokens), columns=129280, ipc=ipc)
-        markov_collective = (create_all_gather_runtime(group, device,
-            max_rows=slots, columns=2 * 129280, ipc=ipc) if config.dspark else None)
         identity = hashlib.sha256(json.dumps({"config": json.loads((metadata_path / "config.json").read_text()),
             "headers": [s.header_sha256 for s in manifest.shards], "world_size": shard.world_size,
             "contract": "deepseek41.graph-inputs.v1"}, sort_keys=True).encode()).hexdigest()
@@ -229,7 +227,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                 draft_tokens=config.draft_tokens, records=records, frame=frame, sequence=sequence,
                 session=session, workspace=arena,
                 runtime=collective, vocabulary_runtime=vocabulary_collective,
-                markov_runtime=markov_collective, coordinator=coordinator,
+                markov_runtime=None, coordinator=coordinator,
                 forwards=DSparkForwards(decoder_factory,Scratch,_CONTEXT,PreparedDraft,PreparedMarkov))
 
     del manifest
@@ -426,9 +424,9 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         package_data=tables if rank == 0 else None,
         resources=(weights, tables, pool, requests, inputs, admission, commands, arena, forwards,
             prefill_storage, decoder_storage, scratch, metadata, compiled, stream, graph_pool, session,
-            collective, prefill_collective, vocabulary_collective, markov_collective, coordinator, speculation,
+            collective, prefill_collective, vocabulary_collective, coordinator, speculation,
             vision_state, vision_storage, vision_inputs, vision_prefill, graph_buffers),
-        close_resources=tuple(c for c in (markov_collective, prefill_collective, vocabulary_collective, collective) if c is not None))
+        close_resources=tuple(c for c in (prefill_collective, vocabulary_collective, collective) if c is not None))
     if split is not None:
         model.proposal_confidence = confidence.host_view
         model.proposal_state = split

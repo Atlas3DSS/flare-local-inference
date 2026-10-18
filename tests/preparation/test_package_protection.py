@@ -13,7 +13,7 @@ import pytest
 from helios.tests.signing import publisher
 from ignition.preparation import runtime_package_pb2 as proto
 from ignition.preparation.package_file import align, publish, read_index
-from ignition.preparation.protection import CHUNK, Publisher, signature_message
+from ignition.preparation.protection import CHUNK, License, Publisher, signature_message
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -275,10 +275,30 @@ def test_every_signature_group_is_verified_before_access(native, tmp_path, group
     assert result.returncode != 0 and f'signature failed for {label}' in result.stderr
 
 
-def test_acceptance_requires_the_exact_namespace(native, tmp_path):
+def test_the_accepted_string_is_the_key_material(native, tmp_path):
+    # The exporter encrypts under the publisher namespace; any other accepted string opens nothing.
     path, _ = fixture(tmp_path, size=41)
     result = read(native, path, namespace='yes')
-    assert result.returncode != 0 and 'acceptance does not match' in result.stderr
+    assert result.returncode != 0 and 'executable decryption failed' in result.stderr
+    assert read(native, path).returncode == 0
+
+
+def test_invalid_license_metadata_is_rejected(native, tmp_path):
+    path, _ = fixture(tmp_path, size=41)
+    value, payload = envelope(path)
+    metadata = proto.PublisherMetadata.FromString(value.groups[0].body)
+    metadata.license.name, metadata.license.link = 'apache-2.0', 'http://example.com/LICENSE'
+    value.groups[0].body = metadata.SerializeToString(deterministic=True)
+    signer = publisher()
+    for group in chain(value.groups, value.ranks):
+        group.signature = signer.key.sign(signature_message(value.package_id, value.signer, group.kind, group.body))
+    replace_envelope(path, value, payload)
+    result = read(native, path)
+    assert result.returncode != 0 and 'invalid package license metadata' in result.stderr
+    with pytest.raises(ValueError, match='https URL'):
+        License('apache-2.0', 'http://example.com/LICENSE')
+    with pytest.raises(ValueError, match='printable'):
+        License('apache\x1b[31m-2.0')
 
 
 @pytest.mark.parametrize('change', ['key', 'namespace'])
@@ -340,8 +360,10 @@ def flare():
 
 
 def launch(flare, path, profile, store, *args):
-    # A rank-count mismatch stops this CPU fixture after trust handling and before CUDA.
-    return subprocess.run([str(flare), 'run', str(path), '--publisher-keys', str(profile),
+    # A rank-count mismatch stops this CPU fixture after trust handling and before CUDA. Offline,
+    # the publisher's repository is not consulted, so identity rests on the supplied profile.
+    keys = [] if profile is None else ['--publisher-keys', str(profile)]
+    return subprocess.run([str(flare), 'run', str(path), *keys, '--offline',
         '--trust-store', str(store), '--gpus', '0,1', *args],
         capture_output=True, text=True, stdin=subprocess.DEVNULL)
 
@@ -407,7 +429,7 @@ def test_rotation_does_not_inherit_namespace_trust(flare, tmp_path):
     assert 'unattended first use requires' in result.stderr
 
 
-def test_release_stamping_recognizes_only_the_embedded_identity(flare, tmp_path):
+def test_stamped_profiles_verify_signatures_without_conferring_identity(flare, tmp_path):
     from ignition.release import stamp
     signer = publisher()
     path, _ = fixture(tmp_path, size=41)
@@ -415,20 +437,69 @@ def test_release_stamping_recognizes_only_the_embedded_identity(flare, tmp_path)
     executable = tmp_path / 'flare-publisher'
     stamp(flare, executable, json.loads(profile.read_text()))
     store = tmp_path / 'trust.toml'
-    known = launch(executable, path, profile, store, *approval(signer))
+    unknown = launch(flare, path, None, store, *approval(signer))
+    assert unknown.returncode != 0 and 'publish the key in publisher.json' in unknown.stderr
+    assert 'https://huggingface.co/flare-tests/fixture' in unknown.stderr and not store.exists()
+    known = launch(executable, path, None, store, *approval(signer))
     assert 'Publisher:  Local Inference Lab fixture' in known.stderr
-    assert 'Identity:   Verified' in known.stderr and 'Identity:   Unverified' not in known.stderr
+    assert 'Identity:   Unverified' in known.stderr and 'Verified via' not in known.stderr
     assert 'model rank count must match distinct selected devices' in known.stderr
-    directory = tmp_path / 'impersonation'
-    directory.mkdir()
-    impostor = Publisher(Ed25519PrivateKey.generate(), signer.namespace, signer.official_source)
-    changed, _ = fixture(directory, size=41, signer=impostor)
-    profiles(profile, impostor, 'Local Inference Lab fixture')
-    result = launch(executable, changed, profile, store)
-    assert 'Signing key acceptance' in result.stderr
-    assert 'Identity:   Unverified' in result.stderr and 'Identity:   Verified' not in result.stderr
     with pytest.raises(ValueError, match='not an empty release slot'):
         stamp(executable, tmp_path / 'restamped', json.loads(profile.read_text()))
+
+
+def test_license_is_disclosed_and_accepted_by_name(flare, tmp_path):
+    link = 'https://huggingface.co/flare-tests/fixture/blob/main/LICENSE'
+    signer = Publisher(publisher().key, 'flare-tests', 'https://huggingface.co/flare-tests/fixture',
+                       license=License('apache-2.0', link))
+    path, _ = fixture(tmp_path, size=41, signer=signer)
+    profile = profiles(tmp_path / 'publisher.json', signer)
+    store = tmp_path / 'trust.toml'
+    result = launch(flare, path, profile, store, *approval(signer))
+    assert 'License:    apache-2.0' in result.stderr and link in result.stderr
+    assert 'agrees to the license terms at the link above' in result.stderr
+    assert 'model rank count must match distinct selected devices' in result.stderr
+    # A package exported before licenses were recorded discloses none and prompts as before.
+    directory = tmp_path / 'unlicensed'
+    directory.mkdir()
+    plain, _ = fixture(directory, size=41)
+    result = launch(flare, plain, profile, directory / 'trust.toml', *approval(signer))
+    assert 'License:' not in result.stderr and 'license terms' not in result.stderr
+    assert 'model rank count must match distinct selected devices' in result.stderr
+
+
+def test_remembered_acceptance_keeps_the_key_and_needs_no_profile(flare, tmp_path):
+    import tomllib
+    signer = publisher()
+    path, _ = fixture(tmp_path, size=41)
+    profile = profiles(tmp_path / 'publisher.json', signer)
+    store = tmp_path / 'trust.toml'
+    accepted = launch(flare, path, profile, store, *approval(signer))
+    assert 'model rank count must match distinct selected devices' in accepted.stderr
+    [entry] = tomllib.loads(store.read_text())['trusted']
+    assert entry == {'fingerprint': signer.fingerprint.hex(), 'namespace': 'flare-tests',
+                     'public_key': signer.public_key.hex(), 'name': 'Fixture publisher', 'identity': 'profile'}
+    remembered = launch(flare, path, None, store)
+    assert 'Signing key acceptance' not in remembered.stderr
+    assert 'model rank count must match distinct selected devices' in remembered.stderr
+
+
+def test_trust_entries_without_a_key_still_apply_and_gain_one(flare, tmp_path):
+    import tomllib
+    signer = publisher()
+    path, _ = fixture(tmp_path, size=41)
+    profile = profiles(tmp_path / 'publisher.json', signer)
+    store = tmp_path / 'trust.toml'
+    store.write_text(f'[[trusted]]\nfingerprint = "{signer.fingerprint.hex()}"\nnamespace = "flare-tests"\n')
+    result = launch(flare, path, profile, store)
+    assert 'Signing key acceptance' not in result.stderr
+    assert 'model rank count must match distinct selected devices' in result.stderr
+    [entry] = tomllib.loads(store.read_text())['trusted']
+    assert entry['public_key'] == signer.public_key.hex() and entry['identity'] == 'profile'
+    tampered = store.read_text().replace(signer.public_key.hex(), '11' * 32)
+    store.write_text(tampered)
+    result = launch(flare, path, profile, store)
+    assert result.returncode != 0 and 'does not match its fingerprint' in result.stderr
 
 
 def test_invalid_signature_cannot_record_trust_even_with_approval(flare, tmp_path):
@@ -740,3 +811,254 @@ def test_promotion_requires_development_source_and_production_target(tmp_path):
     with pytest.raises(ValueError, match='production publisher'):
         promote(source, output, publisher=development_publisher(), development_profile={})
     assert not output.exists()
+
+
+def shard_fixture(tmp_path, *, sizes=(6000, 8000, 17000, 100), shard_size=12288, signer=None,
+                  name='model', ranks=1):
+    index = proto.ModelIndex(version=4)
+    if ranks > 1:
+        index.cluster.world, index.cluster.export_id = ranks, 'sharded-test'
+    payload, cursor, expected = [], 0, {}
+    for rank in range(ranks):
+        bundle = index.ranks.add()
+        for i, size in enumerate(sizes):
+            key = f'weight-{i}'
+            contents = bytes([rank * 16 + i + 1]) * size
+            source = tmp_path / f'{name}-source-{rank}-{i}'
+            source.write_bytes(contents)
+            bundle.allocations.add(name=key, file=key)
+            bundle.resources[key].CopyFrom(proto.Span(offset=cursor, nbytes=size))
+            payload.append((cursor, source, 0, size))
+            expected[rank, key] = contents
+            cursor = align(cursor + size)
+        source = tmp_path / f'{name}-code-{rank}'
+        source.write_bytes(b'kernel-code')
+        bundle.modules.add(name='kernel', file='kernel')
+        bundle.resources['kernel'].CopyFrom(proto.Span(offset=cursor, nbytes=11))
+        payload.append((cursor, source, 0, 11))
+        cursor = align(cursor + 11)
+    path = tmp_path / f'{name}.safetensors'
+    publish(path, index, payload, publisher=signer or publisher(), shard_size=shard_size)
+    return path, expected
+
+
+def assert_shard_contents(path, expected):
+    from ignition.preparation.package_file import PackageFiles
+    index, base = read_index(path)
+    _, primary = envelope(path)
+    with path.open('rb') as source, PackageFiles(path, source, base, len(primary)) as files:
+        for (rank, key), contents in expected.items():
+            span = index.ranks[rank].resources[key]
+            file, start, _ = files.get(span.filename)
+            file.seek(start + span.offset)
+            assert file.read(span.nbytes) == contents
+    return index
+
+
+def test_shards_hold_whole_resources_and_keep_code_primary(native, tmp_path):
+    path, expected = shard_fixture(tmp_path)
+    index = assert_shard_contents(path, expected)
+    assert index.version == 5
+    assert not index.ranks[0].resources['kernel'].filename
+    names = sorted({span.filename for span in index.ranks[0].resources.values()} - {''})
+    assert names == [f'model-data-{i:02}-of-04.safetensors' for i in range(1, 5)]
+    assert [path.with_name(name).stat().st_size for name in names] == [10096, 12096, 21096, 4196]
+    result = read(native, path, weights=True)
+    assert result.returncode == 0, result.stderr
+    value, _ = envelope(path)
+    data = proto.RankProtection.FromString(value.ranks[0].body).data
+    assert data.offset == 0 and data.nbytes == sum(part.nbytes for part in data.parts)
+    assert [part.filename for part in data.parts] == names
+
+
+@pytest.mark.parametrize('limit', [0, 1 << 30])
+def test_small_or_explicitly_monolithic_packages_keep_legacy_encoding(native, tmp_path, limit):
+    path, expected = shard_fixture(tmp_path, shard_size=limit)
+    index = assert_shard_contents(path, expected)
+    assert index.version == 4
+    assert not list(tmp_path.glob('*-data-*.safetensors'))
+    value, _ = envelope(path)
+    assert not proto.RankProtection.FromString(value.ranks[0].body).data.parts
+    assert read(native, path, weights=True).returncode == 0
+
+
+def test_shard_boundary_and_two_digit_limit(tmp_path):
+    path, _ = shard_fixture(tmp_path, sizes=(4096, 4096, 4096), shard_size=12288)
+    index, _ = read_index(path)
+    a, b, c = (index.ranks[0].resources[f'weight-{i}'] for i in range(3))
+    assert a.filename == b.filename != c.filename
+    assert path.with_name(a.filename).stat().st_size == 12288
+    path, _ = shard_fixture(tmp_path, sizes=(1,) * 99, shard_size=1, name='ninety-nine')
+    assert path.with_name('ninety-nine-data-99-of-99.safetensors').exists()
+    with pytest.raises(ValueError, match='more than 99'):
+        shard_fixture(tmp_path, sizes=(1,) * 100, shard_size=1, name='hundred')
+    assert not list(tmp_path.glob('hundred*.safetensors'))
+
+
+@pytest.mark.parametrize('name', ['../escape.safetensors', '/root.safetensors', r'a\b.safetensors',
+                                  'C:stream.safetensors', '.hidden.safetensors', 'a..b.safetensors',
+                                  'CON.safetensors', 'x\0.safetensors', 'a/b.safetensors'])
+def test_signed_companion_names_cannot_select_paths(native, tmp_path, name):
+    path, _ = shard_fixture(tmp_path)
+    value, payload = envelope(path)
+    rank = proto.RankProtection.FromString(value.ranks[0].body)
+    previous = rank.bundle.resources['weight-0'].filename
+    rank.bundle.resources['weight-0'].filename = name
+    next(part for part in rank.data.parts if part.filename == previous).filename = name
+    value.ranks[0].body = rank.SerializeToString(deterministic=True)
+    resign(value, publisher())
+    replace_envelope(path, value, payload)
+    assert read(native, path).returncode != 0
+
+
+@pytest.mark.parametrize('corruption', ['symlink', 'missing', 'truncate', 'trailing', 'header', 'weights'])
+def test_companion_validation_and_optional_weight_scan(native, tmp_path, corruption):
+    path, _ = shard_fixture(tmp_path)
+    index, _ = read_index(path)
+    companion = path.with_name(index.ranks[0].resources['weight-0'].filename)
+    if corruption == 'symlink':
+        target = companion.with_suffix('.held')
+        companion.rename(target)
+        companion.symlink_to(target)
+    elif corruption == 'missing':
+        companion.unlink()
+    elif corruption == 'truncate':
+        companion.write_bytes(companion.read_bytes()[:-1])
+    elif corruption == 'trailing':
+        with companion.open('ab') as output:
+            output.write(b'x')
+    elif corruption == 'header':
+        with companion.open('r+b') as output:
+            output.write(struct.pack('<Q', 1 << 30))
+    else:
+        overwrite(companion, [(4096, 1)])
+    assert read(native, path, weights=True).returncode != 0
+    assert (read(native, path, weights=False).returncode == 0) == (corruption == 'weights')
+
+
+@pytest.mark.parametrize('source_limit,destination_limit', [(0, 12288), (12288, 0), (12288, 24000)])
+def test_resigning_repacks_verified_resources(native, tmp_path, source_limit, destination_limit):
+    from ignition.preparation.resign import resign as promote
+    signer = development_publisher()
+    path, expected = shard_fixture(tmp_path, shard_size=source_limit, signer=signer)
+    output = tmp_path / 'production.safetensors'
+    promote(path, output, publisher=publisher(), development_profile=development_profile(signer),
+            shard_size=destination_limit)
+    assert_shard_contents(output, expected)
+    result = read(native, output, weights=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_sharded_promotion_rechecks_copied_bytes_and_cleans_outputs(tmp_path, monkeypatch):
+    import ignition.preparation.resign as promotion
+    signer = development_publisher()
+    path, _ = shard_fixture(tmp_path, signer=signer)
+    index, _ = read_index(path)
+    companion = path.with_name(index.ranks[0].resources['weight-2'].filename)
+    publish_output = promotion._publish
+    def mutate(*args):
+        overwrite(companion, [(4096, 1)])
+        return publish_output(*args)
+    monkeypatch.setattr(promotion, '_publish', mutate)
+    with pytest.raises(ValueError, match='stored-data digest mismatch'):
+        promotion.resign(path, tmp_path / 'production.safetensors', publisher=publisher(),
+                         development_profile=development_profile(signer), shard_size=12288)
+    assert not list(tmp_path.glob('production*.safetensors'))
+
+
+def test_publishing_does_not_overwrite_existing_companions(tmp_path):
+    occupied = tmp_path / 'model-data-02-of-04.safetensors'
+    occupied.write_bytes(b'keep this file')
+    with pytest.raises(FileExistsError):
+        shard_fixture(tmp_path)
+    assert occupied.read_bytes() == b'keep this file'
+    assert sorted(tmp_path.glob('*.safetensors')) == [occupied]
+
+
+def test_native_file_qualified_rank_ranges_verify_after_sparse_transfer(native, tmp_path):
+    path, _ = shard_fixture(tmp_path, ranks=2)
+    result = subprocess.run([str(native), str(path), 'ranges', '1'], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    ranges = json.loads(result.stdout)
+    assert '' in ranges and len(ranges) > 1
+    destination = tmp_path / 'peer'
+    destination.mkdir()
+    for name, (length, parts) in ranges.items():
+        source = path.with_name(name) if name else path
+        output = destination / (name or path.name)
+        with source.open('rb') as stream, output.open('wb') as copy:
+            copy.truncate(length)
+            for offset, size in parts:
+                stream.seek(offset)
+                copy.seek(offset)
+                copy.write(stream.read(size))
+    result = read(native, destination / path.name, weights=True, rank=1)
+    assert result.returncode == 0, result.stderr
+    assert read(native, destination / path.name, weights=True).returncode != 0
+
+
+@pytest.mark.parametrize('corruption', ['protected-filename', 'destination-filename', 'part-length',
+                                      'part-overlap', 'span-overflow', 'wrong-file', 'legacy-version'])
+def test_signed_shard_geometry_is_validated_without_scanning_weights(native, tmp_path, corruption):
+    path, _ = shard_fixture(tmp_path)
+    value, payload = envelope(path)
+    rank = proto.RankProtection.FromString(value.ranks[0].body)
+    weights = rank.bundle.resources['weight-0']
+    if corruption == 'protected-filename':
+        rank.bundle.resources['kernel'].filename = weights.filename
+    elif corruption == 'destination-filename':
+        rank.bundle.allocations[0].data_spans.add(offset=0, nbytes=1, filename=weights.filename)
+    elif corruption == 'part-length':
+        rank.data.nbytes += 1
+    elif corruption == 'part-overlap':
+        rank.data.parts.add().CopyFrom(rank.data.parts[0])
+        rank.data.nbytes += rank.data.parts[0].nbytes
+    elif corruption == 'span-overflow':
+        weights.offset = 2**64 - 1
+    elif corruption == 'wrong-file':
+        weights.filename = 'absent.safetensors'
+    else:
+        metadata = proto.PublisherMetadata.FromString(value.groups[0].body)
+        metadata.index.version = 4
+        value.groups[0].body = metadata.SerializeToString(deterministic=True)
+    value.ranks[0].body = rank.SerializeToString(deterministic=True)
+    resign(value, publisher())
+    replace_envelope(path, value, payload)
+    assert read(native, path, weights=False).returncode != 0
+
+
+def test_sharded_promotion_retains_companion_handles(native, tmp_path, monkeypatch):
+    import ignition.preparation.resign as promotion
+    signer = development_publisher()
+    path, expected = shard_fixture(tmp_path, signer=signer)
+    publish_output = promotion._publish
+    def replace_names(*args):
+        for companion in tmp_path.glob('model-data-*.safetensors'):
+            companion.rename(companion.with_suffix('.held'))
+            companion.write_bytes(b'replaced pathname')
+        return publish_output(*args)
+    monkeypatch.setattr(promotion, '_publish', replace_names)
+    output = tmp_path / 'production.safetensors'
+    promotion.resign(path, output, publisher=publisher(), development_profile=development_profile(signer),
+                     shard_size=12288)
+    assert_shard_contents(output, expected)
+    result = read(native, output, weights=True)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize('stage', ['companion', 'primary'])
+def test_publish_failure_removes_only_its_outputs(tmp_path, monkeypatch, stage):
+    import ignition.preparation.package_file as packages
+    original_link = packages.os.link
+    foreign = tmp_path / 'unrelated.safetensors'
+    foreign.write_bytes(b'keep')
+    def link(source, destination):
+        if Path(destination).name == ('model-data-03-of-04.safetensors' if stage == 'companion' else 'model.safetensors'):
+            raise OSError('injected publication failure')
+        return original_link(source, destination)
+    monkeypatch.setattr(packages.os, 'link', link)
+    with pytest.raises(OSError, match='injected publication failure'):
+        shard_fixture(tmp_path)
+    assert not list(tmp_path.glob('model*.safetensors'))
+    assert not list(tmp_path.glob('.model*.safetensors-*'))
+    assert foreign.read_bytes() == b'keep'

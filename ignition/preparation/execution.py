@@ -112,12 +112,9 @@ class PreparedExecution(PreparedGraphBundle):
                 cursor += nbytes
         graphs = []
         speculative = any(signature.kind in ("speculative", "proposal", "verification") for signature in self.signatures.values())
-        proposal_width = max((s.token_capacity for s in self.signatures.values() if s.kind == "proposal"), default=0)
         for (name, _), handle in zip(self.graphs.items(), handles, strict=True):
             signature = self.signatures[name]
             if not all_variants and signature.speculation_enabled not in (None, speculative):
-                continue
-            if not all_variants and signature.kind == "proposal" and signature.token_capacity != proposal_width:
                 continue
             inputs = ("frame_index", "submission_sequence", *signature.inputs)
             graphs.append({"name": name, "kind": signature.kind, "handle": handle,

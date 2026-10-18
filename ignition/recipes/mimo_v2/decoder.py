@@ -72,7 +72,7 @@ class PreparedFeedForward(torch.nn.Module):
                 routed_scaling_factor=c.get("routed_scaling_factor") or 1., correction_bias=weights.correction)
             self.experts = PreparedRoutedExperts(source, weights.experts, scratch.router.ids, scratch.router.weights,
                 output, session=session, name=name + ".experts", workspace=workspace,
-                router_weight=weights.router, router_plan=self.router.plan, correction_bias=weights.correction)
+                router_plan=self.router.plan)
         self.reduction = PreparedAllReduce(output, scratch.reduced, runtime=runtime,
                                            coordinator=coordinator, session=session, name=name + ".reduce")
 

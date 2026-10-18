@@ -305,6 +305,8 @@ class PreparedDecoder:
                 inputs.live_rows, completion_records, frame_index, submission_sequence,
                 sample_enabled=inputs.sample_enabled[:state.rows], workspace=sampling_workspace)
             self.sampler.prepare()
+            self.sampler.prepare_broadcast(runtime=vocabulary_runtime, session=session,
+                coordinator=coordinator, name=name + ".sampling")
 
     def __call__(self):
         sampler = self.sampler

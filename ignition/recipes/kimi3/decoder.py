@@ -12,46 +12,55 @@ from ignition.components.moe import PreparedRouter, PreparedRoutedExperts, Route
 from ignition.components.recurrent import DeltaMetadata, _commit_convolution
 from ignition.components.vocabulary import PreparedVocabularyProjection
 from ignition.components.kda_speculation import PreparedKDAReplay
+from ignition.preparation.tuning import register_finalizer
 
 from .attention import PreparedMLA
 from .config import DSparkConfig
 from .kda import PreparedKDA
 from .pointwise import rms_norm_columns, situ
+from .projections import prepare_projection
 from .residual import ADD, REPLACE, ResidualStream
 from .routing import MAX_ROWS as ROUTE_ROWS, PreparedRouteGather
 
 
 # A concurrent shared-expert MLP forks onto the auxiliary stream after its input is written and joins before its
 # output is added; the explicit mutated outputs order both against the routed branch through compilation.
-@torch.library.custom_op("flare::kimi3_start_shared_expert", mutates_args=("outputs",))
-def _start_shared_expert(source: torch.Tensor, weights: list[torch.Tensor], outputs: list[torch.Tensor],
-                         plans: list[int], auxiliary_stream: int) -> None:
-    from ignition.components.sm103_projection import bf16_out
+@torch.library.custom_op("flare::kimi3_start_shared_expert", mutates_args=("outputs", "workspace"))
+def _start_shared_expert(source: torch.Tensor, weights: list[torch.Tensor], scales: list[torch.Tensor | None],
+                         outputs: list[torch.Tensor], workspace: torch.Tensor, plans: list[int], auxiliary_stream: int) -> None:
+    from ignition.components.sm103_projection import bf16_out, packed_out_workspace
+
+    def project(value, index, output):
+        if scales[index] is None:
+            bf16_out(value, weights[index], output, plans[index])
+        else:
+            packed_out_workspace(value, weights[index], scales[index], None, None, output,
+                                 workspace, "none", None, plans[index], "any")
 
     main = torch.cuda.current_stream(source.device)
     auxiliary = torch.cuda.ExternalStream(auxiliary_stream, device=source.device)
     auxiliary.wait_stream(main)
     gate_up, intermediate, projected = outputs
     with torch.cuda.stream(auxiliary):
-        bf16_out(source, weights[0], gate_up, plans[0])
+        project(source, 0, gate_up)
         situ(gate_up, intermediate)
-        bf16_out(intermediate, weights[1], projected, plans[1])
+        project(intermediate, 1, projected)
 
 
 @_start_shared_expert.register_fake
-def _fake_start_shared_expert(source, weights, outputs, plans, auxiliary_stream) -> None:
+def _fake_start_shared_expert(source, weights, scales, outputs, workspace, plans, auxiliary_stream) -> None:
     pass
 
 
-@torch.library.custom_op("flare::kimi3_join_shared_expert", mutates_args=("outputs",))
+@torch.library.custom_op("flare::kimi3_join_shared_expert", mutates_args=("outputs", "workspace"))
 def _join_shared_expert(source: torch.Tensor, routed: torch.Tensor, outputs: list[torch.Tensor],
-                        auxiliary_stream: int) -> None:
+                        workspace: torch.Tensor, auxiliary_stream: int) -> None:
     main = torch.cuda.current_stream(source.device)
     main.wait_stream(torch.cuda.ExternalStream(auxiliary_stream, device=source.device))
 
 
 @_join_shared_expert.register_fake
-def _fake_join_shared_expert(source, routed, outputs, auxiliary_stream) -> None:
+def _fake_join_shared_expert(source, routed, outputs, workspace, auxiliary_stream) -> None:
     pass
 
 
@@ -60,12 +69,14 @@ class DecoderStorage:
     scratch: dict
     hidden_columns: torch.Tensor
     latent_begin: torch.Tensor
+    allocator: object = None
 
     @classmethod
-    def allocate(cls, config, shard, device, *, scratch=None):
+    def allocate(cls, config, shard, device, *, scratch=None, allocator=None):
         # Rank-specific offsets stay in tensors so every rank replays rank zero's compiled forward.
         return cls({} if scratch is None else scratch, torch.arange(*shard.partition(config.hidden), device=device),
-            torch.tensor(shard.partition(config.text["routed_expert_hidden_size"])[:1], dtype=torch.int32, device=device))
+            torch.tensor(shard.partition(config.text["routed_expert_hidden_size"])[:1], dtype=torch.int32, device=device),
+            allocator)
 
     def scratch_tensors(self):
         return tuple(self.scratch.values())
@@ -93,40 +104,60 @@ class Scratch:
 class PreparedMLP:
     """A SiTU MLP; with an overlapping workspace, ``start`` and ``finish`` run it on the auxiliary stream."""
 
-    def __init__(self, weights, source, *, session, name, buffers, workspace=None):
+    def __init__(self, weights, source, *, session, name, buffers, workspace=None, allocator=None,
+                 parallel_plans=()):
         rows, device = source.shape[0], source.device
         def buffer(field, width):
             if field not in buffers or buffers[field].shape[0] < rows:
-                buffers[field] = torch.zeros((rows, width), dtype=source.dtype, device=device)
+                buffers[field] = (torch.zeros((rows, width), dtype=source.dtype, device=device) if allocator is None
+                                  else allocator.zeros((rows, width), source.dtype))
             return buffers[field][:rows]
-        self.input = buffer("input", weights["gate_up"].shape[0] // 2)
-        self.gate_up = UnquantizedProjection(source, weights["gate_up"], buffer("gate_up", 2 * self.input.shape[1]),
-                                            session=session, name=name + ".gate_up")
-        self.down = UnquantizedProjection(self.input, weights["down"], buffer("output", source.shape[1]),
-                                         session=session, name=name + ".down")
-        self.concurrent = workspace is not None and workspace.overlap
+        width = (weights["gate_up"].shape[0] if isinstance(weights["gate_up"], torch.Tensor)
+                 else weights["gate_up"].out_features)
+        self.input = buffer("input", width // 2)
+        self.gate_up = prepare_projection(source, weights["gate_up"], buffer("gate_up", width),
+                                          session=session, name=name + ".gate_up", workspace=workspace)
+        self.down = prepare_projection(self.input, weights["down"], buffer("output", source.shape[1]),
+                                       session=session, name=name + ".down", workspace=workspace)
+        self.concurrent = bool(parallel_plans) and workspace is not None and workspace.overlap
         if self.concurrent:
-            # BF16 GEMVs and SiTU use no arena scratch, so the branch cannot alias main-stream workspaces.
+            self.arena, self.parallel_plans = workspace, tuple(parallel_plans)
             self.stream_handle = workspace.auxiliary_stream.cuda_stream
-            self.weights = [weights["gate_up"], weights["down"]]
+            self.weights, self.scales = [], []
+            for projection in (self.gate_up, self.down):
+                if isinstance(projection, UnquantizedProjection):
+                    self.weights.append(projection.weight)
+                    self.scales.append(None)
+                else:
+                    values, scales, _ = projection.parts
+                    self.weights.append(values)
+                    self.scales.append(scales.view(torch.uint8))
+                for main in self.parallel_plans:
+                    workspace.register_parallel(main, projection.plan)
             self.outputs = [self.gate_up.output, self.input, self.down.output]
+            register_finalizer(session, self.refresh, workspace=workspace)
+
+    def refresh(self):
+        main_bytes = max(plan.memory_requirements().scratch_nbytes for plan in self.parallel_plans)
+        side_bytes = max(p.plan.memory_requirements().scratch_nbytes for p in (self.gate_up, self.down))
+        _, self.workspace = self.arena.views(((main_bytes,), torch.uint8), ((side_bytes,), torch.uint8))
 
     def __call__(self, source):
         situ(self.gate_up(source), self.input)
         return self.down(self.input)
 
     def start(self, source):
-        _start_shared_expert(source, self.weights, self.outputs, [self.gate_up.plan.handle, self.down.plan.handle],
-                             self.stream_handle)
+        _start_shared_expert(source, self.weights, self.scales, self.outputs, self.workspace,
+                             [self.gate_up.plan.handle, self.down.plan.handle], self.stream_handle)
 
     def finish(self, source, routed):
-        _join_shared_expert(source, routed, self.outputs, self.stream_handle)
+        _join_shared_expert(source, routed, self.outputs, self.workspace, self.stream_handle)
         return self.down.output
 
 
 class PreparedLatentMoE:
     def __init__(self, weights, source, config, shard, *, runtime, router_runtime, coordinator, session, name, workspace, buffers, storage,
-                 route_runtime=None):
+                 route_runtime=None, allocator=None):
         tokens, hidden = source.shape
         c, device = config.text, source.device
         latent = c["routed_expert_hidden_size"]
@@ -134,7 +165,9 @@ class PreparedLatentMoE:
         def buffer(field, width, dtype=torch.bfloat16):
             # Decode-only fields first appear in a decoder of any row count, so each holds every route row.
             if field not in buffers or buffers[field].shape[0] < tokens:
-                buffers[field] = torch.zeros((max(tokens, ROUTE_ROWS), width), dtype=dtype, device=device)
+                shape = (max(tokens, ROUTE_ROWS), width)
+                buffers[field] = (torch.zeros(shape, dtype=dtype, device=device) if allocator is None
+                                  else allocator.zeros(shape, dtype))
             return buffers[field][:tokens]
 
         self.source = buffer("source", hidden // shard.world_size)
@@ -146,8 +179,8 @@ class PreparedLatentMoE:
         self.latent_sum = self.latent
         self.up_input = buffer("up_input", latent // shard.world_size)
         self.output = buffer("output", hidden)
-        self.up = UnquantizedProjection(self.up_input, weights["latent_up"], self.output,
-                                       session=session, name=name + ".latent_up")
+        self.up = prepare_projection(self.up_input, weights["latent_up"], self.output,
+                                      session=session, name=name + ".latent_up", workspace=workspace)
         # Each rank normalizes the full latent row and keeps the columns its up-projection shard reads.
         self.latent_norm, self.eps = weights["latent_norm"], c["rms_norm_eps"]
         self.expert_reduce = PreparedChunkedAllReduce(self.expert_output, self.latent_sum, runtime=runtime,
@@ -160,14 +193,15 @@ class PreparedLatentMoE:
         self.route_gather = None
         if route_runtime is not None and tokens <= ROUTE_ROWS:
             # Decode rows gather row-sharded latent and router shards and select experts in one exchange.
-            self.down = UnquantizedProjection(source, weights["latent_down_rows"],
-                buffer("local_down", latent // shard.world_size), session=session, name=name + ".latent_down_rows")
+            self.down = prepare_projection(source, weights["latent_down_rows"],
+                buffer("local_down", latent // shard.world_size), session=session, name=name + ".latent_down_rows",
+                workspace=workspace)
             self.route_gather = PreparedRouteGather(self.down.output, local_logits, weights["correction"],
                 self.latent, routes.weights, routes.ids, runtime=route_runtime, session=session,
                 coordinator=coordinator, name=name + ".route_gather")
         else:
-            self.down = UnquantizedProjection(self.source, weights["latent_down"], buffer("down", latent),
-                                             session=session, name=name + ".latent_down")
+            self.down = prepare_projection(self.source, weights["latent_down"], buffer("down", latent),
+                                            session=session, name=name + ".latent_down", workspace=workspace)
             self.down_reduce = PreparedChunkedAllReduce(self.down.output, self.latent, runtime=runtime,
                                                        coordinator=coordinator, session=session, name=name + ".down_reduce")
             logits = buffer("router", c["num_experts"], torch.float32)
@@ -187,8 +221,9 @@ class PreparedLatentMoE:
             self.expert_output, workspace=workspace, session=session, name=name + ".experts")
         # Decode and verification rows run the shared experts beside routing and the routed experts.
         self.shared = PreparedMLP(weights["shared"], source, session=session, name=name + ".shared",
-                                  buffers=buffers.setdefault("shared", {}),
-                                  workspace=workspace if self.route_gather is not None else None)
+                                  buffers=buffers.setdefault("shared", {}), allocator=allocator,
+                                  workspace=workspace, parallel_plans=(self.router_projection.plan, self.down.plan,
+                                      self.experts.plan, self.up.plan) if self.route_gather is not None else ())
 
     def __call__(self, source):
         if self.shared.concurrent:
@@ -230,6 +265,7 @@ class PreparedDecoder:
         self.weights, self.scratch, self.metadata, self.pool = weights, scratch, metadata, pool
         self.vision_state = vision_state if mode == "prefill" else None
         config, source = weights.config, scratch.activations
+        allocator = buffers.allocator
         self.local_embedding = torch.zeros((source.shape[0], weights.embedding.shape[1]), dtype=source.dtype, device=source.device)
         self.embedding = PreparedShardedEmbedding(weights.embedding, metadata.token_ids, self.local_embedding, source,
             runtime=embedding_runtime, coordinator=coordinator,
@@ -237,19 +273,27 @@ class PreparedDecoder:
         self.delta = DeltaMetadata.allocate(metadata.starts.numel(), source.device,
             verification_columns=8 if mode == "verify" else 1)
         self.buffers, self.layers = buffers.scratch, []
+        def zeros(shape):
+            return (torch.zeros(shape, dtype=source.dtype, device=source.device) if allocator is None
+                    else allocator.zeros(shape, source.dtype))
+
+        # Residual blocks stay live across layers; reserve them before smaller layer intermediates.
+        tokens, hidden = source.shape
+        if "residual" not in self.buffers:
+            committed = -(-len(weights.layers) // config.text["attn_res_block_size"])
+            self.buffers["residual"] = dict(blocks=zeros((tokens, committed, hidden)), prefix=zeros(source.shape))
         self.target_layers = (() if weights.draft is None or isinstance(config.draft, DSparkConfig)
                               else config.draft.target_layers)
         self.auxiliary = None
         if self.target_layers:
             if "auxiliary" not in self.buffers:
-                self.buffers["auxiliary"] = torch.zeros((source.shape[0], len(self.target_layers) * config.hidden),
-                    dtype=source.dtype, device=source.device)
+                self.buffers["auxiliary"] = zeros((source.shape[0], len(self.target_layers) * config.hidden))
             self.auxiliary = self.buffers["auxiliary"][:source.shape[0]]
         for index, w in enumerate(weights.layers):
             prefix = f"{name}.layer{index}"
             kind = config.layers[index]
             kwargs = dict(mode=mode, session=session, name=prefix + ".attention", workspace=workspace,
-                          buffers=self.buffers.setdefault(kind, {}))
+                          buffers=self.buffers.setdefault(kind, {}), allocator=allocator)
             attention = (PreparedKDA(w["attention"], source, pool.recurrent(index), self.delta,
                 eps=config.text["rms_norm_eps"], records=kda_records.layer(index) if mode == "verify" else None,
                 **kwargs) if kind == "kda" else
@@ -264,7 +308,8 @@ class PreparedDecoder:
                 dense = self.buffers.setdefault("dense", {})
                 if "output" in self.buffers.get("moe", {}):
                     dense.setdefault("output", self.buffers["moe"]["output"])
-                mlp = PreparedMLP(w["mlp"], source, session=session, name=prefix + ".mlp", buffers=dense)
+                mlp = PreparedMLP(w["mlp"], source, session=session, name=prefix + ".mlp", buffers=dense,
+                                  allocator=allocator)
             else:
                 # Shared experts write the sum buffer, which the preceding mixture consumed and the MoE
                 # reduction overwrites only after their output is added.
@@ -273,21 +318,16 @@ class PreparedDecoder:
                 mlp = PreparedLatentMoE(w, source, config, weights.shard, runtime=runtime,
                     router_runtime=router_runtime, route_runtime=route_runtime if mode != "prefill" else None,
                     coordinator=coordinator, session=session, name=prefix + ".moe", workspace=workspace,
-                    buffers=self.buffers.setdefault("moe", {}), storage=buffers)
+                    buffers=self.buffers.setdefault("moe", {}), storage=buffers, allocator=allocator)
             # The sum buffer is consumed before the next attention or MLP reduction.
             if "total" not in self.buffers:
-                self.buffers["total"] = torch.zeros_like(source)
+                self.buffers["total"] = zeros(source.shape)
             total = self.buffers["total"][:source.shape[0]]
             reduce = PreparedChunkedAllReduce(source, total, runtime=runtime, coordinator=coordinator,
                                               session=session, name=prefix + ".reduce")
             self.layers.append((w, attention, mlp, reduce))
         # The running block sum and committed blocks persist through one forward; every forward
         # rewrites them from its embeddings before reading them.
-        tokens, hidden = source.shape
-        if "residual" not in self.buffers:
-            committed = -(-len(weights.layers) // config.text["attn_res_block_size"])
-            self.buffers["residual"] = dict(prefix=torch.zeros_like(source),
-                blocks=torch.zeros((tokens, committed, hidden), dtype=source.dtype, device=source.device))
         r = self.buffers["residual"]
         # The normalized mixture entering attention takes the MoE output, which the previous reduction
         # consumed; the one entering the MLP takes the attention output, which its reduction consumed.
@@ -301,8 +341,7 @@ class PreparedDecoder:
                                  if weights.draft is not None and isinstance(config.draft, DSparkConfig) else ())
         if self.auxiliary_layers:
             if "auxiliary" not in self.buffers:
-                self.buffers["auxiliary"] = torch.zeros((tokens, len(self.auxiliary_layers) * hidden),
-                                                        dtype=source.dtype, device=source.device)
+                self.buffers["auxiliary"] = zeros((tokens, len(self.auxiliary_layers) * hidden))
             self.auxiliary = self.buffers["auxiliary"][:tokens]
         self.replay = None
         if mode == "verify":

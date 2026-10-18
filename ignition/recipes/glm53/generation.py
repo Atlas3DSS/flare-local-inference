@@ -30,6 +30,9 @@ class PreparedGeneration:
         self.completion = PreparedCompletion(*arguments) if decoder.weights.shard.rank != 0 and not replicated_sampling else PreparedSampling(
             decoder.scratch.logits, *arguments, sample_enabled=b.sample_enabled[:rows])
         self.completion.prepare()
+        if replicated_sampling:
+            self.completion.prepare_broadcast(runtime=decoder.lm_head.gather.runtime, session=session,
+                coordinator=coordinator, name=name + ".sampling")
         self.compilation_variant = "sample" if decoder.weights.shard.rank == 0 or replicated_sampling else "consume"
         self.replicated_sampling = replicated_sampling
 

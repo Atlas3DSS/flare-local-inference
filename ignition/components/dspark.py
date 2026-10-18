@@ -214,24 +214,30 @@ class PreparedContext:
 
 
 class PreparedMarkov:
-    """Preserve FP32 conditional logits across the bitwise TP gather."""
+    """Project FP32 transition logits from replicated or vocabulary-sharded weights.
+
+    A replicated head runs independently on each rank without a collective.
+    A sharded head uses the supplied runtime to gather its FP32 bits unchanged.
+    """
 
     def __init__(self, weights, tokens, *, runtime, coordinator, session, name):
         rows, device = tokens.numel(), tokens.device
         self.embedding = torch.zeros(
             (rows, weights.config.draft.markov_rank), dtype=torch.bfloat16, device=device
         )
-        self.local = torch.zeros(
-            (rows, 129280 // weights.shard.world_size), dtype=torch.float32, device=device
-        )
-        self.logits = torch.zeros((rows, 129280), dtype=torch.float32, device=device)
+        columns = weights.draft.markov_head.shape[0]
+        expected_columns = 129280 if runtime is None else 129280 // weights.shard.world_size
+        if columns != expected_columns:
+            raise ValueError("Markov head vocabulary partition must match its gather runtime")
+        self.local = torch.zeros((rows, columns), dtype=torch.float32, device=device)
+        self.logits = self.local if runtime is None else torch.zeros((rows, 129280), dtype=torch.float32, device=device)
         self.embed = PreparedEmbedding(
             weights.draft.markov_embedding, tokens, self.embedding, session=session, name=name + ".embed"
         )
         self.projection = UnquantizedProjection(
             self.embedding, weights.draft.markov_head, self.local, session=session, name=name + ".head"
         )
-        self.gather = PreparedAllGather(
+        self.gather = None if runtime is None else PreparedAllGather(
             self.local.view(torch.bfloat16),
             self.logits.view(torch.bfloat16),
             runtime=runtime,
@@ -242,5 +248,6 @@ class PreparedMarkov:
 
     def __call__(self):
         self.projection(self.embed())
-        self.gather(self.local.view(torch.bfloat16))
+        if self.gather is not None:
+            self.gather(self.local.view(torch.bfloat16))
         return self.logits

@@ -108,14 +108,15 @@ class PreparedRoutedExperts:
         return super().__new__(cls)
 
     def __init__(self, source, experts, ids, weights, output, *, session: PreparationSession, name: str,
-                 workspace: ScratchArena | torch.Tensor | None = None, router_weight=None, router_plan=None,
-                 correction_bias=None, a4_prefill=False, routing=None):
+                 workspace: ScratchArena | torch.Tensor | None = None, router_plan=None,
+                 a4_prefill=False, routing=None):
         # A16 experts prepared with A4 capability run large prefill calls with quantized activations.
         precision = {"a4_prefill": True} if a4_prefill else {}
         self.source = source
         self.output = output
         self.scratch = None
         invocation = FrozenMapping({"tuning_route_pattern": TUNING_WORKLOAD_VERSION,
+            "tuning_route_source": "b12x",
             **({"tuning_execution": "cuda_graph"} if experts.has_csf_blocks else {})})
         self.scale_plan = fused_moe.plan_scale_expansion(
             experts, routes=ids.numel(), ids_dtype=ids.dtype, invocation=invocation,
@@ -139,14 +140,12 @@ class PreparedRoutedExperts:
             prepare_call=lambda state: moe_fixtures.scale_expansion_call(state, ids=torch.zeros_like(ids), experts=experts),
             benchmark_call=partial(moe_fixtures.scale_expansion_benchmark_call,
                 source=source, experts=experts, top_k=ids.shape[1], session=session, name=name,
-                allocate_router=RouterScratch.allocate, router_weight=router_weight,
-                router_plan=router_plan, correction_bias=correction_bias)),)
+                allocate_router=RouterScratch.allocate, router_plan=router_plan)),)
         declare(session, (*scale_requests, self.plan.request(name=name, prepare_call=prepare_call,
             dependencies=tuple(request.name for request in scale_requests),
             benchmark_call=partial(moe_fixtures.benchmark_call, source=source, experts=experts,
                 top_k=ids.shape[1], session=session, name=name, workspace=workspace,
-                allocate_router=RouterScratch.allocate, router_weight=router_weight,
-                router_plan=router_plan, correction_bias=correction_bias, precision=precision)),))
+                allocate_router=RouterScratch.allocate, router_plan=router_plan, precision=precision)),))
 
         def finalize():
             self.scratch = planned_scratch(self.plan.scratch_specs(), workspace)

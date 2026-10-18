@@ -32,6 +32,51 @@ def test_draft_configuration_and_state_geometry():
     assert config.draft.target_layers == (19, 37, 66, 78, 90)
 
 
+@pytest.mark.parametrize("kind", ["dflash2", "dspark"])
+def test_draft_scratch_export_ranges(kind):
+    import ctypes
+    from dataclasses import fields, is_dataclass
+    from types import SimpleNamespace
+    from ignition.components.parallel import TensorParallelShard
+    from ignition.preparation.disposable import storage_ranges
+    from ignition.recipes.kimi3.decoder import Scratch
+    from ignition.recipes.kimi3.dflash import DraftScratch as DFlashScratch
+    from ignition.recipes.kimi3.dspark import DraftScratch as DSparkScratch
+
+    config = SimpleNamespace(hidden=128, vocabulary=512, draft=SimpleNamespace(
+        heads=2, kv_heads=1, head_dim=64, window=128, text={"intermediate_size": 256}))
+    if kind == "dflash2":
+        activations = Scratch.allocate(32, 32, config, 1, "cpu")
+        buffers = {"projection": torch.empty((32, 64)), "alias": activations.activations[:8]}
+        scratch = DFlashScratch(activations, buffers, 32)
+    else:
+        scratch = DSparkScratch.allocate(config, TensorParallelShard(0, 1), 32, 8, "cpu")
+
+    def tensors(value):
+        if isinstance(value, torch.Tensor):
+            yield value
+        elif is_dataclass(value):
+            for field in fields(value):
+                yield from tensors(getattr(value, field.name))
+        elif isinstance(value, dict):
+            for child in value.values():
+                yield from tensors(child)
+
+    owned = tuple(tensors(scratch))
+    for tensor in owned:
+        tensor.fill_(1)
+    ranges = storage_ranges(scratch.scratch_tensors())
+    assert len(ranges) == len({tensor.untyped_storage().data_ptr() for tensor in owned})
+    assert ranges == storage_ranges(scratch.rows(8, 8).scratch_tensors())
+    for address, size in ranges:
+        ctypes.memset(address, 0, size)
+    assert all(not tensor.count_nonzero() for tensor in owned)
+    if kind == "dflash2":
+        assert scratch.token_capacity == 32
+        with pytest.raises(ValueError, match="token capacity"):
+            scratch.rows(40, 40)
+
+
 @cuda
 @torch.no_grad()
 def test_dynamic_convolution_preserves_bf16_rounding_and_block_boundaries():
@@ -230,7 +275,7 @@ def test_checkpoint_kda_verification_commits_only_accepted_prefix():
 
 @cuda
 @torch.no_grad()
-@pytest.mark.parametrize("batch", [1, 3])
+@pytest.mark.parametrize("batch", [1, 4])
 def test_complete_draft_and_context_replay_with_checkpoint_weights(batch):
     from types import SimpleNamespace
     from ignition.components.parallel import TensorParallelShard
@@ -267,18 +312,28 @@ def test_complete_draft_and_context_replay_with_checkpoint_weights(batch):
         kv=kda.flatten()[:129 * 576].view(129, 576),
         latent=mla.flatten()[:129 * 576].view(129, 576))
     context_meta = Metadata.allocate(129, 1, 2, device)
-    draft_meta = Metadata.allocate(8 * batch, batch, 2, device, samples=8 * batch)
     scratch = DraftScratch(Scratch.allocate(8 * batch, 8 * batch, c, 1, device,
-                                          activations=activation[:8 * batch]), {})
+                                          activations=activation[:8 * batch]), {}, 8 * batch)
     with RecordedPreparationSession(device=device, checkpoint="kimi-dflash2-forward",
             workload_schema="kimi-dflash2-forward", numerical_policy="default") as session:
         arena = ScratchArena(device)
         session.register_scratch(arena)
         context = PreparedContext(weights, auxiliary, context_meta, pool, session=session, name="context",
             workspace=arena, runtime=None, coordinator=None, buffers=context_buffers)
-        forward = PreparedDraft(weights, scratch, draft_meta, pool, session=session, name="draft",
-            workspace=arena, runtime=None, vocabulary_runtime=None, embedding_runtime=None,
-            router_runtime=None, vision_state=None, coordinator=None)
+        forwards = []
+        # Every draft batch shares storage sized for the maximum request batch.
+        for draft_batch in (1,) if batch == 1 else (1, 2, 4):
+            draft_meta = Metadata.allocate(8 * draft_batch, draft_batch, 2, device, samples=8 * draft_batch)
+            forward = PreparedDraft(weights, scratch.rows(8 * draft_batch, 8 * draft_batch), draft_meta,
+                pool, session=session, name=f"draft{draft_batch}", workspace=arena, runtime=None,
+                vocabulary_runtime=None, embedding_runtime=None, router_runtime=None, vision_state=None,
+                coordinator=None)
+            forwards.append(forward)
+            assert forward.layers[0][2].output.shape == (8 * draft_batch, c.hidden)
+            assert forward.layers[0][5].output.shape == (8 * draft_batch, c.hidden)
+        for prepared in forwards:
+            assert prepared.layers[0][2].output.data_ptr() == forward.layers[0][2].output.data_ptr()
+            assert prepared.layers[0][5].output.data_ptr() == forward.layers[0][5].output.data_ptr()
         session.tune(show_progress=False)
         context_meta.set(torch.zeros(1, device=device), torch.tensor([129], device=device),
             torch.ones(1, device=device), torch.tensor([[0, 1]], device=device),

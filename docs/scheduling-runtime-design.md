@@ -27,8 +27,9 @@ model-specific concurrency cutoff. The scheduler chooses among the resulting
 physical graphs using measured costs and useful output. Fixed mode uses its
 loaded width where captured; larger buckets retain width-one execution.
 
-A retained proposal catalog captures every request bucket at every load-time
-selectable depth from one through `D`. Proposal depth is independent of target
+A retained proposal catalog captures every request bucket at every selectable
+depth from one through `D`. Adaptive serving can select these depths at each
+proposal dispatch. Proposal depth is independent of target
 verification width and is not capped by `R`. Separate width-one speculative
 graphs execute without producing a proposal and maintain draft context. With
 `C=4`, `D=7`, and `R=8`, the catalog has 21 proposal graphs, 14 verification
@@ -56,14 +57,20 @@ draws again.
 For conditional acceptance estimates `p_i`, expected output at width `W` is
 `1 + p_1 + p_1*p_2 + ... + product(p_1..p_(W-1))`. Combined graphs search all
 loaded widths using request-local historical acceptance. A producer supplying
-native confidence forecasts proposal work from an exponential average of prior
-confidence curves. Every observation contributes one quarter of the request
-estimate and one sixty-fourth of a model-local population estimate. As a request
-generates tokens without a proposal, its estimate approaches the population
-curve with a half-life of 32 output tokens; the population starts at 0.5. Thus a
-pessimistic observation cannot permanently prevent its own replacement. Observed
-acceptance is not substituted for confidence, and fresh retained proposals keep
-their unsmoothed confidence for causal prefix selection.
+native confidence forecasts proposal work by averaging each observed prefix's
+survival probability. It multiplies conditional probabilities before averaging,
+preserving their correlation within a draft block. Every observation contributes
+one quarter of the request estimate and one sixty-fourth of a model-local
+population estimate. The initial conditional prior is 0.5.
+
+Each prefix records its last observation independently; a short proposal does
+not refresh or average the omitted suffix. Estimates approach the population
+curve with a half-life of 32 output tokens. After 32 tokens without an observation,
+proposal planning prices that position at the upper bound allowed by the
+preceding prefix, so an unobserved suffix can become worth probing. Fresh
+confidence still determines the causal verification prefix after the proposal
+completes. Observed acceptance is not substituted for confidence, and fresh
+retained proposals keep their unsmoothed confidence for causal prefix selection.
 
 Rank zero supplies the confidence curve used for the shared scheduling decision.
 Every rank must report finite probabilities within `[0, 1]`; the root's curve is
@@ -87,8 +94,9 @@ limited by each request's remaining output, context, and sampling restrictions.
 
 Finalized widths are never shortened to make a cheaper batch. A dynamic program
 over requests sorted by width minimizes the cost of physical verification
-calls, including padding. Proposal planning evaluates bounded request counts
-and the complete remaining proposal-plus-verification cost. Once proposals are
+calls, including padding. Proposal planning evaluates bounded request counts,
+the available draft depths covering each planned prefix, and the complete
+remaining proposal-plus-verification cost. Once proposals are
 retained, their elapsed time has already entered service accounting and only
 remaining work is priced. Proposal completion earns no output or delivery credit.
 The dispatcher executes one operation and replans, allowing several proposal
@@ -311,7 +319,12 @@ Defaults specify these preferences:
 These weights express a throughput/cadence tradeoff. They are not graph timing
 measurements or latency guarantees. Setting fairness or age coefficients to zero
 removes the corresponding preference; intrinsic throughput alone does not ensure
-starvation freedom. The native CLI uses these defaults.
+starvation freedom. The native CLI defaults to `--scheduler-policy balanced`,
+which uses these coefficients. `--scheduler-policy throughput` retains token
+fairness and output-token value while setting delivery fairness and decode-age
+price to zero. It favors token throughput and can select longer output bursts.
+It changes scheduling preferences without changing captured capacities or
+sampling policy.
 
 ## Mixed execution contract
 

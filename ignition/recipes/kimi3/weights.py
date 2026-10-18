@@ -76,8 +76,8 @@ class KimiWeightLoader(DirectWeightLoader):
         super().__init__(manifest, device, prefixes=prefixes, progress=progress)
         self.peers, self.shared_columns = peers, None
         self.config, self.shard = ModelConfig.load(manifest.snapshot), shard
-        # The fused KDA input projection keeps checkpoint BF16 unless the plan stores it as MXFP8:
-        # E4M3 values with E8M0 block-32 scales, run with BF16 activations as vLLM's Kimi X4T profile does.
+        # Online conversion stores attention, shared-expert, and latent projections as E4M3 values
+        # with E8M0 block-32 scales; their activations stay BF16.
         self.online_mxfp8 = online_mxfp8
         self.config.validate_shard(shard)
         self.scale_scratch = None
@@ -122,10 +122,11 @@ class KimiWeightLoader(DirectWeightLoader):
         values = [self.linear(p, rows=r) for p, r in zip(prefixes, ranges, strict=True)]
         return torch.cat(values)
 
-    def mlp(self, prefix, intermediate):
+    def mlp(self, prefix, intermediate, *, online_mxfp8=False):
         interval = self.shard.partition(intermediate, alignment=32)
-        return dict(gate_up=self.fused([prefix + ".gate_proj", prefix + ".up_proj"], [interval] * 2),
-                    down=self.linear(prefix + ".down_proj", columns=interval))
+        weights = dict(gate_up=self.fused([prefix + ".gate_proj", prefix + ".up_proj"], [interval] * 2),
+                       down=self.linear(prefix + ".down_proj", columns=interval))
+        return {key: quantize_bf16_linear_as_mxfp8(weight) for key, weight in weights.items()} if online_mxfp8 else weights
 
     def load_attention(self, index):
         c, shard = self.config.text, self.shard
@@ -142,7 +143,7 @@ class KimiWeightLoader(DirectWeightLoader):
                 [head_rows] * 3 + [None, head_rows, (h0, h1)])
             padding = -projected.shape[0] % 8
             projected = torch.cat((projected, projected.new_zeros((padding, projected.shape[1]))))
-            attention["input"] = quantize_bf16_linear_as_mxfp8(projected) if self.online_mxfp8 else projected
+            attention["input"] = projected
             attention["forget"] = self.linear(a + ".f_b_proj", rows=head_rows)
             conv = [self.load_tensor(a + "." + n + ".weight", extent=slice(*head_rows))
                     for n in ("q_conv1d", "k_conv1d", "v_conv1d")]
@@ -170,6 +171,10 @@ class KimiWeightLoader(DirectWeightLoader):
             width = sum(x.shape[0] for x in latent)
             attention["latent_gate"] = torch.cat((*latent, gate.new_zeros((-width % 8, gate.shape[1])), gate))
         attention["output"] = self.linear(a + ".o_proj", columns=head_rows)
+        if self.online_mxfp8:
+            for key in ("input", "forget", "latent_gate", "q_b", "output"):
+                if key in attention:
+                    attention[key] = quantize_bf16_linear_as_mxfp8(attention[key])
         return attention
 
     def load_layer(self, index):
@@ -185,7 +190,8 @@ class KimiWeightLoader(DirectWeightLoader):
             result["mlp"] = self.mlp(prefix + ".mlp", c["intermediate_size"])
             return result
         m = prefix + ".block_sparse_moe"
-        result["shared"] = self.mlp(m + ".shared_experts", c["num_shared_experts"] * c["moe_intermediate_size"])
+        result["shared"] = self.mlp(m + ".shared_experts", c["num_shared_experts"] * c["moe_intermediate_size"],
+                                    online_mxfp8=self.online_mxfp8)
         result["router"] = self.linear(m + ".gate", rows=shard.partition(c["num_experts"], alignment=8))
         result["correction"] = self.load_tensor(m + ".gate.e_score_correction_bias")
         result["latent_down"] = self.linear(m + ".routed_expert_down_proj", columns=shard.partition(c["hidden_size"]))
@@ -193,6 +199,9 @@ class KimiWeightLoader(DirectWeightLoader):
         result["latent_down_rows"] = self.linear(m + ".routed_expert_down_proj",
                                                  rows=shard.partition(c["routed_expert_hidden_size"]))
         result["latent_up"] = self.linear(m + ".routed_expert_up_proj", columns=shard.partition(c["routed_expert_hidden_size"]))
+        if self.online_mxfp8:
+            for key in ("latent_down", "latent_down_rows", "latent_up"):
+                result[key] = quantize_bf16_linear_as_mxfp8(result[key])
         # Each rank applies the latent norm's weights to the columns its up-projection shard reads.
         result["latent_norm"] = self.load_tensor(m + ".routed_expert_norm.weight",
                                                  extent=slice(*shard.partition(c["routed_expert_hidden_size"])))

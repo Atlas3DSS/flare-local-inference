@@ -43,6 +43,22 @@ def prepare_sampling_scratch(batch, width, vocab, device, *, buffers=None, propo
     return result
 
 
+def prepare_sampling_broadcasts(proposals, verification, *, collectives, session, name, buffers=None):
+    """Synchronize proposals before dependent work and acceptance before state commits."""
+    cursors = []
+    operations = [(f"proposal{index}", proposal) for index, proposal in enumerate(proposals)]
+    if verification is not None:
+        operations.append(("acceptance", verification))
+    for suffix, operation in operations:
+        cursor = None if buffers is None else buffers.fork()
+        operation.prepare_broadcast(runtime=collectives["vocabulary_runtime"], session=session,
+            coordinator=collectives["coordinator"], name=f"{name}.{suffix}", buffers=cursor)
+        if cursor is not None:
+            cursors.append(cursor)
+    if buffers is not None:
+        buffers.join(*cursors)
+
+
 class PreparedParallelDraftRound:
     """Prepare verification and optionally its draft generator.
 
@@ -60,6 +76,7 @@ class PreparedParallelDraftRound:
 
     def __init__(self, owner, batch, width, name, *, generate_proposals=True, buffers=None, proposal_only=False):
         self.owner, self.batch, self.width = owner, batch, width
+        self.name, self.buffers = name, buffers
         self.generate_proposals = generate_proposals
         self.proposal_only = proposal_only
         o, b, w = owner, batch, width
@@ -196,6 +213,8 @@ class PreparedParallelDraftRound:
         for proposal in proposals:
             proposal.prepare()
         if self.proposal_only:
+            prepare_sampling_broadcasts(proposals, None, collectives=o.collectives, session=o.session,
+                                        name=self.name, buffers=self.buffers)
             self.operations = None, proposals, None, None
             return
         verify = PreparedStochasticVerification(
@@ -210,6 +229,8 @@ class PreparedParallelDraftRound:
             workspace=self.sampling_scratch.get("verify"),
         )
         verify.prepare()
+        prepare_sampling_broadcasts(proposals, verify, collectives=o.collectives, session=o.session,
+                                    name=self.name, buffers=self.buffers)
         commit = PreparedSpeculativeCommit(
             o.requests,
             verify.output,

@@ -8,6 +8,7 @@ import sys
 import tempfile
 import traceback
 from dataclasses import replace
+from pathlib import Path
 
 from ignition import planning
 from ignition.errors import CapacityError, FlareError, PreparationError, UsageError
@@ -72,17 +73,31 @@ def _exhausted(error, plan) -> CapacityError | None:
         f"{', '.join(relief[:-1]).capitalize()}, or {relief[-1]} need less memory.")
 
 
-def _publisher(configuration, args):
+def _publisher(configuration, args, model=None, hub_cache=None):
+    """The signing publisher; with `model`, carrying the license its cached model card declares."""
     from ignition.preparation.protection import Publisher
     values = configuration.values.get("publishing", {})
     try:
-        if not values and not args.official_source:
+        if not any(key in values for key in ("signing_key", "namespace", "official_source")) and not args.official_source:
             from ignition.development import publisher
-            return publisher(configuration)
-        return Publisher.load(values["signing_key"], values["namespace"],
-                              args.official_source or values["official_source"])
+            signer = publisher(configuration)
+        else:
+            signer = Publisher.load(values["signing_key"], values["namespace"],
+                                    args.official_source or values["official_source"])
     except (KeyError, ValueError, OSError) as error:
         raise UsageError(f"publishing requires an Ed25519 signing_key, namespace, and official_source: {error}") from error
+    if model is None:
+        return signer
+    from ignition.preparation.model_card import model_license
+    from ignition.preparation.checkpoint import inspect_indexed_checkpoint
+    try:
+        metadata = inspect_indexed_checkpoint(model.snapshot(hub_cache)).metadata_path
+        license = model_license(metadata,
+                                None if model.directory is not None else model.checkpoint.repository,
+                                model.checkpoint.revision)
+    except ValueError as error:
+        raise UsageError(str(error)) from error
+    return replace(signer, license=license)
 
 
 def run(args) -> int:
@@ -105,7 +120,8 @@ def run(args) -> int:
     host = configuration.get("server.host", args.host).value
     port = configuration.get("server.port", args.port).value
     _address(host, port)
-    with cached_package(configuration, model, plan, args.no_compile, publisher) as package:
+    with cached_package(configuration, model, plan, args.no_compile, publisher,
+                        configuration.shard_size(getattr(args, "shard_size", None))) as package:
         if not package.exists():
             _prepare(args, export_path=package)
         else:
@@ -125,6 +141,12 @@ def run(args) -> int:
     if publisher.development:
         from ignition.development import profile
         command += ["--publisher-keys", str(profile(configuration, publisher))]
+    else:
+        # Before the key is published at the official source, the profile keygen wrote beside the
+        # signing key lets Flare verify the signatures; Flare reports the identity as unverified.
+        profile = Path(configuration.values["publishing"]["signing_key"]).expanduser().parent / "publisher.json"
+        if profile.is_file():
+            command += ["--publisher-keys", str(profile)]
     command += ["--dangerously-approve-key", publisher.fingerprint.hex(),
                 "--dangerously-accept-publisher", publisher.namespace]
     if args.trust_store is not None:
@@ -225,7 +247,8 @@ def _export_hosts(args, *, export_path) -> int:
         with prepared:
             with phase(progress, "Export native packages") as stage:
                 prepared.export(export_path, options=options, export_id=uuid.uuid4().hex, images=recorder,
-                                storage=storage, publisher=_publisher(configuration, args),
+                                storage=storage, publisher=_publisher(configuration, args, model, hub_cache),
+                                shard_size=configuration.shard_size(getattr(args, "shard_size", None)),
                                 progress=progress if args.verbose else None)
                 stage.update(f"{export_path} on each of {plan.world_size} hosts")
         for region in storage.host_regions:
@@ -246,7 +269,7 @@ def _prepare(args, *, export_path) -> int:
 
     progress = Progress()
     configuration = Configuration.load(args.config)
-    publisher = _publisher(configuration, args)
+    _publisher(configuration, args)
     hub_cache = configuration.directory("hub_cache")
     with phase(progress, "Resolve checkpoint") as stage:
         model = resolve_model(configuration, args.model)
@@ -328,12 +351,14 @@ def _prepare(args, *, export_path) -> int:
             options = _server_options(configuration, model, plan)
             from ignition.preparation.model_package import export_package
 
+            publisher = _publisher(configuration, args, model, hub_cache)
             with phase(progress, "Export native package") as stage:
                 try:
                     options.pop("api_key")
                     export_package(prepared, recorder, storage, export_path, options=options, publisher=publisher,
                                  progress=progress if args.verbose else None, console=progress.console,
-                                 staging=configuration.directory("export_staging"))
+                                 staging=configuration.directory("export_staging"),
+                                 shard_size=configuration.shard_size(getattr(args, "shard_size", None)))
                 except Exception as error:
                     if args.verbose:
                         traceback.print_exc()

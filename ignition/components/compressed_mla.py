@@ -58,13 +58,13 @@ class PreparedCompressedMLA:
     def __init__(self, query, window, indices, lengths, sink, output, *, indexed=None,
                  indexed_indices=None, indexed_lengths=None, page_table=None,
                  window_page_size=128, indexed_page_size=64, mode="decode", session, name, workspace,
-                 cache_format="deepseek_v41"):
+                 cache_format="deepseek_v41", decode_row_capacity=None):
         width = 0 if indexed_indices is None else indexed_indices.shape[1]
         caps = mla.Caps(device=query.device, num_q_heads=query.shape[1], max_q_rows=query.shape[0],
             max_width=indices.shape[1] + width, swa_width=indices.shape[1], indexed_width=width,
             max_page_table_width=1 if page_table is None else page_table.shape[1],
             swa_page_size=window_page_size, indexed_page_size=indexed_page_size,
-            cache_format=cache_format, mode=mode)
+            cache_format=cache_format, mode=mode, decode_row_capacity=decode_row_capacity)
         self.plan = mla.plan(caps, invocation=mla.invocation_from_tensors(q=query,
             swa_k_cache=window, indexed_k_cache=indexed, attn_sink=sink, out=output))
         self.query, self.window, self.indexed, self.output = query, window, indexed, output

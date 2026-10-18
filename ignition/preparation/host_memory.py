@@ -30,9 +30,11 @@ def cpu_workers(requested=None, *, pools=1):
     return max(1, budget // pools)
 
 
-def release_unused():
-    """Collect preparation objects and release unused glibc arenas on Linux."""
-    gc.collect()
+def release_unused(*, generation=2):
+    """Collect preparation temporaries and release unused glibc arenas on Linux."""
+    if generation == 0 and available_bytes() < _HEADROOM_BYTES:
+        generation = 2
+    gc.collect(generation)
     if os.name == "nt":
         return
     trim = ctypes.CDLL(None).malloc_trim

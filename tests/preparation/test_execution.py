@@ -48,6 +48,15 @@ def test_manifest_offsets_are_stable_across_graphs(monkeypatch):
     assert manifest["buffers"][-1]["dtype"] == "bool"
 
 
+def test_diagnostic_manifest_preserves_selectable_proposal_depths(monkeypatch):
+    signatures = {f"proposal{width}": GraphSignature("proposal", 4, width, ("tokens",),
+                  speculation_enabled=True) for width in (2, 4, 6)}
+    execution = _execution(graphs={name: object() for name in signatures}, signatures=signatures)
+    spans = [(4096, 4), (8192, 8), (12288, 512), (16384, 128), (20480, 1)]
+    monkeypatch.setattr(execution, "_validate_resources", lambda: (9, [11, 12, 13], spans))
+    assert [g["token_capacity"] for g in execution.manifest()["graphs"]] == [2, 4, 6]
+
+
 def test_resident_binding_is_retained_for_diagnostics_and_excluded_from_export(monkeypatch):
     import flare_heliopause
     from ignition.preparation.model import PreparedModel

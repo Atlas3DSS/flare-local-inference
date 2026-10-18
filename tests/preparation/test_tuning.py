@@ -1084,7 +1084,7 @@ def test_operator_benchmark_owners_release_after_trial_close(backend, operator):
         elif operator == "fused_moe":
             call = fused_moe.benchmark_call(state, source=source,
                 experts=SimpleNamespace(num_experts=512, has_csf_blocks=False), top_k=10, session=session, name="op",
-                workspace=None, allocate_router=RouterScratch.allocate, router_weight=None, router_plan=None)
+                workspace=None, allocate_router=RouterScratch.allocate, router_plan=None)
         elif operator == "hyperconnection":
             call = hyperconnection.benchmark_call(state, "scaled_silu", (source, output), {})
         elif operator == "varlen_attention":

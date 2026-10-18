@@ -223,6 +223,7 @@ class PreparedSpeculativeRound:
             draft_ids=self.drafts, draft_probabilities=self.draft_probabilities, draft_valid=self.draft_valid,
             copy_mask=self.copy_mask, previous_accepted=owner.previous_accepted,
             accepted_generation=owner.accepted_generation, token_limits=self.token_limits) if self.copy_only else None)
+        self.broadcast_buffers, self.name = buffers, name
         self.operations = None
 
     def prepare(self):
@@ -248,6 +249,9 @@ class PreparedSpeculativeRound:
             draft_valid=self.draft_valid, target_valid=target.valid, token_limits=self.token_limits,
             workspace=self.sampling_scratch["verify"])
         verify.prepare()
+        from ignition.components.parallel_draft import prepare_sampling_broadcasts
+        prepare_sampling_broadcasts(proposals, verify, collectives=o.collectives, session=o.session,
+                                    name=self.name, buffers=self.broadcast_buffers)
         commit = PreparedSpeculativeCommit(o.requests, verify.output,
             self.state.token_ids.view(b, w), slots, epochs, o.inputs.live_rows,
             o.completion, o.frame, o.sequence, rng=o.rng, copy_offered_mask=self.copy_mask,

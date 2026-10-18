@@ -3,12 +3,15 @@
 ## Runtime packages
 
 Run commands from the repository root. Ignition prepares a source checkpoint
-into a **runtime package**: a single `.safetensors` file with two `U8` tensors.
-`flare.payload` holds stored tensors before graph, kernel, and frontend data;
-`flare.metadata` holds the bounded Protobuf index at the end of the file.
+into a **runtime package**: a primary `.safetensors` file with two `U8` tensors,
+plus sibling data files when the package exceeds the 64 GiB soft target.
+`flare.payload` holds primary resources; `flare.metadata` holds the bounded
+Protobuf index at the end. `--shard-size SIZE` overrides `[publishing] shard_size`;
+`0` keeps the package monolithic. Companions use the primary basename, such as
+`example-data-01-of-02.safetensors`, and hold whole allocation payloads or
+embedding planes. Encrypted and individually authenticated resources stay primary.
 The protobuf describes independently addressed resources. Tensor-parallel
-packages contain one resource bundle per rank, with all ranks' storage before
-execution resources.
+packages contain one resource bundle per rank.
 Final packages use a format-4 signed envelope and encrypted cubins and graph
 records. Ignition creates a per-user development signing key when `[publishing]`
 is absent. `ignition run` passes the exact export key and publisher to Flare for
@@ -16,7 +19,7 @@ unattended approval; direct `flare run` needs the corresponding publisher profil
 and first-use acceptance. See [signing and development](cli-design.md#signing-and-local-development).
 Unsigned rank staging is private to preparation and cannot load in Helios.
 
-Flare loads the file without Python. Helios is a Rust library;
+Flare loads the package files without Python. Helios is a Rust library;
 `flare_heliopause` is a CPython extension imported by Ignition.
 
 Every recipe defaults to FP8 E4M3 KV storage, including learned draft-model
@@ -380,13 +383,24 @@ residuals, and latent SiTU experts. DFlash2 uses
 `e77935fb4804e17eb55085bffd045eae1d779769`, downloaded to the Hugging Face hub
 cache (or `[paths].hub_cache`), and defaults to seven draft tokens per round.
 
+For Kimi K3, `--online-mxfp8` converts KDA input, forget-gate, and output
+projections; MLA latent/gate, query, and output projections; shared
+expert gate/up and down projections; and both tensor-parallel layouts of the
+MoE latent down projection and its latent up projection. Activations remain
+BF16. MLA's batched key/value projections, routers, the first dense MLP,
+embeddings, vocabulary head, vision encoder, and DFlash2 retain checkpoint
+precision. DSpark converts its context projection, attention outputs, and MLPs.
+Shared and routed experts keep disjoint
+kernel scratch when their execution overlaps.
+
 ```sh
 .venv/bin/python -m ignition export /data/models/Kimi-K3-MXFP4-CSF --gpus 0-15 \
-  --max-concurrency 4 --mtp-draft-tokens 7 --prefill-chunk-size 4096 \
-  --output /data/flare-runtime/kimi-k3-mxfp4-csf-tp16-c4-dflash2-7.safetensors --verbose
+  --max-concurrency 4 --image-concurrency 4 --mtp-draft-tokens 7 \
+  --prefill-chunk-size 4096 --compile-workers 16 --online-mxfp8 \
+  --output /data/flare-runtime/kimi-k3-mxfp4-csf-tp16-c4-dflash2-7-mxfp8.safetensors --verbose
 
 ./flare/target/release/flare run \
-  /data/flare-runtime/kimi-k3-mxfp4-csf-tp16-c4-dflash2-7.safetensors \
+  /data/flare-runtime/kimi-k3-mxfp4-csf-tp16-c4-dflash2-7-mxfp8.safetensors \
   --gpus 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15 --host 127.0.0.1 --port 8001
 ```
 
@@ -399,6 +413,12 @@ Loading with `--mtp-draft-tokens 0` selects ordinary execution; exporting with
 `--no-mtp` excludes draft weights and state.
 
 FP8 MLA latent records occupy 128-token pages in both the target and DFlash2.
+With context parallelism across sixteen ranks, concurrency four, and a
+4096-token prefill chunk, preparation backs ten logical KV pages and nine
+continuation rows: one null row, four live rows, and four snapshot destinations.
+Retaining CUDA graph handles for export does not expand this working set.
+Native package loading sizes serving caches from available device memory;
+in-process diagnostic serving limits admission to physically backed storage.
 Continuation rows preserve KDA
 convolution and recurrent state, partial latent pages, and the normalized
 last hidden state. The MoonViT encoder accepts a combined 65,536 image patches

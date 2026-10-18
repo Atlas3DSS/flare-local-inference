@@ -21,6 +21,7 @@ class PreparedRound:
     def __init__(self, owner, batch, width, name, *, buffers=None):
         o, b, w = owner, batch, width
         self.batch, self.width, self.buffers = b, w, buffers
+        self.collectives, self.session, self.name = o.collectives, o.session, name
         self.inputs, self.requests, self.pool = o.inputs, o.requests, o.pool
         self.records, self.frame, self.sequence = o.records, o.frame, o.sequence
         self.rng, self.draft_offset, self.draft_generation = o.rng, o.offset, o.generation
@@ -72,6 +73,9 @@ class PreparedRound:
             *args, rng=self.rng, draft_valid=self.valid, target_valid=target.valid,
             token_limits=self.inputs.query_lengths[:b], workspace=self.sampling_scratch["verify"])
         verify.prepare()
+        from ignition.components.parallel_draft import prepare_sampling_broadcasts
+        prepare_sampling_broadcasts(proposals, verify, collectives=self.collectives, session=self.session,
+                                    name=self.name, buffers=self.buffers)
         commit = PreparedSpeculativeCommit(self.requests, verify.output, self.candidates,
             self.inputs.row_slot_ids[:b], self.inputs.row_generations[:b], self.inputs.live_rows, self.records, self.frame,
             self.sequence, rng=self.rng, token_limits=self.inputs.query_lengths[:b], draft_context_lag=0, buffers=self.buffers)

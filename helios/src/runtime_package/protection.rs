@@ -1,8 +1,11 @@
-//! Publisher signatures and namespace-bound access to executable resources.
+//! Publisher signatures and acceptance-bound access to executable resources.
 //!
-//! Verification, publisher acceptance, and decryption form the package access boundary.
-//! Unauthorized circumvention may implicate 17 U.S.C. §1201(a)(1) or (a)(2), as defined
-//! in (a)(3). Signatures authenticate publisher identity; they do not sandbox GPU code.
+//! Verification, publisher acceptance, and decryption form the package access boundary. The
+//! string a user applies to accept the publisher's terms is the key material for every
+//! executable resource; the exporter encrypts under the publisher namespace, so no other string
+//! decrypts. Unauthorized circumvention may implicate 17 U.S.C. §1201(a)(1) or (a)(2), as
+//! defined in (a)(3). Signatures authenticate publisher identity; they do not sandbox GPU code.
+//! Resolving who a signing key belongs to is the caller's task, from a `PackageClaim`.
 
 use super::{archive::Archive, format::invalid, protobuf::wire};
 use crate::Result;
@@ -53,6 +56,93 @@ pub(super) fn namespace_valid(value: &str) -> bool {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
+/// The official source is a repository under the publisher's Hugging Face namespace, or the
+/// literal `local-development` marker for development packages.
+pub(super) fn source_valid(namespace: &str, development: bool, source: &str) -> bool {
+    if development {
+        return namespace == "local-development" && source == "local-development";
+    }
+    let Some(repository) = source.strip_prefix(&format!("https://huggingface.co/{namespace}/"))
+    else {
+        return false;
+    };
+    !repository.is_empty()
+        && repository.len() <= 96
+        && repository.as_bytes()[0].is_ascii_alphanumeric()
+        && repository
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+/// Links are printed to a terminal before acceptance: HTTPS, bounded, and printable ASCII only.
+fn link_valid(link: &str) -> bool {
+    link.len() <= 512 && link.starts_with("https://") && link.bytes().all(|b| b.is_ascii_graphic())
+}
+
+/// The license governing use of the model, as the publisher recorded it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PackageLicense {
+    pub name: String,
+    /// Where the license text is published; empty when the publisher recorded none.
+    pub link: String,
+}
+impl PackageLicense {
+    fn validated(license: &wire::License) -> Result<Self> {
+        if license.name.is_empty()
+            || license.name.len() > 128
+            || license.name.chars().any(char::is_control)
+            || !(license.link.is_empty() || link_valid(&license.link))
+        {
+            return Err(invalid("invalid package license metadata"));
+        }
+        Ok(Self {
+            name: license.name.clone(),
+            link: license.link.clone(),
+        })
+    }
+}
+/// What a package claims before any signature is verified: which key signed it and where it says
+/// it was published. The caller resolves the signer's identity from the claim, then verifies the
+/// package with the resolved profile; nothing here is trusted until that verification.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PackageClaim {
+    /// Lowercase SHA-256 fingerprint of the signing key.
+    pub signer: String,
+    pub namespace: String,
+    pub official_source: String,
+    pub development: bool,
+}
+impl PackageClaim {
+    pub fn read(path: &Path) -> Result<Self> {
+        let (_, _, _, bytes) = Archive::envelope(path)?;
+        let envelope = wire::ProtectedIndex::decode(bytes.as_slice())
+            .map_err(|e| invalid(format!("invalid signed envelope: {e}")))?;
+        if envelope.version != 4 || envelope.signer.len() != 32 || envelope.groups.is_empty() {
+            return Err(invalid(
+                "signed format-4 package required; re-export the checkpoint",
+            ));
+        }
+        let metadata = wire::PublisherMetadata::decode(envelope.groups[0].body.as_slice())
+            .map_err(|e| invalid(format!("invalid signed metadata: {e}")))?;
+        if !namespace_valid(&metadata.namespace)
+            || !source_valid(
+                &metadata.namespace,
+                metadata.development,
+                &metadata.official_source,
+            )
+        {
+            return Err(invalid(
+                "package publisher namespace or official source mismatch",
+            ));
+        }
+        Ok(Self {
+            signer: hex(&envelope.signer),
+            namespace: metadata.namespace,
+            official_source: metadata.official_source,
+            development: metadata.development,
+        })
+    }
+}
+
 pub(super) fn sha256(bytes: &[u8]) -> Vec<u8> {
     digest::digest(&digest::SHA256, bytes).as_ref().to_vec()
 }
@@ -121,7 +211,6 @@ pub struct VerifiedPackage {
     pub(super) index: wire::ModelIndex,
     publisher: Publisher,
     official_source: String,
-    identity_verified: bool,
 }
 pub struct AuthorizedPackage {
     pub(super) archive: Archive,
@@ -131,8 +220,7 @@ impl VerifiedPackage {
     /// Authenticate the package's index and publisher binding, for every rank or only `rank` of
     /// a multi-host package, which a copy holding that rank's bytes alone verifies completely.
     pub fn open(path: &Path, publishers: &[Publisher], rank: Option<usize>) -> Result<Self> {
-        let embedded = super::publishers::embedded()?;
-        let mut profiles = embedded.clone();
+        let mut profiles = super::publishers::embedded()?;
         for publisher in publishers {
             publisher.validate()?;
             if let Some(previous) = profiles
@@ -149,19 +237,12 @@ impl VerifiedPackage {
         let (archive, index) = Archive::open(path, &profiles, rank)?;
         let publisher = archive.protection.publisher.clone();
         let official_source = archive.protection.official_source.clone();
-        let identity_verified = embedded
-            .iter()
-            .any(|p| p.public_key == publisher.public_key);
         Ok(Self {
             archive,
             index,
             publisher,
             official_source,
-            identity_verified,
         })
-    }
-    pub fn identity_verified(&self) -> bool {
-        self.identity_verified
     }
     pub fn publisher(&self) -> &Publisher {
         &self.publisher
@@ -169,23 +250,17 @@ impl VerifiedPackage {
     pub fn official_source(&self) -> &str {
         &self.official_source
     }
-    /// The caller must obtain explicit namespace acceptance or match remembered signer trust.
-    pub fn authorize(
-        mut self,
-        accepted_namespace: &str,
-        verify_weights: bool,
-    ) -> Result<AuthorizedPackage> {
-        if accepted_namespace != self.publisher.namespace {
-            return Err(invalid(
-                "publisher acceptance does not match authenticated namespace",
-            ));
-        }
+    pub fn license(&self) -> Option<&PackageLicense> {
+        self.archive.protection.license.as_ref()
+    }
+    /// Record the string the user applied to accept the publisher's terms. It derives every
+    /// executable key, so a string other than the namespace the exporter encrypted under opens
+    /// nothing; the caller obtains it from the user or from remembered acceptance.
+    pub fn authorize(mut self, accepted: &str, verify_weights: bool) -> Result<AuthorizedPackage> {
         if verify_weights {
-            self.archive
-                .protection
-                .verify_data(&self.archive.file, self.archive.start)?;
+            self.archive.protection.verify_data(&self.archive)?;
         }
-        self.archive.accepted = true;
+        self.archive.protection.accepted = Some(accepted.to_owned());
         Ok(AuthorizedPackage {
             archive: self.archive,
             index: self.index,
@@ -196,6 +271,9 @@ impl VerifiedPackage {
 pub(super) struct Protection {
     publisher: Publisher,
     official_source: String,
+    license: Option<PackageLicense>,
+    /// The acceptance string, once applied; executable keys derive from it.
+    accepted: Option<String>,
     package_id: Vec<u8>,
     resources: BTreeMap<u64, (bool, wire::ProtectedResource)>,
     /// Stored-data ranges: what every rank shares, then each verified rank's in index order.
@@ -237,17 +315,57 @@ fn add_catalog(
     }
     Ok(())
 }
-fn stored_data(data: wire::StoredData, payload_size: u64) -> Result<wire::StoredData> {
-    if data.sha256.len() != 32
-        || data
+fn stored_data(
+    mut data: wire::StoredData,
+    payload_size: u64,
+    version: u32,
+) -> Result<wire::StoredData> {
+    if data.sha256.len() != 32 {
+        return Err(invalid("invalid stored-data signature group"));
+    }
+    if data.parts.is_empty() {
+        if data
             .offset
             .checked_add(data.nbytes)
             .is_none_or(|end| end > payload_size)
+        {
+            return Err(invalid("invalid stored-data signature group"));
+        }
+        if data.nbytes > 0 {
+            data.parts.push(wire::Span {
+                offset: data.offset,
+                nbytes: data.nbytes,
+                filename: String::new(),
+            });
+        }
+    } else if data.offset != 0
+        || data
+            .parts
+            .iter()
+            .try_fold(0u64, |sum, part| sum.checked_add(part.nbytes))
+            != Some(data.nbytes)
     {
-        return Err(invalid("invalid stored-data signature group"));
+        return Err(invalid("invalid stored-data parts"));
+    }
+    for part in &data.parts {
+        if !part.filename.is_empty() {
+            super::archive::validate_filename(&part.filename)?;
+            if version != 5 {
+                return Err(invalid("companion references require model index 5"));
+            }
+        }
+        if part.nbytes == 0
+            || part
+                .offset
+                .checked_add(part.nbytes)
+                .is_none_or(|end| part.filename.is_empty() && end > payload_size)
+        {
+            return Err(invalid("invalid stored-data part"));
+        }
     }
     Ok(data)
 }
+
 impl Protection {
     /// Authenticate the envelope: what every rank shares, then every rank, or only `rank` of a
     /// multi-host package, whose host holds that rank's bytes alone.
@@ -309,32 +427,29 @@ impl Protection {
         {
             return Err(invalid("signature group commitment mismatch"));
         }
-        let prefix = format!("https://huggingface.co/{}/", publisher.namespace);
-        let repository = metadata.official_source.strip_prefix(&prefix).unwrap_or("");
-        let valid_source = if publisher.development {
-            publisher.namespace == "local-development"
-                && metadata.official_source == "local-development"
-        } else {
-            !repository.is_empty()
-                && repository.len() <= 96
-                && repository.as_bytes()[0].is_ascii_alphanumeric()
-                && repository
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
-        };
         if metadata.namespace != publisher.namespace
             || metadata.development != publisher.development
-            || !valid_source
+            || !source_valid(
+                &publisher.namespace,
+                publisher.development,
+                &metadata.official_source,
+            )
         {
             return Err(invalid(
                 "package publisher namespace or official source mismatch",
             ));
         }
+        // Packages exported before the field existed carry no license; it stays absent.
+        let license = metadata
+            .license
+            .as_ref()
+            .map(PackageLicense::validated)
+            .transpose()?;
         let mut index = metadata
             .index
             .ok_or_else(|| invalid("missing signed model index"))?;
         let count = metadata.ranks as usize;
-        if index.version != 4
+        if !matches!(index.version, 4 | 5)
             || !index.ranks.is_empty()
             || envelope.ranks.len() != count
             || index
@@ -359,7 +474,7 @@ impl Protection {
         add_catalog(&mut resources, shared, false, payload_size)?;
         let shared = wire::StoredData::decode(envelope.groups[2].body.as_slice())
             .map_err(|e| invalid(e.to_string()))?;
-        let mut data = vec![stored_data(shared, payload_size)?];
+        let mut data = vec![stored_data(shared, payload_size, index.version)?];
         for rank in verified {
             let group = &envelope.ranks[rank];
             authenticate(4, group, format!("rank {rank}"))?;
@@ -383,12 +498,14 @@ impl Protection {
                 false,
                 payload_size,
             )?;
-            data.push(stored_data(stored, payload_size)?);
+            data.push(stored_data(stored, payload_size, index.version)?);
             index.ranks.push(bundle);
         }
         let protection = Self {
             publisher,
             official_source: metadata.official_source,
+            license,
+            accepted: None,
             package_id: envelope.package_id,
             resources,
             data,
@@ -410,20 +527,23 @@ impl Protection {
     }
     /// Payload ranges of the stored data that serving the bundle at `position` reads: what every
     /// rank shares, then that rank's.
-    pub fn stored_ranges(&self, position: usize) -> Vec<(u64, u64)> {
+    pub fn stored_ranges(&self, position: usize) -> Vec<wire::Span> {
         [&self.data[0], &self.data[position + 1]]
             .into_iter()
-            .map(|range| (range.offset, range.nbytes))
+            .flat_map(|range| range.parts.iter().cloned())
             .collect()
     }
     fn validate_membership(&self, index: &wire::ModelIndex, payload_size: u64) -> Result<()> {
-        let ranges: Vec<&wire::StoredData> =
-            self.data.iter().filter(|range| range.nbytes > 0).collect();
-        // Each stored allocation or table lies in its own part's signed range.
+        let ranges: Vec<&wire::Span> = self.data.iter().flat_map(|range| &range.parts).collect();
         let within = |range: &wire::StoredData, span: &wire::Span| -> Result<()> {
-            if span.offset < range.offset
-                || span.offset.saturating_add(span.nbytes) > range.offset + range.nbytes
-            {
+            if !range.parts.iter().any(|part| {
+                span.filename == part.filename
+                    && span.offset >= part.offset
+                    && span
+                        .offset
+                        .checked_add(span.nbytes)
+                        .is_some_and(|end| end <= part.offset + part.nbytes)
+            }) {
                 return Err(invalid("stored allocation outside its data range"));
             }
             Ok(())
@@ -451,6 +571,13 @@ impl Protection {
                 add(&graph.resource, 2)?;
             }
             for allocation in &rank.allocations {
+                if allocation
+                    .data_spans
+                    .iter()
+                    .any(|span| !span.filename.is_empty())
+                {
+                    return Err(invalid("allocation destination spans cannot name a file"));
+                }
                 if let Some(file) = &allocation.file {
                     add(file, 4)?;
                 }
@@ -490,18 +617,35 @@ impl Protection {
                 }
             }
         }
-        spans.sort_by_key(|(_, s)| s.offset);
+        spans.sort_by_key(|(_, s)| (&s.filename, s.offset));
         let mut end = 0;
         let mut protected = 0;
+        let mut filename = "";
+        let mut primary_end = 0;
         for (kind, span) in spans {
+            if span.filename != filename {
+                end = 0;
+                filename = &span.filename;
+            }
+            if !span.filename.is_empty() {
+                super::archive::validate_filename(&span.filename)?;
+                if index.version != 5 || kind != 4 {
+                    return Err(invalid(
+                        "only stored data in model index 5 may reference a companion",
+                    ));
+                }
+            }
             if span.nbytes == 0 || span.offset < end {
                 return Err(invalid("empty or overlapping package resources"));
             }
             end = span
                 .offset
                 .checked_add(span.nbytes)
-                .filter(|n| *n <= payload_size)
+                .filter(|n| !span.filename.is_empty() || *n <= payload_size)
                 .ok_or_else(|| invalid("resource exceeds package"))?;
+            if span.filename.is_empty() {
+                primary_end = end;
+            }
             if kind != 4 {
                 let (encrypted, entry) = self
                     .resources
@@ -510,10 +654,11 @@ impl Protection {
                 if *encrypted != (kind == 2) || entry.stored_bytes != span.nbytes {
                     return Err(invalid("resource signature classification mismatch"));
                 }
-                if ranges
-                    .iter()
-                    .any(|range| span.offset < range.offset + range.nbytes && range.offset < end)
-                {
+                if ranges.iter().any(|range| {
+                    range.filename == span.filename
+                        && span.offset < range.offset + range.nbytes
+                        && range.offset < end
+                }) {
                     return Err(invalid(
                         "executable or supporting resource inside stored data",
                     ));
@@ -522,30 +667,38 @@ impl Protection {
             }
         }
         let mut ordered = ranges.clone();
-        ordered.sort_by_key(|range| range.offset);
-        if ordered
-            .windows(2)
-            .any(|pair| pair[1].offset < pair[0].offset + pair[0].nbytes)
-        {
+        ordered.sort_by_key(|range| (&range.filename, range.offset));
+        if ordered.windows(2).any(|pair| {
+            pair[1].filename == pair[0].filename && pair[1].offset < pair[0].offset + pair[0].nbytes
+        }) {
             return Err(invalid("overlapping stored-data ranges"));
         }
         // A host verifying one rank cannot see the others' resources, which complete the payload.
-        if protected != self.resources.len() || (self.rank.is_none() && end != payload_size) {
+        if protected != self.resources.len() || (self.rank.is_none() && primary_end != payload_size)
+        {
             return Err(invalid("unreferenced package resources"));
         }
         Ok(())
     }
-    fn verify_data(&self, file: &File, start: u64) -> Result<()> {
+    pub fn data_parts(&self) -> impl Iterator<Item = &wire::Span> {
+        self.data.iter().flat_map(|data| &data.parts)
+    }
+    fn verify_data(&self, archive: &Archive) -> Result<()> {
         let mut block = vec![0; CHUNK];
         for range in &self.data {
             let mut hash = digest::Context::new(&digest::SHA256);
-            let mut pos = 0;
-            while pos < range.nbytes {
-                let count = block.len().min((range.nbytes - pos) as usize);
-                file.read_exact_at(&mut block[..count], start + range.offset + pos)
-                    .map_err(|e| e.to_string())?;
-                hash.update(&block[..count]);
-                pos += count as u64;
+            for part in &range.parts {
+                let source = archive.source(part)?;
+                let mut pos = 0;
+                while pos < part.nbytes {
+                    let count = (part.nbytes - pos).min(block.len() as u64) as usize;
+                    source
+                        .file
+                        .read_exact_at(&mut block[..count], source.start + part.offset + pos)
+                        .map_err(|e| e.to_string())?;
+                    hash.update(&block[..count]);
+                    pos += count as u64;
+                }
             }
             if hash.finish().as_ref() != range.sha256 {
                 return Err(invalid("stored-data content verification failed"));
@@ -558,16 +711,20 @@ impl Protection {
             .resources
             .get(&span.offset)
             .ok_or_else(|| invalid("resource lacks publisher authentication"))?;
-        if span.nbytes != entry.stored_bytes {
+        if !span.filename.is_empty() || span.nbytes != entry.stored_bytes {
             return Err(invalid("resource length mismatch"));
         }
+        let accepted = self
+            .accepted
+            .as_deref()
+            .ok_or_else(|| invalid("publisher acceptance required before resource access"))?;
         let key = encrypted
             .then(|| {
                 resource_key(
                     &self.publisher.public_key,
                     &self.package_id,
                     entry.offset,
-                    &self.publisher.namespace,
+                    accepted,
                 )
             })
             .transpose()?;
@@ -663,5 +820,32 @@ impl Read for ResourceReader {
         output[..n].copy_from_slice(&self.buffer[self.position..self.position + n]);
         self.position += n;
         Ok(n)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serialized_primary_spans_and_stored_ranges_keep_their_legacy_meaning() {
+        let span = wire::Span::decode(&b"\x08\x09\x10\x07"[..]).unwrap();
+        assert_eq!(
+            (span.offset, span.nbytes, span.filename.as_str()),
+            (9, 7, "")
+        );
+        let mut bytes = vec![8, 7, 18, 32];
+        bytes.extend([0; 32]);
+        bytes.extend([24, 9]);
+        let data = wire::StoredData::decode(bytes.as_slice()).unwrap();
+        assert!(data.parts.is_empty());
+        let normalized = stored_data(data.clone(), 16, 4).unwrap();
+        assert_eq!(normalized.parts, vec![span]);
+        assert!(stored_data(data, 15, 4).is_err());
+        let empty = wire::StoredData {
+            sha256: sha256(&[]).to_vec(),
+            ..Default::default()
+        };
+        assert!(stored_data(empty, 0, 4).unwrap().parts.is_empty());
     }
 }

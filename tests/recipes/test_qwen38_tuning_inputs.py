@@ -243,49 +243,25 @@ def test_gdn_candidate_cohort_shares_fixture_and_reserved_scratch_with_per_trial
     assert sum(value is operands for value in resource_cache.values()) == 1
 
 
-def test_moe_benchmark_covers_shared_routes_without_mutating_serving_operands():
-    source = torch.zeros(4, 32, dtype=torch.bfloat16)
-    fixture = ExpertBenchmarkInputs(source, experts=512, top_k=10, allocate_router=RouterScratch.allocate)
-    assert len(fixture.producers) == 5
-    distinct_counts = []
-    for produce in fixture.producers:
+@pytest.mark.parametrize("tokens", [1, 4, 16, 128])
+@pytest.mark.parametrize("scaling_factor", [1.0, 2.5])
+def test_moe_benchmark_uses_shared_b12x_routes_without_mutating_serving_operands(tokens, scaling_factor):
+    from b12x.moe.fused_moe.workloads import make_tuning_routes
+
+    source = torch.zeros(tokens, 32, dtype=torch.bfloat16)
+    plan = SimpleNamespace(query=SimpleNamespace(routed_scaling_factor=scaling_factor))
+    fixture = ExpertBenchmarkInputs(source, experts=512, top_k=10,
+        allocate_router=RouterScratch.allocate, router_plan=plan)
+    expected = make_tuning_routes(tokens, 10, 512, device="cpu")
+    expected_weights = torch.softmax(torch.arange(10, dtype=torch.float32) / 8, -1).bfloat16().float() * scaling_factor
+    assert len(fixture.producers) == len(expected) == 6
+    for produce, routes in zip(fixture.producers, expected, strict=True):
         produce()
         ids = fixture.router.ids
+        assert torch.equal(ids, routes)
         assert bool(((ids >= 0) & (ids < 512)).all())
         assert all(row.unique().numel() == 10 for row in ids)
         assert torch.count_nonzero(fixture.source) > 0
-        assert torch.equal(fixture.router.weights, fixture.router.weights.bfloat16().float())
-        distinct_counts.append(ids.unique().numel())
-    assert len(set(distinct_counts)) >= 3
+        assert torch.equal(fixture.router.weights, expected_weights.expand_as(fixture.router.weights))
     assert not source.count_nonzero()
     assert fixture.source.data_ptr() != source.data_ptr()
-
-
-def test_prefill_benchmark_reuses_prepared_router_without_nested_preparation(monkeypatch):
-    from ignition.recipes.qwen38 import moe
-
-    source = torch.zeros(16, 32, dtype=torch.bfloat16)
-    weight = torch.randn(512, 32, generator=torch.Generator().manual_seed(17)).bfloat16()
-    plan, calls = SimpleNamespace(query=SimpleNamespace(logits_dtype="bfloat16", routed_scaling_factor=1.0)), []
-
-    def route(selected_plan, logits, selected, ids, weights):
-        assert selected_plan is plan
-        calls.append(logits)
-        values, indices = logits.float().topk(10, -1)
-        selected.copy_(values)
-        ids.copy_(indices)
-        weights.copy_(values.softmax(-1))
-
-    monkeypatch.setattr(moe.fused_moe, "route_topk", route)
-    with pytest.raises(ValueError, match="already-prepared"):
-        ExpertBenchmarkInputs(source, experts=512, top_k=10, allocate_router=RouterScratch.allocate, router_weight=weight)
-    fixture = ExpertBenchmarkInputs(source, experts=512, top_k=10, allocate_router=RouterScratch.allocate, router_weight=weight, router_plan=plan)
-    assert len(fixture.producers) == 3
-    fixture.producers[1]()
-    independent = fixture.router.ids.clone()
-    fixture.producers[2]()
-    assert torch.equal(fixture.router.ids, fixture.router.ids[:1].expand_as(fixture.router.ids))
-    assert not torch.equal(independent, fixture.router.ids)
-    assert torch.equal(fixture.source, fixture.source[:1].expand_as(fixture.source))
-    assert not source.count_nonzero()
-    assert calls == [fixture.logits, fixture.logits]

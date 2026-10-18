@@ -89,6 +89,7 @@ impl PreparedTables {
                     );
                 }
                 planes.push(Plane {
+                    file: 0,
                     offset: plane.offset,
                     nbytes: plane.nbytes,
                     row_bytes: plane.row_bytes,

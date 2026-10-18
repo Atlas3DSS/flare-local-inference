@@ -159,6 +159,34 @@ def test_resized_checkpoint_storage_invalidates_numeric_metadata():
 
 @pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
                     reason="explicit CUDA assignment required")
+def test_triton_launch_metadata_distinguishes_scalar_values_from_pointers():
+    import triton
+    import triton.language as tl
+    from cuda.bindings import driver as cu
+    from ignition.preparation.tensor_metadata import _triton_parameters
+
+    @triton.jit
+    def scale_values(source, output, count, factor, BLOCK: tl.constexpr):
+        indices = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+        values = tl.load(source + indices, indices < count, other=0)
+        tl.store(output + indices, values * factor, indices < count)
+
+    source = torch.arange(513, dtype=torch.float32, device="cuda")
+    output = torch.empty_like(source)
+    kernel = scale_values[(triton.cdiv(source.numel(), 128),)](
+        source, output, source.numel(), 2.5, 128)
+    torch.testing.assert_close(output, source * 2.5, rtol=0, atol=0)
+    layout = _triton_parameters(kernel)
+    assert layout == ((8, False), (8, False), (4, True), (4, True),
+                      (8, False), (8, False))
+    for index, (size, _) in enumerate(layout):
+        status, _, actual_size = cu.cuFuncGetParamInfo(cu.CUfunction(kernel.function), index)
+        assert status == cu.CUresult.CUDA_SUCCESS
+        assert actual_size == size
+
+
+@pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
+                    reason="explicit CUDA assignment required")
 def test_metadata_skips_uninitialized_cache_and_deduplicates_live_views(monkeypatch):
     import ignition.preparation.tensor_metadata as metadata
 

@@ -81,6 +81,7 @@ impl Drop for Staging<'_> {
 }
 
 struct Chunk {
+    file: Arc<File>,
     file_offset: u64,
     destination: u64,
     nbytes: usize,
@@ -129,11 +130,15 @@ pub(super) unsafe fn load(
         let Some(file) = &allocation.file else {
             continue;
         };
-        let mut file_offset = archive.start + archive.span(package, file)?.offset;
+        let span = archive.span(package, file)?;
+        let source = archive.source(span)?;
+        let file = source.direct()?;
+        let mut file_offset = source.start + span.offset;
         for [offset, nbytes] in allocation.spans() {
             for start in (0..nbytes).step_by(chunk_bytes) {
                 let nbytes = chunk_bytes.min(nbytes - start);
                 chunks.push(Chunk {
+                    file: file.clone(),
                     file_offset,
                     destination: owner.allocations[&allocation.name].address
                         + (offset + start) as u64,
@@ -153,8 +158,6 @@ pub(super) unsafe fn load(
         .map(|chunk| chunk.read_range().2)
         .max()
         .unwrap();
-    let file = crate::os::direct_reopen(&archive.file)
-        .map_err(|e| invalid(format!("open model payload for direct I/O: {e}")))?;
     // SAFETY: The owning context is current throughout loading and cleanup.
     let staging = unsafe { Staging::new(&owner.driver, count, chunk_size)? };
     let buffers: Vec<_> = staging
@@ -167,7 +170,6 @@ pub(super) unsafe fn load(
         let available = Arc::new(Mutex::new(available));
         let (ready, finished) = mpsc::sync_channel(count);
         for index in 0..READERS.min(count) {
-            let file = &file;
             let (available, chunks, buffers, ready) =
                 (available.clone(), &chunks, &buffers, ready.clone());
             thread::Builder::new()
@@ -186,7 +188,7 @@ pub(super) unsafe fn load(
                             let destination = unsafe {
                                 std::slice::from_raw_parts_mut(buffers[slot] as *mut u8, nbytes)
                             };
-                            let bytes = chunk.read(file, destination).map_err(|error| {
+                            let bytes = chunk.read(&chunk.file, destination).map_err(|error| {
                                 invalid(format!(
                                     "read {} at {}: {error}",
                                     archive.path.display(),
@@ -302,6 +304,7 @@ mod tests {
             file.seek(SeekFrom::Start(offset)).unwrap();
             file.write_all(&payload).unwrap();
             let chunk = Chunk {
+                file: Arc::new(reader.try_clone().unwrap()),
                 file_offset: offset,
                 destination: 0,
                 nbytes: payload.len(),

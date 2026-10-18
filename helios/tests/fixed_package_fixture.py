@@ -73,7 +73,7 @@ __global__ void no_arguments() {}
     return module, function, empty
 
 
-def prepare(root):
+def prepare(root, shard_size=64 << 30):
     with ModuleImages() as images:
         torch.cuda.set_device(0)
         with PackageStorage() as storage:
@@ -149,7 +149,7 @@ def prepare(root):
             assert any(start <= freed_address < end for start, end in storage.unused_ranges())
             graph_segments = storage.graph_pool.snapshot(include_traces=False)
             assert graph_segments
-    package = export_model(prepared, images, storage, root / "package", options={}, publisher=publisher())
+    package = export_model(prepared, images, storage, root / "package", options={}, publisher=publisher(), shard_size=shard_size)
     assert not any(a.address <= unused_address < a.address + a.nbytes for a in package.allocations)
     assert not any(a.address <= freed_address < a.address + a.nbytes for a in package.allocations)
     assert any(a.address == segment["address"] for a in package.allocations for segment in graph_segments)
@@ -173,8 +173,13 @@ def prepare(root):
 
 
 if __name__ == "__main__":
-    root = Path(sys.argv[1])
-    root.mkdir(parents=True, exist_ok=True)
-    prepare(root)
-    if len(sys.argv) == 3:
-        os.execv(sys.argv[2], [sys.argv[2], str(root)])
+    import argparse
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("directory", type=Path)
+    parser.add_argument("executable", nargs="?")
+    parser.add_argument("--shard-size", type=int, default=64 << 30)
+    args = parser.parse_args()
+    args.directory.mkdir(parents=True, exist_ok=True)
+    prepare(args.directory, args.shard_size)
+    if args.executable:
+        os.execv(args.executable, [args.executable, str(args.directory)])

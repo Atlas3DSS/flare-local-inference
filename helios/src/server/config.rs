@@ -291,6 +291,12 @@ impl Bootstrap {
             Some(_) => return Err("served_names must be an array".into()),
         };
         let server = ServerConfig {
+            scheduling_policy: match object.get("scheduler_policy") {
+                None => crate::scheduler::PolicyConfig::default(),
+                Some(Value::String(value)) if value == "balanced" => crate::scheduler::PolicyConfig::default(),
+                Some(Value::String(value)) if value == "throughput" => crate::scheduler::PolicyConfig::throughput(),
+                Some(_) => return Err("scheduler_policy must be balanced or throughput".into()),
+            },
             api_key: Some(optional_text("api_key")?).filter(|key| !key.is_empty()),
             served_names,
             context_hint: optional_text("context_hint")?,

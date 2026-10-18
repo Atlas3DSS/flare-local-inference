@@ -162,7 +162,7 @@ def test_forward_cache_load_requests_its_compile_time_contract(tmp_path, monkeyp
         observed.append(_FREEZE_TUNING.get())
         return SimpleNamespace(guard_check=lambda bound: bound is owner)
     monkeypatch.setattr(torch.compiler, "load_compiled_function", load)
-    monkeypatch.setattr("ignition.preparation.aot.release_unused", lambda: None)
+    monkeypatch.setattr("ignition.preparation.aot.release_unused", lambda **_: None)
     cache = ForwardCache.__new__(ForwardCache)
     cache.device = torch.device("cuda", 0)
     for frozen in (False, True):

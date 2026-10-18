@@ -7,20 +7,24 @@ from pathlib import Path
 from signing import publisher
 
 
-def prepare(root):
+def prepare(root, shard_size=64 << 30):
     import torch
     from ignition.preparation.module_images import ModuleImages
 
     torch.cuda.set_device(0)
     with ModuleImages() as images:
-        _prepare(root, images)
+        _prepare(root, images, shard_size)
 
 
-def _prepare(root, images):
+def _prepare(root, images, shard_size):
     import torch
     import cutlass
     from cuda.bindings import driver as cuda
-    from b12x._lib.dense_gemm import _DenseGemmPolicy, _get_compiled_dense_gemm
+    try:
+        from b12x._lib.dense_gemm import _DenseGemmPolicy, _get_compiled_dense_gemm
+    except ImportError:
+        from b12x._lib.dense_gemm.config import _DenseGemmPolicy
+        from b12x._lib.dense_gemm.compile import _get_compiled_dense_gemm
     from ignition.preparation.runtime_package import Allocation, Argument, Kernel, Reference, Relocation, RuntimePackage
 
     torch.cuda.set_device(0)
@@ -126,7 +130,7 @@ def _prepare(root, images):
                              kernels=[Kernel(function, "dense", tuple(arguments)),
                                       Kernel(int(fill.func), "fill", fill_arguments)],
                              owners=(gemm, tensors))
-    package.write(root / "package", graphs, publisher=publisher())
+    package.write(root / "package", graphs, publisher=publisher(), shard_size=shard_size)
     tensors["input"].copy_((tensors["input"].float() * 0.25 + 0.5).to(torch.float8_e4m3fn))
     (root / "modified-input.bin").write_bytes(tensors["input"].view(torch.uint8).cpu().numpy().tobytes())
     for rows in (32, 64):
@@ -146,6 +150,7 @@ def _prepare(root, images):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("directory", type=Path)
+    parser.add_argument("--shard-size", type=int, default=64 << 30)
     args = parser.parse_args()
     args.directory.mkdir(parents=True, exist_ok=True)
-    prepare(args.directory)
+    prepare(args.directory, args.shard_size)

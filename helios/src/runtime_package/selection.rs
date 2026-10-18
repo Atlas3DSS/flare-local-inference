@@ -242,7 +242,8 @@ impl LoadOptions {
                         .is_none_or(|value| value == enabled)
                     && (graph.kind != "decode" || !enabled)
                     && (graph.kind != "proposal" || (enabled
-                        && graph.draft_tokens == Some(drafts as u32)))
+                        && graph.draft_tokens.is_some_and(|n| n as usize <= drafts
+                            && (fixed.is_none() || n as usize == drafts))))
                     && (graph.kind != "verification" || (enabled
                         && widths.contains(&(graph.token_capacity as usize))
                         && (graph.token_capacity == 1 || fixed.is_none_or(|w| graph.token_capacity == w as u64))))
@@ -1142,8 +1143,8 @@ mod tests {
                             .select(std::slice::from_mut(&mut p), &mut c).unwrap();
                         let graphs = &p.execution.as_ref().unwrap().graphs;
                         let proposals: Vec<_> = graphs.iter().filter(|g| g.kind == "proposal").collect();
-                        assert_eq!(proposals.len(), if depth == 0 { 0 } else { active.next_power_of_two().ilog2() as usize + 1 });
-                        assert!(proposals.iter().all(|g| g.draft_tokens == Some(depth as u32) && g.verify_tokens.is_none()));
+                        assert_eq!(proposals.len(), if depth == 0 { 0 } else { (active.next_power_of_two().ilog2() as usize + 1) * if adaptive { depth } else { 1 } });
+                        assert!(proposals.iter().all(|g| g.draft_tokens.is_some_and(|n| n > 0 && n as usize <= depth && (adaptive || n as usize == depth)) && g.verify_tokens.is_none()));
                         for b in BATCH_CAPACITIES.into_iter().filter(|b| *b <= active.next_power_of_two()) {
                             for w in 1..=8 {
                                 let present = graphs.iter().any(|g| g.kind == "verification" && g.batch_capacity == b as u64 && g.token_capacity == w as u64);
@@ -1171,6 +1172,19 @@ mod tests {
         p.execution.as_mut().unwrap().graphs.iter_mut().find(|g| g.kind == "verification").unwrap().draft_tokens = Some(7);
         let mut c = serde_json::json!({"speculative_widths": [1,2,3,4,5,6,7,8], "speculative_token_capacity": 8});
         assert!(LoadOptions::default().select(&mut [p], &mut c).is_err());
+    }
+
+    #[test]
+    fn packages_with_only_the_maximum_proposal_depth_remain_loadable() {
+        let mut p = split_package(4, 8);
+        p.execution.as_mut().unwrap().graphs.retain(|g| g.kind != "proposal" || g.token_capacity == 8);
+        let names: HashSet<_> = p.execution.as_ref().unwrap().graphs.iter().map(|g| g.name.clone()).collect();
+        p.graphs.retain(|g| names.contains(&g.name));
+        let mut c = serde_json::json!({"speculative_widths": [1,2,3,4,5,6,7,8], "speculative_token_capacity": 8});
+        LoadOptions::default().select(std::slice::from_mut(&mut p), &mut c).unwrap();
+        let proposals: Vec<_> = p.execution.as_ref().unwrap().graphs.iter().filter(|g| g.kind == "proposal").collect();
+        assert_eq!(proposals.len(), 3);
+        assert!(proposals.iter().all(|g| g.token_capacity == 8));
     }
 
 }

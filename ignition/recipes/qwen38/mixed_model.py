@@ -74,6 +74,8 @@ class PreparedMixedRound:
                 self.prompt_inputs.live_rows, self.prompt_completion, frame, sequence,
                 sample_enabled=self.prompt_inputs.sample_enabled[:1], workspace=owner.sampling_workspace)
             self.prompt_sampler.prepare()
+            self.prompt_sampler.prepare_broadcast(runtime=owner.collectives["vocabulary_runtime"],
+                session=owner.session, coordinator=owner.collectives["coordinator"], name=name + ".prompt.sampling")
             return SimpleNamespace(scratch=decode_scratch, forward=self.decoder)
 
         if enabled:
@@ -100,6 +102,8 @@ class PreparedMixedRound:
                 self.decode_inputs.live_rows, self.decode_completion, owner.frame, owner.sequence,
                 sample_enabled=self.decode_inputs.sample_enabled[:batch], workspace=owner.sampling_workspace)
             self.decode_sampler.prepare()
+            self.decode_sampler.prepare_broadcast(runtime=owner.collectives["vocabulary_runtime"],
+                session=owner.session, coordinator=owner.collectives["coordinator"], name=name + ".decode.sampling")
 
     def __call__(self):
         o = self.owner

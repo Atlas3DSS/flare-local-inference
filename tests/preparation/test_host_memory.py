@@ -7,6 +7,32 @@ from ignition.preparation import host_memory
 from ignition.preparation.host_memory import worker_limit
 
 
+def test_loading_reclaims_promoted_cycles_when_host_headroom_is_low(monkeypatch):
+    import gc
+    import weakref
+
+    class Owner:
+        pass
+
+    enabled = gc.isenabled()
+    gc.disable()
+    try:
+        owner = Owner()
+        owner.cycle = owner
+        observer = weakref.ref(owner)
+        gc.collect(0)
+        del owner
+        monkeypatch.setattr(host_memory, "available_bytes", lambda: 2 * host_memory._HEADROOM_BYTES)
+        host_memory.release_unused(generation=0)
+        assert observer() is not None
+        monkeypatch.setattr(host_memory, "available_bytes", lambda: host_memory._HEADROOM_BYTES - 1)
+        host_memory.release_unused(generation=0)
+        assert observer() is None
+    finally:
+        if enabled:
+            gc.enable()
+
+
 def test_cpu_worker_budget_uses_affinity_and_is_shared_by_local_ranks(monkeypatch):
     monkeypatch.setattr(host_memory, "os", SimpleNamespace(sched_getaffinity=lambda _: set(range(48))))
     assert host_memory.cpu_workers() == 48

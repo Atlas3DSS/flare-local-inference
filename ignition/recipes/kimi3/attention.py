@@ -14,18 +14,18 @@ from b12x.attention import dense_mla
 
 from ignition.components.collectives import PreparedAllGather, PreparedChunkedAllGather, PreparedLseReduceScatter
 from ignition.components.dense_mla import PreparedDenseMLA
-from ignition.components.linear import UnquantizedProjection
 
 from .config import PAGE_TOKENS
 from .dcp import RECORD_BYTES, ContextShards, pull_context, write_records
 from .pointwise import rms_norm_columns, sigmoid_gate
+from .projections import prepare_projection
 
 FP8 = torch.float8_e4m3fn
 
 
 class PreparedMLA:
     def __init__(self, weights, source, metadata, cache, *, mode, session, name, workspace, buffers, latents=None,
-                 coordinator=None, context=None, peers=None):
+                 coordinator=None, context=None, peers=None, allocator=None):
         tokens, hidden = source.shape
         heads = weights["key"].shape[0]
         device = source.device
@@ -34,8 +34,10 @@ class PreparedMLA:
             # Graphs share each buffer at its declared capacity, else their own rows; a larger graph replaces
             # it and earlier graphs keep their bindings.
             if key not in buffers or buffers[key].shape[0] < tokens:
-                buffers[key] = torch.zeros((max(rows or tokens, tokens), *shape),
-                                           dtype=source.dtype if dtype is None else dtype, device=device)
+                shape = (max(rows or tokens, tokens), *shape)
+                dtype = source.dtype if dtype is None else dtype
+                buffers[key] = (torch.zeros(shape, dtype=dtype, device=device) if allocator is None
+                                else allocator.zeros(shape, dtype))
             return buffers[key][:tokens]
 
         latent_width = weights["query_norm"].shape[0] + RECORD_BYTES
@@ -50,14 +52,16 @@ class PreparedMLA:
         # latents, as vLLM's VLLM_KIMI_SHARD_QKV_A does: every rank keeps and reads a sixteenth of the latent
         # projection. A single rank (``latents`` None) projects every latent row itself.
         self.latent_gather = None
+        local_width = (weights["latent_gate"].shape[0] if isinstance(weights["latent_gate"], torch.Tensor)
+                       else weights["latent_gate"].out_features)
         if latents is None:
-            self.local = buffer("local", weights["latent_gate"].shape[0])
+            self.local = buffer("local", local_width)
             self.input = self.local[:, :latent_width]
             self.gate = self.local[:, latent_width:]
         else:
             rows, width = latents.max_batch_size, latents.query_head_dim
             self.input = buffer("input", latent_width)
-            self.local = buffer("local", weights["latent_gate"].shape[0], rows=rows)
+            self.local = buffer("local", local_width, rows=rows)
             self.gate = self.local[:, width:]
             # The exchange reads contiguous rows, which a single row's latent columns already are.
             self.staged = tokens > 1
@@ -65,7 +69,8 @@ class PreparedMLA:
             self.gathered_latents = buffer("gathered_latents", latents.world_size * width, rows=rows)
             self.latent_gather = PreparedChunkedAllGather(self.send, self.gathered_latents, runtime=latents,
                 session=session, coordinator=coordinator, name=name + ".gather_latents")
-        self.projections = {key: UnquantizedProjection(x, weights[key], y, session=session, name=name + "." + key)
+        self.projections = {key: prepare_projection(x, weights[key], y, session=session,
+            name=name + "." + key, workspace=workspace)
             for key, x, y in (("latent_gate", source, self.local), ("q_b", self.query_norm, self.query.view(tokens, -1)),
                              ("output", self.expanded, buffer("output", hidden)))}
         self.shards = ContextShards() if context is None else context.shards

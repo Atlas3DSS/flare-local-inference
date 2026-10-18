@@ -64,7 +64,7 @@ fn disk_cached_and_resident_tables_feed_native_b12x_graphs() {
         archive.validate(&package).unwrap();
         let tables = super::engram::decode(
             index.engram.unwrap(),
-            archive.start,
+            &archive,
             std::slice::from_ref(&package),
         )
         .unwrap();
@@ -82,16 +82,22 @@ fn disk_cached_and_resident_tables_feed_native_b12x_graphs() {
             "helios-engram-truncated-{}.safetensors",
             std::process::id()
         ));
+        let mut sources = archive
+            .files
+            .values()
+            .map(|file| file.direct().unwrap())
+            .collect::<Vec<_>>();
         if fail_read {
-            std::fs::copy(&archive.path, &failed_source).unwrap();
+            let file = tables.tables[0].planes[0].file;
+            let name = archive.files.keys().nth(file).unwrap();
+            let source = root.join(if name.is_empty() { "package" } else { name });
+            std::fs::copy(source, &failed_source).unwrap();
+            sources[file] =
+                std::sync::Arc::new(crate::os::direct_file(&failed_source, false).unwrap());
         }
         let shared = Shared::new(
             tables,
-            &if fail_read {
-                std::fs::File::open(&failed_source).unwrap()
-            } else {
-                archive.file.try_clone().unwrap()
-            },
+            &sources,
             1,
             4,
             owner.context as usize,

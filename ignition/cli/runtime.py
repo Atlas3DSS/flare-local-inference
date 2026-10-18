@@ -59,10 +59,11 @@ def package_key(model, plan, no_compile):
 
 
 @contextmanager
-def cached_package(configuration, model, plan, no_compile, publisher):
+def cached_package(configuration, model, plan, no_compile, publisher, shard_size=None):
+    shard_size = configuration.shard_size() if shard_size is None else shard_size
     root = configuration.directory("package_cache")
     root.mkdir(parents=True, exist_ok=True)
     key = hashlib.sha256((package_key(model, plan, no_compile) + publisher.fingerprint.hex()
-                          + publisher.namespace + publisher.official_source).encode()).hexdigest()
+                          + publisher.namespace + publisher.official_source + f":shard-size={shard_size}").encode()).hexdigest()
     with FileLock(root / f"{key}.lock"):
         yield root / f"{key}.safetensors"

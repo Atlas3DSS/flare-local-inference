@@ -70,7 +70,7 @@ class PreparationConfig:
     speculative_widths: tuple[int, ...] = tuple(range(1, 9))
     speculative_fixed_width: int | None = None
     speculative_token_capacity: int | None = None
-    # Store KDA input projections, and DSpark's draft projections, as MXFP8 instead of the checkpoint's BF16.
+    # Store eligible attention, shared-expert, latent MoE, and DSpark projections as MXFP8.
     online_mxfp8: bool = False
     # Shared experts overlap routing and routed experts on an auxiliary stream.
     stream_overlap: bool = True
@@ -109,6 +109,11 @@ class PreparationConfig:
     def page_tokens(self):
         """Global positions per KV page: PAGE_TOKENS local records on each rank that shares the context."""
         return PAGE_TOKENS * (len(self.devices) if self.context_parallel else 1)
+
+    @property
+    def preparation_pages(self):
+        """Back one prefill chunk and two boundary pages per request row."""
+        return -(-self.prefill_chunk_size // self.page_tokens) + 2 * request_capacity(self.max_active)
 
     @property
     def speculative_shapes(self):
@@ -157,7 +162,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
     draft_rows = slots * weights.config.draft.block_size if drafting and not config.dspark else 0
     max_tokens = max(config.prefill_chunk_size, config.decode_tokens, draft_rows)
     state_rows = slots + snapshots
-    pages = config.prefill_chunk_size // PAGE_TOKENS + 2 * slots
+    pages = config.preparation_pages
     total_memory = minimum_across_ranks(torch.cuda.mem_get_info(device)[1], group)
     with phase(progress, "Allocate model state"):
         pool = ContinuationPool.for_model(weights.config, shard.world_size, state_rows + 1, pages, device,
@@ -246,6 +251,11 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
             cursor = graph_buffers.cursor()
             shared_scratch = cursor.zeros((max(max(patches, default=0) * 3 * weights.config.vision["qkv_hidden_size"],
                 sum(rows * columns for rows, columns in text_shapes)),), torch.bfloat16)
+            if patches:
+                # Reserve the largest vision slabs before smaller text allocations share their chunks.
+                VisionScratch.allocate(max(patches), device, work=shared_scratch, buffers=cursor)
+                cursor = graph_buffers.cursor()
+                shared_scratch = cursor.zeros(shared_scratch.shape, torch.bfloat16)
             activation, total, kda_output, *views = scratch_views(shared_scratch, text_shapes)
             mla_output, moe_output, *auxiliary = views if separate else (kda_output, *views)
             prefill_storage = Scratch.allocate(config.prefill_chunk_size, 1, weights.config, shard.world_size, device,
@@ -275,7 +285,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
             sampling_grammar_mask=requests.grammar_mask, frame_index=frame,
             submission_sequence=sequence, completion_records=records)
     forwards, signatures, metadata = {}, {}, {}
-    decoder_buffers = DecoderStorage.allocate(weights.config, shard, device, scratch={
+    decoder_buffers = DecoderStorage.allocate(weights.config, shard, device, allocator=cursor, scratch={
         "total": total, "kda": {"output": kda_output},
         "mla": {"output": mla_output}, "moe": {"output": moe_output},
         **({"auxiliary": auxiliary[0]} if drafting else {})})
@@ -383,10 +393,6 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
 
     def materialize():
         scratch_pool.materialize()
-        if config.retain_graphs:
-            # In-process serving admits and snapshots into every declared row; native loading backs them itself.
-            package_storage.grow("STATE_ROWS", state_rows + 1)
-            pool.memory_capacity[0] = state_rows + 1
         if vision_inputs is not None:
             vision_inputs.vision_slot.fill_(-1)
         pool.clear_for_preparation()
@@ -442,7 +448,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                                                                   config.speculative_token_capacity),
             speculative_fixed_width=config.speculative_fixed_width)
         memory.update(speculative_shapes=config.speculative_shapes)
-    draft_disposable = [] if speculation is None else [speculation.draft_scratch, speculation.context_buffers,
+    draft_disposable = [] if speculation is None else [speculation.draft_scratch.scratch_tensors(), speculation.context_buffers,
         speculation.kda_records.corrections, speculation.kda_records.keys_and_gates]
     return PreparedModel(device=config.devices[rank], graphs=graphs, buffers=buffers, signatures=signatures,
         max_active=config.max_active, session=session, server_config=server_config, memory_report=memory,

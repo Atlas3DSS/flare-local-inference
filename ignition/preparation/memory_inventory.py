@@ -2,6 +2,7 @@
 
 from collections import defaultdict, deque
 from collections.abc import Mapping
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, fields, is_dataclass
 from functools import lru_cache
 import heapq
@@ -44,29 +45,44 @@ def owner_claims(prepared):
 
     Tensor claims cover elements rather than entire backing storages. Pool claims
     cover their full allocations, including unused chunk capacity. Object identity
-    bounds traversal; identical tensor views use their first owning field.
+    bounds traversal; overlapping tensor elements use their first owning field.
     """
     import torch
     from .scratch import GraphBufferPool, ScratchArena
 
-    pending = deque((value, f"resources[{index}]", "") for index, value in enumerate(prepared.resources))
-    pending.append((prepared.buffers, "buffers", ""))
-    seen, tensor_views, result = set(), set(), []
+    seen, covered, result = set(), [], []
+    pending = deque()
+
+    def enqueue(entries):
+        for value, path, source in entries:
+            if id(value) in seen or value is None or isinstance(value, (str, bytes, int, float, bool, type, ModuleType)):
+                continue
+            seen.add(id(value))
+            pending.append((value, path, source))
+
+    enqueue((value, f"resources[{index}]", "") for index, value in enumerate(prepared.resources))
+    enqueue(((prepared.buffers, "buffers", ""),))
     while pending:
         value, path, source = pending.popleft()
         if isinstance(value, torch.Tensor):
             if (value.device.type == "cuda" and value.device.index == prepared.device
                     and value.untyped_storage().device.type != "meta"):
-                view = (value.data_ptr(), tuple(value.shape), value.stride(), value.element_size())
-                if view in tensor_views:
+                if not value.numel():
                     continue
-                tensor_views.add(view)
-                result.extend(Claim(start, end, "", path, source, tensor=True)
-                              for start, end in tensor_ranges(value))
+                start = value.data_ptr()
+                end = start + value.element_size() * (1 + sum(
+                    (size - 1) * stride for size, stride in zip(value.shape, value.stride())))
+                previous = bisect_right(covered, start, key=lambda span: span[0]) - 1
+                if previous >= 0 and covered[previous][1] >= end:
+                    continue
+                for start, end in tensor_ranges(value):
+                    first = max(0, bisect_left(covered, start, key=lambda span: span[0]) - 1)
+                    stop = bisect_right(covered, end, key=lambda span: span[0])
+                    overlaps = covered[first:stop]
+                    result.extend(Claim(left, right, "", path, source, tensor=True)
+                                  for left, right in subtract_ranges([(start, end)], overlaps))
+                    covered[first:stop] = merge_ranges([*overlaps, (start, end)])
             continue
-        if id(value) in seen or value is None or isinstance(value, (str, bytes, int, float, bool, type, ModuleType)):
-            continue
-        seen.add(id(value))
         if isinstance(value, (ScratchArena, GraphBufferPool)):
             category = "Operator scratch" if isinstance(value, ScratchArena) else "Graph scratch pools"
             tensors = [value.tensor] if isinstance(value, ScratchArena) else [
@@ -77,22 +93,22 @@ def owner_claims(prepared):
             # Chunk tensors would hide the fields using their individual views.
             continue
         if isinstance(value, Mapping):
-            pending.extend((child, f"{path}[{key!r}]", source) for key, child in value.items())
+            enqueue((child, f"{path}[{key!r}]", source) for key, child in value.items())
         elif isinstance(value, (tuple, list)):
-            pending.extend((child, f"{path}[{index}]", source) for index, child in enumerate(value))
+            enqueue((child, f"{path}[{index}]", source) for index, child in enumerate(value))
         elif isinstance(value, MethodType):
-            pending.append((value.__self__, path, source))
+            enqueue(((value.__self__, path, source),))
         elif isinstance(value, FunctionType):
             source = f"{value.__code__.co_filename}:{value.__code__.co_firstlineno}"
-            pending.extend((child, f"{path}.defaults[{index}]", source)
-                           for index, child in enumerate(value.__defaults__ or ()))
-            pending.append((value.__kwdefaults__, f"{path}.defaults", source))
+            enqueue((child, f"{path}.defaults[{index}]", source)
+                    for index, child in enumerate(value.__defaults__ or ()))
+            enqueue(((value.__kwdefaults__, f"{path}.defaults", source),))
             for name, cell in zip(value.__code__.co_freevars, value.__closure__ or ()):
                 try:
                     child = cell.cell_contents
                 except ValueError:
                     continue
-                pending.append((child, f"{path}.{name}", source))
+                enqueue(((child, f"{path}.{name}", source),))
         else:
             cls = type(value)
             source = _source(cls) or source
@@ -101,7 +117,7 @@ def owner_claims(prepared):
                 children = ((f.name, getattr(value, f.name)) for f in fields(value))
             else:
                 children = vars(value).items() if hasattr(value, "__dict__") else ()
-            pending.extend((child, f"{path}.{name}", source) for name, child in children)
+            enqueue((child, f"{path}.{name}", source) for name, child in children)
     return result
 
 

@@ -9,6 +9,27 @@ use std::{
 };
 
 const TIMEOUT: Duration = Duration::from_secs(120);
+const HANDOFF_POLL: Duration = Duration::from_micros(500);
+
+// Prepare/commit and completion/prepare exchanges are brief. Poll that interval
+// before parking a rank, while retaining blocking waits for idle serving.
+fn receive<T>(receiver: &mpsc::Receiver<T>, timeout: Option<Duration>) -> std::result::Result<T, mpsc::RecvTimeoutError> {
+    let started = Instant::now();
+    let poll = timeout.map_or(HANDOFF_POLL, |limit| limit.min(HANDOFF_POLL));
+    loop {
+        match receiver.try_recv() {
+            Ok(value) => return Ok(value),
+            Err(mpsc::TryRecvError::Disconnected) => return Err(mpsc::RecvTimeoutError::Disconnected),
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
+        if started.elapsed() >= poll { break; }
+        std::hint::spin_loop();
+    }
+    match timeout {
+        Some(limit) => receiver.recv_timeout(limit.saturating_sub(started.elapsed())),
+        None => receiver.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected),
+    }
+}
 fn invalid(message: impl Into<String>) -> Error {
     Error::execution(ExecutionError::Worker, message)
 }
@@ -54,8 +75,7 @@ impl Peer {
             .map_err(|_| invalid("rank thread disconnected"))
     }
     fn receive(&self) -> Result<Reply> {
-        self.receiver
-            .recv_timeout(TIMEOUT)
+        receive(&self.receiver, Some(TIMEOUT))
             .map_err(|_| invalid("rank thread response deadline expired"))?
     }
 }
@@ -223,11 +243,14 @@ impl ThreadedExecutor {
         if let Some(error) = &self.poison {
             return Err(error.clone());
         }
-        let result = self.poll_ranks();
-        if let Err(error) = &result {
-            self.poison = Some(error.clone());
+        match self.poll_ranks() {
+            Ok(None) => Ok(None),
+            Ok(Some(completion)) => Ok(Some(completion)),
+            Err(error) => {
+                self.poison = Some(error.clone());
+                Err(error)
+            }
         }
-        result
     }
     fn poll_ranks(&mut self) -> Result<Option<FrameCompletion>> {
         let Some(started) = self.pending else {
@@ -237,7 +260,13 @@ impl ThreadedExecutor {
             return Err(invalid("tensor-parallel graph completion deadline expired"));
         }
         if self.completion.is_none() {
-            self.completion = self.local.poll()?;
+            // Inspect both tags before moving the large inline completion.
+            // Empty polls must not copy its inactive record storage.
+            match self.local.poll() {
+                Ok(None) => {}
+                Ok(Some(completion)) => self.completion = Some(completion),
+                Err(error) => return Err(error),
+            }
         }
         for peer in &mut self.peers {
             if peer.completion.is_some() {
@@ -257,7 +286,8 @@ impl ThreadedExecutor {
             super::parallel::agree(
                 self.completion.as_ref().unwrap(),
                 peer.completion.as_ref().unwrap(),
-            )?;
+            )
+            .map_err(|error| invalid(format!("rank {}: {error}", index + 1)))?;
             self.completion.as_mut().unwrap().timing.gpu_ns[index + 1] =
                 peer.completion.as_ref().unwrap().timing.gpu_ns[0];
             peer.completion = None;
@@ -326,7 +356,7 @@ fn rank_loop(
             .map_err(|_| invalid("rank coordinator disconnected"))
     };
     send(Reply::Ready)?;
-    while let Ok(command) = commands.recv() {
+    while let Ok(command) = receive(&commands, None) {
         match command {
             Command::Prepare(step) => {
                 let uploads = step.uploads();
@@ -336,7 +366,7 @@ fn rank_loop(
                     return Err(invalid("rank submission fence differs"));
                 }
                 send(Reply::Ready)?;
-                if !matches!(commands.recv_timeout(TIMEOUT), Ok(Command::Commit)) {
+                if !matches!(receive(&commands, Some(TIMEOUT)), Ok(Command::Commit)) {
                     return Err(invalid("rank commit missing after preparation"));
                 }
                 if executor.submit(step.graph, &uploads, step.grammar)? != Some(step.fence) {
@@ -344,9 +374,13 @@ fn rank_loop(
                 }
                 let started = Instant::now();
                 loop {
-                    if let Some(completion) = executor.poll()? {
-                        send(Reply::Complete(completion))?;
-                        break;
+                    match executor.poll() {
+                        Ok(None) => {}
+                        Ok(Some(completion)) => {
+                            send(Reply::Complete(completion))?;
+                            break;
+                        }
+                        Err(error) => return Err(error),
                     }
                     if started.elapsed() > TIMEOUT {
                         return Err(invalid("rank graph completion deadline expired"));
@@ -423,6 +457,29 @@ fn same_layout(a: &ExecutionManifest, b: &ExecutionManifest) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn handoff_receive_preserves_queued_messages_and_disconnects() {
+        let (sender, receiver) = mpsc::channel();
+        sender.send(7).unwrap();
+        sender.send(9).unwrap();
+        drop(sender);
+        assert_eq!(receive(&receiver, Some(Duration::ZERO)), Ok(7));
+        assert_eq!(receive(&receiver, None), Ok(9));
+        assert_eq!(receive(&receiver, None), Err(mpsc::RecvTimeoutError::Disconnected));
+    }
+
+    #[test]
+    fn handoff_receive_parks_for_late_messages_and_respects_deadlines() {
+        let (sender, receiver) = mpsc::channel();
+        assert_eq!(receive(&receiver, Some(Duration::ZERO)), Err(mpsc::RecvTimeoutError::Timeout));
+        let worker = thread::spawn(move || {
+            thread::sleep(HANDOFF_POLL * 4);
+            sender.send(17).unwrap();
+        });
+        assert_eq!(receive(&receiver, Some(Duration::from_secs(1))), Ok(17));
+        worker.join().unwrap();
+    }
     #[test]
     fn rank_layout_compares_bindings_but_not_cuda_addresses() {
         let root = super::super::tests::manifest();

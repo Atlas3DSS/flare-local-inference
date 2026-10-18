@@ -78,12 +78,13 @@ Flare banner on a terminal and reports model loading through Helios.
 
 `export` imports the `flare_heliopause` CPython extension in Ignition's process.
 Ignition performs weight loading, tuning, compilation, warmup, and capture. It writes compiled CUDA modules,
-allocation contents, graph descriptions, and frontend assets to one `.safetensors` file
-that must not exist, then exits without opening a listener. `run` caches the resulting package in
+allocation contents, graph descriptions, and frontend assets to a `.safetensors`
+primary and optional sibling data files. Every destination must be unused. It
+then exits without opening a listener. `run` caches the resulting package in
 `paths.package_cache` and replaces its Python process with the Rust `flare` executable. Cache keys
 include checkpoint identity, preparation settings, dependency versions, and
-preparation source contents, signing-key fingerprint, publisher namespace, and
-source URL. Qwen, GLM, and DeepSeek provide native package storage support.
+preparation source contents, signing-key fingerprint, publisher namespace,
+source URL, and the resolved shard size. Qwen, GLM, and DeepSeek provide native package storage support.
 Tensor-parallel packages contain one resource bundle per selected GPU and load
 in one process with one execution thread per rank. API keys are excluded from
 the package.
@@ -129,6 +130,7 @@ requires `--output FILE`, and excludes `--host` and `--port`.
 | `--kv-cache-limit concurrency\|context\|memory` | `run` only: pass the shared KV-pool ceiling to Flare without changing preparation | `memory` |
 | `--memory-limit LIMIT` | `run` only: pass an occupied size (`30G`), free reserve (`-30G`), or total-memory fraction (`0.8`) to Flare | Package serving reserve |
 | `--config PATH` | Configuration file | `~/.config/flare/config.toml` |
+| `--shard-size SIZE` | Soft file-size target for export/run; `0` keeps one file | `[publishing] shard_size`, else `64G` |
 | `--official-source URL` | Published repository URL under the configured publisher namespace | `[publishing] official_source` |
 | `--publisher-keys PATH` | Additional publisher profiles passed to Flare; repeatable, `run` only | Embedded keys plus the local development profile when applicable |
 | `--trust-store PATH` | Remembered execution trust passed to Flare; `run` only | `~/.config/flare/trust.toml` |
@@ -153,7 +155,7 @@ explicit flags take precedence.
 | `--compile-workers N` | CPU compiler process budget per host, divided among local preparation ranks and bounded by available RAM and device memory. Applies to b12x kernel compilation and complete-forward compilation. Overrides `[preparation] compile_workers`. | Automatic |
 | `--tuning-gpus LIST` | Local kernel-tuning GPUs. Start with the serving GPU list, then append complete replicas of that TP group on matching hardware. Serving TP size stays fixed. Command line only; cannot be combined with multi-host `--ranks`. | Serving GPUs |
 | `--no-compile` | Development only: capture graphs without compiling forwards. A recipe never sets it. | off |
-| `--online-mxfp8` | Store the recipe's eligible BF16 projections as MXFP8 while loading (Kimi K3: KDA inputs and DSpark draft outputs and MLPs), trading checkpoint precision for decode bandwidth. Recipes that name no such projections reject it. Selects a separate cached package. | Checkpoint precision |
+| `--online-mxfp8` | Store the recipe's eligible BF16 projections as MXFP8 while loading (Kimi K3: KDA projections, MLA latent/gate, query and output projections, shared experts, MoE latent down/up projections, and DSpark draft context, outputs and MLPs), trading checkpoint precision for decode bandwidth. MLA's batched key/value projections retain BF16. Recipes that name no such projections reject it. Selects a separate cached package. | Checkpoint precision |
 | `--language-model-only` | Prepare no vision encoder and serve text only, as vLLM's flag of the same name; requests with images are rejected and the encoder's weights, scratch, and graphs become KV pages. Recipes without a separable encoder reject it. Selects a separate cached package. | The recipe's image support |
 
 The speculation flags exist on the command line only. `--no-mtp` excludes the
@@ -261,11 +263,17 @@ token rows is prepared with:
 Proposal captures cover batches 1, 2, and 4 at each draft depth 1 through 7.
 Verification captures cover widths 1–8 at batch one, 1–4 at batch two, and 1–2
 at batch four. Native scheduling uses conditional confidence, measured costs,
-and shared fairness prices to finalize logical prefixes and group them into
+and shared fairness prices to choose proposal depth, finalize logical prefixes, and group them into
 verification calls. Proposal-free width-one graphs serve every batch bucket.
 See [retained proposals](scheduling-runtime-design.md#retained-proposals-and-confidence).
 
 ### 3.2 Native serving flags
+
+`flare run --scheduler-policy balanced` is the default and balances token
+throughput with output cadence. For throughput-oriented serving, use
+`flare run model.safetensors --gpus 0,1,2,3 --scheduler-policy throughput`.
+This preference retains token-service fairness and can produce longer gaps
+between larger output bursts. It uses the package's existing graphs.
 
 `flare run PACKAGE` loads an exported file without the Ignition configuration
 reader. `PACKAGE` can also be a Hugging Face repository ID with an optional
@@ -281,7 +289,7 @@ Help exits with status 0; usage errors go to stderr with status 2. Its options a
 
 | Flag | Meaning | Default |
 |---|---|---|
-| `--publisher-keys PATH` | Additional JSON verification profiles; importing a key does not approve execution | Embedded profiles |
+| `--publisher-keys PATH` | Additional JSON verification profiles; importing a key does not approve execution or verify identity | Embedded profiles and remembered keys |
 | `--dangerously-approve-key FINGERPRINT` | Explicitly approve this full lowercase SHA-256 key fingerprint; requires the matching publisher flag | Interactive first use or remembered trust |
 | `--dangerously-accept-publisher NAMESPACE` | Accept this exact publisher namespace; requires the matching key flag | Interactive first use or remembered trust |
 | `--trust-store PATH` | Persistent key/namespace acceptance file | `~/.config/flare/trust.toml` |
@@ -394,9 +402,12 @@ revision. GPU selection follows `CUDA_VISIBLE_DEVICES` for both commands.
 An explicit `--revision` overrides `@revision` and hardware detection. It accepts
 a branch, tag, or commit, and permits downloading on a machine without NVIDIA
 hardware. Online resolution obtains the revision's commit and downloads from
-that exact commit. If the revision contains exactly one `.safetensors` file,
-Flare selects it. Multiple files require `--filename`; Flare prints the available
-names. Hardware selection does not infer tensor-parallel size or graph capacities
+that exact commit. Flare excludes `*-data-NN-of-NN.safetensors` companions when
+selecting the primary; multiple primaries require `--filename`. Referenced
+companions download from the primary's directory at that same commit. Offline
+resolution requires every referenced file. Multi-file packages use regular
+hardlinks in the Hub cache's `flare-packages` directory so the loader can reject
+symlink companions; filesystems without hardlink support report an error. Hardware selection does not infer tensor-parallel size or graph capacities
 from filenames. The selected package must match the serving GPU count, topology,
 and capacities; the native loader validates its contract.
 
@@ -412,10 +423,10 @@ Both commands accept these download options:
 | Flag | Meaning | Default |
 |---|---|---|
 | `--revision REVISION` | Explicit Hub branch, tag, or commit | Detected `gb10` or `gb202` |
-| `--filename FILE` | Repository-relative prepared package filename | Sole `.safetensors` file |
+| `--filename FILE` | Repository-relative prepared package filename | Sole primary `.safetensors` file |
 | `--cache-dir PATH` | Hugging Face hub cache directory | `~/.cache/huggingface/hub` from the OS user account |
 | `--token-file PATH` | File containing a Hub token for gated or private repositories | No authentication |
-| `--offline` | Resolve only from cached refs and snapshots; make no network requests | Off |
+| `--offline` | Resolve only from cached refs and snapshots and skip the publisher identity check; make no network requests. Accepted with a local package path | Off |
 
 The native client uses Hugging Face's `refs`, `snapshots`, and `blobs` cache
 layout. Existing cached files can be reused without copying their weights.
@@ -441,8 +452,17 @@ official_source = "https://huggingface.co/local-inference-lab/foobar"
 The key must be an owner-only Ed25519 PKCS#8 PEM file. Encrypted keys prompt
 for their passphrase in an interactive terminal; unencrypted keys are also
 accepted. Runtime publisher profiles contain only the verification key.
-`--official-source` overrides the configured repository URL. A partial publishing
-configuration is an error and never falls back to local credentials.
+`--official-source` overrides the configured repository URL. Setting any signing
+identity field requires all three identity fields. `[publishing] shard_size` may
+be configured independently and does not select a production identity.
+
+`shard_size = "64G"` is the default soft target; export/run/sign accept
+`--shard-size SIZE` to override it, and `0` requests one file. An indivisible
+resource may exceed the target. `example.safetensors` keeps metadata, encrypted
+resources, and supporting assets; companions are named
+`example-data-01-of-02.safetensors` through `example-data-02-of-02.safetensors`.
+At most 99 companions are supported, and no resource crosses a file boundary.
+Move or upload the complete set together.
 
 `ignition keygen` creates an encrypted production key and public profile.
 `ignition key-password` changes the key's passphrase while preserving its identity.
@@ -450,7 +470,7 @@ configuration is an error and never falls back to local credentials.
 model preparation or GPU access. See [production signing](signing.md) for key
 custody, commands, and package promotion.
 
-With no publishing configuration, Ignition creates and reuses
+With no publishing identity configured, Ignition creates and reuses
 `development-signing-key.pem` beside its configuration file, with owner-only
 permissions. It also writes `development-publisher.json` containing the public
 verification profile. These packages use the explicit namespace and source
@@ -463,11 +483,33 @@ approval from the cached package's claimed publisher. An unrecognized key still
 prints its first-use warning; subsequent loads remember that exact pair. There
 is no unsigned runtime mode and no blanket approval for development keys.
 
-Publisher identity, key, source, and verification disclosures appear only on
-first acceptance of a signing-key fingerprint and publisher namespace. On a
-terminal, the banner animation finishes before those disclosures and the
+Publisher identity, key, source, license, and verification disclosures appear
+only on first acceptance of a signing-key fingerprint and publisher namespace.
+On a terminal, the banner animation finishes before those disclosures and the
 acceptance prompt. Remembered acceptance suppresses the disclosures, while
 every load still verifies signatures and executable resources.
+
+Every signing key is verified the same way. On every load that is not
+`--offline`, Flare fetches `publisher.json` from the root of the package's
+signed official source on huggingface.co, the profile `ignition keygen` writes.
+A file that lists the signing key under the package's namespace verifies the
+identity. A file that exists but omits the key rejects the package with no
+prompt and no override, remembered or not: the package was not signed by its
+claimed publisher, or the key was revoked by removing it from the file. When
+the file is absent, the repository is unreachable, or `--offline` is set, the
+identity is unverified unless an earlier load confirmed it; loading then needs
+the key from an embedded profile, `--publisher-keys`, or remembered acceptance,
+and the disclosure names the reason. Embedded profiles and `--publisher-keys`
+verify signatures only; they never confer a verified identity. Accepting a key
+remembers its verification key and how its identity was established, so later
+loads need no profile. A package downloaded from a repository other than its
+signed official source prints a warning naming both on every load.
+
+The disclosure names the model license the exporter recorded from the
+checkpoint's model card, with a link to the license text in the repository.
+Typing the publisher namespace agrees to the terms at that link and trusts the
+signing key; the typed string is the key material Helios derives executable
+decryption keys from, so acceptance is what decrypts the package's kernels.
 
 To load a locally exported package directly, supply its public profile:
 
@@ -480,7 +522,11 @@ First interactive use requires typing `local-development`. For unattended
 loading, supply both dangerous-approval flags with the exact fingerprint and
 namespace. `flare trust revoke FINGERPRINT --trust-store PATH` removes acceptance;
 omitting the path uses the default trust store. No official release key is
-required for independent preparation and signing.
+required for independent preparation and signing: a publisher is verified by
+the `publisher.json` at its official source, as [production signing](signing.md)
+describes. `ignition run` with a production key also passes the `publisher.json`
+beside the signing key when present, so a package loads for testing before the
+key is published.
 
 ### 3.3 Configuration file
 

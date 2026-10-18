@@ -42,7 +42,7 @@ pub fn start(
     options: &[String],
     token: &[u8],
     publisher: &flare_helios::runtime_package::Publisher,
-    shares: &[Vec<(u64, u64)>],
+    shares: &[Vec<flare_helios::runtime_package::PackageFile>],
 ) -> Result<Peers, Failure> {
     let binary = std::env::current_exe()?;
     let binary_name = agent::binary_name(&std::fs::read(&binary)?);
@@ -59,25 +59,33 @@ pub fn start(
             thread::spawn(move || -> Result<(Agent, String), Failure> {
                 let rank = index + 1;
                 let mut agent = Agent::connect(&host, &token)?;
+                let sharded = share.iter().any(|file| !file.filename.is_empty());
+                if sharded && !agent.holds_package_files() {
+                    return Err(format!("{host}: multi-file packages require flare agent protocol 3; update the agent").into());
+                }
                 if agent.ensure("binary", &binary_name, &binary, None)? {
                     eprintln!("{host}: sent flare {binary_name}");
                 }
-                // A current agent keeps only the bytes its rank reads, under a name for that rank.
-                let (name, ranges) = if agent.holds_ranges() {
-                    (
-                        format!("{export_id}-{length}-rank{rank}.safetensors"),
-                        Some(share),
-                    )
+                let name = if sharded {
+                    let directory = format!("{export_id}-{length}-rank{rank}");
+                    let primary = package.file_name().and_then(|name| name.to_str()).ok_or("invalid primary basename")?;
+                    for file in &share {
+                        let filename = if file.filename.is_empty() { primary } else { &file.filename };
+                        agent.ensure_file("package", &format!("{directory}/{filename}"), &file.file, Some(&file.ranges))?;
+                    }
+                    format!("{directory}/{primary}")
                 } else {
-                    (format!("{export_id}-{length}.safetensors"), None)
+                    let name = if agent.holds_ranges() {
+                        format!("{export_id}-{length}-rank{rank}.safetensors")
+                    } else { format!("{export_id}-{length}.safetensors") };
+                    let file = &share[0];
+                    let ranges = agent.holds_ranges().then_some(file.ranges.as_slice());
+                    if agent.ensure_file("package", &name, &file.file, ranges)? {
+                        let sent = ranges.map_or(length, |r| r.iter().map(|&(_, n)| n).sum());
+                        eprintln!("{host}: sent rank {rank} of the package, {:.1} GiB", sent as f64 / (1u64 << 30) as f64);
+                    }
+                    name
                 };
-                if agent.ensure("package", &name, &package, ranges.as_deref())? {
-                    let sent = ranges.map_or(length, |r| r.iter().map(|&(_, n)| n).sum());
-                    eprintln!(
-                        "{host}: sent rank {rank} of the package, {:.1} GiB",
-                        sent as f64 / (1u64 << 30) as f64
-                    );
-                }
                 Ok((agent, name))
             })
         })

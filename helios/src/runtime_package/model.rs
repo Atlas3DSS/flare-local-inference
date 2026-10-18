@@ -116,7 +116,10 @@ pub fn package_cluster(package: &AuthorizedPackage) -> Option<(usize, String)> {
 /// The byte ranges of an authorized multi-host package, in offset order, that the host serving
 /// `rank` reads. A copy holding only these, at the same offsets and length, verifies completely
 /// and loads as that rank.
-pub fn rank_ranges(package: &AuthorizedPackage, rank: usize) -> Result<Vec<(u64, u64)>> {
+pub fn rank_ranges(
+    package: &AuthorizedPackage,
+    rank: usize,
+) -> Result<Vec<super::archive::PackageFile>> {
     if package.index.cluster.is_none() {
         return Err(invalid(
             "only a multi-host package has ranks for separate hosts",
@@ -274,7 +277,7 @@ impl NativeModel {
         let engram = descriptor
             .engram
             .take()
-            .map(|value| super::engram::decode(value, archive.start, &packages))
+            .map(|value| super::engram::decode(value, &archive, &packages))
             .transpose()?;
         if options.embedding_table_cache_bytes != 0 && engram.is_none() {
             return Err(invalid(
@@ -553,7 +556,11 @@ impl NativeModel {
                 let storage = options.embedding_table_storage.unwrap_or_default();
                 model.engram = Some(crate::engram::Shared::new(
                     index,
-                    &archive.file,
+                    &archive
+                        .files
+                        .values()
+                        .map(|file| file.direct())
+                        .collect::<Result<Vec<_>>>()?,
                     devices.len(),
                     tokens,
                     model.ranks[0].context as usize,

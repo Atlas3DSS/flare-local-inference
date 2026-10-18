@@ -43,6 +43,21 @@ def test_compiler_fake_tensors_do_not_claim_physical_addresses():
     assert owner_claims(prepared) == []
 
 
+def test_shared_owner_graph_does_not_queue_duplicate_paths():
+    import tracemalloc
+    import torch
+
+    shared = SimpleNamespace(value=torch.empty(1))
+    parents = [[shared] * 1000 for _ in range(1000)]
+    prepared = SimpleNamespace(device=0, resources=(parents,), buffers={})
+    tracemalloc.start()
+    try:
+        assert owner_claims(prepared) == []
+        assert tracemalloc.get_traced_memory()[1] < 8 << 20
+    finally:
+        tracemalloc.stop()
+
+
 @pytest.mark.skipif(os.environ.get('FLARE_RUN_CUDA_TESTS') != '1', reason='requires an assigned CUDA device')
 def test_repeated_strided_views_have_one_owner_and_preserve_holes():
     import torch
@@ -57,6 +72,26 @@ def test_repeated_strided_views_have_one_owner_and_preserve_holes():
     rows = attribute([(start, start + backing.nbytes)], claims)
     assert sum(row['nbytes'] for row in rows if row['owner'] == 'resources[0]') == backing.nbytes // 2
     assert sum(row['nbytes'] for row in rows if row['category'] == 'Unknown storage') == backing.nbytes // 2
+
+
+@pytest.mark.skipif(os.environ.get('FLARE_RUN_CUDA_TESTS') != '1', reason='requires an assigned CUDA device')
+def test_overlapping_views_bound_claims_and_preserve_first_owner():
+    import torch
+
+    backing = torch.empty((4096, 32), device='cuda:0')
+    first, second = backing[:, :16], backing[1024:3072, 8:24]
+    views = [first, second, *(backing[:rows] for rows in range(128, 4097, 128))]
+    prepared = SimpleNamespace(device=0, resources=tuple(views), buffers={})
+    claims = owner_claims(prepared)
+    ordered = sorted((claim.start, claim.end) for claim in claims)
+    assert all(end <= start for (_, end), (start, _) in zip(ordered, ordered[1:]))
+    assert len(claims) <= 3 * backing.shape[0]
+    rows = attribute([(backing.data_ptr(), backing.data_ptr() + backing.nbytes)], claims)
+    sizes = {row['owner']: row['nbytes'] for row in rows}
+    assert sizes['resources[0]'] == first.nbytes
+    assert sizes['resources[1]'] == 2048 * 8 * backing.element_size()
+    assert sum(sizes.values()) == backing.nbytes
+    assert not any(row['category'] == 'Unknown storage' for row in rows)
 
 
 def test_inventory_separates_physical_cache_host_peers_and_package_alignment(monkeypatch):

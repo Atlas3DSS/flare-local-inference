@@ -39,13 +39,12 @@ class DSparkWeights:
 
     @classmethod
     def load(cls, loader, *, confidence=False):
-        config, shard = loader.config.draft, loader.shard
+        config = loader.config.draft
         last = f"mtp.{config.layers - 1}"
         return cls(tuple(loader.load_layer(i, draft=True) for i in range(config.layers)),
             loader.load_linear("mtp.0.main_proj"), loader.load_tensor("mtp.0.main_norm.weight"),
             loader.load_tensor(last + ".norm.weight"), loader.load_tensor(last + ".markov_head.embed.weight"),
-            loader.load_tensor(last + ".markov_head.head.weight",
-                extent=slice(*shard.partition(129280, alignment=64))),
+            loader.load_tensor(last + ".markov_head.head.weight"),
             loader.load_tensor(last + ".confidence_head.proj.weight") if confidence else None)
 
 

@@ -15,7 +15,7 @@ from ignition.errors import UsageError
 DEFAULT_PATH = Path("~/.config/flare/config.toml")
 
 _SECTIONS = {
-    "publishing": {"signing_key": str, "namespace": str, "official_source": str},
+    "publishing": {"signing_key": str, "namespace": str, "official_source": str, "shard_size": str},
     "server": {"host": str, "port": int, "api_key": str},
     "defaults": {"model": str, "max_concurrency": int, "image_concurrency": int, "speculative_token_capacity": int},
     "memory": {"reserve": str},
@@ -27,6 +27,7 @@ _SECTIONS = {
 _MODEL_KEYS = {"max_concurrency": int, "image_concurrency": int, "speculative_token_capacity": int}
 # Empty prefix-cache values leave the decision to Flare, which derives them from the host.
 _BUILT_IN = {
+    "publishing.shard_size": "64G",
     "server.host": "127.0.0.1", "server.port": 8000, "server.api_key": "",
     "memory.reserve": "0",
     "preparation.compile_workers": 0,
@@ -100,6 +101,7 @@ class Configuration:
                 raise UsageError(f"{resolved}: unknown section [{section}]")
         configuration = cls(resolved, values, True)
         parse_size(configuration.get("memory.reserve").value)
+        configuration.shard_size()
         for key in ("prefix_cache.memory", "prefix_cache.disk_limit"):
             if configuration.get(key).value:
                 parse_size(configuration.get(key).value, key.replace(".", " "))
@@ -147,6 +149,9 @@ class Configuration:
                 return Setting(table[key], section)
         return Setting(recipe_default, "recipe")
 
+    def shard_size(self, flag=None) -> int:
+        return parse_size(self.get("publishing.shard_size", flag).value, "shard size")
+
     @property
     def reserve_bytes(self) -> int:
         return parse_size(self.get("memory.reserve").value)
@@ -173,6 +178,8 @@ class Configuration:
         """Create the file with every resolved value present as a comment."""
         lines = [
             "# Flare configuration. Every key is optional; remove a leading # to set it.",
+            "", "[publishing]",
+            '# shard_size = "64G"             # soft file-size target; 0 keeps one file',
             "", "[server]",
             f'# host = "{self.get("server.host").value}"',
             f'# port = {self.get("server.port").value}',

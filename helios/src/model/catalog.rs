@@ -29,17 +29,17 @@ fn validate_inner(config: &ModelConfig, manifest: &ExecutionManifest) -> Result<
         .collect();
     let split = !proposals.is_empty();
     if split {
+        let maximum = proposals.iter().map(|g| g.token_capacity).max().unwrap();
         if config.history_drafts
             || config.speculative_proposal_source != speculation::ProposalSource::Mtp
-            || config.speculative_widths != (1..=proposals[0].token_capacity).collect::<Vec<_>>()
-            || proposals.iter().any(|g| Some(&g.token_capacity) != config.speculative_widths.last())
+            || config.speculative_widths != (1..=maximum).collect::<Vec<_>>()
             || manifest
                 .graphs
                 .iter()
                 .any(|g| g.kind == GraphKind::Mixed
                     || (g.kind == GraphKind::Speculative && g.token_capacity != 1))
         {
-            return Err("retained proposal catalogs require a common proposal depth and proposal-free width-one execution".into());
+            return Err("retained proposal catalogs require contiguous prefix widths and proposal-free width-one execution".into());
         }
     } else if manifest
         .graphs
@@ -250,7 +250,7 @@ pub fn select(
             GraphKind::Speculative | GraphKind::Verification => {
                 speculative_shape(config, batch, tokens)
             }
-            GraphKind::Proposal => config.speculative_widths.last() == Some(&tokens),
+            GraphKind::Proposal => tokens > 1 && config.speculative_widths.contains(&tokens),
             _ => tokens == 1,
         };
     if !declared || (kind != GraphKind::Mixed && prefill != 0) {

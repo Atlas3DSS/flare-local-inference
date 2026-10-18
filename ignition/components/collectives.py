@@ -252,6 +252,59 @@ def _fake_all_gather(source, output, handle):
 
 
 
+class PreparedBroadcast:
+    """Copy rank zero's tensor bytes through a serial all-gather channel.
+
+    Integer decisions and floating-point payloads retain their exact bit patterns.
+    The BF16 channel views transport bytes without floating-point arithmetic.
+    """
+
+    def __init__(self, tensors, *, runtime, session, coordinator, name, buffers=None):
+        self.single = runtime is None
+        if self.single:
+            return
+        tensors = tuple(tensors)
+        if not tensors or any(not tensor.is_contiguous() or tensor.device != tensors[0].device
+                              for tensor in tensors):
+            raise ValueError("broadcast requires contiguous tensors on one device")
+        offsets, size = [], 0
+        for tensor in tensors:
+            size = (size + 7) // 8 * 8
+            offsets.append(size)
+            size += tensor.numel() * tensor.element_size()
+        columns = ((size + 15) // 16 * 8 if _roce(runtime)
+                   else runtime.heads_per_rank * runtime.query_head_dim)
+        rows = (size + 2 * columns - 1) // (2 * columns)
+
+        def allocate(shape):
+            return (torch.zeros(shape, dtype=torch.uint8, device=tensors[0].device) if buffers is None
+                    else buffers.zeros(shape, torch.uint8))
+
+        self.send = allocate((rows, columns * 2))
+        self.received = allocate((rows, columns * 2 * runtime.world_size))
+        self.root = allocate((rows, columns * 2))
+        self.bindings = tuple((tensor, offset, tensor.numel() * tensor.element_size())
+                              for tensor, offset in zip(tensors, offsets, strict=True))
+        self.gather = PreparedAllGather(self.send.view(torch.bfloat16), self.received.view(torch.bfloat16),
+            runtime=runtime, session=session, coordinator=coordinator, name=name)
+
+    def __call__(self):
+        if self.single:
+            return
+        for tensor, offset, size in self.bindings:
+            value = tensor.to(torch.uint8) if tensor.dtype == torch.bool else tensor.view(torch.uint8)
+            self.send.view(-1)[offset:offset + size].copy_(value.view(-1))
+        self.gather(self.send.view(torch.bfloat16))
+        # Rank-zero columns are strided when the message spans multiple rows.
+        self.root.copy_(self.received[:, :self.send.shape[1]])
+        for tensor, offset, size in self.bindings:
+            value = self.root.view(-1)[offset:offset + size]
+            if tensor.dtype == torch.bool:
+                tensor.copy_(value.view(tensor.shape) != 0)
+            else:
+                tensor.view(torch.uint8).view(-1).copy_(value)
+
+
 class PreparedAllGather:
     """Gather contiguous column partitions through a caller-owned b12x channel.
 

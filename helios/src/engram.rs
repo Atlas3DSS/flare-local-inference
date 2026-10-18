@@ -217,7 +217,7 @@ pub(crate) struct Shared {
 impl Shared {
     pub fn new(
         index: Index,
-        file: &std::fs::File,
+        files: &[Arc<std::fs::File>],
         ranks: usize,
         max_tokens: usize,
         context: usize,
@@ -246,8 +246,8 @@ impl Shared {
                 let rows = max_tokens
                     .checked_mul(table.heads)
                     .ok_or("embedding row capacity exceeds host range")?;
-                reader::Reader::from_file(
-                    file,
+                reader::Reader::from_files(
+                    files,
                     &table.planes,
                     storage == Storage::Ram,
                     budget,

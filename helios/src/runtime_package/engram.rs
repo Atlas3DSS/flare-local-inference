@@ -8,7 +8,11 @@ use crate::{
 };
 use std::collections::HashSet;
 
-pub(super) fn decode(value: wire::Engram, start: u64, packages: &[Package]) -> Result<Index> {
+pub(super) fn decode(
+    value: wire::Engram,
+    archive: &super::archive::Archive,
+    packages: &[Package],
+) -> Result<Index> {
     if value.compressed_vocabulary == 0
         || value
             .token_map
@@ -96,7 +100,10 @@ pub(super) fn decode(value: wire::Engram, start: u64, packages: &[Package]) -> R
                 return Err(invalid("Engram payload geometry mismatch"));
             }
             Ok(Plane {
-                offset: start
+                file: archive.file_index(&span.filename)?,
+                offset: archive
+                    .source(&span)?
+                    .start
                     .checked_add(span.offset)
                     .ok_or_else(|| invalid("Engram file offset overflow"))?,
                 nbytes: usize::try_from(span.nbytes)

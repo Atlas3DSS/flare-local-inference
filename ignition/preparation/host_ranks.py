@@ -563,7 +563,7 @@ class HostRankGroup:
     def manifest(self):
         return self.model.manifest()
 
-    def export(self, path, *, options, export_id, images, storage, publisher, progress=None):
+    def export(self, path, *, options, export_id, images, storage, publisher, progress=None, shard_size=64 << 30):
         """Write one package holding every rank at `path` here; `flare run --hosts` serves it.
 
         Each peer exports its rank on its own host and sends the file over its control connection,
@@ -590,7 +590,7 @@ class HostRankGroup:
 
         export_cluster_package(self.model, images, storage, path, peer_files=peer_files(), options=options,
                                export_id=export_id, world=self.rendezvous.world, publisher=publisher,
-                               peer_inventories=inventories, progress=progress)
+                               peer_inventories=inventories, progress=progress, shard_size=shard_size)
 
     def start_server(self, *, bind="127.0.0.1:8000", template_defaults=None, options=None):
         if self._started or self._closed:

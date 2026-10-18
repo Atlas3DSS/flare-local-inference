@@ -157,7 +157,7 @@ class PreparedPrefill:
 
 
 class PreparedRound:
-    """All ranks replay identical stochastic draws from gathered logits and request seeds."""
+    """Rank zero's proposal and acceptance decisions are broadcast before dependent work."""
 
     def __init__(self, owner, batch, width, name):
         self.owner, self.batch, self.width = owner, batch, width
@@ -204,6 +204,7 @@ class PreparedRound:
         self.valid = torch.zeros((b, w - 1), dtype=torch.bool, device=device)
         self.seed, self.offset, self.base_offset, self.sampled = (torch.zeros_like(self.before) for _ in range(4))
         self.tail_backup = torch.empty_like(o.pool.draft.index.tail[:b])
+        self.broadcast_buffers, self.name = buffers, name
         self.operations = None
 
     def prepare(self):
@@ -224,6 +225,9 @@ class PreparedRound:
             *args, rng=o.rng, draft_valid=self.valid, target_valid=target.valid,
             token_limits=o.inputs.query_lengths[:b], workspace=self.sampling_scratch["verify"])
         verify.prepare()
+        from ignition.components.parallel_draft import prepare_sampling_broadcasts
+        prepare_sampling_broadcasts(proposals, verify, collectives=o.collectives, session=o.session,
+                                    name=self.name, buffers=self.broadcast_buffers)
         commit = PreparedSpeculativeCommit(o.requests, verify.output, self.candidates,
             o.inputs.row_slot_ids[:b], o.inputs.row_generations[:b], o.inputs.live_rows,
             o.records, o.frame, o.sequence, rng=o.rng, token_limits=o.inputs.query_lengths[:b])

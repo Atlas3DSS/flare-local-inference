@@ -12,6 +12,7 @@ import pytest
 
 from ignition import planning
 from ignition.cli import environment, main as cli_main, runtime, serve
+from ignition.cli.config import Configuration
 from ignition.recipes import ResolvedModel, resolve
 from ignition.recipes.declaration import RankUsage
 
@@ -105,6 +106,13 @@ def host(monkeypatch, tmp_path):
         return calls["prepared"]
 
     model = resolve("qwen3.8-flash")
+    snapshot = model.snapshot(Configuration.load().directory("hub_cache"))
+    snapshot.mkdir(parents=True)
+    header = json.dumps({"weight": {"dtype": "U8", "shape": [1], "data_offsets": [0, 1]}}).encode()
+    header += b" " * (-len(header) % 8)
+    (snapshot / "model.safetensors").write_bytes(len(header).to_bytes(8, "little") + header + b"\0")
+    (snapshot / "model.safetensors.index.json").write_text(json.dumps({
+        "metadata": {"total_size": 1}, "weight_map": {"weight": "model.safetensors"}}))
     recipe = replace(model.recipe, prepare=prepare, usage=lambda prepared: prepared.usage())
     monkeypatch.setattr(serve, "resolve_model", lambda configuration, name: ResolvedModel(recipe, model.checkpoint))
     monkeypatch.setattr(runtime, "binary", lambda: Path("/native/flare"))
@@ -112,11 +120,12 @@ def host(monkeypatch, tmp_path):
         str((plan.concurrency, plan.prefill_chunk, plan.speculation, plan.stream_overlap,
              plan.mixed_prefill, plan.expert_scale_compression, no_compile)))
 
-    def export_model(prepared, images, storage, path, *, options, publisher, progress, console, staging):
+    def export_model(prepared, images, storage, path, *, options, publisher, progress, console, staging, shard_size):
         assert prepared is calls["prepared"] and not prepared.closed
         assert isinstance(images, Scope) and isinstance(storage, Scope)
         assert "api_key" not in options
         calls["publisher"] = publisher
+        calls["shard_size"] = shard_size
         calls["options"] = options
         calls["exports"] += 1
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -231,6 +240,7 @@ def test_diagnostic_startup_failure_retains_undrained_host_storage(host, monkeyp
 @pytest.mark.parametrize("grouped", [False, True])
 @pytest.mark.parametrize("requests,width,snapshots,backed,expected", [
     (64, 6, 512, 449, 64), (1, 6, 512, 8, 1), (4, 1, 16, 21, 16), (3, 6, 512, 33, 8),
+    (4, 1, 32, 9, 4),
 ])
 def test_diagnostic_admission_uses_backed_rows_without_changing_export(
         grouped, requests, width, snapshots, backed, expected):
@@ -533,3 +543,14 @@ def test_local_tuning_gpus_cannot_change_multihost_sharding(tmp_path, capsys, co
         arguments += ['--output', str(tmp_path / 'unused.safetensors')]
     assert main(arguments) != 0
     assert 'multi-host ranks retain their sharding' in capsys.readouterr().err
+
+
+def test_shard_policy_reaches_export_and_separates_cached_packages(host):
+    assert run("qwen3.8-flash") == 0
+    assert host["shard_size"] == 64 << 30
+    default = host["exec"][2]
+    assert run("qwen3.8-flash", "--shard-size", "0") == 0
+    assert host["shard_size"] == 0 and host["exec"][2] != default
+    assert host["exports"] == 2
+    assert run("qwen3.8-flash", "--shard-size", "65536M") == 0
+    assert host["exec"][2] == default and host["exports"] == 2

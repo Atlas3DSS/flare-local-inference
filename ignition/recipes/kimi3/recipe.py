@@ -69,8 +69,8 @@ RECIPE = Recipe(
     context=1048576, page_tokens=128, concurrency=4, max_concurrency=64, prefill_chunk=4096,
     speculation=Speculation(draft_tokens=7), max_draft_tokens=7, max_images=4, image_bytes=32 << 20,
     verification_rows=0,
-    # KDA's fused input projection (query, key, value, gates and beta) and the DSpark draft's state
-    # combination, attention outputs and MLPs may load as MXFP8.
+    # KDA, MLA except batched key/value, shared experts, latent MoE projections, and the DSpark
+    # draft's context projection, attention outputs and MLPs may load as MXFP8.
     online_mxfp8=True,
     # Decode and verification run each MoE layer's shared experts beside its routing and routed experts.
     stream_overlap=True,

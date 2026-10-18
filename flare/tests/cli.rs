@@ -69,7 +69,18 @@ fn offline_download_and_run_share_the_cached_package_path() {
         .join(commit);
     std::fs::create_dir_all(&directory).unwrap();
     let package = directory.join("model.safetensors");
-    std::fs::write(&package, b"invalid package fixture").unwrap();
+    // Discoverable format-4 metadata without publisher authentication.
+    let envelope = b"\x08\x04\x22\x08\x08\x01\x12\x04\x0a\x02\x08\x04\x22\x02\x08\x02\x22\x02\x08\x03\x2a\x06\x08\x04\x12\x02\x12\x00";
+    let header = serde_json::json!({
+        "__metadata__": {"format": "flare"},
+        "flare.payload": {"dtype": "U8", "shape": [0], "data_offsets": [0, 0]},
+        "flare.metadata": {"dtype": "U8", "shape": [envelope.len()], "data_offsets": [0, envelope.len()]},
+    });
+    let mut bytes = 4088u64.to_le_bytes().to_vec();
+    bytes.extend(serde_json::to_vec(&header).unwrap());
+    bytes.resize(4096, b' ');
+    bytes.extend(envelope);
+    std::fs::write(&package, bytes).unwrap();
     let cache = temp.path().to_str().unwrap();
     let output = flare(&[
         "download",

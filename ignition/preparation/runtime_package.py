@@ -383,7 +383,7 @@ class RuntimePackage:
                     raise ValueError(f"tensor-map binding does not match {relocation.target}")
 
     def write(self, path, graphs, *, execution=None, server=None, progress=None, package_data=None, publisher=None,
-              sources=False):
+              sources=False, shard_size=64 << 30):
         """Synchronize and publish an indexed model file without overwriting.
 
         With `sources`, `path` records the index and the staged files holding each range instead
@@ -561,7 +561,7 @@ class RuntimePackage:
                 write_sources(path, index, payload)
                 staged = True
             else:
-                publish(path, index, payload, publisher=publisher)
+                publish(path, index, payload, publisher=publisher, shard_size=shard_size)
         finally:
             if stage.exists() and not staged:
                 shutil.rmtree(stage)
@@ -720,7 +720,7 @@ def _roce_transport(message, transport):
 
 
 def export_model(prepared, images, storage, path, *, options, progress=None, publisher=None, bundle_only=False,
-                 sources=False):
+                 sources=False, shard_size=64 << 30):
     """Export one rank's graphs and storage with recorded virtual addresses.
 
     With `bundle_only`, a multi-host peer's export omits frontend assets and package-level
@@ -899,7 +899,7 @@ def export_model(prepared, images, storage, path, *, options, progress=None, pub
     server = None if bundle_only else {**prepared.server_config, **options}
     package.write(path, prepared.graphs, execution=execution, server=server, progress=progress,
                   package_data=None if bundle_only else prepared.package_data, publisher=publisher,
-                  sources=sources)
+                  sources=sources, shard_size=shard_size)
     from .memory_inventory import collect_inventory, print_inventory
 
     package.memory_inventory = collect_inventory(prepared, storage, package, external=outside)

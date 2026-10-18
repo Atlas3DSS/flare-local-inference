@@ -9,9 +9,28 @@ public-key fingerprint is:
 937c0143f6856d3ee8ad164f62e3d804bd825d7a8750d0accb9a5849f703a8c1
 ```
 
-Embedding a public identity authenticates the publisher; execution still requires
-first-use acceptance. Private keys never belong in source control, packages, or
-publisher profiles.
+The embedded profile lets Flare verify signatures without consulting the network;
+it does not verify identity. Every publisher, including this one, is verified the
+same way: by the `publisher.json` at the root of the package's official source
+repository. Execution still requires first-use acceptance. Private keys never
+belong in source control, packages, or publisher profiles.
+
+## Publish the verification key
+
+Upload the `publisher.json` that key creation wrote, unchanged, to the root of
+every repository named as an official source. Flare fetches it from the default
+branch on every online load and requires it to list the key under the publisher
+namespace. The file is a list, so a rotated key stays valid
+by keeping the previous profile in it, and removing a profile revokes that key
+for every package it signed. A repository whose `publisher.json` omits the
+signing key makes the package fail to load everywhere; a repository without the
+file leaves the identity unverified, and users must then supply the profile with
+`--publisher-keys`.
+
+Each repository should also hold the license file its model card names. The
+exporter records the license name and a link to that file from the model card
+front matter, Flare shows both before acceptance, and typing the namespace
+agrees to the terms at the link.
 
 ## Create and protect a key
 
@@ -93,7 +112,11 @@ Re-signing verifies the development signatures and every executable and supporti
 resource, decrypts executable resources, and encrypts them under the production
 identity with a fresh package ID. Weight bytes and prepared execution contracts
 are preserved. Stored-data hashes are checked against the development signatures
-while copying, before the final file is published. Invalid packages fail without
+while copying, before the primary file is published. `--shard-size SIZE` overrides
+`[publishing] shard_size` (default `64G`); `0` produces one file. Re-signing can
+repack either layout, preserving whole resources and verifying the original
+signed parts and padding against the bytes copied. All metadata, encrypted
+resources, and supporting assets remain in the primary. Invalid packages fail without
 publishing an output; existing destinations are never overwritten.
 
 No checkpoint reload, compilation, graph capture, or GPU access is required.
@@ -101,7 +124,7 @@ The operation reads and copies the entire package, so allow space for another
 package plus temporary executable resources. Temporary plaintext executable files
 reside in a private directory beside the destination and are removed when the
 command exits normally or raises an error. A forced kill can leave that directory
-or an incomplete hidden output file; remove those after confirming no signing
+or unreferenced companion files or an incomplete hidden output file; remove those after confirming no signing
 process is using them. The source package remains intact.
 
 Rebuild Flare after changing embedded public profiles. A separately built or

@@ -279,6 +279,24 @@ class PreparedDraftDistribution(PreparedSpeculativeDistributions):
             self.scores, self.probabilities, self.valid, self.packed_top_k, self.packed_top_p,
             requests.parameters, slots, seed, offset, sampled, capacity=requests.capacity,
             candidates=self.proposal_candidates, selected=self.proposal_selected)
+        self.sampled = sampled
+        self.broadcast = None
+
+    def prepare_broadcast(self, *, runtime, session, coordinator, name, buffers=None):
+        if runtime is None:
+            return
+        from .collectives import PreparedBroadcast
+
+        def allocate(shape, dtype):
+            return (torch.zeros(shape, dtype=dtype, device=self.logits.device) if buffers is None
+                    else buffers.zeros(shape, dtype))
+
+        shape = self.proposal_selected.shape
+        self.support_ids = allocate(shape, torch.int64)
+        self.support_probabilities = allocate(shape, torch.float32)
+        self.broadcast = PreparedBroadcast(
+            (self.support_ids, self.support_probabilities, self.sampled, self.valid),
+            runtime=runtime, session=session, coordinator=coordinator, name=name, buffers=buffers)
 
     def prepare(self):
         if self.logits.device.type != "cuda":
@@ -315,4 +333,17 @@ class PreparedDraftDistribution(PreparedSpeculativeDistributions):
             raise RuntimeError("draft proposal requires prepare() before capture")
         self.prepare_scores()
         self.proposal()
+        if self.broadcast is not None:
+            keys = self.proposal_selected
+            present = keys != -9223372036854775808
+            ids = 2147483647 - (keys & 2147483647)
+            self.support_ids.copy_(torch.where(present, ids, 0))
+            probabilities = self.probabilities[:, 0].gather(1, self.support_ids)
+            # Padding repeats token zero with its exact probability, so duplicate stores agree.
+            # Invalid proposals use the sampler's point mass at token zero.
+            self.support_probabilities.copy_(torch.where(self.valid, probabilities, 1.))
+            self.support_ids.masked_fill_(~self.valid, 0)
+            self.broadcast()
+            self.probabilities.zero_()
+            self.probabilities[:, 0].scatter_(1, self.support_ids, self.support_probabilities)
         return self.probabilities

@@ -1256,6 +1256,19 @@ fn retained_proposal_catalog_requires_prefix_coverage_and_proposal_free_decode()
         strides: vec![7, 1],
     });
     catalog::validate(&config, &manifest).unwrap();
+    // Packages with only the maximum proposal depth remain valid. Additional
+    // captured depths use the same ownership and verification contract.
+    let mut shallow = manifest.graphs.iter().find(|g| g.kind == GraphKind::Proposal).unwrap().clone();
+    let mut shallow_contract = config.contract.graph(&shallow.name).unwrap().clone();
+    shallow.name = "Proposal-1-2".into();
+    shallow.token_capacity = 2;
+    shallow.handle = manifest.graphs.len() + 1;
+    shallow_contract.graph = shallow.name.clone();
+    manifest.graphs.insert(0, shallow);
+    config.contract.graphs.push(shallow_contract);
+    catalog::validate(&config, &manifest).unwrap();
+    assert_eq!(manifest.graphs[catalog::select(&config, &manifest, GraphKind::Proposal,
+        1, 2, 0, crate::execution::SamplingMode::General).unwrap()].token_capacity, 2);
     let mut missing = manifest.clone();
     missing
         .graphs
