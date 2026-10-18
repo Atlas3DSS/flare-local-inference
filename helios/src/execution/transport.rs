@@ -3,7 +3,7 @@ use std::{marker::PhantomData, rc::Rc, time::Instant};
 use crate::{
     Error, ExecutionError, Failure, Result, Shutdown,
     cache::Fence,
-    cuda::{Event, PinnedHost, Stream},
+    cuda::{BATCH_BYTES, BATCH_ENTRIES, Event, PinnedHost, Stream},
 };
 
 use super::{ExecutionManifest, GraphKind, MAX_OUTPUT_TOKENS, REQUEST_LANES, VECTOR_RECORD_FIELDS};
@@ -176,11 +176,102 @@ struct Pending {
 struct Frame {
     input: PinnedHost,
     output: PinnedHost,
-    confidence: Option<PinnedHost>,
+    confidence: Option<ConfidenceStorage>,
     produced: Event,
     started: Event,
     transferred: Event,
     pending: Option<Pending>,
+}
+
+enum ConfidenceStorage {
+    MappedHost { address: usize, nbytes: usize },
+    DeviceCopy(PinnedHost),
+}
+
+impl ConfidenceStorage {
+    fn new(stream: &Stream, address: usize, nbytes: usize) -> Result<Self> {
+        Ok(match stream.mapped_host_address(address, nbytes)? {
+            Some(address) => Self::MappedHost { address, nbytes },
+            None => Self::DeviceCopy(stream.host_buffer(nbytes)?),
+        })
+    }
+
+    unsafe fn enqueue_copy(&self, stream: &Stream, source: usize, nbytes: usize) -> Result<()> {
+        match self {
+            Self::MappedHost { .. } => Ok(()),
+            // SAFETY: The caller retains the device source and this pinned
+            // destination until the transfer stream completes.
+            Self::DeviceCopy(host) => unsafe { stream.download(host, source, nbytes) },
+        }
+    }
+
+    /// The caller has observed the frame's transfer event and retains the source
+    /// allocation; proposal feedback prevents another graph from overwriting it.
+    unsafe fn bytes(&self) -> &[u8] {
+        match self {
+            Self::MappedHost { address, nbytes } => {
+                // SAFETY: The mapped allocation and producing graph obey the
+                // executor's ownership and completion requirements above.
+                unsafe { std::slice::from_raw_parts(*address as *const u8, *nbytes) }
+            }
+            Self::DeviceCopy(host) => host.bytes(),
+        }
+    }
+}
+
+struct InputCopyBatches {
+    destinations: Vec<u64>,
+    sources: Vec<u64>,
+    sizes: Vec<usize>,
+    bytes: usize,
+}
+
+impl InputCopyBatches {
+    fn new(capacity: usize) -> Self {
+        let capacity = capacity.min(BATCH_ENTRIES);
+        Self {
+            destinations: Vec::with_capacity(capacity),
+            sources: Vec::with_capacity(capacity),
+            sizes: Vec::with_capacity(capacity),
+            bytes: 0,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.destinations.clear();
+        self.sources.clear();
+        self.sizes.clear();
+        self.bytes = 0;
+    }
+
+    fn submit(
+        &mut self,
+        host: usize,
+        copies: impl Iterator<Item = ResolvedUpload>,
+        mut emit: impl FnMut(&[u64], &[u64], &[usize]) -> Result<()>,
+    ) -> Result<()> {
+        self.clear();
+        for copy in copies {
+            let mut offset = 0;
+            while offset < copy.nbytes {
+                if self.bytes == BATCH_BYTES || self.sizes.len() == BATCH_ENTRIES {
+                    emit(&self.destinations, &self.sources, &self.sizes)?;
+                    self.clear();
+                }
+                let nbytes = (copy.nbytes - offset).min(BATCH_BYTES - self.bytes);
+                self.destinations.push((copy.device_address + offset) as u64);
+                self.sources.push((host + copy.host_offset + offset) as u64);
+                self.sizes.push(nbytes);
+                self.bytes += nbytes;
+                offset += nbytes;
+            }
+        }
+        if !self.sizes.is_empty() {
+            emit(&self.destinations, &self.sources, &self.sizes)?;
+        }
+        self.clear();
+        Ok(())
+    }
 }
 
 struct Resources {
@@ -188,6 +279,7 @@ struct Resources {
     copy: Stream,
     frames: [Frame; 2],
     engram: Option<crate::engram::Transfers>,
+    input_copies: InputCopyBatches,
 }
 
 /// Thread-bound executor over one borrowed prepared model and its CUDA context.
@@ -227,7 +319,10 @@ impl GraphExecutor {
                     .graphs
                     .iter()
                     .any(|g| g.kind == GraphKind::Proposal)
-                    .then(|| model.host_buffer(manifest.buffer("proposal_confidence")?.nbytes))
+                    .then(|| {
+                        let buffer = manifest.buffer("proposal_confidence")?;
+                        ConfidenceStorage::new(&model, buffer.address, buffer.nbytes)
+                    })
                     .transpose()?,
                 produced: model.event_with_timing(true)?,
                 started: model.event_with_timing(true)?,
@@ -248,6 +343,7 @@ impl GraphExecutor {
                 copy,
                 frames,
                 engram,
+                input_copies: InputCopyBatches::new(upload_capacity.saturating_add(2)),
             }),
             resolved_uploads: Vec::with_capacity(upload_capacity),
             next_sequence: 1,
@@ -415,22 +511,16 @@ impl GraphExecutor {
             queued,
         });
         self.next_sequence += 1;
-        let operation = || -> Result<()> {
-            for upload in resolved.copies() {
-                // SAFETY: Validation resolved aligned device/host subranges within the
-                // retained manifest allocations and this pinned frame. The frame is
-                // marked pending before enqueue, remains immutable until completion,
-                // and cannot be reused after an enqueue error until close drains both
-                // context-bound streams (or intentionally retains their resources).
-                unsafe {
-                    resources.model.upload(
-                        upload.device_address,
-                        &frame.input,
-                        upload.host_offset,
-                        upload.nbytes,
-                    )?;
-                }
-            }
+        let mut operation = || -> Result<()> {
+            // Validated destinations are disjoint, so copies within a batch do
+            // not depend on each other. Omitted input ranges remain untouched.
+            resources.input_copies.submit(frame.input.address(), resolved.copies(), |dst, src, sizes| {
+                // SAFETY: The manifest and pinned frame retain every validated
+                // range. Pending frames remain immutable until completion, and
+                // enqueue failures retain their owners until both streams drain.
+                // Descriptor slices are consumed synchronously by the driver.
+                unsafe { resources.model.copy_batch(dst, src, sizes) }
+            })?;
             resources.model.record(&frame.started)?;
             if crate::engram::consumes(graph.kind) {
                 if let Some(engram) = &resources.engram {
@@ -454,10 +544,8 @@ impl GraphExecutor {
                 )?;
                 if graph.kind == GraphKind::Proposal {
                     let confidence = self.manifest.buffer("proposal_confidence")?;
-                    resources.copy.download(
-                        frame.confidence.as_ref().unwrap(),
-                        confidence.address,
-                        confidence.nbytes,
+                    frame.confidence.as_ref().unwrap().enqueue_copy(
+                        &resources.copy, confidence.address, confidence.nbytes,
                     )?;
                 }
             }
@@ -571,7 +659,9 @@ impl GraphExecutor {
                 for (row, bytes) in confidence
                     .iter_mut()
                     .take(graph.batch_capacity)
-                    .zip(frame.confidence.as_ref().unwrap().bytes()
+                    // SAFETY: The transfer event follows the producing graph;
+                    // no subsequent proposal can reuse its feedback storage yet.
+                    .zip(unsafe { frame.confidence.as_ref().unwrap().bytes() }
                         .chunks_exact(4 * self.manifest.buffer("proposal_confidence")?.shape[1]))
                 {
                     for (value, bytes) in row.iter_mut().take(graph.token_capacity - 1).zip(bytes.chunks_exact(4)) {
@@ -828,4 +918,201 @@ pub(super) fn decode_records(
         }
     }
     Ok(records)
+}
+
+#[cfg(test)]
+mod input_copy_tests {
+    use super::*;
+
+    #[test]
+    fn input_batches_preserve_every_partial_range_across_both_driver_limits() {
+        let host = 0x10000;
+        let mut copies = vec![ResolvedUpload {
+            host_offset: 128, device_address: 0x20000000, nbytes: BATCH_BYTES + 16,
+        }];
+        copies.extend((0..BATCH_ENTRIES + 3).map(|i| ResolvedUpload {
+            host_offset: BATCH_BYTES + 1024 + i * 8,
+            device_address: 0x40000000 + i * 16,
+            nbytes: 8,
+        }));
+        let mut batches = InputCopyBatches::new(4);
+        let mut recorded = Vec::new();
+        batches.submit(host, copies.iter().copied(), |dst, src, sizes| {
+            assert!(sizes.len() <= BATCH_ENTRIES);
+            assert!(sizes.iter().sum::<usize>() <= BATCH_BYTES);
+            assert!(sizes.iter().all(|&size| size > 0));
+            recorded.extend(dst.iter().zip(src).zip(sizes).map(|((&d, &s), &n)| (d, s, n)));
+            Ok(())
+        }).unwrap();
+        let mut actual = recorded.into_iter();
+        for copy in copies {
+            let mut offset = 0;
+            while offset < copy.nbytes {
+                let (dst, src, nbytes) = actual.next().unwrap();
+                assert_eq!(dst, (copy.device_address + offset) as u64);
+                assert_eq!(src, (host + copy.host_offset + offset) as u64);
+                assert!(nbytes <= copy.nbytes - offset);
+                offset += nbytes;
+            }
+        }
+        assert!(actual.next().is_none());
+        assert!(batches.sizes.is_empty());
+    }
+
+    #[test]
+    fn failed_batch_stops_submission_and_does_not_retain_descriptors_for_reuse() {
+        let mut batches = InputCopyBatches::new(4);
+        let copy = ResolvedUpload { host_offset: 16, device_address: 4096, nbytes: BATCH_BYTES + 8 };
+        let mut calls = 0;
+        assert!(batches.submit(8192, std::iter::once(copy), |_, _, _| {
+            calls += 1;
+            Err("copy failed".into())
+        }).is_err());
+        assert_eq!(calls, 1);
+        batches.submit(8192, std::iter::once(ResolvedUpload { nbytes: 8, ..copy }), |dst, src, sizes| {
+            assert_eq!(dst, &[4096]);
+            assert_eq!(src, &[8208]);
+            assert_eq!(sizes, &[8]);
+            Ok(())
+        }).unwrap();
+        batches.submit(8192, std::iter::empty(), |_, _, _| panic!("empty input must not enqueue")).unwrap();
+    }
+}
+
+#[cfg(all(test, feature = "runtime-package"))]
+mod confidence_tests {
+    use super::*;
+    use crate::runtime_package::driver::{CopyEndpoint, CopyParams, Driver};
+
+    #[test]
+    #[ignore = "requires a CUDA device selected through CUDA_VISIBLE_DEVICES"]
+    fn mapped_and_device_confidence_survive_repeated_graph_replay() {
+        const BYTES: usize = 160;
+        let driver = Driver::load().unwrap();
+        let mut context = std::ptr::null_mut();
+        let (mut source, mut device_output) = (0, 0);
+        unsafe {
+            driver.check("cuInit", (driver.init)(0)).unwrap();
+            let mut device = 0;
+            driver
+                .check("cuDeviceGet", (driver.device)(&mut device, 0))
+                .unwrap();
+            driver
+                .check(
+                    "cuCtxCreate_v2",
+                    (driver.context_create)(&mut context, 0, device),
+                )
+                .unwrap();
+            driver
+                .check("cuMemAlloc_v2", (driver.allocate)(&mut source, BYTES))
+                .unwrap();
+            driver
+                .check(
+                    "cuMemAlloc_v2",
+                    (driver.allocate)(&mut device_output, BYTES),
+                )
+                .unwrap();
+        }
+        {
+            let model = Stream::open(context as usize, 0).unwrap();
+            let copy = Stream::open(context as usize, 0).unwrap();
+            let mapped = model.mapped_host_buffer(BYTES).unwrap();
+            let mapped_address = model.mapped_address(&mapped).unwrap();
+            let mut input = model.host_buffer(BYTES).unwrap();
+            for address in [mapped_address, device_output as usize] {
+                let confidence = ConfidenceStorage::new(&model, address, BYTES).unwrap();
+                assert_eq!(
+                    matches!(confidence, ConfidenceStorage::MappedHost { .. }),
+                    address == mapped_address
+                );
+                let mut graph = std::ptr::null_mut();
+                let mut executable = std::ptr::null_mut();
+                unsafe {
+                    driver
+                        .check("cuGraphCreate", (driver.graph_create)(&mut graph, 0))
+                        .unwrap();
+                    let endpoint = |address| CopyEndpoint {
+                        memory_type: 2,
+                        device: address,
+                        pitch: BYTES,
+                        height: 1,
+                        ..CopyEndpoint::default()
+                    };
+                    let params = CopyParams {
+                        source: endpoint(source),
+                        destination: endpoint(address as u64),
+                        width: BYTES,
+                        height: 1,
+                        depth: 1,
+                    };
+                    let mut node = std::ptr::null_mut();
+                    driver
+                        .check(
+                            "cuGraphAddMemcpyNode",
+                            (driver.graph_copy)(
+                                &mut node,
+                                graph,
+                                std::ptr::null(),
+                                0,
+                                &params,
+                                context,
+                            ),
+                        )
+                        .unwrap();
+                    driver
+                        .check(
+                            "cuGraphInstantiateWithFlags",
+                            (driver.graph_instantiate)(&mut executable, graph, 0),
+                        )
+                        .unwrap();
+                }
+                let produced = model.event().unwrap();
+                let transferred = copy.event().unwrap();
+                for generation in 1..=16 {
+                    let values: Vec<u8> = (0..BYTES / 4)
+                        .flat_map(|i| ((generation * 100 + i) as f32).to_ne_bytes())
+                        .collect();
+                    input.bytes_mut().copy_from_slice(&values);
+                    unsafe {
+                        model.upload(source as usize, &input, 0, BYTES).unwrap();
+                    }
+                    model.launch(executable as usize).unwrap();
+                    model.record(&produced).unwrap();
+                    copy.wait(&produced).unwrap();
+                    unsafe {
+                        confidence.enqueue_copy(&copy, address, BYTES).unwrap();
+                    }
+                    copy.record(&transferred).unwrap();
+                    while !transferred.completed().unwrap() {
+                        std::thread::yield_now();
+                    }
+                    // The transfer fence covers the mapped graph output as well
+                    // as the copied device output before either is read or reused.
+                    assert_eq!(unsafe { confidence.bytes() }, values);
+                }
+                copy.synchronize().unwrap();
+                model.synchronize().unwrap();
+                unsafe {
+                    driver
+                        .check(
+                            "cuGraphExecDestroy",
+                            (driver.executable_destroy)(executable),
+                        )
+                        .unwrap();
+                    driver
+                        .check("cuGraphDestroy", (driver.graph_destroy)(graph))
+                        .unwrap();
+                }
+            }
+        }
+        unsafe {
+            driver.check("cuMemFree_v2", (driver.free)(source)).unwrap();
+            driver
+                .check("cuMemFree_v2", (driver.free)(device_output))
+                .unwrap();
+            driver
+                .check("cuCtxDestroy_v2", (driver.context_destroy)(context))
+                .unwrap();
+        }
+    }
 }

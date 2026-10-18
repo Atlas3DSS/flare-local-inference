@@ -753,9 +753,16 @@ impl Stream {
     /// polls a graph-produced mailbox. Ordinary device storage is not readable
     /// through a host pointer, even when its virtual address is nonzero.
     pub(crate) fn host_address(&self, address: usize, nbytes: usize) -> Result<usize> {
+        self.mapped_host_address(address, nbytes)?
+            .ok_or_else(|| "embedding request mailbox must use mapped host storage".into())
+    }
+
+    /// Resolve CPU-readable mapped storage, or identify an ordinary device range.
+    /// Callers must observe the producing stream's completion before reading it.
+    pub(crate) fn mapped_host_address(&self, address: usize, nbytes: usize) -> Result<Option<usize>> {
         let last = address
-            .checked_add(nbytes.checked_sub(1).ok_or("empty host mailbox")?)
-            .ok_or("host mailbox address overflow")?;
+            .checked_add(nbytes.checked_sub(1).ok_or("empty mapped storage range")?)
+            .ok_or("mapped storage address overflow")?;
         let mut host_start = 0;
         for pointer in [address, last] {
             let mut kind: c_int = 0;
@@ -769,7 +776,11 @@ impl Stream {
                 })?;
             if kind != 1 {
                 // CU_MEMORYTYPE_HOST
-                return Err("embedding request mailbox must use mapped host storage".into());
+                if pointer == address && kind == 2 {
+                    // CU_MEMORYTYPE_DEVICE
+                    return Ok(None);
+                }
+                return Err("mapped storage range crosses memory types".into());
             }
             let mut host: Handle = std::ptr::null_mut();
             self.driver
@@ -783,13 +794,13 @@ impl Stream {
             if pointer == address {
                 host_start = host as usize;
             } else if host_start.checked_add(nbytes - 1) != Some(host as usize) {
-                return Err("embedding request mailbox is not one contiguous host range".into());
+                return Err("mapped storage is not one contiguous host range".into());
             }
         }
         if host_start == 0 {
-            return Err("embedding request mailbox lacks a host address".into());
+            return Err("mapped storage lacks a host address".into());
         }
-        Ok(host_start)
+        Ok(Some(host_start))
     }
 
     pub(crate) fn wait(&self, event: &Event) -> Result<()> {

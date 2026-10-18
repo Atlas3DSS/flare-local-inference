@@ -413,6 +413,44 @@ impl Inputs {
                     );
                     continue;
                 }
+                if binding.source == ValueSource::GrammarMask
+                    && input.dtype == Dtype::Int32
+                    && binding.value_offset == 0
+                    && matches!(
+                        binding.indexing,
+                        InputIndexing::RequestRow | InputIndexing::ActiveRow
+                    )
+                {
+                    // Grammar masks already contain packed i32 bit patterns.
+                    // Preserve those bytes without widening and validating every word.
+                    let count = admission
+                        .grammar_mask
+                        .as_ref()
+                        .map_or(input.width, Vec::len);
+                    if count == 0 {
+                        continue;
+                    }
+                    if destination
+                        .checked_add(count)
+                        .is_none_or(|end| end > input.elements)
+                    {
+                        return Err("packed values exceed prepared input storage".into());
+                    }
+                    if let Some(mask) = &admission.grammar_mask {
+                        self.staging.i32(
+                            &binding.buffer,
+                            destination * 4,
+                            mask.iter().copied(),
+                        );
+                    } else {
+                        self.staging.put(
+                            &binding.buffer,
+                            destination * 4,
+                            std::iter::repeat_n(0xff, count * 4),
+                        );
+                    }
+                    continue;
+                }
                 self.values.clear();
                 let values = &mut self.values;
                 use ValueSource::*;
