@@ -62,6 +62,7 @@ pub(crate) struct Encoder {
     pub model: String,
     pub created: u64,
     pub include_usage: bool,
+    continuous_usage: bool,
     pub outputs: Vec<ResponseOutput>,
     chats: Vec<Accumulator>,
     tools: Vec<Tool>,
@@ -110,6 +111,7 @@ impl Encoder {
             prompts,
             choices_per_prompt,
             include_usage,
+            continuous_usage: false,
             stop: None,
             sequence: 0,
             metadata,
@@ -121,6 +123,14 @@ impl Encoder {
         grammars: std::collections::HashMap<String, crate::grammar::TextGrammar>,
     ) {
         self.tool_grammars = grammars;
+    }
+    pub fn set_continuous_usage(&mut self, enabled: bool) {
+        self.continuous_usage = self.include_usage && enabled;
+    }
+
+    /// Count raw generated tokens before text decoding can merge or hide them.
+    pub fn observe_generated_token(&mut self, index: usize) {
+        self.usage[index].generated += 1;
     }
     fn named(&mut self, name: &str, mut data: Value) -> Frame {
         data["type"] = json!(name);
@@ -137,7 +147,7 @@ impl Encoder {
             json!({"id":self.id,"object":"chat.completion.chunk","created":self.created,"model":self.model,"choices":[{"index":index,"delta":delta,"finish_reason":finish}]})
         };
         if self.include_usage {
-            data["usage"] = Value::Null;
+            data["usage"] = if self.continuous_usage { self.usage_value() } else { Value::Null };
         }
         Frame::json(data)
     }

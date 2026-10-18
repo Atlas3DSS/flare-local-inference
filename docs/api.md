@@ -222,6 +222,14 @@ including the legacy terminal usage when token IDs are requested without a
 separate usage chunk. Stop sequences report the exact matched string through
 Anthropic `stop_sequence`.
 
+For cumulative usage during Chat and Completions streaming, set
+`"stream_options": {"include_usage": true, "continuous_usage_stats": true}`.
+The `continuous_usage_stats` option defaults to false and requires
+`include_usage: true`. Enable it when measuring streams that may be cancelled
+before the final usage chunk arrives. Each emitted chunk carries cumulative
+native token counts; text chunks can combine multiple tokens, so counting
+chunks does not measure generated tokens. Final usage is still emitted.
+
 ## Raw completions
 
 `prompt` accepts a string, an array of strings, a token-ID array, or an array of

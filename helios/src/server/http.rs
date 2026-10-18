@@ -235,6 +235,8 @@ pub(super) async fn generate(
         })
         .collect();
     let observation = decoded.observation;
+    let continuous_usage = decoded.stream && observation.continuous_usage
+        && matches!(protocol, Protocol::Chat | Protocol::Completions);
     let ingress_ns = observation.timestamps.then_some(ingress_ns);
     let prompt_ids = observation
         .token_ids
@@ -255,6 +257,8 @@ pub(super) async fn generate(
     }
     let submitted = if prompts.is_empty() {
         Ok(vec![])
+    } else if continuous_usage {
+        state.model.generate_many_observed(prompts, observation.timestamps)
     } else if observation.token_ids && size == 1 {
         state
             .model
@@ -301,6 +305,7 @@ pub(super) async fn generate(
         decoded.metadata,
     );
     encoder.set_tool_grammars(tool_grammars);
+    encoder.set_continuous_usage(continuous_usage);
     let streaming = decoded.stream;
     let stream_state = state.clone();
     let delivery = async_stream::stream! {
@@ -388,21 +393,25 @@ pub(super) async fn generate(
                     token,
                     timestamp_ns,
                 } => {
-                    raw_tokens.push(token);
-                    if let Some(timestamp) = timestamp_ns {
-                        timestamps.push(timestamp);
+                    if continuous_usage {
+                        encoder.observe_generated_token(index);
                     }
-                    if protocol == Protocol::Chat {
+                    if observation.token_ids {
+                        raw_tokens.push(token);
+                        if let Some(timestamp) = timestamp_ns {
+                            timestamps.push(timestamp);
+                        }
+                    }
+                    if protocol == Protocol::Chat && observation.token_ids {
+                        let mut data = super::observed_chunk(
+                            &id, created, &state.model.config().model_id,
+                            token, timestamp_ns, observation.include_usage);
+                        if continuous_usage {
+                            data["usage"] = encoder.usage_value();
+                        }
                         yield Delivery::Frame(Frame {
                             event: None,
-                            data: super::observed_chunk(
-                                &id,
-                                created,
-                                &state.model.config().model_id,
-                                token,
-                                timestamp_ns,
-                                observation.include_usage,
-                            ),
+                            data,
                             done: false,
                         });
                     }

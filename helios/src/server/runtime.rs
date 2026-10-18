@@ -520,6 +520,10 @@ impl ModelRuntime {
         self.enqueue_many(prompts, None)
     }
 
+    pub(super) fn generate_many_observed(&self, prompts: Vec<Prompt>, timestamps: bool) -> Result<Vec<Generation>> {
+        self.enqueue_many(prompts, Some(timestamps))
+    }
+
     fn enqueue_many(
         &self,
         prompts: Vec<Prompt>,
