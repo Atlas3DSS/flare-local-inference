@@ -183,6 +183,9 @@ class DraftScratch:
                            else self.mlp.rows(tokens) if field == "mlp"
                            else getattr(self, field)[:tokens] for field in self.__dataclass_fields__))
 
+    def scratch_tensors(self):
+        return (self,)
+
 
 class DraftAttention(torch.nn.Module):
     def __init__(self, index, weights, config, scratch, metadata, pool, block, *, runtime, coordinator, session,

@@ -122,6 +122,9 @@ class DraftScratch:
             raise ValueError("DFlash2 scratch requires complete draft rows within its token capacity")
         return type(self)(self.scratch.rows(tokens, samples), self.buffers, self.token_capacity)
 
+    def scratch_tensors(self):
+        return self.scratch, self.buffers
+
 
 class DraftAttention:
     """One draft layer: the block's queries attend the committed context's E4M3 records, a sliding layer's
