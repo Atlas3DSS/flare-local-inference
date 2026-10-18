@@ -152,6 +152,7 @@ explicit flags take precedence.
 | `--mtp-proposal-source {mtp,copy}` | Where drafts come from: the checkpoint's MTP module, or `copy` for continuations of the request's own history, which loads no draft model. Qwen only. | `mtp` |
 | `--history-drafts` | Also draft continuations copied from the request's own history. Qwen only. | off |
 | `--packed-verification` | Prepare a shared target-row capacity across retained request prefixes. DeepSeek V4.1 only; requires adaptive learned proposals. | Disabled |
+| `--mla-compute-mode {auto,bf16}` | Constrain DeepSeek V4.1 MLA arithmetic while preserving packed KV storage and autotuning among compatible kernels. Selects a separate cached package. | `auto` |
 | `--no-stream-overlap` | Run every concurrent branch (shared experts, projection chains, query chains) serially on the main stream with the same kernels, to diagnose scheduling-dependent faults. Slower. Recipes that run no branches concurrently reject it. | Overlap |
 | `--compile-workers N` | CPU compiler process budget per host, divided among local preparation ranks and bounded by available RAM and device memory. Applies to b12x kernel compilation and complete-forward compilation. Overrides `[preparation] compile_workers`. | Automatic |
 | `--tuning-gpus LIST` | Local kernel-tuning GPUs. Start with the serving GPU list, then append complete replicas of that TP group on matching hardware. Serving TP size stays fixed. Command line only; cannot be combined with multi-host `--ranks`. | Serving GPUs |
@@ -198,6 +199,22 @@ are mutually exclusive and require a packed adaptive catalog. Each budget must
 cover the selected padded batch capacity; a maximum budget must also cover the
 captured per-request verification width. Missing required graphs fail before
 GPU initialization.
+
+For DeepSeek V4.1, `--mla-compute-mode auto` lets b12x choose arithmetic
+and is the default. Use `bf16` when BF16 MLA arithmetic is required; packed KV
+storage remains unchanged, and compatible kernels still autotune. The pinned
+FlashInfer dependency supplies the required preparation API. For example:
+
+```sh
+.venv/bin/ignition export deepseek-v4.1-flash --gpus 0,1,2,3 \
+  --max-concurrency 8 --mtp-draft-tokens 5 --packed-verification \
+  --speculative-token-capacity 24 --prefill-chunk-size 4096 \
+  --mla-compute-mode bf16 \
+  --output /data/flare-runtime/deepseek41-tp4-c8-packed24-bf16.safetensors --verbose
+```
+
+The arithmetic choice applies to target, prefill, and draft attention and is
+fixed in the exported graphs. Changing it requires another export.
 
 CPU compilation and GPU tuning have independent controls. For a TP1 package,
 `--gpus 0 --tuning-gpus 0-3 --compile-workers 24` uses four GPUs to benchmark

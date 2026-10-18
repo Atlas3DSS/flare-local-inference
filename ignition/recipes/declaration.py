@@ -137,6 +137,8 @@ class Recipe:
     MXFP8 while loading, trading checkpoint precision for decode bandwidth.
     `language_model_only` states that a plan may prepare the recipe without its vision
     encoder, rejecting images and leaving the encoder's memory to KV pages.
+    `mla_compute_modes` declares the attention arithmetic constraints a plan may select,
+    independently of KV storage encoding and kernel tuning.
     `b12x_environment` holds the b12x settings the recipe prepares with. b12x reads them
     only from its environment, so Ignition sets them for the preparing process.
     """
@@ -165,6 +167,7 @@ class Recipe:
     online_mxfp8: bool = False
     language_model_only: bool = False
     b12x_environment: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
+    mla_compute_modes: tuple[str, ...] = ("auto",)
 
     def mixed_shapes(self, concurrency, chunk, speculation):
         from ignition.components.capacity import mixed_shapes

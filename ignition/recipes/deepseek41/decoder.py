@@ -102,7 +102,7 @@ class PreparedDecoderBoundary:
 class PreparedLayer:
     def __init__(self, index, weights, tables, scratch, metadata, pool, rotary, *, shard, mode,
                  runtime, coordinator, session, name, workspace, carry, defer_post,
-                 boundary=None, replay_start=None, window_staging=None):
+                 boundary=None, replay_start=None, window_staging=None, mla_compute_mode="auto"):
         s, text = scratch, pool.config.text
         self.scratch, self.carry = s, carry
         self.metadata = metadata
@@ -124,7 +124,7 @@ class PreparedLayer:
         self.attention = PreparedAttention(index, weights.attention, s.attention_hc.normalized, s.attention,
             metadata, pool, rotary, mode=mode, world=shard.world_size,
             session=session, name=name + ".attention", workspace=workspace, replay_start=replay_start,
-            window_staging=window_staging)
+            window_staging=window_staging, mla_compute_mode=mla_compute_mode)
         self.attention_reduce = PreparedAllReduce(s.attention.output, s.attention_output, runtime=runtime,
             coordinator=coordinator, session=session, name=name + ".attention_reduce")
         self.ffn_hc = PreparedMHC((s.attention_output, s.attention_hc.residual, s.attention_hc.post, s.attention_hc.comb),
@@ -186,7 +186,7 @@ class PreparedLayer:
 class PreparedDecoder:
     def __init__(self, weights, tables, scratch, metadata, pool, *, mode, runtime,
                  vocabulary_runtime, coordinator, session, name, workspace,
-                 window_staging=None, suffix_scratch=None, vision=None):
+                 window_staging=None, suffix_scratch=None, vision=None, mla_compute_mode="auto"):
         self.weights, self.scratch, self.metadata, self.pool = weights, scratch, metadata, pool
         self.mode = mode
         self.vision = vision if mode == "prefill" else None
@@ -236,7 +236,8 @@ class PreparedDecoder:
                 shard=weights.shard, mode=mode, runtime=runtime,
                 coordinator=coordinator, session=session, name=f"{name}.layer{index}", workspace=workspace,
                 carry=carry, defer_post=defer, boundary=boundary, replay_start=replay_start,
-                window_staging=None if self.window_commit is None else self.window_commit.staging[index]))
+                window_staging=None if self.window_commit is None else self.window_commit.staging[index],
+                mla_compute_mode=mla_compute_mode))
             carry = defer
         self.compact_head = scratch.hidden.shape[0] > self.output_metadata.token_ids.numel()
         head_rows = self.output_metadata.token_ids.numel() if self.compact_head else scratch.hidden.shape[0]

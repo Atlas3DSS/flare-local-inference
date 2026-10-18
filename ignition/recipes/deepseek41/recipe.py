@@ -23,7 +23,8 @@ def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress, retain_
         snapshot_budget_bytes=plan.snapshots * plan.costs.state_row_bytes,
         headroom_bytes=HEADROOM_BYTES + plan.reserve_bytes, kernel_cache=kernel_cache,
         dspark=speculation is not None, split_speculation=speculation is not None and speculation.draft_tokens > 0,
-        stream_overlap=plan.stream_overlap, expert_scale_compression=plan.expert_scale_compression, **drafting)
+        stream_overlap=plan.stream_overlap, expert_scale_compression=plan.expert_scale_compression,
+        mla_compute_mode=plan.mla_compute_mode, **drafting)
     return prepare_group(snapshot, config, prepare_rank, progress=progress, package_storage=package_storage)
 
 
@@ -33,6 +34,7 @@ def usage(prepared):
 
 RECIPE = Recipe(
     name="deepseek41", prepare=prepare, usage=usage,
+    mla_compute_modes=("auto", "bf16"),
     # Recommended sampling: https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017#minimal-inference.
     sampling_defaults=SamplingDefaults(temperature=1., top_p=1., top_k=-1),
     checkpoints=(Checkpoint(alias="deepseek-v4.1-flash", repository="deepseek-ai/DeepSeek-V4.1-Flash-1017",

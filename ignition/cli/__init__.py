@@ -178,6 +178,9 @@ def _preparation_arguments(running):
     speculative.add_argument("--history-drafts", action="store_true",
                           help="also draft continuations copied from the request's own history")
     advanced = running.add_argument_group("advanced options")
+    advanced.add_argument("--mla-compute-mode", choices=("auto", "bf16"), default="auto",
+                          help="constrain MLA arithmetic while retaining packed KV storage and compatible"
+                               " kernel tuning (default: auto; bf16 requires the preparation API)")
     advanced.add_argument("--compile-workers", type=int, metavar="N",
                           help="CPU compiler process budget per host, shared by local preparation ranks;"
                                " bounded by available RAM and device memory (default: automatic)")

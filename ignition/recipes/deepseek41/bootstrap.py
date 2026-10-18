@@ -47,6 +47,13 @@ from .weights import ModelWeights
 _CONTEXT = partial(PreparedContext, compact_prefill=True)
 
 
+def _forward_factories(mla_compute_mode, *, window_staging, suffix_scratch, vision):
+    """Bind one arithmetic contract to target, prefill, and draft attention."""
+    return (partial(PreparedDecoder, window_staging=window_staging, suffix_scratch=suffix_scratch,
+                    vision=vision, mla_compute_mode=mla_compute_mode),
+            partial(PreparedDraft, mla_compute_mode=mla_compute_mode))
+
+
 @dataclass(frozen=True)
 class PreparationConfig:
     image_concurrency: int | None = None
@@ -71,6 +78,7 @@ class PreparationConfig:
     # Run single-row decode's shared expert on an auxiliary stream; without overlap it runs serially.
     stream_overlap: bool = True
     expert_scale_compression: str | None = None
+    mla_compute_mode: str = "auto"
     # Separate proposal and verification graphs for native confidence-prefix scheduling.
     split_speculation: bool = False
     packed_verification: bool = False
@@ -79,7 +87,9 @@ class PreparationConfig:
 
     def __post_init__(self):
         from ignition.components.capacity import image_capacity
+        from ignition.components.compressed_mla import validate_mla_compute_mode
 
+        validate_mla_compute_mode(self.mla_compute_mode)
         object.__setattr__(self, "image_concurrency", image_capacity(self.max_active, self.image_concurrency))
         if self.expert_scale_compression not in (None, "csf"):
             raise ValueError("DeepSeek V4.1 expert scale compression must be None or 'csf'")
@@ -225,8 +235,8 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                 token_base=129280, sentinel_names=("image_start", "image_start", "image_newline", "image_end"),
                 feature_type=1, image_slots=config.image_concurrency)
             vision_storage = {}
-        decoder_factory = partial(PreparedDecoder, window_staging=window_staging, suffix_scratch=suffix_storage,
-                                  vision=vision_state)
+        decoder_factory, draft_factory = _forward_factories(config.mla_compute_mode,
+            window_staging=window_staging, suffix_scratch=suffix_storage, vision=vision_state)
         buffers = dict(inputs.buffers(), **tables.buffers(), **commands.buffers(), **{
             name: getattr(admission, name) for name in admission.__dataclass_fields__},
             state_pool=pool.backing, memory_capacity=pool.memory_capacity,
@@ -245,7 +255,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                 runtime=collective, vocabulary_runtime=vocabulary_collective,
                 markov_runtime=None, coordinator=coordinator, result_runtime=result_collective,
                 forwards=DSparkForwards(decoder_factory, Scratch, _CONTEXT,
-                    PreparedDraft, PreparedMarkov))
+                    draft_factory, PreparedMarkov))
 
     del manifest
     modes = (True, False) if config.dspark else (False,)
@@ -414,6 +424,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         "catalog_operand_bytes": catalog_bytes,
         "weights_bytes": weights.allocated_bytes, "mapped_host_bytes": 0,
         "expert_scale_compression": config.expert_scale_compression,
+        "mla_compute_mode": config.mla_compute_mode,
         "offloaded_bytes": sum(source.nbytes for pair in tables.sources.values() for source in pair),
         "continuation_bytes": pool.backing.nbytes, "state_rows": state_rows,
         "preparation_state_rows": int(pool.memory_capacity[0].item()),

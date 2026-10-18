@@ -115,7 +115,8 @@ def run(args) -> int:
                   context_parallel=context_parallel(args, model), stream_overlap=stream_overlap(args, model),
                   roce_ring=args.roce_ring,
                   mixed_prefill=args.mixed_prefill, expert_scale_compression=args.expert_scale_compression,
-                  online_mxfp8=args.online_mxfp8, language_model_only=args.language_model_only)
+                  online_mxfp8=args.online_mxfp8, language_model_only=args.language_model_only,
+                  mla_compute_mode=args.mla_compute_mode)
     runtime = binary()
     host = configuration.get("server.host", args.host).value
     port = configuration.get("server.port", args.port).value
@@ -219,7 +220,8 @@ def _export_hosts(args, *, export_path) -> int:
                          context_parallel=context_parallel(args, model), stream_overlap=stream_overlap(args, model),
                          roce_ring=args.roce_ring,
                          mixed_prefill=args.mixed_prefill, expert_scale_compression=args.expert_scale_compression,
-                         online_mxfp8=args.online_mxfp8, language_model_only=args.language_model_only)
+                         online_mxfp8=args.online_mxfp8, language_model_only=args.language_model_only,
+                         mla_compute_mode=args.mla_compute_mode)
     plan = replace(plan, compile_workers=compiler_workers(configuration, args.compile_workers), hub_cache=hub_cache)
     environment.apply(configuration, local, plan.recipe.b12x_environment)
     options = _server_options(configuration, model, plan)
@@ -286,7 +288,8 @@ def _prepare(args, *, export_path) -> int:
                       context_parallel=context_parallel(args, model), stream_overlap=stream_overlap(args, model),
                       roce_ring=args.roce_ring,
                       mixed_prefill=args.mixed_prefill, expert_scale_compression=args.expert_scale_compression,
-                      online_mxfp8=args.online_mxfp8, language_model_only=args.language_model_only)
+                      online_mxfp8=args.online_mxfp8, language_model_only=args.language_model_only,
+                      mla_compute_mode=args.mla_compute_mode)
         indices = planning.format_gpus(gpu.index for gpu in plan.gpus)
         # A caller's restriction changes which GPU each index names.
         restricted = "" if host.restriction is None else f" of CUDA_VISIBLE_DEVICES={host.restriction}"
@@ -437,7 +440,7 @@ def serve(args) -> int:
                          roce_ring=args.roce_ring,
                          cache_states=args.prefix_cache_states, mixed_prefill=args.mixed_prefill,
                          expert_scale_compression=args.expert_scale_compression, online_mxfp8=args.online_mxfp8,
-                         language_model_only=args.language_model_only)
+                         language_model_only=args.language_model_only, mla_compute_mode=args.mla_compute_mode)
     plan = replace(plan, compile_workers=compiler_workers(configuration, args.compile_workers), hub_cache=hub_cache)
     if rendezvous is None:
         plan = tuning_devices(plan, host, args.tuning_gpus)
