@@ -4,7 +4,7 @@ pub(super) fn measured_costs(graphs: &[crate::execution::GraphDescriptor]) -> co
     let mut costs = cost::ActionCosts::prepared(graphs).unwrap();
     for graph in graphs {
         costs.observe(
-            &ScheduledStep {
+            &ScheduledStep { packed_token_capacity: 0,
                 kind: graph.kind,
                 batch_capacity: graph.batch_capacity,
                 token_capacity: graph.token_capacity,
@@ -154,7 +154,7 @@ pub(crate) fn duration_graphs(active: usize) -> Vec<crate::execution::GraphDescr
             GraphKind::Speculative,
         ] {
             for tokens in 1..=if kind == GraphKind::Speculative { 8 } else { 1 } {
-                graphs.push(crate::execution::GraphDescriptor {
+                graphs.push(crate::execution::GraphDescriptor { packed_token_capacity: 0,
                     name: format!("{kind:?}-{batch}-{tokens}"),
                     kind,
                     sampling_mode: crate::execution::SamplingMode::General,
@@ -173,7 +173,7 @@ pub(crate) fn duration_graphs(active: usize) -> Vec<crate::execution::GraphDescr
         (GraphKind::Vision, vec![8, 16, 256, 1024, 4096, 16384]),
     ] {
         for tokens in capacities {
-            graphs.push(crate::execution::GraphDescriptor {
+            graphs.push(crate::execution::GraphDescriptor { packed_token_capacity: 0,
                 name: format!("{kind:?}-{tokens}"),
                 kind,
                 sampling_mode: crate::execution::SamplingMode::General,

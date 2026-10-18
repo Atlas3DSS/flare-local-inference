@@ -48,6 +48,20 @@ def test_manifest_offsets_are_stable_across_graphs(monkeypatch):
     assert manifest["buffers"][-1]["dtype"] == "bool"
 
 
+def test_verification_keeps_prefix_width_separate_from_total_rows(monkeypatch):
+    signature = GraphSignature('verification', 4, 6, ('tokens',), packed_token_capacity=12)
+    execution = _execution(graphs={'verify':object()}, signatures={'verify':signature})
+    spans = [(4096,4),(8192,8),(12288,512),(16384,128),(20480,1)]
+    monkeypatch.setattr(execution, '_validate_resources', lambda:(9,[11],spans))
+    graph = execution.manifest()['graphs'][0]
+    assert (graph['batch_capacity'],graph['token_capacity'],graph['packed_token_capacity']) == (4,6,12)
+    for capacity in (3,25):
+        with pytest.raises(ValueError,match='packed verification capacity'):
+            GraphSignature('verification',4,6,packed_token_capacity=capacity)
+    with pytest.raises(ValueError,match='packed verification capacity'):
+        GraphSignature('decode',4,1,packed_token_capacity=4)
+
+
 def test_diagnostic_manifest_preserves_selectable_proposal_depths(monkeypatch):
     signatures = {f"proposal{width}": GraphSignature("proposal", 4, width, ("tokens",),
                   speculation_enabled=True) for width in (2, 4, 6)}
@@ -199,6 +213,15 @@ def test_mixed_manifest_preserves_both_capacities_and_decode_mode(monkeypatch, p
     assert (decoded.batch_capacity, decoded.token_capacity, decoded.prefill_capacity) == (4, width, prefill)
     assert decoded.speculation_enabled == enabled
     assert "prefill_row" in [b.buffer_name for b in decoded.input_bindings]
+
+
+def test_verification_protobuf_preserves_physical_rows_and_legacy_width_bounds():
+    from ignition.preparation.runtime_package_pb2 import ExecutionGraph
+    legacy = ExecutionGraph.FromString(b"\x12\x0cverification\x20\x08\x28\x06")
+    assert (legacy.batch_capacity, legacy.token_capacity, legacy.packed_token_capacity) == (8, 6, 0)
+    graph = ExecutionGraph(kind="verification", batch_capacity=8, token_capacity=6, packed_token_capacity=24)
+    decoded = ExecutionGraph.FromString(graph.SerializeToString())
+    assert (decoded.batch_capacity, decoded.token_capacity, decoded.packed_token_capacity) == (8, 6, 24)
 
 
 @pytest.mark.parametrize("changes", [

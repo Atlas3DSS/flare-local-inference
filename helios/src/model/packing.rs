@@ -24,6 +24,7 @@ struct BoundGraph {
     kind: GraphKind,
     batch: usize,
     tokens: usize,
+    packed_tokens: usize,
     prefill: usize,
 }
 
@@ -143,7 +144,7 @@ impl Inputs {
                             } else if graph.kind == GraphKind::Prefill {
                                 graph.token_capacity
                             } else {
-                                graph.batch_capacity * graph.token_capacity
+                                graph.packed_tokens()
                             };
                             if elements < rows * width {
                                 return Err(
@@ -205,6 +206,7 @@ impl Inputs {
                     kind: graph.kind,
                     batch: graph.batch_capacity,
                     tokens: graph.token_capacity,
+                    packed_tokens: graph.packed_token_capacity,
                     prefill: graph.prefill_capacity,
                 })
             })
@@ -240,6 +242,7 @@ impl Inputs {
                 g.kind == step.kind
                     && g.batch == step.batch_capacity
                     && g.tokens == step.token_capacity
+                    && g.packed_tokens == step.packed_token_capacity
                     && g.prefill == step.prefill_capacity()
             })
             .map(|g| &g.semantics)
@@ -308,6 +311,7 @@ impl Inputs {
                 g.kind == frame.step.kind
                     && g.batch == frame.step.batch_capacity
                     && g.tokens == frame.step.token_capacity
+                    && g.packed_tokens == frame.step.packed_token_capacity
                     && g.prefill == frame.step.prefill_capacity()
             })
             .ok_or("submission has no resolved packing plan")?;

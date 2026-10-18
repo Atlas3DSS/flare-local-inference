@@ -293,6 +293,7 @@ class Plan:
             "online_mxfp8": self.online_mxfp8, "language_model_only": self.language_model_only,
             "speculation": None if self.speculation is None else {
                 "draft_tokens": self.speculation.draft_tokens, "adaptive": self.speculation.adaptive,
+                "packed_verification": self.speculation.packed_verification,
                 "proposal_source": self.speculation.proposal_source,
                 "history_drafts": self.speculation.history_drafts},
             "context": self.context, "checkpoint_context": self.recipe.context,

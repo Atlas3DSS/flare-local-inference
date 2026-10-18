@@ -441,6 +441,7 @@ fn same_layout(a: &ExecutionManifest, b: &ExecutionManifest) -> bool {
                 && a.sampling_mode == b.sampling_mode
                 && a.batch_capacity == b.batch_capacity
                 && a.token_capacity == b.token_capacity
+                && a.packed_token_capacity == b.packed_token_capacity
                 && a.prefill_capacity == b.prefill_capacity
                 && a.input_bindings.len() == b.input_bindings.len()
                 && a.input_bindings

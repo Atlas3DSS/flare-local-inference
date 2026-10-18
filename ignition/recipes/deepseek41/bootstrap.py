@@ -73,6 +73,7 @@ class PreparationConfig:
     expert_scale_compression: str | None = None
     # Separate proposal and verification graphs for native confidence-prefix scheduling.
     split_speculation: bool = False
+    packed_verification: bool = False
     # Additional combined graphs for exact qualification; omit when measuring service memory.
     speculation_reference_graphs: bool = False
 
@@ -86,6 +87,9 @@ class PreparationConfig:
             raise ValueError("speculation reference graphs require split speculation")
         if self.split_speculation and (not self.dspark or self.draft_tokens < 1):
             raise ValueError("split speculation requires a learned draft model and positive draft depth")
+        if self.packed_verification and (not self.split_speculation or self.speculative_fixed_width is not None
+                                         or self.speculation_reference_graphs):
+            raise ValueError("packed verification requires an adaptive retained-proposal catalog")
         if type(self.stream_overlap) is not bool:
             raise TypeError("stream_overlap must be a boolean")
         if len(self.devices) != 4 or len(set(self.devices)) != 4 or any(d < 0 for d in self.devices):
@@ -178,11 +182,13 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         coordinator = CollectivePreparation(group)
         ipc = package_storage.peer_storage
         tokens = max(config.prefill_chunk_size, config.decode_tokens, slots * config.draft_tokens)
+        verification_samples = (slots * max(config.speculative_widths)
+                                if config.packed_verification else config.decode_tokens)
         collective = create_all_reduce_runtime(group, device, max_tokens=tokens, hidden_size=5120, ipc=ipc)
         prefill_collective = create_dma_all_reduce_runtime(group, device,
             max_tokens=config.prefill_chunk_size, hidden_size=5120, ipc=ipc)
         vocabulary_collective = create_all_gather_runtime(group, device,
-            max_rows=max(config.decode_tokens, slots * config.draft_tokens), columns=129280, ipc=ipc)
+            max_rows=max(verification_samples, slots * config.draft_tokens), columns=129280, ipc=ipc)
         identity = hashlib.sha256(json.dumps({"config": json.loads((metadata_path / "config.json").read_text()),
             "headers": [s.header_sha256 for s in manifest.shards], "world_size": shard.world_size,
             "contract": "deepseek41.graph-inputs.v1"}, sort_keys=True).encode()).hexdigest()
@@ -197,7 +203,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         session.register_scratch(arena)
         graph_buffers = GraphBufferPool(device, chunk_bytes=2 << 20)
         prefill_storage = Scratch.allocate(config.prefill_chunk_size, 1, shard.world_size, device)
-        decoder_storage = Scratch.allocate(config.decode_tokens, config.decode_tokens, shard.world_size, device)
+        decoder_storage = Scratch.allocate(config.decode_tokens, verification_samples, shard.world_size, device)
         suffix_storage = Scratch.allocate(128, 1, shard.world_size, device)
         window_staging = (torch.empty((len(weights.layers), slots, (128 + max(config.speculative_widths)) * 528),
                                      dtype=torch.uint8, device=device) if config.dspark else None)
@@ -242,10 +248,11 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
     catalog_bytes = {}
     catalog_previous = torch.cuda.memory_allocated(device)
     with phase(progress, "Construct graph catalog", total=count) as stage:
-        def add(name, forward, kind, rows, tokens, fields, *, enabled=None):
+        def add(name, forward, kind, rows, tokens, fields, *, enabled=None, packed_tokens=0):
             nonlocal catalog_previous
             forwards[name] = forward
-            signatures[name] = GraphSignature(kind, rows, tokens, tuple(fields), speculation_enabled=enabled)
+            signatures[name] = GraphSignature(kind, rows, tokens, tuple(fields), speculation_enabled=enabled,
+                                              packed_token_capacity=packed_tokens)
             allocated = torch.cuda.memory_allocated(device)
             catalog_bytes[kind] = catalog_bytes.get(kind, 0) + allocated - catalog_previous
             catalog_previous = allocated
@@ -301,11 +308,17 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                     add(name, proposal, "proposal", batch, depth + 1, forward_inputs, enabled=True)
                 for batch, width in sorted(config.speculative_shapes, key=lambda shape: shape[0] * shape[1], reverse=True):
                     name = f"verification{batch}x{width}"
-                    target = PreparedParallelDraftRound(speculation, batch, width, name,
-                        generate_proposals=False, buffers=speculation.sampling_buffers.cursor())
+                    logical_width = max(config.speculative_widths) if config.packed_verification else width
+                    packed_tokens = batch * width if config.packed_verification else 0
+                    if packed_tokens:
+                        name = f"verification{batch}x{logical_width}-tokens{packed_tokens}"
+                    target = PreparedParallelDraftRound(speculation, batch, logical_width, name,
+                        generate_proposals=False, buffers=speculation.sampling_buffers.cursor(),
+                        target_token_capacity=packed_tokens or None)
                     target.prepare()
                     verification = PreparedDraftVerification(split, target)
-                    add(name, verification, "verification", batch, width, forward_inputs, enabled=True)
+                    add(name, verification, "verification", batch, logical_width, forward_inputs, enabled=True,
+                        packed_tokens=packed_tokens)
                     if width == 1:
                         # No proposal is needed to decode while retaining draft context.
                         decode = PreparedParallelDraftRound(speculation, batch, 1, f"speculative{batch}x1",

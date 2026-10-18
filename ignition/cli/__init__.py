@@ -193,6 +193,9 @@ def _preparation_arguments(running):
                                " (default: overlap)")
     advanced.add_argument("--no-compile", action="store_true",
                           help="development: capture graphs without compiling forwards")
+    advanced.add_argument("--packed-verification", action="store_true",
+                          help="share target-token rows across retained request prefixes"
+                               " (default: rectangular per-request capacities)")
     advanced.add_argument("--online-mxfp8", action="store_true",
                           help="store the recipe's eligible BF16 projections as MXFP8 while loading; faster"
                                " decode at reduced precision (Kimi K3 KDA, MLA except batched key/value, shared"

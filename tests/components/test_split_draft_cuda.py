@@ -118,7 +118,8 @@ def test_native_proposal_feedback_copies_host_mapped_confidence_without_allocati
 
 
 @torch.no_grad()
-def test_retained_proposals_regroup_prefixes_and_reject_stale_ownership():
+@pytest.mark.parametrize("target_capacity", [9, 12])
+def test_retained_proposals_regroup_prefixes_and_reject_stale_ownership(target_capacity):
     from types import SimpleNamespace
     from ignition.components.split_draft import PreparedDraftVerification, PreparedProposalStorage
 
@@ -146,7 +147,7 @@ def test_retained_proposals_regroup_prefixes_and_reject_stale_ownership():
     retained.drafts.copy_(retained.candidates[:, 1:])
     retained.probabilities.copy_(torch.arange(4 * 7 * 13, device="cuda").view(4, 7, 13))
     retained.valid.fill_(True)
-    target = SimpleNamespace(owner=owner, batch=4, width=3,
+    target = SimpleNamespace(owner=owner, batch=4, width=3, target_token_capacity=target_capacity,
         active=torch.zeros(4, dtype=torch.bool, device="cuda"), before=torch.empty_like(retained.before),
         base_offset=torch.empty_like(retained.before), candidates=torch.empty((4, 3), dtype=torch.int64, device="cuda"),
         drafts=torch.empty((4, 2), dtype=torch.int64, device="cuda"),
@@ -200,4 +201,12 @@ def test_retained_proposals_regroup_prefixes_and_reject_stale_ownership():
     torch.cuda.synchronize()
     assert observed.tolist() == [3, 0, -1, -1]
     assert retained.ready.tolist() == [False, True, True, False]
+    if target_capacity == 9:
+        retained.ready.fill_(True)
+        inputs.live_rows.fill_(4)
+        inputs.query_lengths.fill_(3)
+        graph.replay()
+        torch.cuda.synchronize()
+        assert observed.tolist() == [-1] * 4
+        assert retained.ready.all()
     graph.reset()

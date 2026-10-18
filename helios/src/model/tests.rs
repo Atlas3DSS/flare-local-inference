@@ -1021,7 +1021,7 @@ fn mixed_manifest(config: &mut ModelConfig, width: usize) -> crate::execution::E
             -1,
         ));
         config.contract.graphs.push(semantics);
-        manifest.graphs.push(GraphDescriptor {
+        manifest.graphs.push(GraphDescriptor { packed_token_capacity: 0,
             name,
             kind: GraphKind::Mixed,
             sampling_mode: SamplingMode::General,
@@ -1277,6 +1277,19 @@ fn retained_proposal_catalog_requires_prefix_coverage_and_proposal_free_decode()
     let mut multiple = config.clone();
     multiple.limits.max_active = 2;
     assert!(catalog::validate(&multiple, &manifest).is_err());
+    let mut packed = manifest.clone();
+    for graph in &mut packed.graphs {
+        if graph.kind == GraphKind::Verification {
+            graph.packed_token_capacity = graph.token_capacity;
+            graph.token_capacity = 8;
+        }
+    }
+    catalog::validate(&config, &packed).unwrap();
+    let index = catalog::select_shape(&config, &packed, GraphKind::Verification,
+        1, 8, 0, 3, crate::execution::SamplingMode::General).unwrap();
+    assert_eq!(packed.graphs[index].packed_tokens(), 3);
+    packed.graphs[index].packed_token_capacity = 9;
+    assert!(catalog::validate(&config, &packed).is_err());
     config.speculative_token_capacity = 0;
     assert!(catalog::validate(&config, &manifest).is_err());
 }

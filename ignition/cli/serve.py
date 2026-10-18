@@ -464,6 +464,11 @@ def serve(args) -> int:
             model.snapshot(hub_cache), plan, compile_forwards=not args.no_compile,
             kernel_cache=configuration.directory("kernel_cache"), progress=progress,
             **preparation_options)
+    if plan.speculation is not None and plan.speculation.packed_verification:
+        local_model = prepared.model if hasattr(prepared, "model") else prepared
+        if not any(signature.packed_token_capacity for signature in local_model.signatures.values()):
+            prepared.close()
+            raise UsageError("this prepared recipe does not declare packed verification capacities")
     if args.direct:
         from ignition.direct.server import serve_direct
 

@@ -2,6 +2,8 @@
 
 use super::{policy::{Candidate, bits}, utility::{LaneValue, ValueRate}, *};
 
+mod packed;
+
 pub(super) struct SplitSpeculation {
     pub width: usize,
     pub retained: [Option<RetainedProposal>; REQUEST_LANES],
@@ -9,6 +11,7 @@ pub(super) struct SplitSpeculation {
     // between the conditional probabilities in each observed draft block.
     forecast: [Option<Forecast>; REQUEST_LANES],
     population: [f32; 7],
+    pub(super) pending_budget: Option<(Fence, usize)>,
 }
 
 #[derive(Clone, Copy)]
@@ -133,6 +136,7 @@ impl RequestScheduler {
             retained: [None; REQUEST_LANES],
             forecast: [None; REQUEST_LANES],
             population: survival(&[FORECAST_PRIOR; 7]),
+            pending_budget: None,
         });
         Ok(())
     }
@@ -324,6 +328,11 @@ impl RequestScheduler {
                 rate = candidate;
             }
         }
+        self.finalize_selected(fresh, needs);
+        Ok(())
+    }
+
+    fn finalize_selected(&mut self, fresh: u64, needs: Vec<(usize, usize)>) {
         let generated: Vec<_> = needs.iter()
             .map(|(slot, _)| self.slots[*slot].request.as_ref().map_or(0, |r| r.generated_tokens)).collect();
         let split = self.split.as_mut().unwrap();
@@ -343,16 +352,19 @@ impl RequestScheduler {
                 split.forecast[slot] = Some(forecast);
             }
         }
-        Ok(())
     }
 
     pub(super) fn split_candidates(&self, output: &mut Vec<Candidate>, values: &[LaneValue; REQUEST_LANES], age_price: f64) {
         if !self.submissions.is_empty() { return; }
+        if self.costs.packed_shapes().next().is_some() {
+            self.packed_candidates(output, values, age_price);
+            return;
+        }
         let split = self.split.as_ref().unwrap();
         let retained = self.retained_needs();
         let proposal_shapes = self.packing_shapes(GraphKind::Proposal);
         let verification_shapes = self.packing_shapes(GraphKind::Verification);
-        let make = |kind, call: PackedCall, rate| Candidate {
+        let make = |kind, call: PackedCall, rate| Candidate { packed_token_capacity: 0, verification_budget: None,
             kind, mask: call.mask, batch: call.batch, capacity: call.width,
             prefill_capacity: 0, prefill_slot: None, work: 0, duration_ns: call.nanos, rate, feedback: true,
         };
@@ -448,7 +460,13 @@ impl RequestScheduler {
                 self.split.as_mut().unwrap().retained[lane.request.slot as usize] = None;
             }
         }
-        self.finalize_proposals(fresh)?;
+        let budget = self.split.as_mut().unwrap().pending_budget.take();
+        if let Some((owner, tokens)) = budget {
+            if owner != fence { return Err("packed verification budget belongs to another proposal".into()); }
+            self.finalize_packed(fresh, tokens)?;
+        } else {
+            self.finalize_proposals(fresh)?;
+        }
         Ok(generated)
     }
 }
@@ -456,6 +474,73 @@ impl RequestScheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn packed_budget_survives_cost_updates_before_commit_and_redistributes_across_requests() {
+        let mut s = engine(8);
+        s.configure_policy(PolicyConfig::throughput()).unwrap();
+        let mut graphs = super::super::tests::duration_graphs(8);
+        graphs.retain(|g| g.kind != GraphKind::Speculative);
+        for batch in [1, 2, 4, 8] {
+            for (kind,width,budget) in [(GraphKind::Speculative,1,0),(GraphKind::Proposal,8,0)].into_iter()
+                .chain((1..=8).map(|width| (GraphKind::Verification,8,batch*width))) {
+                graphs.push(GraphDescriptor { name: format!("{kind:?}-{batch}-{width}-{budget}"),kind,
+                    sampling_mode: SamplingMode::General, handle: 1, batch_capacity: batch, token_capacity: width,
+                    packed_token_capacity: budget, prefill_capacity: 0, estimated_duration_ns: 1, input_bindings: vec![] });
+            }
+        }
+        s.graph_durations(&graphs).unwrap();
+        let mut measurements = Vec::new();
+        for graph in &graphs {
+            let duration = match graph.kind {
+                GraphKind::Proposal => 2_000_000,
+                GraphKind::Verification => 8_000_000 + graph.packed_token_capacity as u64 * 375_000,
+                _ => 11_000_000,
+            };
+            let step = ScheduledStep { kind: graph.kind, batch_capacity: graph.batch_capacity,
+                token_capacity: graph.token_capacity, packed_token_capacity: graph.packed_token_capacity,
+                mixed: None, lanes: vec![], requires_feedback: true };
+            s.costs.set_measured(&step, duration);
+            measurements.push((step, duration));
+        }
+        s.split.as_mut().unwrap().population = survival(&[0.7,0.5,0.1,0.1,0.1,0.1,0.1]);
+        let handles: Vec<_> = (0..8).map(|_|ready(&mut s)).collect();
+        let plan = s.plan().unwrap();
+        assert_eq!(plan.kind,GraphKind::Proposal);
+        assert_eq!(plan.batch_capacity,8);
+        assert_eq!(plan.verification_budget, Some(24));
+        for (step, _) in &measurements {
+            if step.kind == GraphKind::Verification {
+                s.costs.set_measured(step, if step.packed_token_capacity == 8 { 1 } else { 100_000_000 });
+            }
+        }
+        assert_eq!(s.plan().unwrap().verification_budget, Some(8));
+        let fence = Fence(1);
+        s.commit(&plan,fence).unwrap();
+        let budget = s.split.as_ref().unwrap().pending_budget.unwrap().1;
+        assert_eq!(budget,24);
+        for (step, duration) in &measurements {
+            s.costs.set_measured(step, *duration);
+        }
+        s.split.as_mut().unwrap().population = [1.;7];
+        let mut records = vec![CompletionRecord::default();s.limits.request_capacity()];
+        for &h in &handles {
+            records[h.slot as usize] = CompletionRecord { generation: h.generation as i64,
+                submission_sequence: fence.0 as i64, consumed_tokens: 65, generated_tokens: 1,
+                token_id: -1, status: 1, vector: Some(TokenVector::default()), ..Default::default() };
+        }
+        let confidence: Vec<_> = (0..8).map(|row|if row<2 {[0.999;7]} else {[0.3;7]}).collect();
+        assert!(s.complete_proposal(fence,&records,Default::default(),&confidence).unwrap().is_empty());
+        let prefixes: Vec<_> = handles.iter().map(|&h| s.retained_proposal(s.request(h).unwrap()).unwrap().width).collect();
+        assert_eq!(prefixes,[8,8,2,2,1,1,1,1]);
+        assert_eq!(prefixes.iter().sum::<usize>(),budget);
+        let verify = s.plan().unwrap();
+        assert_eq!(verify.kind,GraphKind::Verification);
+        assert_eq!(verify.batch_capacity,8);
+        assert_eq!(verify.packed_token_capacity,24);
+        assert_eq!(verify.token_capacity,8);
+        s.commit(&verify,Fence(2)).unwrap();
+    }
     use crate::execution::{GraphDescriptor, SamplingMode, TokenVector};
 
     #[test]
@@ -464,7 +549,7 @@ mod tests {
         let confidence = [0.73, 0.59, 0.49, 0.43, 0.38, 0.0, 0.0];
         for (batch, plain, draft) in [(1, 7.5, 1.215), (2, 8.5, 1.563), (4, 9.5, 1.935), (8, 10.99, 2.529)] {
             for (kind, width, ms) in [(GraphKind::Speculative, 1, plain), (GraphKind::Proposal, 6, draft)] {
-                s.costs.set_measured(&ScheduledStep { kind, batch_capacity: batch, token_capacity: width,
+                s.costs.set_measured(&ScheduledStep { packed_token_capacity: 0, kind, batch_capacity: batch, token_capacity: width,
                     mixed: None, lanes: vec![], requires_feedback: true }, (ms * 1e6) as u64);
             }
         }
@@ -518,7 +603,7 @@ mod tests {
             ] {
                 for width in widths {
                     if kind == GraphKind::Verification { shapes.push((batch, width)); }
-                    graphs.push(GraphDescriptor { name: format!("{kind:?}-{batch}-{width}"), kind,
+                    graphs.push(GraphDescriptor { packed_token_capacity: 0, name: format!("{kind:?}-{batch}-{width}"), kind,
                         sampling_mode: SamplingMode::General, handle: 1, batch_capacity: batch,
                         token_capacity: width, prefill_capacity: 0,
                         estimated_duration_ns: if kind == GraphKind::Speculative { 100_000 } else { 1000 },
@@ -544,11 +629,11 @@ mod tests {
 
     fn proposal(s: &mut RequestScheduler, handles: &[RequestHandle], confidence: &[[f32; 7]]) -> Fence {
         let fence = Fence(s.submitted.0 + 1);
-        let step = ScheduledStep { kind: GraphKind::Proposal, batch_capacity: handles.len().next_power_of_two(),
+        let step = ScheduledStep { packed_token_capacity: 0, kind: GraphKind::Proposal, batch_capacity: handles.len().next_power_of_two(),
             token_capacity: 8, mixed: None, requires_feedback: true,
             lanes: handles.iter().map(|&h| ScheduledLane { request: h, start_position: 65, tokens: 8 }).collect() };
         let plan = ScheduledPlan { owner: s.plan_owner.clone(), epochs: handles.iter().map(|h| s.request(*h).unwrap().epoch).collect(),
-            estimated_duration_ns: 1000, selection_value_rate: 0.0, selection_log_scale: 0.0, step };
+            estimated_duration_ns: 1000, selection_value_rate: 0.0, selection_log_scale: 0.0, verification_budget: None, step };
         s.commit(&plan, fence).unwrap();
         let mut records = vec![CompletionRecord::default(); s.limits.request_capacity()];
         for &h in handles { records[h.slot as usize] = CompletionRecord {
@@ -569,7 +654,7 @@ mod tests {
 
     fn costs(s: &mut RequestScheduler, batch: usize, times: &[u64]) {
         for (i, &ns) in times.iter().enumerate() {
-            s.costs.set_measured(&ScheduledStep { kind: GraphKind::Verification, batch_capacity: batch,
+            s.costs.set_measured(&ScheduledStep { packed_token_capacity: 0, kind: GraphKind::Verification, batch_capacity: batch,
                 token_capacity: i + 1, mixed: None, lanes: vec![], requires_feedback: true }, ns);
         }
     }
@@ -589,7 +674,7 @@ mod tests {
                                    (GraphKind::Verification, (1..=6).collect())] {
                 for width in widths {
                     if kind == GraphKind::Verification { shapes.push((batch, width)); }
-                    graphs.push(GraphDescriptor { name: format!("{kind:?}-{batch}-{width}"), kind,
+                    graphs.push(GraphDescriptor { packed_token_capacity: 0, name: format!("{kind:?}-{batch}-{width}"), kind,
                         sampling_mode: SamplingMode::General, handle: 1, batch_capacity: batch,
                         token_capacity: width, prefill_capacity: 0, estimated_duration_ns: 1000, input_bindings: vec![] });
                 }
@@ -630,11 +715,11 @@ mod tests {
         let mut s = measured_split_engine_depths(8, &[2, 3, 4, 5, 6]);
         for batch in [1, 2, 4, 8] {
             for width in 2..=6 {
-                s.costs.set_measured(&ScheduledStep { kind: GraphKind::Proposal, batch_capacity: batch,
+                s.costs.set_measured(&ScheduledStep { packed_token_capacity: 0, kind: GraphKind::Proposal, batch_capacity: batch,
                     token_capacity: width, mixed: None, lanes: vec![], requires_feedback: true },
                     (width as u64 - 1) * 500_000);
             }
-            s.costs.set_measured(&ScheduledStep { kind: GraphKind::Speculative, batch_capacity: batch,
+            s.costs.set_measured(&ScheduledStep { packed_token_capacity: 0, kind: GraphKind::Speculative, batch_capacity: batch,
                 token_capacity: 1, mixed: None, lanes: vec![], requires_feedback: true }, 11_000_000);
         }
         for _ in 0..8 { ready(&mut s); }
@@ -653,11 +738,11 @@ mod tests {
         let mut s = measured_split_engine_depths(1, &[2, 6]);
         let h = ready(&mut s);
         let fence = Fence(1);
-        let step = ScheduledStep { kind: GraphKind::Proposal, batch_capacity: 1, token_capacity: 2,
+        let step = ScheduledStep { packed_token_capacity: 0, kind: GraphKind::Proposal, batch_capacity: 1, token_capacity: 2,
             mixed: None, requires_feedback: true,
             lanes: vec![ScheduledLane { request: h, start_position: 65, tokens: 2 }] };
         let plan = ScheduledPlan { owner: s.plan_owner.clone(), epochs: vec![s.request(h).unwrap().epoch],
-            estimated_duration_ns: 1_000_000, selection_value_rate: 0.0, selection_log_scale: 0.0, step };
+            estimated_duration_ns: 1_000_000, selection_value_rate: 0.0, selection_log_scale: 0.0, verification_budget: None, step };
         s.commit(&plan, fence).unwrap();
         let record = CompletionRecord { generation: h.generation as i64, submission_sequence: 1,
             consumed_tokens: 65, generated_tokens: 1, token_id: -1, status: 1,
@@ -682,9 +767,9 @@ mod tests {
         let h = s.admit(super::super::tests::spec(65, 1024)).unwrap();
         let r = s.request_mut(h).unwrap();
         (r.phase, r.consumed_tokens, r.scheduled_consumed, r.generated_tokens) = (RequestPhase::Decode, 65, 65, 1);
-        s.costs.set_measured(&ScheduledStep { kind: GraphKind::Speculative, batch_capacity: 1, token_capacity: 1,
+        s.costs.set_measured(&ScheduledStep { packed_token_capacity: 0, kind: GraphKind::Speculative, batch_capacity: 1, token_capacity: 1,
             mixed: None, lanes: vec![], requires_feedback: true }, ms(7.3));
-        s.costs.set_measured(&ScheduledStep { kind: GraphKind::Proposal, batch_capacity: 1, token_capacity: 6,
+        s.costs.set_measured(&ScheduledStep { packed_token_capacity: 0, kind: GraphKind::Proposal, batch_capacity: 1, token_capacity: 6,
             mixed: None, lanes: vec![], requires_feedback: true }, ms(1.34));
         let generated = s.request(h).unwrap().generated_tokens;
         s.split.as_mut().unwrap().forecast[h.slot as usize] = Some(Forecast { request: h, prefixes: [0.0; 7], observed_at: [generated; 7] });
@@ -734,7 +819,7 @@ mod tests {
         for batch in [1, 2, 4, 8] {
             for (kind, width, nanos) in [(GraphKind::Speculative, 1, 10_000_000),
                                         (GraphKind::Proposal, 6, 2_000_000)] {
-                s.costs.set_measured(&ScheduledStep { kind, batch_capacity: batch,
+                s.costs.set_measured(&ScheduledStep { packed_token_capacity: 0, kind, batch_capacity: batch,
                     token_capacity: width, mixed: None, lanes: vec![], requires_feedback: true }, nanos);
             }
         }

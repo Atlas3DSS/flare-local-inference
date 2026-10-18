@@ -567,6 +567,9 @@ message ExecutionGraph {
   optional bool speculation_enabled = 10;
   uint64 estimated_duration_ns = 11; // Zero denotes an indeterminate duration.
   uint64 prefill_capacity = 12; // Prompt capacity of a mixed graph; zero otherwise.
+  // Physical target rows of a verification graph. Zero retains batch_capacity *
+  // token_capacity for packages without a separate packed-row bound.
+  uint64 packed_token_capacity = 13;
 }
 enum DraftSource { NO_DRAFT = 0; MTP = 1; COPY_DRAFT = 2; }
 message InputBinding { string buffer_name = 1; uint64 host_offset = 2; uint64 nbytes = 3; }

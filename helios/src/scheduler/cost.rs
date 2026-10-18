@@ -22,6 +22,15 @@ struct Key {
     batch: usize,
     tokens: usize,
     prefill: usize,
+    packed: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct PackedShape {
+    pub batch: usize,
+    pub width: usize,
+    pub tokens: usize,
+    pub nanos: u64,
 }
 
 struct Estimate {
@@ -51,6 +60,7 @@ impl ActionCosts {
             batch: step.batch_capacity,
             tokens: step.token_capacity,
             prefill: step.prefill_capacity(),
+            packed: step.packed_token_capacity,
         };
         let estimate = &mut self.entries.iter_mut().find(|(k, _)| *k == key).unwrap().1;
         estimate.nanos = nanos;
@@ -66,6 +76,7 @@ impl ActionCosts {
                 batch: graph.batch_capacity,
                 tokens: graph.token_capacity,
                 prefill: graph.prefill_capacity,
+                packed: graph.packed_token_capacity,
             };
             if entries.iter().any(|(k, _)| *k == key) {
                 return Err("prepared graphs require unique shapes".into());
@@ -92,7 +103,19 @@ impl ActionCosts {
     }
 
     pub fn duration(&self, kind: GraphKind, batch: usize, tokens: usize) -> Option<u64> {
-        self.shape_duration(kind, batch, tokens, 0)
+        self.shape_duration(kind, batch, tokens, 0).or_else(|| {
+            (kind == GraphKind::Verification).then(|| self.packed_shapes()
+                .filter(|shape| shape.batch == batch && shape.width >= tokens && shape.tokens >= batch * tokens)
+                .map(|shape| shape.nanos).min()).flatten()
+        })
+    }
+
+    pub fn packed_shapes(&self) -> impl Iterator<Item = PackedShape> + '_ {
+        self.entries.iter().filter(|(key, _)| key.kind == GraphKind::Verification && key.packed != 0)
+            .map(|(key, estimate)| PackedShape { batch: key.batch, width: key.tokens, tokens: key.packed,
+                nanos: if estimate.fresh(self.now_ns, self.ttl_ns) {
+                    estimate.nanos.saturating_add(estimate.handoff_ns)
+                } else { 0 } })
     }
 
     pub fn shape_duration(
@@ -102,11 +125,16 @@ impl ActionCosts {
         tokens: usize,
         prefill: usize,
     ) -> Option<u64> {
+        self.exact_duration(kind, batch, tokens, prefill, 0)
+    }
+
+    fn exact_duration(&self, kind: GraphKind, batch: usize, tokens: usize, prefill: usize, packed: usize) -> Option<u64> {
         self.entry(Key {
             kind,
             batch,
             tokens,
             prefill,
+            packed,
         })
         .map(|estimate| {
             if estimate.fresh(self.now_ns, self.ttl_ns) {
@@ -125,11 +153,12 @@ impl ActionCosts {
     }
 
     pub fn get(&self, step: &ScheduledStep) -> Option<u64> {
-        self.shape_duration(
+        self.exact_duration(
             step.kind,
             step.batch_capacity,
             step.token_capacity,
             step.prefill_capacity(),
+            step.packed_token_capacity,
         )
     }
 
@@ -142,6 +171,7 @@ impl ActionCosts {
             batch: step.batch_capacity,
             tokens: step.token_capacity,
             prefill: step.prefill_capacity(),
+            packed: step.packed_token_capacity,
         };
         if let Some((_, estimate)) = self.entries.iter_mut().find(|(k, _)| *k == key) {
             let fresh = estimate.fresh(self.now_ns, self.ttl_ns);

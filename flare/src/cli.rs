@@ -245,6 +245,19 @@ pub struct Run {
     #[arg(long, value_name = "N", help_heading = "Speculation options")]
     pub mtp_draft_tokens: Option<usize>,
 
+    /// Advanced: fix the total verification-row budget, including pending inputs, using
+    /// one exact captured packed graph per batch [default: adaptive within captured capacities].
+    /// Requires adaptive prefix selection at the captured draft depth.
+    #[arg(long, value_name = "N", help_heading = "Advanced speculation options")]
+    pub mtp_verification_token_budget: Option<NonZeroUsize>,
+
+    /// Advanced: retain all captured packed verification capacities up to N total rows,
+    /// including pending inputs [default: all captured capacities]. Requires adaptive
+    /// prefix selection at the captured draft depth.
+    #[arg(long, value_name = "N", conflicts_with = "mtp_verification_token_budget",
+        help_heading = "Advanced speculation options")]
+    pub mtp_max_verification_token_budget: Option<NonZeroUsize>,
+
     /// Adapt verification width to acceptance estimates and execution cost [default: package setting].
     #[arg(
         long,
@@ -315,6 +328,12 @@ impl Run {
         if let Some(n) = self.mtp_draft_tokens {
             options.extend(["--mtp-draft-tokens".into(), n.to_string()]);
         }
+        if let Some(n) = self.mtp_verification_token_budget {
+            options.extend(["--mtp-verification-token-budget".into(), n.to_string()]);
+        }
+        if let Some(n) = self.mtp_max_verification_token_budget {
+            options.extend(["--mtp-max-verification-token-budget".into(), n.to_string()]);
+        }
         if self.mtp_adaptive_verification {
             options.push("--mtp-adaptive-verification".into());
         }
@@ -353,6 +372,8 @@ impl Run {
             embedding_table_workers: self.embedding_table_workers,
             max_concurrency: self.max_concurrency.map(NonZeroUsize::get),
             mtp_draft_tokens: self.mtp_draft_tokens,
+            mtp_verification_token_budget: self.mtp_verification_token_budget.map(NonZeroUsize::get),
+            mtp_max_verification_token_budget: self.mtp_max_verification_token_budget.map(NonZeroUsize::get),
             adaptive_verification: if self.mtp_adaptive_verification {
                 Some(true)
             } else if self.no_mtp_adaptive_verification {
@@ -438,6 +459,8 @@ mod tests {
         assert_eq!(options.kv_cache_limit, KvCacheLimit::Memory);
         assert_eq!(options.memory_limit, None);
         assert_eq!(options.mtp_draft_tokens, None);
+        assert_eq!(options.mtp_verification_token_budget, None);
+        assert_eq!(options.mtp_max_verification_token_budget, None);
         assert_eq!(options.adaptive_verification, None);
         assert_eq!(options.prefix_cache, PrefixCacheOffload::default());
     }
@@ -501,6 +524,37 @@ mod tests {
         let args = run(&["flare", "run", "model.safetensors", "--roce-ring"]);
         assert!(args.roce_ring);
         assert_eq!(args.rank_options(), vec!["--roce-ring"]);
+    }
+
+    #[test]
+    fn verification_token_budget_reaches_loader_and_peer_ranks() {
+        for budget in ["24", "32"] {
+            let args = run(&["flare", "run", "model.safetensors",
+                "--mtp-verification-token-budget", budget]);
+            assert_eq!(args.load_options().mtp_verification_token_budget, Some(budget.parse().unwrap()));
+            assert_eq!(args.rank_options(), vec!["--mtp-verification-token-budget", budget]);
+        }
+        for invalid in ["0", "-1", "unbounded"] {
+            assert!(Cli::try_parse_from(["flare", "run", "model.safetensors",
+                "--mtp-verification-token-budget", invalid]).is_err());
+        }
+    }
+
+    #[test]
+    fn maximum_verification_token_budget_reaches_loader_and_peer_ranks() {
+        for budget in ["24", "32"] {
+            let args = run(&["flare", "run", "model.safetensors",
+                "--mtp-max-verification-token-budget", budget]);
+            assert_eq!(args.load_options().mtp_max_verification_token_budget, Some(budget.parse().unwrap()));
+            assert_eq!(args.rank_options(), vec!["--mtp-max-verification-token-budget", budget]);
+        }
+        for invalid in ["0", "-1", "unbounded"] {
+            assert!(Cli::try_parse_from(["flare", "run", "model.safetensors",
+                "--mtp-max-verification-token-budget", invalid]).is_err());
+        }
+        assert!(Cli::try_parse_from(["flare", "run", "model.safetensors",
+            "--mtp-verification-token-budget", "24",
+            "--mtp-max-verification-token-budget", "24"]).is_err());
     }
 
     #[test]

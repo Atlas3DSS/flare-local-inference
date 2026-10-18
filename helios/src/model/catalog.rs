@@ -28,6 +28,9 @@ fn validate_inner(config: &ModelConfig, manifest: &ExecutionManifest) -> Result<
         .filter(|g| g.kind == GraphKind::Proposal)
         .collect();
     let split = !proposals.is_empty();
+    if config.speculative_fixed_width.is_some() && manifest.graphs.iter().any(|g| g.packed_token_capacity != 0) {
+        return Err("packed verification catalogs require adaptive prefix selection".into());
+    }
     if split {
         let maximum = proposals.iter().map(|g| g.token_capacity).max().unwrap();
         if config.history_drafts
@@ -123,13 +126,14 @@ fn validate_inner(config: &ModelConfig, manifest: &ExecutionManifest) -> Result<
                 );
             }
         }
-        select(
+        select_shape(
             config,
             manifest,
             graph.kind,
             graph.batch_capacity,
             graph.token_capacity,
             graph.prefill_capacity,
+            graph.packed_token_capacity,
             graph.sampling_mode,
         )?;
     }
@@ -225,6 +229,22 @@ pub fn select(
     prefill: usize,
     mode: SamplingMode,
 ) -> Result<usize> {
+    if kind == GraphKind::Verification {
+        if let Some((index, _)) = manifest.graphs.iter().enumerate()
+            .filter(|(_, graph)| graph.kind == kind && graph.batch_capacity == batch
+                && graph.token_capacity >= tokens && graph.packed_token_capacity >= batch.saturating_mul(tokens)
+                && graph.prefill_capacity == prefill && graph.sampling_mode == mode)
+            .min_by_key(|(_, graph)| graph.packed_token_capacity) {
+            return Ok(index);
+        }
+    }
+    select_shape(config, manifest, kind, batch, tokens, prefill, 0, mode)
+}
+
+pub fn select_shape(
+    config: &ModelConfig, manifest: &ExecutionManifest, kind: GraphKind,
+    batch: usize, tokens: usize, prefill: usize, packed: usize, mode: SamplingMode,
+) -> Result<usize> {
     let declared = batches(config).any(|capacity| capacity == batch)
         && match kind {
             GraphKind::Mixed => {
@@ -248,7 +268,13 @@ pub fn select(
                 batch == 1 && config.contract.vision.patch_capacities.contains(&tokens)
             }
             GraphKind::Speculative | GraphKind::Verification => {
-                speculative_shape(config, batch, tokens)
+                if packed != 0 && kind == GraphKind::Verification {
+                    config.speculative_widths.contains(&tokens)
+                        && packed <= config.speculative_token_capacity
+                        && packed >= batch && packed <= batch.saturating_mul(tokens)
+                } else {
+                    speculative_shape(config, batch, tokens)
+                }
             }
             GraphKind::Proposal => tokens > 1 && config.speculative_widths.contains(&tokens),
             _ => tokens == 1,
@@ -264,6 +290,7 @@ pub fn select(
             && graph.batch_capacity == batch
             && graph.token_capacity == tokens
             && graph.prefill_capacity == prefill
+            && graph.packed_token_capacity == packed
             && graph.sampling_mode == mode
     });
     let (index, _) = matches.next().ok_or_else(|| {

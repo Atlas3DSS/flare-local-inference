@@ -80,6 +80,7 @@ class Speculation:
     proposal_source: str = "mtp"
     history_drafts: bool = False
     token_capacity: int | None = None
+    packed_verification: bool = False
 
     @property
     def learned(self) -> bool:

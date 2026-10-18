@@ -275,6 +275,7 @@ pub struct ScheduledStep {
     pub kind: GraphKind,
     pub batch_capacity: usize,
     pub token_capacity: usize,
+    pub packed_token_capacity: usize,
     pub mixed: Option<MixedStep>,
     pub lanes: Vec<ScheduledLane>,
     /// Completion feedback must be processed before another action is submitted.
@@ -283,6 +284,12 @@ pub struct ScheduledStep {
 
 impl ScheduledStep {
     pub fn validate_mixed(&self) -> Result<()> {
+        if self.packed_token_capacity != 0 && (self.kind != GraphKind::Verification
+            || self.packed_token_capacity < self.batch_capacity
+            || self.packed_token_capacity > self.batch_capacity.saturating_mul(self.token_capacity)
+            || self.lanes.iter().map(|lane| lane.tokens).sum::<usize>() > self.packed_token_capacity) {
+            return Err("verification lanes exceed their packed token capacity".into());
+        }
         match &self.mixed {
             None if self.kind != GraphKind::Mixed => Ok(()),
             Some(m)
@@ -336,6 +343,8 @@ pub struct ScheduledPlan {
     estimated_duration_ns: u64,
     selection_value_rate: f64,
     selection_log_scale: f64,
+    /// Physical verification rows selected before the proposal is sampled.
+    verification_budget: Option<usize>,
 }
 
 impl ScheduledPlan {
@@ -1559,6 +1568,9 @@ impl RequestScheduler {
             }
         }
         self.submitted = fence;
+        if let Some(tokens) = plan.verification_budget {
+            self.split.as_mut().unwrap().pending_budget = Some((fence, tokens));
+        }
         if step.kind == GraphKind::Verification {
             for lane in &step.lanes {
                 self.split.as_mut().unwrap().retained[lane.request.slot as usize] = None;

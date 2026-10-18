@@ -54,9 +54,13 @@ class Metadata:
     page_table: torch.Tensor
     token_page_table: torch.Tensor
     live_counts: torch.Tensor
+    max_query_tokens: int
 
     @classmethod
-    def allocate(cls, tokens, rows, blocks, device, *, samples=None, buffers=None):
+    def allocate(cls, tokens, rows, blocks, device, *, samples=None, buffers=None, max_query_tokens=None):
+        query_capacity = (tokens + rows - 1) // rows if max_query_tokens is None else max_query_tokens
+        if type(query_capacity) is not int or query_capacity < 1:
+            raise ValueError("per-request query capacity must be a positive integer")
         def zeros(shape, dtype=torch.int32):
             return torch.zeros(shape, dtype=dtype, device=device) if buffers is None else buffers.zeros(shape, dtype)
 
@@ -74,6 +78,7 @@ class Metadata:
             pages,
             per_token,
             zeros(2),
+            query_capacity,
         )
 
     def set(self, starts, lengths, state_rows, pages, tokens, live_rows):

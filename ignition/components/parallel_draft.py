@@ -74,9 +74,15 @@ class PreparedParallelDraftRound:
         return dict(probabilities=((batch, width - 1, vocab), torch.float32),
                     logits=((batch, 1, vocab), torch.float32))
 
-    def __init__(self, owner, batch, width, name, *, generate_proposals=True, buffers=None, proposal_only=False):
+    def __init__(self, owner, batch, width, name, *, generate_proposals=True, buffers=None, proposal_only=False,
+                 target_token_capacity=None):
         self.owner, self.batch, self.width = owner, batch, width
         self.name, self.buffers = name, buffers
+        tokens = batch * width if target_token_capacity is None else target_token_capacity
+        if (type(tokens) is not int or not batch <= tokens <= batch * width
+                or (proposal_only and target_token_capacity is not None)):
+            raise ValueError("packed verification capacity must cover the request batch within its prefix bounds")
+        self.target_token_capacity = tokens
         self.generate_proposals = generate_proposals
         self.proposal_only = proposal_only
         o, b, w = owner, batch, width
@@ -84,7 +90,7 @@ class PreparedParallelDraftRound:
         self.sampling_scratch = prepare_sampling_scratch(b, w, o.requests.vocab_size, device, buffers=buffers,
                                                         proposal=generate_proposals, verification=not proposal_only)
         self.rows = torch.arange(b, device=device)
-        self.metadata = Metadata.allocate(b * w, b, blocks, device, samples=b * w)
+        self.metadata = Metadata.allocate(tokens, b, blocks, device, samples=b * w, max_query_tokens=w)
         self.validator = PreparedBatch(
             o.inputs,
             o.requests,
@@ -107,7 +113,7 @@ class PreparedParallelDraftRound:
         self.decoder = None if proposal_only else o.forwards.decoder(
             o.weights,
             o.tables,
-            o.scratch.rows(b * w, b * w),
+            o.scratch.rows(tokens, b * w),
             self.metadata,
             o.pool,
             mode="decode" if w == 1 else "verify",

@@ -115,7 +115,7 @@ impl Fixture {
                 GraphKind::Prefill,
             ] {
                 for width in 1..=if kind == GraphKind::Speculative { 8 } else { 1 } {
-                    graphs.push(crate::execution::GraphDescriptor {
+                    graphs.push(crate::execution::GraphDescriptor { packed_token_capacity: 0,
                         name: format!("{kind:?}-{batch}-{width}"),
                         kind,
                         sampling_mode: crate::execution::SamplingMode::General,

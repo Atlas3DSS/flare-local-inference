@@ -189,7 +189,7 @@ def test_peer_export_keeps_shared_frontend_only_on_rank_zero(tmp_path, monkeypat
         assets[name] = {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
     graph = SimpleNamespace(raw_cuda_graph=lambda: 1, raw_cuda_graph_exec=lambda: 1)
     address = 0x100000000000
-    prepared = SimpleNamespace(_consumed=False, signatures={"decode": SimpleNamespace(kind="decode")},
+    prepared = SimpleNamespace(_consumed=False, signatures={"decode": SimpleNamespace(kind="decode", packed_token_capacity=0)},
         export_zero_ranges=[(address, 4096)], graphs={"decode": graph},
         buffers={}, export_events={}, package_data=None,
         server_config={"model_id": "fixture", "assets": assets,
@@ -268,7 +268,7 @@ def test_export_rejects_reachable_storage_below_the_address_floor(tmp_path, monk
     monkeypatch.setattr(module_images, "global_symbols", lambda image: [])
     monkeypatch.setattr(tensor_metadata, "live_metadata", lambda *args: ([], {}))
     graph = SimpleNamespace(raw_cuda_graph=lambda: 1, raw_cuda_graph_exec=lambda: 1)
-    prepared = SimpleNamespace(_consumed=False, signatures={"decode": SimpleNamespace(kind="decode")},
+    prepared = SimpleNamespace(_consumed=False, signatures={"decode": SimpleNamespace(kind="decode", packed_token_capacity=0)},
         export_zero_ranges=[], graphs={"decode": graph},
         buffers={}, export_events={}, package_data=None, server_config={},
         manifest=lambda **kwargs: {"context": {}, "device": 0, "graphs": [], "buffers": [

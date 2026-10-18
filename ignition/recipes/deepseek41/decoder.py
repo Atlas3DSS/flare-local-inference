@@ -216,7 +216,7 @@ class PreparedDecoder:
             self.window_commit = PreparedRingCommit(pool.reserved_backing,
                 [pool.layout.region(f"layer{index}.window").offset for index in range(len(weights.layers))],
                 metadata.state_rows, metadata.starts,
-                token_capacity=metadata.token_ids.numel() // metadata.starts.numel(),
+                token_capacity=metadata.max_query_tokens,
                 window_tokens=128, record_bytes=528, staging=window_staging)
         self.layers, carry = [], False
         for index, layer in enumerate(weights.layers):

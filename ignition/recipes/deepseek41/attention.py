@@ -182,7 +182,7 @@ class PreparedAttention:
         self.eps = config.text["rms_norm_eps"]
         tokens, device = source.shape[0], source.device
         rows = metadata.starts.numel()
-        self.window_page_size = 128 if mode == "decode" else 128 + tokens // rows
+        self.window_page_size = 128 if mode == "decode" else 128 + metadata.max_query_tokens
         self.window = pool.window(layer, draft=draft)
         if window_staging is not None:
             if (mode != "verify" or window_staging.shape != (rows, self.window_page_size * 528)

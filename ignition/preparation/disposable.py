@@ -12,7 +12,8 @@ def storage_ranges(values):
     storage = {}
 
     def visit(value):
-        if value is None:
+        # Integer capacities are host metadata and own no backing storage.
+        if value is None or isinstance(value, int):
             return
         if isinstance(value, torch.Tensor):
             if value.is_meta:

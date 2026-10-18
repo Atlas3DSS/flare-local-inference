@@ -21,6 +21,7 @@ class GraphSignature:
     sampling_mode: str = "general"
     speculation_enabled: bool | None = None
     prefill_capacity: int = 0
+    packed_token_capacity: int = 0
 
     def __post_init__(self):
         if self.kind not in ("init", "restore", "snapshot", "prefill", "decode", "resume", "vision", "speculative", "mixed", "proposal", "verification"):
@@ -52,6 +53,10 @@ class GraphSignature:
                 raise ValueError("mixed graphs require the prefill_row input")
         elif self.prefill_capacity:
             raise ValueError("only mixed graphs declare a separate prefill capacity")
+        if (type(self.packed_token_capacity) is not int or self.packed_token_capacity < 0
+                or (self.packed_token_capacity and (self.kind != "verification"
+                    or not self.batch_capacity <= self.packed_token_capacity <= self.batch_capacity * self.token_capacity))):
+            raise ValueError("packed verification capacity must fit the batch and per-request prefix bounds")
         object.__setattr__(self, "inputs", tuple(self.inputs))
         if len(set(self.inputs)) != len(self.inputs):
             raise ValueError("graph input names must be unique")
@@ -126,6 +131,8 @@ class PreparedExecution(PreparedGraphBundle):
                                     "nbytes": offsets[field][1]} for field in inputs]})
             if signature.speculation_enabled is not None:
                 graphs[-1]["speculation_enabled"] = signature.speculation_enabled
+            if signature.packed_token_capacity:
+                graphs[-1]["packed_token_capacity"] = signature.packed_token_capacity
         abi_version = 3 if self.buffers["completion_records"].shape[-1] == 24 else 2
         return {"abi_version": abi_version, "context": context, "device": self.device,
                 "max_active": self.max_active, "input_frame_bytes": (cursor + 7) // 8 * 8,
