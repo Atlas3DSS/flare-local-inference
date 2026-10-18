@@ -49,6 +49,7 @@ before committing; a design acknowledgment cannot authorize them.
 4. **Use FlashInfer/b12x and NVIDIA directly.** Target SM120/SM121, reuse proven
    operators and sampling, and avoid interchangeable backends or portability layers.
    Remove superseded internal paths unless compatibility is explicitly required.
+   Model package compatibility is required by principle 13.
 5. **Finish preparation before capture.** Constructors declare operations; one
    preparation batch tunes the complete shape catalog. Size scratch from tuned
    plans, refresh bindings, compile complete forwards, and warm every variant
@@ -92,6 +93,13 @@ before committing; a design acknowledgment cannot authorize them.
     GPU steps across all ranks, and actual Helios service measurements. Correctness
     failures block performance claims; keep raw measurements and disclose unrun
     checks and material limitations.
+13. **Keep older model packages usable.** Every Protocol Buffer change **must** be
+    accompanied by Helios code that preserves loading and serving of previously
+    exported model packages without re-export. Review absent fields, Protobuf
+    default values, older metadata semantics, and explicit values in every affected
+    consumer. Wire-format compatibility alone is insufficient. Require regression
+    tests for older serialized metadata and validation of affected loading and
+    serving paths. Compatibility must apply across all affected model contracts.
 
 ## Review and acknowledgment
 

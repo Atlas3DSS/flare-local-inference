@@ -178,8 +178,16 @@ architectural boundary before committing the change.
 ## Python prepares; Helios serves
 
 - When replacing internal formats or execution paths, remove superseded loaders,
-  fallback paths, and migration-only tests. Retain backward compatibility only
-  when it is an explicit requirement.
+  fallback paths, and migration-only tests except those required for model package
+  compatibility. Other backward compatibility requires an explicit requirement.
+- **Preserve model package compatibility.** Every Protocol Buffer change **must**
+  be accompanied by code in Helios that keeps previously exported model packages
+  loadable and usable without re-export. Handle absent fields and Protobuf default
+  values explicitly, preserve the meaning of older metadata, and honor explicit
+  values. Wire-format compatibility alone is insufficient. Include regression
+  tests for older serialized metadata and validate the affected package loading
+  and serving paths. Implement compatibility in shared code across all affected
+  model contracts.
 - Python loads weights, resolves and autotunes kernels, plans storage, warms
   execution paths, and captures supported graph variants before serving starts.
   Ignition exports a runtime package and closes the prepared model. `ignition run`
