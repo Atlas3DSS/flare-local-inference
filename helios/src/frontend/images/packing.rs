@@ -18,7 +18,7 @@ pub(crate) fn tensor_layout(
             (Float32, patches * 1536)
         }
         (
-            ImageLayoutKind::Deepseek | ImageLayoutKind::Moonvit | ImageLayoutKind::Step,
+            ImageLayoutKind::Deepseek | ImageLayoutKind::DeepseekRowMajor | ImageLayoutKind::Moonvit | ImageLayoutKind::Step,
             "vision_pixel_values",
         ) => (Float32, patches * 588),
         (ImageLayoutKind::Radio, "vision_pixel_values") => (Float32, patches * 768),
@@ -28,7 +28,7 @@ pub(crate) fn tensor_layout(
         (_, "vision_num_patches" | "vision_feature_offset") => (Int32, 1),
         (
             ImageLayoutKind::Mimo
-            | ImageLayoutKind::Deepseek
+            | ImageLayoutKind::Deepseek | ImageLayoutKind::DeepseekRowMajor
             | ImageLayoutKind::Moonvit
             | ImageLayoutKind::Step
             | ImageLayoutKind::Radio,
@@ -52,7 +52,7 @@ pub(crate) fn tensor_layout(
             (Int32, patches / 4)
         }
         (
-            ImageLayoutKind::Deepseek | ImageLayoutKind::Moonvit | ImageLayoutKind::Radio,
+            ImageLayoutKind::Deepseek | ImageLayoutKind::DeepseekRowMajor | ImageLayoutKind::Moonvit | ImageLayoutKind::Radio,
             "vision_merge_indices",
         ) => (Int32, patches),
         (ImageLayoutKind::Step, "vision_downsample1_indices") => (Int32, patches / 4 * 9),
@@ -76,7 +76,7 @@ pub(crate) fn prepare(
     {
         ImageLayoutKind::Qwen => qwen(config, handle, images, image),
         ImageLayoutKind::Mimo => mimo(config, handle, images, image),
-        ImageLayoutKind::Deepseek => deepseek(config, handle, images, image),
+        ImageLayoutKind::Deepseek | ImageLayoutKind::DeepseekRowMajor => deepseek(config, handle, images, image),
         ImageLayoutKind::Moonvit | ImageLayoutKind::Radio => {
             spatial_merge(config, handle, images, image)
         }
@@ -270,11 +270,12 @@ fn deepseek(
     let end = start + geometry.patches;
     let h = usize::try_from(geometry.grid_thw[1]).map_err(|_| "invalid vision height")?;
     let w = usize::try_from(geometry.grid_thw[2]).map_err(|_| "invalid vision width")?;
+    let capacity = *config.contract.vision.patch_capacities.last().ok_or("missing vision capacities")?;
     let actual = h
         .checked_mul(w)
-        .filter(|n| *n > 0 && *n <= 3456)
+        .filter(|n| *n > 0 && *n <= capacity)
         .ok_or("invalid vision grid")?;
-    if geometry.patches > 3456
+    if geometry.patches > capacity
         || geometry.patches != h.div_ceil(3) * w.div_ceil(3) * 9
         || geometry.tokens != geometry.patches / 9
         || end / 9 > config.contract.vision.features_per_request

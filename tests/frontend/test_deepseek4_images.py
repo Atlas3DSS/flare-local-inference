@@ -1,6 +1,7 @@
 """Native RGB preprocessing and image sentinel layout against the checkpoint implementation."""
 
 import importlib.util
+import os
 import io
 import json
 import subprocess
@@ -109,7 +110,7 @@ def test_native_images_match_checkpoint(reference, tmp_path, sizes, start):
     case.write_text(json.dumps({"images": inputs, "prompt": prompt}))
     subprocess.run(
         [
-            str(ROOT / "helios/target/debug/test_deepseek4_images"),
+            str(Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "helios/target")) / "debug/test_deepseek4_images"),
             str(SNAPSHOT),
             str(ROOT / "ignition/recipes/deepseek4/assets"),
             str(case),

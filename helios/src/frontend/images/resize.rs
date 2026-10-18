@@ -90,6 +90,15 @@ pub(super) fn resize(input: &RgbImage, width: usize, height: usize) -> Vec<u8> {
 }
 
 pub(super) fn pillow(input: &RgbImage, width: usize, height: usize) -> Vec<u8> {
+    // Pillow 12.3 chooses the vertical pass first when it removes more than
+    // twice as many pixels. Each pass rounds to uint8, so the order affects RGB.
+    if input.height > height
+        && input.height as i64 - height as i64 > 2 * (input.width as i64 - width as i64)
+    {
+        let pixels = resample(input, input.width, height, true, false);
+        let intermediate = RgbImage::new(input.width, height, pixels).unwrap();
+        return resample(&intermediate, width, height, true, false);
+    }
     resample(input, width, height, true, false)
 }
 

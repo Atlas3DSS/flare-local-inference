@@ -102,6 +102,10 @@ pub(super) fn frontend_settings(value: wire::FrontendSettings) -> Result<serde_j
                     "min_pixels": config.min_pixels, "max_pixels": config.max_pixels,
                     "image_mean": config.image_mean, "image_std": config.image_std,
                 }}),
+                Profile::DeepseekRowMajor(config) => serde_json::json!({"deepseek_row_major": {
+                    "min_pixels": config.min_pixels, "max_tokens": config.max_tokens,
+                    "max_width_height_ratio": config.max_width_height_ratio,
+                }}),
                 Profile::Deepseek4(_) => serde_json::json!({"deepseek4": {}}),
                 Profile::Moonvit(_) => serde_json::json!({"moonvit": {}}),
                 Profile::Step(_) => serde_json::json!({"step": {}}),
@@ -379,6 +383,33 @@ mod tests {
                     .values
                     .is_empty()
             );
+        }
+    }
+
+    #[test]
+    fn serialized_text_and_deepseek_image_profiles_keep_their_meaning() {
+        // Tokenizer field 1, optional image field 2, and packed EOS field 3
+        // use the wire representation exported before row-major image profiles.
+        for (bytes, image) in [
+            (&[0x0a, 0x00, 0x1a, 0x01, 0x01][..], false),
+            (&[0x0a, 0x00, 0x12, 0x02, 0x1a, 0x00, 0x1a, 0x01, 0x01][..], true),
+        ] {
+            let decoded = wire::FrontendSettings::decode(bytes).unwrap();
+            let json = frontend_settings(decoded).unwrap();
+            assert_eq!(json["eos_token_ids"], serde_json::json!([1]));
+            if image {
+                assert_eq!(json["image"], serde_json::json!({"deepseek4": {}}));
+            } else {
+                assert!(json["image"].is_null());
+            }
+            #[cfg(feature = "server")]
+            {
+                let frontend: crate::frontend::FrontendSettings = serde_json::from_value(json).unwrap();
+                if let Some(settings) = frontend.image {
+                    let processor = crate::frontend::images::ImageProcessor::load(settings, Default::default()).unwrap();
+                    assert!(processor.geometry(701, 503).unwrap().tokens <= 384);
+                }
+            }
         }
     }
 

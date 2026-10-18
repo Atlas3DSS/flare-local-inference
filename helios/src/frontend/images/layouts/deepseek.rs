@@ -54,11 +54,46 @@ fn image_block(
 }
 
 pub(crate) fn prepare_input(
+    vocabulary: usize, frontend: &Frontend, processor: Option<&ImageProcessor>,
+    rendered: &RenderedPrompt, images: Vec<RgbImage>,
+) -> Result<PreparedInput> {
+    prepare(vocabulary, frontend, processor, rendered, images, image_block)
+}
+
+pub(crate) fn prepare_row_major_input(
+    vocabulary: usize, frontend: &Frontend, processor: Option<&ImageProcessor>,
+    rendered: &RenderedPrompt, images: Vec<RgbImage>,
+) -> Result<PreparedInput> {
+    prepare(vocabulary, frontend, processor, rendered, images, row_major_block)
+}
+
+fn row_major_block(
+    vocabulary: usize, height: usize, width: usize, _position: usize, feature_offset: usize,
+) -> (Vec<u32>, Vec<i32>, usize) {
+    // Input-only IDs carry the type; the graph replaces every image embedding.
+    let base = vocabulary as u32;
+    let mut tokens = vec![base];
+    let mut indices = vec![-1];
+    for row in 0..height {
+        for column in 0..width {
+            tokens.push(base + 1);
+            indices.push((feature_offset + row * width + column) as i32);
+        }
+        tokens.push(base + 2);
+        indices.push(-1);
+    }
+    tokens.push(base + 3);
+    indices.push(-1);
+    (tokens, indices, 0)
+}
+
+fn prepare(
     vocabulary: usize,
     frontend: &Frontend,
     processor: Option<&ImageProcessor>,
     rendered: &RenderedPrompt,
     images: Vec<RgbImage>,
+    block: fn(usize, usize, usize, usize, usize) -> (Vec<u32>, Vec<i32>, usize),
 ) -> Result<PreparedInput> {
     let placeholder = frontend.encode("<｜deepseek_image｜>", false)?;
     if placeholder.len() != 1 || rendered.token_ids.iter().any(|t| *t as usize >= vocabulary) {
@@ -96,7 +131,7 @@ pub(crate) fn prepare_input(
         let source = &images[image_index];
         let geometry = &processed.as_ref().unwrap().geometry[image_index];
         let start = tokens.len();
-        let (block, indices, padding) = image_block(
+        let (block, indices, padding) = block(
             vocabulary,
             (geometry.grid_thw[1] as usize).div_ceil(3),
             (geometry.grid_thw[2] as usize).div_ceil(3),

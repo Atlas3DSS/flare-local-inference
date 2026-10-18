@@ -195,7 +195,8 @@ use the same prepared model graphs; the flag selects table storage only.
 ## DeepSeek V4.1 Flash
 
 The `deepseek-v4.1-flash` alias selects `deepseek-ai/DeepSeek-V4.1-Flash-1017`
-and supports TP4 text generation, reasoning, and DSML tool calls.
+and supports TP4 text generation, reasoning, DSML tool calls, and up to four images
+per request when the checkpoint contains its vision encoder.
 Sampling defaults are temperature 1.0 and top-p 1.0, following the
 [model card](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017#minimal-inference).
 Add `--expert-scale-compression csf` to losslessly compress backbone and DSpark
@@ -205,8 +206,9 @@ expansion buffers reused by serial expert layers. Planning conservatively estima
 the flag preserves native scales.
 DSpark is its learned draft method, defaulting to five draft tokens per round
 with separate proposal and verification graphs, using native conditional
-confidence and measured execution cost for adaptive verification;
-vision graphs are not prepared. Its 188.8 GiB of Engram tables are
+confidence and measured execution cost for adaptive verification. Image preprocessing
+preserves the checkpoint's row-major patch layout and 1024-token image limit.
+Its 188.8 GiB of Engram tables are
 stored once in the package and read on demand through bounded direct-I/O
 staging by default; `flare run --embedding-table-storage ram` loads them into
 ordinary resident memory instead.
@@ -225,6 +227,12 @@ GPUs explicitly:
   /data/flare-runtime/deepseek-v41-flash-1017-csf-tp4-c4-dspark5.safetensors \
   --gpus 0,4,6,8 --host 127.0.0.1 --port 8001
 ```
+
+`--image-concurrency` defaults to the smaller of four and `--max-concurrency`.
+For example, add `--max-concurrency 64 --image-concurrency 4` during export to
+prepare 64 text request slots while retaining four independent image feature slots.
+The native server can lower text concurrency at load time. Engram histories
+exclude image positions, so n-grams cannot cross an image boundary.
 
 DeepSeek V4.1's logical cache pages cover 128 tokens across compressed latent and
 index regions with different byte sizes. Continuation rows retain sliding

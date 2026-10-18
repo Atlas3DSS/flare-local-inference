@@ -59,6 +59,11 @@ def image_settings(config, model, profile):
             "init_pos_emb_width": 64, "pos_emb_interpolation_mode": "bilinear",
             "merge_kernel_size": [2, 2]}, "MoonViT vision configuration")
         return {"moonvit": {}}
+    if profile == "deepseek_row_major":
+        vision = model["vision_config"]
+        _expected(vision, {"patch_size": 14, "downsample_ratio": 3, "max_image_tokens": 1024,
+            "min_pixels": 295936, "max_wh_ratio": None}, "DeepSeek row-major vision configuration")
+        return {profile: dict(min_pixels=vision["min_pixels"], max_tokens=vision["max_image_tokens"])}
     if profile == "deepseek4":
         _expected(config, {"image_processor_type": "DeepSeekV4ImageProcessor", "patch_size": 14,
             "merge_size": 3, "max_image_tokens": 384, "min_pixels": 147456,
@@ -111,6 +116,6 @@ def prepare_frontend(snapshot, *, eos_token_ids, image_profile=None, preprocesso
               "eos_token_ids": eos_token_ids}
     if image_profile is not None:
         path = snapshot / "preprocessor_config.json" if preprocessor is None else Path(preprocessor)
-        result["image"] = image_settings(json.loads(path.read_text()),
+        result["image"] = image_settings({} if image_profile == "deepseek_row_major" else json.loads(path.read_text()),
             json.loads((snapshot / "config.json").read_text()), image_profile)
     return result

@@ -40,6 +40,11 @@ pub fn prepare_input(
         Some(ImageLayoutKind::Mimo) => crate::frontend::images::layouts::mimo::prepare_input(
             frontend, processor, rendered, images,
         )?,
+        Some(ImageLayoutKind::DeepseekRowMajor) => {
+            crate::frontend::images::layouts::deepseek::prepare_row_major_input(
+                config.contract.vocabulary, frontend, processor, rendered, images,
+            )?
+        }
         Some(ImageLayoutKind::Deepseek) => {
             crate::frontend::images::layouts::deepseek::prepare_input(
                 config.contract.vocabulary,

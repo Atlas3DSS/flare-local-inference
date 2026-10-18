@@ -105,6 +105,9 @@ class PreparedLayer:
                  boundary=None, replay_start=None, window_staging=None):
         s, text = scratch, pool.config.text
         self.scratch, self.carry = s, carry
+        self.metadata = metadata
+        self.image_mask = (torch.zeros_like(metadata.token_ids, dtype=torch.bool)
+                           if mode == "prefill" and weights.experts.vision_correction is not None else None)
         self.boundary = boundary
         self.engram = None
         if weights.engram is not None:
@@ -131,7 +134,9 @@ class PreparedLayer:
             session=session, name=name + ".router")
         self.router = PreparedRouter(s.router_logits, s.router, session=session, name=name + ".topk",
             score_func=text["scoring_func"], renormalize=text["norm_topk_prob"],
-            routed_scaling_factor=text["routed_scaling_factor"], correction_bias=weights.experts.correction)
+            routed_scaling_factor=text["routed_scaling_factor"], correction_bias=weights.experts.correction,
+            image_correction_bias=weights.experts.vision_correction if self.image_mask is not None else None,
+            image_mask=self.image_mask)
         self.experts = PreparedRoutedExperts(s.ffn_hc.normalized, weights.experts.experts, s.router.ids,
             s.router.weights, s.routed, session=session, name=name + ".experts", workspace=workspace,
             router_weight=weights.experts.router, router_plan=self.router.plan,
@@ -165,6 +170,8 @@ class PreparedLayer:
         self.ffn_hc(s.attention_output, s.attention_hc.residual, s.attention_hc.post, s.attention_hc.comb)
         if self.concurrent_shared is not None:
             self.concurrent_shared.start(s.ffn_hc.normalized)
+        if self.image_mask is not None:
+            self.image_mask.copy_(self.metadata.token_ids >= 129280)
         self.router(self.router_projection(s.ffn_hc.normalized))
         self.experts()
         if self.concurrent_shared is None:
@@ -180,9 +187,10 @@ class PreparedLayer:
 class PreparedDecoder:
     def __init__(self, weights, tables, scratch, metadata, pool, *, mode, runtime,
                  vocabulary_runtime, coordinator, session, name, workspace,
-                 window_staging=None, suffix_scratch=None):
+                 window_staging=None, suffix_scratch=None, vision=None):
         self.weights, self.scratch, self.metadata, self.pool = weights, scratch, metadata, pool
         self.mode = mode
+        self.vision = vision if mode == "prefill" else None
         self.table_requests = PreparedTableRequests(tables, metadata, pool, session=session, name=name + ".table_requests")
         decoder_start = weights.config.decoder_start
         self.packing = None
@@ -200,7 +208,8 @@ class PreparedDecoder:
             raise ValueError("bounded decoder feedback requires draft target layers after its global-KV boundary")
         self.auxiliary = torch.zeros((self.output_metadata.token_ids.numel(), len(self.aux_layers) * 5120),
                                     dtype=torch.bfloat16, device=scratch.embedding.device)
-        self.embedding = PreparedEmbedding(weights.embedding, metadata.token_ids, scratch.embedding,
+        self.safe_tokens = torch.zeros_like(metadata.token_ids) if self.vision is not None else metadata.token_ids
+        self.embedding = PreparedEmbedding(weights.embedding, self.safe_tokens, scratch.embedding,
             num_rows=metadata.live_counts[:1], session=session, name=name + ".embedding")
         self.rotary = Rotary(weights.config, scratch.embedding.device)
         self.window_commit = None
@@ -236,7 +245,12 @@ class PreparedDecoder:
     def __call__(self):
         s, m = self.scratch, self.metadata
         self.table_requests()
-        s.residual.copy_(self.embedding()[:, None, :])
+        if self.vision is not None:
+            self.safe_tokens.copy_(m.token_ids.clamp(0, self.weights.embedding.shape[0] - 1))
+        self.embedding()
+        if self.vision is not None:
+            self.vision.inject(m, s.embedding)
+        s.residual.copy_(s.embedding[:, None, :])
         s.pre_mix.zero_()
         s.pre_mix[:, 0].fill_(1)
         for index, layer in enumerate(self.layers):

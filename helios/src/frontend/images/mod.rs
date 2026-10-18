@@ -3,6 +3,7 @@
 #[cfg(test)]
 mod decoding_tests;
 mod deepseek4;
+mod deepseek_row_major;
 #[cfg(feature = "server")]
 pub(crate) mod layouts;
 mod mimo;
@@ -126,6 +127,7 @@ pub enum ImageSettings {
     Qwen(QwenImageSettings),
     Mimo(MimoImageSettings),
     Deepseek4 {},
+    DeepseekRowMajor(DeepseekRowMajorImageSettings),
     Moonvit {},
     Step {},
     Radio {},
@@ -138,11 +140,20 @@ impl ImageSettings {
             Self::Qwen(_) => ImagePreparationKind::Qwen,
             Self::Mimo(_) => ImagePreparationKind::Mimo,
             Self::Deepseek4 {} => ImagePreparationKind::Deepseek,
+            Self::DeepseekRowMajor(_) => ImagePreparationKind::DeepseekRowMajor,
             Self::Moonvit {} => ImagePreparationKind::Moonvit,
             Self::Step {} => ImagePreparationKind::Step,
             Self::Radio {} => ImagePreparationKind::Radio,
         }
     }
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeepseekRowMajorImageSettings {
+    pub min_pixels: usize,
+    pub max_tokens: usize,
+    pub max_width_height_ratio: Option<usize>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -168,6 +179,7 @@ enum Profile {
     Qwen(qwen::QwenProcessor),
     MiMo(patches::PatchProcessor),
     DeepSeek4,
+    DeepseekRowMajor(DeepseekRowMajorImageSettings),
     Moonvit,
     Step,
     Radio,
@@ -191,6 +203,10 @@ impl ImageProcessor {
         }
         let profile = match settings {
             ImageSettings::Deepseek4 {} => Profile::DeepSeek4,
+            ImageSettings::DeepseekRowMajor(settings) => {
+                deepseek_row_major::validate(&settings)?;
+                Profile::DeepseekRowMajor(settings)
+            }
             ImageSettings::Moonvit {} => Profile::Moonvit,
             ImageSettings::Step {} => Profile::Step,
             ImageSettings::Radio {} => Profile::Radio,
@@ -257,7 +273,7 @@ impl ImageProcessor {
                 e,
             )))
         })?;
-        let orientation = if matches!(self.profile, Profile::Moonvit) {
+        let orientation = if matches!(self.profile, Profile::Moonvit | Profile::DeepseekRowMajor(_)) {
             1
         } else {
             reader
@@ -305,7 +321,7 @@ impl ImageProcessor {
                 "encoded image exceeds the configured byte limit",
             ))));
         }
-        let orientation = if matches!(self.profile, Profile::Moonvit) {
+        let orientation = if matches!(self.profile, Profile::Moonvit | Profile::DeepseekRowMajor(_)) {
             1
         } else {
             orientation::jpeg_orientation(bytes)?
@@ -380,6 +396,7 @@ impl ImageProcessor {
             Profile::Qwen(profile) => profile.patches.geometry(width, height),
             Profile::MiMo(profile) => profile.geometry(width, height),
             Profile::DeepSeek4 => deepseek4::geometry(self.limits, width, height),
+            Profile::DeepseekRowMajor(settings) => deepseek_row_major::geometry(settings, self.limits, width, height),
             Profile::Moonvit => moonvit::geometry(self.limits, width, height),
             Profile::Step => step::geometry(self.limits, width, height),
             Profile::Radio => radio::geometry(self.limits, width, height),
@@ -390,6 +407,7 @@ impl ImageProcessor {
             Profile::Qwen(profile) => profile.patches.resized_rgb(image),
             Profile::MiMo(profile) => profile.resized_rgb(image),
             Profile::DeepSeek4 => deepseek4::resized_rgb(self.limits, image),
+            Profile::DeepseekRowMajor(settings) => deepseek_row_major::resized_rgb(settings, self.limits, image),
             Profile::Moonvit => moonvit::resized_rgb(self.limits, image),
             Profile::Step => step::resized_rgb(self.limits, image),
             Profile::Radio => Err("RADIO resizing produces float32 pixels; use process".into()),
@@ -400,6 +418,7 @@ impl ImageProcessor {
             Profile::Qwen(profile) => profile.process(images),
             Profile::MiMo(profile) => profile.process(images),
             Profile::DeepSeek4 => deepseek4::process(self.limits, images),
+            Profile::DeepseekRowMajor(settings) => deepseek4::pack(self.limits, images, |image| deepseek_row_major::resized_rgb(settings, self.limits, image)),
             Profile::Moonvit => moonvit::process(self.limits, images),
             Profile::Step => step::process(self.limits, images),
             Profile::Radio => radio::process(self.limits, images),
@@ -413,7 +432,7 @@ impl ImageProcessor {
     ) -> Result<ImagePrompt> {
         match &self.profile {
             Profile::Qwen(profile) => profile.expand_prompt(frontend, text, images),
-            Profile::DeepSeek4 => Err("DeepSeek image spans require its model contract".into()),
+            Profile::DeepSeek4 | Profile::DeepseekRowMajor(_) => Err("DeepSeek image spans require its model contract".into()),
             Profile::MiMo(_) => Err("MiMo image expansion requires its model contract".into()),
             Profile::Moonvit => Err("MoonViT image expansion requires its model contract".into()),
             Profile::Step => Err("Step image expansion requires its model contract".into()),
