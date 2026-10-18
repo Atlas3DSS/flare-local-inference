@@ -306,11 +306,13 @@ def test_deepseek41_native_checkpoint_and_scale_compression(monkeypatch, tmp_pat
     speculation = model.recipe.speculation if drafting else None
     native = fitted(model, 4, speculation=speculation)
     plan = fitted(model, 4, speculation=speculation, expert_scale_compression=compression)
+    assert plan.max_images == 4 and plan.image_concurrency == min(4, plan.concurrency)
     assert plan.expert_scale_compression == compression
     assert (plan.weights_bytes < native.weights_bytes) == (compression == "csf")
     monkeypatch.setattr("ignition.preparation.rank_group.prepare_group",
                         lambda snapshot, config, prepare, **options: config)
     config = model.recipe.prepare(tmp_path, plan, compile_forwards=True, kernel_cache=None, progress=None)
     assert config.expert_scale_compression == compression and config.dspark == drafting
+    assert config.image_concurrency == plan.image_concurrency
     with pytest.raises(ValueError, match="scale compression"):
         PreparationConfig(expert_scale_compression="zip")
