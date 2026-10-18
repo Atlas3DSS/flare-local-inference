@@ -182,6 +182,13 @@ def _preparation_arguments(running):
                                " (default: overlap)")
     advanced.add_argument("--no-compile", action="store_true",
                           help="development: capture graphs without compiling forwards")
+    advanced.add_argument("--online-mxfp8", action="store_true",
+                          help="store the recipe's eligible BF16 projections as MXFP8 while loading; faster"
+                               " decode at reduced precision (Kimi K3 KDA inputs and DSpark draft outputs and MLPs;"
+                               " default: checkpoint precision)")
+    advanced.add_argument("--language-model-only", action="store_true",
+                          help="prepare no vision encoder and reject images; its weights and scratch become KV"
+                               " pages (Kimi K3; default: the recipe's image support)")
 
 
 def main(argv=None) -> int:

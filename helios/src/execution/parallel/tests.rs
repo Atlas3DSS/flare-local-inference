@@ -202,7 +202,7 @@ fn rank_completion_requires_every_record() {
 }
 
 #[test]
-fn proposal_confidence_survives_rank_transport_and_requires_agreement() {
+fn proposal_confidence_survives_rank_transport_without_numeric_consensus() {
     let mut root = completed(1);
     root.proposal_confidence = Some([[0.5; 7]; 64]);
     let mut peer = completed(1);
@@ -210,7 +210,7 @@ fn proposal_confidence_survives_rank_transport_and_requires_agreement() {
     peer.proposal_confidence = root.proposal_confidence;
     agree(&root, &peer).unwrap();
     peer.proposal_confidence.as_mut().unwrap()[3][2] = 0.6;
-    assert!(agree(&root, &peer).is_err());
+    agree(&root, &peer).unwrap();
     let bytes = completion(&root);
     let mut reader = Reader(&bytes);
     reader.number().unwrap();
@@ -221,7 +221,7 @@ fn proposal_confidence_survives_rank_transport_and_requires_agreement() {
 }
 
 #[test]
-fn proposal_confidence_allows_fp32_roundoff_and_rejects_invalid_probabilities() {
+fn proposal_confidence_validates_each_rank_without_changing_root_values() {
     let mut root = completed(1);
     let mut peer = completed(1);
     root.proposal_confidence = Some([[0.0; 7]; 64]);
@@ -230,10 +230,31 @@ fn proposal_confidence_allows_fp32_roundoff_and_rejects_invalid_probabilities() 
     peer.proposal_confidence.as_mut().unwrap()[1][2] = f32::from_bits(0x3f79149e);
     agree(&root, &peer).unwrap();
     peer.proposal_confidence.as_mut().unwrap()[1][2] = 0.973;
-    assert!(agree(&root, &peer).is_err());
+    let authoritative = root.proposal_confidence;
+    agree(&root, &peer).unwrap();
+    assert_eq!(root.proposal_confidence, authoritative);
     for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -0.000001, 1.000001] {
+        root.proposal_confidence = authoritative;
+        peer.proposal_confidence = authoritative;
         root.proposal_confidence.as_mut().unwrap()[1][2] = invalid;
+        assert!(agree(&root, &peer).is_err());
+        root.proposal_confidence = authoritative;
         peer.proposal_confidence.as_mut().unwrap()[1][2] = invalid;
         assert!(agree(&root, &peer).is_err());
     }
+}
+
+#[test]
+fn rank_zero_confidence_is_authoritative_without_relaxing_request_agreement() {
+    let mut root = completed(1);
+    let mut peer = completed(1);
+    root.proposal_confidence = Some([[0.5; 7]; 64]);
+    peer.proposal_confidence = root.proposal_confidence;
+    root.proposal_confidence.as_mut().unwrap()[2][2] = 0.51028365;
+    peer.proposal_confidence.as_mut().unwrap()[2][2] = 0.5102996;
+    let authoritative = root.proposal_confidence;
+    agree(&root, &peer).unwrap();
+    assert_eq!(root.proposal_confidence, authoritative);
+    peer.records[0].consumed_tokens += 1;
+    assert!(agree(&root, &peer).is_err());
 }

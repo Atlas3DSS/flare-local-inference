@@ -43,7 +43,8 @@ Anthropic Messages, stateless Responses, authentication, and client configuratio
   `CUDA_VISIBLE_DEVICES` restricts which GPUs the caller exposed, which changes
   the GPU each index names, so Flare inspects it to interpret `--gpus`.
   Variables that underlying libraries read are set by Flare from its own
-  configuration before those libraries are imported.
+  configuration, and b12x's from the recipe's declared settings, before those
+  libraries are imported.
 - **Two levels of precedence.** Flags override the configuration file, which
   overrides the recipe. Nothing else exists.
 
@@ -152,6 +153,8 @@ explicit flags take precedence.
 | `--compile-workers N` | CPU compiler process budget per host, divided among local preparation ranks and bounded by available RAM and device memory. Applies to b12x kernel compilation and complete-forward compilation. Overrides `[preparation] compile_workers`. | Automatic |
 | `--tuning-gpus LIST` | Local kernel-tuning GPUs. Start with the serving GPU list, then append complete replicas of that TP group on matching hardware. Serving TP size stays fixed. Command line only; cannot be combined with multi-host `--ranks`. | Serving GPUs |
 | `--no-compile` | Development only: capture graphs without compiling forwards. A recipe never sets it. | off |
+| `--online-mxfp8` | Store the recipe's eligible BF16 projections as MXFP8 while loading (Kimi K3: KDA inputs and DSpark draft outputs and MLPs), trading checkpoint precision for decode bandwidth. Recipes that name no such projections reject it. Selects a separate cached package. | Checkpoint precision |
+| `--language-model-only` | Prepare no vision encoder and serve text only, as vLLM's flag of the same name; requests with images are rejected and the encoder's weights, scratch, and graphs become KV pages. Recipes without a separable encoder reject it. Selects a separate cached package. | The recipe's image support |
 
 The speculation flags exist on the command line only. `--no-mtp` excludes the
 others. The `Select GPUs.` startup line states the settings in effect: `up to
@@ -215,7 +218,7 @@ performance results.
 
 The `deepseek-v4-flash` alias selects the lossless MXFP4-CSF checkpoint
 `local-inference-lab/DeepSeek-V4-Flash-Vision-Exp-lossless-CSF`.
-The `deepseek-v4.1-flash` alias selects `DeepSeek-AI/DeepSeek-V4.1-Flash-1017`,
+The `deepseek-v4.1-flash` alias selects `deepseek-ai/DeepSeek-V4.1-Flash-1017`,
 with native MXFP4 expert scales by default. `--expert-scale-compression csf`
 compresses its backbone and DSpark expert scales during preparation.
 Compressed routed-expert scales remain in GPU memory. Serialized layers reuse scale buffers by expert geometry;
@@ -507,6 +510,7 @@ max_concurrency = 2
 hub_cache = "~/.cache/huggingface/hub"
 kernel_cache = "~/.cache/flare/kernels"
 package_cache = "~/.cache/flare/packages"
+export_staging = ""               # Rank files an export assembles from; empty: beside the package.
 cuda = "/opt/cuda"                # Used when installed packages provide no toolkit.
 ```
 

@@ -233,6 +233,11 @@ impl NativeModel {
                 .contract
                 .take()
                 .ok_or_else(|| invalid("model package lacks a typed serving contract"))?,
+            packages
+                .first()
+                .and_then(|package| package.execution.as_ref())
+                .ok_or_else(|| invalid("model package has no serving contract"))?
+                .max_active,
         )?;
         server_config["sampling_defaults"] = protobuf::sampling_defaults(
             descriptor

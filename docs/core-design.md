@@ -332,6 +332,13 @@ same boundary; violations must be resolved before committing.
   allowlist. Shared code derives behavior from concrete geometry and dataflow.
   Independent enum identifiers select reusable tool/reasoning parsers and image
   preparation/layout implementations only. Review every field and all consumers.
+- **Protocol Buffer changes preserve model package compatibility.** Every Protocol
+  Buffer change **must** be accompanied by Helios code that keeps previously
+  exported model packages loadable and usable without re-export. Shared code must
+  handle absent fields and Protobuf default values while preserving older metadata
+  semantics and explicit values. Wire-format compatibility alone is insufficient.
+  Include regression tests for older serialized metadata and validate the affected
+  package loading and serving paths across the affected model contracts.
 - **Numerical and performance requirements are separate.** State copies and
   metadata are exact. Arithmetic comparisons follow each operator's precision
   and reduction semantics. Complete graph and service measurements determine

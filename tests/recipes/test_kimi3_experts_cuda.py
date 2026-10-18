@@ -1,4 +1,4 @@
-"""Checkpoint CSF partition loading and SiTU expert execution against MXFP8 arithmetic."""
+"""Checkpoint partition loading and SiTU expert execution against MXFP8 arithmetic."""
 
 import os
 from pathlib import Path
@@ -6,6 +6,8 @@ from pathlib import Path
 import pytest
 
 CHECKPOINT = Path("/data/models/Kimi-K3-MXFP4-CSF")
+NATIVE_CHECKPOINT = Path("/data/models--moonshotai--Kimi-K3/snapshots/2496450e92e425c886db095102a52a6682ca3970")
+PREFIXES = tuple(f"language_model.model.layers.1.block_sparse_moe.experts.{i}" for i in (0, 17, 433, 895))
 pytestmark = pytest.mark.skipif(os.getenv("FLARE_RUN_CUDA_TESTS") != "1",
                                 reason="requires CUDA checkpoint tests")
 
@@ -38,49 +40,51 @@ def _decode_scales(values, rows, columns):
     return result
 
 
-@pytest.mark.parametrize("partition", [(0, 192), (2880, 3072)])
-def test_checkpoint_experts(partition):
+def _load(checkpoint, partition, load, logical_scales):
+    """Load four layer-one experts, then read their packed weights and logical scales back."""
     import torch
     from safetensors import safe_open
-    from b12x.moe._shared.kernels.reference import moe_reference_w4a8_mx
-    from ignition.components.moe import PreparedRoutedExperts
     from ignition.components.weights import DirectWeightLoader
     from ignition.preparation.checkpoint import inspect_indexed_checkpoint
-    from ignition.preparation.scratch import ScratchArena
-    from ignition.preparation.tuning import RecordedPreparationSession
 
-    if not CHECKPOINT.is_dir():
+    if not checkpoint.is_dir():
         pytest.skip("Kimi K3 checkpoint is not installed")
     device = torch.device("cuda:0")
     torch.cuda.set_device(device)
-    manifest = inspect_indexed_checkpoint(CHECKPOINT)
-    prefixes = tuple(f"language_model.model.layers.1.block_sparse_moe.experts.{i}" for i in (0, 17, 433, 895))
+    manifest = inspect_indexed_checkpoint(checkpoint)
     scales = (torch.empty((4, 512, 112), dtype=torch.uint8, device=device),
               torch.empty((4, 3584, 8), dtype=torch.uint8, device=device))
-    with DirectWeightLoader(manifest, device, prefixes=tuple(p + "." for p in prefixes)) as loader:
-        experts = loader.load_mxfp4_csf_experts(prefixes, hidden_size=3584, intermediate_size=3072,
-            intermediate_range=partition, projection_names=("w1", "w3", "w2"), weight_name="weight_packed",
-            activation="situ", scale_scratch=scales)
+    with DirectWeightLoader(manifest, device, prefixes=tuple(p + "." for p in PREFIXES)) as loader:
+        experts = load(loader, scales)
 
     def read(name):
-        with safe_open(CHECKPOINT / manifest.tensors[name].shard, framework="pt") as file:
+        with safe_open(checkpoint / manifest.tensors[name].shard, framework="pt") as file:
             return file.get_tensor(name)
 
     packed, expanded = [], []
-    for prefix in prefixes:
+    first, last = partition
+    for prefix in PREFIXES:
         weights, scale_values = {}, {}
         for projection in ("w1", "w3", "w2"):
             name = f"{prefix}.{projection}"
             weights[projection] = read(name + ".weight_packed")
             rows, columns = (3584, 96) if projection == "w2" else (3072, 112)
-            fields = [read(name + ".weight_scale.csf32_" + field)
-                      for field in ("bases", "codes", "page_bases", "offsets", "exceptions")]
-            scale_values[projection] = torch.from_numpy(_decode_scales(fields, rows, columns))
-        first, last = partition
+            scale_values[projection] = logical_scales(read, name, rows, columns)
         packed.append((torch.cat((weights["w3"][first:last], weights["w1"][first:last])),
                        weights["w2"][:, first // 2:last // 2]))
         expanded.append((torch.cat((scale_values["w3"][first:last], scale_values["w1"][first:last])),
                          scale_values["w2"][:, first // 32:last // 32]))
+    return experts, scales, packed, expanded
+
+
+def _assert_matches_arithmetic(checkpoint, experts, scales, packed, expanded):
+    import torch
+    from b12x.moe._shared.kernels.reference import moe_reference_w4a8_mx
+    from ignition.components.moe import PreparedRoutedExperts
+    from ignition.preparation.scratch import ScratchArena
+    from ignition.preparation.tuning import RecordedPreparationSession
+
+    device = torch.device("cuda:0")
     w13, w2 = (torch.stack(x).to(device) for x in zip(*packed))
     s13, s2 = (torch.stack(x).to(device) for x in zip(*expanded))
     torch.manual_seed(41)
@@ -89,7 +93,7 @@ def test_checkpoint_experts(partition):
     ids = torch.cat((ids, (ids + 1) % 4), -1)
     probabilities = torch.softmax(torch.randn(17, 2, device=device), -1)
     output = torch.empty_like(source)
-    with RecordedPreparationSession(device=device, checkpoint=str(CHECKPOINT),
+    with RecordedPreparationSession(device=device, checkpoint=str(checkpoint),
             workload_schema="kimi3-experts", numerical_policy="default") as session:
         arena = ScratchArena(device)
         session.register_scratch(arena)
@@ -111,3 +115,34 @@ def test_checkpoint_experts(partition):
         torch.cuda.synchronize(device)
         assert torch.cuda.memory_stats(device)["allocation.all.allocated"] == allocated
         torch.testing.assert_close(output, actual, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("partition", [(0, 192), (2880, 3072)])
+def test_checkpoint_experts(partition):
+    import torch
+
+    def load(loader, scales):
+        return loader.load_mxfp4_csf_experts(PREFIXES, hidden_size=3584, intermediate_size=3072,
+            intermediate_range=partition, projection_names=("w1", "w3", "w2"), weight_name="weight_packed",
+            activation="situ", scale_scratch=scales)
+
+    def logical_scales(read, name, rows, columns):
+        fields = [read(name + ".weight_scale.csf32_" + field)
+                  for field in ("bases", "codes", "page_bases", "offsets", "exceptions")]
+        return torch.from_numpy(_decode_scales(fields, rows, columns))
+
+    _assert_matches_arithmetic(CHECKPOINT, *_load(CHECKPOINT, partition, load, logical_scales))
+
+
+@pytest.mark.parametrize("partition", [(0, 192), (2880, 3072)])
+def test_native_checkpoint_experts_compress_scales_while_loading(partition):
+    def load(loader, scales):
+        experts = loader.load_fp4_experts(PREFIXES, hidden_size=3584, intermediate_size=3072, format="mxfp4",
+            activation_mode="a8", intermediate_range=partition, projection_names=("w1", "w3", "w2"),
+            weight_name="weight_packed", activation="situ", w13_layout="w31", scale_compression="csf",
+            scale_scratch=scales)
+        assert experts.plan.scale_compression == "csf"
+        return experts
+
+    _assert_matches_arithmetic(NATIVE_CHECKPOINT, *_load(NATIVE_CHECKPOINT, partition, load,
+        lambda read, name, rows, columns: read(name + ".weight_scale")))

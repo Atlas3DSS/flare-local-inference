@@ -125,6 +125,62 @@ class PreparedAllReduce:
         return self.output
 
 
+class PreparedChunkedAllGather:
+    """Column gathers of more rows than the channel's batch capacity, gathered in row chunks it accepts.
+
+    Each chunk is a PreparedAllGather over contiguous row views of the source and output, so a channel sized
+    for decode can also gather prefill activations; the chunks run in order on one stream.
+    """
+
+    def __init__(self, source, output, *, runtime, session, coordinator, name):
+        rows = source.shape[0]
+        step = rows if runtime is None or _roce(runtime) else max(1, min(rows, runtime.max_batch_size))
+        self.bounds = [(start, min(start + step, rows)) for start in range(0, rows, step)]
+        self.parts = [PreparedAllGather(source[begin:end], output[begin:end], runtime=runtime, session=session,
+                                        coordinator=coordinator, name=name if len(self.bounds) == 1 else f"{name}.{index}")
+                      for index, (begin, end) in enumerate(self.bounds)]
+        self.output = output
+
+    def __call__(self, source):
+        for (begin, end), part in zip(self.bounds, self.parts, strict=True):
+            part(source[begin:end])
+        return self.output
+
+    def run_eager(self, source):
+        """Gather on the current stream from inside another eager operation."""
+        for (begin, end), part in zip(self.bounds, self.parts, strict=True):
+            part.run_eager(source[begin:end])
+        return self.output
+
+
+class PreparedChunkedAllReduce:
+    """A row-major reduction larger than its PCIe runtime's capacity, reduced in row chunks the runtime accepts.
+
+    Each chunk is a PreparedAllReduce over contiguous row views of the source and output, so a channel sized
+    for decode can also reduce prefill activations; the chunks run in order on one stream.
+    """
+
+    def __init__(self, source, output, *, runtime, session, coordinator, name):
+        rows = source.shape[0]
+        step = rows
+        if runtime is not None and not _roce(runtime):
+            # One-shot pools answer through their stream channel; hierarchical runtimes directly.
+            accepts = (runtime.for_stream().should_allreduce if runtime.algorithm == "oneshot"
+                       else runtime.should_allreduce)
+            while step > 1 and not accepts(source[:step]):
+                step = (step + 1) // 2
+        self.bounds = [(start, min(start + step, rows)) for start in range(0, rows, step)]
+        self.parts = [PreparedAllReduce(source[begin:end], output[begin:end], runtime=runtime, session=session,
+                                        coordinator=coordinator, name=name if len(self.bounds) == 1 else f"{name}.{index}")
+                      for index, (begin, end) in enumerate(self.bounds)]
+        self.output = output
+
+    def __call__(self, source):
+        for (begin, end), part in zip(self.bounds, self.parts, strict=True):
+            part(source[begin:end])
+        return self.output
+
+
 @torch.library.custom_op("flare::pcie_all_reduce_rmsnorm", mutates_args=("residual", "output"))
 def _all_reduce_rmsnorm(source: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor,
                        output: torch.Tensor, handle: int) -> None:
@@ -234,13 +290,14 @@ class PreparedAllGather:
             _OWNERS[self.handle] = self
             return
         if (runtime.world_size < 2 or source.ndim != 2
-                or source.dtype != torch.bfloat16 or output.dtype != source.dtype
+                or source.dtype not in (torch.bfloat16, torch.float8_e4m3fn) or output.dtype != source.dtype
                 or source.device != runtime.device or output.device != source.device
                 or not source.is_contiguous() or not output.is_contiguous()
                 or not 0 < source.shape[0] <= runtime.max_batch_size
                 or source.shape[1] != runtime.heads_per_rank * runtime.query_head_dim
                 or output.shape != (source.shape[0], source.shape[1] * runtime.world_size)):
-            raise ValueError("all-gather requires contiguous BF16 column partitions matching its collective channel")
+            raise ValueError("all-gather requires contiguous BF16 or E4M3 column partitions matching its collective "
+                             "channel")
         self.runtime, self.output = runtime, output
         call = {"local_input": source.view(source.shape[0], runtime.heads_per_rank, runtime.query_head_dim),
                 "out": output.view(output.shape[0], runtime.total_heads, runtime.query_head_dim)}
@@ -362,9 +419,10 @@ class PreparedLseReduceScatter:
             self.gather = PreparedAllGather(self.send, self.received, runtime=runtime, session=session,
                                             coordinator=coordinator, name=f"{name}.gather")
             return
-        if (partial.shape != (rows, runtime.total_heads, runtime.query_head_dim) or partial.dtype != torch.bfloat16
+        # Partials and outputs have the channel's value width, which a latent query may exceed.
+        if (partial.shape != (rows, runtime.total_heads, runtime.head_dim) or partial.dtype != torch.bfloat16
                 or lse.shape != (rows, runtime.total_heads) or lse.dtype != torch.float32
-                or output.shape != (rows, runtime.heads_per_rank, runtime.query_head_dim)
+                or output.shape != (rows, runtime.heads_per_rank, runtime.head_dim)
                 or output.dtype != torch.bfloat16 or not 0 < rows <= runtime.max_batch_size):
             raise ValueError("LSE reduce-scatter requires BF16 partials, FP32 LSE and a head shard of its channel")
         self.runtime, self.output = runtime, output
@@ -389,3 +447,45 @@ class PreparedLseReduceScatter:
             return self.output
         _lse_reduce_scatter(partial, lse, self.output, self.handle)
         return self.output
+
+
+@torch.library.custom_op("flare::pcie_vocabulary_argmax", mutates_args=("out",))
+def _vocabulary_argmax(base: torch.Tensor, bias: torch.Tensor, out: torch.Tensor, handle: int) -> None:
+    owner = _OWNERS[handle]
+    owner.runtime.fused_add_argmax(base, bias, out=out, plan=owner.plan)
+
+
+@_vocabulary_argmax.register_fake
+def _fake_vocabulary_argmax(base, bias, out, handle):
+    pass
+
+
+class PreparedVocabularyArgmax:
+    """Exact greedy tokens of BF16 vocabulary-shard logits plus a matching shard bias, without a gather.
+
+    Each rank holds contiguous vocabulary partitions; b12x's PCIe vocabulary-parallel argmax exchanges
+    every row's local maximum of the BF16-rounded sum. Every rank must run each call in the same order
+    with the same rows. Calls may pass other views with the prepared geometry, such as further rows
+    of the same base storage.
+    """
+
+    def __init__(self, base, bias, out, *, runtime, session, coordinator, name):
+        from b12x.comm.pcie import _owner_preparation
+
+        if (base.ndim != 2 or base.dtype != torch.bfloat16 or bias.shape != base.shape or bias.dtype != base.dtype
+                or base.stride(-1) != 1 or bias.stride(-1) != 1 or out.shape != (base.shape[0],)
+                or out.dtype != torch.int64 or not out.is_contiguous()
+                or base.shape[1] != runtime.local_vocab_size or not 0 < base.shape[0] <= runtime.max_batch_size):
+            raise ValueError("vocabulary argmax requires matching BF16 [rows, local vocabulary] shards and int64 rows")
+        self.runtime = runtime
+        call = dict(base=base, bias=bias, out=out)
+        self.plan = _owner_preparation.plan(_owner_preparation.query_from_runtime(runtime, call=call), runtime=runtime)
+        declare(session, (self.plan.request(name=name,
+            prepare_call=lambda state: _owner_preparation.prepared_call(state, **call),
+            collective=_owner_preparation.collective(runtime, key=name)),), coordinator=coordinator)
+        self.handle = next(_HANDLES)
+        _OWNERS[self.handle] = self
+
+    def __call__(self, base, bias, out):
+        _vocabulary_argmax(base, bias, out, self.handle)
+        return out

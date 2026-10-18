@@ -118,7 +118,10 @@ class PreparedTableRequests:
         m = self.metadata
         gather_rows(self.pool.region("engram_history"), m.state_rows, self.raw_history)
         raw = torch.where(self.columns >= 3 - m.starts[:, None], self.raw_history, 2)
-        self.history.copy_(self.token_map[raw])
+        # Image token types use IDs outside the text vocabulary. A dead marker
+        # stops every n-gram at the image boundary, including across prefill chunks.
+        text = (raw >= 0) & (raw < self.token_map.numel())
+        self.history.copy_(torch.where(text, self.token_map[raw.clamp(0, self.token_map.numel() - 1)], -1))
         for operation in self.operations:
             operation()
 
@@ -171,7 +174,7 @@ class PreparedEngram:
 
     def __call__(self, source):
         m = self.metadata
-        self.mask.copy_(m.positions >= 0)
+        self.mask.copy_((m.positions >= 0) & (m.token_ids < 129280))
         self.lookup(source)
         self.projection(self.gathered)
         hyperconnection.run_engram_mix(source.view(source.shape[0], -1), self.projected, self.norm_weight,

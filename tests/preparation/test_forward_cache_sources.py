@@ -17,6 +17,8 @@ def test_presentation_edits_preserve_forward_cache_but_execution_edits_invalidat
     progress.write_text("splash = 'sun'\n")
     entrypoint = package / "__main__.py"
     entrypoint.write_text("port = 8000\n")
+    publication = preparation / "package_file.py"
+    publication.write_text("threads = 1\n")
     kernels = tmp_path / "flashinfer"
     kernels.mkdir()
     operator = kernels / "operator.py"
@@ -32,6 +34,7 @@ def test_presentation_edits_preserve_forward_cache_but_execution_edits_invalidat
     original = root()
     progress.write_text("splash = 'solar flare'\n")
     entrypoint.write_text("port = 8001\n")
+    publication.write_text("threads = 16\n")
     assert root() == original
     backend.write_text("backend = 2\n")
     changed = root()

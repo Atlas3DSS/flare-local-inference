@@ -75,7 +75,9 @@ def test_fp8_cache_views_and_planned_bytes(alias, world_size, drafting):
         pool = module.ContinuationPool.allocate(config, shard, 2, 3, "meta", dflash=drafting)
         caches = [pool.cache(layer, kind) for layer in range(config.layers) for kind in ("key", "value")]
     elif model.recipe.name == "kimi3":
-        pool = module.ContinuationPool.for_model(config, world_size, 2, 3, "meta")
+        # Decode context parallelism spreads each page's positions over every rank, as preparation lays it out.
+        pool = module.ContinuationPool.for_model(config, world_size, 2, 3, "meta", context_ranks=world_size,
+            speculative_tokens=model.recipe.speculation.draft_tokens if drafting else 0)
         caches = [pool.attention(layer) for layer, kind in enumerate(config.layers) if kind == "mla"]
         if drafting:
             caches.extend(pool.draft_attention(layer) for layer in range(config.draft.layers))
@@ -296,7 +298,7 @@ def test_deepseek41_native_checkpoint_and_scale_compression(monkeypatch, tmp_pat
     from ignition.recipes.deepseek41.bootstrap import PreparationConfig
 
     model = resolve("deepseek-v4.1-flash")
-    assert model.checkpoint.repository == "DeepSeek-AI/DeepSeek-V4.1-Flash-1017"
+    assert model.checkpoint.repository == "deepseek-ai/DeepSeek-V4.1-Flash-1017"
     assert resolve(model.checkpoint.repository).checkpoint is model.checkpoint
     assert model.recipe.sampling_defaults.as_dict() == {
         "temperature": 1., "top_p": 1., "top_k": -1, "seed": 0, "min_p": 0.,
@@ -304,11 +306,13 @@ def test_deepseek41_native_checkpoint_and_scale_compression(monkeypatch, tmp_pat
     speculation = model.recipe.speculation if drafting else None
     native = fitted(model, 4, speculation=speculation)
     plan = fitted(model, 4, speculation=speculation, expert_scale_compression=compression)
+    assert plan.max_images == 4 and plan.image_concurrency == min(4, plan.concurrency)
     assert plan.expert_scale_compression == compression
     assert (plan.weights_bytes < native.weights_bytes) == (compression == "csf")
     monkeypatch.setattr("ignition.preparation.rank_group.prepare_group",
                         lambda snapshot, config, prepare, **options: config)
     config = model.recipe.prepare(tmp_path, plan, compile_forwards=True, kernel_cache=None, progress=None)
     assert config.expert_scale_compression == compression and config.dspark == drafting
+    assert config.image_concurrency == plan.image_concurrency
     with pytest.raises(ValueError, match="scale compression"):
         PreparationConfig(expert_scale_compression="zip")

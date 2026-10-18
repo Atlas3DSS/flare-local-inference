@@ -270,6 +270,25 @@ def test_stream_overlap_flag_applies_only_to_recipes_that_overlap_branches():
         stream_overlap(flag, serial)
 
 
+def test_language_model_only_plans_no_images_for_recipes_that_declare_it():
+    pair = (gpu(0, 95), gpu(1, 95))
+    seeing = replace(PAIR, max_images=4, image_bytes=32 * MIB, language_model_only=True)
+
+    def planned(model, **settings):
+        return planning.plan(model, model.checkpoints[0], pair, selected=None, concurrency=4, reserve_bytes=0,
+                             speculation=None, **settings)
+
+    text = planned(seeing, language_model_only=True)
+    assert planned(seeing).max_images == 4 and text.max_images == 0
+    # Image feature slots follow the vision encoder.
+    assert planned(seeing).image_concurrency == 4 and text.image_concurrency == 0
+    with pytest.raises(UsageError, match="--image-concurrency requires the vision encoder"):
+        planned(seeing, language_model_only=True, image_concurrency=2)
+    assert text.to_dict()["language_model_only"] is True and planned(seeing).to_dict()["language_model_only"] is False
+    with pytest.raises(UsageError, match="--language-model-only: pair prepares no separable vision encoder"):
+        planned(PAIR, language_model_only=True)
+
+
 def test_first_fitting_gpus_and_smallest_supported_tensor_parallel_size():
     assert [g.index for g in derive(gpus=(gpu(0, 10), gpu(1, 95), gpu(2, 95))).gpus] == [1]
     assert [g.index for g in derive(gpus=(gpu(0, 95, (9, 0)), gpu(1, 95))).gpus] == [1]
@@ -449,3 +468,14 @@ def test_compiler_budget_rejects_more_local_ranks_than_workers(model, workers, s
     plan = replace(derive(model, devices), compile_workers=workers)
     with pytest.raises(UsageError, match=message):
         tuning_devices(plan, SimpleNamespace(gpus=devices), selection)
+
+
+def test_recipe_b12x_settings_name_b12x_variables():
+    from dataclasses import replace
+
+    from ignition.recipes.kimi3.recipe import RECIPE
+
+    with pytest.raises(ValueError, match="B12X_"):
+        replace(RECIPE, b12x_environment={"CUDA_VISIBLE_DEVICES": "0"})
+    with pytest.raises(ValueError, match="B12X_"):
+        replace(RECIPE, b12x_environment={"B12X_PCIE_DCP_THREADS": 512})

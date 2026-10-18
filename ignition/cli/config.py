@@ -21,7 +21,8 @@ _SECTIONS = {
     "memory": {"reserve": str},
     "preparation": {"compile_workers": int},
     "prefix_cache": {"memory": str, "disk_limit": str, "disk_transport": str},
-    "paths": {"hub_cache": str, "kernel_cache": str, "package_cache": str, "prefix_cache": str, "cuda": str},
+    "paths": {"hub_cache": str, "kernel_cache": str, "package_cache": str, "export_staging": str,
+              "prefix_cache": str, "cuda": str},
 }
 _MODEL_KEYS = {"max_concurrency": int, "image_concurrency": int, "speculative_token_capacity": int}
 # Empty prefix-cache values leave the decision to Flare, which derives them from the host.
@@ -32,6 +33,7 @@ _BUILT_IN = {
     "prefix_cache.memory": "", "prefix_cache.disk_limit": "", "prefix_cache.disk_transport": "",
     "paths.hub_cache": "~/.cache/huggingface/hub", "paths.kernel_cache": "~/.cache/flare/kernels",
     "paths.package_cache": "~/.cache/flare/packages",
+    "paths.export_staging": "",
     "paths.prefix_cache": "",
     "paths.cuda": "",
 }
@@ -193,6 +195,7 @@ class Configuration:
             f'# hub_cache = "{self.get("paths.hub_cache").value}"',
             f'# kernel_cache = "{self.get("paths.kernel_cache").value}"',
             f'# package_cache = "{self.get("paths.package_cache").value}"',
+            '# export_staging = ""            # rank files an export assembles from; empty: beside the package',
             '# prefix_cache = "~/.cache/flare/prefix-cache"   # prefix checkpoint records; empty: no disk tier',
             '# cuda = "/opt/cuda"              # used only when the toolkit is not found in installed packages',
         ]

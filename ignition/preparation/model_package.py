@@ -9,8 +9,14 @@ from .package_file import combine
 from .memory_inventory import print_inventory
 
 
-def export_package(prepared, images, storage, path, *, options, publisher, progress=None, console=None):
-    """Export every rank, close preparation resources, and assemble the model file."""
+def export_package(prepared, images, storage, path, *, options, publisher, progress=None, console=None,
+                   staging=None):
+    """Export every rank, close preparation resources, and assemble the model file.
+
+    Ranks stage their storage and resources as files under `staging` (default: beside `path`),
+    which the model file copies directly; staging on another disk keeps that copy from reading
+    and writing one device.
+    """
     if publisher is None:
         raise ValueError("final model publication requires a signing publisher")
     import torch
@@ -18,9 +24,11 @@ def export_package(prepared, images, storage, path, *, options, publisher, progr
 
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    stage = Path(tempfile.mkdtemp(prefix=f'.{path.name}-', dir=path.parent))
+    staging = path.parent if staging is None else Path(staging)
+    staging.mkdir(parents=True, exist_ok=True)
+    stage = Path(tempfile.mkdtemp(prefix=f'.{path.name}-', dir=staging))
     try:
-        roots = [f'rank-{rank}.safetensors' for rank in range(storage.world)]
+        roots = [f'rank-{rank}.json' for rank in range(storage.world)]
         if storage.world > 1:
             for rank, control in enumerate(prepared.controls, 1):
                 control.send(('export', stage / roots[rank], options))
@@ -29,7 +37,8 @@ def export_package(prepared, images, storage, path, *, options, publisher, progr
             torch.cuda.synchronize()
             dist.barrier()
         model = prepared if storage.world == 1 else prepared.model
-        package = export_model(model, images, storage, stage / roots[0], options=options, progress=progress)
+        package = export_model(model, images, storage, stage / roots[0], options=options, progress=progress,
+                               sources=True)
         inventories = [package.memory_inventory]
         memory = [[]] if storage.world == 1 else [list(storage.peer_storage.owned.items())]
         if storage.world > 1:

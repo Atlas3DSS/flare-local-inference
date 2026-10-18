@@ -53,7 +53,7 @@ def _server_options(configuration, model, plan) -> dict:
         "reserve_bytes": plan.reserve_bytes,
         "api_key": configuration.get("server.api_key").value,
         "queue_capacity": 4 * plan.concurrency, "frontend_workers": plan.concurrency,
-        "max_body_bytes": recipe.max_images * recipe.image_bytes + recipe.context * _BODY_BYTES_PER_TOKEN,
+        "max_body_bytes": plan.max_images * recipe.image_bytes + recipe.context * _BODY_BYTES_PER_TOKEN,
         "context_hint": "context is limited by the checkpoint and available cache capacity",
         "capacity_hint": "--max-concurrency sets the request limit; a lower [memory] reserve leaves more KV pages",
     }
@@ -99,7 +99,8 @@ def run(args) -> int:
                   speculation=speculation(args, model, configuration), prefill_chunk=args.prefill_chunk_size,
                   context_parallel=context_parallel(args, model), stream_overlap=stream_overlap(args, model),
                   roce_ring=args.roce_ring,
-                  mixed_prefill=args.mixed_prefill, expert_scale_compression=args.expert_scale_compression)
+                  mixed_prefill=args.mixed_prefill, expert_scale_compression=args.expert_scale_compression,
+                  online_mxfp8=args.online_mxfp8, language_model_only=args.language_model_only)
     runtime = binary()
     host = configuration.get("server.host", args.host).value
     port = configuration.get("server.port", args.port).value
@@ -109,7 +110,7 @@ def run(args) -> int:
             _prepare(args, export_path=package)
         else:
             print(f"Load cached runtime package. {package}", flush=True)
-    environment.apply(configuration, plan.gpus)
+    environment.apply(configuration, plan.gpus, plan.recipe.b12x_environment)
     command = [str(runtime), "run", str(package), "--gpus", ",".join(str(rank) for rank in range(plan.world_size)),
                "--host", host, "--port", str(port)]
     command += configuration.prefix_cache_flags()
@@ -195,9 +196,10 @@ def _export_hosts(args, *, export_path) -> int:
                          speculation=speculation(args, model, configuration), prefill_chunk=args.prefill_chunk_size,
                          context_parallel=context_parallel(args, model), stream_overlap=stream_overlap(args, model),
                          roce_ring=args.roce_ring,
-                         mixed_prefill=args.mixed_prefill, expert_scale_compression=args.expert_scale_compression)
+                         mixed_prefill=args.mixed_prefill, expert_scale_compression=args.expert_scale_compression,
+                         online_mxfp8=args.online_mxfp8, language_model_only=args.language_model_only)
     plan = replace(plan, compile_workers=compiler_workers(configuration, args.compile_workers), hub_cache=hub_cache)
-    environment.apply(configuration, local)
+    environment.apply(configuration, local, plan.recipe.b12x_environment)
     options = _server_options(configuration, model, plan)
     options.pop("api_key")
     print(json.dumps({"plan": plan.to_dict()}), file=sys.stderr, flush=True)
@@ -260,7 +262,8 @@ def _prepare(args, *, export_path) -> int:
                       speculation=speculation(args, model, configuration), prefill_chunk=args.prefill_chunk_size,
                       context_parallel=context_parallel(args, model), stream_overlap=stream_overlap(args, model),
                       roce_ring=args.roce_ring,
-                      mixed_prefill=args.mixed_prefill, expert_scale_compression=args.expert_scale_compression)
+                      mixed_prefill=args.mixed_prefill, expert_scale_compression=args.expert_scale_compression,
+                      online_mxfp8=args.online_mxfp8, language_model_only=args.language_model_only)
         indices = planning.format_gpus(gpu.index for gpu in plan.gpus)
         # A caller's restriction changes which GPU each index names.
         restricted = "" if host.restriction is None else f" of CUDA_VISIBLE_DEVICES={host.restriction}"
@@ -273,6 +276,8 @@ def _prepare(args, *, export_path) -> int:
                      f" · concurrency {plan.concurrency} · images {plan.image_concurrency} · {display.speculation(plan.speculation, brief=True)}{capacity}{serial}"
                      f" · mixed prefill {'on' if plan.mixed_prefill else 'off'}"
                      f" · expert scales {plan.expert_scale_compression or 'native'}"
+                     f"{' · online MXFP8' if plan.online_mxfp8 else ''}"
+                     f"{' · language model only' if plan.language_model_only else ''}"
                      f" · compile workers {plan.compile_workers or 'auto'} per host{tuning}")
     if args.config is None and not configuration.exists:
         configuration.write_initial(model.checkpoint.alias, concurrency.value)
@@ -283,7 +288,7 @@ def _prepare(args, *, export_path) -> int:
             fetch(model, hub_cache, progress_bars=False)
             model.verify(hub_cache)
 
-    environment.apply(configuration, plan.gpus)
+    environment.apply(configuration, plan.gpus, plan.recipe.b12x_environment)
     import flare_heliopause
 
     # Preparation runs native CUDA work that cannot unwind; a signal ends the process at once.
@@ -327,7 +332,8 @@ def _prepare(args, *, export_path) -> int:
                 try:
                     options.pop("api_key")
                     export_package(prepared, recorder, storage, export_path, options=options, publisher=publisher,
-                                 progress=progress if args.verbose else None, console=progress.console)
+                                 progress=progress if args.verbose else None, console=progress.console,
+                                 staging=configuration.directory("export_staging"))
                 except Exception as error:
                     if args.verbose:
                         traceback.print_exc()
@@ -405,12 +411,13 @@ def serve(args) -> int:
                          context_parallel=context_parallel(args, model), stream_overlap=stream_overlap(args, model),
                          roce_ring=args.roce_ring,
                          cache_states=args.prefix_cache_states, mixed_prefill=args.mixed_prefill,
-                         expert_scale_compression=args.expert_scale_compression)
+                         expert_scale_compression=args.expert_scale_compression, online_mxfp8=args.online_mxfp8,
+                         language_model_only=args.language_model_only)
     plan = replace(plan, compile_workers=compiler_workers(configuration, args.compile_workers), hub_cache=hub_cache)
     if rendezvous is None:
         plan = tuning_devices(plan, host, args.tuning_gpus)
         local = plan.gpus
-    environment.apply(configuration, local)
+    environment.apply(configuration, local, plan.recipe.b12x_environment)
     options = _server_options(configuration, model, plan)
     print(json.dumps({"plan": plan.to_dict()}), file=sys.stderr, flush=True)
     preparation_options = {} if args.direct else {"retain_graphs": True}
@@ -447,6 +454,22 @@ def serve(args) -> int:
     return code
 
 
+def _diagnostic_options(prepared, options):
+    """Limit diagnostic admission to the physical backing retained by preparation."""
+    from ignition.components.capacity import request_capacity
+
+    model = getattr(prepared, "model", prepared)
+    rows, pages = model.buffers["memory_capacity"].cpu().tolist()
+    graphs = model.server_config["model_contract"]["graphs"]
+    execution_rows = request_capacity(model.max_active) * max(graph["state_rows_per_request"] for graph in graphs)
+    if rows <= execution_rows or pages <= 0:
+        raise PreparationError("diagnostic backing cannot hold the prepared request concurrency")
+    # Row zero is reserved. Export retains the declared capacities; only this
+    # diagnostic server is restricted to the backing that already exists.
+    snapshots = min(model.server_config["snapshots"], rows - 1 - execution_rows)
+    return {**options, "pages": min(model.server_config["pages"], pages), "snapshots": snapshots}
+
+
 def _serve_prepared(prepared, bind, options):
     import signal
 
@@ -454,7 +477,10 @@ def _serve_prepared(prepared, bind, options):
         ranks = [{key: value for key, value in rank.items() if key != "tuning"}
                  for rank in prepared.memory_report.get("ranks", (prepared.memory_report,))]
         print(json.dumps({"memory": ranks}, default=str), file=sys.stderr, flush=True)
-        server = prepared.start_server(bind=bind, options=options)
+        limited = _diagnostic_options(prepared, options)
+        print(json.dumps({"diagnostic_capacity": {key: limited[key] for key in ("pages", "snapshots")}}),
+              file=sys.stderr, flush=True)
+        server = prepared.start_server(bind=bind, options=limited)
         print(f"Listening on {server.address}", flush=True)
 
         def stop(signum, frame):

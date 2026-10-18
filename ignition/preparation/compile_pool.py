@@ -14,17 +14,22 @@ from .host_memory import compile_threads, cpu_workers, device_memory_info, worke
 
 # Device memory one compiler worker can hold: its CUDA context plus Inductor's constant folding.
 _WORKER_DEVICE_BYTES = 2 << 30
+# A discrete GPU's worker holds only device memory, about 0.7 GiB for Kimi K3's 93-layer forwards.
+_DISCRETE_WORKER_DEVICE_BYTES = 1 << 30
 
 
 @_defer_full_collection()
 def _compile_forward(payload, device, options, path, num_threads, grad_enabled):
     from .aot import aot_forward
+    from .device_binding import bind_device
     from .forward_metadata import loads
 
     torch.set_num_threads(num_threads)
     torch.set_grad_enabled(grad_enabled)
     torch.cuda.set_device(device)
-    forward = loads(payload)
+    # A lent forward's metadata names its owner's GPU; it loads bound to this worker's.
+    with bind_device(device):
+        forward = loads(payload)
     artifact = aot_forward(forward, options=options)
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -55,11 +60,12 @@ class CompilePool:
             budget = max(1, options['compile_threads'] // pools)
         if shared and os.name == "nt":
             free = min(free, host_memory.available_bytes())
-        capacity = (free - headroom_bytes) // _WORKER_DEVICE_BYTES
+        worker_bytes = _WORKER_DEVICE_BYTES if shared else _DISCRETE_WORKER_DEVICE_BYTES
+        capacity = (free - headroom_bytes) // worker_bytes
         if capacity < 1:
             raise MemoryError("forward compilation requires memory for a CUDA worker beyond preparation headroom "
                               f"({free >> 20} MiB free, {headroom_bytes >> 20} MiB headroom, "
-                              f"{_WORKER_DEVICE_BYTES >> 20} MiB per worker)")
+                              f"{worker_bytes >> 20} MiB per worker)")
         limit = min(8, budget) if compile_workers is None else budget
         self.workers = worker_limit(min(limit, capacity), pools=pools, available=free if shared else None,
                                    device_bytes=_WORKER_DEVICE_BYTES if shared else 0,
@@ -74,10 +80,14 @@ class CompilePool:
         self.options = dict(options, compile_threads=threads)
 
     def submit(self, forward, path):
-        from torch._inductor.compile_worker.subproc_pool import SubprocKind, SubprocPool
         from .forward_metadata import dumps
 
-        payload = dumps(forward)
+        return self.submit_payload(dumps(forward), path)
+
+    def submit_payload(self, payload, path):
+        """Compile a forward serialized by `forward_metadata.dumps`, possibly on another rank, into `path`."""
+        from torch._inductor.compile_worker.subproc_pool import SubprocKind, SubprocPool
+
         if self.pool is None:
             if os.name == "nt":
                 self.pool = ProcessPoolExecutor(self.workers, mp_context=multiprocessing.get_context("spawn"))

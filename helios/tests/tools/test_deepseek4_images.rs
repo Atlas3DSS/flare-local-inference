@@ -31,11 +31,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let case: Value = serde_json::from_slice(&fs::read(&args[3])?)?;
     let output = Path::new(&args[4]);
     let processor = ImageProcessor::load(
-        flare_helios::frontend::test_support::image(
-            &asset(assets.join("preprocessor_config.json")),
-            &asset(snapshot.join("config.json")),
-        )
-        .unwrap(),
+        if case["image_settings"].is_object() {
+            serde_json::from_value(case["image_settings"].clone())?
+        } else {
+            flare_helios::frontend::test_support::image(
+                &asset(assets.join("preprocessor_config.json")),
+                &asset(snapshot.join("config.json")),
+            ).unwrap()
+        },
         ImageLimits::default(),
     )?;
     let frontend = Frontend::load(
@@ -67,7 +70,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         token_ids: frontend.encode(case["prompt"].as_str().unwrap(), false)?,
     };
     let input = flare_helios::model::prepare_input(
-        &support::model_config(support::contract("deepseek4")),
+        &support::model_config(if case["contract"].is_object() {
+            serde_json::from_value(case["contract"].clone())?
+        } else { support::contract("deepseek4") }),
         &frontend,
         Some(&processor),
         &prompt,

@@ -17,12 +17,12 @@ from ignition.preparation.checkpoint import inspect_indexed_checkpoint
 from ignition.preparation.compilation import compile_forward
 from ignition.preparation.scratch import GraphBufferPool, ScratchArena
 from ignition.recipes.deepseek4.config import REVISION
-from ignition.recipes.deepseek4.vision import (
+from ignition.components.deepseek_vision import (
     PreparedVision,
     VisionInputs,
     VisionScratch,
 )
-from ignition.recipes.deepseek4.vision_state import (
+from ignition.components.deepseek_vision import (
     PrefillVisionInputs,
     PreparedVisionGeneration,
     VisionState,
@@ -78,10 +78,12 @@ def test_compiled_vision_publishes_only_valid_current_generation(compiler):
     )
     pool = GraphBufferPool(device, chunk_bytes=2 << 20)
     buffers = pool.cursor()
-    scratch, inputs = VisionScratch.allocate(576, device, buffers=buffers), VisionInputs.allocate(device)
+    scratch = VisionScratch.allocate(576, device, hidden=4096, buffers=buffers)
+    inputs = VisionInputs.allocate(device, patches=3456)
     requests = DeviceRequestState.allocate(device, vocab_size=129280, capacity=4)
     batch = BatchInputs.allocate(512, 8, device, capacity=4)
-    state = VisionState(weights, batch, PrefillVisionInputs.allocate(512, device), requests)
+    state = VisionState(weights, batch, PrefillVisionInputs.allocate(512, device), requests, features=1536,
+        token_base=129280, sentinel_names=("image_start", "image_pad", "image_pad", "image_newline", "image_end"), feature_type=2)
     records = torch.zeros((2, 4, 24), dtype=torch.int64, device=device)
     frame, sequence = (
         torch.zeros(1, dtype=torch.int32, device=device),
@@ -115,7 +117,8 @@ def test_compiled_vision_publishes_only_valid_current_generation(compiler):
             from ignition.preparation.aot import aot_forward
 
             artifact = aot_forward(operation)
-            compiled = lambda: artifact(operation)
+            def compiled():
+                return artifact(operation)
         else:
             compiled = compile_forward(operation)
         compiled()

@@ -32,10 +32,9 @@ from ignition.preparation.collectives import (
 )
 from ignition.preparation.disposable import storage_ranges
 from ignition.preparation.execution import GraphSignature
-from ignition.preparation.host_memory import release_unused
+from ignition.preparation.host_memory import virtual_device_memory, release_unused
 from ignition.preparation.frontend import prepare_frontend
 from ignition.preparation.model import PreparedModel
-from ignition.preparation.rank_group import minimum_across_ranks
 from ignition.preparation.scratch import GraphBufferPool, ScratchArena
 from ignition.preparation.tuning import RecordedPreparationSession
 from ignition.preparation.tuning_replicas import TuningReplica
@@ -45,9 +44,11 @@ from .recipe import RECIPE
 from .decoder import PreparedDecoder, Scratch
 from .dspark import FORWARDS
 from .pool import PAGE_TOKENS, ContinuationPool, continuation_layout, page_bytes
-from .vision import PATCH_CAPACITIES, PreparedVision, VisionInputs, VisionScratch
-from .vision_state import PrefillVisionInputs, PreparedVisionGeneration, VisionState
+from ignition.components.deepseek_vision import (PreparedVision, VisionInputs, VisionScratch,
+    PrefillVisionInputs, PreparedVisionGeneration, VisionState)
 from .weights import ModelWeights
+
+PATCH_CAPACITIES = (576, 1152, 2304, 3456)
 
 
 @dataclass(frozen=True)
@@ -150,7 +151,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         state_rows = snapshots + execution_rows
         initial_pages = (config.prefill_chunk_size + PAGE_TOKENS - 1) // PAGE_TOKENS + 2 * slots
         bytes_per_page = page_bytes(weights.config)
-        total_memory = minimum_across_ranks(torch.cuda.mem_get_info(device)[1], group)
+        total_memory = virtual_device_memory(device, group, tuning_replica=config.tuning_replica)
         pool = ContinuationPool.allocate(
             weights.config,
             state_rows + 1,
@@ -215,9 +216,11 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
             config.decode_tokens, config.decode_tokens, shard.world_size, device, blocks=blocks,
             buffers=graph_buffers.cursor()
         )
-        vision_inputs = VisionInputs.allocate(device)
+        vision_inputs = VisionInputs.allocate(device, patches=max(PATCH_CAPACITIES))
         vision_prefill = PrefillVisionInputs.allocate(config.prefill_chunk_size, device)
-        vision_state = VisionState(weights.vision, inputs, vision_prefill, requests, image_slots=config.image_concurrency)
+        vision_state = VisionState(weights.vision, inputs, vision_prefill, requests, features=1536, token_base=129280,
+            sentinel_names=("image_start", "image_pad", "image_pad", "image_newline", "image_end"), feature_type=2,
+            image_slots=config.image_concurrency)
         vision_storage = {}
         buffers = dict(
             inputs.buffers(),
@@ -351,7 +354,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         for capacity in reversed(PATCH_CAPACITIES):
             name = f"vision{capacity}"
             cursor = graph_buffers.cursor()
-            vision_storage[capacity] = VisionScratch.allocate(capacity, device, buffers=cursor)
+            vision_storage[capacity] = VisionScratch.allocate(capacity, device, hidden=4096, buffers=cursor)
             encoder = PreparedVision(
                 weights.vision,
                 vision_storage[capacity],

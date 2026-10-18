@@ -64,6 +64,11 @@ pub(super) fn resized_rgb(
     if image.width >= 8 * image.height || image.width * g.height == image.height * g.width {
         return Ok((g, resize::pillow(image, g.width, g.height)));
     }
+    pad(image, g)
+}
+
+/// Pillow ImageOps.pad after RGB conversion, including ties-to-even centering.
+pub(super) fn pad(image: &RgbImage, g: ImageGeometry) -> Result<(ImageGeometry, Vec<u8>)> {
     // Match Pillow ImageOps.contain, then center its RGB result on a gray canvas.
     let source_ratio = image.width as f64 / image.height as f64;
     let target_ratio = g.width as f64 / g.height as f64;
@@ -91,6 +96,13 @@ pub(super) fn resized_rgb(
 }
 
 pub(super) fn process(limits: ImageLimits, images: &[RgbImage]) -> Result<ProcessedImages> {
+    pack(limits, images, |image| resized_rgb(limits, image))
+}
+
+pub(super) fn pack(
+    limits: ImageLimits, images: &[RgbImage],
+    resize: impl Fn(&RgbImage) -> Result<(ImageGeometry, Vec<u8>)>,
+) -> Result<ProcessedImages> {
     if images.is_empty() || images.len() > limits.max_images {
         return Err("image count is empty or exceeds the configured limit".into());
     }
@@ -103,7 +115,7 @@ pub(super) fn process(limits: ImageLimits, images: &[RgbImage]) -> Result<Proces
         cu_seqlens: vec![0],
     };
     for image in images {
-        let (g, pixels) = resized_rgb(limits, image)?;
+        let (g, pixels) = resize(image)?;
         if output.position_ids.len() + g.patches > limits.max_total_patches {
             return Err("images exceed the configured total patch limit".into());
         }

@@ -6,7 +6,10 @@ from pathlib import Path
 
 import pytest
 
-CHECKPOINT = Path("/data/models/Kimi-K3-MXFP4-CSF")
+# The CSF and native checkpoints share configuration and BF16 attention weights.
+CHECKPOINT = next((path for path in (Path("/data/models/Kimi-K3-MXFP4-CSF"), Path(
+    "/data/models--moonshotai--Kimi-K3/snapshots/2496450e92e425c886db095102a52a6682ca3970")) if path.is_dir()),
+    Path("/data/models/Kimi-K3-MXFP4-CSF"))
 
 
 @pytest.fixture
@@ -28,6 +31,7 @@ def test_checkpoint_geometry(config):
     assert config.layers[0] == "kda" and config.layers[3] == "mla"
     layout = continuation_layout(config, 16)
     assert layout.region("layer0.recurrent").shape == (6, 128, 128)
+    # E4M3 latent records, as vLLM serves Kimi K3 with an FP8 KV cache.
     assert page_bytes(config) == 24 * 128 * 576
 
 
@@ -46,16 +50,10 @@ def test_quantization_and_layer_partition_rejected(config):
         ModelConfig.from_dict(raw)
 
 
-def test_attention_residual_and_situ():
+def test_situ():
     import torch
-    from ignition.recipes.kimi3.model import attention_residual, situ
+    from ignition.recipes.kimi3.model import situ
 
-    generator = torch.Generator().manual_seed(41)
-    prefix, a, b = (torch.randn((3, 32), generator=generator).bfloat16() for _ in range(3))
-    weight = torch.ones(32, dtype=torch.bfloat16)
-    projection = torch.zeros((1, 32), dtype=torch.bfloat16)
-    expected = torch.stack((a, b, prefix), 1).float().mean(1).bfloat16()
-    torch.testing.assert_close(attention_residual(prefix, (a, b), weight, projection, 1e-5), expected)
     x = torch.tensor([[100., -100., 0., 100., 100., 100.]], dtype=torch.bfloat16)
     y = situ(x)
     assert torch.isfinite(y).all() and y[0, 0] == 100 and y[0, 2] == 0
@@ -108,7 +106,7 @@ def test_checkpoint_kda(config, mode, tokens):
 
         w = weights["attention"]
         projected = F.linear(source, w["input"])
-        qkv, beta, forget = projected.split((2304, 6, 128), -1)
+        qkv, forget, gate, beta, _ = projected.split((2304, 128, 768, 6, 2), -1)
         convolution = F.conv1d(F.pad(qkv.T.float()[None], (3, 0)),
                                w["convolution"][:, None], groups=2304).bfloat16()
         q, k, v = F.silu(convolution)[0].T.reshape(tokens, 3, 6, 128).unbind(1)
@@ -117,7 +115,7 @@ def test_checkpoint_kda(config, mode, tokens):
             w["A_log"], w["dt_bias"].view(6, 128), lower_bound=-5.,
             initial_state=torch.zeros_like(expected_state))
         normalized = recurrent.float() * torch.rsqrt(recurrent.float().square().mean(-1, keepdim=True) + 1e-5)
-        gate = F.linear(source, w["gate"]).view(tokens, 6, 128).float().sigmoid()
+        gate = gate.reshape(tokens, 6, 128).float().sigmoid()
         reference = F.linear((normalized * w["norm"] * gate).bfloat16().flatten(1), w["output"])
         for actual, expected in ((output, reference), (expected_state, reference_state)):
             relative_rms = (actual.float() - expected.float()).square().mean().sqrt() / expected.float().square().mean().sqrt()
@@ -152,7 +150,8 @@ def test_checkpoint_mla(config, mode, tokens):
     device = torch.device("cuda:0")
     torch.cuda.set_device(device)
     manifest = inspect_indexed_checkpoint(CHECKPOINT)
-    with KimiWeightLoader(manifest, device, shard=TensorParallelShard(0, 16),
+    # One rank projects every latent row itself; tensor-parallel ranks gather them through b12x.
+    with KimiWeightLoader(manifest, device, shard=TensorParallelShard(0, 1),
                          prefixes=("language_model.model.layers.3.self_attn.",)) as loader:
         weights = loader.load_attention(3)
     with RecordedPreparationSession(device=device, checkpoint=str(CHECKPOINT),
@@ -171,29 +170,33 @@ def test_checkpoint_mla(config, mode, tokens):
         metadata.lengths.fill_(tokens)
         metadata.page_table.copy_(torch.arange(pages, device=device)[None])
         metadata.positions.copy_(torch.arange(tokens, device=device))
+        metadata.token_page_table.copy_(metadata.page_table.expand(tokens, -1))
         output = op(source).clone()
         w = weights
-        projected = F.linear(source, w["input"])
+        projected = F.linear(source, w["latent_gate"][:2112])
         def norm(x, weight):
             return (x.float() * torch.rsqrt(x.float().square().mean(-1, keepdim=True) + 1e-6)).to(x.dtype) * weight
-        query = F.linear(norm(projected[:, :1536], w["query_norm"]), w["q_b"]).view(tokens, 6, 192)
+        heads = w["key"].shape[0]
+        query = F.linear(norm(projected[:, :1536], w["query_norm"]), w["q_b"]).view(tokens, heads, 192)
         latent = norm(projected[:, 1536:-64], w["kv_norm"])
+        gate = F.linear(source, w["latent_gate"][2112:]).sigmoid()
         keys = torch.einsum("tk,hdk->thd", latent.float(), w["key"].float()).bfloat16()
-        keys = torch.cat((keys, projected[:, None, -64:].expand(-1, 6, -1)), -1)
+        keys = torch.cat((keys, projected[:, None, -64:].expand(-1, heads, -1)), -1)
         values = torch.einsum("tk,hkd->thd", latent.float(), w["value"].float()).bfloat16()
         expected = F.scaled_dot_product_attention(query.transpose(0, 1)[None], keys.transpose(0, 1)[None],
             values.transpose(0, 1)[None], is_causal=True).squeeze(0).transpose(0, 1).flatten(1)
-        expected = F.linear(expected * F.linear(source, w["gate"]).sigmoid(), w["output"])
+        expected = F.linear(expected * gate, w["output"])
         error = (output.float() - expected.float()).square().mean().sqrt() / expected.float().square().mean().sqrt()
         assert error.item() < .06
-        # Compare implementation error separately from FP8 query/cache quantization.
+        # Compare implementation error separately from quantization: E4M3 records with a unit scale, and the
+        # absorbed query that b12x quantizes to E4M3 the same way.
         absorbed = torch.cat((torch.bmm(query[:, :, :128].transpose(0, 1), w["key"]).transpose(0, 1),
-                              query[:, :, 128:]), -1).to(torch.float8_e4m3fn).float()
+                              query[:, :, 128:]), -1).float().clamp(-448., 448.).to(torch.float8_e4m3fn).float()
         records = torch.cat((latent, projected[:, -64:]), -1).to(torch.float8_e4m3fn).float()
         attended = F.scaled_dot_product_attention(absorbed.transpose(0, 1)[None], records[None, None],
             records[None, None, :, :512], is_causal=True, scale=192 ** -.5).squeeze(0).transpose(0, 1).bfloat16()
         expanded = torch.bmm(attended.transpose(0, 1), w["value"]).transpose(0, 1).flatten(1)
-        quantized_reference = F.linear(expanded * F.linear(source, w["gate"]).sigmoid(), w["output"])
+        quantized_reference = F.linear(expanded * gate, w["output"])
         error = (output.float() - quantized_reference.float()).norm() / quantized_reference.float().norm()
         assert error.item() < .02
         stream = torch.cuda.Stream(device=device)
@@ -204,3 +207,58 @@ def test_checkpoint_mla(config, mode, tokens):
         graph.replay()
         torch.cuda.synchronize(device)
         torch.testing.assert_close(replayed, output, rtol=0, atol=0)
+
+
+DRAFT = Path("/root/.cache/huggingface/hub/models--RedHatAI--Kimi-K3-speculator.dspark/snapshots/"
+             "38a88101e0d46bb22134b9da340f381b954d40d4")
+
+
+def test_dspark_draft_geometry(config):
+    import json
+
+    import torch
+    from ignition.components.parallel import TensorParallelShard
+    from ignition.recipes.kimi3.config import DSparkConfig, ModelConfig
+    from ignition.recipes.kimi3.pool import continuation_layout
+
+    if not DRAFT.is_dir():
+        pytest.skip("Kimi K3 DSpark draft is not installed")
+    raw = json.loads((DRAFT / "config.json").read_text())
+    draft = DSparkConfig.from_dict(raw, config.text)
+    draft.validate_shard(TensorParallelShard(0, 16))
+    assert draft.auxiliary_layers == (24, 48, 72, 88, 92) and draft.noise_token == 163837
+    assert (draft.layers, draft.heads, draft.kv_heads, draft.head_dim, draft.window) == (5, 96, 16, 64, 2048)
+    speculative = ModelConfig(config.text, config.vision, draft)
+    plain, widened = continuation_layout(speculative, 16), continuation_layout(speculative, 16, speculative_tokens=7)
+    assert widened.region("layer1.convolution").shape == (2304, 10)
+    assert widened.region("draft4.value").shape == (2048, 1, 64) and widened.region("draft4.value").dtype == torch.bfloat16
+    assert widened.row_bytes > plain.row_bytes
+    for name, value in (("aux_hidden_state_layer_ids", [0, 93]), ("sample_from_anchor", False),
+                        ("sliding_window_non_causal", True)):
+        with pytest.raises(ValueError, match="DSpark"):
+            DSparkConfig.from_dict({**raw, name: value}, config.text)
+
+
+def test_context_shards_place_interleaved_positions_on_their_owners():
+    import torch
+
+    from ignition.recipes.kimi3.config import PAGE_TOKENS
+    from ignition.recipes.kimi3.dcp import ContextShards
+
+    world, pages = 16, torch.tensor([[7, 3, -1]], dtype=torch.int32)
+    positions = torch.tensor([-1, 0, 1, 15, 16, 17, PAGE_TOKENS * world + 5, PAGE_TOKENS * world * 2 + 1])
+    tables = pages.expand(positions.numel(), -1)
+    owned = {}
+    for rank in range(world):
+        shards = ContextShards.on(rank, world, "cpu")
+        slots = shards.token_slots(positions, tables)
+        for position, slot in zip(positions.tolist(), slots.tolist()):
+            if slot >= 0:
+                assert position % world == rank and position not in owned
+                owned[position] = slot
+        # Each rank holds its share of every prefix, interleaved one position at a time as vLLM's DCP stores it.
+        lengths = torch.arange(0, 3 * world + 1)
+        assert shards.local_tokens(lengths).tolist() == [sum(p % world == rank for p in range(n)) for n in range(len(lengths))]
+    # Position t lives at local record t // 16 of its page; a third page without a table entry stores nothing.
+    assert owned == {0: 7 * PAGE_TOKENS, 1: 7 * PAGE_TOKENS, 15: 7 * PAGE_TOKENS, 16: 7 * PAGE_TOKENS + 1,
+                     17: 7 * PAGE_TOKENS + 1, PAGE_TOKENS * world + 5: 3 * PAGE_TOKENS}

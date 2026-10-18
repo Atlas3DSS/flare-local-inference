@@ -9,7 +9,7 @@ import pickle
 import tempfile
 import zlib
 from concurrent.futures import FIRST_COMPLETED, wait
-from contextlib import contextmanager, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass
 from functools import partial
@@ -400,6 +400,8 @@ def _completed(pending):
 
 # Command-line, planning, display, and diagnostic direct-execution sources do not change compiled forwards.
 _COMMAND_SOURCES = ('cli', 'direct', 'errors.py', 'planning.py', 'progress.py')
+# Nor does writing and signing the package file after preparation.
+_PUBLICATION_SOURCES = ('preparation/model_package.py', 'preparation/package_file.py', 'preparation/protection.py')
 
 
 def _variant_compilers(selections):
@@ -416,6 +418,31 @@ def _variant_compilers(selections):
             assigned[compiler] += 1
             compilers[name, variant] = compiler
     return compilers
+
+
+def _balance_compilations(counts, workers):
+    """Spread forwards missing from one host's cache over its ranks' compilers.
+
+    Rank `i` must compile `counts[i]` forwards with `workers[i]` workers; a rank without workers,
+    whose GPU lacks room for one, lends all of them. Returns, per rank, the (owner, index)
+    forwards it compiles: each rank keeps its own until lending one finishes sooner elsewhere.
+    Every rank derives the same assignment.
+    """
+    if not any(workers):
+        raise MemoryError("no rank on this host has room for a forward compiler")
+    assigned = [[(owner, index) for index in range(count)] for owner, count in enumerate(counts)]
+    able = [rank for rank, count in enumerate(workers) if count]
+
+    def finish(rank, extra=0):
+        held = len(assigned[rank]) + extra
+        return -(-held // workers[rank]) if workers[rank] else float("inf") if held else 0
+
+    while True:
+        busiest = max(range(len(counts)), key=lambda rank: (finish(rank), -rank))
+        idlest = min(able, key=lambda rank: (finish(rank, 1), rank))
+        if finish(idlest, 1) >= finish(busiest):
+            return assigned
+        assigned[idlest].append(assigned[busiest].pop())
 
 
 def _share_artifacts(owned, group, ranks):
@@ -474,7 +501,8 @@ class ForwardCache:
         for source in (Path(__file__).resolve().parents[1], Path(flashinfer.__file__).resolve().parent):
             for path in sorted(source.rglob('*.py')):
                 if source.name == 'ignition' and (path.name == '__main__.py'
-                                               or path.relative_to(source).parts[0] in _COMMAND_SOURCES):
+                                               or path.relative_to(source).parts[0] in _COMMAND_SOURCES
+                                               or path.relative_to(source).as_posix() in _PUBLICATION_SOURCES):
                     continue
                 key.update(str(path.relative_to(source)).encode())
                 key.update(path.read_bytes())
@@ -583,10 +611,12 @@ class ForwardCache:
         """Compile the catalog for a rank group, then bind and warm it on every rank.
 
         Compiled forwards serve every rank, so the catalog compiles once: each forward variant a
-        rank selects through `compilation_variant` compiles on one rank that selects it, from that
-        rank's own forward, with a compiler pool budgeted for the host's ranks. Ranks on one host
-        share its cache directory; a rank on another host receives the artifacts it lacks from the
-        ranks that compiled them. Every rank then binds the same artifacts.
+        rank selects through `compilation_variant` compiles on a rank that selects it, from that
+        rank's own forward, unless an idle rank on the same host borrows it and compiles it from
+        the owner's traced forward metadata. Compiler pools are budgeted for the host's ranks.
+        Ranks on one host share its cache directory; a rank on another host receives the
+        artifacts it lacks from the ranks that compiled them. Every rank then binds the same
+        artifacts.
         """
         import torch.distributed as dist
         from ignition.progress import phase
@@ -599,14 +629,72 @@ class ForwardCache:
                                             for name, forward in functions.items()}, group=group)
         if any(chosen.keys() != selections[0].keys() for chosen in selections):
             raise RuntimeError("ranks prepared different forward catalogs")
-        work = [(name, variant, functions[name]) for (name, variant), compiler in _variant_compilers(selections).items()
-                if compiler == share]
-        selected, outcome = {}, (None, None)
-        try:
-            pending, paths = [], {}
-            with phase(progress, "Compile model forwards", total=len(work)) as stage, CompilePool(
+        compilers = _variant_compilers(selections)
+        work = [(name, variant, functions[name]) for (name, variant), compiler in compilers.items() if compiler == share]
+        selected, outcome, error, compiler, paths, lent, sent = {}, (None, None), None, None, {}, set(), []
+        unavailable, loans = None, []
+        with ExitStack() as scope:
+            stage = scope.enter_context(phase(progress, "Compile model forwards", total=len(work)))
+            try:
+                compiler = scope.enter_context(CompilePool(
                     self.device, headroom_bytes=self.headroom_bytes, pools=coordinator.local_ranks,
-                    options=self.options, compile_workers=self.compile_workers) as compiler:
+                    options=self.options, compile_workers=self.compile_workers))
+            except MemoryError as failure:
+                # A rank whose GPU has no room for a compiler lends its forwards to the others on this host.
+                unavailable = f"{type(failure).__name__}: {failure}"
+            except Exception as failure:
+                error = f"{type(failure).__name__}: {failure}"
+            # Variants that only one rank selects, such as rank zero's sampling, can leave that rank most of
+            # the catalog. Ranks on one host share its cache, so a rank lends forwards it cannot restore, whether
+            # missing or bound differently by another launch, to ranks whose compilers would otherwise finish
+            # first; the borrower compiles the owner's metadata.
+            restored, missing = {}, []
+            try:
+                for index, (name, variant, forward) in enumerate(work):
+                    with _guard_code_cache(self.root / 'guards'):
+                        bound, path = self._restore(forward, name=f"{name}.{variant}", signature=signatures[name],
+                                                    deferred=materialize is not None)
+                    if bound is None:
+                        missing.append(index)
+                    else:
+                        restored[index] = bound, path
+            except Exception as failure:
+                error = error or f"{type(failure).__name__}: {failure}"
+            demand = [None] * len(ranks)
+            dist.all_gather_object(demand, (len(missing), 0 if compiler is None else compiler.workers), group=group)
+            if not coordinator.spans_hosts and any(workers for _, workers in demand):
+                assigned = _balance_compilations([count for count, _ in demand], [workers for _, workers in demand])
+                loans = [(borrower, missing[index]) for borrower, forwards in enumerate(assigned)
+                         for owner, index in forwards if owner == share and borrower != share]
+                lent = {work[index][:2] for _, index in loans}
+                try:
+                    from .forward_metadata import dumps
+
+                    jobs = self.root / 'lent'
+                    jobs.mkdir(parents=True, exist_ok=True)
+                    for borrower, index in loans:
+                        name, variant, forward = work[index]
+                        path = self._path(forward, name=f"{name}.{variant}", signature=signatures[name])
+                        job = jobs / f"{path.stem}.forward"
+                        with tempfile.NamedTemporaryFile(dir=jobs, suffix='.tmp', delete=False) as file:
+                            pickle.dump((dumps(forward), str(path)), file)
+                        os.replace(file.name, job)
+                        sent.append((borrower, str(job)))
+                        # The borrower compiles it before every rank gathers the outcome below.
+                        paths[name, variant] = str(path), True
+                except Exception as failure:
+                    error = error or f"{type(failure).__name__}: {failure}"
+            mailed = [None] * len(ranks)
+            dist.all_gather_object(mailed, sent, group=group)
+            borrowed = [job for jobs in mailed for borrower, job in jobs if borrower == share]
+            try:
+                if error is not None:
+                    raise RuntimeError(error)
+                if compiler is None and (borrowed or any(index not in {i for _, i in loans} for index in missing)
+                                         if not coordinator.spans_hosts else missing):
+                    raise RuntimeError(unavailable)
+                pending = []
+
                 def finish():
                     name, variant, bound, path = _completed(pending)
                     if bound.pending is not None:
@@ -614,24 +702,39 @@ class ForwardCache:
                     elif materialize is None:
                         # Restored and bound to this rank's own forward already.
                         selected[name] = bound
-                    # Each forward's path, and whether this launch compiled it rather than restoring it.
-                    paths[name, variant] = str(path), bound.pending is not None
-                    stage.update(advance=1)
+                    if name is not None:
+                        # Each forward's path, and whether this launch compiled it rather than restoring it.
+                        paths[name, variant] = str(path), bound.pending is not None
+                        stage.update(advance=1)
 
-                for name, variant, forward in work:
-                    with _guard_code_cache(self.root / 'guards'):
-                        bound, path = self._prepare(forward, name=f"{name}.{variant}",
-                            signature=signatures[name], compiler=compiler, deferred=materialize is not None)
+                for index, (name, variant, forward) in enumerate(work):
+                    if (name, variant) in lent:
+                        continue
+                    if index in restored:
+                        bound, path = restored[index]
+                    else:
+                        path = self._path(forward, name=f"{name}.{variant}", signature=signatures[name])
+                        bound = BoundForward(None, forward, False, compiler.submit(forward, path))
                     pending.append((name, variant, bound, path))
+                    if compiler is not None and len(pending) >= compiler.workers:
+                        finish()
+                for job in borrowed:
+                    with open(job, 'rb') as file:
+                        payload, path = pickle.load(file)
+                    os.unlink(job)
+                    future = compiler.submit_payload(payload, Path(path))
+                    pending.append((None, None, BoundForward(None, None, False, future), path))
                     if len(pending) >= compiler.workers:
                         finish()
                 while pending:
                     finish()
-            outcome = paths, None
-        except Exception as error:
-            outcome = None, f"{type(error).__name__}: {error}"
-        outcomes = [None] * len(ranks)
-        dist.all_gather_object(outcomes, outcome, group=group)
+                outcome = paths, None
+            except Exception as failure:
+                outcome = None, f"{type(failure).__name__}: {failure}"
+            outcomes = [None] * len(ranks)
+            dist.all_gather_object(outcomes, outcome, group=group)
+            # Forwards lent to other ranks are complete once every rank reports.
+            stage.update(advance=len(lent))
         failures = [(index, failure) for index, (_, failure) in zip(ranks, outcomes) if failure is not None]
         if failures:
             raise RuntimeError(f"forward compilation failed: {failures}")
@@ -685,22 +788,33 @@ class ForwardCache:
             raise BindingMismatch(f"rank-local forward does not match compiled guards: {reason}")
         return None
 
+    def _path(self, forward, *, name, signature):
+        identity = (type(forward).__module__, type(forward).__qualname__, name, signature)
+        return self.root / (hashlib.sha256(pickle.dumps(identity)).hexdigest() + '.bin')
+
+    def _restore(self, forward, *, name, signature, deferred=False, report=None):
+        """The cached forward bound to `forward`, or None when it is missing or its guards reject it, and its path."""
+        path = self._path(forward, name=name, signature=signature)
+        if not path.is_file():
+            return None, path
+        if report is not None:
+            report("restoring compiled forward")
+        token = _DEFERRED_BINDINGS.set(deferred)
+        try:
+            bound = self._load(forward, path)
+        finally:
+            _DEFERRED_BINDINGS.reset(token)
+        if report is not None:
+            report("checking compiled bindings")
+        return bound, path
+
     def _prepare(self, forward, *, name, signature, compiler=None, progress=None, deferred=False):
         def report(operation):
             if progress is not None:
                 progress.update(f"{name} · {operation}")
-        identity = (type(forward).__module__, type(forward).__qualname__, name, signature)
-        path = self.root / (hashlib.sha256(pickle.dumps(identity)).hexdigest() + '.bin')
-        if path.is_file():
-            report("restoring compiled forward")
-            token = _DEFERRED_BINDINGS.set(deferred)
-            try:
-                bound = self._load(forward, path)
-            finally:
-                _DEFERRED_BINDINGS.reset(token)
-            report("checking compiled bindings")
-            if bound is not None:
-                return bound, path
+        bound, path = self._restore(forward, name=name, signature=signature, deferred=deferred, report=report)
+        if bound is not None:
+            return bound, path
         report("tracing and compiling forward")
         if compiler is not None:
             return BoundForward(None, forward, False, compiler.submit(forward, path)), path

@@ -20,6 +20,12 @@ from .tuning_replicas import TuningComplete
 _PREPARATION_TIMEOUT = timedelta(hours=2)
 
 
+def _use_loopback():
+    # Ranks on one host connect over loopback. The hostname can resolve to an address the network
+    # later withdraws, such as an expiring IPv6 prefix, which stalls every established connection.
+    os.environ["GLOO_SOCKET_IFNAME"] = "lo"
+
+
 def minimum_across_ranks(value, group):
     """The smallest integer any rank reports, for sizing storage every rank must allocate."""
     if group is None:
@@ -38,6 +44,7 @@ def _peer(parent, snapshot, config, rank, rendezvous, connection, control, prepa
     # Rank zero coordinates shutdown; a terminal interrupt must not end a peer mid-drain.
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     try:
+        _use_loopback()
         dist.init_process_group("gloo", init_method=rendezvous, rank=rank, world_size=len(config.devices),
                                 timeout=_PREPARATION_TIMEOUT)
         recorder = storage = None
@@ -85,7 +92,7 @@ def _peer(parent, snapshot, config, rank, rendezvous, connection, control, prepa
             storage.peer_storage.reset()
             torch.cuda.synchronize()
             dist.barrier()
-            package = export_model(model, recorder, storage, path, options=options)
+            package = export_model(model, recorder, storage, path, options=options, sources=True)
             control.send({"peer_memory": list(storage.peer_storage.owned.items()),
                           "memory_inventory": package.memory_inventory})
             command = control.recv()
@@ -265,6 +272,7 @@ def prepare_group(snapshot, config, prepare, *, progress=None, package_storage=N
         raise
     try:
         with phase(progress, "Connect tensor-parallel ranks"):
+            _use_loopback()
             dist.init_process_group("gloo", init_method=address, rank=0, world_size=len(config.devices),
                                     timeout=_PREPARATION_TIMEOUT)
         model = prepare(snapshot, config, rank=0, group=dist.group.WORLD, progress=progress,

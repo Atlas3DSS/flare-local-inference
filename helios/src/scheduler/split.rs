@@ -5,7 +5,8 @@ use super::{policy::{Candidate, bits}, utility::{LaneValue, ValueRate}, *};
 pub(super) struct SplitSpeculation {
     pub width: usize,
     pub retained: [Option<RetainedProposal>; REQUEST_LANES],
-    forecast: [Option<(RequestHandle, [f32; 7])>; REQUEST_LANES],
+    forecast: [Option<(RequestHandle, [f32; 7], u32)>; REQUEST_LANES],
+    population: [f32; 7],
 }
 
 #[derive(Clone, Copy)]
@@ -33,6 +34,18 @@ struct Packing {
 
 fn horizon(a: u64, b: u64) -> u64 {
     if a == 0 || b == 0 { 0 } else { a.saturating_add(b) }
+}
+
+const FORECAST_PRIOR: f32 = 0.5;
+const FORECAST_WEIGHT: f32 = 0.25;
+const POPULATION_WEIGHT: f32 = 1.0 / 64.0;
+const FORECAST_HALF_LIFE_TOKENS: f64 = 32.0;
+
+// Target-only progress ages an estimate even when no proposal refreshes it.
+// Otherwise one pessimistic observation can prevent its own replacement.
+fn relaxed(confidence: &[f32; 7], prior: &[f32; 7], age_tokens: u32) -> [f32; 7] {
+    let keep = 0.5f64.powf(f64::from(age_tokens) / FORECAST_HALF_LIFE_TOKENS) as f32;
+    std::array::from_fn(|i| prior[i] + (confidence[i] - prior[i]) * keep)
 }
 
 fn expected(confidence: &[f32; 7], width: usize) -> f64 {
@@ -93,6 +106,7 @@ impl RequestScheduler {
             width,
             retained: [None; REQUEST_LANES],
             forecast: [None; REQUEST_LANES],
+            population: [FORECAST_PRIOR; 7],
         });
         Ok(())
     }
@@ -117,7 +131,9 @@ impl RequestScheduler {
         }
         if let Some(split) = &self.split {
             let confidence = split.forecast[request.handle.slot as usize]
-                .filter(|(h, _)| *h == request.handle).map_or([0.5; 7], |(_, p)| p);
+                .filter(|(h, _, _)| *h == request.handle)
+                .map_or(split.population, |(_, p, at)| relaxed(&p, &split.population,
+                    request.generated_tokens.saturating_sub(at)));
             expected(&confidence, width)
         } else {
             request.acceptance.expected_tokens(self.proposal_source, width)
@@ -208,27 +224,72 @@ impl RequestScheduler {
             let mut rate = score(&needs)?;
             loop {
                 let mut best = None;
-                for index in 0..needs.len() {
-                    let (slot, width) = needs[index];
-                    if fresh & (1 << slot) == 0 || width >= split.retained[slot].unwrap().limit { continue; }
-                    needs[index].1 += 1;
-                    let candidate = score(&needs)?;
-                    needs[index].1 -= 1;
-                    if candidate.compare(rate).is_gt()
-                        && best.is_none_or(|(_, old)| candidate.compare(old).is_gt()) {
-                        best = Some((index, candidate));
+                for width in 1..maximum {
+                    let mut frontier: Vec<_> = needs.iter().enumerate().filter_map(|(index, &(slot, selected))| {
+                        let proposal = split.retained[slot].unwrap();
+                        (selected == width && fresh & (1 << slot) != 0 && width < proposal.limit).then(|| {
+                            let gain = values[slot].output_token * (expected(&proposal.confidence, width + 1)
+                                - expected(&proposal.confidence, width));
+                            (index, gain)
+                        })
+                    }).collect();
+                    // Equal-width extensions share the same packing cost at each
+                    // cohort size. Rank their marginal token value, then price
+                    // every prefix together so one row need not pay the whole
+                    // increase in graph duration. Only immediate frontiers enter.
+                    frontier.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+                    let mut extended = 0u64;
+                    for &(index, _) in &frontier {
+                        needs[index].1 += 1;
+                        extended |= 1 << index;
+                        let candidate = score(&needs)?;
+                        if candidate.compare(rate).is_gt()
+                            && best.is_none_or(|(_, old)| candidate.compare(old).is_gt()) {
+                            best = Some((extended, candidate));
+                        }
+                    }
+                    for &(index, _) in &frontier {
+                        needs[index].1 -= 1;
                     }
                 }
-                let Some((index, candidate)) = best else { break; };
-                needs[index].1 += 1;
+                // Requests at different widths can also share a graph-cost
+                // increase. Price their joint immediate frontier separately.
+                let joint: Vec<_> = needs.iter().enumerate().filter_map(|(index, &(slot, width))|
+                    (fresh & (1 << slot) != 0 && width < split.retained[slot].unwrap().limit)
+                        .then_some(index)).collect();
+                if joint.len() > 1 && joint.iter().any(|&i| needs[i].1 != needs[joint[0]].1) {
+                    let mut extended = 0u64;
+                    for &index in &joint {
+                        needs[index].1 += 1;
+                        extended |= 1 << index;
+                    }
+                    let candidate = score(&needs)?;
+                    for &index in &joint { needs[index].1 -= 1; }
+                    if candidate.compare(rate).is_gt()
+                        && best.is_none_or(|(_, old)| candidate.compare(old).is_gt()) {
+                        best = Some((extended, candidate));
+                    }
+                }
+                let Some((extended, candidate)) = best else { break; };
+                for index in bits(extended) { needs[index].1 += 1; }
                 rate = candidate;
             }
         }
+        let generated: Vec<_> = needs.iter()
+            .map(|(slot, _)| self.slots[*slot].request.as_ref().map_or(0, |r| r.generated_tokens)).collect();
         let split = self.split.as_mut().unwrap();
-        for (slot, width) in needs {
+        for ((slot, width), generated) in needs.into_iter().zip(generated) {
             let proposal = split.retained[slot].as_mut().unwrap();
             proposal.width = width;
-            if fresh & (1 << slot) != 0 { split.forecast[slot] = Some((proposal.request, proposal.confidence)); }
+            if fresh & (1 << slot) != 0 {
+                let previous = split.forecast[slot].filter(|(h, _, _)| *h == proposal.request)
+                    .map_or(split.population, |(_, p, at)| relaxed(&p, &split.population, generated.saturating_sub(at)));
+                let average = std::array::from_fn(|i| previous[i] + FORECAST_WEIGHT * (proposal.confidence[i] - previous[i]));
+                split.forecast[slot] = Some((proposal.request, average, generated));
+                for (prior, &p) in split.population.iter_mut().zip(&proposal.confidence) {
+                    *prior += POPULATION_WEIGHT * (p - *prior);
+                }
+            }
         }
         Ok(())
     }
@@ -412,6 +473,101 @@ mod tests {
         }
     }
 
+    fn measured_split_engine(active: usize) -> RequestScheduler {
+        let mut s = super::super::tests::scheduler(active, 512, 64);
+        s.enable_speculation(&(1..=6).collect::<Vec<_>>()).unwrap();
+        let mut graphs = super::super::tests::duration_graphs(active);
+        graphs.retain(|g| g.kind != GraphKind::Speculative);
+        let mut shapes = Vec::new();
+        for batch in crate::execution::BATCH_CAPACITIES.into_iter().take_while(|b| *b <= active.next_power_of_two()) {
+            for (kind, widths) in [(GraphKind::Proposal, vec![6]), (GraphKind::Speculative, vec![1]),
+                                   (GraphKind::Verification, (1..=6).collect())] {
+                for width in widths {
+                    if kind == GraphKind::Verification { shapes.push((batch, width)); }
+                    graphs.push(GraphDescriptor { name: format!("{kind:?}-{batch}-{width}"), kind,
+                        sampling_mode: SamplingMode::General, handle: 1, batch_capacity: batch,
+                        token_capacity: width, prefill_capacity: 0, estimated_duration_ns: 1000, input_bindings: vec![] });
+                }
+            }
+        }
+        s.speculative_graphs(&shapes).unwrap();
+        s.measured_graph_durations(&graphs).unwrap();
+        s.split_speculation(6).unwrap();
+        let ms = |v: f64| (v * 1e6) as u64;
+        for (batch, row) in [(1, [7.3, 7.8, 8.7, 9.0, 9.6, 11.0]), (2, [8.4, 9.6, 10.6, 11.6, 12.6, 13.8]),
+                             (4, [9.8, 11.9, 13.4, 15.0, 16.6, 18.4]), (8, [11.6, 15.4, 17.5, 20.0, 22.6, 25.4])] {
+            if batch > active.next_power_of_two() { continue; }
+            costs(&mut s, batch, &row.map(ms));
+        }
+        s
+    }
+
+    #[test]
+    fn shared_verification_calls_widen_together_at_measured_costs() {
+        let confidence = [0.70, 0.62, 0.54, 0.52, 0.51, 0.5, 0.5];
+        for active in [1, 8] {
+            let mut s = measured_split_engine(active);
+            let handles: Vec<_> = (0..active).map(|_| ready(&mut s)).collect();
+            let mut fresh = 0;
+            for &h in &handles {
+                retain(&mut s, h, confidence);
+                s.split.as_mut().unwrap().retained[h.slot as usize].as_mut().unwrap().limit = 6;
+                fresh |= 1 << h.slot;
+            }
+            s.finalize_proposals(fresh).unwrap();
+            let widths: Vec<_> = handles.iter().map(|h| s.retained_proposal(s.request(*h).unwrap()).unwrap().width).collect();
+            assert!(widths.iter().all(|w| *w == widths[0] && *w >= 3), "active {active}: {widths:?}");
+        }
+    }
+
+    #[test]
+    fn a_low_forecast_relaxes_until_proposals_resume() {
+        let ms = |v: f64| (v * 1e6) as u64;
+        let mut s = measured_split_engine(1);
+        let h = s.admit(super::super::tests::spec(65, 1024)).unwrap();
+        let r = s.request_mut(h).unwrap();
+        (r.phase, r.consumed_tokens, r.scheduled_consumed, r.generated_tokens) = (RequestPhase::Decode, 65, 65, 1);
+        s.costs.set_measured(&ScheduledStep { kind: GraphKind::Speculative, batch_capacity: 1, token_capacity: 1,
+            mixed: None, lanes: vec![], requires_feedback: true }, ms(7.3));
+        s.costs.set_measured(&ScheduledStep { kind: GraphKind::Proposal, batch_capacity: 1, token_capacity: 6,
+            mixed: None, lanes: vec![], requires_feedback: true }, ms(1.34));
+        let generated = s.request(h).unwrap().generated_tokens;
+        s.split.as_mut().unwrap().forecast[h.slot as usize] = Some((h, [0.0; 7], generated));
+        assert_eq!(s.plan().unwrap().kind, GraphKind::Speculative);
+        s.request_mut(h).unwrap().generated_tokens += 8 * FORECAST_HALF_LIFE_TOKENS as u32;
+        assert_eq!(s.plan().unwrap().kind, GraphKind::Proposal);
+    }
+
+    #[test]
+    fn forecasts_average_proposals_from_the_prior() {
+        let mut s = engine(1);
+        let h = ready(&mut s);
+        for _ in 0..2 {
+            retain(&mut s, h, [1.0; 7]);
+            s.finalize_proposals(1 << h.slot).unwrap();
+        }
+        let (_, forecast, _) = s.split.as_ref().unwrap().forecast[h.slot as usize].unwrap();
+        assert!((forecast[0] - (0.5 + 0.5 * (1.0 - 0.75 * 0.75))).abs() < 1e-6, "{forecast:?}");
+    }
+
+    #[test]
+    fn requests_without_recent_proposals_are_priced_like_their_peers() {
+        let mut s = engine(2);
+        let proposer = ready(&mut s);
+        let quiet = ready(&mut s);
+        for _ in 0..256 {
+            retain(&mut s, proposer, [0.9; 7]);
+            s.finalize_proposals(1 << proposer.slot).unwrap();
+        }
+        let tokens = s.expected_speculative_tokens(s.request(quiet).unwrap(), 2);
+        assert!((tokens - 1.9).abs() < 0.01, "{tokens}");
+        let generated = s.request(quiet).unwrap().generated_tokens;
+        s.split.as_mut().unwrap().forecast[quiet.slot as usize] = Some((quiet, [0.0; 7], generated));
+        s.request_mut(quiet).unwrap().generated_tokens += 8 * FORECAST_HALF_LIFE_TOKENS as u32;
+        let tokens = s.expected_speculative_tokens(s.request(quiet).unwrap(), 2);
+        assert!(tokens > 1.85, "{tokens}");
+    }
+
     #[test]
     fn delivery_references_do_not_batch_incompatible_retained_widths() {
         let mut s = engine(2);
@@ -439,6 +595,35 @@ mod tests {
             s.finalize_proposals(1 << h.slot).unwrap();
             assert_eq!(s.retained_proposal(s.request(h).unwrap()).unwrap().width, 1);
         }
+    }
+
+    #[test]
+    fn shared_verification_cost_can_make_a_cohort_extension_profitable() {
+        let mut s = engine(2);
+        let first = ready(&mut s);
+        let second = ready(&mut s);
+        for handle in [first, second] {
+            retain(&mut s, handle, [0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        }
+        costs(&mut s, 1, &[10_000_000, 14_000_000, 100_000_000,
+            100_000_000, 100_000_000, 100_000_000, 100_000_000, 100_000_000]);
+        costs(&mut s, 2, &[10_000_000, 14_000_000, 100_000_000, 100_000_000]);
+        let (values, age_price, _) = s.lane_values(0);
+        let score = |widths: [usize; 2]| {
+            let needs = [(first.slot as usize, widths[0]), (second.slot as usize, widths[1])];
+            let packed = s.pack(GraphKind::Verification, &needs).unwrap();
+            let value = needs.iter().map(|&(slot, width)| {
+                values[slot].decode(expected(&[0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], width),
+                    packed.nanos as f64 / 1e6)
+            }).sum();
+            ValueRate::new(packed.nanos, value, age_price)
+        };
+        assert!(score([2, 2]).compare(score([1, 1])).is_gt());
+        assert!(score([2, 1]).compare(score([1, 1])).is_lt());
+        s.finalize_proposals((1 << first.slot) | (1 << second.slot)).unwrap();
+        let selected: Vec<_> = [first, second].into_iter().map(|h|
+            s.retained_proposal(s.request(h).unwrap()).unwrap().width).collect();
+        assert_eq!(selected, [2, 2]);
     }
 
     #[test]
@@ -516,7 +701,9 @@ mod tests {
         assert_eq!(replacement.slot, h.slot);
         assert_ne!(replacement.generation, h.generation);
         assert!(!s.owns_proposal(s.request(replacement).unwrap()));
-        assert!((s.expected_speculative_tokens(s.request(replacement).unwrap(), 8) - 1.9921875).abs() < 1e-10);
+        let prior = expected(&s.split.as_ref().unwrap().population, 8);
+        assert!((s.expected_speculative_tokens(s.request(replacement).unwrap(), 8) - prior).abs() < 1e-10);
+        assert!(prior < 2.1, "one proposal moves the population prior only slightly: {prior}");
     }
 
     #[test]

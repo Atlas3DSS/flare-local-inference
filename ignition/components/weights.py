@@ -8,7 +8,9 @@ from dataclasses import dataclass, replace
 from functools import cached_property
 from math import prod
 import json
+import os
 import sys
+from pathlib import Path
 from time import monotonic
 from typing import TYPE_CHECKING
 
@@ -27,6 +29,111 @@ class MLPWeights:
     down: Weight | torch.Tensor
 
 
+class SharedColumnReads:
+    """Ranks on one host read each column-sharded checkpoint tensor once and copy their columns.
+
+    A rank's column slice of a row-major tensor spans every row, so a direct read of the slice reads
+    the whole tensor, and every rank of the host reads it again. Instead each tensor has one reader
+    rank, which stages it whole in symmetric peer storage; after a barrier every rank copies its own
+    columns from the readers' GPUs. Every rank must stage and copy the same tensors in the same order.
+    """
+
+    def __init__(self, group, peer_storage, device, capacity):
+        import torch
+        import torch.distributed as dist
+
+        self.group, self.peer_storage, self.device = group, peer_storage, torch.device(device)
+        self.rank, self.world = dist.get_rank(group), dist.get_world_size(group)
+        self.capacity = capacity
+        self.pointer = peer_storage.cudaMalloc(capacity)
+        handles = [None] * self.world
+        dist.all_gather_object(handles, peer_storage.cudaIpcGetMemHandleBytes(self.pointer), group=group)
+        self.bases = [self.pointer if rank == self.rank else peer_storage.cudaIpcOpenMemHandleBytes(handle)
+                      for rank, handle in enumerate(handles)]
+
+    def reader(self, index):
+        return index % self.world
+
+    def view(self, rank, offset, shape, dtype):
+        """``rank``'s staged bytes at ``offset``, addressed from this rank's GPU."""
+        import torch
+
+        nbytes = prod(shape) * dtype.itemsize
+        if offset < 0 or offset % 256 or offset + nbytes > self.capacity:
+            raise ValueError("shared column staging lies outside its aligned capacity")
+        storage = torch._C._construct_storage_from_data_pointer(self.bases[rank] + offset, self.device, nbytes)
+        strides = tuple(prod(shape[index + 1:]) for index in range(len(shape)))
+        return torch.empty(0, dtype=dtype, device=self.device).set_(storage, 0, shape, strides)
+
+    def read_columns(self, loader, source, columns, out):
+        """Fill ``out`` with ``source[:, columns]``: ranks read disjoint blocks of whole rows and copy their columns.
+
+        Each round every rank stages one row block in its staging slot zero, so the reads of one
+        tensor proceed on all ranks at once and each checkpoint byte is read once.
+        """
+        from ignition.preparation.tensor_metadata import record_numeric_tensor
+
+        rows, width = source.shape
+        first, last = columns
+        if out.shape != (rows, last - first) or out.dtype != source.dtype:
+            raise ValueError("shared column output must hold the selected columns of every row")
+        block = max(1, min(-(-rows // self.world), self.capacity // (width * source.dtype.itemsize)))
+        for start in range(0, rows, self.world * block):
+            mine = start + self.rank * block
+            if mine < rows:
+                count = min(block, rows - mine)
+                loader._copy(self.view(self.rank, 0, (count, width), source.dtype), source[mine:mine + count],
+                             numeric=False)
+            loader._session.flush()
+            self.exchange()
+            for reader in range(self.world):
+                begin = start + reader * block
+                if begin >= rows:
+                    break
+                count = min(block, rows - begin)
+                out[begin:begin + count].copy_(self.view(reader, 0, (count, width), source.dtype)[:, first:last])
+            self.exchange()
+        record_numeric_tensor(out)
+        return out
+
+    def exchange(self):
+        """Complete this rank's staging or copies on its GPU, then wait for every rank."""
+        import torch
+        import torch.distributed as dist
+
+        torch.cuda.synchronize(self.device)
+        dist.barrier(group=self.group)
+
+    def close(self):
+        self.exchange()
+        for rank, base in enumerate(self.bases):
+            if rank != self.rank:
+                self.peer_storage.cudaIpcCloseMemHandle(base)
+        self.exchange()
+        self.peer_storage.cudaFree(self.pointer)
+
+
+def fp4_down_staging_bytes(hidden_size, intermediate_size, group):
+    """Bytes one whole packed FP4 down projection and its block scales occupy in shared staging."""
+    return -(-(hidden_size * (intermediate_size // 2 + intermediate_size // group)) // 4096) * 4096
+
+
+def _checkpoint_read_mode(paths):
+    """Use b12x's pinned-host reader for RAM files that GDS cannot register."""
+    if sys.platform != "linux":
+        return "auto"
+    memory_devices = set()
+    for line in Path('/proc/self/mountinfo').read_text().splitlines():
+        mount, filesystem = line.split(' - ', 1)
+        if filesystem.split()[0] in ('tmpfs', 'ramfs'):
+            memory_devices.add(tuple(map(int, mount.split()[2].split(':'))))
+    for path in paths:
+        device = path.stat().st_dev
+        if (os.major(device), os.minor(device)) in memory_devices:
+            return "bounce"
+    return _read_mode()
+
+
 def quantize_bf16_linear_as_mxfp8(weight):
     """Convert a BF16 projection to b12x MXFP8 storage during loading."""
     import torch
@@ -42,6 +149,20 @@ def quantize_bf16_linear_as_mxfp8(weight):
     padded = (columns + 127) // 128 * 128
     source = weight if columns == padded else torch.nn.functional.pad(weight, (0, padded - columns))
     return MXFP8LinearWeight(quantize_mxfp8_rows_torch(source), columns, padded, rows)
+
+
+def _read_mode():
+    """Checkpoint transport for a rank process that allocates only on its own GPU.
+
+    Without the nvidia-fs driver, cuFile only emulates direct reads through host
+    memory, yet still retains a context and bounce buffers on every visible GPU,
+    about 0.5 GiB each. With many ranks per host those claims can exhaust a GPU
+    before its weights fit. The bounce reader performs the same reads on its own
+    device only.
+    """
+    import os
+
+    return "auto" if os.path.exists("/proc/driver/nvidia-fs") else "bounce"
 
 
 def _release_unused_contexts(device):
@@ -213,9 +334,10 @@ class DirectWeightLoader:
             # Scalar calibration checks do not amortize intra-op thread dispatch.
             stack.callback(torch.set_num_threads, torch.get_num_threads())
             torch.set_num_threads(1)
-            self._session = stack.enter_context(DirectWeightSession(device=self.device.index))
             selected = self._selected_names()
             shards = {self.manifest.tensors[name].shard for name in selected}
+            read_mode = _checkpoint_read_mode(self.manifest.snapshot / shard for shard in shards)
+            self._session = stack.enter_context(DirectWeightSession(device=self.device.index, read_mode=read_mode))
             if self._display is not None:
                 self._display.source(len(shards))
 
@@ -268,12 +390,13 @@ class DirectWeightLoader:
         if self._session is None:
             raise RuntimeError(f"weight loading requires an open {type(self).__name__} context")
 
-    def _copy(self, destination, source):
+    def _copy(self, destination, source, *, numeric=True):
         from ignition.preparation.tensor_metadata import record_numeric_tensor
 
         if not self._session(destination, source):
             raise RuntimeError("b12x rejected the direct weight transfer")
-        record_numeric_tensor(destination)
+        if numeric:
+            record_numeric_tensor(destination)
         if self._display is not None:
             self._display.update(self._session.payload_bytes)
 
@@ -506,16 +629,22 @@ class DirectWeightLoader:
                          intermediate_range=None, scale_vectors=None, swiglu_limit=None,
                          swiglu_clamp_after_silu=False,
                          scale_compression=None, scale_scratch=None,
-                         projection_names=("up_proj", "gate_proj", "down_proj"), scale_name="weight_scale"):
+                         projection_names=("up_proj", "gate_proj", "down_proj"), scale_name="weight_scale",
+                         weight_name="weight", activation="silu", w13_layout="w13", shared_columns=None):
         """Prepare NVFP4 or MXFP4 experts, optionally compressing their block scales.
 
-        CSF compression requires two caller-owned expansion buffers. Serial
-        routed layers may share those buffers; overlapping calls must not.
+        The first two projection names fill the first and second w13 halves in that
+        order; ``w13_layout`` declares which halves hold up and gate. CSF compression
+        requires two caller-owned expansion buffers. Serial routed layers may share
+        those buffers; overlapping calls must not. With ``shared_columns``, each
+        expert's down projection, whose intermediate columns partition across ranks,
+        is read once per host (``SharedColumnReads``).
         """
         import torch
         from b12x.moe import fused_moe as moe
         from b12x._lib.intrinsics.reference import swizzle_block_scale
         from .sm103 import is_sm103
+        from ignition.preparation.tensor_metadata import record_numeric_tensor
 
         self._require_open()
         prefixes = tuple(prefixes)
@@ -534,6 +663,12 @@ class DirectWeightLoader:
         s13 = torch.empty((count, 2 * local, hidden_size // group), dtype=scale_dtype, device=self.device)
         s2 = torch.empty((count, hidden_size, local // group), dtype=scale_dtype, device=self.device)
         globals13, globals2 = [], []
+        shared = shared_columns
+        if shared is not None:
+            down_bytes = hidden_size * (intermediate_size // 2)
+            slot_bytes = fp4_down_staging_bytes(hidden_size, intermediate_size, group)
+            if -(-count // shared.world) * slot_bytes > shared.capacity:
+                raise ValueError("shared column staging cannot hold this rank's down projections")
         for index, prefix in enumerate(prefixes):
             scales = {}
             for projection, values, blocks in (
@@ -541,7 +676,7 @@ class DirectWeightLoader:
                 (gate_name, w13[index, local:], s13[index, local:]),
                 (down_name, w2[index], s2[index]),
             ):
-                source = self._sources[f"{prefix}.{projection}.weight"]
+                source = self._sources[f"{prefix}.{projection}.{weight_name}"]
                 scale = self._sources[f"{prefix}.{projection}.{scale_name}"]
                 if format == "mxfp4":
                     if source.dtype == torch.int8:
@@ -554,8 +689,18 @@ class DirectWeightLoader:
                     raise ValueError(f"{prefix}.{projection}: packed FP4 weight geometry mismatch")
                 if scale.shape != (rows, columns // group) or scale.dtype != scale_dtype:
                     raise ValueError(f"{prefix}.{projection}: {format.upper()} block scale geometry or dtype mismatch")
-                self._copy(values, source[:, first // 2:last // 2] if projection == down_name else source[first:last])
-                self._copy(blocks, scale[:, first // group:last // group] if projection == down_name else scale[first:last])
+                if projection == down_name and shared is not None:
+                    # The reader stages the whole projection; its rows are contiguous in the checkpoint.
+                    if shared.reader(index) == shared.rank:
+                        offset = index // shared.world * slot_bytes
+                        self._copy(shared.view(shared.rank, offset, source.shape, torch.uint8), source, numeric=False)
+                        self._copy(shared.view(shared.rank, offset + down_bytes, scale.shape, scale_dtype), scale,
+                                   numeric=False)
+                else:
+                    self._copy(values, source[:, first // 2:last // 2] if projection == down_name
+                               else source[first:last])
+                    self._copy(blocks, scale[:, first // group:last // group] if projection == down_name
+                               else scale[first:last])
                 if format == "mxfp4":
                     continue
                 value = self._sources[f"{prefix}.{projection}.weight_scale_2"]
@@ -568,6 +713,20 @@ class DirectWeightLoader:
                 raise ValueError(f"{prefix}: gate/up global scales differ")
             globals13.append(scales[up_name])
             globals2.append(scales[down_name])
+        if shared is not None:
+            # Every rank copies its intermediate columns of each staged down projection.
+            self._session.flush()
+            shared.exchange()
+            for index in range(count):
+                reader, offset = shared.reader(index), index // shared.world * slot_bytes
+                down = shared.view(reader, offset, (hidden_size, intermediate_size // 2), torch.uint8)
+                blocks = shared.view(reader, offset + down_bytes, (hidden_size, intermediate_size // group),
+                                     scale_dtype)
+                w2[index].copy_(down[:, first // 2:last // 2])
+                s2[index].copy_(blocks[:, first // group:last // group])
+            record_numeric_tensor(w2)
+            record_numeric_tensor(s2)
+            shared.exchange()
         if activation_mode == "a4":
             if scale_vectors is None or len(scale_vectors) != 4:
                 raise ValueError("NVFP4 A4 experts require weight and activation scale vectors")
@@ -591,8 +750,9 @@ class DirectWeightLoader:
             return _sm103_fp4_experts(w13, s13, w2, s2, vectors, format=format,
                                       activation_mode=activation_mode, swiglu_limit=swiglu_limit)
         plan = moe.plan_weights(
-            source=moe.PackedSource(format="modelopt_nvfp4" if format == "nvfp4" else "fp4_e8m0_k32", w13_layout="w13"),
-            activation=moe.ActivationSpec(mode=activation_mode, nonlinearity="silu", io_dtype=torch.bfloat16,
+            source=moe.PackedSource(format="modelopt_nvfp4" if format == "nvfp4" else "fp4_e8m0_k32",
+                                    w13_layout=w13_layout),
+            activation=moe.ActivationSpec(mode=activation_mode, nonlinearity=activation, io_dtype=torch.bfloat16,
                                           swiglu_limit=swiglu_limit,
                                           swiglu_clamp_after_silu=swiglu_clamp_after_silu),
             geometry=moe.MoEGeometry(num_experts=count, hidden_size=hidden_size, intermediate_size=local),
@@ -617,6 +777,8 @@ class DirectWeightLoader:
         ``scale_scratch`` is a caller-owned dictionary keyed by expert geometry.
         Sharing it between calls requires serialized routed-expert execution;
         overlapping expert branches must provide separate dictionaries.
+        ``scale_compression="csf"`` losslessly encodes native scales during loading;
+        checkpoints that already contain CSF retain their encoded storage.
         """
         import torch
 
@@ -653,13 +815,14 @@ class DirectWeightLoader:
         self, prefixes, *, hidden_size, intermediate_size, scale_scratch,
         intermediate_range=None, swiglu_limit=None,
         projection_names=("gate_proj", "up_proj", "down_proj"), scale_name="weight_scale",
-        weight_name="weight", activation="silu",
+        weight_name="weight", activation="silu", activation_mode="a8",
     ):
         """Keep lossless MXFP4 scales compressed and expand into shared native scratch.
 
         Gate and up weights use b12x's w31 source order. The caller may share
         scale scratch between serialized expert layers, retaining both buffers
-        until every captured graph using those layers has drained.
+        until every captured graph using those layers has drained. Activations
+        are quantized to MXFP8 (``a8``) or kept in BF16 (``a16``).
         """
         import torch
         from b12x.moe import fused_moe as moe
@@ -705,7 +868,7 @@ class DirectWeightLoader:
         self._session.flush()
         plan = moe.plan_weights(
             source=moe.PackedSource(format="fp4_e8m0_k32", w13_layout="w31"),
-            activation=moe.ActivationSpec(mode="a8", nonlinearity=activation, io_dtype=torch.bfloat16,
+            activation=moe.ActivationSpec(mode=activation_mode, nonlinearity=activation, io_dtype=torch.bfloat16,
                                           swiglu_limit=swiglu_limit),
             geometry=moe.MoEGeometry(num_experts=count, hidden_size=hidden_size, intermediate_size=local))
         return moe.prepare_weights(plan=plan, weights=moe.Mxfp4CsfWeights(

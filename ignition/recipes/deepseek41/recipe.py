@@ -1,4 +1,4 @@
-"""DeepSeek V4.1 Flash text checkpoint and tensor-parallel memory geometry."""
+"""DeepSeek V4.1 Flash checkpoint and tensor-parallel memory geometry."""
 
 from types import MappingProxyType
 
@@ -15,6 +15,7 @@ def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress, retain_
     drafting = {} if speculation is None else {
         "speculative_widths": speculation.widths, "speculative_token_capacity": plan.speculative_token_capacity, "speculative_fixed_width": speculation.fixed_width}
     config = PreparationConfig(compile_workers=plan.compile_workers, tuning_replica=plan.tuning_replica,
+        image_concurrency=plan.image_concurrency,
         devices=tuple(range(plan.world_size)), compile_decoder=compile_forwards,
         retain_graphs=retain_graphs, max_active=plan.concurrency, context=plan.context,
         prefill_chunk_size=plan.prefill_chunk, minimum_pages=plan.minimum_pages,
@@ -33,13 +34,13 @@ RECIPE = Recipe(
     name="deepseek41", prepare=prepare, usage=usage,
     # Recommended sampling: https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017#minimal-inference.
     sampling_defaults=SamplingDefaults(temperature=1., top_p=1., top_k=-1),
-    checkpoints=(Checkpoint(alias="deepseek-v4.1-flash", repository="DeepSeek-AI/DeepSeek-V4.1-Flash-1017",
+    checkpoints=(Checkpoint(alias="deepseek-v4.1-flash", repository="deepseek-ai/DeepSeek-V4.1-Flash-1017",
         revision="1bae0e1088993b9b82de08f59de5be5a34e42170", architecture="DeepseekV41ForCausalLM",
         stored_bytes=510_286_023_000, device_bytes=306_557_453_640, draft_bytes=7_932_874_632,
         # Estimate half of backbone scale bytes saved; retain the full draft budget.
         scale_compressed_device_bytes={"csf": 298_063_988_040}),),
     context=1048576, page_tokens=128, concurrency=4, max_concurrency=64, prefill_chunk=4096,
-    speculation=Speculation(draft_tokens=5), max_draft_tokens=7,
+    speculation=Speculation(draft_tokens=5), max_draft_tokens=7, max_images=4, image_bytes=32 << 20,
     # Single-row decode runs the shared expert on an auxiliary stream.
     stream_overlap=True,
     ranks=MappingProxyType({4: RankCosts(3_043_840, 113_920, 8 << 30)}),

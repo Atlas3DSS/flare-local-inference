@@ -25,7 +25,19 @@ pub(super) fn size(value: u64) -> Result<usize> {
     usize::try_from(value).map_err(|_| invalid("resource size exceeds host address space"))
 }
 
-pub(super) fn serving_contract(value: wire::ServingContract) -> Result<serde_json::Value> {
+pub(super) fn serving_contract(
+    mut value: wire::ServingContract,
+    prepared_concurrency: u64,
+) -> Result<serde_json::Value> {
+    if let Some(vision) = value
+        .model_contract
+        .as_mut()
+        .and_then(|model| model.vision.as_mut())
+    {
+        if vision.max_images > 0 && vision.feature_slots == 0 {
+            vision.feature_slots = prepared_concurrency;
+        }
+    }
     let mut value = serde_json::to_value(value).map_err(|e| invalid(e.to_string()))?;
     value.as_object_mut().unwrap().retain(|_, v| !v.is_null());
     Ok(value)
@@ -89,6 +101,10 @@ pub(super) fn frontend_settings(value: wire::FrontendSettings) -> Result<serde_j
                 Profile::Mimo(config) => serde_json::json!({"mimo": {
                     "min_pixels": config.min_pixels, "max_pixels": config.max_pixels,
                     "image_mean": config.image_mean, "image_std": config.image_std,
+                }}),
+                Profile::DeepseekRowMajor(config) => serde_json::json!({"deepseek_row_major": {
+                    "min_pixels": config.min_pixels, "max_tokens": config.max_tokens,
+                    "max_width_height_ratio": config.max_width_height_ratio,
                 }}),
                 Profile::Deepseek4(_) => serde_json::json!({"deepseek4": {}}),
                 Profile::Moonvit(_) => serde_json::json!({"moonvit": {}}),
@@ -259,6 +275,33 @@ mod tests {
     use super::*;
     use prost::Message;
 
+    #[test]
+    fn omitted_vision_slots_inherit_prepared_concurrency() {
+        for (prepared, slots, images, expected) in [
+            (16, 0, 4, 16),
+            (3, 0, 4, 3),
+            (16, 4, 4, 4),
+            (16, 0, 0, 0),
+        ] {
+            let value = wire::ServingContract {
+                max_active: Some(2),
+                model_contract: Some(wire::ModelContract {
+                    vision: Some(wire::VisionCapacity {
+                        feature_slots: slots,
+                        max_images: images,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            let decoded = wire::ServingContract::decode(value.encode_to_vec().as_slice()).unwrap();
+            let json = serving_contract(decoded, prepared).unwrap();
+            assert_eq!(json["model_contract"]["vision"]["feature_slots"], expected);
+            assert_eq!(json["max_active"], 2);
+        }
+    }
+
     fn defaults() -> wire::DefaultSamplingParameters {
         wire::DefaultSamplingParameters {
             seed: Some(u64::MAX),
@@ -340,6 +383,33 @@ mod tests {
                     .values
                     .is_empty()
             );
+        }
+    }
+
+    #[test]
+    fn serialized_text_and_deepseek_image_profiles_keep_their_meaning() {
+        // Tokenizer field 1, optional image field 2, and packed EOS field 3
+        // use the wire representation exported before row-major image profiles.
+        for (bytes, image) in [
+            (&[0x0a, 0x00, 0x1a, 0x01, 0x01][..], false),
+            (&[0x0a, 0x00, 0x12, 0x02, 0x1a, 0x00, 0x1a, 0x01, 0x01][..], true),
+        ] {
+            let decoded = wire::FrontendSettings::decode(bytes).unwrap();
+            let json = frontend_settings(decoded).unwrap();
+            assert_eq!(json["eos_token_ids"], serde_json::json!([1]));
+            if image {
+                assert_eq!(json["image"], serde_json::json!({"deepseek4": {}}));
+            } else {
+                assert!(json["image"].is_null());
+            }
+            #[cfg(feature = "server")]
+            {
+                let frontend: crate::frontend::FrontendSettings = serde_json::from_value(json).unwrap();
+                if let Some(settings) = frontend.image {
+                    let processor = crate::frontend::images::ImageProcessor::load(settings, Default::default()).unwrap();
+                    assert!(processor.geometry(701, 503).unwrap().tokens <= 384);
+                }
+            }
         }
     }
 

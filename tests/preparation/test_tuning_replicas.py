@@ -52,6 +52,15 @@ def _transport(directory, member):
     dist.init_process_group("gloo", init_method=(Path(directory) / f"tp-{replica}").as_uri(),
                             rank=rank, world_size=2, timeout=timedelta(seconds=30))
     role = TuningReplica(str(Path(directory) / "replicas"), replica, 2, 2)
+    from ignition.preparation import host_memory
+
+    memory_info = host_memory.device_memory_info
+    host_memory.device_memory_info = lambda device: (0, (96 << 30) - member * (1 << 20))
+    try:
+        assert host_memory.virtual_device_memory(None, dist.group.WORLD, tuning_replica=role) == (
+            (96 << 30) - 3 * (1 << 20))
+    finally:
+        host_memory.device_memory_info = memory_info
     coordinator = ReplicaPreparation(role, rank, ranks=(0, 1))
     assert coordinator.gather((replica, rank)) == [(0, 0), (0, 1), (1, 0), (1, 1)]
     assert dist.get_rank() == rank and dist.get_world_size() == 2

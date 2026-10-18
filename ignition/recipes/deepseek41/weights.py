@@ -16,6 +16,7 @@ class ExpertWeights:
     correction: torch.Tensor
     experts: object
     shared: MLPWeights
+    vision_correction: torch.Tensor | None = None
 
 
 @dataclass(frozen=True)
@@ -58,6 +59,7 @@ class ModelWeights:
     layers: tuple[LayerWeights, ...]
     draft: DSparkWeights | None
     allocated_bytes: int
+    vision: dict | None = None
 
     @classmethod
     def load(cls, manifest, device, *, shard, progress=None, dspark=False, confidence=False,
@@ -70,8 +72,11 @@ class ModelWeights:
             head = loader.load_tensor("head.weight", extent=slice(*shard.partition(129280, alignment=64)))
             layers = tuple(loader.load_layer(i) for i in range(config.layers))
             draft = DSparkWeights.load(loader, confidence=confidence) if dspark else None
+            vision = ({name: loader.load_tensor(name) for name in loader._sources
+                       if name.startswith(("vision.", "aligner.", "image_"))}
+                      if config.vision is not None else None)
         return cls(config, shard, embedding, norm, head, layers, draft,
-                   torch.cuda.memory_allocated(device) - before)
+                   torch.cuda.memory_allocated(device) - before, vision)
 
 
 class DeepSeekWeightLoader(BlockFP8WeightLoader):
@@ -96,6 +101,7 @@ class DeepSeekWeightLoader(BlockFP8WeightLoader):
     def _selected_names(self):
         return {name for name in super()._selected_names()
                 if (name.startswith("layers.") or (self.dspark and name.startswith("mtp."))
+                    or name.startswith(("vision.", "aligner.", "image_"))
                     or name in ("embed.weight", "norm.weight", "head.weight"))
                 and ".engram.embed." not in name}
 
@@ -137,7 +143,8 @@ class DeepSeekWeightLoader(BlockFP8WeightLoader):
         shared = MLPWeights(self.load_linear_group((ffn + ".shared_experts.w1", ffn + ".shared_experts.w3"),
             row_ranges=(interval, interval)), self.load_linear(ffn + ".shared_experts.w2", columns=interval))
         routed = ExpertWeights(self.load_tensor(ffn + ".gate.weight"),
-            self.load_tensor(ffn + ".gate.bias"), experts, shared)
+            self.load_tensor(ffn + ".gate.bias"), experts, shared,
+            self.load_tensor(ffn + ".gate.bias_vl") if self.config.vision is not None else None)
         residual = {name: self.load_tensor(prefix + "." + name) for name in (
             "hc_attn_fn", "hc_attn_base", "hc_attn_scale", "hc_ffn_fn", "hc_ffn_base", "hc_ffn_scale",
             "attn_norm.weight", "ffn_norm.weight")}

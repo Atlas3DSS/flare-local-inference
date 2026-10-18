@@ -48,6 +48,7 @@ class DSparkConfig:
 class ModelConfig:
     text: dict
     quantization: dict
+    vision: dict | None = None
 
     @classmethod
     def load(cls, snapshot):
@@ -76,7 +77,17 @@ class ModelConfig:
                 or quant.get("scale_fmt") != "ue8m0" or quant.get("expert_dtype") != "fp4"
                 or quant.get("activation_scheme") != "dynamic"):
             raise ValueError("DeepSeek V4.1 requires block-32 FP8 weights and native MXFP4 experts")
-        result = cls(text, quant)
+        vision = config.get("vision_config")
+        if vision is not None:
+            for key, expected in {"num_hidden_layers": 32, "hidden_size": 1024,
+                    "num_attention_heads": 16, "intermediate_size": 2816, "patch_size": 14,
+                    "rope_theta": 10000, "downsample_ratio": 3, "max_image_tokens": 1024,
+                    "min_pixels": 295936, "max_wh_ratio": None}.items():
+                if vision.get(key) != expected:
+                    raise ValueError(f"unsupported DeepSeek V4.1 vision {key}: {vision.get(key)}")
+            if config.get("image_token_id") != 129264:
+                raise ValueError("DeepSeek V4.1 image placeholder requires token 129264")
+        result = cls(text, quant, vision)
         ratios = text["compress_ratios"]
         if len(ratios) < result.layers or any(r not in (0, 1, 2) for r in ratios):
             raise ValueError("unsupported DeepSeek compression schedule")

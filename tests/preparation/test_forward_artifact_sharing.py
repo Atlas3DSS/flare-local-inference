@@ -53,3 +53,110 @@ def test_every_rank_receives_what_it_lacks_from_the_rank_that_compiled_it(tmp_pa
         process.join(timeout=60)
     expected = {"forwards/a.bin": b"compiled a", "forwards/b.bin": b"compiled b"}
     assert results == {rank: expected for rank in range(3)}
+
+
+def test_ranks_lend_missing_compilations_until_lending_finishes_no_sooner():
+    from ignition.preparation.aot import _balance_compilations
+
+    # Rank zero's sampling variants leave it most of a TP16 catalog; lending levels every rank at three waves.
+    assigned = _balance_compilations([13] + [2] * 15, [1] * 16)
+    assert max(map(len, assigned)) == 3 and len(assigned[0]) == 3
+    assert sorted(job for jobs in assigned for job in jobs) == sorted(
+        [(0, index) for index in range(13)] + [(rank, index) for rank in range(1, 16) for index in range(2)])
+    # Ranks keep their own forwards, and a rank with two workers finishes two per wave.
+    assigned = _balance_compilations([9, 0, 0], [2, 1, 1])
+    assert [len(jobs) for jobs in assigned] == [5, 2, 2]
+    assert all(owner == 0 for jobs in assigned for owner, _ in jobs)
+    assert _balance_compilations([1, 1], [1, 1]) == [[(0, 0)], [(1, 0)]]
+    # A rank whose GPU has no room for a compiler lends every forward it owns.
+    assigned = _balance_compilations([13, 2, 2, 2], [1, 1, 0, 1])
+    assert assigned[2] == [] and sorted(job for jobs in assigned for job in jobs) == sorted(
+        [(0, index) for index in range(13)] + [(rank, index) for rank in (1, 2, 3) for index in range(2)])
+    assert max(map(len, assigned)) == 7
+
+
+class _Forward:
+    def __init__(self, variant):
+        self.compilation_variant = variant
+
+
+class _Pool:
+    """Compiles by writing the artifact path with the compiling rank, as a worker would."""
+
+    workers = 1
+
+    def __init__(self, device, **kwargs):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        pass
+
+    def submit(self, forward, path):
+        from ignition.preparation.forward_metadata import dumps
+
+        return self.submit_payload(dumps(forward), path)
+
+    def submit_payload(self, payload, path):
+        from concurrent.futures import Future
+        import torch.distributed as dist
+
+        from ignition.preparation.forward_metadata import loads
+
+        forward = loads(payload)
+        Path(path).write_text(f"{forward.compilation_variant} compiled by rank {dist.get_rank()}")
+        future = Future()
+        future.set_result(None)
+        return future
+
+
+def _lending_rank(rank, world, store, root, outcome):
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    import torch.distributed as dist
+
+    from ignition.preparation import aot, compile_pool
+
+    try:
+        compile_pool.CompilePool = _Pool
+        aot.ForwardCache._load = lambda self, forward, path, required=False: aot.BoundForward(
+            lambda owner: None, forward, True)
+        dist.init_process_group("gloo", init_method=f"file://{store}", rank=rank, world_size=world)
+        cache = aot.ForwardCache.__new__(aot.ForwardCache)
+        cache.root, cache.device, cache.headroom_bytes, cache.options = root, "cpu", 0, aot.MappingProxyType({})
+        cache.compile_workers = None
+        variant = "sample" if rank == 0 else "consume"
+        functions = {name: _Forward(variant) for name in "abcd"}
+        coordinator = SimpleNamespace(group=dist.group.WORLD, ranks=tuple(range(world)), spans_hosts=False,
+                                      local_ranks=world)
+        selected = cache._prepare_ranks(functions, {name: name for name in functions}, coordinator, progress=None,
+                                        materialize=lambda: None, warmup=nullcontext)
+        outcome.put((rank, sorted(selected)))
+        dist.destroy_process_group()
+    except Exception:  # noqa: BLE001 - The parent reports every rank's failure.
+        import traceback
+
+        outcome.put((rank, traceback.format_exc()))
+
+
+def test_one_host_lends_a_ranks_missing_compilations_to_idle_ranks(tmp_path):
+    context = multiprocessing.get_context("fork")
+    root = tmp_path / "forwards"
+    root.mkdir()
+    outcome = context.Queue()
+    processes = [context.Process(target=_lending_rank, args=(rank, 3, tmp_path / "store", root, outcome))
+                 for rank in range(3)]
+    for process in processes:
+        process.start()
+    results = dict(outcome.get(timeout=120) for _ in processes)
+    for process in processes:
+        process.join(timeout=60)
+    assert results == {rank: list("abcd") for rank in range(3)}
+    # Rank zero owns four sampling variants and its peers two consuming variants each: rank zero lends one.
+    compiled = sorted(path.read_text() for path in root.glob("*.bin"))
+    assert compiled.count("sample compiled by rank 0") == 3
+    assert compiled.count("sample compiled by rank 1") == 1
+    assert len(compiled) == 8 and not list((root / "lent").iterdir())

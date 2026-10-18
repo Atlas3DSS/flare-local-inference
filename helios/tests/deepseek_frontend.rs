@@ -32,7 +32,7 @@ fn canonical_text_template_renders_in_the_native_frontend() {
     let prompt = frontend.render_chat(&messages, &options).unwrap();
     assert_eq!(
         prompt.text,
-        "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 50 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>Hello<｜Assistant｜><think>"
+        "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>Hello<｜Assistant｜><think>"
     );
     assert!(!prompt.token_ids.is_empty());
     let output = flare_helios::model::prepare_output(

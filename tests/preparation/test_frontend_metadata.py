@@ -7,7 +7,7 @@ from google.protobuf.json_format import MessageToDict, ParseError
 import pytest
 
 from ignition.preparation.frontend import image_settings, prepare_frontend, tokenizer_settings
-from ignition.preparation.package_file import combine, publish, read_index
+from ignition.preparation.package_file import combine, read_index, write_sources
 from ignition.preparation.package_proto import serving
 from ignition.preparation.runtime_package_pb2 import BundleIndex, ModelIndex
 from ignition.recipes import recipes
@@ -18,7 +18,7 @@ from ignition.recipes.declaration import SamplingDefaults
                                       ("deepseek4", -1), ("mimo_v2", -1)])
 def test_default_mode_uses_manually_declared_model_card_sampling(name, top_k):
     defaults = next(recipe for recipe in recipes() if recipe.name == name).sampling_defaults
-    assert defaults.as_dict() == dict(seed=0, temperature=1., top_p=.95, top_k=top_k,
+    assert defaults.as_dict() == dict(seed=0, temperature=1., top_p=1. if name == "deepseek41" else .95, top_k=top_k,
         min_p=0., repetition_penalty=1., presence_penalty=0., frequency_penalty=0.)
 
 
@@ -97,8 +97,8 @@ def test_typed_settings_survive_publication_and_tensor_parallel_assembly(tmp_pat
         assert index.contract.frontend_workers == 4
         assert index.HasField("sampling_defaults") and index.sampling_defaults.HasField("seed")
         assert index.frontend.image.WhichOneof("profile") == "mimo"
-        path = tmp_path / f"rank-{rank}.safetensors"
-        publish(path, index, [])
+        path = tmp_path / f"rank-{rank}.json"
+        write_sources(path, index, [])
         paths.append(path)
     result = tmp_path / "model.safetensors"
     combine(result, paths, [])
@@ -134,13 +134,13 @@ def test_cached_checkpoint_structural_metadata_extracts_without_model_weights(re
                 / "snapshots" / checkpoint.revision)
     if not (snapshot / "tokenizer_config.json").exists():
         pytest.skip("checkpoint structural metadata is not cached")
-    profiles = {"qwen38": "qwen", "mimo_v2": "mimo", "deepseek4": "deepseek4"}
+    profiles = {"qwen38": "qwen", "mimo_v2": "mimo", "deepseek4": "deepseek4", "deepseek41": "deepseek_row_major"}
     preprocessor = Path("ignition/recipes/deepseek4/assets/preprocessor_config.json") if recipe.name == "deepseek4" else None
     token_source = snapshot / "generation_config.json"
     if not token_source.exists():
         token_source = snapshot / "config.json"
     token_config = json.loads(token_source.read_text())
-    eos = token_config.get("text_config", token_config)["eos_token_id"]
+    eos = 1 if recipe.name == "deepseek41" else token_config.get("text_config", token_config)["eos_token_id"]
     result = prepare_frontend(snapshot, eos_token_ids=eos, image_profile=profiles.get(recipe.name), preprocessor=preprocessor)
     index = ModelIndex()
     source = server()

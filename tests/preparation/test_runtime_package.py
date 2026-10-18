@@ -10,7 +10,7 @@ import pytest
 
 from ignition.preparation.runtime_package import (
     Allocation, Argument, FileSource, Kernel, Reference, Relocation, RuntimePackage,
-    _external_allocations, _merge_ranges, _trim_inactive_tail, _without_zero_ranges, _write_allocation,
+    _external_allocations, _live_pieces, _merge_ranges, _without_zero_ranges, _write_allocation,
     _KernelParams, _kernel_argument_data,
 )
 
@@ -495,17 +495,22 @@ def test_cooperative_package_clamps_to_device_capacity(tmp_path):
         env={**os.environ, "FLARE_COOPERATIVE_TEST_PACKAGE": str(tmp_path)})
 
 
-def test_only_allocator_inactive_tail_granules_are_trimmed():
+def test_only_allocator_inactive_granules_are_released():
     allocation = Allocation("weights", 0x80000000000, 66 << 20, alignment=2 << 20, preserve_address=True)
-    end = allocation.address + allocation.nbytes
-    live = allocation.address + (51 << 20) + (128 << 10)
-    trimmed = _trim_inactive_tail(allocation, [(live, end - (2 << 20)), (end - (2 << 20), end)])
-    assert trimmed.address == allocation.address
-    assert trimmed.nbytes == 52 << 20
-    assert _trim_inactive_tail(allocation, [(live, end - 1)]) is allocation
-    assert _trim_inactive_tail(allocation, [(allocation.address, end)]) is allocation
-    assert _trim_inactive_tail(allocation, []) is allocation
+    begin, end = allocation.address, allocation.address + allocation.nbytes
+    live = begin + (51 << 20) + (128 << 10)
+    trimmed, = _live_pieces(allocation, [(live, end)])
+    assert (trimmed.name, trimmed.address, trimmed.nbytes) == ("weights", begin, 52 << 20)
+    # Freed blocks between live ones release their whole granules; partial granules stay backed.
+    pieces = _live_pieces(allocation, [(begin + (3 << 20), begin + (9 << 20)),
+                                       (begin + (9 << 20) + 256, begin + (20 << 20)), (end - (1 << 20), end)])
+    assert [(p.name, p.address - begin, p.nbytes) for p in pieces] == [
+        ("weights.0", 0, 4 << 20), ("weights.1", 8 << 20, 2 << 20), ("weights.2", 20 << 20, 46 << 20)]
+    leading, = _live_pieces(allocation, [(begin - (8 << 20), begin + (5 << 20))])
+    assert (leading.address - begin, leading.nbytes) == (4 << 20, 62 << 20)
+    assert _live_pieces(allocation, [(begin, end)]) == (allocation,)
+    assert _live_pieces(allocation, []) == (allocation,)
     # Disposable live scratch has no initializer, but still needs physical backing.
     zero = _without_zero_ranges(allocation, [(allocation.address, allocation.nbytes)])
     assert zero.initialize == "zero"
-    assert _trim_inactive_tail(zero, []).nbytes == allocation.nbytes
+    assert _live_pieces(zero, []) == (zero,)

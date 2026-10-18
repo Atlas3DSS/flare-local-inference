@@ -78,14 +78,22 @@ class _ForwardPickler(pickle.Pickler):
         from cutlass.base_dsl.jit_executor import JitCompiledFunction
         from b12x._lib.compile_plan import CompiledCuTeProgram, DeferredCuTeKernel, DeferredTritonKernel
         from b12x.preparation import PreparationSession
+        from b12x.preparation.device import DetectedDevice
         from b12x.preparation.types import _PreparedSlot, _Prepared
         from torch._dynamo.aot_compile_types import _deserialize_triton_kernel, _serialize_triton_kernel
+        from .device_binding import restore_device, restore_prepared_device
         from .package_storage import PackageStorage
+        from .peer_storage import PeerStorage
 
         if isinstance(value, PreparationSession):
             return _Unavailable, ("b12x preparation session",)
         if isinstance(value, _Unavailable):
             return _Unavailable, (value.description,)
+        # A worker may trace another local rank's forward on its own GPU; the artifact relocates when bound.
+        if isinstance(value, torch.device):
+            return restore_device, (value.type, value.index)
+        if isinstance(value, DetectedDevice):
+            return restore_prepared_device, (type(value), dict(vars(value)))
         if isinstance(value, torch.Tensor):
             if type(value) not in (torch.Tensor, torch.nn.Parameter, FakeTensor):
                 raise TypeError(f'unsupported forward tensor subclass: {type(value)}')
@@ -115,8 +123,9 @@ class _ForwardPickler(pickle.Pickler):
                               ctypes._CFuncPtr, ctypes.Structure, ctypes.Array, ctypes._SimpleCData,
                               CompiledKernel, JitCompiledFunction, CompiledCuTeProgram, local,
                               DeferredCuTeKernel, DeferredTritonKernel, PreparationSession, PackageStorage,
-                              *_LOCK_TYPES)):
-            # Preparation sessions and allocators retain process-local contexts, not forward metadata.
+                              PeerStorage, *_LOCK_TYPES)):
+            # Preparation sessions, allocators and peer storage retain process-local contexts, not forward
+            # metadata; collective runtimes keep peer storage for teardown.
             return _Unavailable, (f'{type(value).__module__}.{type(value).__qualname__}',)
         if not isinstance(value, type) and (hasattr(type(value), '__del__')
                 or type(value).__module__.startswith('cutlass._mlir.')):

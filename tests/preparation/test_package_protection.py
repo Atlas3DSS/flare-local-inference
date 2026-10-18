@@ -455,29 +455,88 @@ def test_corrupt_trust_store_fails_closed(flare, tmp_path):
 
 
 def test_tensor_parallel_assembly_authenticates_all_ranks(native, tmp_path):
-    from ignition.preparation.package_file import combine
+    from ignition.preparation.package_file import combine, write_sources
     ranks = []
-    for rank in range(2):
+    for rank in range(3):
         index = proto.ModelIndex(version=4, ranks=[proto.BundleIndex()])
         bundle = index.ranks[0]
         bundle.allocations.add(name='weight', file='weight')
+        bundle.allocations.add(name='scale', file='scale')
         bundle.graphs.add(name='decode', resource='graph')
         payload = []
+        # Stored data spans several copy blocks and leaves padding inside and between ranks.
         for name, offset, data in [('weight', 0, bytes([rank]) * 301),
-                                   ('graph', 4096, bytes([rank + 2]) * 41)]:
+                                   ('scale', 4096, bytes(range(256)) * (rank * 70000 + 9)),
+                                   ('graph', 64 << 20, bytes([rank + 2]) * 41)]:
             source = tmp_path / f'{name}-{rank}'
             source.write_bytes(data)
             bundle.resources[name].CopyFrom(proto.Span(offset=offset, nbytes=len(data)))
             payload.append((offset, source, 0, len(data)))
-        path = tmp_path / f'rank-{rank}'
-        publish(path, index, payload)
+        path = tmp_path / f'rank-{rank}.json'
+        write_sources(path, index, payload)
         ranks.append(path)
-    output = tmp_path / 'tp2.safetensors'
+    output = tmp_path / 'tp3.safetensors'
     combine(output, ranks, [], publisher=publisher())
     result = read(native, output, weights=True)
     assert result.returncode == 0, result.stderr
     assert {digest for _, digest in json.loads(result.stdout)} == {
-        hashlib.sha256(bytes([rank + 2]) * 41).hexdigest() for rank in range(2)}
+        hashlib.sha256(bytes([rank + 2]) * 41).hexdigest() for rank in range(3)}
+    index, start = read_index(output)
+    with output.open('rb') as package:
+        for rank, bundle in enumerate(index.ranks):
+            span = bundle.resources['scale']
+            package.seek(start + span.offset)
+            assert package.read(span.nbytes) == bytes(range(256)) * (rank * 70000 + 9)
+    # A stored-data byte flipped after publication fails the rank's weight scan.
+    value, _ = envelope(output)
+    data = proto.RankProtection.FromString(value.ranks[1].body).data
+    overwrite(output, [(start + data.offset + data.nbytes - 1, 1)])
+    assert read(native, output, weights=True).returncode != 0
+
+
+def test_signed_assembly_stores_a_table_read_from_several_checkpoint_shards(native, tmp_path):
+    from ignition.preparation.package_file import combine, write_sources
+    index = proto.ModelIndex(version=4, ranks=[proto.BundleIndex()])
+    bundle = index.ranks[0]
+    bundle.allocations.add(name='weight', file='weight')
+    bundle.graphs.add(name='decode', resource='graph')
+    weight, scales, graph = tmp_path / 'weight', tmp_path / 'scales', tmp_path / 'graph'
+    weight.write_bytes(b'weight-data')
+    scales.write_bytes(b'table-scales')
+    graph.write_bytes(b'graph-records')
+    bundle.resources['weight'].CopyFrom(proto.Span(offset=0, nbytes=11))
+    # The table's rows lie in three shards, each behind its own header, and span several copy blocks.
+    parts = [bytes(range(251)) * (part * 70000 + 3) for part in range(3)]
+    table = index.engram.tables.add(layer=1)
+    table.weights.CopyFrom(proto.Span(offset=4096, nbytes=sum(map(len, parts))))
+    payload, cursor = [(0, weight, 0, 11)], 4096
+    for number, part in enumerate(parts):
+        shard = tmp_path / f'shard-{number}'
+        shard.write_bytes(b'header' * number + part)
+        payload.append((cursor, shard, 6 * number, len(part)))
+        cursor += len(part)
+    cursor = align(cursor)
+    table.scales.CopyFrom(proto.Span(offset=cursor, nbytes=12))
+    payload.append((cursor, scales, 0, 12))
+    cursor = align(cursor + 12)
+    bundle.resources['graph'].CopyFrom(proto.Span(offset=cursor, nbytes=13))
+    payload.append((cursor, graph, 0, 13))
+    recorded = tmp_path / 'rank-0.json'
+    write_sources(recorded, index, payload)
+    output = tmp_path / 'model.safetensors'
+    combine(output, [recorded], [], publisher=publisher())
+    result = read(native, output, weights=True)
+    assert result.returncode == 0, result.stderr
+    combined, start = read_index(output)
+    span = combined.engram.tables[0].weights
+    with output.open('rb') as package:
+        package.seek(start + span.offset)
+        assert package.read(span.nbytes) == b''.join(parts)
+    # Executables are one range each.
+    split = tmp_path / 'split.json'
+    write_sources(split, index, [*payload[:-1], (cursor, graph, 0, 6), (cursor + 6, graph, 6, 7)])
+    with pytest.raises(ValueError, match='publication ranges differ from classified resources'):
+        combine(tmp_path / 'split.safetensors', [split], [], publisher=publisher())
 
 
 def test_native_record_reader_selects_independently_and_rejects_malformed_records(native, tmp_path):
@@ -627,7 +686,7 @@ def test_promotion_detects_in_place_weight_change_during_copy(tmp_path, monkeypa
 def test_sign_cli_with_encrypted_key_and_tensor_parallel_package(native, tmp_path, monkeypatch):
     from ignition import signing
     from ignition.cli import main
-    from ignition.preparation.package_file import combine
+    from ignition.preparation.package_file import combine, write_sources
 
     original = development_publisher()
     staged = []
@@ -643,8 +702,8 @@ def test_sign_cli_with_encrypted_key_and_tensor_parallel_package(native, tmp_pat
             path.write_bytes(data)
             bundle.resources[name].CopyFrom(proto.Span(offset=offset, nbytes=len(data)))
             payload.append((offset, path, 0, len(data)))
-        path = tmp_path / f'rank-{rank}'
-        publish(path, index, payload)
+        path = tmp_path / f'rank-{rank}.json'
+        write_sources(path, index, payload)
         staged.append(path)
     source = tmp_path / 'development.safetensors'
     combine(source, staged, [], publisher=original)

@@ -27,6 +27,11 @@ def _fake_attend(q, cache, output, pages, lengths, starts, scratch, handle, scal
 
 
 class PreparedDenseMLA:
+    """Dense MLA over a paged cache; an E4M3 cache defaults to unit query and cache scales.
+
+    With ``lse``, each query head's natural-log LSE [rows, heads] is copied out beside the output.
+    """
+
     def __init__(self, query, cache, output, page_table, lengths, starts, *, caps, scale, session, name, workspace,
                  lse=None, kv_scale=None, q_scale=None):
         if cache.dtype == torch.float8_e4m3fn:
@@ -54,13 +59,17 @@ class PreparedDenseMLA:
                     arguments[field] = torch.empty_strided(value.shape, value.stride(),
                         dtype=value.dtype, device=value.device)
                 generator = torch.Generator(device=query.device).manual_seed(410528)
-                arguments["q"].normal_(std=.2, generator=generator)
+                if query.dtype == torch.float8_e4m3fn:
+                    arguments["q"].copy_(torch.randn(query.shape, device=query.device, generator=generator) * .2)
+                else:
+                    arguments["q"].normal_(std=.2, generator=generator)
                 arguments["page_table"].zero_()
                 arguments["cache_seqlens"].fill_(min(max(4096, query.shape[0]), caps.max_cache_tokens))
                 arguments["cu_seqlens_q"].copy_(torch.arange(starts.numel(), device=query.device,
                     dtype=starts.dtype) * (query.shape[0] // lengths.numel()))
-                cache_seed = (torch.randn(cache[0].shape, dtype=query.dtype, device=cache.device,
-                                          generator=generator) * .2).to(cache.dtype)
+                # E4M3 queries cannot be sampled directly; seed in FP32 and convert.
+                cache_seed = (torch.randn(cache[0].shape, device=cache.device, generator=generator) * .2).to(
+                    cache.dtype)
                 return arguments, arguments["q"].clone(), cache_seed
 
             arguments, query_seed, cache_seed = benchmark_resource(session, ("dense_mla", name), inputs)

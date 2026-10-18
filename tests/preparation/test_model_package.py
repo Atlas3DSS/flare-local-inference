@@ -7,7 +7,7 @@ import pytest
 from helios.tests.signing import publisher
 from ignition.preparation import model_package
 from ignition.preparation.runtime_package_pb2 import Asset, ModelIndex, BundleIndex, Span
-from ignition.preparation.package_file import combine, publish, read_index
+from ignition.preparation.package_file import combine, read_index, write_sources
 
 
 @pytest.mark.parametrize('world', [1, 2])
@@ -21,7 +21,7 @@ def test_publication_contains_one_bundle_per_rank(monkeypatch, tmp_path, world):
     closed = []
     printed = []
     def export(prepared, images, storage, path, **kwargs):
-        publish(path, ModelIndex(version=4, ranks=[BundleIndex()]), [])
+        write_sources(path, ModelIndex(version=4, ranks=[BundleIndex()]), [])
         exported.append(path.name)
         return SimpleNamespace(memory_inventory={'rank': 0})
     monkeypatch.setattr(model_package, 'export_model', export)
@@ -50,7 +50,7 @@ def test_publication_contains_one_bundle_per_rank(monkeypatch, tmp_path, world):
     descriptor, start = read_index(output)
     assert descriptor.version == 4
     assert len(descriptor.ranks) == world
-    assert sorted(exported) == [f'rank-{rank}.safetensors' for rank in range(world)]
+    assert sorted(exported) == [f'rank-{rank}.json' for rank in range(world)]
     assert output.is_file()
     assert printed == [{'rank': rank} for rank in range(world)]
     assert len(descriptor.peer_memory) == (2 if world == 2 else 0)
@@ -78,8 +78,8 @@ def test_combined_file_preserves_rank_resources_and_frontend_ranges(tmp_path):
         if rank == 0:
             index.assets.append(Asset(name='tokenizer', payload=Span(offset=13, nbytes=9)))
             index.contract.model_id = "test"
-        path = tmp_path / f'rank-{rank}.safetensors'
-        publish(path, index, [(3, source, 0, len(data))])
+        path = tmp_path / f'rank-{rank}.json'
+        write_sources(path, index, [(3, source, 0, len(data))])
         ranks.append(path)
     model = tmp_path / 'model.safetensors'
     combine(model, ranks, [])
@@ -110,8 +110,8 @@ def test_offloaded_engram_planes_are_stored_once_and_bounds_checked(tmp_path):
             table.weights.CopyFrom(Span(offset=4096, nbytes=7))
             table.scales.CopyFrom(Span(offset=8192, nbytes=6))
             payload = [(4096, source, 0, 7), (8192, source, 12, 6)]
-        path = tmp_path / f'rank-{rank}.safetensors'
-        publish(path, index, payload)
+        path = tmp_path / f'rank-{rank}.json'
+        write_sources(path, index, payload)
         ranks.append(path)
     output = tmp_path / 'model.safetensors'
     combine(output, ranks, [])
@@ -124,8 +124,8 @@ def test_offloaded_engram_planes_are_stored_once_and_bounds_checked(tmp_path):
             assert package.read(span.nbytes) == expected
     with pytest.raises(ValueError, match='stored once on rank zero'):
         combine(tmp_path / 'duplicated', [ranks[0], ranks[0]], [])
-    _, rank_start = read_index(ranks[0])
-    with ranks[0].open('r+b') as package:
-        package.truncate(rank_start + 8192 + 5)
-    with pytest.raises(ValueError, match='safetensors data length'):
-        read_index(ranks[0])
+    with source.open('r+b') as table:
+        table.truncate(12 + 5)
+    with pytest.raises(ValueError, match='truncated package resource'):
+        combine(tmp_path / 'truncated', ranks, [])
+    assert not (tmp_path / 'truncated').exists()

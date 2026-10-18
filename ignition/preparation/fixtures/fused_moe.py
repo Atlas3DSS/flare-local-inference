@@ -31,6 +31,11 @@ class ExpertBenchmarkInputs:
         self.router_weight = router_weight
         self.router_plan = router_plan
         self.route_options = {} if correction_bias is None else {"correction_bias": correction_bias}
+        if router_plan is not None and router_plan.query.has_image_mask:
+            # Model-route trials represent text rows even when the serving route
+            # also accepts image rows. The inactive image bias is never selected.
+            self.route_options.update(image_mask=torch.zeros(tokens, dtype=torch.bool, device=source.device),
+                                      image_correction_bias=correction_bias)
         if router_plan is not None:
             self.route_weights.mul_(router_plan.query.routed_scaling_factor)
         self.logits = None
@@ -52,7 +57,7 @@ class ExpertBenchmarkInputs:
     def nbytes(self):
         tensors = (self.fixture, self.source, self.output, self.routes,
             *(getattr(self.router, field) for field in self.router.__dataclass_fields__),
-            self.route_weights, self.logits, self.projection_source)
+            self.route_weights, self.logits, self.projection_source, *self.route_options.values())
         storage = {value.untyped_storage().data_ptr(): value.untyped_storage().nbytes()
                    for value in tensors if value is not None}
         return sum(storage.values())

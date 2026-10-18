@@ -5,7 +5,7 @@ from b12x.preparation import PreparedCall
 from b12x.sequence import embedding
 
 from ignition.preparation.tuning import declare
-from .collectives import PreparedAllGather
+from .collectives import PreparedChunkedAllGather
 
 
 class PreparedEmbedding:
@@ -38,8 +38,8 @@ class PreparedShardedEmbedding:
     def __init__(self, weight, ids, local_output, output, *, runtime, coordinator, session, name, num_rows=None):
         self.lookup = PreparedEmbedding(weight, ids, local_output, session=session, name=name + ".lookup",
                                         num_rows=num_rows)
-        self.gather = PreparedAllGather(local_output, output, runtime=runtime, coordinator=coordinator,
-                                        session=session, name=name + ".gather")
+        self.gather = PreparedChunkedAllGather(local_output, output, runtime=runtime, coordinator=coordinator,
+                                               session=session, name=name + ".gather")
 
     def __call__(self):
         return self.gather(self.lookup())
