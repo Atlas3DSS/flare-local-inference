@@ -1,12 +1,13 @@
 """Finite varlen-attention operands with one full-capacity sequence."""
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 
 import torch
 from b12x.preparation import PreparedCall
 
 from ignition.preparation.scratch import planned_scratch
-from ignition.preparation.tuning import benchmark_resource
+from .resources import candidate_inputs
 
 
 @dataclass(frozen=True)
@@ -49,12 +50,16 @@ def attention_benchmark_inputs(arguments):
     return AttentionBenchmarkInputs(**result, cu_seqlens_q=lengths)
 
 
-def benchmark_call(state, *, arguments, session, workspace):
-    identity = (arguments["max_seqlen_q"], arguments["max_seqlen_k"], tuple((name, tuple(arguments[name].shape), arguments[name].stride(),
-                      arguments[name].dtype, arguments[name].device)
-                     for name in ("q", "k", "v", "cu_seqlens_q")))
-    inputs = benchmark_resource(session, ("vision_attention_inputs", identity),
-                                lambda: attention_benchmark_inputs(arguments))
+def input_factory(arguments, *, storage=None):
+    def allocate():
+        with (nullcontext() if storage is None else storage.transient()):
+            return attention_benchmark_inputs(arguments)
+
+    return candidate_inputs(allocate)
+
+
+def benchmark_call(state, *, arguments, inputs, workspace):
+    inputs = inputs()
     arguments = {**arguments, **{key: getattr(inputs, key)
                                   for key in ("q", "k", "v", "cu_seqlens_q")}}
     scratch = planned_scratch(state.scratch_plan.scratch_specs(), workspace)

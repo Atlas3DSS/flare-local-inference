@@ -1,5 +1,7 @@
 """Prepared variable-length attention with explicit compiler-visible storage."""
 
+from functools import partial
+
 import torch
 from b12x.attention import varlen
 from b12x.preparation import PreparedCall
@@ -81,9 +83,8 @@ class PreparedVarlenAttention:
                 self.plan.request(
                     name=name,
                     prepare_call=prepare,
-                    benchmark_call=lambda state: fixtures.benchmark_call(
-                        state, arguments=arguments, session=session, workspace=workspace
-                    ),
+                    benchmark_call=partial(fixtures.benchmark_call, arguments=arguments, workspace=workspace,
+                        inputs=fixtures.input_factory(arguments, storage=getattr(session, "benchmark_storage", None))),
                 ),
             ),
         )

@@ -94,6 +94,40 @@ def test_projection_fixture_pools_release_after_trial_owners(mailbox_storage):
         assert not retained, [(segment["segment_pool_id"], segment["total_size"]) for segment in retained]
 
 
+@pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
+                    reason="requires an explicitly assigned CUDA device")
+def test_attention_fixture_releases_before_projection_tuning(mailbox_storage):
+    import gc
+    import weakref
+    import torch
+    from ignition.preparation.fixtures import projection, varlen_attention
+
+    storage = mailbox_storage
+    source = torch.zeros((65536, 12, 128), dtype=torch.bfloat16, device="cuda:0")
+    arguments = dict(q=source, k=source, v=source,
+        cu_seqlens_q=torch.zeros(2, dtype=torch.int32, device=source.device),
+        max_seqlen_q=65536, max_seqlen_k=65536)
+    acquire = varlen_attention.input_factory(arguments, storage=storage)
+    baseline = torch.cuda.memory_allocated()
+    first, second = acquire(), acquire()
+    assert first is second
+    reference = weakref.ref(first)
+    assert first.nbytes == 6 * source.nbytes + 8
+    first.q.fill_(float("nan"))
+    second.produce()
+    assert torch.equal(second.q, second.seed_q)
+    del first, second
+    gc.collect()
+    torch.cuda.synchronize()
+    torch.cuda.empty_cache()
+    assert reference() is None
+    assert torch.cuda.memory_allocated() == baseline
+    operands = projection.input_factory(source[:, 0], source[:, 0], storage=storage)()
+    operands.produce()
+    assert torch.isfinite(operands.source).all()
+    assert not source.count_nonzero()
+
+
 @pytest.fixture(scope="module")
 def mailbox_storage():
     import torch

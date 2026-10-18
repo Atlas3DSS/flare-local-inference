@@ -1092,7 +1092,7 @@ def test_operator_benchmark_owners_release_after_trial_close(backend, operator):
                 v=source.view(4, 2, 16), cu_seqlens_q=torch.zeros(3, dtype=torch.int32),
                 max_seqlen_q=2, max_seqlen_k=2)
             call = varlen_attention.benchmark_call(state, arguments=arguments,
-                session=session, workspace=None)
+                inputs=varlen_attention.input_factory(arguments), workspace=None)
         elif operator == "mtp_feedback":
             call = mtp_feedback.benchmark_call(state,
                 arguments=dict(token_embedding=source, multi_state=source, output=output),

@@ -58,6 +58,26 @@ def test_shared_owner_graph_does_not_queue_duplicate_paths():
         tracemalloc.stop()
 
 
+def test_compiled_forward_traverses_runtime_owner_without_compiler_metadata():
+    from ignition.preparation.aot import BoundForward
+    from ignition.preparation.scratch import ScratchArena
+
+    class CompilerMetadata:
+        @property
+        def __dict__(self):
+            raise AssertionError("compiler metadata must not be traversed for storage ownership")
+
+    arena = ScratchArena("cpu")
+    arena.reserve(4096)
+    forward = BoundForward(CompilerMetadata(), SimpleNamespace(workspace=arena), True,
+                           pending=CompilerMetadata())
+    claims = owner_claims(SimpleNamespace(device=0, resources=(forward,), buffers={}))
+    claim, = claims
+    assert claim.end - claim.start == 4096
+    assert claim.category == "Operator scratch"
+    assert ".owner" in claim.owner and ".workspace" in claim.owner
+
+
 @pytest.mark.skipif(os.environ.get('FLARE_RUN_CUDA_TESTS') != '1', reason='requires an assigned CUDA device')
 def test_repeated_strided_views_have_one_owner_and_preserve_holes():
     import torch

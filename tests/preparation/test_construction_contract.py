@@ -110,13 +110,15 @@ def test_extracted_attention_fixture_lives_through_trials_and_releases_before_ca
     backend, monkeypatch, fail_finalizer
 ):
     from b12x.preparation import PreparationSession
-    from ignition.preparation.fixtures.varlen_attention import benchmark_call
+    from ignition.preparation.fixtures.varlen_attention import benchmark_call, input_factory
     from ignition.preparation.tuning import RecordedPreparationSession
 
     session = RecordedPreparationSession(device=0, checkpoint="fixture-lifetime",
         workload_schema="attention-fixture-v1", numerical_policy="default")
     arguments = {name: torch.zeros(4, 2, 8) for name in ("q", "k", "v")}
     arguments["cu_seqlens_q"] = torch.zeros(3, dtype=torch.int32)
+    arguments.update(max_seqlen_q=4, max_seqlen_k=4)
+    acquire = input_factory(arguments)
     calls, references, events = [], [], []
     spec = ScratchBufferSpec(name="work", shape=(256,), dtype=torch.uint8,
                              device=torch.device("cpu"))
@@ -127,7 +129,7 @@ def test_extracted_attention_fixture_lives_through_trials_and_releases_before_ca
     )
 
     def trial(_):
-        call = benchmark_call(state, arguments=arguments, session=session, workspace=None)
+        call = benchmark_call(state, arguments=arguments, inputs=acquire, workspace=None)
         calls.append(call)
         inputs = call.owners[0]
         references.append(weakref.ref(inputs))
@@ -138,7 +140,7 @@ def test_extracted_attention_fixture_lives_through_trials_and_releases_before_ca
         assert torch.equal(inputs.q, expected)
         assert inputs.cu_seqlens_q.tolist() == [0, 4, 4]
         assert torch.isfinite(call.invoke()).all()
-        assert all(not tensor.count_nonzero() for tensor in arguments.values())
+        assert all(not tensor.count_nonzero() for tensor in arguments.values() if isinstance(tensor, torch.Tensor))
 
     original_prepare = PreparationSession.prepare
 
