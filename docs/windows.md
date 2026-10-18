@@ -66,8 +66,11 @@ follow the [CLI specification](cli-design.md). The default trust store is
 selects another path. Ctrl-C and Ctrl-Break drain native work before releasing
 CUDA resources.
 
-Disk embedding tables and disk prefix caches use unbuffered overlapped I/O with
-bounded completion queues. File offsets, lengths, and buffers retain the package's
+Disk embedding tables use Windows I/O rings with registered files and buffers.
+Each disk-reader worker refills completed slots during the gather; the default
+four workers share 128 slots and 8 MiB of staging per table. Disk prefix caches
+continue using I/O completion ports. Both paths use unbuffered overlapped I/O with
+bounded queues. File offsets, lengths, and buffers retain the package's
 4 KiB alignment; incompatible storage geometry is rejected. RAM embedding tables
 and memory prefix caches retain their existing explicit storage selections.
 The retained package handle is also unbuffered and prevents replacement or writes

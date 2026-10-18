@@ -1,8 +1,8 @@
 //! Windows disk readers share a fixed staging and queue budget across workers.
 
 use super::{Aligned, CHUNK, DEPTH, DiskTimings, Fragment, Read, Stats};
-use crate::{Result, os::completion::Queue};
-use std::{fs::File, sync::atomic::Ordering, time::Instant};
+use crate::{Result, os::ioring::ReadRing};
+use std::{fs::File, sync::atomic::Ordering};
 
 pub(super) struct Readers {
     lanes: Vec<Lane>,
@@ -10,9 +10,9 @@ pub(super) struct Readers {
 
 struct Lane {
     // Drain before releasing the staging allocation and file.
-    queue: Queue,
+    ring: ReadRing,
     staging: Aligned,
-    file: File,
+    #[cfg(test)]
     depth: usize,
 }
 
@@ -49,14 +49,14 @@ impl Readers {
         for _ in 0..workers {
             let file = crate::os::direct_reopen(source)
                 .map_err(|e| format!("open Engram direct reader: {e}"))?;
-            let queue = Queue::new(depth).map_err(|e| format!("Engram completion port: {e}"))?;
-            queue
-                .attach(&file)
-                .map_err(|e| format!("attach Engram reader: {e}"))?;
+            let staging = Aligned::new(depth * CHUNK)?;
+            // SAFETY: Lane drops its ring before the registered staging allocation.
+            let ring = unsafe { ReadRing::new(file, staging.0, depth, CHUNK as u32) }
+                .map_err(|e| format!("Engram I/O ring: {e}"))?;
             lanes.push(Lane {
-                queue,
-                staging: Aligned::new(depth * CHUNK)?,
-                file,
+                ring,
+                staging,
+                #[cfg(test)]
                 depth,
             });
         }
@@ -120,7 +120,7 @@ impl Lane {
         }))
         .unwrap_or_else(|_| Err("embedding read worker panicked".into()));
         if result.is_err() {
-            self.queue.cancel_and_drain();
+            self.ring.cancel_and_drain();
         }
         result
     }
@@ -139,73 +139,50 @@ impl Lane {
             wait: 0,
             complete: 0,
         };
-        for batch in reads.chunks(self.depth) {
-            let begin = Instant::now();
+        // Refill each lane's fixed window as slots complete across the full gather.
+        for batch in [reads] {
             let mut failure = None;
-            let mut submitted = 0;
-            let mut bytes = 0;
-            for (slot, read) in batch.iter().enumerate() {
-                if let Err(error) = unsafe {
-                    self.queue.submit(
-                        slot,
-                        &self.file,
-                        self.staging.at(slot) as usize,
-                        read.nbytes as u32,
-                        read.offset,
-                        false,
-                    )
-                } {
-                    failure = Some(format!("submit Engram read: {error}"));
-                    self.queue.cancel();
-                    break;
-                }
-                submitted += 1;
-                bytes += read.nbytes as u64;
-            }
-            stats.disk_reads.fetch_add(submitted, Ordering::Relaxed);
-            stats.disk_bytes.fetch_add(bytes, Ordering::Relaxed);
-            timing.submit += begin.elapsed().as_nanos() as u64;
-            while self.queue.pending() != 0 {
-                let begin = Instant::now();
-                let result = self.queue.wait();
-                timing.wait += begin.elapsed().as_nanos() as u64;
-                let begin = Instant::now();
-                match result {
-                    Err(error) => {
-                        failure.get_or_insert_with(|| format!("wait for Engram read: {error}"));
-                        self.queue.cancel();
-                        std::thread::sleep(std::time::Duration::from_millis(1));
-                    }
-                    Ok((slot, result)) => {
-                        let read = &batch[slot];
-                        match result {
-                            Ok(count) if count >= read.required => {
-                                for fragment in &fragments[read.fragments.clone()] {
-                                    // SAFETY: Only this worker writes this fragment; staging
-                                    // is complete and stays owned until every copy finishes.
-                                    unsafe {
-                                        output.copy(
-                                            fragment,
-                                            self.staging
-                                                .at(slot)
-                                                .add((fragment.source - read.offset) as usize),
-                                        );
-                                    }
+            let result = self.ring.read_all(
+                batch.iter().map(|read| (read.offset, read.nbytes as u32)),
+                |index, slot, result| {
+                    let read = &batch[index];
+                    match result {
+                        Ok(count) if count >= read.required => {
+                            for fragment in &fragments[read.fragments.clone()] {
+                                // SAFETY: This lane exclusively owns each fragment;
+                                // read_all waits until copying ends before slot reuse.
+                                unsafe {
+                                    output.copy(
+                                        fragment,
+                                        self.staging
+                                            .at(slot)
+                                            .add((fragment.source - read.offset) as usize),
+                                    );
                                 }
                             }
-                            result => {
-                                failure.get_or_insert_with(|| {
-                                    format!(
-                                        "Engram read at {} requires {} bytes: {result:?}",
-                                        read.offset, read.required
-                                    )
-                                });
-                            }
+                        }
+                        result => {
+                            failure.get_or_insert_with(|| {
+                                format!(
+                                    "Engram read at {} requires {} bytes: {result:?}",
+                                    read.offset, read.required,
+                                )
+                            });
                         }
                     }
-                }
-                timing.complete += begin.elapsed().as_nanos() as u64;
-            }
+                },
+            );
+            timing.submit += self.ring.timings.submit;
+            timing.wait += self.ring.timings.wait;
+            timing.complete += self.ring.timings.complete;
+            result.map_err(|e| format!("Engram I/O ring read: {e}"))?;
+            stats
+                .disk_reads
+                .fetch_add(batch.len() as u64, Ordering::Relaxed);
+            stats.disk_bytes.fetch_add(
+                batch.iter().map(|read| read.nbytes as u64).sum(),
+                Ordering::Relaxed,
+            );
             if let Some(error) = failure {
                 return Err(error.into());
             }

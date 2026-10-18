@@ -10,6 +10,8 @@ mod windows;
 pub(crate) use windows::*;
 #[cfg(windows)]
 pub(crate) mod completion;
+#[cfg(windows)]
+pub(crate) mod ioring;
 
 use std::{fs::File, io};
 
