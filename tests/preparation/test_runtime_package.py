@@ -410,7 +410,8 @@ def test_graph_export_preserves_construction_order_across_branches():
     ("fixed_package_fixture.py", "test_fixed_runtime_package", "native fixed-address replay passed", False),
     ("fixed_package_fixture.py", "test_fixed_runtime_package", "native fixed-address replay passed", True),
 ])
-def test_package_replays_without_python(tmp_path, fixture, binary, expected, exec_handover):
+@pytest.mark.parametrize("shard_size", [0, 128 << 10])
+def test_package_replays_without_python(tmp_path, fixture, binary, expected, exec_handover, shard_size):
     assert os.environ.get("CUDA_VISIBLE_DEVICES"), "assign CUDA_VISIBLE_DEVICES before running GPU tests"
     root = Path(__file__).resolve().parents[2]
     subprocess.run([
@@ -421,6 +422,7 @@ def test_package_replays_without_python(tmp_path, fixture, binary, expected, exe
     arguments = [sys.executable, str(root / "helios/tests" / fixture), str(tmp_path)]
     if exec_handover:
         arguments.append(executable)
+    arguments += ["--shard-size", str(shard_size)]
     result = subprocess.run(arguments, cwd=root, text=True, capture_output=True, timeout=180)
     assert result.returncode == 0, result.stdout + result.stderr
     package_path = tmp_path / "package"
@@ -440,7 +442,11 @@ def test_package_replays_without_python(tmp_path, fixture, binary, expected, exe
     document = index.ranks[0]
     storage = {allocation.file for allocation in document.allocations if allocation.HasField("file")}
     storage_end = max((document.resources[key].offset + document.resources[key].nbytes for key in storage), default=0)
-    assert all(span.offset >= storage_end for key, span in document.resources.items() if key not in storage)
+    assert all(not span.filename for key, span in document.resources.items() if key not in storage)
+    if index.version == 4:
+        assert all(span.offset >= storage_end for key, span in document.resources.items() if key not in storage)
+    else:
+        assert all(document.resources[key].filename for key in storage)
     def contents(key):
         span = document.resources[key]
         with package_path.open("rb") as source:

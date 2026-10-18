@@ -35,8 +35,14 @@ message ProtectedResource {
   uint64 plain_bytes = 3;
   repeated bytes sha256 = 4;
 }
-// One contiguous payload range of stored allocations or tables, alignment padding included.
-message StoredData { uint64 nbytes = 1; bytes sha256 = 2; uint64 offset = 3; }
+// Stored allocation or table bytes, including alignment padding, hashed in part order.
+message StoredData {
+  uint64 nbytes = 1;
+  bytes sha256 = 2;
+  uint64 offset = 3;
+  // Empty retains the primary-file range above. Otherwise hashes the concatenated parts.
+  repeated Span parts = 4;
+}
 // One rank's bundle, its encrypted executables, its supporting resources and its stored data.
 message RankProtection {
   uint32 rank = 1;
@@ -47,6 +53,7 @@ message RankProtection {
 }
 
 message ModelIndex {
+  // Version 4 uses only the primary payload; version 5 permits companion data files.
   uint32 version = 1;
   repeated BundleIndex ranks = 2;
   repeated PeerMemory peer_memory = 3;
@@ -464,7 +471,12 @@ message PeerMemory {
 message Context { uint32 flags = 1; int32 cache = 2; repeated Limit limits = 3; }
 message Limit { uint64 id = 1; uint64 value = 2; }
 message Reservation { uint64 address = 1; uint64 nbytes = 2; }
-message Span { uint64 offset = 1; uint64 nbytes = 2; }
+message Span {
+  uint64 offset = 1;
+  uint64 nbytes = 2;
+  // Empty selects the primary payload. Allocation destination spans must leave this empty.
+  string filename = 3;
+}
 // PEER names another rank's device allocation that this rank reads or writes at its recorded
 // address; the owner allocates it and model.pb grants this rank access.
 enum Memory { DEVICE = 0; MAPPED_HOST = 1; PEER = 2; }

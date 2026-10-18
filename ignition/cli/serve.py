@@ -78,7 +78,7 @@ def _publisher(configuration, args, model=None, hub_cache=None):
     from ignition.preparation.protection import Publisher
     values = configuration.values.get("publishing", {})
     try:
-        if not values and not args.official_source:
+        if not any(key in values for key in ("signing_key", "namespace", "official_source")) and not args.official_source:
             from ignition.development import publisher
             signer = publisher(configuration)
         else:
@@ -120,7 +120,8 @@ def run(args) -> int:
     host = configuration.get("server.host", args.host).value
     port = configuration.get("server.port", args.port).value
     _address(host, port)
-    with cached_package(configuration, model, plan, args.no_compile, publisher) as package:
+    with cached_package(configuration, model, plan, args.no_compile, publisher,
+                        configuration.shard_size(getattr(args, "shard_size", None))) as package:
         if not package.exists():
             _prepare(args, export_path=package)
         else:
@@ -247,6 +248,7 @@ def _export_hosts(args, *, export_path) -> int:
             with phase(progress, "Export native packages") as stage:
                 prepared.export(export_path, options=options, export_id=uuid.uuid4().hex, images=recorder,
                                 storage=storage, publisher=_publisher(configuration, args, model, hub_cache),
+                                shard_size=configuration.shard_size(getattr(args, "shard_size", None)),
                                 progress=progress if args.verbose else None)
                 stage.update(f"{export_path} on each of {plan.world_size} hosts")
         for region in storage.host_regions:
@@ -355,7 +357,8 @@ def _prepare(args, *, export_path) -> int:
                     options.pop("api_key")
                     export_package(prepared, recorder, storage, export_path, options=options, publisher=publisher,
                                  progress=progress if args.verbose else None, console=progress.console,
-                                 staging=configuration.directory("export_staging"))
+                                 staging=configuration.directory("export_staging"),
+                                 shard_size=configuration.shard_size(getattr(args, "shard_size", None)))
                 except Exception as error:
                     if args.verbose:
                         traceback.print_exc()

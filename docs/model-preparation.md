@@ -3,12 +3,15 @@
 ## Runtime packages
 
 Run commands from the repository root. Ignition prepares a source checkpoint
-into a **runtime package**: a single `.safetensors` file with two `U8` tensors.
-`flare.payload` holds stored tensors before graph, kernel, and frontend data;
-`flare.metadata` holds the bounded Protobuf index at the end of the file.
+into a **runtime package**: a primary `.safetensors` file with two `U8` tensors,
+plus sibling data files when the package exceeds the 64 GiB soft target.
+`flare.payload` holds primary resources; `flare.metadata` holds the bounded
+Protobuf index at the end. `--shard-size SIZE` overrides `[publishing] shard_size`;
+`0` keeps the package monolithic. Companions use the primary basename, such as
+`example-data-01-of-02.safetensors`, and hold whole allocation payloads or
+embedding planes. Encrypted and individually authenticated resources stay primary.
 The protobuf describes independently addressed resources. Tensor-parallel
-packages contain one resource bundle per rank, with all ranks' storage before
-execution resources.
+packages contain one resource bundle per rank.
 Final packages use a format-4 signed envelope and encrypted cubins and graph
 records. Ignition creates a per-user development signing key when `[publishing]`
 is absent. `ignition run` passes the exact export key and publisher to Flare for
@@ -16,7 +19,7 @@ unattended approval; direct `flare run` needs the corresponding publisher profil
 and first-use acceptance. See [signing and development](cli-design.md#signing-and-local-development).
 Unsigned rank staging is private to preparation and cannot load in Helios.
 
-Flare loads the file without Python. Helios is a Rust library;
+Flare loads the package files without Python. Helios is a Rust library;
 `flare_heliopause` is a CPython extension imported by Ignition.
 
 Every recipe defaults to FP8 E4M3 KV storage, including learned draft-model

@@ -24,6 +24,7 @@ const LOAD_READERS: usize = 4;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Plane {
+    pub file: usize,
     pub offset: u64,
     pub nbytes: usize,
     pub row_bytes: usize,
@@ -31,12 +32,14 @@ pub(crate) struct Plane {
 
 #[derive(Clone, Copy)]
 struct Fragment {
+    file: usize,
     source: u64,
     destination: usize,
     nbytes: usize,
 }
 
 struct Read {
+    file: usize,
     offset: u64,
     nbytes: usize,
     required: usize,
@@ -285,16 +288,21 @@ pub(crate) struct DiskReader {
     #[cfg(windows)]
     ring: crate::os::completion::Queue,
     staging: Aligned,
-    file: File,
+    files: Vec<Arc<File>>,
     fragments: Vec<Fragment>,
     reads: Vec<Read>,
     stats: Arc<Stats>,
 }
 
 impl DiskReader {
-    fn from_file(source: &File, stats: Arc<Stats>) -> Result<Self> {
-        let file = crate::os::direct_reopen(source)
-            .map_err(|e| format!("open Engram direct reader: {e}"))?;
+    fn from_files(files: &[Arc<File>], stats: Arc<Stats>) -> Result<Self> {
+        // Windows associates a file object with one completion port; each reader owns its objects.
+        #[cfg(windows)]
+        let files = files
+            .iter()
+            .map(|file| crate::os::direct_reopen(file).map(Arc::new))
+            .collect::<std::io::Result<Vec<_>>>()
+            .map_err(|e| format!("open Engram completion files: {e}"))?;
         let staging = Aligned::new(DEPTH * CHUNK)?;
         #[cfg(unix)]
         let ring = {
@@ -313,12 +321,14 @@ impl DiskReader {
         let ring = crate::os::completion::Queue::new(DEPTH)
             .map_err(|e| format!("Engram completion port: {e}"))?;
         #[cfg(windows)]
-        ring.attach(&file)
-            .map_err(|e| format!("attach Engram reader: {e}"))?;
+        for file in &files {
+            ring.attach(file)
+                .map_err(|e| format!("attach Engram reader: {e}"))?;
+        }
         Ok(Self {
             ring,
             staging,
-            file,
+            files: files.to_vec(),
             fragments: Vec::new(),
             reads: Vec::new(),
             stats,
@@ -341,6 +351,7 @@ impl DiskReader {
                     let address = source + copied as u64;
                     let nbytes = (plane.row_bytes - copied).min(BLOCK - address as usize % BLOCK);
                     self.fragments.push(Fragment {
+                        file: plane.file,
                         source: address,
                         destination: destination + copied,
                         nbytes,
@@ -350,12 +361,13 @@ impl DiskReader {
             }
             base += ids.len() * plane.row_bytes;
         }
-        self.fragments.sort_unstable_by_key(|f| f.source);
+        self.fragments.sort_unstable_by_key(|f| (f.file, f.source));
         self.reads.clear();
         for (i, fragment) in self.fragments.iter().enumerate() {
             let block = fragment.source / BLOCK as u64 * BLOCK as u64;
             if let Some(read) = self.reads.last_mut().filter(|r| {
-                block <= r.offset + r.nbytes as u64
+                r.file == fragment.file
+                    && block <= r.offset + r.nbytes as u64
                     && block + BLOCK as u64 <= r.offset + CHUNK as u64
             }) {
                 read.nbytes = (block - read.offset) as usize + BLOCK;
@@ -365,6 +377,7 @@ impl DiskReader {
                 read.fragments.end = i + 1;
             } else {
                 self.reads.push(Read {
+                    file: fragment.file,
                     offset: block,
                     nbytes: BLOCK,
                     required: (fragment.source - block) as usize + fragment.nbytes,
@@ -376,7 +389,7 @@ impl DiskReader {
         for batch in self.reads.chunks(DEPTH) {
             for (slot, read) in batch.iter().enumerate() {
                 let entry = opcode::ReadFixed::new(
-                    types::Fd(self.file.as_raw_fd()),
+                    types::Fd(self.files[read.file].as_raw_fd()),
                     self.staging.at(slot),
                     read.nbytes as u32,
                     slot as u16,
@@ -439,7 +452,7 @@ impl DiskReader {
                 if let Err(error) = unsafe {
                     self.ring.submit(
                         slot,
-                        &self.file,
+                        &self.files[read.file],
                         self.staging.at(slot) as usize,
                         read.nbytes as u32,
                         read.offset,
@@ -665,8 +678,8 @@ impl Reader {
         max_rows: usize,
         stats: Arc<Stats>,
     ) -> Result<Self> {
-        Self::from_file(
-            &File::open(path).unwrap(),
+        Self::from_files(
+            &[Arc::new(open_file(path)?)],
             planes,
             resident,
             cache_bytes,
@@ -674,8 +687,8 @@ impl Reader {
             stats,
         )
     }
-    pub fn from_file(
-        source: &File,
+    pub fn from_files(
+        files: &[Arc<File>],
         planes: &[Plane; 2],
         resident: bool,
         cache_bytes: usize,
@@ -685,15 +698,16 @@ impl Reader {
         if resident && cache_bytes != 0 {
             return Err("embedding row cache requires disk table storage".into());
         }
+        if planes.iter().any(|plane| plane.file >= files.len()) {
+            return Err("embedding plane references an unknown file".into());
+        }
         let data = if resident {
-            let file = crate::os::direct_reopen(source)
-                .map_err(|e| format!("open resident Engram reader: {e}"))?;
             Data::Ram([
-                Arc::new(Resident::load(&file, planes[0])?),
-                Arc::new(Resident::load(&file, planes[1])?),
+                Arc::new(Resident::load(&files[planes[0].file], planes[0])?),
+                Arc::new(Resident::load(&files[planes[1].file], planes[1])?),
             ])
         } else {
-            let disk = DiskReader::from_file(source, stats.clone())?;
+            let disk = DiskReader::from_files(files, stats.clone())?;
             if cache_bytes != 0 {
                 Data::Cached(Box::new(CachedReader::new(
                     disk,
@@ -778,11 +792,13 @@ mod tests {
         std::fs::write(&path, &bytes).unwrap();
         let planes = [
             Plane {
+                file: 0,
                 offset: 0,
                 nbytes: second,
                 row_bytes: 256,
             },
             Plane {
+                file: 0,
                 offset: second as u64,
                 nbytes: rows * 8,
                 row_bytes: 8,
@@ -838,6 +854,7 @@ mod tests {
         let bytes: Vec<_> = (0..12345).map(|i| (i * 19 + i / 7) as u8).collect();
         std::fs::write(&path, &bytes).unwrap();
         let plane = Plane {
+            file: 0,
             offset: 97,
             nbytes: 8192,
             row_bytes: 128,
@@ -878,11 +895,13 @@ mod tests {
         std::fs::write(&path, &bytes).unwrap();
         let planes = [
             Plane {
+                file: 0,
                 offset: first as u64,
                 nbytes: rows * 80,
                 row_bytes: 80,
             },
             Plane {
+                file: 0,
                 offset: second as u64,
                 nbytes: rows * 10,
                 row_bytes: 10,
@@ -923,11 +942,13 @@ mod tests {
         std::fs::write(&path, &bytes).unwrap();
         let planes = [
             Plane {
+                file: 0,
                 offset: first as u64,
                 nbytes: rows * 80,
                 row_bytes: 80,
             },
             Plane {
+                file: 0,
                 offset: second as u64,
                 nbytes: rows * 10,
                 row_bytes: 10,
@@ -990,11 +1011,13 @@ mod tests {
         std::fs::write(&path, &bytes).unwrap();
         let planes = [
             Plane {
+                file: 0,
                 offset: first as u64,
                 nbytes: rows * 256,
                 row_bytes: 256,
             },
             Plane {
+                file: 0,
                 offset: second as u64,
                 nbytes: rows * 8,
                 row_bytes: 8,
@@ -1050,5 +1073,50 @@ mod tests {
             .unwrap();
         assert!(reader.gather(&planes, &[100], &mut [0; 264]).is_err());
         std::fs::remove_file(&path).unwrap();
+    }
+    #[test]
+    fn equal_offsets_in_separate_files_never_coalesce() {
+        let root = std::env::temp_dir().join(format!("helios-engram-files-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let planes = [
+            Plane {
+                file: 0,
+                offset: 4093,
+                nbytes: 80 * 128,
+                row_bytes: 80,
+            },
+            Plane {
+                file: 1,
+                offset: 4093,
+                nbytes: 10 * 128,
+                row_bytes: 10,
+            },
+        ];
+        let mut files = Vec::new();
+        for (i, plane) in planes.iter().enumerate() {
+            let path = root.join(i.to_string());
+            std::fs::write(
+                &path,
+                vec![i as u8 + 1; plane.offset as usize + plane.nbytes],
+            )
+            .unwrap();
+            files.push(Arc::new(open_file(&path).unwrap()));
+        }
+        for (resident, cache) in [(false, 0), (false, 65536), (true, 0)] {
+            let mut reader =
+                Reader::from_files(&files, &planes, resident, cache, 16, Arc::default()).unwrap();
+            for _ in 0..3 {
+                let mut output = vec![0xa5; 4 * 90];
+                reader
+                    .gather(&planes, &[17, 2, -1, 17], &mut output)
+                    .unwrap();
+                assert_eq!(&output[..80], &[1; 80]);
+                assert_eq!(&output[160..240], &[0; 80]);
+                assert_eq!(&output[320..340], &[2; 20]);
+                assert_eq!(&output[340..350], &[0; 10]);
+                assert_eq!(&output[350..360], &[2; 10]);
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

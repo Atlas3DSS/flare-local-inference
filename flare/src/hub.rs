@@ -63,17 +63,30 @@ fn validate_relative(value: &str) -> Result<()> {
     Ok(())
 }
 
+fn is_companion(filename: &str) -> bool {
+    let Some(stem) = filename.strip_suffix(".safetensors") else {
+        return false;
+    };
+    let Some((_, numbers)) = stem.rsplit_once("-data-") else {
+        return false;
+    };
+    let bytes = numbers.as_bytes();
+    bytes.len() == 8
+        && &bytes[2..6] == b"-of-"
+        && bytes[..2].iter().chain(&bytes[6..]).all(u8::is_ascii_digit)
+}
+
 fn choose_file(files: impl IntoIterator<Item = String>, requested: Option<&str>) -> Result<String> {
     if let Some(filename) = requested {
         validate_relative(filename)?;
-        if !filename.ends_with(".safetensors") {
+        if !filename.ends_with(".safetensors") || is_companion(filename) {
             return Err("--filename must name a prepared .safetensors package".into());
         }
         return Ok(filename.to_owned());
     }
     let mut candidates: Vec<_> = files
         .into_iter()
-        .filter(|file| file.ends_with(".safetensors"))
+        .filter(|file| file.ends_with(".safetensors") && !is_companion(file))
         .collect();
     candidates.sort();
     match candidates.as_slice() {
@@ -148,8 +161,21 @@ fn fetch(api: &Api, cache: &Cache, repo: &Repo, requested: Option<&str>) -> Resu
         path
     } else {
         eprintln!("Downloading model: {filename}...");
-        api.repo(pinned).download(&filename)?
+        api.repo(pinned.clone()).download(&filename)?
     };
+    let companions = flare_helios::runtime_package::package_companions(&path)?;
+    let parent = Path::new(&filename).parent().unwrap();
+    for name in &companions {
+        let relative = parent.join(name).to_string_lossy().replace('\\', "/");
+        if !snapshot(cache, &pinned, &info.sha)
+            .join(&relative)
+            .is_file()
+        {
+            eprintln!("Downloading model data: {relative}...");
+            api.repo(pinned.clone()).download(&relative)?;
+        }
+    }
+    let path = package_view(cache, repo, &info.sha, &filename, &companions)?;
     cache.repo(repo.clone()).create_ref(&info.sha)?;
     Ok(path)
 }
@@ -188,11 +214,68 @@ fn cached(cache: &Cache, repo: &Repo, requested: Option<&str>) -> Result<PathBuf
         collect_files(&directory, &directory, &mut files)?;
         choose_file(files, None)?
     };
-    let path = directory.join(filename);
+    let path = directory.join(&filename);
     if !path.is_file() {
         return Err(format!("package is not cached: {}", path.display()).into());
     }
-    Ok(path)
+    let companions = flare_helios::runtime_package::package_companions(&path)?;
+    package_view(cache, repo, &commit, &filename, &companions)
+}
+
+/// Snapshot entries may be symlinks to blobs. A package view uses regular hardlinks so the
+/// runtime can reject symlink companions without duplicating model bytes.
+fn package_view(
+    cache: &Cache,
+    repo: &Repo,
+    commit: &str,
+    filename: &str,
+    companions: &[String],
+) -> Result<PathBuf> {
+    let primary = snapshot(cache, repo, commit).join(filename);
+    if companions.is_empty() {
+        return Ok(primary);
+    }
+    let view = cache
+        .path()
+        .join(repo.folder_name())
+        .join("flare-packages")
+        .join(commit)
+        .join(filename);
+    std::fs::create_dir_all(&view)?;
+    let basename = primary
+        .file_name()
+        .ok_or("missing package filename")?
+        .to_string_lossy()
+        .into_owned();
+    for name in companions.iter().chain(std::iter::once(&basename)) {
+        let source = primary
+            .parent()
+            .unwrap()
+            .join(name)
+            .canonicalize()
+            .map_err(|e| format!("package file is not cached: {name}: {e}"))?;
+        if !source.is_file() {
+            return Err(format!("package file is not regular: {name}").into());
+        }
+        let target = view.join(name);
+        match std::fs::hard_link(&source, &target) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                let info = std::fs::symlink_metadata(&target)?;
+                if !info.is_file() || info.len() != std::fs::metadata(&source)?.len() {
+                    return Err(format!("invalid cached package view: {}", target.display()).into());
+                }
+            }
+            Err(e) => {
+                return Err(format!(
+                    "cannot hardlink package cache view {}: {e}",
+                    target.display()
+                )
+                .into());
+            }
+        }
+    }
+    Ok(view.join(basename))
 }
 
 fn collect_files(root: &Path, directory: &Path, files: &mut Vec<String>) -> Result<()> {
@@ -224,6 +307,43 @@ mod tests {
     };
 
     const COMMIT: &str = "0123456789012345678901234567890123456789";
+
+    fn fixture(companions: &[&str]) -> Vec<u8> {
+        fn bytes(field: u8, body: &[u8]) -> Vec<u8> {
+            let mut out = vec![field * 8 + 2];
+            let mut n = body.len();
+            while n >= 128 {
+                out.push((n as u8 & 127) | 128);
+                n >>= 7;
+            }
+            out.push(n as u8);
+            out.extend_from_slice(body);
+            out
+        }
+        // ProtectedIndex -> PublisherMetadata -> ModelIndex, with unsigned discovery metadata.
+        let index = [8, if companions.is_empty() { 4 } else { 5 }];
+        let metadata = bytes(1, &index);
+        let mut envelope = vec![8, 4];
+        for (kind, body) in [(1, metadata), (2, vec![]), (3, vec![])] {
+            envelope.extend(bytes(4, &[vec![8, kind], bytes(2, &body)].concat()));
+        }
+        let mut data = Vec::new();
+        for name in companions {
+            data.extend(bytes(4, &bytes(3, name.as_bytes())));
+        }
+        let rank = [bytes(2, &[]), bytes(5, &data)].concat();
+        envelope.extend(bytes(5, &[vec![8, 4], bytes(2, &rank)].concat()));
+        let header = serde_json::json!({
+            "__metadata__": {"format": "flare"},
+            "flare.payload": {"dtype": "U8", "shape": [0], "data_offsets": [0, 0]},
+            "flare.metadata": {"dtype": "U8", "shape": [envelope.len()], "data_offsets": [0, envelope.len()]},
+        });
+        let mut result = 4088u64.to_le_bytes().to_vec();
+        result.extend(serde_json::to_vec(&header).unwrap());
+        result.resize(4096, b' ');
+        result.extend(envelope);
+        result
+    }
 
     #[test]
     fn local_paths_and_repository_revisions_are_distinct() {
@@ -282,7 +402,7 @@ mod tests {
         let repo = Repo::with_revision("owner/model".into(), RepoType::Model, "gb10".into());
         let directory = snapshot(&cache, &repo, COMMIT);
         std::fs::create_dir_all(&directory).unwrap();
-        std::fs::write(directory.join("model.safetensors"), b"package fixture").unwrap();
+        std::fs::write(directory.join("model.safetensors"), &fixture(&[])).unwrap();
         cache.repo(repo.clone()).create_ref(COMMIT).unwrap();
         assert_eq!(
             cached(&cache, &repo, None).unwrap(),
@@ -313,7 +433,7 @@ mod tests {
         );
     }
 
-    fn mock_hub(responses: Vec<(String, String)>) -> (String, thread::JoinHandle<()>) {
+    fn mock_hub(responses: Vec<(String, Vec<u8>)>) -> (String, thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let worker = thread::spawn(move || {
@@ -333,19 +453,19 @@ mod tests {
                         break;
                     }
                 }
-                socket.write_all(response.as_bytes()).unwrap();
+                socket.write_all(&response).unwrap();
             }
         });
         (endpoint, worker)
     }
 
-    fn metadata_response() -> String {
+    fn metadata_response() -> Vec<u8> {
         let body =
             format!(r#"{{"sha":"{COMMIT}","siblings":[{{"rfilename":"model.safetensors"}}]}}"#);
         format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
-        )
+        ).into_bytes()
     }
 
     fn test_api(cache: &Cache, endpoint: String) -> Api {
@@ -363,15 +483,16 @@ mod tests {
         let cache = Cache::new(temp.path().to_owned());
         let repo = Repo::with_revision("owner/model".into(), RepoType::Model, "gb202".into());
         let resolve = format!("/owner/model/resolve/{COMMIT}/model.safetensors");
+        let package = fixture(&[]);
         let (endpoint, worker) = mock_hub(vec![
             ("/api/models/owner/model/revision/gb202".into(), metadata_response()),
-            (resolve.clone(), format!("HTTP/1.1 206 Partial Content\r\nx-repo-commit: {COMMIT}\r\netag: fixture\r\nContent-Range: bytes 0-0/7\r\nContent-Length: 1\r\nConnection: close\r\n\r\np")),
-            (resolve, "HTTP/1.1 206 Partial Content\r\nContent-Length: 7\r\nConnection: close\r\n\r\npackage".into()),
+            (resolve.clone(), format!("HTTP/1.1 206 Partial Content\r\nx-repo-commit: {COMMIT}\r\netag: fixture\r\nContent-Range: bytes 0-0/{}\r\nContent-Length: 1\r\nConnection: close\r\n\r\np", package.len()).into_bytes()),
+            (resolve, [format!("HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", package.len()).into_bytes(), package.clone()].concat()),
         ]);
         let api = test_api(&cache, endpoint);
         let path = fetch(&api, &cache, &repo, None).unwrap();
         worker.join().unwrap();
-        assert_eq!(std::fs::read(&path).unwrap(), b"package");
+        assert_eq!(std::fs::read(&path).unwrap(), package);
         assert_eq!(cached(&cache, &repo, None).unwrap(), path);
     }
 
@@ -382,13 +503,75 @@ mod tests {
         let repo = Repo::with_revision("owner/model".into(), RepoType::Model, "gb10".into());
         let directory = snapshot(&cache, &repo, COMMIT);
         std::fs::create_dir_all(&directory).unwrap();
-        std::fs::write(directory.join("model.safetensors"), b"existing package").unwrap();
+        std::fs::write(directory.join("model.safetensors"), &fixture(&[])).unwrap();
         let (endpoint, worker) = mock_hub(vec![(
             "/api/models/owner/model/revision/gb10".into(),
             metadata_response(),
         )]);
         let path = fetch(&test_api(&cache, endpoint), &cache, &repo, None).unwrap();
         worker.join().unwrap();
-        assert_eq!(std::fs::read(path).unwrap(), b"existing package");
+        assert_eq!(std::fs::read(path).unwrap(), fixture(&[]));
+    }
+    #[test]
+    fn offline_shards_require_complete_snapshots_and_use_regular_file_views() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = Cache::new(temp.path().to_owned());
+        let repo = Repo::with_revision("owner/model".into(), RepoType::Model, COMMIT.into());
+        let directory = snapshot(&cache, &repo, COMMIT);
+        std::fs::create_dir_all(&directory).unwrap();
+        let name = "model-data-01-of-01.safetensors";
+        std::fs::write(directory.join("model.safetensors"), fixture(&[name])).unwrap();
+        assert!(
+            cached(&cache, &repo, None)
+                .unwrap_err()
+                .to_string()
+                .contains("not cached")
+        );
+        let blob = temp.path().join("blob");
+        std::fs::write(&blob, b"companion data").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&blob, directory.join(name)).unwrap();
+        #[cfg(windows)]
+        std::fs::hard_link(&blob, directory.join(name)).unwrap();
+        let path = cached(&cache, &repo, None).unwrap();
+        assert_ne!(path, directory.join("model.safetensors"));
+        assert!(
+            std::fs::symlink_metadata(path.parent().unwrap().join(name))
+                .unwrap()
+                .is_file()
+        );
+        assert_eq!(
+            std::fs::read(path.parent().unwrap().join(name)).unwrap(),
+            b"companion data"
+        );
+        assert_eq!(cached(&cache, &repo, None).unwrap(), path);
+        assert_eq!(
+            choose_file(["model.safetensors".into(), name.into()], None).unwrap(),
+            "model.safetensors"
+        );
+        assert!(choose_file([], Some(name)).is_err());
+    }
+    #[test]
+    fn companions_download_from_the_primary_commit() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = Cache::new(temp.path().to_owned());
+        let repo = Repo::with_revision("owner/model".into(), RepoType::Model, "gb202".into());
+        let name = "model-data-01-of-01.safetensors";
+        let directory = snapshot(&cache, &repo, COMMIT);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("model.safetensors"), fixture(&[name])).unwrap();
+        let resolve = format!("/owner/model/resolve/{COMMIT}/{name}");
+        let (endpoint, worker) = mock_hub(vec![
+            ("/api/models/owner/model/revision/gb202".into(), metadata_response()),
+            (resolve.clone(), format!("HTTP/1.1 206 Partial Content\r\nx-repo-commit: {COMMIT}\r\netag: data-fixture\r\nContent-Range: bytes 0-0/4\r\nContent-Length: 1\r\nConnection: close\r\n\r\nd").into_bytes()),
+            (resolve, b"HTTP/1.1 206 Partial Content\r\nContent-Length: 4\r\nConnection: close\r\n\r\ndata".to_vec()),
+        ]);
+        let path = fetch(&test_api(&cache, endpoint), &cache, &repo, None).unwrap();
+        worker.join().unwrap();
+        assert_eq!(
+            std::fs::read(path.parent().unwrap().join(name)).unwrap(),
+            b"data"
+        );
+        assert_eq!(cached(&cache, &repo, None).unwrap(), path);
     }
 }

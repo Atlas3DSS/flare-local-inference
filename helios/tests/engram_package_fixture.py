@@ -12,7 +12,7 @@ from ignition.preparation.runtime_package import FileSource, export_model
 
 
 @torch.no_grad()
-def prepare(root):
+def prepare(root, shard_size=64 << 30):
     root.mkdir(parents=True, exist_ok=False)
     torch.cuda.set_device(0)
     with ModuleImages() as images, PackageStorage() as storage:
@@ -79,10 +79,16 @@ def prepare(root):
                     max_active=4, resources=(storage, lookup), export_events=tables.events())
                 prepared.server_config = server_config(root)
                 prepared.package_data = tables
-                export_model(prepared, images, storage, root / 'package', options={}, publisher=publisher())
+                export_model(prepared, images, storage, root / 'package', options={}, publisher=publisher(),
+                             shard_size=shard_size)
             finally:
                 graph.reset()
 
 
 if __name__ == '__main__':
-    prepare(Path(sys.argv[1]))
+    import argparse
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("directory", type=Path)
+    parser.add_argument("--shard-size", type=int, default=64 << 30)
+    args = parser.parse_args()
+    prepare(args.directory, args.shard_size)

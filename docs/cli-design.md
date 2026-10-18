@@ -78,12 +78,13 @@ Flare banner on a terminal and reports model loading through Helios.
 
 `export` imports the `flare_heliopause` CPython extension in Ignition's process.
 Ignition performs weight loading, tuning, compilation, warmup, and capture. It writes compiled CUDA modules,
-allocation contents, graph descriptions, and frontend assets to one `.safetensors` file
-that must not exist, then exits without opening a listener. `run` caches the resulting package in
+allocation contents, graph descriptions, and frontend assets to a `.safetensors`
+primary and optional sibling data files. Every destination must be unused. It
+then exits without opening a listener. `run` caches the resulting package in
 `paths.package_cache` and replaces its Python process with the Rust `flare` executable. Cache keys
 include checkpoint identity, preparation settings, dependency versions, and
-preparation source contents, signing-key fingerprint, publisher namespace, and
-source URL. Qwen, GLM, and DeepSeek provide native package storage support.
+preparation source contents, signing-key fingerprint, publisher namespace,
+source URL, and the resolved shard size. Qwen, GLM, and DeepSeek provide native package storage support.
 Tensor-parallel packages contain one resource bundle per selected GPU and load
 in one process with one execution thread per rank. API keys are excluded from
 the package.
@@ -129,6 +130,7 @@ requires `--output FILE`, and excludes `--host` and `--port`.
 | `--kv-cache-limit concurrency\|context\|memory` | `run` only: pass the shared KV-pool ceiling to Flare without changing preparation | `memory` |
 | `--memory-limit LIMIT` | `run` only: pass an occupied size (`30G`), free reserve (`-30G`), or total-memory fraction (`0.8`) to Flare | Package serving reserve |
 | `--config PATH` | Configuration file | `~/.config/flare/config.toml` |
+| `--shard-size SIZE` | Soft file-size target for export/run; `0` keeps one file | `[publishing] shard_size`, else `64G` |
 | `--official-source URL` | Published repository URL under the configured publisher namespace | `[publishing] official_source` |
 | `--publisher-keys PATH` | Additional publisher profiles passed to Flare; repeatable, `run` only | Embedded keys plus the local development profile when applicable |
 | `--trust-store PATH` | Remembered execution trust passed to Flare; `run` only | `~/.config/flare/trust.toml` |
@@ -400,9 +402,12 @@ revision. GPU selection follows `CUDA_VISIBLE_DEVICES` for both commands.
 An explicit `--revision` overrides `@revision` and hardware detection. It accepts
 a branch, tag, or commit, and permits downloading on a machine without NVIDIA
 hardware. Online resolution obtains the revision's commit and downloads from
-that exact commit. If the revision contains exactly one `.safetensors` file,
-Flare selects it. Multiple files require `--filename`; Flare prints the available
-names. Hardware selection does not infer tensor-parallel size or graph capacities
+that exact commit. Flare excludes `*-data-NN-of-NN.safetensors` companions when
+selecting the primary; multiple primaries require `--filename`. Referenced
+companions download from the primary's directory at that same commit. Offline
+resolution requires every referenced file. Multi-file packages use regular
+hardlinks in the Hub cache's `flare-packages` directory so the loader can reject
+symlink companions; filesystems without hardlink support report an error. Hardware selection does not infer tensor-parallel size or graph capacities
 from filenames. The selected package must match the serving GPU count, topology,
 and capacities; the native loader validates its contract.
 
@@ -418,7 +423,7 @@ Both commands accept these download options:
 | Flag | Meaning | Default |
 |---|---|---|
 | `--revision REVISION` | Explicit Hub branch, tag, or commit | Detected `gb10` or `gb202` |
-| `--filename FILE` | Repository-relative prepared package filename | Sole `.safetensors` file |
+| `--filename FILE` | Repository-relative prepared package filename | Sole primary `.safetensors` file |
 | `--cache-dir PATH` | Hugging Face hub cache directory | `~/.cache/huggingface/hub` from the OS user account |
 | `--token-file PATH` | File containing a Hub token for gated or private repositories | No authentication |
 | `--offline` | Resolve only from cached refs and snapshots and skip the publisher identity check; make no network requests. Accepted with a local package path | Off |
@@ -447,8 +452,17 @@ official_source = "https://huggingface.co/local-inference-lab/foobar"
 The key must be an owner-only Ed25519 PKCS#8 PEM file. Encrypted keys prompt
 for their passphrase in an interactive terminal; unencrypted keys are also
 accepted. Runtime publisher profiles contain only the verification key.
-`--official-source` overrides the configured repository URL. A partial publishing
-configuration is an error and never falls back to local credentials.
+`--official-source` overrides the configured repository URL. Setting any signing
+identity field requires all three identity fields. `[publishing] shard_size` may
+be configured independently and does not select a production identity.
+
+`shard_size = "64G"` is the default soft target; export/run/sign accept
+`--shard-size SIZE` to override it, and `0` requests one file. An indivisible
+resource may exceed the target. `example.safetensors` keeps metadata, encrypted
+resources, and supporting assets; companions are named
+`example-data-01-of-02.safetensors` through `example-data-02-of-02.safetensors`.
+At most 99 companions are supported, and no resource crosses a file boundary.
+Move or upload the complete set together.
 
 `ignition keygen` creates an encrypted production key and public profile.
 `ignition key-password` changes the key's passphrase while preserving its identity.
@@ -456,7 +470,7 @@ configuration is an error and never falls back to local credentials.
 model preparation or GPU access. See [production signing](signing.md) for key
 custody, commands, and package promotion.
 
-With no publishing configuration, Ignition creates and reuses
+With no publishing identity configured, Ignition creates and reuses
 `development-signing-key.pem` beside its configuration file, with owner-only
 permissions. It also writes `development-publisher.json` containing the public
 verification profile. These packages use the explicit namespace and source

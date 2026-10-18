@@ -29,9 +29,9 @@ pub type Failure = Box<dyn std::error::Error + Send + Sync>;
 /// The agent's default port on every host.
 pub const PORT: u16 = 29900;
 const PROTOCOL: &[u8] = b"flare-agent-1";
-/// Sent with the token check's OK. Version 2 accepts packages as byte ranges; version 1 agents
-/// send nothing there.
-const VERSION: u8 = 2;
+/// Sent with the token check's OK. Version 2 accepts byte ranges; version 3 also accepts
+/// package directories preserving companion basenames. Version 1 sends no version byte.
+const VERSION: u8 = 3;
 
 // Frame tags.
 const NONCE: u8 = 1;
@@ -134,7 +134,17 @@ pub fn default_cache() -> PathBuf {
 
 /// A cache entry name: one path component, no traversal.
 fn entry(cache: &Path, directory: &str, name: &str) -> Result<PathBuf, Failure> {
-    if name.is_empty() || name.contains('/') || name.starts_with('.') {
+    let components: Vec<_> = name.split('/').collect();
+    if components.len() > if directory == "packages" { 2 } else { 1 }
+        || components.iter().any(|part| {
+            part.is_empty()
+                || part.starts_with('.')
+                || part.contains("..")
+                || !part
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
+        })
+    {
         return Err(format!("invalid cache entry name {name:?}").into());
     }
     Ok(cache.join(directory).join(name))
@@ -230,7 +240,11 @@ fn evict(directory: &Path, pins: &Pins) -> Result<(), Failure> {
             .file_name()
             .is_none_or(|name| name.to_string_lossy().starts_with('.'));
         if !hidden && !pins.contains_key(&path) {
-            fs::remove_file(&path)?;
+            if path.is_dir() {
+                fs::remove_dir_all(&path)?;
+            } else {
+                fs::remove_file(&path)?;
+            }
             eprintln!("removed superseded {}", path.display());
         }
     }
@@ -271,14 +285,15 @@ fn session(mut stream: TcpStream, token: &[u8], cache: &Path, pins: &Pins) -> Re
         let result = match tag {
             HAVE => have(cache, &request).map(|held| {
                 if let Some(path) = &held {
-                    pinned.pin(path.clone());
+                    pinned.pin(cache_unit(cache, path));
                 }
                 vec![held.is_some() as u8]
             }),
             PUT => put(cache, &mut stream, &request).and_then(|path| {
                 // The newest entry of its kind replaces those no connection uses.
-                let directory = path.parent().unwrap().to_owned();
-                pinned.pin(path);
+                let unit = cache_unit(cache, &path);
+                let directory = unit.parent().unwrap().to_owned();
+                pinned.pin(unit);
                 evict(&directory, pins).map(|_| Vec::new())
             }),
             RUN => return run(cache, stream, &request),
@@ -291,6 +306,15 @@ fn session(mut stream: TcpStream, token: &[u8], cache: &Path, pins: &Pins) -> Re
                 return Err(error);
             }
         }
+    }
+}
+
+fn cache_unit(cache: &Path, path: &Path) -> PathBuf {
+    let packages = cache.join("packages");
+    if path.parent().and_then(Path::parent) == Some(packages.as_path()) {
+        path.parent().unwrap().to_owned()
+    } else {
+        path.to_owned()
     }
 }
 
@@ -351,7 +375,11 @@ fn put(
     let path = entry(cache, kind_directory(kind)?, name)?;
     let size = request["size"].as_u64().ok_or("agent request lacks size")?;
     let ranges = transfer_ranges(kind, size, request)?;
-    let partial = path.with_file_name(format!(".{name}.partial"));
+    fs::create_dir_all(path.parent().unwrap())?;
+    let partial = path.with_file_name(format!(
+        ".{}.partial",
+        path.file_name().unwrap().to_string_lossy()
+    ));
     let mut output = File::create(&partial)?;
     // Bytes outside the ranges stay holes, which occupy no disk.
     output.set_len(size)?;
@@ -505,6 +533,10 @@ impl Agent {
         self.version >= 2
     }
 
+    pub fn holds_package_files(&self) -> bool {
+        self.version >= 3
+    }
+
     fn request(&mut self, tag: u8, request: serde_json::Value) -> Result<Vec<u8>, Failure> {
         write_frame(&mut self.stream, tag, &serde_json::to_vec(&request)?)?;
         expect(&mut self.stream, OK).map_err(|e| format!("{}: {e}", self.host).into())
@@ -520,7 +552,18 @@ impl Agent {
         source: &Path,
         ranges: Option<&[(u64, u64)]>,
     ) -> Result<bool, Failure> {
-        let size = fs::metadata(source)?.len();
+        self.ensure_file(kind, name, &File::open(source)?, ranges)
+    }
+
+    pub fn ensure_file(
+        &mut self,
+        kind: &str,
+        name: &str,
+        file: &File,
+        ranges: Option<&[(u64, u64)]>,
+    ) -> Result<bool, Failure> {
+        use std::os::unix::fs::FileExt;
+        let size = file.metadata()?.len();
         let mut request = serde_json::json!({"kind": kind, "name": name, "size": size});
         if self.request(HAVE, request.clone())? == [1] {
             return Ok(false);
@@ -529,10 +572,15 @@ impl Agent {
             request["ranges"] = serde_json::json!(ranges);
         }
         write_frame(&mut self.stream, PUT, &serde_json::to_vec(&request)?)?;
-        let mut file = File::open(source)?;
+        let mut block = vec![0; 16 << 20];
         for &(offset, nbytes) in ranges.unwrap_or(&[(0, size)]) {
-            file.seek(SeekFrom::Start(offset))?;
-            std::io::copy(&mut (&file).take(nbytes), &mut self.stream)?;
+            let mut position = 0;
+            while position < nbytes {
+                let count = (nbytes - position).min(block.len() as u64) as usize;
+                file.read_exact_at(&mut block[..count], offset + position)?;
+                self.stream.write_all(&block[..count])?;
+                position += count as u64;
+            }
         }
         expect(&mut self.stream, OK).map_err(|e| format!("{}: {e}", self.host))?;
         Ok(true)
@@ -739,5 +787,103 @@ mod tests {
         for name in ["", "../x", "a/b", ".hidden"] {
             assert!(entry(Path::new("/c"), "bin", name).is_err(), "{name}");
         }
+    }
+    #[test]
+    fn package_directories_keep_companions_together_until_eviction() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = temp.path().join("cache");
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        let token = b"0123456789abcdef0123456789abcdef".to_vec();
+        {
+            let (cache, token) = (cache.clone(), token.clone());
+            thread::spawn(move || serve_on(listener, token, cache));
+        }
+        let source = temp.path().join("source");
+        fs::write(&source, b"source bytes").unwrap();
+        let mut agent = Agent::connect(&address, &token).unwrap();
+        assert!(agent.holds_package_files());
+        for name in ["model-data-01-of-01.safetensors", "model.safetensors"] {
+            assert!(
+                agent
+                    .ensure(
+                        "package",
+                        &format!("first/{name}"),
+                        &source,
+                        Some(&[(0, 6)])
+                    )
+                    .unwrap()
+            );
+        }
+        assert!(
+            cache
+                .join("packages/first/model-data-01-of-01.safetensors")
+                .is_file()
+        );
+        let mut second = Agent::connect(&address, &token).unwrap();
+        second
+            .ensure("package", "second/model.safetensors", &source, None)
+            .unwrap();
+        assert!(cache.join("packages/first/model.safetensors").is_file());
+        drop(agent);
+        thread::sleep(Duration::from_millis(200));
+        second
+            .ensure(
+                "package",
+                "second/model-data-01-of-01.safetensors",
+                &source,
+                None,
+            )
+            .unwrap();
+        assert!(!cache.join("packages/first").exists());
+        for name in ["a/../escape", "a/b/c", "a/", "a/hidden\\name", "a/.hidden"] {
+            assert!(entry(&cache, "packages", name).is_err());
+        }
+    }
+
+    #[test]
+    fn sharded_launch_rejects_older_agents_before_transferring_bytes() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        let peer = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            write_frame(&mut stream, NONCE, &[0; 32]).unwrap();
+            expect(&mut stream, PROOF).unwrap();
+            write_frame(&mut stream, OK, &[2]).unwrap();
+            assert_eq!(stream.read(&mut [0; 1]).unwrap(), 0);
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("model.safetensors");
+        fs::write(&path, b"primary").unwrap();
+        let file = Arc::new(File::open(&path).unwrap());
+        let shares = vec![vec![flare_helios::runtime_package::PackageFile {
+            filename: "model-data-01-of-01.safetensors".into(),
+            file,
+            ranges: vec![(0, 7)],
+        }]];
+        let publisher = Publisher {
+            name: "Test".into(),
+            namespace: "test".into(),
+            public_key: [1; 32],
+            development: false,
+        };
+        let error = crate::launch::start(
+            &[address],
+            &path,
+            "export",
+            "127.0.0.1:29800",
+            &[],
+            &[0; 32],
+            &publisher,
+            &shares,
+        )
+        .err()
+        .unwrap()
+        .to_string();
+        assert!(error.contains("protocol 3"), "{error}");
+        peer.join().unwrap();
     }
 }

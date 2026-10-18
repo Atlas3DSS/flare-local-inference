@@ -111,6 +111,17 @@ def _parser() -> argparse.ArgumentParser:
     signing.add_argument("--namespace", help="publisher namespace (default: publishing.namespace)")
     signing.add_argument("--official-source", help="published repository URL (default: publishing.official_source)")
     signing.add_argument("--development-publisher", type=Path, help="source public profile (default: beside config)")
+    def shard_size(value):
+        from .config import parse_size
+        try:
+            parse_size(value, "shard size")
+        except FlareError as error:
+            raise argparse.ArgumentTypeError(str(error)) from error
+        return value
+
+    for publishing in (running, exporting, signing):
+        publishing.add_argument("--shard-size", type=shard_size, metavar="SIZE",
+                                help="soft package file-size target (default: publishing.shard_size, else 64G); 0 keeps one file")
     return parser
 
 

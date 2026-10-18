@@ -24,6 +24,7 @@ pub mod test_support;
 pub use protection::{AuthorizedPackage, PackageClaim, PackageLicense, Publisher, VerifiedPackage};
 mod selection;
 mod serving;
+pub use archive::{PackageFile, package_companions};
 pub use limits::{KvCacheLimit, MemoryLimit};
 pub use model::{CacheAgreement, ClusterRank, NativeModel, RoceSpec, package_cluster, rank_ranges};
 pub use selection::LoadOptions;

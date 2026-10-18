@@ -5,12 +5,12 @@ import shutil
 import tempfile
 
 from .runtime_package import export_model
-from .package_file import combine
+from .package_file import DEFAULT_SHARD_SIZE, combine
 from .memory_inventory import print_inventory
 
 
 def export_package(prepared, images, storage, path, *, options, publisher, progress=None, console=None,
-                   staging=None):
+                   staging=None, shard_size=DEFAULT_SHARD_SIZE):
     """Export every rank, close preparation resources, and assemble the model file.
 
     Ranks stage their storage and resources as files under `staging` (default: beside `path`),
@@ -53,7 +53,7 @@ def export_package(prepared, images, storage, path, *, options, publisher, progr
         prepared.close()
         for region in storage.host_regions:
             region.close()
-        combine(path, [stage / root for root in roots], peers, publisher=publisher)
+        combine(path, [stage / root for root in roots], peers, publisher=publisher, shard_size=shard_size)
         print_inventory(inventories, console=console or getattr(progress, "console", None))
     finally:
         if stage.exists():
@@ -61,7 +61,7 @@ def export_package(prepared, images, storage, path, *, options, publisher, progr
 
 
 def export_cluster_package(prepared, images, storage, path, *, peer_files, options, export_id, world,
-                           publisher, peer_inventories, progress=None):
+                           publisher, peer_inventories, progress=None, shard_size=DEFAULT_SHARD_SIZE):
     """Assemble private rank exports and sign one package holding every rank.
 
     `peer_files` yields a readable stream of each peer's exported rank file, ranks 1 onward, in
@@ -88,7 +88,7 @@ def export_cluster_package(prepared, images, storage, path, *, peer_files, optio
         index, start = read_index(partial)
         payload = sorted((span.offset, partial, start + span.offset, span.nbytes)
                          for _, _, span in resource_roles(index))
-        publish(path, index, payload, publisher=publisher)
+        publish(path, index, payload, publisher=publisher, shard_size=shard_size)
         print_inventory([package.memory_inventory, *peer_inventories], console=getattr(progress, "console", None))
     finally:
         partial.unlink(missing_ok=True)

@@ -139,3 +139,13 @@ def test_sizes_use_binary_units(text, expected):
 def test_malformed_sizes_are_usage_errors(text):
     with pytest.raises(UsageError):
         parse_size(text)
+
+
+def test_shard_size_uses_binary_units_and_flags_override_configuration(tmp_path):
+    assert load(tmp_path, '').shard_size() == 64 << 30
+    config = load(tmp_path, '[publishing]\nshard_size = "2G"\n')
+    assert config.shard_size() == 2 << 30
+    assert config.shard_size('0') == 0
+    assert config.shard_size('16M') == 16 << 20
+    with pytest.raises(UsageError, match='shard size'):
+        load(tmp_path, '[publishing]\nshard_size = "-1G"\n')

@@ -258,9 +258,7 @@ impl VerifiedPackage {
     /// nothing; the caller obtains it from the user or from remembered acceptance.
     pub fn authorize(mut self, accepted: &str, verify_weights: bool) -> Result<AuthorizedPackage> {
         if verify_weights {
-            self.archive
-                .protection
-                .verify_data(&self.archive.file, self.archive.start)?;
+            self.archive.protection.verify_data(&self.archive)?;
         }
         self.archive.protection.accepted = Some(accepted.to_owned());
         Ok(AuthorizedPackage {
@@ -317,17 +315,57 @@ fn add_catalog(
     }
     Ok(())
 }
-fn stored_data(data: wire::StoredData, payload_size: u64) -> Result<wire::StoredData> {
-    if data.sha256.len() != 32
-        || data
+fn stored_data(
+    mut data: wire::StoredData,
+    payload_size: u64,
+    version: u32,
+) -> Result<wire::StoredData> {
+    if data.sha256.len() != 32 {
+        return Err(invalid("invalid stored-data signature group"));
+    }
+    if data.parts.is_empty() {
+        if data
             .offset
             .checked_add(data.nbytes)
             .is_none_or(|end| end > payload_size)
+        {
+            return Err(invalid("invalid stored-data signature group"));
+        }
+        if data.nbytes > 0 {
+            data.parts.push(wire::Span {
+                offset: data.offset,
+                nbytes: data.nbytes,
+                filename: String::new(),
+            });
+        }
+    } else if data.offset != 0
+        || data
+            .parts
+            .iter()
+            .try_fold(0u64, |sum, part| sum.checked_add(part.nbytes))
+            != Some(data.nbytes)
     {
-        return Err(invalid("invalid stored-data signature group"));
+        return Err(invalid("invalid stored-data parts"));
+    }
+    for part in &data.parts {
+        if !part.filename.is_empty() {
+            super::archive::validate_filename(&part.filename)?;
+            if version != 5 {
+                return Err(invalid("companion references require model index 5"));
+            }
+        }
+        if part.nbytes == 0
+            || part
+                .offset
+                .checked_add(part.nbytes)
+                .is_none_or(|end| part.filename.is_empty() && end > payload_size)
+        {
+            return Err(invalid("invalid stored-data part"));
+        }
     }
     Ok(data)
 }
+
 impl Protection {
     /// Authenticate the envelope: what every rank shares, then every rank, or only `rank` of a
     /// multi-host package, whose host holds that rank's bytes alone.
@@ -411,7 +449,7 @@ impl Protection {
             .index
             .ok_or_else(|| invalid("missing signed model index"))?;
         let count = metadata.ranks as usize;
-        if index.version != 4
+        if !matches!(index.version, 4 | 5)
             || !index.ranks.is_empty()
             || envelope.ranks.len() != count
             || index
@@ -436,7 +474,7 @@ impl Protection {
         add_catalog(&mut resources, shared, false, payload_size)?;
         let shared = wire::StoredData::decode(envelope.groups[2].body.as_slice())
             .map_err(|e| invalid(e.to_string()))?;
-        let mut data = vec![stored_data(shared, payload_size)?];
+        let mut data = vec![stored_data(shared, payload_size, index.version)?];
         for rank in verified {
             let group = &envelope.ranks[rank];
             authenticate(4, group, format!("rank {rank}"))?;
@@ -460,7 +498,7 @@ impl Protection {
                 false,
                 payload_size,
             )?;
-            data.push(stored_data(stored, payload_size)?);
+            data.push(stored_data(stored, payload_size, index.version)?);
             index.ranks.push(bundle);
         }
         let protection = Self {
@@ -489,20 +527,23 @@ impl Protection {
     }
     /// Payload ranges of the stored data that serving the bundle at `position` reads: what every
     /// rank shares, then that rank's.
-    pub fn stored_ranges(&self, position: usize) -> Vec<(u64, u64)> {
+    pub fn stored_ranges(&self, position: usize) -> Vec<wire::Span> {
         [&self.data[0], &self.data[position + 1]]
             .into_iter()
-            .map(|range| (range.offset, range.nbytes))
+            .flat_map(|range| range.parts.iter().cloned())
             .collect()
     }
     fn validate_membership(&self, index: &wire::ModelIndex, payload_size: u64) -> Result<()> {
-        let ranges: Vec<&wire::StoredData> =
-            self.data.iter().filter(|range| range.nbytes > 0).collect();
-        // Each stored allocation or table lies in its own part's signed range.
+        let ranges: Vec<&wire::Span> = self.data.iter().flat_map(|range| &range.parts).collect();
         let within = |range: &wire::StoredData, span: &wire::Span| -> Result<()> {
-            if span.offset < range.offset
-                || span.offset.saturating_add(span.nbytes) > range.offset + range.nbytes
-            {
+            if !range.parts.iter().any(|part| {
+                span.filename == part.filename
+                    && span.offset >= part.offset
+                    && span
+                        .offset
+                        .checked_add(span.nbytes)
+                        .is_some_and(|end| end <= part.offset + part.nbytes)
+            }) {
                 return Err(invalid("stored allocation outside its data range"));
             }
             Ok(())
@@ -530,6 +571,13 @@ impl Protection {
                 add(&graph.resource, 2)?;
             }
             for allocation in &rank.allocations {
+                if allocation
+                    .data_spans
+                    .iter()
+                    .any(|span| !span.filename.is_empty())
+                {
+                    return Err(invalid("allocation destination spans cannot name a file"));
+                }
                 if let Some(file) = &allocation.file {
                     add(file, 4)?;
                 }
@@ -569,18 +617,35 @@ impl Protection {
                 }
             }
         }
-        spans.sort_by_key(|(_, s)| s.offset);
+        spans.sort_by_key(|(_, s)| (&s.filename, s.offset));
         let mut end = 0;
         let mut protected = 0;
+        let mut filename = "";
+        let mut primary_end = 0;
         for (kind, span) in spans {
+            if span.filename != filename {
+                end = 0;
+                filename = &span.filename;
+            }
+            if !span.filename.is_empty() {
+                super::archive::validate_filename(&span.filename)?;
+                if index.version != 5 || kind != 4 {
+                    return Err(invalid(
+                        "only stored data in model index 5 may reference a companion",
+                    ));
+                }
+            }
             if span.nbytes == 0 || span.offset < end {
                 return Err(invalid("empty or overlapping package resources"));
             }
             end = span
                 .offset
                 .checked_add(span.nbytes)
-                .filter(|n| *n <= payload_size)
+                .filter(|n| !span.filename.is_empty() || *n <= payload_size)
                 .ok_or_else(|| invalid("resource exceeds package"))?;
+            if span.filename.is_empty() {
+                primary_end = end;
+            }
             if kind != 4 {
                 let (encrypted, entry) = self
                     .resources
@@ -589,10 +654,11 @@ impl Protection {
                 if *encrypted != (kind == 2) || entry.stored_bytes != span.nbytes {
                     return Err(invalid("resource signature classification mismatch"));
                 }
-                if ranges
-                    .iter()
-                    .any(|range| span.offset < range.offset + range.nbytes && range.offset < end)
-                {
+                if ranges.iter().any(|range| {
+                    range.filename == span.filename
+                        && span.offset < range.offset + range.nbytes
+                        && range.offset < end
+                }) {
                     return Err(invalid(
                         "executable or supporting resource inside stored data",
                     ));
@@ -601,30 +667,38 @@ impl Protection {
             }
         }
         let mut ordered = ranges.clone();
-        ordered.sort_by_key(|range| range.offset);
-        if ordered
-            .windows(2)
-            .any(|pair| pair[1].offset < pair[0].offset + pair[0].nbytes)
-        {
+        ordered.sort_by_key(|range| (&range.filename, range.offset));
+        if ordered.windows(2).any(|pair| {
+            pair[1].filename == pair[0].filename && pair[1].offset < pair[0].offset + pair[0].nbytes
+        }) {
             return Err(invalid("overlapping stored-data ranges"));
         }
         // A host verifying one rank cannot see the others' resources, which complete the payload.
-        if protected != self.resources.len() || (self.rank.is_none() && end != payload_size) {
+        if protected != self.resources.len() || (self.rank.is_none() && primary_end != payload_size)
+        {
             return Err(invalid("unreferenced package resources"));
         }
         Ok(())
     }
-    fn verify_data(&self, file: &File, start: u64) -> Result<()> {
+    pub fn data_parts(&self) -> impl Iterator<Item = &wire::Span> {
+        self.data.iter().flat_map(|data| &data.parts)
+    }
+    fn verify_data(&self, archive: &Archive) -> Result<()> {
         let mut block = vec![0; CHUNK];
         for range in &self.data {
             let mut hash = digest::Context::new(&digest::SHA256);
-            let mut pos = 0;
-            while pos < range.nbytes {
-                let count = block.len().min((range.nbytes - pos) as usize);
-                file.read_exact_at(&mut block[..count], start + range.offset + pos)
-                    .map_err(|e| e.to_string())?;
-                hash.update(&block[..count]);
-                pos += count as u64;
+            for part in &range.parts {
+                let source = archive.source(part)?;
+                let mut pos = 0;
+                while pos < part.nbytes {
+                    let count = (part.nbytes - pos).min(block.len() as u64) as usize;
+                    source
+                        .file
+                        .read_exact_at(&mut block[..count], source.start + part.offset + pos)
+                        .map_err(|e| e.to_string())?;
+                    hash.update(&block[..count]);
+                    pos += count as u64;
+                }
             }
             if hash.finish().as_ref() != range.sha256 {
                 return Err(invalid("stored-data content verification failed"));
@@ -637,7 +711,7 @@ impl Protection {
             .resources
             .get(&span.offset)
             .ok_or_else(|| invalid("resource lacks publisher authentication"))?;
-        if span.nbytes != entry.stored_bytes {
+        if !span.filename.is_empty() || span.nbytes != entry.stored_bytes {
             return Err(invalid("resource length mismatch"));
         }
         let accepted = self
@@ -746,5 +820,32 @@ impl Read for ResourceReader {
         output[..n].copy_from_slice(&self.buffer[self.position..self.position + n]);
         self.position += n;
         Ok(n)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serialized_primary_spans_and_stored_ranges_keep_their_legacy_meaning() {
+        let span = wire::Span::decode(&b"\x08\x09\x10\x07"[..]).unwrap();
+        assert_eq!(
+            (span.offset, span.nbytes, span.filename.as_str()),
+            (9, 7, "")
+        );
+        let mut bytes = vec![8, 7, 18, 32];
+        bytes.extend([0; 32]);
+        bytes.extend([24, 9]);
+        let data = wire::StoredData::decode(bytes.as_slice()).unwrap();
+        assert!(data.parts.is_empty());
+        let normalized = stored_data(data.clone(), 16, 4).unwrap();
+        assert_eq!(normalized.parts, vec![span]);
+        assert!(stored_data(data, 15, 4).is_err());
+        let empty = wire::StoredData {
+            sha256: sha256(&[]).to_vec(),
+            ..Default::default()
+        };
+        assert!(stored_data(empty, 0, 4).unwrap().parts.is_empty());
     }
 }

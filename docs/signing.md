@@ -112,7 +112,11 @@ Re-signing verifies the development signatures and every executable and supporti
 resource, decrypts executable resources, and encrypts them under the production
 identity with a fresh package ID. Weight bytes and prepared execution contracts
 are preserved. Stored-data hashes are checked against the development signatures
-while copying, before the final file is published. Invalid packages fail without
+while copying, before the primary file is published. `--shard-size SIZE` overrides
+`[publishing] shard_size` (default `64G`); `0` produces one file. Re-signing can
+repack either layout, preserving whole resources and verifying the original
+signed parts and padding against the bytes copied. All metadata, encrypted
+resources, and supporting assets remain in the primary. Invalid packages fail without
 publishing an output; existing destinations are never overwritten.
 
 No checkpoint reload, compilation, graph capture, or GPU access is required.
@@ -120,7 +124,7 @@ The operation reads and copies the entire package, so allow space for another
 package plus temporary executable resources. Temporary plaintext executable files
 reside in a private directory beside the destination and are removed when the
 command exits normally or raises an error. A forced kill can leave that directory
-or an incomplete hidden output file; remove those after confirming no signing
+or unreferenced companion files or an incomplete hidden output file; remove those after confirming no signing
 process is using them. The source package remains intact.
 
 Rebuild Flare after changing embedded public profiles. A separately built or

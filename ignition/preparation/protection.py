@@ -133,9 +133,17 @@ def resource_roles(index):
         resources.extend((roles[name], owner, span) for name, span in rank.resources.items())
     resources.extend((3, None, asset.payload) for asset in index.assets)
     resources.extend((4, None, span) for table in index.engram.tables for span in (table.weights, table.scales))
-    ranges = sorted((s.offset, s.nbytes) for _, _, s in resources)
-    end = 0
-    for offset, size in ranges:
+    from .package_file import validate_filename
+    for kind, _, span in resources:
+        if span.filename:
+            validate_filename(span.filename)
+            if index.version != 5 or kind != 4:
+                raise ValueError('only stored data in model index 5 may reference a companion')
+    ranges = sorted((s.filename, s.offset, s.nbytes) for _, _, s in resources)
+    end, previous = 0, None
+    for filename, offset, size in ranges:
+        if filename != previous:
+            end, previous = 0, filename
         if size <= 0 or offset < end:
             raise ValueError('empty or overlapping package resources')
         end = offset + size
@@ -185,102 +193,142 @@ class Protection:
     holding one rank's bytes verifies that rank completely.
     """
 
-    def __init__(self, index, payload, publisher, stage, *, expected_stored=None):
+    def __init__(self, index, payload, publisher, stage, *, shard_size=0, basename='model',
+                 source_verifiers=None):
         from concurrent.futures import ThreadPoolExecutor
-        from .package_file import COPY_THREADS, align
+        from .package_file import COPY_THREADS, align, container_header, validate_filename
+        if type(shard_size) is not int or shard_size < 0:
+            raise ValueError('shard size must be a nonnegative byte count')
         self.publisher = publisher
-        self.expected_stored = expected_stored
         self.package_id = os.urandom(32)
         self.index = index
-        # Parts in stored-data order: what every rank shares, then each rank.
-        parts = [None, *range(len(index.ranks))]
-        self.code = {owner: proto.ResourceCatalog() for owner in parts[1:]}
-        self.support = {owner: proto.ResourceCatalog() for owner in parts}
+        self.source_verifiers = source_verifiers or {}
+        owners = [None, *range(len(index.ranks))]
         roles = resource_roles(index)
+        if any(span.filename for _, _, span in roles):
+            raise ValueError('publication inputs must use a contiguous staging address space')
         by_offset = {span.offset: (kind, owner, span) for kind, owner, span in roles}
-        # Stored data may arrive as adjacent ranges of several files, such as a table read from
-        # several checkpoint shards; every other resource is one range.
         starts = sorted(by_offset)
         ranges = {offset: [] for offset in starts}
         for entry in sorted(payload, key=lambda entry: entry[0]):
-            ranges[starts[max(bisect_right(starts, entry[0]) - 1, 0)]].append(entry)
+            if not starts or entry[0] < starts[0]:
+                raise ValueError('publication range has no classified resource')
+            ranges[starts[bisect_right(starts, entry[0]) - 1]].append(entry)
         for offset, entries in ranges.items():
             kind, _, span = by_offset[offset]
             ends = [destination + size for destination, _, _, size in entries]
-            if [entry[0] for entry in entries] != [offset, *ends[:-1]] or kind != 4 and len(entries) != 1:
+            if (not entries or [entry[0] for entry in entries] != [offset, *ends[:-1]]
+                    or kind != 4 and len(entries) != 1 or ends[-1] - offset != span.nbytes):
                 raise ValueError('publication ranges differ from classified resources')
-            if ends[-1] - offset != span.nbytes:
-                raise ValueError('resource length differs from publication range')
+        ordered = sorted(ranges, key=lambda offset: (by_offset[offset][0] != 4,
+                         owners.index(by_offset[offset][1]) if by_offset[offset][0] == 4 else 0, offset))
+        sizes = {offset: by_offset[offset][2].nbytes for offset in ordered}
+        self.hashes = {owner: hashlib.sha256() for owner in owners}
 
-        def order(offset):
-            kind, owner, _ = by_offset[offset]
-            return (kind != 4, parts.index(owner) if kind == 4 else 0, offset)
+        def layout(sharded):
+            self.code = {owner: proto.ResourceCatalog() for owner in owners[1:]}
+            self.support = {owner: proto.ResourceCatalog() for owner in owners}
+            self.ranges = {owner: [] for owner in owners}
+            self.payloads = {'': []}
+            positions = {'': 0}
+            locations, catalog_entries = {}, {}
+            data_file, data_files = '', []
+            for offset in ordered:
+                kind, owner, span = by_offset[offset]
+                size = sizes[offset]
+                stored = size + (16 * -(-size // CHUNK) if kind == 2 else 0)
+                if sharded and kind == 4:
+                    if not data_file or (positions[data_file] and align(positions[data_file]) + size + 4096 > shard_size):
+                        data_file = str(len(data_files) + 1)
+                        data_files.append(data_file)
+                        if len(data_files) > 99:
+                            raise ValueError('package requires more than 99 data files')
+                        self.payloads[data_file], positions[data_file] = [], 0
+                    filename = data_file
+                else:
+                    filename = ''
+                cursor = align(positions[filename])
+                span.offset, span.nbytes, span.filename = cursor, stored, filename
+                positions[filename] = cursor + stored
+                locations[offset] = (filename, cursor)
+                if kind == 4:
+                    parts = self.ranges[owner]
+                    if parts and parts[-1].filename == filename:
+                        parts[-1].nbytes = cursor + stored - parts[-1].offset
+                    else:
+                        parts.append(proto.Span(filename=filename, offset=cursor, nbytes=stored))
+                else:
+                    catalog = self.code[owner] if kind == 2 else self.support[owner]
+                    catalog_entries[offset] = catalog.resources.add(
+                        offset=cursor, plain_bytes=size, stored_bytes=stored,
+                        sha256=[bytes(32)] * (-(-size // CHUNK) if kind == 2 else 1))
+            # Assign alignment gaps to the preceding stored-data part, as in single-file packages.
+            for filename in positions:
+                parts = sorted((part for parts in self.ranges.values() for part in parts
+                                if part.filename == filename), key=lambda part: part.offset)
+                end = min((s.offset for k, _, s in roles if k != 4 and s.filename == filename),
+                          default=positions[filename])
+                for part, following in zip(parts, [p.offset for p in parts[1:]] + [end]):
+                    part.nbytes = following - part.offset
+            if sharded:
+                names = {f: f'{basename}-data-{i:02}-of-{len(data_files):02}.safetensors'
+                         for i, f in enumerate(data_files, 1)}
+                for name in names.values():
+                    validate_filename(name)
+                for _, _, span in roles:
+                    span.filename = names.get(span.filename, '')
+                for parts in self.ranges.values():
+                    for part in parts:
+                        part.filename = names.get(part.filename, '')
+                locations = {offset: (names.get(f, ''), pos) for offset, (f, pos) in locations.items()}
+                self.payloads = {names.get(f, ''): [] for f in positions}
+            index.version = 5 if sharded else 4
+            return locations, positions[''], catalog_entries
 
-        self.payload = []
-        cursor = 0
-        data_end = 0
-        firsts = {}
-        # Executables encrypt and supporting resources hash on several threads once laid out.
+        locations, length, catalog_entries = layout(False)
+        encoded = self.envelope()
+        total = len(container_header(length, len(encoded), 'flare')) + length + len(encoded)
+        if shard_size and total > shard_size and any(kind == 4 for kind, _, _ in roles):
+            locations, _, catalog_entries = layout(True)
         jobs = []
-        # Stored data precedes execution and frontend resources, each part's contiguous.
-        for offset in sorted(ranges, key=order):
+        for offset in ordered:
             kind, owner, span = by_offset[offset]
+            filename, cursor = locations[offset]
             entries = ranges[offset]
-            cursor = align(cursor)
-            span.offset = cursor
-            if kind == 4:
-                firsts.setdefault(owner, cursor)
-            else:
+            if kind != 4:
                 ((_, source, source_offset, size),) = entries
-            if kind == 2:
-                encrypted = Path(stage) / f'executable-{cursor}'
-                resource = self.code[owner].resources.add(offset=cursor, plain_bytes=size)
-                cipher = AESGCM(resource_key(publisher.public_key, self.package_id, cursor, publisher.namespace))
-                jobs.append((resource, encrypted, _encrypt, (cipher, self.package_id, cursor, source, source_offset,
-                                                             size, encrypted)))
-                # Each chunk's ciphertext carries a 16-byte tag.
-                size += 16 * -(-size // CHUNK)
-                resource.stored_bytes = size
-                entries = [(offset, encrypted, 0, size)]
-                span.nbytes = size
-            elif kind == 3:
-                resource = self.support[owner].resources.add(offset=cursor, plain_bytes=size, stored_bytes=size)
-                jobs.append((resource, None, _digest, (source, source_offset, size)))
+                resource = catalog_entries[offset]
+                if kind == 2:
+                    encrypted = Path(stage) / f'executable-{cursor}'
+                    cipher = AESGCM(resource_key(publisher.public_key, self.package_id, cursor, publisher.namespace))
+                    jobs.append((resource, _encrypt, (cipher, self.package_id, cursor, source, source_offset,
+                                                       size, encrypted)))
+                    entries = [(offset, encrypted, 0, resource.stored_bytes)]
+                else:
+                    jobs.append((resource, _digest, (source, source_offset, size)))
             for _, source, source_offset, size in entries:
-                self.payload.append((cursor, source, source_offset, size))
+                self.payloads[filename].append((cursor, source, source_offset, size))
                 cursor += size
-            if kind == 4:
-                data_end = cursor
         if jobs:
             with ThreadPoolExecutor(COPY_THREADS) as pool:
-                futures = [(resource, encrypted, pool.submit(work, *arguments))
-                           for resource, encrypted, work, arguments in jobs]
-                for resource, encrypted, future in futures:
+                futures = [(resource, pool.submit(work, *arguments)) for resource, work, arguments in jobs]
+                for resource, future in futures:
+                    del resource.sha256[:]
                     resource.sha256.extend(future.result())
-                    if encrypted is not None and encrypted.stat().st_size != resource.stored_bytes:
-                        raise ValueError('encrypted executable size differs from its layout')
-        # Include alignment padding up to the first non-data resource.
-        self.data_end = min((s.offset for k, _, s in roles if k != 4), default=data_end)
-        # Each part's stored data runs from its first byte to the next part's, or the end of stored data.
-        self.ranges = dict.fromkeys(parts, (0, 0))
-        starts = sorted((start, owner) for owner, start in firsts.items())
-        for (start, owner), (end, _) in zip(starts, starts[1:] + [(self.data_end, None)]):
-            self.ranges[owner] = (start, end - start)
-        self.hashes = {owner: hashlib.sha256() for owner in parts}
-        if expected_stored is not None and (set(expected_stored) != set(self.ranges)
-                or any(self.ranges[owner] != (data.offset, data.nbytes) for owner, data in expected_stored.items())):
-            raise ValueError('re-signing must preserve the signed stored-data ranges')
+        self.payload = self.payloads['']
 
     def envelope(self, final=False):
         """The signed envelope; before every payload byte is absorbed, one of the same size."""
-        if final and self.expected_stored is not None:
-            for owner, expected in self.expected_stored.items():
-                if self.hashes[owner].digest() != expected.sha256:
-                    raise ValueError(f'development package stored-data digest mismatch for rank {owner}')
+        if final:
+            for verifier in self.source_verifiers.values():
+                verifier.finish()
         def stored(owner):
-            offset, nbytes = self.ranges[owner]
+            parts = self.ranges[owner]
             digest = self.hashes[owner].digest() if final else bytes(32)
-            return proto.StoredData(offset=offset, nbytes=nbytes, sha256=digest)
+            if self.index.version == 4:
+                part = parts[0] if parts else proto.Span()
+                return proto.StoredData(offset=part.offset, nbytes=part.nbytes, sha256=digest)
+            return proto.StoredData(nbytes=sum(p.nbytes for p in parts), sha256=digest, parts=parts)
 
         result = proto.ProtectedIndex(version=VERSION, package_id=self.package_id, signer=self.publisher.fingerprint)
 

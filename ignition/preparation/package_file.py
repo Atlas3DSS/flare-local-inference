@@ -7,6 +7,8 @@ import os
 from itertools import chain
 from pathlib import Path
 import struct
+import re
+import stat
 import tempfile
 
 from . import runtime_package_pb2 as proto
@@ -50,16 +52,114 @@ def _byte_tensor(tensor):
     return offsets
 
 
+DEFAULT_SHARD_SIZE = 64 << 30
+
+
+def validate_filename(filename):
+    """Accept a portable sibling basename, never a path or device name."""
+    if (not isinstance(filename, str) or len(filename) > 255
+            or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]*\.safetensors', filename)
+            or '..' in filename
+            or filename.split('.')[0].upper() in {'CON', 'PRN', 'AUX', 'NUL',
+                *(f'COM{i}' for i in range(1, 10)), *(f'LPT{i}' for i in range(1, 10))}):
+        raise ValueError('invalid package companion filename')
+    return filename
+
+
+def container_header(length, index_size=0, format='flare-data'):
+    header = {
+        "__metadata__": {"format": format},
+        "flare.payload": {"dtype": "U8", "shape": [length], "data_offsets": [0, length]},
+    }
+    if format != 'flare-data':
+        header["flare.metadata"] = {"dtype": "U8", "shape": [index_size],
+                                    "data_offsets": [length, length + index_size]}
+    encoded = json.dumps(header, separators=(",", ":")).encode()
+    encoded = encoded.ljust(align(8 + len(encoded)) - 8, b" ")
+    if len(encoded) > MAX_HEADER_BYTES:
+        raise ValueError('package header exceeds its size limit')
+    return struct.pack('<Q', len(encoded)) + encoded
+
+
+class PackageFiles:
+    """Retain regular companion files opened relative to one pinned directory."""
+
+    def __init__(self, path, primary, base, length):
+        self.directory = os.open(Path(path).absolute().parent, os.O_RDONLY | os.O_DIRECTORY)
+        self.files = {'': (primary, base, length)}
+
+    def get(self, filename):
+        if filename in self.files:
+            return self.files[filename]
+        validate_filename(filename)
+        if len(self.files) > 99:
+            raise ValueError('package references more than 99 data files')
+        fd = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=self.directory)
+        source = os.fdopen(fd, 'rb')
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
+                raise ValueError('package companion must be a regular file')
+            prefix = source.read(8)
+            if len(prefix) != 8:
+                raise ValueError('truncated companion header')
+            size, = struct.unpack('<Q', prefix)
+            if not 0 < size <= MAX_HEADER_BYTES or (8 + size) % ALIGNMENT:
+                raise ValueError('invalid companion header size')
+            header = json.loads(source.read(size), object_pairs_hook=_unique_fields)
+            if (set(header) != {'__metadata__', 'flare.payload'}
+                    or header['__metadata__'] != {'format': 'flare-data'}):
+                raise ValueError('invalid package companion header')
+            start, length = _byte_tensor(header['flare.payload'])
+            if start or size + 8 + length != info.st_size:
+                raise ValueError('invalid companion payload length')
+            self.files[filename] = source, size + 8, length
+            return self.files[filename]
+        except BaseException:
+            source.close()
+            raise
+
+    def close(self):
+        for name, (source, _, _) in self.files.items():
+            if name:
+                source.close()
+        os.close(self.directory)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+
+def stored_parts(data):
+    if len(data.sha256) != 32:
+        raise ValueError('invalid stored-data digest')
+    if data.parts:
+        if data.offset or sum(part.nbytes for part in data.parts) != data.nbytes:
+            raise ValueError('invalid signed stored-data parts')
+        return list(data.parts)
+    return [proto.Span(offset=data.offset, nbytes=data.nbytes)] if data.nbytes else []
+
+
 def _validate_spans(index, length):
-    if index.version != 4 or not index.ranks:
+    if index.version not in (4, 5) or not index.ranks:
         raise ValueError("unsupported model index")
     spans = chain(
         (span for rank in index.ranks for span in rank.resources.values()),
         (asset.payload for asset in index.assets),
         (span for table in index.engram.tables for span in (table.weights, table.scales)),
     )
-    if any(span.offset + span.nbytes > length for span in spans):
-        raise ValueError("resource exceeds model package payload")
+    for span in spans:
+        if span.filename:
+            validate_filename(span.filename)
+            if index.version != 5:
+                raise ValueError('companion references require model index 5')
+        elif span.offset + span.nbytes > length:
+            raise ValueError("resource exceeds model package payload")
+    if any(span.filename for rank in index.ranks for allocation in rank.allocations
+           for span in allocation.data_spans):
+        raise ValueError('allocation destination spans cannot name a file')
 
 
 def read_index(path):
@@ -107,7 +207,7 @@ def read_index(path):
     return result, start
 
 
-def publish(path, index, payload, *, publisher=None):
+def publish(path, index, payload, *, publisher=None, shard_size=DEFAULT_SHARD_SIZE):
     """Publish private rank staging or a publisher-protected final package."""
     if publisher is None:
         return _publish(path, index, payload)
@@ -115,53 +215,80 @@ def publish(path, index, payload, *, publisher=None):
     with tempfile.TemporaryDirectory(prefix="flare-protection-") as stage:
         protected_index = type(index)()
         protected_index.CopyFrom(index)
-        protection = Protection(protected_index, list(payload), publisher, stage)
+        protection = Protection(protected_index, list(payload), publisher, stage,
+                                shard_size=shard_size, basename=Path(path).stem)
         return _publish(path, protected_index, protection.payload, protection)
 
 
 def _publish(path, index, payload, protection=None):
-    """Publish an index and an ordered sequence of file ranges without overwriting."""
+    """Sync companions before publishing the primary, without replacing any existing file."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        raise FileExistsError(path)
+    payloads = {'': list(payload)} if protection is None else protection.payloads
+    names = [name for name in payloads if name] + ['']
+    destinations = {name: path.parent / name if name else path for name in names}
+    for destination in destinations.values():
+        if os.path.lexists(destination):
+            raise FileExistsError(destination)
     encoded = (index.SerializeToString(deterministic=True) if protection is None
                else protection.envelope())
     if not 0 < len(encoded) <= MAX_INDEX_BYTES:
         raise ValueError(f"model index is {len(encoded)} bytes; metadata limit is {MAX_INDEX_BYTES} bytes")
-    payload = list(payload)
-    length = 0
-    for destination, _, offset, size in payload:
-        if destination < length or offset < 0 or size < 0:
-            raise ValueError("package payload ranges must be ordered and disjoint")
-        length = destination + size
-    _validate_spans(index, length)
-    header = json.dumps({
-        "__metadata__": {"format": "flare" if protection is not None else "flare-staging"},
-        "flare.payload": {"dtype": "U8", "shape": [length], "data_offsets": [0, length]},
-        "flare.metadata": {"dtype": "U8", "shape": [len(encoded)],
-                           "data_offsets": [length, length + len(encoded)]},
-    }, separators=(",", ":")).encode()
-    data_start = align(8 + len(header))
-    header = header.ljust(data_start - 8, b" ")
-    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}-", dir=path.parent)
+    published = []
     try:
-        with os.fdopen(descriptor, "wb") as output:
-            output.write(struct.pack("<Q", len(header)) + header)
-            output.flush()
-            _copy_payload(output.fileno(), data_start, payload, protection)
-            if protection is not None:
-                signed = protection.envelope(final=True)
-                if len(signed) != len(encoded):
-                    raise ValueError("signed envelope size changed during publication")
-                encoded = signed
-            output.seek(data_start + length)
-            output.write(encoded)
-            output.flush()
-            os.fsync(output.fileno())
-        os.link(temporary, path)
+        for name in names:
+            if not name and len(names) > 1:
+                _sync_directory(path.parent)
+            entries, length = payloads[name], 0
+            for destination, _, offset, size in entries:
+                if destination < length or offset < 0 or size < 0:
+                    raise ValueError("package payload ranges must be ordered and disjoint")
+                length = destination + size
+            if not name:
+                _validate_spans(index, length)
+            header = container_header(length, 0 if name else len(encoded),
+                                      'flare-data' if name else 'flare' if protection else 'flare-staging')
+            destination = destinations[name]
+            descriptor, temporary = tempfile.mkstemp(prefix=f".{destination.name}-", dir=path.parent)
+            try:
+                with os.fdopen(descriptor, "wb") as output:
+                    output.write(header)
+                    output.flush()
+                    _copy_payload(output.fileno(), len(header), entries, protection, name)
+                    output.truncate(len(header) + length)
+                    if not name:
+                        if protection is not None:
+                            signed = protection.envelope(final=True)
+                            if len(signed) != len(encoded):
+                                raise ValueError("signed envelope size changed during publication")
+                            encoded = signed
+                        output.seek(len(header) + length)
+                        output.write(encoded)
+                    output.flush()
+                    os.fsync(output.fileno())
+                os.link(temporary, destination)
+                info = os.stat(temporary)
+                published.append((destination, info.st_dev, info.st_ino))
+            finally:
+                Path(temporary).unlink(missing_ok=True)
+        _sync_directory(path.parent)
+    except BaseException:
+        for destination, device, inode in reversed(published):
+            try:
+                info = destination.lstat()
+                if (info.st_dev, info.st_ino) == (device, inode):
+                    destination.unlink()
+            except FileNotFoundError:
+                pass
+        raise
+
+
+def _sync_directory(path):
+    directory = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory)
     finally:
-        Path(temporary).unlink(missing_ok=True)
+        os.close(directory)
 
 
 def _write_all(fd, data, position):
@@ -178,42 +305,29 @@ def _absorb_zeros(digest, count):
         count -= len(block)
 
 
-def _copy_payload(fd, data_start, payload, protection):
-    """Copy every payload range into `fd` at `data_start` onward, in parallel.
-
-    Each part's stored data is contiguous and hashed in order, padding included, so parts hash on
-    separate threads; ranges outside stored data copy as independent jobs.
-    """
-    from bisect import bisect_right
+def _copy_payload(fd, data_start, payload, protection, filename=''):
+    """Copy in parallel across owners; hash each owner's parts in publication order."""
     from concurrent.futures import ThreadPoolExecutor
 
-    parts, starts = {}, []
-    if protection is not None:
-        starts = sorted((start, owner) for owner, (start, nbytes) in protection.ranges.items() if nbytes)
-    positions = [start for start, _ in starts]
-    jobs = []
+    parts = [] if protection is None else [(owner, part) for owner, ranges in protection.ranges.items()
+                                           for part in ranges if part.filename == filename]
+    stored_jobs = [(protection.hashes[owner], part, [], protection.source_verifiers.get(owner))
+                   for owner, part in parts]
+    jobs = list(stored_jobs)
     for entry in payload:
-        destination = entry[0]
-        index = bisect_right(positions, destination) - 1
-        if protection is not None and destination < protection.data_end and index >= 0:
-            # What every rank shares is the part owned by None.
-            owner = starts[index][1]
-            if owner not in parts:
-                parts[owner] = []
-                jobs.append((protection.hashes[owner], protection.ranges[owner], parts[owner]))
-            parts[owner].append(entry)
+        destination, _, _, size = entry
+        job = next((job for job in stored_jobs if job[1].offset <= destination
+                    and destination + size <= job[1].offset + job[1].nbytes), None)
+        if job is None:
+            jobs.append((None, None, [entry], None))
         else:
-            jobs.append((None, None, [entry]))
+            job[2].append(entry)
 
-    def copy(digest, stored, entries):
-        if digest is not None:
-            cursor, nbytes = stored
-            end = cursor + nbytes
+    def copy(digest, stored, entries, verifier):
+        cursor = stored.offset if stored else 0
         for destination, source, offset, size in entries:
             if digest is not None:
-                # Stored-data hashes cover the zero padding between ranges.
                 _absorb_zeros(digest, destination - cursor)
-            # Open sources (a signed package being re-signed) are read by position, so threads share them.
             with _open_source(source) as contents:
                 copied = 0
                 while copied < size:
@@ -221,20 +335,20 @@ def _copy_payload(fd, data_start, payload, protection):
                     block = os.pread(contents.fileno(), length, offset + copied)
                     if len(block) != length:
                         raise ValueError(f"truncated package resource: {source}")
+                    if verifier is not None:
+                        verifier.consume(contents, offset + copied, block)
                     _write_all(fd, block, data_start + destination + copied)
                     if digest is not None:
                         digest.update(block)
                     copied += length
-            if digest is not None:
-                cursor = destination + size
+            cursor = destination + size
         if digest is not None:
-            _absorb_zeros(digest, end - cursor)
+            _absorb_zeros(digest, stored.offset + stored.nbytes - cursor)
 
-    if not jobs:
-        return
-    with ThreadPoolExecutor(min(COPY_THREADS, len(jobs))) as pool:
-        for future in [pool.submit(copy, *job) for job in jobs]:
-            future.result()
+    if jobs:
+        with ThreadPoolExecutor(min(COPY_THREADS, len(jobs))) as pool:
+            for future in [pool.submit(copy, *job) for job in jobs]:
+                future.result()
 
 
 def write_sources(path, index, payload):
@@ -298,7 +412,7 @@ def read_sources(path):
     return index, locate
 
 
-def combine(path, ranks, peer_memory, *, publisher=None):
+def combine(path, ranks, peer_memory, *, publisher=None, shard_size=DEFAULT_SHARD_SIZE):
     """Place every rank's tensor storage before execution resources and the index.
 
     `ranks` names each rank's export recorded by `write_sources`; ranges copy directly from the
@@ -339,7 +453,7 @@ def combine(path, ranks, peer_memory, *, publisher=None):
         for source, offset, nbytes in pieces:
             payload.append((cursor, source, offset, nbytes))
             cursor += nbytes
-    publish(path, result, payload, publisher=publisher)
+    publish(path, result, payload, publisher=publisher, shard_size=shard_size)
 
 
 def _copy(source, output, nbytes):

@@ -10,10 +10,11 @@ use crate::os::FileReadAt;
 use prost::Message;
 use serde::Deserialize;
 use std::{
+    collections::BTreeMap,
     fs::File,
     io::{BufReader, Read, Take},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 const MAX_HEADER: usize = 64 << 10;
@@ -54,44 +55,17 @@ impl ByteTensor {
     }
 }
 
-/// Byte ranges of a package file of `length` bytes, payload at `start`, that serving `rank` reads,
-/// including the signed stored-data ranges `stored` (payload offset, length) that rank verifies.
-fn rank_ranges(
-    index: &wire::ModelIndex,
-    rank: usize,
-    stored: &[(u64, u64)],
-    start: u64,
-    payload: u64,
-    length: u64,
-) -> Result<Vec<(u64, u64)>> {
-    let bundle = index.ranks.get(rank).ok_or_else(|| {
-        invalid(format!(
-            "rank {rank} is outside the package's {} ranks",
-            index.ranks.len()
-        ))
-    })?;
-    let index_start = start + payload;
-    let mut ranges: Vec<(u64, u64)> = bundle
-        .resources
-        .values()
-        .chain(index.assets.iter().filter_map(|a| a.payload.as_ref()))
-        .chain(
-            index
-                .engram
-                .iter()
-                .flat_map(|e| &e.tables)
-                .flat_map(|t| [&t.weights, &t.scales])
-                .filter_map(Option::as_ref),
-        )
-        .map(|span| (start + span.offset, span.nbytes))
-        .chain(
-            stored
-                .iter()
-                .map(|&(offset, nbytes)| (start + offset, nbytes)),
-        )
-        .chain([(0, start), (index_start, length - index_start)])
-        .filter(|&(_, nbytes)| nbytes > 0)
-        .collect();
+/// One package file retained while a peer receives selected byte ranges.
+#[derive(Clone)]
+pub struct PackageFile {
+    /// Empty for the primary; companions retain their signed sibling basenames.
+    pub filename: String,
+    pub file: Arc<File>,
+    pub ranges: Vec<(u64, u64)>,
+}
+
+fn merge_ranges(mut ranges: Vec<(u64, u64)>) -> Vec<(u64, u64)> {
+    ranges.retain(|&(_, nbytes)| nbytes > 0);
     ranges.sort_unstable();
     let mut merged: Vec<(u64, u64)> = Vec::with_capacity(ranges.len());
     for (offset, nbytes) in ranges {
@@ -102,7 +76,156 @@ fn rank_ranges(
             _ => merged.push((offset, nbytes)),
         }
     }
-    Ok(merged)
+    merged
+}
+
+pub(super) fn validate_filename(name: &str) -> Result<()> {
+    let stem = name.split('.').next().unwrap_or("").to_ascii_uppercase();
+    if name.len() > 255
+        || !name.ends_with(".safetensors")
+        || name.contains("..")
+        || !name
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphanumeric)
+        || !name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+        || matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (stem.len() == 4
+            && (stem.starts_with("COM") || stem.starts_with("LPT"))
+            && matches!(stem.as_bytes()[3], b'1'..=b'9'))
+    {
+        return Err(invalid("invalid package companion filename"));
+    }
+    Ok(())
+}
+
+pub(super) struct PayloadFile {
+    pub file: Arc<File>,
+    pub start: u64,
+    pub length: u64,
+    direct: Mutex<Option<Arc<File>>>,
+}
+impl PayloadFile {
+    pub fn direct(&self) -> Result<Arc<File>> {
+        let mut cached = self.direct.lock().unwrap();
+        if cached.is_none() {
+            *cached = Some(Arc::new(crate::os::direct_reopen(&self.file).map_err(
+                |e| invalid(format!("open package payload for direct I/O: {e}")),
+            )?));
+        }
+        Ok(cached.as_ref().unwrap().clone())
+    }
+    fn companion(file: File) -> Result<Self> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct DataHeader {
+            #[serde(rename = "__metadata__")]
+            format: Format,
+            #[serde(rename = "flare.payload")]
+            payload: ByteTensor,
+        }
+        let info = file.metadata().map_err(|e| e.to_string())?;
+        if !info.is_file() {
+            return Err(invalid("package companion must be a regular file"));
+        }
+        let mut prefix = [0; 8];
+        file.read_exact_at(&mut prefix, 0)
+            .map_err(|e| e.to_string())?;
+        let size = u64::from_le_bytes(prefix);
+        if size == 0 || size > MAX_HEADER as u64 || (size + 8) % 4096 != 0 {
+            return Err(invalid("invalid companion header size"));
+        }
+        let mut bytes = vec![0; size as usize];
+        file.read_exact_at(&mut bytes, 8)
+            .map_err(|e| e.to_string())?;
+        if bytes[0] != b'{' {
+            return Err(invalid("invalid companion header"));
+        }
+        let header: DataHeader =
+            serde_json::from_slice(&bytes).map_err(|e| invalid(e.to_string()))?;
+        let length = header.payload.size()?;
+        if header.format.format != "flare-data"
+            || header.payload.data_offsets[0] != 0
+            || info.len().checked_sub(size + 8) != Some(length)
+        {
+            return Err(invalid("invalid companion payload length or format"));
+        }
+        Ok(Self {
+            file: Arc::new(file),
+            start: size + 8,
+            length,
+            direct: Mutex::new(None),
+        })
+    }
+}
+
+/// Inspect bounded metadata for sibling files before authentication, without opening any sibling.
+/// Callers may fetch these names from the primary's pinned source; signatures still require verification.
+pub fn package_companions(path: &Path) -> Result<Vec<String>> {
+    let (_, _, _, bytes) = Archive::envelope(path)?;
+    let envelope =
+        wire::ProtectedIndex::decode(bytes.as_slice()).map_err(|e| invalid(e.to_string()))?;
+    if envelope.version != 4
+        || envelope.groups.len() != 3
+        || envelope.groups[0].kind != 1
+        || envelope.ranks.is_empty()
+    {
+        return Err(invalid("invalid protected package envelope"));
+    }
+    let metadata = wire::PublisherMetadata::decode(envelope.groups[0].body.as_slice())
+        .map_err(|e| invalid(e.to_string()))?;
+    let mut index = metadata
+        .index
+        .ok_or_else(|| invalid("missing model index"))?;
+    if !matches!(index.version, 4 | 5) {
+        return Err(invalid("unsupported model index"));
+    }
+    let mut parts = wire::StoredData::decode(envelope.groups[2].body.as_slice())
+        .map_err(|e| invalid(e.to_string()))?
+        .parts;
+    for group in envelope.ranks {
+        let rank = wire::RankProtection::decode(group.body.as_slice())
+            .map_err(|e| invalid(e.to_string()))?;
+        index
+            .ranks
+            .push(rank.bundle.ok_or_else(|| invalid("missing rank bundle"))?);
+        parts.extend(rank.data.unwrap_or_default().parts);
+    }
+    let mut names = std::collections::BTreeSet::new();
+    for span in index
+        .ranks
+        .iter()
+        .flat_map(|rank| rank.resources.values())
+        .chain(
+            index
+                .assets
+                .iter()
+                .filter_map(|asset| asset.payload.as_ref()),
+        )
+        .chain(
+            index
+                .engram
+                .iter()
+                .flat_map(|e| &e.tables)
+                .flat_map(|t| [&t.weights, &t.scales])
+                .filter_map(Option::as_ref),
+        )
+        .chain(&parts)
+    {
+        if !span.filename.is_empty() {
+            validate_filename(&span.filename)?;
+            if index.version != 5 {
+                return Err(invalid("companion references require model index 5"));
+            }
+            names.insert(span.filename.clone());
+            if names.len() > 99 {
+                return Err(invalid("package references more than 99 data files"));
+            }
+        }
+    }
+    Ok(names.into_iter().collect())
 }
 
 pub(super) struct Archive {
@@ -111,6 +234,8 @@ pub(super) struct Archive {
     /// Payload bytes after `start`; the signed index follows them to the end of the file.
     pub payload: u64,
     pub file: Arc<File>,
+    pub files: BTreeMap<String, PayloadFile>,
+    _directory: File,
     pub(super) protection: Protection,
 }
 impl Archive {
@@ -173,34 +298,226 @@ impl Archive {
         publishers: &[Publisher],
         rank: Option<usize>,
     ) -> Result<(Self, wire::ModelIndex)> {
-        let (file, start, payload, bytes) = Self::envelope(path)?;
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        #[cfg(unix)]
+        let directory = {
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_PATH | libc::O_DIRECTORY)
+                .open(parent)
+                .map_err(|e| e.to_string())?
+        };
+        #[cfg(windows)]
+        let directory = {
+            use std::os::windows::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ)
+                .custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS)
+                .open(parent)
+                .map_err(|e| e.to_string())?
+        };
+        #[cfg(unix)]
+        let primary = {
+            use std::os::fd::AsRawFd;
+            PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd())).join(
+                path.file_name()
+                    .ok_or_else(|| invalid("missing primary filename"))?,
+            )
+        };
+        #[cfg(windows)]
+        let primary = path.to_owned();
+        let (file, start, payload, bytes) = Self::envelope(&primary)?;
         let (protection, index) = Protection::verify(&bytes, publishers, payload, rank)?;
-        Ok((
-            Self {
-                #[cfg(unix)]
-                path: {
-                    use std::os::fd::AsRawFd;
-                    PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()))
-                },
-                #[cfg(windows)]
-                path: path.to_owned(),
+        let file = Arc::new(file);
+        let mut files = BTreeMap::new();
+        files.insert(
+            String::new(),
+            PayloadFile {
+                file: file.clone(),
                 start,
-                payload,
-                file: Arc::new(file),
-                protection,
+                length: payload,
+                direct: Mutex::new(None),
             },
-            index,
-        ))
+        );
+        for part in protection.data_parts() {
+            if files.contains_key(&part.filename) {
+                continue;
+            }
+            validate_filename(&part.filename)?;
+            if files.len() > 99 {
+                return Err(invalid("package references more than 99 data files"));
+            }
+            #[cfg(unix)]
+            let companion = {
+                use std::os::fd::{AsRawFd, FromRawFd};
+                let name = std::ffi::CString::new(part.filename.as_str()).unwrap();
+                // SAFETY: directory and name remain live; the returned descriptor has one owner.
+                let fd = unsafe {
+                    libc::openat(
+                        directory.as_raw_fd(),
+                        name.as_ptr(),
+                        libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+                    )
+                };
+                if fd < 0 {
+                    return Err(invalid(format!(
+                        "open companion {}: {}",
+                        part.filename,
+                        std::io::Error::last_os_error()
+                    )));
+                }
+                unsafe { File::from_raw_fd(fd) }
+            };
+            #[cfg(windows)]
+            let companion = {
+                use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+                use windows_sys::Win32::Storage::FileSystem::{
+                    FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
+                };
+                let file = std::fs::OpenOptions::new()
+                    .read(true)
+                    .share_mode(FILE_SHARE_READ)
+                    .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+                    .open(parent.join(&part.filename))
+                    .map_err(|e| e.to_string())?;
+                if file
+                    .metadata()
+                    .map_err(|e| e.to_string())?
+                    .file_attributes()
+                    & FILE_ATTRIBUTE_REPARSE_POINT
+                    != 0
+                {
+                    return Err(invalid("package companion cannot be a reparse point"));
+                }
+                file
+            };
+            files.insert(part.filename.clone(), PayloadFile::companion(companion)?);
+        }
+        let result = Self {
+            #[cfg(unix)]
+            path: {
+                use std::os::fd::AsRawFd;
+                PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()))
+            },
+            #[cfg(windows)]
+            path: path.to_owned(),
+            start,
+            payload,
+            file,
+            files,
+            _directory: directory,
+            protection,
+        };
+        for part in result.protection.data_parts() {
+            result.source(part)?;
+        }
+        let spans = index
+            .ranks
+            .iter()
+            .flat_map(|rank| rank.resources.values())
+            .chain(
+                index
+                    .assets
+                    .iter()
+                    .filter_map(|asset| asset.payload.as_ref()),
+            )
+            .chain(
+                index
+                    .engram
+                    .iter()
+                    .flat_map(|e| &e.tables)
+                    .flat_map(|t| [&t.weights, &t.scales])
+                    .filter_map(Option::as_ref),
+            );
+        let mut ends = BTreeMap::new();
+        for span in spans {
+            result.source(span)?;
+            let end = ends.entry(&span.filename).or_insert(0);
+            *end = (*end).max(span.offset + span.nbytes);
+        }
+        if rank.is_none()
+            && ends
+                .iter()
+                .any(|(name, end)| result.files[*name].length != *end)
+        {
+            return Err(invalid("unreferenced package payload bytes"));
+        }
+        Ok((result, index))
+    }
+    pub fn source(&self, span: &wire::Span) -> Result<&PayloadFile> {
+        let file = self
+            .files
+            .get(&span.filename)
+            .ok_or_else(|| invalid("resource names an unsigned companion"))?;
+        if span
+            .offset
+            .checked_add(span.nbytes)
+            .is_none_or(|end| end > file.length)
+        {
+            return Err(invalid("resource exceeds package payload"));
+        }
+        Ok(file)
+    }
+    pub fn file_index(&self, filename: &str) -> Result<usize> {
+        self.files
+            .keys()
+            .position(|name| name == filename)
+            .ok_or_else(|| invalid("unknown package file"))
     }
 
-    /// File byte ranges, in offset order, that a host serving `rank` of `index` reads: the header,
-    /// the signed index, that rank's bundle and stored data, and the assets and tables every rank
-    /// shares.
-    pub fn rank_ranges(&self, index: &wire::ModelIndex, rank: usize) -> Result<Vec<(u64, u64)>> {
+    /// Per-file ranges that a rank needs, including signed stored-data padding.
+    pub fn rank_ranges(&self, index: &wire::ModelIndex, rank: usize) -> Result<Vec<PackageFile>> {
         let position = self.protection.position(rank)?;
-        let length = self.file.metadata().map_err(|e| e.to_string())?.len();
+        let bundle = index
+            .ranks
+            .get(position)
+            .ok_or_else(|| invalid("rank outside package"))?;
         let stored = self.protection.stored_ranges(position);
-        rank_ranges(index, position, &stored, self.start, self.payload, length)
+        let mut selected: BTreeMap<String, Vec<(u64, u64)>> = BTreeMap::new();
+        let length = self.file.metadata().map_err(|e| e.to_string())?.len();
+        selected.insert(
+            String::new(),
+            vec![
+                (0, self.start),
+                (
+                    self.start + self.payload,
+                    length - self.start - self.payload,
+                ),
+            ],
+        );
+        for span in bundle
+            .resources
+            .values()
+            .chain(index.assets.iter().filter_map(|a| a.payload.as_ref()))
+            .chain(
+                index
+                    .engram
+                    .iter()
+                    .flat_map(|e| &e.tables)
+                    .flat_map(|t| [&t.weights, &t.scales])
+                    .filter_map(Option::as_ref),
+            )
+            .chain(&stored)
+        {
+            let file = self.source(span)?;
+            selected
+                .entry(span.filename.clone())
+                .or_insert_with(|| vec![(0, file.start)])
+                .push((file.start + span.offset, span.nbytes));
+        }
+        Ok(selected
+            .into_iter()
+            .map(|(filename, ranges)| PackageFile {
+                file: self.files[&filename].file.clone(),
+                filename,
+                ranges: merge_ranges(ranges),
+            })
+            .collect())
     }
     pub fn span<'a>(&self, package: &'a Package, key: &str) -> Result<&'a wire::Span> {
         package
@@ -249,7 +566,9 @@ impl Archive {
     /// so weights read through the cache would otherwise leave no room for caches.
     pub fn release_page_cache(&self) {
         // SAFETY: an advisory call on an open descriptor; failure only leaves the pages cached.
-        crate::os::release_page_cache(&self.file);
+        for file in self.files.values() {
+            crate::os::release_page_cache(&file.file);
+        }
     }
     fn reader(&self, package: &Package, key: &str) -> Result<ResourceReader> {
         self.protection
@@ -304,61 +623,11 @@ mod tests {
     use super::*;
     use std::io::Write;
     #[test]
-    fn a_rank_reads_its_bundle_and_shared_spans_only() {
-        let span = |offset, nbytes| Some(wire::Span { offset, nbytes });
-        let bundle = |offset| wire::BundleIndex {
-            resources: [(
-                "storage.bin".to_owned(),
-                wire::Span {
-                    offset,
-                    nbytes: 100,
-                },
-            )]
-            .into(),
-            ..Default::default()
-        };
-        let index = wire::ModelIndex {
-            version: 4,
-            ranks: vec![bundle(0), bundle(4096)],
-            assets: vec![wire::Asset {
-                name: "tokenizer".into(),
-                payload: span(100, 50),
-                sha256: String::new(),
-            }],
-            engram: Some(wire::Engram {
-                tables: vec![wire::EngramTable {
-                    weights: span(8192, 1000),
-                    scales: span(9192, 8),
-                    ..Default::default()
-                }],
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        let (start, payload, length) = (4096, 10_000, 4096 + 10_000 + 300);
-        let index_start = start + payload;
-        // The tables' signed range, then each rank's, padding included.
-        let shared = (8192, 1008);
-        // Rank zero's bundle abuts the header and its tokenizer.
+    fn transfer_ranges_merge_adjacent_and_overlapping_extents() {
         assert_eq!(
-            rank_ranges(&index, 0, &[shared, (0, 100)], start, payload, length).unwrap(),
-            vec![
-                (0, start + 150),
-                (start + 8192, 1008),
-                (index_start, length - index_start)
-            ]
+            merge_ranges(vec![(20, 3), (0, 10), (5, 10), (15, 1), (30, 0)]),
+            vec![(0, 16), (20, 3)]
         );
-        assert_eq!(
-            rank_ranges(&index, 1, &[shared, (4096, 200)], start, payload, length).unwrap(),
-            vec![
-                (0, start),
-                (start + 100, 50),
-                (start + 4096, 200),
-                (start + 8192, 1008),
-                (index_start, length - index_start)
-            ]
-        );
-        assert!(rank_ranges(&index, 2, &[shared], start, payload, length).is_err());
     }
 
     #[test]

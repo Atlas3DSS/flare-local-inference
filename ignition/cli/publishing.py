@@ -54,7 +54,7 @@ def sign(args):
         if not isinstance(profiles, list) or len(profiles) != 1:
             raise ValueError('development profile must contain exactly one publisher')
         promote(args.package, args.output, publisher=publisher, development_profile=profiles[0],
-                progress=StartupProgress())
+                progress=StartupProgress(), shard_size=configuration.shard_size(getattr(args, "shard_size", None)))
     except (ValueError, OSError, EOFError, DecodeError) as error:
         raise UsageError(str(error)) from error
     print(f'Signed package: {args.output}')

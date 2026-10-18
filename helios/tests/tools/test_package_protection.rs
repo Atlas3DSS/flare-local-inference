@@ -3,6 +3,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().collect();
     let path = args.get(1).ok_or("expected package path")?;
     let namespace = args.get(2).ok_or("expected accepted namespace")?;
+    if namespace == "ranges" {
+        use flare_helios::runtime_package::{rank_ranges, test_support};
+        let package = test_support::authorize(path);
+        let rank = args.get(3).ok_or("expected rank")?.parse()?;
+        let ranges = rank_ranges(&package, rank)?
+            .into_iter()
+            .map(|part| Ok((part.filename, (part.file.metadata()?.len(), part.ranges))))
+            .collect::<Result<std::collections::BTreeMap<_, _>, std::io::Error>>()?;
+        println!("{}", serde_json::to_string(&ranges)?);
+        return Ok(());
+    }
     if namespace == "records" {
         flare_helios::runtime_package::test_support::inspect_graph(
             std::path::Path::new(path),

@@ -1,6 +1,7 @@
 # Runtime packages: the preparation boundary and native serving
 
-Flare serves a prepared model from a runtime package: a single `.safetensors` file holding
+Flare serves a prepared model from a runtime package: a primary `.safetensors` file and
+optional sibling data files holding
 everything a Rust process needs to rebuild the model's CUDA graphs and
 storage without a Python interpreter. Preparation still happens in Python
 with PyTorch, Transformers, and b12x. Serving requires the NVIDIA driver,
@@ -128,14 +129,17 @@ pool holds only graph-local intermediates and is also cleared, as are unused
 bytes in the preparation allocator. Weight tensors, MTP weights, rotary
 tables, pointer tables, and required initialized metadata retain their contents.
 
-A model file is a valid safetensors container with two one-dimensional `U8`
+The primary file is a valid safetensors container with two one-dimensional `U8`
 tensors. Its little-endian u64 header length precedes a JSON header padded
 with spaces so the data buffer begins on a 4 KiB boundary. The JSON header is
 limited to 64 KiB and declares `__metadata__: {"format": "flare"}`.
 `flare.payload` covers the resource bytes, including alignment padding, from
 the start of the data buffer. `flare.metadata` immediately follows it and
 contains a serialized `ProtectedIndex` from `helios/proto/runtime_package.proto`.
-The envelope uses version 4 and its authenticated `ModelIndex` version 4.
+The envelope uses version 4. Its authenticated `ModelIndex` uses version 4 for
+monolithic packages and version 5 for packages with companion data files.
+Helios accepts both; absent filename and stored-part fields retain their
+primary-file meaning, so format-4 packages load without re-export.
 Unsigned rank staging uses `format: flare-staging` and cannot be loaded by
 Helios. Incompatible packages require re-export.
 These tensors cover the entire data buffer without gaps or overlap. The
@@ -147,8 +151,7 @@ and a versioned `ModelContract` containing vocabulary bounds, vision capacities,
 attention-history storage, page-table views, graph value sources and dependencies,
 completion cursors, and frontend syntax. Field 4 is reserved; arbitrary Protobuf
 `Struct` configuration is not accepted. Execution ABI 2/3 and protected envelope
-version 4 are versioned separately; packages with a different model-index version require
-re-export.
+version 4 are versioned separately from model-index versions 4 and 5.
 
 Semantic bindings name a destination buffer and an enum-selected value source.
 Indexing distinguishes scalar, submission row, active row, physical request row,
@@ -182,23 +185,25 @@ checkpoint config files, then exports only these consumed fields. The only front
 payload assets are `tokenizer.json` and the Jinja chat template; raw generation,
 tokenizer, processor, and model configuration files are not included.
 
-Stored allocations from every rank and offloaded embedding tables precede all
-graph bodies, cubins, module globals, and frontend assets. The protobuf sits
-at the end of the file, located directly through the JSON header. Updating
-graphs or the index does not shift the preceding storage. The payload remains
+In a monolithic package, stored allocations and offloaded embedding tables precede
+graph bodies, cubins, module globals, and frontend assets. In a multi-file package,
+stored allocations and tables occupy companions; the remaining resources and
+metadata stay in the primary. Updating graphs or the index does not shift stored
+data. Payloads remain
 uncompressed, allowing [Hugging Face Xet's content-defined storage](https://huggingface.co/docs/xet/deduplication)
 to deduplicate unchanged byte ranges across package revisions. Upload clients
 may still scan the complete local file to compute its chunks and hashes.
 
-Every resource span stores its byte offset relative to `flare.payload` and
-its byte length. Spans cannot extend into `flare.metadata`. The index is
+Every resource span stores a sibling `filename`, a byte `offset` relative to that
+file's `flare.payload`, and its byte length. An empty filename selects the primary.
+A resource occupies exactly one span in one file; it never straddles files.
+Spans cannot extend into `flare.metadata`. The index is
 limited to 128 MiB and contains ordered rank bundles, peer-memory ownership,
 serving configuration, frontend asset spans, allocation descriptions, kernel
 metadata, and graph declarations. Each tensor-parallel size requires a distinct export.
 
 Graph bodies, cubins, module globals, packed tensor data, tokenizer data, and
-other frontend assets live in separate indexed payload spans inside the same
-file. A decrypted graph body contains its declared number of nodes followed by its
+other frontend assets live in separate indexed payload spans. A decrypted graph body contains its declared number of nodes followed by its
 edges. Each record is a little-endian u32 length followed by one Protobuf
 `Node` or `Edge`, with a 1 MiB record limit. Kernel arguments, node attributes,
 and edge data are Protobuf byte strings. Graph bodies are independent; the
@@ -208,6 +213,7 @@ bindings generated by `protoc` from the same schema.
 
 Allocation extents are separate from stored payloads. Each allocation has
 ordered, disjoint `data_spans` containing destination byte offsets and lengths.
+These are memory destinations and must leave `filename` empty.
 Its payload concatenates those spans without padding. Declared disposable
 ranges are excluded before device reads; remaining ranges are checked for
 zero-filled 64 KiB blocks, which are also omitted. An entirely zero allocation
@@ -223,6 +229,48 @@ releases registered host buffers. Final file assembly requires only rank files
 and their indexes. N-gram table payloads are appended directly from checkpoint
 file ranges during rank export, without materializing their contents in
 preparation memory.
+
+### File placement and addressing
+
+`ignition export`, `ignition run`, and `ignition sign` use a 64 GiB soft file-size
+target, configured by `[publishing] shard_size = "64G"` or `--shard-size SIZE`.
+The flag wins; `0` requests one file. The package cache key includes the resolved
+byte count. Packages fitting the target remain monolithic. Otherwise the exporter
+places ordinary persisted allocation payloads and embedding planes in data files.
+Pointer tables and other initialized allocation contents are ordinary stored data
+for this purpose. Cubins, graph records, module globals, frontend assets, and all
+signed metadata remain in the primary. A resource larger than the target occupies
+an oversized file by itself; primary metadata and special resources can also
+exceed the target.
+
+For `example.safetensors`, companions are `example-data-01-of-02.safetensors` and
+`example-data-02-of-02.safetensors`. The two-digit count excludes the primary;
+at most 99 companions are permitted. Each companion contains only a one-dimensional
+`U8` `flare.payload` tensor and `__metadata__: {"format": "flare-data"}`. Headers
+use the same 4 KiB alignment and 64 KiB bound as the primary; the declared tensor
+must cover the exact remaining file length.
+
+Companion references are portable ASCII basenames ending in `.safetensors`, with
+an alphanumeric first character and only letters, digits, dots, underscores, and
+hyphens thereafter. Paths, `..`, device names, symlinks, reparse points, and
+nonregular files are rejected. The loader retains the package directory and
+opened files, validates ranges against each file's payload, and caches each
+payload base and direct-I/O handle. Allocation uploads add the resource offset
+to that base. Embedding readers retain their file handles before serving; block
+coalescing compares both file identity and offset.
+
+File placement precedes encryption, so executable keys and authenticated chunk
+data use final primary offsets. Publication syncs and installs companions first,
+then publishes the primary without overwriting any destination. Failed publication
+removes its own outputs. A forced interruption can leave unreferenced companions;
+choose an unused export basename or remove those only after confirming ownership.
+
+`StoredData.parts` describes the ordered file-qualified ranges of one owner's
+stored data. Its SHA-256 covers their concatenation, including declared alignment
+padding. With parts present, `offset` is zero and `nbytes` is the sum of their
+lengths. With parts absent, `offset` and `nbytes` select the legacy primary range.
+Each allocation or plane must fit within one signed part. Bounds, resource roles,
+and overlaps are checked per file even when the optional content scan is disabled.
 
 **Offloaded n-gram tables.** The model index declares token normalization or
 EOS-bounded history, per-head n-gram orders, XOR multipliers, modulus sizes,
@@ -355,16 +403,20 @@ resources:
 |---|---|---|
 | 1 | Model index without rank bundles, publisher namespace, source URL, development marker, model license name and link when recorded, rank count, and SHA-256 commitments to groups 2–3 | Before publisher acceptance or CUDA initialization |
 | 2 | Frontend asset spans and hashes | Before those contents are consumed |
-| 3 | Range and SHA-256 of the stored embedding tables, including padding | With `flare run --verify-weights` |
-| Rank *r* | Rank *r*'s bundle; its cubin and graph spans, plaintext and ciphertext sizes, and ciphertext chunk hashes; its module global spans and hashes; and the range and SHA-256 of its stored allocations, including padding | Bundle before loading; resources as for groups 2–3 |
+| 3 | Ranges and SHA-256 of the stored embedding tables, including padding | With `flare run --verify-weights` |
+| Rank *r* | Rank *r*'s bundle; its cubin and graph spans, plaintext and ciphertext sizes, and ciphertext chunk hashes; its module global spans and hashes; and the ranges and SHA-256 of its stored allocations, including padding | Bundle before loading; resources as for groups 2–3 |
 
-Stored data comes first: the tables, then each rank's allocations, each part one
-contiguous range. Executables and supporting resources follow. Every signature
+Stored data is ordered by owner: shared tables, then each rank's allocations.
+Each owner's signed parts describe its contiguous ranges across files. Every signature
 of the ranks a process serves is mandatory even when the stored-data scan is
 omitted. A process verifies every rank, except a host serving one rank of a
 multi-host package, which verifies the shared groups and its own rank only, so
 a copy holding only that rank's bytes verifies completely and other ranks'
-bytes or signatures do not affect it.
+bytes or signatures do not affect it. Peer transfer sends ranges separately for
+each file, including its header and signed padding. Agent protocol 3 stores a
+package in a rank-specific directory preserving companion basenames and pins or
+evicts that directory as a unit. A peer needing companions rejects older agents
+before sending any files; monolithic transfer retains protocol 1/2 compatibility.
 Resource classification follows actual consumers in the signed index. Missing,
 overlapping, unclassified, or incorrectly classified spans fail loading. The
 128 MiB metadata limit applies to the complete signed envelope. The package
@@ -396,7 +448,7 @@ license. `VerifiedPackage::authorize` records the acceptance string and
 optionally checks the stored-data contents. Only its `AuthorizedPackage` result can enter
 `NativeModel::load` or `NativeResources::load`. Executable resources are
 hash-checked and decrypted before CUDA receives them. Frontend assets retain
-signed digest checks. The open package descriptor remains alive through native
+signed digest checks. Open package descriptors remain alive through native
 use, including deferred frontend and embedding-table reads; replacing the
 pathname cannot redirect those reads. Package files must remain immutable while
 loaded. Signatures authenticate bytes and do not sandbox executable code.
