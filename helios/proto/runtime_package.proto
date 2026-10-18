@@ -93,6 +93,7 @@ message ModelContract {
   FrontendContract frontend = 7;
 }
 message VisionCapacity {
+  // Zero inherits prepared execution concurrency when max_images is nonzero.
   uint64 feature_slots = 5;
   uint64 features_per_request = 1;
   uint64 max_images = 2;

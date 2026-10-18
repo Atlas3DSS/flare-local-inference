@@ -25,7 +25,19 @@ pub(super) fn size(value: u64) -> Result<usize> {
     usize::try_from(value).map_err(|_| invalid("resource size exceeds host address space"))
 }
 
-pub(super) fn serving_contract(value: wire::ServingContract) -> Result<serde_json::Value> {
+pub(super) fn serving_contract(
+    mut value: wire::ServingContract,
+    prepared_concurrency: u64,
+) -> Result<serde_json::Value> {
+    if let Some(vision) = value
+        .model_contract
+        .as_mut()
+        .and_then(|model| model.vision.as_mut())
+    {
+        if vision.max_images > 0 && vision.feature_slots == 0 {
+            vision.feature_slots = prepared_concurrency;
+        }
+    }
     let mut value = serde_json::to_value(value).map_err(|e| invalid(e.to_string()))?;
     value.as_object_mut().unwrap().retain(|_, v| !v.is_null());
     Ok(value)
@@ -258,6 +270,33 @@ pub(super) fn edge(value: wire::Edge) -> Result<Edge> {
 mod tests {
     use super::*;
     use prost::Message;
+
+    #[test]
+    fn omitted_vision_slots_inherit_prepared_concurrency() {
+        for (prepared, slots, images, expected) in [
+            (16, 0, 4, 16),
+            (3, 0, 4, 3),
+            (16, 4, 4, 4),
+            (16, 0, 0, 0),
+        ] {
+            let value = wire::ServingContract {
+                max_active: Some(2),
+                model_contract: Some(wire::ModelContract {
+                    vision: Some(wire::VisionCapacity {
+                        feature_slots: slots,
+                        max_images: images,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            let decoded = wire::ServingContract::decode(value.encode_to_vec().as_slice()).unwrap();
+            let json = serving_contract(decoded, prepared).unwrap();
+            assert_eq!(json["model_contract"]["vision"]["feature_slots"], expected);
+            assert_eq!(json["max_active"], 2);
+        }
+    }
 
     fn defaults() -> wire::DefaultSamplingParameters {
         wire::DefaultSamplingParameters {
