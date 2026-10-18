@@ -63,9 +63,8 @@ class PreparationConfig:
     compile_decoder: bool = True
     retain_graphs: bool = False
     kernel_cache: Path | None = None
-    # DFlash2 drafts from this checkpoint; DSpark from the target checkpoint's dspark directory.
+    # Red Hat DSpark checkpoint, either external or in the target's dspark directory.
     draft_checkpoint: Path | None = None
-    dspark: bool = False
     # Verification widths count the pending input and up to seven drafts.
     speculative_widths: tuple[int, ...] = tuple(range(1, 9))
     speculative_fixed_width: int | None = None
@@ -86,8 +85,6 @@ class PreparationConfig:
         if len(self.devices) != 16 or len(set(self.devices)) != 16 or any(d < 0 for d in self.devices):
             raise ValueError("Kimi K3 preparation requires sixteen distinct GPUs")
         request_capacity(self.max_active)
-        if self.dspark and self.draft_checkpoint is not None:
-            raise ValueError("Kimi K3 drafts with either DSpark or DFlash2")
         if self.drafting:
             if not self.speculative_widths or not set(self.speculative_widths) <= set(range(1, 9)):
                 raise ValueError("Kimi K3 drafts verify one through eight rows per request")
@@ -103,7 +100,7 @@ class PreparationConfig:
 
     @property
     def drafting(self):
-        return self.dspark or self.draft_checkpoint is not None
+        return self.draft_checkpoint is not None
 
     @property
     def page_tokens(self):
@@ -143,31 +140,26 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
     with package_storage.transient():
         peers = None if group is None or package_storage.peer_storage is None else (group, package_storage.peer_storage)
         weights = ModelWeights.load(manifest, device, shard=shard, progress=progress, online_mxfp8=config.online_mxfp8,
-                                    draft_checkpoint=config.draft_checkpoint, dspark=config.dspark, peers=peers,
+                                    draft_checkpoint=config.draft_checkpoint, peers=peers,
                                     vision=config.vision)
         del manifest
         release_unused()
     transient = contextlib.ExitStack()
     transient.enter_context(package_storage.transient())
-    # Ranks that share each page's positions; a DFlash2 draft still keeps every position on every rank.
-    context_ranks = shard.world_size if config.context_parallel and shard.world_size > 1 else 1
-    layout = continuation_layout(weights.config, shard.world_size, speculative_tokens=config.draft_tokens,
-                                 context_ranks=context_ranks)
+    layout = continuation_layout(weights.config, shard.world_size, speculative_tokens=config.draft_tokens)
     snapshots = layout.snapshot_capacity(config.snapshot_budget_bytes)
     if snapshots < 1:
         raise ValueError("snapshot budget must hold a complete Kimi K3 continuation")
     slots, blocks = request_capacity(config.max_active), config.context // config.page_tokens
     drafting = weights.draft is not None
-    # DFlash2 drafts a block of positions per request in one forward; DSpark one position per draft step.
-    draft_rows = slots * weights.config.draft.block_size if drafting and not config.dspark else 0
-    max_tokens = max(config.prefill_chunk_size, config.decode_tokens, draft_rows)
+    max_tokens = max(config.prefill_chunk_size, config.decode_tokens)
     state_rows = slots + snapshots
     pages = config.preparation_pages
     total_memory = minimum_across_ranks(torch.cuda.mem_get_info(device)[1], group)
     with phase(progress, "Allocate model state"):
         pool = ContinuationPool.for_model(weights.config, shard.world_size, state_rows + 1, pages, device,
-            speculative_tokens=config.draft_tokens, context_ranks=context_ranks, storage=package_storage,
-            maximum_pages=total_memory // page_bytes(weights.config, context_ranks),
+            speculative_tokens=config.draft_tokens, storage=package_storage,
+            maximum_pages=total_memory // page_bytes(weights.config),
             maximum_rows=total_memory // layout.row_bytes, backed_slots=min(state_rows + 1, 1 + 2 * slots))
         vocabulary = weights.config.vocabulary
         requests = DeviceRequestState.allocate(device, vocab_size=vocabulary, capacity=slots)
@@ -180,18 +172,18 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         coordinator = CollectivePreparation(group)
         # Prefill activations reduce in chunks of the rows decode and verification already need a channel for: a
         # channel sized for whole prefill chunks would stage 448 MiB per rank for 4096 rows.
-        channel_rows = max(min(max_tokens, REDUCE_ROWS), config.decode_tokens, draft_rows)
+        channel_rows = max(min(max_tokens, REDUCE_ROWS), config.decode_tokens)
         collective = create_all_reduce_runtime(group, device, max_tokens=channel_rows,
             hidden_size=weights.config.hidden, ipc=package_storage.peer_storage)
         vocabulary_collective = create_all_gather_runtime(group, device,
-            max_rows=max(config.decode_tokens, draft_rows, slots * (config.draft_tokens or 1)),
+            max_rows=max(config.decode_tokens, slots * (config.draft_tokens or 1)),
             columns=weights.config.vocabulary, ipc=package_storage.peer_storage)
         context_collective = draft_argmax = None
-        if config.dspark:
+        if drafting:
             context_collective = create_all_gather_runtime(group, device, max_rows=channel_rows,
                 columns=weights.config.hidden, ipc=package_storage.peer_storage)
             # DSpark drafts greedily: each position's head and Markov shards meet in one vocabulary-parallel
-            # argmax, as vLLM's Kimi K3 DSpark does, instead of gathering both distributions.
+            # argmax without gathering both distributions.
             draft_argmax = create_vocabulary_argmax_runtime(group, device,
                 local_vocab_size=weights.config.vocabulary // shard.world_size, max_rows=slots,
                 ipc=package_storage.peer_storage)
@@ -222,7 +214,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                                 for rows in sorted({min(8, max_tokens), channel_rows}))
         identity = hashlib.sha256(json.dumps({
             "config": weights.config.text, "headers": headers, "vision": weights.config.vision,
-            "draft": None if not drafting else weights.config.draft.raw if config.dspark else weights.config.draft.text,
+            "draft": None if not drafting else weights.config.draft.raw,
             "world_size": shard.world_size, "contract": "kimi3.graph-inputs.v1"}, sort_keys=True).encode()).hexdigest()
         session = RecordedPreparationSession(
             compile_workers=config.compile_workers, tuning_replica=config.tuning_replica,
@@ -238,15 +230,10 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         with package_storage.scratch_pool() as scratch_pool:
             # Vision and text graphs execute serially and share disposable workspace.
             text_shape = (max(config.prefill_chunk_size, config.decode_tokens), weights.config.hidden)
-            # A layer attends with either KDA or MLA, so both write one attention output; DFlash2's context injection
-            # uses the two as separate buffers.
-            separate = drafting and not config.dspark
-            text_shapes = (text_shape,) * (5 if separate else 4)
+            # KDA and MLA layers execute serially and share their attention output.
+            text_shapes = (text_shape,) * 4
             if drafting:
-                # The draft's context features: DSpark's auxiliary mixtures or DFlash2's target-layer sums.
-                draft = weights.config.draft
-                layers = draft.auxiliary_layers if config.dspark else draft.target_layers
-                text_shapes += ((text_shape[0], len(layers) * text_shape[1]),)
+                text_shapes += ((text_shape[0], len(weights.config.draft.auxiliary_layers) * text_shape[1]),)
             patches = PATCH_CAPACITIES if config.vision else ()
             cursor = graph_buffers.cursor()
             shared_scratch = cursor.zeros((max(max(patches, default=0) * 3 * weights.config.vision["qkv_hidden_size"],
@@ -256,8 +243,8 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                 VisionScratch.allocate(max(patches), device, work=shared_scratch, buffers=cursor)
                 cursor = graph_buffers.cursor()
                 shared_scratch = cursor.zeros(shared_scratch.shape, torch.bfloat16)
-            activation, total, kda_output, *views = scratch_views(shared_scratch, text_shapes)
-            mla_output, moe_output, *auxiliary = views if separate else (kda_output, *views)
+            activation, total, kda_output, moe_output, *auxiliary = scratch_views(shared_scratch, text_shapes)
+            mla_output = kda_output
             prefill_storage = Scratch.allocate(config.prefill_chunk_size, 1, weights.config, shard.world_size, device,
                                                activations=activation[:config.prefill_chunk_size], buffers=cursor)
             decode_storage = Scratch.allocate(config.decode_tokens, config.decode_tokens, weights.config, shard.world_size,
@@ -294,24 +281,13 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         route_runtime=route_collective, vocabulary_runtime=vocabulary_collective, coordinator=coordinator,
         vision_state=vision_state, context=context, latent_runtimes=latent_runtimes)
     speculation = None
-    if config.dspark:
+    if drafting:
         from .dspark import SpeculativePreparation
 
         speculation = SpeculativePreparation(weights, pool, requests, inputs, decode_storage, records=records,
             frame=frame, sequence=sequence, session=session, workspace=arena, collectives=collectives,
             decoder_buffers=decoder_buffers, draft_tokens=config.draft_tokens, context_runtime=context_collective,
             page_tokens=config.page_tokens, draft_argmax=draft_argmax)
-    elif drafting:
-        from .dflash import SpeculativePreparation
-        # Context injection follows target execution and retains only auxiliary features.
-        context_buffers = dict(hidden=activation,
-            local=total.flatten()[:text_shape[0] * text_shape[1] // shard.world_size].view(text_shape[0], -1),
-            kv=kda_output.flatten()[:text_shape[0] * 576].view(text_shape[0], 576),
-            latent=mla_output.flatten()[:text_shape[0] * 576].view(text_shape[0], 576))
-        speculation = SpeculativePreparation(weights, pool, requests, inputs, decode_storage,
-            records=records, frame=frame, sequence=sequence, session=session, workspace=arena,
-            collectives=collectives, decoder_buffers=decoder_buffers, context_buffers=context_buffers,
-            page_tokens=config.page_tokens)
     modes = (True, False) if drafting else (False,)
     count = (len(modes) * (len(prefill_sizes) + 4 * len(batch_sizes)) + len(batch_sizes)
              + len(config.speculative_shapes) + len(patches))
@@ -337,10 +313,10 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                     batch = PreparedBatch(inputs, requests, m, mode=mode, shard=weights.shard, pool=pool,
                         validate_prefill=vision_state.validate_prefill if mode == "prefill" and patches else None,
                         page_tokens=config.page_tokens)
-                    # DSpark's plain graphs keep no draft context; DFlash2's keep it current for later rounds.
+                    # Plain graphs do not update draft context.
                     forward = PreparedGeneration(decoder, batch, records, frame, sequence, runtime=collective,
                         coordinator=coordinator, session=session, name=name + ".generation", workspace=arena,
-                        context_factory=(None if speculation is None or config.dspark and not enabled
+                        context_factory=(None if speculation is None or not enabled
                                          else speculation.forwards.context))
                     add(name, forward, mode, rows, capacity if mode == "prefill" else 1,
                         (*forward_inputs, *(vision_prefill.buffers() if mode == "prefill" and patches else ())),
@@ -438,8 +414,8 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         mapped_host_bytes=0, offloaded_bytes=0, continuation_bytes=pool.backing.nbytes, state_rows=state_rows,
         preparation_state_rows=int(pool.memory_capacity[0].item()),
         preparation_state_bytes=int(pool.memory_capacity[0].item()) * layout.row_bytes,
-        pages=pages, page_bytes=page_bytes(weights.config, context_ranks), page_tokens=config.page_tokens,
-        kv_bytes=pages * page_bytes(weights.config, context_ranks), operator_scratch_bytes=arena.nbytes, graphs=len(graphs),
+        pages=pages, page_bytes=page_bytes(weights.config), page_tokens=config.page_tokens,
+        kv_bytes=pages * page_bytes(weights.config), operator_scratch_bytes=arena.nbytes, graphs=len(graphs),
         prefill_capacities=prefill_sizes, free_device_bytes=free, total_device_bytes=total,
         headroom_bytes=config.headroom_bytes, tuning=tuning, compiled_decoder=config.compile_decoder)
     if drafting:

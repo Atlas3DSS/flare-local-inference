@@ -378,17 +378,19 @@ Kimi K3 uses the local `/data/models/Kimi-K3-MXFP4-CSF` checkpoint. The
 and up to four images per request on sixteen GPUs. It preserves MXFP4 experts
 with compressed scales, BF16 projections, and FP32 KDA recurrent state.
 Its 93-layer decoder combines KDA, unrotated latent attention, attention
-residuals, and latent SiTU experts. DFlash2 uses
-`lightseekorg/kimi-k3-dflash2` revision
-`e77935fb4804e17eb55085bffd045eae1d779769`, downloaded to the Hugging Face hub
+residuals, and latent SiTU experts. Red Hat DSpark uses
+`RedHatAI/Kimi-K3-speculator.dspark` revision
+`38a88101e0d46bb22134b9da340f381b954d40d4`, downloaded to the Hugging Face hub
 cache (or `[paths].hub_cache`), and defaults to seven draft tokens per round.
+A target checkpoint may instead carry that draft in its `dspark/` directory;
+`kimi-k3-dspark` selects this layout at `/data/kimi-k3-dspark`.
 
 For Kimi K3, `--online-mxfp8` converts KDA input, forget-gate, and output
 projections; MLA latent/gate, query, and output projections; shared
 expert gate/up and down projections; and both tensor-parallel layouts of the
 MoE latent down projection and its latent up projection. Activations remain
 BF16. MLA's batched key/value projections, routers, the first dense MLP,
-embeddings, vocabulary head, vision encoder, and DFlash2 retain checkpoint
+embeddings, vocabulary head, and vision encoder retain checkpoint
 precision. DSpark converts its context projection, attention outputs, and MLPs.
 Shared and routed experts keep disjoint
 kernel scratch when their execution overlaps.
@@ -397,22 +399,27 @@ kernel scratch when their execution overlaps.
 .venv/bin/python -m ignition export /data/models/Kimi-K3-MXFP4-CSF --gpus 0-15 \
   --max-concurrency 4 --image-concurrency 4 --mtp-draft-tokens 7 \
   --prefill-chunk-size 4096 --compile-workers 16 --online-mxfp8 \
-  --output /data/flare-runtime/kimi-k3-mxfp4-csf-tp16-c4-dflash2-7-mxfp8.safetensors --verbose
+  --output /data/flare-runtime/kimi-k3-mxfp4-csf-tp16-c4-images-redhat-dspark-7-mxfp8.safetensors --verbose
 
 ./flare/target/release/flare run \
-  /data/flare-runtime/kimi-k3-mxfp4-csf-tp16-c4-dflash2-7-mxfp8.safetensors \
+  /data/flare-runtime/kimi-k3-mxfp4-csf-tp16-c4-images-redhat-dspark-7-mxfp8.safetensors \
   --gpus 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15 --host 127.0.0.1 --port 8001
 ```
 
-The draft consumes prefix residuals from target layers 19, 37, 66, 78, and 90
-(zero-based). Its five noncausal MLA layers predict an eight-position block;
-grouped convolutions and a predecessor-conditioned candidate selector generate
-seven proposals. Only accepted target features enter the draft's paged context,
-and KDA verification records replay the accepted prefix into committed state.
+The draft consumes AttnRes mixtures entering target layers 24, 48, 72, 88,
+and 92, before input normalization. Its five causal Qwen3 layers use
+2,048-token BF16 key/value windows. An anchor followed by mask tokens produces
+seven proposals; each preceding proposal conditions the Markov bias.
+Ignition uses greedy proposals and adaptive target verification widths,
+without the draft's confidence head. The
+[Red Hat model card](https://huggingface.co/RedHatAI/Kimi-K3-speculator.dspark)
+reports eight-token probabilistic proposals with block rejection sampling,
+which differs from this execution configuration. Only accepted target features
+update draft windows; KDA verification commits the accepted recurrent prefix.
 Loading with `--mtp-draft-tokens 0` selects ordinary execution; exporting with
 `--no-mtp` excludes draft weights and state.
 
-FP8 MLA latent records occupy 128-token pages in both the target and DFlash2.
+Target FP8 MLA latent records occupy 128-token pages.
 With context parallelism across sixteen ranks, concurrency four, and a
 4096-token prefill chunk, preparation backs ten logical KV pages and nine
 continuation rows: one null row, four live rows, and four snapshot destinations.
@@ -420,7 +427,7 @@ Retaining CUDA graph handles for export does not expand this working set.
 Native package loading sizes serving caches from available device memory;
 in-process diagnostic serving limits admission to physically backed storage.
 Continuation rows preserve KDA
-convolution and recurrent state, partial latent pages, and the normalized
+convolution and recurrent state, DSpark key/value windows, partial latent pages, and the normalized
 last hidden state. The MoonViT encoder accepts a combined 65,536 image patches
 per request and publishes hidden-column-sharded features for causal text
 prefill. XTML encoding distinguishes protocol tokens from literal marker text.

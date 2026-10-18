@@ -12,10 +12,10 @@ from ignition.cli.preparation import Host, derive
 from ignition.recipes import ResolvedModel, recipes
 
 
-@pytest.mark.parametrize("name", ["nemotron_h", "kimi3"])
+@pytest.mark.parametrize("name,embedded", [("nemotron_h", False), ("kimi3", False), ("kimi3", True)])
 @pytest.mark.parametrize("custom_cache", [False, True])
 @pytest.mark.parametrize("drafting", [False, True])
-def test_draft_preparation_reuses_the_hub_snapshot(monkeypatch, tmp_path, name, custom_cache, drafting):
+def test_draft_preparation_selects_local_or_hub_snapshot(monkeypatch, tmp_path, name, custom_cache, drafting, embedded):
     import huggingface_hub
 
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -31,8 +31,10 @@ def test_draft_preparation_reuses_the_hub_snapshot(monkeypatch, tmp_path, name, 
                   concurrency=Setting(4, "test"), speculation=recipe.speculation if drafting else None)
     assert plan.hub_cache == hub_cache
 
-    draft = import_module(f"ignition.recipes.{name}.draft_config")
-    snapshot = hub_cache / f"models--{draft.REPOSITORY.replace('/', '--')}" / "snapshots" / draft.REVISION
+    draft = import_module(f"ignition.recipes.{name}." + ("config" if name == "kimi3" else "draft_config"))
+    repository = draft.DSPARK_REPOSITORY if name == "kimi3" else draft.REPOSITORY
+    revision = draft.DSPARK_REVISION if name == "kimi3" else draft.REVISION
+    snapshot = hub_cache / f"models--{repository.replace('/', '--')}" / "snapshots" / revision
     if drafting:
         snapshot.mkdir(parents=True)
         (snapshot / "config.json").write_text("{}")
@@ -60,6 +62,10 @@ def test_draft_preparation_reuses_the_hub_snapshot(monkeypatch, tmp_path, name, 
         PreparationConfig=preparation_config, prepare=prepare_model, prepare_rank=prepare_model))
     monkeypatch.setitem(sys.modules, "ignition.preparation.rank_group", SimpleNamespace(
         prepare_group=lambda snapshot, config, prepare, **options: config))
-    config = recipe.prepare(tmp_path / "target", plan, compile_forwards=True, kernel_cache=None, progress=None)
+    target = tmp_path / "target"
+    if embedded:
+        snapshot = target / "dspark"
+        snapshot.mkdir(parents=True)
+    config = recipe.prepare(target, plan, compile_forwards=True, kernel_cache=None, progress=None)
     assert config.draft_checkpoint == (str(snapshot) if drafting else None)
-    assert downloads == ([draft.REPOSITORY] if drafting else [])
+    assert downloads == ([repository] if drafting and not embedded else [])

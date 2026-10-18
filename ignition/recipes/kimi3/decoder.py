@@ -15,7 +15,6 @@ from ignition.components.kda_speculation import PreparedKDAReplay
 from ignition.preparation.tuning import register_finalizer
 
 from .attention import PreparedMLA
-from .config import DSparkConfig
 from .kda import PreparedKDA
 from .pointwise import rms_norm_columns, situ
 from .projections import prepare_projection
@@ -252,14 +251,13 @@ class PreparedDecoder:
 
     ``verify`` rows are speculative candidates: KDA layers record them without advancing committed states
     until ``commit`` replays each request's accepted prefix. With a draft model, every forward also keeps
-    the draft's context features in ``auxiliary``: DSpark's AttnRes mixtures entering its auxiliary layers,
-    or DFlash2's running sums after its target layers.
+    DSpark's AttnRes mixtures entering its auxiliary layers in ``auxiliary``.
     """
 
     def __init__(self, weights, scratch, metadata, pool, *, mode, runtime, vocabulary_runtime, embedding_runtime, router_runtime, vision_state,
                  coordinator, session, name, workspace, buffers, kda_records=None, route_runtime=None, context=None,
                  latent_runtimes=()):
-        # Verification records its candidate rows; other modes ignore records, which DFlash2 rounds always pass.
+        # Verification records its candidate rows; other modes ignore records.
         if mode not in ("prefill", "decode", "verify") or mode == "verify" and kda_records is None:
             raise ValueError("Kimi K3 verification decodes recorded candidate rows")
         self.weights, self.scratch, self.metadata, self.pool = weights, scratch, metadata, pool
@@ -282,13 +280,7 @@ class PreparedDecoder:
         if "residual" not in self.buffers:
             committed = -(-len(weights.layers) // config.text["attn_res_block_size"])
             self.buffers["residual"] = dict(blocks=zeros((tokens, committed, hidden)), prefix=zeros(source.shape))
-        self.target_layers = (() if weights.draft is None or isinstance(config.draft, DSparkConfig)
-                              else config.draft.target_layers)
         self.auxiliary = None
-        if self.target_layers:
-            if "auxiliary" not in self.buffers:
-                self.buffers["auxiliary"] = zeros((source.shape[0], len(self.target_layers) * config.hidden))
-            self.auxiliary = self.buffers["auxiliary"][:source.shape[0]]
         for index, w in enumerate(weights.layers):
             prefix = f"{name}.layer{index}"
             kind = config.layers[index]
@@ -338,7 +330,7 @@ class PreparedDecoder:
         # DSpark's context: the AttnRes mixture each auxiliary layer receives, before its input norm. Plans
         # without the draft keep none.
         self.auxiliary_layers = (config.draft.auxiliary_layers
-                                 if weights.draft is not None and isinstance(config.draft, DSparkConfig) else ())
+                                 if weights.draft is not None else ())
         if self.auxiliary_layers:
             if "auxiliary" not in self.buffers:
                 self.buffers["auxiliary"] = zeros((tokens, len(self.auxiliary_layers) * hidden))
@@ -352,12 +344,6 @@ class PreparedDecoder:
             regions = [pool.layout.region(f"layer{i}.convolution") for i in indices]
             self.convolution_offsets = torch.tensor([r.offset // 2 for r in regions], dtype=torch.int64, device=source.device)
             self.convolution_shape = regions[0].shape
-
-    def capture(self, index):
-        """Copy the running residual sum after target layer ``index`` into the draft's context features."""
-        if index in self.target_layers:
-            column = self.target_layers.index(index) * self.residual.prefix.shape[1]
-            self.auxiliary[:, column:column + self.residual.prefix.shape[1]].copy_(self.residual.prefix)
 
     def commit(self, counts):
         self.replay(counts)
@@ -393,8 +379,6 @@ class PreparedDecoder:
                 mixture = self.auxiliary[:, column:column + self.residual.prefix.shape[1]]
             hidden = self.residual.mix(delta, mode, sources=committed, write=index // size if boundary else -1,
                 score=w["attention_res_score"], norm=w["input_layernorm"], eps=eps, output_eps=eps, mixture=mixture)
-            # The running sum now includes the previous layer's MLP output.
-            self.capture(index - 1)
             attended = reduce(attention(hidden))
             hidden = self.residual.mix(attended, REPLACE if boundary else ADD, sources=committed + boundary, write=-1,
                 score=w["mlp_res_score"], norm=w["post_attention_layernorm"], eps=eps, output_eps=eps,
@@ -402,6 +386,5 @@ class PreparedDecoder:
             delta, mode = reduce(mlp(hidden)), ADD
         hidden = self.residual.mix(delta, mode, sources=-(-len(self.layers) // size), write=-1,
             score=self.weights.output_res_score, norm=self.weights.norm, eps=eps, output_eps=eps)
-        self.capture(len(self.layers) - 1)
         self.scratch.hidden.copy_(hidden[m.sample_indices])
         self.head(self.scratch.hidden)

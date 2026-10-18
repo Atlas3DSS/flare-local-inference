@@ -48,6 +48,7 @@ def owner_claims(prepared):
     bounds traversal; overlapping tensor elements use their first owning field.
     """
     import torch
+    from .aot import BoundForward
     from .scratch import GraphBufferPool, ScratchArena
 
     seen, covered, result = set(), [], []
@@ -64,6 +65,10 @@ def owner_claims(prepared):
     enqueue(((prepared.buffers, "buffers", ""),))
     while pending:
         value, path, source = pending.popleft()
+        if isinstance(value, BoundForward):
+            # Runtime operands belong to the bound owner; compiler IR and guards describe them again.
+            enqueue(((value.owner, f"{path}.owner", source),))
+            continue
         if isinstance(value, torch.Tensor):
             if (value.device.type == "cuda" and value.device.index == prepared.device
                     and value.untyped_storage().device.type != "meta"):

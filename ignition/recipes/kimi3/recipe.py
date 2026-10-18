@@ -10,7 +10,7 @@ def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress, retain_
             package_storage=None, ranks=None):
     from ignition.preparation.rank_group import prepare_group
     from .bootstrap import PreparationConfig, prepare_rank
-    from .config import DRAFT_DIRECTORY
+    from .config import DRAFT_DIRECTORY, DSPARK_REPOSITORY, DSPARK_REVISION
 
     if ranks is not None:
         raise ValueError("Kimi K3 preparation requires GPUs on one host")
@@ -19,13 +19,11 @@ def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress, retain_
         drafting = dict(speculative_widths=plan.speculation.widths, speculative_fixed_width=plan.speculation.fixed_width,
                         speculative_token_capacity=plan.speculative_token_capacity)
         if (Path(snapshot) / DRAFT_DIRECTORY).is_dir():
-            # A checkpoint carrying Red Hat's DSpark speculator drafts with it.
-            drafting["dspark"] = True
+            drafting["draft_checkpoint"] = str(Path(snapshot) / DRAFT_DIRECTORY)
         else:
             from huggingface_hub import snapshot_download
-            from .draft_config import REPOSITORY, REVISION
 
-            drafting["draft_checkpoint"] = snapshot_download(REPOSITORY, revision=REVISION, cache_dir=plan.hub_cache,
+            drafting["draft_checkpoint"] = snapshot_download(DSPARK_REPOSITORY, revision=DSPARK_REVISION, cache_dir=plan.hub_cache,
                                                              allow_patterns=("config.json", "model.safetensors"))
     config = PreparationConfig(compile_workers=plan.compile_workers, tuning_replica=plan.tuning_replica,
         devices=tuple(range(plan.world_size)), context=plan.context,
@@ -52,20 +50,15 @@ RECIPE = Recipe(
     sampling_defaults=SamplingDefaults(temperature=1., top_p=1., top_k=-1),
     checkpoints=(Checkpoint(alias="kimi-k3-mxfp4-csf", repository="/data/models/Kimi-K3-MXFP4-CSF",
         revision="local", architecture="KimiK3ForConditionalGeneration",
-        stored_bytes=1_491_026_420_236, device_bytes=1_505_431_429_644, draft_bytes=14_405_009_408),
+        stored_bytes=1_491_026_420_236, device_bytes=1_498_926_420_236, draft_bytes=7_900_000_000),
         # The native checkpoint's block scales are compressed while loading, as resident as the CSF copy's.
         Checkpoint(alias="kimi-k3", repository="moonshotai/Kimi-K3",
         revision="2496450e92e425c886db095102a52a6682ca3970", architecture="KimiK3ForConditionalGeneration",
-        stored_bytes=1_560_860_324_864, device_bytes=1_505_431_429_644, draft_bytes=14_405_009_408),
-        # The native checkpoint with Red Hat's DSpark speculator (RedHatAI/Kimi-K3-speculator.dspark@38a88101)
-        # in its dspark/ directory; the draft shares the target's output head and keeps its windows in
-        # continuation rows, so decode context parallelism spreads each page over the sixteen ranks.
+        stored_bytes=1_560_860_324_864, device_bytes=1_498_926_420_236, draft_bytes=7_900_000_000),
+        # A local target checkpoint carrying Red Hat's DSpark weights in dspark/.
         Checkpoint(alias="kimi-k3-dspark", repository="/data/kimi-k3-dspark", revision="local",
-        architecture="KimiK3ForConditionalGeneration", stored_bytes=1_570_350_125_826,
-        device_bytes=1_498_926_420_236, draft_bytes=7_900_000_000,
-        # Language-only DSpark serving measured 4.1 GiB per rank beside weights and KV pages.
-        ranks=MappingProxyType({16: RankCosts(state_row_bytes=34_716_928, page_bytes=1_769_472, graph_bytes=9 << 29,
-                                              page_tokens=128 * 16)}))),
+        architecture="KimiK3ForConditionalGeneration", stored_bytes=1_500_516_228_062,
+        device_bytes=1_498_926_420_236, draft_bytes=7_900_000_000)),
     context=1048576, page_tokens=128, concurrency=4, max_concurrency=64, prefill_chunk=4096,
     speculation=Speculation(draft_tokens=7), max_draft_tokens=7, max_images=4, image_bytes=32 << 20,
     verification_rows=0,
@@ -81,11 +74,9 @@ RECIPE = Recipe(
     b12x_environment=MappingProxyType({"B12X_PCIE_ALLREDUCE_ALGORITHM": "island_rs",
         "B12X_PCIE_HIERARCHICAL_DEFERRED_CONSUMPTION": "1", "B12X_PCIE_HIERARCHICAL_THREADS": "256",
         "B12X_PCIE_DCP_THREADS": "512", "B12X_PCIE_DCP_BLOCK_LIMIT": "8", "B12X_W4A16_SMALL_M_HOST_BARRIER_RESET": "0"}),
-    # E4M3 latent pages, as vLLM serves Kimi K3 (--kv-cache-dtype fp8); decode context parallelism spreads each
-    # page's target positions over the sixteen ranks. DFlash2 keeps its full-attention layer's records of every
-    # position on every rank, as vLLM replicates its draft cache, and its sliding layers' rings in continuations.
-    ranks=MappingProxyType({16: RankCosts(state_row_bytes=42_712_320, page_bytes=2_949_120,
-                                        draft_page_bytes=1_179_648, graph_bytes=9 << 29, page_tokens=128 * 16)}),
+    # Target MLA pages are context-parallel; DSpark keeps its sliding KV windows in continuation rows.
+    ranks=MappingProxyType({16: RankCosts(state_row_bytes=34_716_928, page_bytes=1_769_472,
+                                        graph_bytes=9 << 29, page_tokens=128 * 16)}),
     plain_ranks=MappingProxyType({16: RankCosts(state_row_bytes=29_869_824, page_bytes=1_769_472, graph_bytes=9 << 29,
                                               page_tokens=128 * 16)}),
 )

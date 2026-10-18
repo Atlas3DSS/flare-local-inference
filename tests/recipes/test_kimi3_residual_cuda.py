@@ -72,12 +72,14 @@ def test_checkpoint_residual_mixing_and_graph_replay():
             stream = ResidualStream(prefix.clone(), blocks.clone(), torch.full_like(prefix, float("nan")))
             current = delta.clone() if mode == REPLACE else prefix + delta
             mixed = reference(current, blocks[:, :sources], canonical_projection, canonical_norm) if sources else current
+            mixture = torch.empty_like(prefix)
             actual = stream.mix(delta, mode, sources=sources, write=write, score=score, norm=output_norm,
-                                eps=eps, output_eps=eps)
+                                eps=eps, output_eps=eps, mixture=mixture)
             assert torch.equal(stream.prefix, current)
             if write >= 0:
                 assert torch.equal(stream.blocks[:, write], current)
             _assert_rounding_close(actual, normalize(mixed))
+            _assert_rounding_close(mixture, mixed)
 
     # A 93-layer residual sequence replays from caller-owned storage without allocation.
     rows = 4096
