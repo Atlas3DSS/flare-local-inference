@@ -286,7 +286,8 @@ impl ThreadedExecutor {
             super::parallel::agree(
                 self.completion.as_ref().unwrap(),
                 peer.completion.as_ref().unwrap(),
-            )?;
+            )
+            .map_err(|error| invalid(format!("rank {}: {error}", index + 1)))?;
             self.completion.as_mut().unwrap().timing.gpu_ns[index + 1] =
                 peer.completion.as_ref().unwrap().timing.gpu_ns[0];
             peer.completion = None;

@@ -237,8 +237,9 @@ impl TensorParallelExecutor {
             return Ok(None);
         }
         let root = self.completion.as_ref().unwrap();
-        for peer in &self.peers {
-            agree(root, peer.completion.as_ref().unwrap())?;
+        for (index, peer) in self.peers.iter().enumerate() {
+            agree(root, peer.completion.as_ref().unwrap())
+                .map_err(|error| invalid(format!("rank {}: {error}", index + 1)))?;
         }
         for (index, peer) in self.peers.iter_mut().enumerate() {
             self.completion.as_mut().unwrap().timing.gpu_ns[index + 1] =
@@ -327,16 +328,17 @@ pub(super) fn agree(root: &FrameCompletion, peer: &FrameCompletion) -> Result<()
         }
         _ => return Err(invalid("tensor-parallel proposal confidence presence differs")),
     }
-    for (root, peer) in root.records.iter().zip(peer.records.iter()) {
-        if root.generation != peer.generation
-            || root.submission_sequence != peer.submission_sequence
-            || root.consumed_tokens != peer.consumed_tokens
-            || root.error_code != peer.error_code
-            || !(root.status == peer.status || root.status == 2 && peer.status == 1)
+    for (lane, (a, b)) in root.records.iter().zip(peer.records.iter()).enumerate() {
+        if a.generation != b.generation
+            || a.submission_sequence != b.submission_sequence
+            || a.consumed_tokens != b.consumed_tokens
+            || a.error_code != b.error_code
+            || !(a.status == b.status || a.status == 2 && b.status == 1)
         {
-            return Err(invalid(
-                "tensor-parallel request epochs, consumption, or status differ",
-            ));
+            return Err(invalid(format!(
+                "tensor-parallel request epochs, consumption, or status differ at graph {}, fence {}, lane {lane}: root {a:?}, peer {b:?}",
+                root.graph_index, root.fence.0,
+            )));
         }
     }
     Ok(())

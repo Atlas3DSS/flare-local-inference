@@ -146,7 +146,10 @@ fn peers_agree_on_request_consumption_without_sampling() {
     let mut peer = completed(1);
     agree(&root, &peer).unwrap();
     peer.records[0].consumed_tokens -= 1;
-    assert!(agree(&root, &peer).is_err());
+    let error = agree(&root, &peer).unwrap_err().to_string();
+    assert!(error.contains("graph 2, fence 3, lane 0"), "{error}");
+    assert!(error.contains("consumed_tokens: 65"), "{error}");
+    assert!(error.contains("consumed_tokens: 64"), "{error}");
     peer = completed(1);
     peer.records[0].generation += 1;
     assert!(agree(&root, &peer).is_err());

@@ -261,7 +261,11 @@ fn serve_peer(
     if !shutdown.drained {
         std::mem::forget(joined.transport);
         std::mem::forget(owner);
-        return Err("native replay did not drain".into());
+        return Err(match shutdown.error {
+            Some(error) => format!("native replay did not drain: {error}"),
+            None => "native replay did not drain".into(),
+        }
+        .into());
     }
     // The proxy stops before the package releases the region it posts from.
     drop(joined.transport);
@@ -348,7 +352,11 @@ fn serve(
     if !shutdown.drained {
         std::mem::forget(transport);
         std::mem::forget(owner);
-        return Err("native replay did not drain".into());
+        return Err(match shutdown.error {
+            Some(error) => format!("native replay did not drain: {error}"),
+            None => "native replay did not drain".into(),
+        }
+        .into());
     }
     if let Some(error) = shutdown.error {
         return Err(error.into());
