@@ -1,5 +1,6 @@
 """Promote authenticated development packages without preparing model computation."""
 
+from dataclasses import replace
 import hashlib
 import json
 from pathlib import Path
@@ -12,7 +13,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from ignition.progress import phase
 from . import runtime_package_pb2 as proto
 from .package_file import MAX_INDEX_BYTES, _publish, _validate_spans, read_index
-from .protection import CHUNK, Protection, chunk_aad, resource_key, resource_roles, signature_message
+from .protection import CHUNK, License, Protection, chunk_aad, resource_key, resource_roles, signature_message
 
 
 def _authenticate(source, profile):
@@ -100,7 +101,7 @@ def _authenticate(source, profile):
     ordered = sorted(ranges)
     if any(left[1] > right[0] for left, right in zip(ordered, ordered[1:])):
         raise ValueError('signed stored-data ranges overlap')
-    return index, base, envelope.package_id, public, resources, stored
+    return index, base, envelope.package_id, public, resources, stored, (License(metadata.license.name, metadata.license.link) if metadata.HasField('license') else None)
 
 
 def _zero_padding(source, offset, size):
@@ -122,7 +123,10 @@ def resign(source, destination, *, publisher, development_profile, progress=None
     destination.parent.mkdir(parents=True, exist_ok=True)
     with Path(source).open('rb') as contents, TemporaryDirectory(prefix='.flare-resign-', dir=destination.parent) as temporary:
         with phase(progress, 'Authenticate development package'):
-            index, base, package_id, public, resources, stored = _authenticate(contents, development_profile)
+            index, base, package_id, public, resources, stored, license = _authenticate(contents, development_profile)
+        # The model's license travels with the model; the production publisher may override it.
+        if publisher.license is None and license is not None:
+            publisher = replace(publisher, license=license)
         payload = []
         with phase(progress, 'Verify and decrypt executable resources'):
             for kind, owner, span in sorted(resource_roles(index), key=lambda r: r[2].offset):

@@ -353,7 +353,7 @@ resources:
 
 | Group | Authenticated contents | Payload checks |
 |---|---|---|
-| 1 | Model index without rank bundles, publisher namespace, source URL, development marker, rank count, and SHA-256 commitments to groups 2–3 | Before publisher acceptance or CUDA initialization |
+| 1 | Model index without rank bundles, publisher namespace, source URL, development marker, model license name and link when recorded, rank count, and SHA-256 commitments to groups 2–3 | Before publisher acceptance or CUDA initialization |
 | 2 | Frontend asset spans and hashes | Before those contents are consumed |
 | 3 | Range and SHA-256 of the stored embedding tables, including padding | With `flare run --verify-weights` |
 | Rank *r* | Rank *r*'s bundle; its cubin and graph spans, plaintext and ciphertext sizes, and ciphertext chunk hashes; its module global spans and hashes; and the range and SHA-256 of its stored allocations, including padding | Bundle before loading; resources as for groups 2–3 |
@@ -375,7 +375,10 @@ Cubins and graph records use AES-256-GCM in independent 4 MiB plaintext chunks,
 each followed by a 16-byte tag. Each package has a random 32-byte identifier.
 HKDF-SHA256 derives a resource key from the publisher verification key, with
 the package identifier as salt and a domain-separated encoding of the resource
-offset and accepted namespace as context. Chunk nonces encode the chunk index;
+offset and the acceptance string as context. The exporter encrypts under the
+publisher namespace; Helios derives from the string the user applied to accept
+the package, which the trust store remembers, so acceptance is the key material
+and any other string decrypts nothing. Chunk nonces encode the chunk index;
 authenticated data binds the package identifier, offset, plaintext length, and
 chunk index. Field encodings use little-endian u64 byte lengths followed by the
 field bytes; the exporter and native reader define the matching domain strings
@@ -384,10 +387,13 @@ in `ignition/preparation/protection.py` and
 key or namespace does not produce a loadable package. Weights and tables stay
 plaintext and retain direct-I/O compatibility and storage deduplication.
 
-`VerifiedPackage::open` authenticates the index and publisher binding, for
-every rank or for one rank of a multi-host package.
-`VerifiedPackage::authorize` requires the exact accepted namespace and optionally
-checks the stored-data contents. Only its `AuthorizedPackage` result can enter
+`PackageClaim::read` returns what a package claims before verification: signer
+fingerprint, namespace, official source, and development marker, syntax-checked
+so a caller can resolve the signer's identity from them. `VerifiedPackage::open`
+authenticates the index and publisher binding against the supplied profiles,
+for every rank or for one rank of a multi-host package, and exposes the recorded
+license. `VerifiedPackage::authorize` records the acceptance string and
+optionally checks the stored-data contents. Only its `AuthorizedPackage` result can enter
 `NativeModel::load` or `NativeResources::load`. Executable resources are
 hash-checked and decrypted before CUDA receives them. Frontend assets retain
 signed digest checks. The open package descriptor remains alive through native
@@ -396,11 +402,12 @@ pathname cannot redirect those reads. Package files must remain immutable while
 loaded. Signatures authenticate bytes and do not sandbox executable code.
 Encryption does not prevent a user controlling the runtime from recovering code.
 
-Helios embeds the Local Inference Lab, Inc. public identity from
+Helios embeds the Local Inference Lab, Inc. public profile from
 `helios/src/runtime_package/publishers.json` in source builds. It also reserves an
-ELF `.flare_publishers` section for additional release-provisioned identities.
-The private release command stamps a JSON profile array into a separately named
-executable:
+ELF `.flare_publishers` section for additional release-provisioned profiles.
+Embedded profiles verify signatures when the publisher's repository cannot be
+consulted; they confer no verified identity. The private release command stamps
+a JSON profile array into a separately named executable:
 
 ```sh
 .venv/bin/python -m ignition.release flare/target/release/flare \
@@ -409,21 +416,28 @@ executable:
 
 Each profile has `name`, `namespace`, and `public_key` (32 integer bytes), plus
 an optional boolean `development`. The public key belongs to the Ed25519 key
-used by Ignition. The built-in identity uses namespace `local-inference-lab`;
-names in externally supplied profiles remain unverified claims. Profile import
-does not grant execution trust. An external key claiming an embedded publisher's name or namespace still receives the
-unrecognized-key warning. A key with conflicting profile attributes is rejected.
+used by Ignition. Names in profiles are claims; profile import does not grant
+execution trust or verify identity. A key with conflicting profile attributes is
+rejected.
 
-Flare displays the authenticated namespace, source, and full key fingerprint.
-First use asks for the exact namespace and remembers the key/namespace pair.
-An external key receives a prominent warning about unverified identity and
-executable code. Unattended approval requires both
-`--dangerously-approve-key FINGERPRINT` and
+Flare establishes identity from the publisher's own repository. On every load
+that is not offline it fetches `publisher.json` from the root of the signed
+official source on huggingface.co and requires the file to list the signing key
+under the package's namespace. A file that omits the key rejects the package
+outright, remembered or not, which is how a publisher revokes a key. An absent
+file or an unreachable repository leaves the identity unverified unless an
+earlier load confirmed it, and loading then needs the key from a profile or
+remembered acceptance. Flare displays the publisher,
+how its identity was established, the source, the recorded license and its
+link, and the full key fingerprint. First use asks for the exact namespace,
+which agrees to the license terms at the link, and remembers the key, its
+namespace, its verification key, and how its identity was established.
+Unattended approval requires both `--dangerously-approve-key FINGERPRINT` and
 `--dangerously-accept-publisher NAMESPACE`; both must match even if trust was
 previously remembered. Trust never transfers to a replacement key merely
 because it uses the same namespace. `flare trust revoke FINGERPRINT` removes
-remembered acceptance. This local acceptance mechanism does not contact a
-website or establish ownership of a publisher's claimed domain or account.
+remembered acceptance. Identity rests on control of the Hugging Face namespace,
+the same account the model itself is published from.
 
 ## 3. Address rules
 

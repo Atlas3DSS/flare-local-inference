@@ -1,12 +1,21 @@
-//! Publisher-specific acceptance and the persistent signing-key trust store.
+//! Publisher acceptance and the persistent signing-key trust store.
+//!
+//! Loading a package: read its unverified claim, resolve the signer's identity from the
+//! publisher's repository whenever it can be consulted, verify the signatures, disclose
+//! publisher, identity, source, and license, and obtain the acceptance string, which Helios
+//! uses as the key material for every executable resource. Remembered acceptance suppresses
+//! the disclosure and supplies the key; it never skips the repository check.
 
 #[cfg(unix)]
 use std::fs::OpenOptions;
 #[cfg(unix)]
 use std::os::{fd::AsRawFd, unix::fs::OpenOptionsExt};
 
-use flare_helios::runtime_package::{AuthorizedPackage, Publisher, VerifiedPackage};
+use flare_helios::runtime_package::{AuthorizedPackage, PackageClaim, Publisher, VerifiedPackage};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+use crate::identity::{self, Resolution};
 use std::{
     fs::{self, File},
     io::{self, BufRead, IsTerminal, Read, Write},
@@ -48,11 +57,39 @@ pub fn publishers(paths: &[PathBuf]) -> Result<Vec<Publisher>> {
 struct Store {
     trusted: Vec<Entry>,
 }
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Entry {
     fingerprint: String,
     namespace: String,
+    /// The verification key, remembered so later loads verify signatures without a profile or
+    /// a network request. Entries recorded before it was stored lack it and use profiles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    public_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    /// How the key's identity was established at acceptance: `huggingface.co` when the
+    /// publisher's repository listed it, otherwise `profile`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    identity: Option<String>,
+}
+impl Entry {
+    fn profile(&self) -> Option<Publisher> {
+        let key = self.public_key.as_deref()?;
+        let mut public_key = [0u8; 32];
+        for (byte, pair) in public_key.iter_mut().zip(key.as_bytes().chunks(2)) {
+            *byte = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
+        }
+        Some(Publisher {
+            name: self
+                .name
+                .clone()
+                .unwrap_or_else(|| "Remembered signer".into()),
+            namespace: self.namespace.clone(),
+            public_key,
+            development: self.namespace == "local-development",
+        })
+    }
 }
 fn fingerprint_valid(value: &str) -> bool {
     value.len() == 64
@@ -88,7 +125,7 @@ fn store_path(given: Option<&Path>) -> Result<PathBuf> {
         Ok(Path::new(home).join(".config/flare/trust.toml"))
     }
 }
-fn load(path: &Path) -> Result<Store> {
+fn load_store(path: &Path) -> Result<Store> {
     let bytes = match fs::read_to_string(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Store::default()),
@@ -99,16 +136,32 @@ fn load(path: &Path) -> Result<Store> {
     for entry in &store.trusted {
         if !fingerprint_valid(&entry.fingerprint)
             || !seen.insert((&entry.fingerprint, &entry.namespace))
+            || entry
+                .identity
+                .as_deref()
+                .is_some_and(|i| !matches!(i, "huggingface.co" | "profile"))
         {
             return Err("invalid or duplicate trust-store entry".into());
         }
-        Publisher {
-            development: false,
-            name: "trust entry".into(),
-            namespace: entry.namespace.clone(),
-            public_key: [1; 32],
+        match entry.profile() {
+            Some(profile) => {
+                profile.validate()?;
+                // The remembered key must be the one the fingerprint names.
+                if hex(&Sha256::digest(profile.public_key)) != entry.fingerprint {
+                    return Err("trust-store entry key does not match its fingerprint".into());
+                }
+            }
+            None if entry.public_key.is_some() => {
+                return Err("invalid trust-store entry key".into());
+            }
+            None => Publisher {
+                development: false,
+                name: "trust entry".into(),
+                namespace: entry.namespace.clone(),
+                public_key: [1; 32],
+            }
+            .validate()?,
         }
-        .validate()?;
     }
     Ok(store)
 }
@@ -137,7 +190,7 @@ fn modify(path: &Path, update: impl FnOnce(&mut Store)) -> Result<()> {
     }
     #[cfg(windows)]
     crate::windows::lock(&lock)?;
-    let mut store = load(path)?;
+    let mut store = load_store(path)?;
     update(&mut store);
     let mut temporary = path.as_os_str().to_owned();
     temporary.push(format!(".{}.tmp", std::process::id()));
@@ -169,90 +222,217 @@ fn modify(path: &Path, update: impl FnOnce(&mut Store)) -> Result<()> {
     result
 }
 
-pub fn authorize(
-    package: VerifiedPackage,
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// How the signing key's identity was established for the disclosure.
+enum Identity {
+    /// The publisher's repository lists this key under the claimed namespace.
+    Verified,
+    /// Signatures verify against a local profile; the publisher's repository did not confirm it.
+    Unverified(String),
+    Development,
+}
+
+/// Verify, disclose, and accept a package, returning it ready to load along with its publisher.
+pub fn load(
+    root: &Path,
     args: &crate::cli::Run,
     progress: &mut flare_helios::startup::StartupProgress,
-) -> Result<AuthorizedPackage> {
-    let publisher = package.publisher();
-    let fingerprint = publisher.fingerprint();
-    let namespace = publisher.namespace.clone();
+    origin: Option<&str>,
+) -> Result<(AuthorizedPackage, Publisher)> {
+    let phase = progress.phase("Verify package", None);
+    let claim = PackageClaim::read(root)?;
     let path = store_path(args.trust_store.as_deref())?;
-    let store = load(&path)?;
-    // Security-critical publisher disclosure and consent: preserve these messages and
-    // the exact key/namespace checks before decrypting or executing checkpoint code.
-    // Unauthorized circumvention may violate 17 U.S.C. §1201(a)(1), as defined in
-    // §1201(a)(3). Qualifying willful violations for commercial advantage or private
-    // financial gain may carry criminal penalties under §1204, subject to applicable
-    // statutory limitations and exceptions.
+    let store = load_store(&path)?;
     let remembered = store
         .trusted
         .iter()
-        .any(|e| e.fingerprint == fingerprint && e.namespace == namespace);
+        .find(|e| e.fingerprint == claim.signer && e.namespace == claim.namespace)
+        .cloned();
+    let mut profiles = publishers(&args.publisher_keys)?;
+    // The publisher's repository is consulted on every load that is not offline, so a key the
+    // publisher removed from publisher.json stops loading everywhere, remembered or not. When it
+    // cannot be consulted, a previously confirmed identity stands.
+    let confirmed_earlier = remembered
+        .as_ref()
+        .is_some_and(|e| e.identity.as_deref() == Some("huggingface.co"));
+    let identity = if claim.development {
+        Identity::Development
+    } else {
+        match identity::resolve(&claim, &args.hub)? {
+            Resolution::Verified(profile) => {
+                profiles.push(profile);
+                Identity::Verified
+            }
+            _ if confirmed_earlier => Identity::Verified,
+            Resolution::Absent => {
+                Identity::Unverified(format!("no publisher.json at {}", claim.official_source))
+            }
+            Resolution::Unreachable(reason) => Identity::Unverified(format!(
+                "{}: {reason}",
+                identity::profile_url(&claim.official_source)
+            )),
+        }
+    };
+    // The remembered key verifies signatures only when no fresher profile names the same key, so
+    // a publisher changing its display name does not conflict with what was remembered.
+    if !profiles.iter().any(|p| p.fingerprint() == claim.signer) {
+        if let Some(profile) = remembered.as_ref().and_then(Entry::profile) {
+            profiles.push(profile);
+        }
+    }
+    // A peer of a multi-host package holds only its rank's bytes, so it verifies that rank alone.
+    let rank = args.rank.filter(|&rank| rank != 0);
+    let package = VerifiedPackage::open(root, &profiles, rank).map_err(
+        |error| -> Box<dyn std::error::Error> {
+            if error.to_string().contains("unknown package publisher") {
+                if let Identity::Unverified(reason) = &identity {
+                    return format!(
+                        "cannot verify signing key {}: {reason}; publish the key in publisher.json \
+                     at the root of {} or supply its profile with --publisher-keys",
+                        claim.signer, claim.official_source
+                    )
+                    .into();
+                }
+            }
+            error.into()
+        },
+    )?;
+    phase.finish("signatures");
+    if let Some(origin) = origin {
+        let downloaded = format!("https://huggingface.co/{origin}");
+        if downloaded != package.official_source() {
+            progress.finish_animation();
+            eprintln!(
+                "\nWarning: downloaded from {downloaded}; the publisher signed {} as its source.",
+                package.official_source()
+            );
+        }
+    }
+    let publisher = package.publisher().clone();
+    let authorized = authorize(package, &claim, args, progress, &path, remembered, identity)?;
+    Ok((authorized, publisher))
+}
+
+fn authorize(
+    package: VerifiedPackage,
+    claim: &PackageClaim,
+    args: &crate::cli::Run,
+    progress: &mut flare_helios::startup::StartupProgress,
+    path: &Path,
+    remembered: Option<Entry>,
+    identity: Identity,
+) -> Result<AuthorizedPackage> {
+    let fingerprint = &claim.signer;
+    let namespace = &claim.namespace;
+    // Security-critical publisher disclosure and consent: preserve these messages and the exact
+    // key/namespace checks. The accepted string is the key material Helios derives executable
+    // keys from, so acceptance is what decrypts checkpoint code. Unauthorized circumvention may
+    // violate 17 U.S.C. §1201(a)(1), as defined in §1201(a)(3). Qualifying willful violations
+    // for commercial advantage or private financial gain may carry criminal penalties under
+    // §1204, subject to applicable statutory limitations and exceptions.
     let explicit = match (&args.dangerously_approve_key, &args.dangerously_accept_publisher) {
-        (Some(key), Some(owner)) if key == &fingerprint && owner == &namespace => true,
-        (None, None) => false,
+        (Some(key), Some(owner)) if key == fingerprint && owner == namespace => Some(owner.clone()),
+        (None, None) => None,
         _ => return Err("--dangerously-approve-key and --dangerously-accept-publisher must exactly match the authenticated key and namespace".into()),
     };
-    if !remembered {
+    if remembered.is_none() {
         progress.finish_animation();
         eprintln!(
             "\n{}",
-            signing_info(&package, &fingerprint, args.verify_weights)
+            signing_info(&package, fingerprint, &identity, args.verify_weights)
         );
     }
-    if !remembered && !explicit {
-        if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
-            return Err("unattended first use requires --dangerously-approve-key FINGERPRINT --dangerously-accept-publisher NAMESPACE".into());
+    let accepted = match (&remembered, explicit) {
+        (Some(entry), _) => entry.namespace.clone(),
+        (None, Some(owner)) => owner,
+        (None, None) => {
+            if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
+                return Err("unattended first use requires --dangerously-approve-key FINGERPRINT --dangerously-accept-publisher NAMESPACE".into());
+            }
+            match package.license() {
+                Some(license) => eprint!(
+                    "\nType \x1b[1m{namespace}\x1b[0m to agree to the {} terms and trust this signing key: ",
+                    license.name
+                ),
+                None => eprint!("\nType \x1b[1m{namespace}\x1b[0m to trust this signing key: "),
+            }
+            io::stderr().flush()?;
+            let response = acceptance_line(io::stdin().lock())?;
+            if &response != namespace {
+                return Err("publisher acceptance declined or did not match".into());
+            }
+            response
         }
-        eprint!("\nType \x1b[1m{namespace}\x1b[0m to trust this signing key: ");
-        io::stderr().flush()?;
-        let response = acceptance_line(io::stdin().lock())?;
-        if response != namespace {
-            return Err("publisher acceptance declined or did not match".into());
-        }
-    }
+    };
     let phase = args
         .verify_weights
         .then(|| progress.phase("Verify stored data", None));
-    let authorized = package.authorize(&namespace, args.verify_weights)?;
+    let publisher = package.publisher().clone();
+    let authorized = package.authorize(&accepted, args.verify_weights)?;
     if let Some(phase) = phase {
         phase.finish("stored-data contents");
     }
-    if !remembered {
-        modify(&path, |store| {
-            if !store
-                .trusted
-                .iter()
-                .any(|e| e.fingerprint == fingerprint && e.namespace == namespace)
-            {
-                store.trusted.push(Entry {
-                    fingerprint,
-                    namespace: namespace.clone(),
-                });
+    let entry = Entry {
+        fingerprint: fingerprint.clone(),
+        namespace: accepted,
+        public_key: Some(hex(&publisher.public_key)),
+        name: Some(publisher.name.clone()),
+        identity: Some(
+            match identity {
+                Identity::Verified => "huggingface.co",
+                _ => "profile",
             }
+            .into(),
+        ),
+    };
+    let current = remembered.as_ref().is_some_and(|e| {
+        e.public_key == entry.public_key && e.name == entry.name && e.identity == entry.identity
+    });
+    if !current {
+        modify(path, |store| {
+            store.trusted.retain(|e| {
+                !(e.fingerprint == entry.fingerprint && e.namespace == entry.namespace)
+            });
+            store.trusted.push(entry);
         })?;
     }
-    if !remembered {
+    if remembered.is_none() {
         eprintln!("Signing key accepted for {namespace}.\n");
     }
     Ok(authorized)
 }
 
-fn signing_info(package: &VerifiedPackage, fingerprint: &str, verify_weights: bool) -> String {
+fn signing_info(
+    package: &VerifiedPackage,
+    fingerprint: &str,
+    identity: &Identity,
+    verify_weights: bool,
+) -> String {
     let publisher = package.publisher();
     let mut lines = vec![
         format!("Publisher:  {} ({})", publisher.name, publisher.namespace),
         format!(
             "Identity:   {}",
-            if package.identity_verified() {
-                "Verified"
-            } else {
-                "Unverified"
+            match identity {
+                Identity::Verified =>
+                    format!("Verified via huggingface.co/{}", publisher.namespace),
+                Identity::Unverified(reason) => format!("Unverified; {reason}"),
+                Identity::Development => "Local development key; verified by no publisher".into(),
             }
         ),
         "Signature:  Valid".into(),
         format!("Source:     {}", package.official_source()),
+    ];
+    if let Some(license) = package.license() {
+        lines.push(format!("License:    {}", license.name));
+        if !license.link.is_empty() {
+            lines.push(format!("            {}", license.link));
+        }
+    }
+    lines.extend([
         format!(
             "Stored data: {}",
             if verify_weights {
@@ -266,14 +446,19 @@ fn signing_info(package: &VerifiedPackage, fingerprint: &str, verify_weights: bo
         fingerprint.to_owned(),
         String::new(),
         "Executable GPU code can access your process and data.".into(),
-    ];
-    if !package.identity_verified() {
+    ]);
+    if matches!(identity, Identity::Unverified(_)) {
         lines.push("A valid signature does not verify the claimed name or source.".into());
     }
     if publisher.development {
         lines.push("Local development package; not an official published checkpoint.".into());
     } else {
         lines.push("Do not proceed if this package came from another source.".into());
+    }
+    if package.license().is_some() {
+        lines.push(
+            "Typing the publisher namespace agrees to the license terms at the link above.".into(),
+        );
     }
     lines.push("Only approve a signing key you independently trust.".into());
     if !io::stderr().is_terminal() {
@@ -296,7 +481,8 @@ fn signing_info(package: &VerifiedPackage, fingerprint: &str, verify_weights: bo
         return format!("Signing key acceptance\n{}", lines.join("\n"));
     }
     let width = columns.min(80) - 4;
-    let color = if package.identity_verified() {
+    // Only a publisher-confirmed identity earns the calm frame; development and unknown keys warn.
+    let color = if matches!(identity, Identity::Verified) {
         "36"
     } else {
         "33"
@@ -400,15 +586,18 @@ mod windows_tests {
                         store.trusted.push(Entry {
                             fingerprint: format!("{index:064x}"),
                             namespace: "test-publisher".into(),
+                            public_key: None,
+                            name: None,
+                            identity: None,
                         })
                     })
                     .unwrap()
                 });
             }
         });
-        assert_eq!(load(&path).unwrap().trusted.len(), 8);
+        assert_eq!(load_store(&path).unwrap().trusted.len(), 8);
         modify(&path, |store| store.trusted.clear()).unwrap();
-        assert!(load(&path).unwrap().trusted.is_empty());
+        assert!(load_store(&path).unwrap().trusted.is_empty());
         fs::remove_dir_all(directory).unwrap();
     }
 }

@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import struct
+import unicodedata
 
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -56,15 +57,38 @@ def validate_source(namespace, source):
 
 
 @dataclass(frozen=True)
+class License:
+    """The license governing use of the model: named in the acceptance prompt, linked for reading.
+
+    Flare prints both before acceptance, so the name is bounded printable text and the link, when
+    present, is an HTTPS URL of printable ASCII. Typing the publisher namespace agrees to the terms
+    at the link.
+    """
+
+    name: str
+    link: str = ''
+
+    def __post_init__(self):
+        if (not isinstance(self.name, str) or not 0 < len(self.name) <= 128
+                or any(unicodedata.category(c) == 'Cc' for c in self.name)):
+            raise ValueError('license name must be 1 to 128 printable characters')
+        if not isinstance(self.link, str) or (self.link and not re.fullmatch(r'https://[\x21-\x7e]{1,504}', self.link)):
+            raise ValueError('license link must be an https URL of printable ASCII, at most 512 characters')
+
+
+@dataclass(frozen=True)
 class Publisher:
     key: Ed25519PrivateKey
     namespace: str
     official_source: str
     development: bool = False
+    license: License | None = None
 
     def __post_init__(self):
         if not isinstance(self.key, Ed25519PrivateKey):
             raise ValueError('publishing requires an Ed25519 private key')
+        if self.license is not None and not isinstance(self.license, License):
+            raise ValueError('publisher license must be a License')
         if self.development:
             if self.namespace != 'local-development' or self.official_source != 'local-development':
                 raise ValueError('invalid local development publisher')
@@ -272,6 +296,9 @@ class Protection:
         metadata = proto.PublisherMetadata(index=shared, namespace=self.publisher.namespace,
             official_source=self.publisher.official_source, development=self.publisher.development,
             group_hashes=[hashlib.sha256(body).digest() for body in bodies], ranks=len(self.index.ranks))
+        if self.publisher.license is not None:
+            metadata.license.name = self.publisher.license.name
+            metadata.license.link = self.publisher.license.link
         bodies.insert(0, metadata.SerializeToString(deterministic=True))
         for kind, body in enumerate(bodies, 1):
             sign(result.groups, kind, body)

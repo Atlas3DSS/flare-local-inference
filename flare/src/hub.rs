@@ -24,7 +24,7 @@ pub fn is_repository(path: &Path) -> bool {
         })
 }
 
-fn repository(text: &str) -> Result<(&str, Option<&str>)> {
+pub(crate) fn repository(text: &str) -> Result<(&str, Option<&str>)> {
     let (id, revision) = match text.split_once('@') {
         Some((id, revision)) if !revision.is_empty() => (id, Some(revision)),
         Some(_) => return Err("Hugging Face revision cannot be empty".into()),
@@ -106,7 +106,18 @@ pub fn download(source: &str, options: &HubOptions, gpu_count: usize) -> Result<
     if options.offline {
         return cached(&cache, &repo, options.filename.as_deref());
     }
-    let token = options
+    let api = ApiBuilder::from_cache(cache.clone())
+        .with_token(token(options)?)
+        .with_endpoint("https://huggingface.co".into())
+        .with_progress(std::io::stderr().is_terminal())
+        .with_retries(3)
+        .build()?;
+    fetch(&api, &cache, &repo, options.filename.as_deref())
+}
+
+/// The access token named by `--token-file`, for private repositories.
+pub(crate) fn token(options: &HubOptions) -> Result<Option<String>> {
+    options
         .token_file
         .as_ref()
         .map(|path| {
@@ -114,18 +125,11 @@ pub fn download(source: &str, options: &HubOptions, gpu_count: usize) -> Result<
                 .map_err(|error| format!("cannot read token file {}: {error}", path.display()))?;
             let token = value.trim();
             if token.is_empty() {
-                return Err("Hugging Face token file is empty".to_owned());
+                return Err("Hugging Face token file is empty".into());
             }
             Ok(token.to_owned())
         })
-        .transpose()?;
-    let api = ApiBuilder::from_cache(cache.clone())
-        .with_token(token)
-        .with_endpoint("https://huggingface.co".into())
-        .with_progress(std::io::stderr().is_terminal())
-        .with_retries(3)
-        .build()?;
-    fetch(&api, &cache, &repo, options.filename.as_deref())
+        .transpose()
 }
 
 fn fetch(api: &Api, cache: &Cache, repo: &Repo, requested: Option<&str>) -> Result<PathBuf> {

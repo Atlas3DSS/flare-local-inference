@@ -13,7 +13,7 @@ import pytest
 from helios.tests.signing import publisher
 from ignition.preparation import runtime_package_pb2 as proto
 from ignition.preparation.package_file import align, publish, read_index
-from ignition.preparation.protection import CHUNK, Publisher, signature_message
+from ignition.preparation.protection import CHUNK, License, Publisher, signature_message
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -275,10 +275,30 @@ def test_every_signature_group_is_verified_before_access(native, tmp_path, group
     assert result.returncode != 0 and f'signature failed for {label}' in result.stderr
 
 
-def test_acceptance_requires_the_exact_namespace(native, tmp_path):
+def test_the_accepted_string_is_the_key_material(native, tmp_path):
+    # The exporter encrypts under the publisher namespace; any other accepted string opens nothing.
     path, _ = fixture(tmp_path, size=41)
     result = read(native, path, namespace='yes')
-    assert result.returncode != 0 and 'acceptance does not match' in result.stderr
+    assert result.returncode != 0 and 'executable decryption failed' in result.stderr
+    assert read(native, path).returncode == 0
+
+
+def test_invalid_license_metadata_is_rejected(native, tmp_path):
+    path, _ = fixture(tmp_path, size=41)
+    value, payload = envelope(path)
+    metadata = proto.PublisherMetadata.FromString(value.groups[0].body)
+    metadata.license.name, metadata.license.link = 'apache-2.0', 'http://example.com/LICENSE'
+    value.groups[0].body = metadata.SerializeToString(deterministic=True)
+    signer = publisher()
+    for group in chain(value.groups, value.ranks):
+        group.signature = signer.key.sign(signature_message(value.package_id, value.signer, group.kind, group.body))
+    replace_envelope(path, value, payload)
+    result = read(native, path)
+    assert result.returncode != 0 and 'invalid package license metadata' in result.stderr
+    with pytest.raises(ValueError, match='https URL'):
+        License('apache-2.0', 'http://example.com/LICENSE')
+    with pytest.raises(ValueError, match='printable'):
+        License('apache\x1b[31m-2.0')
 
 
 @pytest.mark.parametrize('change', ['key', 'namespace'])
@@ -340,8 +360,10 @@ def flare():
 
 
 def launch(flare, path, profile, store, *args):
-    # A rank-count mismatch stops this CPU fixture after trust handling and before CUDA.
-    return subprocess.run([str(flare), 'run', str(path), '--publisher-keys', str(profile),
+    # A rank-count mismatch stops this CPU fixture after trust handling and before CUDA. Offline,
+    # the publisher's repository is not consulted, so identity rests on the supplied profile.
+    keys = [] if profile is None else ['--publisher-keys', str(profile)]
+    return subprocess.run([str(flare), 'run', str(path), *keys, '--offline',
         '--trust-store', str(store), '--gpus', '0,1', *args],
         capture_output=True, text=True, stdin=subprocess.DEVNULL)
 
@@ -407,7 +429,7 @@ def test_rotation_does_not_inherit_namespace_trust(flare, tmp_path):
     assert 'unattended first use requires' in result.stderr
 
 
-def test_release_stamping_recognizes_only_the_embedded_identity(flare, tmp_path):
+def test_stamped_profiles_verify_signatures_without_conferring_identity(flare, tmp_path):
     from ignition.release import stamp
     signer = publisher()
     path, _ = fixture(tmp_path, size=41)
@@ -415,20 +437,69 @@ def test_release_stamping_recognizes_only_the_embedded_identity(flare, tmp_path)
     executable = tmp_path / 'flare-publisher'
     stamp(flare, executable, json.loads(profile.read_text()))
     store = tmp_path / 'trust.toml'
-    known = launch(executable, path, profile, store, *approval(signer))
+    unknown = launch(flare, path, None, store, *approval(signer))
+    assert unknown.returncode != 0 and 'publish the key in publisher.json' in unknown.stderr
+    assert 'https://huggingface.co/flare-tests/fixture' in unknown.stderr and not store.exists()
+    known = launch(executable, path, None, store, *approval(signer))
     assert 'Publisher:  Local Inference Lab fixture' in known.stderr
-    assert 'Identity:   Verified' in known.stderr and 'Identity:   Unverified' not in known.stderr
+    assert 'Identity:   Unverified' in known.stderr and 'Verified via' not in known.stderr
     assert 'model rank count must match distinct selected devices' in known.stderr
-    directory = tmp_path / 'impersonation'
-    directory.mkdir()
-    impostor = Publisher(Ed25519PrivateKey.generate(), signer.namespace, signer.official_source)
-    changed, _ = fixture(directory, size=41, signer=impostor)
-    profiles(profile, impostor, 'Local Inference Lab fixture')
-    result = launch(executable, changed, profile, store)
-    assert 'Signing key acceptance' in result.stderr
-    assert 'Identity:   Unverified' in result.stderr and 'Identity:   Verified' not in result.stderr
     with pytest.raises(ValueError, match='not an empty release slot'):
         stamp(executable, tmp_path / 'restamped', json.loads(profile.read_text()))
+
+
+def test_license_is_disclosed_and_accepted_by_name(flare, tmp_path):
+    link = 'https://huggingface.co/flare-tests/fixture/blob/main/LICENSE'
+    signer = Publisher(publisher().key, 'flare-tests', 'https://huggingface.co/flare-tests/fixture',
+                       license=License('apache-2.0', link))
+    path, _ = fixture(tmp_path, size=41, signer=signer)
+    profile = profiles(tmp_path / 'publisher.json', signer)
+    store = tmp_path / 'trust.toml'
+    result = launch(flare, path, profile, store, *approval(signer))
+    assert 'License:    apache-2.0' in result.stderr and link in result.stderr
+    assert 'agrees to the license terms at the link above' in result.stderr
+    assert 'model rank count must match distinct selected devices' in result.stderr
+    # A package exported before licenses were recorded discloses none and prompts as before.
+    directory = tmp_path / 'unlicensed'
+    directory.mkdir()
+    plain, _ = fixture(directory, size=41)
+    result = launch(flare, plain, profile, directory / 'trust.toml', *approval(signer))
+    assert 'License:' not in result.stderr and 'license terms' not in result.stderr
+    assert 'model rank count must match distinct selected devices' in result.stderr
+
+
+def test_remembered_acceptance_keeps_the_key_and_needs_no_profile(flare, tmp_path):
+    import tomllib
+    signer = publisher()
+    path, _ = fixture(tmp_path, size=41)
+    profile = profiles(tmp_path / 'publisher.json', signer)
+    store = tmp_path / 'trust.toml'
+    accepted = launch(flare, path, profile, store, *approval(signer))
+    assert 'model rank count must match distinct selected devices' in accepted.stderr
+    [entry] = tomllib.loads(store.read_text())['trusted']
+    assert entry == {'fingerprint': signer.fingerprint.hex(), 'namespace': 'flare-tests',
+                     'public_key': signer.public_key.hex(), 'name': 'Fixture publisher', 'identity': 'profile'}
+    remembered = launch(flare, path, None, store)
+    assert 'Signing key acceptance' not in remembered.stderr
+    assert 'model rank count must match distinct selected devices' in remembered.stderr
+
+
+def test_trust_entries_without_a_key_still_apply_and_gain_one(flare, tmp_path):
+    import tomllib
+    signer = publisher()
+    path, _ = fixture(tmp_path, size=41)
+    profile = profiles(tmp_path / 'publisher.json', signer)
+    store = tmp_path / 'trust.toml'
+    store.write_text(f'[[trusted]]\nfingerprint = "{signer.fingerprint.hex()}"\nnamespace = "flare-tests"\n')
+    result = launch(flare, path, profile, store)
+    assert 'Signing key acceptance' not in result.stderr
+    assert 'model rank count must match distinct selected devices' in result.stderr
+    [entry] = tomllib.loads(store.read_text())['trusted']
+    assert entry['public_key'] == signer.public_key.hex() and entry['identity'] == 'profile'
+    tampered = store.read_text().replace(signer.public_key.hex(), '11' * 32)
+    store.write_text(tampered)
+    result = launch(flare, path, profile, store)
+    assert result.returncode != 0 and 'does not match its fingerprint' in result.stderr
 
 
 def test_invalid_signature_cannot_record_trust_even_with_approval(flare, tmp_path):

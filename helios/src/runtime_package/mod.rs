@@ -21,7 +21,7 @@ mod protobuf;
 mod publishers;
 #[cfg(any(test, feature = "test-tools"))]
 pub mod test_support;
-pub use protection::{AuthorizedPackage, Publisher, VerifiedPackage};
+pub use protection::{AuthorizedPackage, PackageClaim, PackageLicense, Publisher, VerifiedPackage};
 mod selection;
 mod serving;
 pub use limits::{KvCacheLimit, MemoryLimit};

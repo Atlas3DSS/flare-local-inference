@@ -112,14 +112,11 @@ pub(super) struct Archive {
     pub payload: u64,
     pub file: Arc<File>,
     pub(super) protection: Protection,
-    pub(super) accepted: bool,
 }
 impl Archive {
-    pub fn open(
-        path: &Path,
-        publishers: &[Publisher],
-        rank: Option<usize>,
-    ) -> Result<(Self, wire::ModelIndex)> {
+    /// Open the file and read its signed envelope: the file, the payload start and size, and the
+    /// envelope bytes, none of them verified yet.
+    pub(super) fn envelope(path: &Path) -> Result<(File, u64, u64, Vec<u8>)> {
         #[cfg(unix)]
         let file = File::open(path).map_err(|e| e.to_string())?;
         #[cfg(windows)]
@@ -169,6 +166,14 @@ impl Archive {
         let mut bytes = vec![0; size as usize];
         file.read_exact_at(&mut bytes, start + payload)
             .map_err(|e| e.to_string())?;
+        Ok((file, start, payload, bytes))
+    }
+    pub fn open(
+        path: &Path,
+        publishers: &[Publisher],
+        rank: Option<usize>,
+    ) -> Result<(Self, wire::ModelIndex)> {
+        let (file, start, payload, bytes) = Self::envelope(path)?;
         let (protection, index) = Protection::verify(&bytes, publishers, payload, rank)?;
         Ok((
             Self {
@@ -183,7 +188,6 @@ impl Archive {
                 payload,
                 file: Arc::new(file),
                 protection,
-                accepted: false,
             },
             index,
         ))
@@ -248,11 +252,6 @@ impl Archive {
         crate::os::release_page_cache(&self.file);
     }
     fn reader(&self, package: &Package, key: &str) -> Result<ResourceReader> {
-        if !self.accepted {
-            return Err(invalid(
-                "publisher acceptance required before resource access",
-            ));
-        }
         self.protection
             .reader(self.file.clone(), self.start, self.span(package, key)?)
     }

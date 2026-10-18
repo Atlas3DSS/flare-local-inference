@@ -1,8 +1,11 @@
-//! Publisher signatures and namespace-bound access to executable resources.
+//! Publisher signatures and acceptance-bound access to executable resources.
 //!
-//! Verification, publisher acceptance, and decryption form the package access boundary.
-//! Unauthorized circumvention may implicate 17 U.S.C. §1201(a)(1) or (a)(2), as defined
-//! in (a)(3). Signatures authenticate publisher identity; they do not sandbox GPU code.
+//! Verification, publisher acceptance, and decryption form the package access boundary. The
+//! string a user applies to accept the publisher's terms is the key material for every
+//! executable resource; the exporter encrypts under the publisher namespace, so no other string
+//! decrypts. Unauthorized circumvention may implicate 17 U.S.C. §1201(a)(1) or (a)(2), as
+//! defined in (a)(3). Signatures authenticate publisher identity; they do not sandbox GPU code.
+//! Resolving who a signing key belongs to is the caller's task, from a `PackageClaim`.
 
 use super::{archive::Archive, format::invalid, protobuf::wire};
 use crate::Result;
@@ -53,6 +56,93 @@ pub(super) fn namespace_valid(value: &str) -> bool {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
+/// The official source is a repository under the publisher's Hugging Face namespace, or the
+/// literal `local-development` marker for development packages.
+pub(super) fn source_valid(namespace: &str, development: bool, source: &str) -> bool {
+    if development {
+        return namespace == "local-development" && source == "local-development";
+    }
+    let Some(repository) = source.strip_prefix(&format!("https://huggingface.co/{namespace}/"))
+    else {
+        return false;
+    };
+    !repository.is_empty()
+        && repository.len() <= 96
+        && repository.as_bytes()[0].is_ascii_alphanumeric()
+        && repository
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+/// Links are printed to a terminal before acceptance: HTTPS, bounded, and printable ASCII only.
+fn link_valid(link: &str) -> bool {
+    link.len() <= 512 && link.starts_with("https://") && link.bytes().all(|b| b.is_ascii_graphic())
+}
+
+/// The license governing use of the model, as the publisher recorded it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PackageLicense {
+    pub name: String,
+    /// Where the license text is published; empty when the publisher recorded none.
+    pub link: String,
+}
+impl PackageLicense {
+    fn validated(license: &wire::License) -> Result<Self> {
+        if license.name.is_empty()
+            || license.name.len() > 128
+            || license.name.chars().any(char::is_control)
+            || !(license.link.is_empty() || link_valid(&license.link))
+        {
+            return Err(invalid("invalid package license metadata"));
+        }
+        Ok(Self {
+            name: license.name.clone(),
+            link: license.link.clone(),
+        })
+    }
+}
+/// What a package claims before any signature is verified: which key signed it and where it says
+/// it was published. The caller resolves the signer's identity from the claim, then verifies the
+/// package with the resolved profile; nothing here is trusted until that verification.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PackageClaim {
+    /// Lowercase SHA-256 fingerprint of the signing key.
+    pub signer: String,
+    pub namespace: String,
+    pub official_source: String,
+    pub development: bool,
+}
+impl PackageClaim {
+    pub fn read(path: &Path) -> Result<Self> {
+        let (_, _, _, bytes) = Archive::envelope(path)?;
+        let envelope = wire::ProtectedIndex::decode(bytes.as_slice())
+            .map_err(|e| invalid(format!("invalid signed envelope: {e}")))?;
+        if envelope.version != 4 || envelope.signer.len() != 32 || envelope.groups.is_empty() {
+            return Err(invalid(
+                "signed format-4 package required; re-export the checkpoint",
+            ));
+        }
+        let metadata = wire::PublisherMetadata::decode(envelope.groups[0].body.as_slice())
+            .map_err(|e| invalid(format!("invalid signed metadata: {e}")))?;
+        if !namespace_valid(&metadata.namespace)
+            || !source_valid(
+                &metadata.namespace,
+                metadata.development,
+                &metadata.official_source,
+            )
+        {
+            return Err(invalid(
+                "package publisher namespace or official source mismatch",
+            ));
+        }
+        Ok(Self {
+            signer: hex(&envelope.signer),
+            namespace: metadata.namespace,
+            official_source: metadata.official_source,
+            development: metadata.development,
+        })
+    }
+}
+
 pub(super) fn sha256(bytes: &[u8]) -> Vec<u8> {
     digest::digest(&digest::SHA256, bytes).as_ref().to_vec()
 }
@@ -121,7 +211,6 @@ pub struct VerifiedPackage {
     pub(super) index: wire::ModelIndex,
     publisher: Publisher,
     official_source: String,
-    identity_verified: bool,
 }
 pub struct AuthorizedPackage {
     pub(super) archive: Archive,
@@ -131,8 +220,7 @@ impl VerifiedPackage {
     /// Authenticate the package's index and publisher binding, for every rank or only `rank` of
     /// a multi-host package, which a copy holding that rank's bytes alone verifies completely.
     pub fn open(path: &Path, publishers: &[Publisher], rank: Option<usize>) -> Result<Self> {
-        let embedded = super::publishers::embedded()?;
-        let mut profiles = embedded.clone();
+        let mut profiles = super::publishers::embedded()?;
         for publisher in publishers {
             publisher.validate()?;
             if let Some(previous) = profiles
@@ -149,19 +237,12 @@ impl VerifiedPackage {
         let (archive, index) = Archive::open(path, &profiles, rank)?;
         let publisher = archive.protection.publisher.clone();
         let official_source = archive.protection.official_source.clone();
-        let identity_verified = embedded
-            .iter()
-            .any(|p| p.public_key == publisher.public_key);
         Ok(Self {
             archive,
             index,
             publisher,
             official_source,
-            identity_verified,
         })
-    }
-    pub fn identity_verified(&self) -> bool {
-        self.identity_verified
     }
     pub fn publisher(&self) -> &Publisher {
         &self.publisher
@@ -169,23 +250,19 @@ impl VerifiedPackage {
     pub fn official_source(&self) -> &str {
         &self.official_source
     }
-    /// The caller must obtain explicit namespace acceptance or match remembered signer trust.
-    pub fn authorize(
-        mut self,
-        accepted_namespace: &str,
-        verify_weights: bool,
-    ) -> Result<AuthorizedPackage> {
-        if accepted_namespace != self.publisher.namespace {
-            return Err(invalid(
-                "publisher acceptance does not match authenticated namespace",
-            ));
-        }
+    pub fn license(&self) -> Option<&PackageLicense> {
+        self.archive.protection.license.as_ref()
+    }
+    /// Record the string the user applied to accept the publisher's terms. It derives every
+    /// executable key, so a string other than the namespace the exporter encrypted under opens
+    /// nothing; the caller obtains it from the user or from remembered acceptance.
+    pub fn authorize(mut self, accepted: &str, verify_weights: bool) -> Result<AuthorizedPackage> {
         if verify_weights {
             self.archive
                 .protection
                 .verify_data(&self.archive.file, self.archive.start)?;
         }
-        self.archive.accepted = true;
+        self.archive.protection.accepted = Some(accepted.to_owned());
         Ok(AuthorizedPackage {
             archive: self.archive,
             index: self.index,
@@ -196,6 +273,9 @@ impl VerifiedPackage {
 pub(super) struct Protection {
     publisher: Publisher,
     official_source: String,
+    license: Option<PackageLicense>,
+    /// The acceptance string, once applied; executable keys derive from it.
+    accepted: Option<String>,
     package_id: Vec<u8>,
     resources: BTreeMap<u64, (bool, wire::ProtectedResource)>,
     /// Stored-data ranges: what every rank shares, then each verified rank's in index order.
@@ -309,27 +389,24 @@ impl Protection {
         {
             return Err(invalid("signature group commitment mismatch"));
         }
-        let prefix = format!("https://huggingface.co/{}/", publisher.namespace);
-        let repository = metadata.official_source.strip_prefix(&prefix).unwrap_or("");
-        let valid_source = if publisher.development {
-            publisher.namespace == "local-development"
-                && metadata.official_source == "local-development"
-        } else {
-            !repository.is_empty()
-                && repository.len() <= 96
-                && repository.as_bytes()[0].is_ascii_alphanumeric()
-                && repository
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
-        };
         if metadata.namespace != publisher.namespace
             || metadata.development != publisher.development
-            || !valid_source
+            || !source_valid(
+                &publisher.namespace,
+                publisher.development,
+                &metadata.official_source,
+            )
         {
             return Err(invalid(
                 "package publisher namespace or official source mismatch",
             ));
         }
+        // Packages exported before the field existed carry no license; it stays absent.
+        let license = metadata
+            .license
+            .as_ref()
+            .map(PackageLicense::validated)
+            .transpose()?;
         let mut index = metadata
             .index
             .ok_or_else(|| invalid("missing signed model index"))?;
@@ -389,6 +466,8 @@ impl Protection {
         let protection = Self {
             publisher,
             official_source: metadata.official_source,
+            license,
+            accepted: None,
             package_id: envelope.package_id,
             resources,
             data,
@@ -561,13 +640,17 @@ impl Protection {
         if span.nbytes != entry.stored_bytes {
             return Err(invalid("resource length mismatch"));
         }
+        let accepted = self
+            .accepted
+            .as_deref()
+            .ok_or_else(|| invalid("publisher acceptance required before resource access"))?;
         let key = encrypted
             .then(|| {
                 resource_key(
                     &self.publisher.public_key,
                     &self.package_id,
                     entry.offset,
-                    &self.publisher.namespace,
+                    accepted,
                 )
             })
             .transpose()?;

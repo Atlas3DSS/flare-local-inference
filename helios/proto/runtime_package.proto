@@ -22,7 +22,12 @@ message PublisherMetadata {
   repeated bytes group_hashes = 4;
   bool development = 5;
   uint32 ranks = 6;
+  // The license governing use of the model, whose terms acceptance agrees to; absent in packages
+  // exported before it was recorded.
+  License license = 7;
 }
+// A license named for the acceptance prompt and linked for reading; the link may be empty.
+message License { string name = 1; string link = 2; }
 message ResourceCatalog { repeated ProtectedResource resources = 1; }
 message ProtectedResource {
   uint64 offset = 1;

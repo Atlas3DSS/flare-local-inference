@@ -281,7 +281,7 @@ Help exits with status 0; usage errors go to stderr with status 2. Its options a
 
 | Flag | Meaning | Default |
 |---|---|---|
-| `--publisher-keys PATH` | Additional JSON verification profiles; importing a key does not approve execution | Embedded profiles |
+| `--publisher-keys PATH` | Additional JSON verification profiles; importing a key does not approve execution or verify identity | Embedded profiles and remembered keys |
 | `--dangerously-approve-key FINGERPRINT` | Explicitly approve this full lowercase SHA-256 key fingerprint; requires the matching publisher flag | Interactive first use or remembered trust |
 | `--dangerously-accept-publisher NAMESPACE` | Accept this exact publisher namespace; requires the matching key flag | Interactive first use or remembered trust |
 | `--trust-store PATH` | Persistent key/namespace acceptance file | `~/.config/flare/trust.toml` |
@@ -415,7 +415,7 @@ Both commands accept these download options:
 | `--filename FILE` | Repository-relative prepared package filename | Sole `.safetensors` file |
 | `--cache-dir PATH` | Hugging Face hub cache directory | `~/.cache/huggingface/hub` from the OS user account |
 | `--token-file PATH` | File containing a Hub token for gated or private repositories | No authentication |
-| `--offline` | Resolve only from cached refs and snapshots; make no network requests | Off |
+| `--offline` | Resolve only from cached refs and snapshots and skip the publisher identity check; make no network requests. Accepted with a local package path | Off |
 
 The native client uses Hugging Face's `refs`, `snapshots`, and `blobs` cache
 layout. Existing cached files can be reused without copying their weights.
@@ -463,11 +463,33 @@ approval from the cached package's claimed publisher. An unrecognized key still
 prints its first-use warning; subsequent loads remember that exact pair. There
 is no unsigned runtime mode and no blanket approval for development keys.
 
-Publisher identity, key, source, and verification disclosures appear only on
-first acceptance of a signing-key fingerprint and publisher namespace. On a
-terminal, the banner animation finishes before those disclosures and the
+Publisher identity, key, source, license, and verification disclosures appear
+only on first acceptance of a signing-key fingerprint and publisher namespace.
+On a terminal, the banner animation finishes before those disclosures and the
 acceptance prompt. Remembered acceptance suppresses the disclosures, while
 every load still verifies signatures and executable resources.
+
+Every signing key is verified the same way. On every load that is not
+`--offline`, Flare fetches `publisher.json` from the root of the package's
+signed official source on huggingface.co, the profile `ignition keygen` writes.
+A file that lists the signing key under the package's namespace verifies the
+identity. A file that exists but omits the key rejects the package with no
+prompt and no override, remembered or not: the package was not signed by its
+claimed publisher, or the key was revoked by removing it from the file. When
+the file is absent, the repository is unreachable, or `--offline` is set, the
+identity is unverified unless an earlier load confirmed it; loading then needs
+the key from an embedded profile, `--publisher-keys`, or remembered acceptance,
+and the disclosure names the reason. Embedded profiles and `--publisher-keys`
+verify signatures only; they never confer a verified identity. Accepting a key
+remembers its verification key and how its identity was established, so later
+loads need no profile. A package downloaded from a repository other than its
+signed official source prints a warning naming both on every load.
+
+The disclosure names the model license the exporter recorded from the
+checkpoint's model card, with a link to the license text in the repository.
+Typing the publisher namespace agrees to the terms at that link and trusts the
+signing key; the typed string is the key material Helios derives executable
+decryption keys from, so acceptance is what decrypts the package's kernels.
 
 To load a locally exported package directly, supply its public profile:
 
@@ -480,7 +502,11 @@ First interactive use requires typing `local-development`. For unattended
 loading, supply both dangerous-approval flags with the exact fingerprint and
 namespace. `flare trust revoke FINGERPRINT --trust-store PATH` removes acceptance;
 omitting the path uses the default trust store. No official release key is
-required for independent preparation and signing.
+required for independent preparation and signing: a publisher is verified by
+the `publisher.json` at its official source, as [production signing](signing.md)
+describes. `ignition run` with a production key also passes the `publisher.json`
+beside the signing key when present, so a package loads for testing before the
+key is published.
 
 ### 3.3 Configuration file
 

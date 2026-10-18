@@ -9,9 +9,28 @@ public-key fingerprint is:
 937c0143f6856d3ee8ad164f62e3d804bd825d7a8750d0accb9a5849f703a8c1
 ```
 
-Embedding a public identity authenticates the publisher; execution still requires
-first-use acceptance. Private keys never belong in source control, packages, or
-publisher profiles.
+The embedded profile lets Flare verify signatures without consulting the network;
+it does not verify identity. Every publisher, including this one, is verified the
+same way: by the `publisher.json` at the root of the package's official source
+repository. Execution still requires first-use acceptance. Private keys never
+belong in source control, packages, or publisher profiles.
+
+## Publish the verification key
+
+Upload the `publisher.json` that key creation wrote, unchanged, to the root of
+every repository named as an official source. Flare fetches it from the default
+branch on every online load and requires it to list the key under the publisher
+namespace. The file is a list, so a rotated key stays valid
+by keeping the previous profile in it, and removing a profile revokes that key
+for every package it signed. A repository whose `publisher.json` omits the
+signing key makes the package fail to load everywhere; a repository without the
+file leaves the identity unverified, and users must then supply the profile with
+`--publisher-keys`.
+
+Each repository should also hold the license file its model card names. The
+exporter records the license name and a link to that file from the model card
+front matter, Flare shows both before acceptance, and typing the namespace
+agrees to the terms at the link.
 
 ## Create and protect a key
 
