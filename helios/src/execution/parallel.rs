@@ -302,15 +302,16 @@ pub(super) fn agree(root: &FrameCompletion, peer: &FrameCompletion) -> Result<()
     match (&root.proposal_confidence, &peer.proposal_confidence) {
         (None, None) => {}
         (Some(root_values), Some(peer_values)) => {
-            // Rank zero supplies the shared scheduling decision. Replicated FP32
-            // probabilities allow reduction roundoff within 1e-5 absolute error.
+            // Only the root completion is returned to the shared scheduler.
+            // Peer estimates do not select execution or enter the root's curve;
+            // their floating-point agreement is not a control-plane invariant.
+            // Validate every reported probability and keep exact request-state
+            // agreement below, without requiring replicated arithmetic identity.
             for (row, (a, b)) in root_values.iter().zip(peer_values).enumerate() {
                 for (draft, (&a, &b)) in a.iter().zip(b).enumerate() {
-                    if !(0.0..=1.0).contains(&a) || !(0.0..=1.0).contains(&b)
-                        || (a - b).abs() > 1e-5
-                    {
+                    if !(0.0..=1.0).contains(&a) || !(0.0..=1.0).contains(&b) {
                         return Err(invalid(format!(
-                            "tensor-parallel proposal confidence differs at row {row}, draft {draft}: root {a:?}, peer {b:?}; graph {}, fence {}",
+                            "tensor-parallel proposal confidence is invalid at row {row}, draft {draft}: root {a:?}, peer {b:?}; graph {}, fence {}",
                             root.graph_index, root.fence.0,
                         )));
                     }
