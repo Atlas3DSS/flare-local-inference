@@ -238,8 +238,12 @@ class PreparedDecoder:
                 carry=carry, defer_post=defer, boundary=boundary, replay_start=replay_start,
                 window_staging=None if self.window_commit is None else self.window_commit.staging[index]))
             carry = defer
-        self.head = PreparedVocabularyProjection(scratch.hidden, weights.head, scratch.local_logits, scratch.logits,
-            runtime=vocabulary_runtime, coordinator=coordinator, session=session, name=name + ".head")
+        self.compact_head = scratch.hidden.shape[0] > self.output_metadata.token_ids.numel()
+        head_rows = self.output_metadata.token_ids.numel() if self.compact_head else scratch.hidden.shape[0]
+        self.head_hidden = scratch.hidden[:head_rows]
+        self.head = PreparedVocabularyProjection(self.head_hidden, weights.head, scratch.local_logits[:head_rows],
+            scratch.logits, runtime=vocabulary_runtime, coordinator=coordinator, session=session, name=name + ".head",
+            row_indices=self.output_metadata.sample_indices if self.compact_head else None)
 
     def __call__(self):
         s, m = self.scratch, self.metadata
@@ -261,11 +265,15 @@ class PreparedDecoder:
                 self.auxiliary[:, column * 5120:(column + 1) * 5120].copy_(feedback)
             layer()
         samples = self.output_metadata.sample_indices
-        residual = self.output_scratch.residual[samples].float()
-        premix = self.output_scratch.pre_mix[samples, :, None]
+        residual = (self.output_scratch.residual if self.compact_head
+                    else self.output_scratch.residual[samples]).float()
+        premix = (self.output_scratch.pre_mix if self.compact_head
+                  else self.output_scratch.pre_mix[samples])[:, :, None]
         collapsed = (residual * premix).sum(1).bfloat16()
-        normalize(collapsed, self.weights.norm, s.hidden, self.weights.config.text["rms_norm_eps"])
-        self.head(s.hidden)
+        normalize(collapsed, self.weights.norm, self.head_hidden, self.weights.config.text["rms_norm_eps"])
+        self.head(self.head_hidden)
+        if self.compact_head:
+            s.hidden.copy_(self.head_hidden[samples])
         if self.mode != "verify":
             self.table_requests.commit(m.lengths)
         return s.hidden

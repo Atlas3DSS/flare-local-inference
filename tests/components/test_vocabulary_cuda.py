@@ -14,7 +14,7 @@ pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_TP_CUDA_TESTS") != "1"
 
 
 @torch.no_grad()
-def _rank(rank, world, rendezvous, vocab):
+def _rank(rank, world, rendezvous, vocab, indexed=False):
     from ignition.components.vocabulary import PreparedVocabularyProjection
     from ignition.preparation.collectives import (
         CollectivePreparation,
@@ -40,7 +40,9 @@ def _rank(rank, world, rendezvous, vocab):
     seed = torch.randn(capacity, hidden, dtype=torch.bfloat16, device=device) * .125
     source = seed.clone()
     local = torch.empty(capacity, width, dtype=torch.bfloat16, device=device)
-    output = torch.empty(capacity, vocab, dtype=torch.bfloat16, device=device)
+    sample_capacity = 2 * capacity if indexed else capacity
+    output = torch.empty(sample_capacity, vocab, dtype=torch.bfloat16, device=device)
+    indices = torch.zeros(sample_capacity, dtype=torch.int64, device=device) if indexed else None
     runtime = create_all_gather_runtime(group, device, max_rows=capacity, columns=width * world)
     graphs, heads, compiled = {}, {}, {}
     control = {"frame_index": torch.zeros(1, dtype=torch.int32, device=device),
@@ -51,8 +53,9 @@ def _rank(rank, world, rendezvous, vocab):
         with RecordedPreparationSession(device=device, checkpoint="vocabulary-test",
                 workload_schema="column-gather-v1", numerical_policy="default", coordinator=coordinator) as session:
             for rows in (4, 1):
-                heads[rows] = PreparedVocabularyProjection(source[:rows], weight, local[:rows], output[:rows],
-                    runtime=runtime, session=session, coordinator=coordinator, name=f"head{rows}")
+                result = output if indexed else output[:rows]
+                heads[rows] = PreparedVocabularyProjection(source[:rows], weight, local[:rows], result,
+                    runtime=runtime, session=session, coordinator=coordinator, name=f"head{rows}", row_indices=indices)
             session.tune()
             stream = torch.cuda.Stream(device=device)
             pool = torch.cuda.graph_pool_handle()
@@ -74,6 +77,9 @@ def _rank(rank, world, rendezvous, vocab):
             for index, (rows, repetitions) in enumerate(((1, 13), (4, 8), (1, 31), (4, 17))):
                 source.copy_(seed + index * .03125)
                 expected = (source[:rows].float() @ full_weight.float().T).bfloat16()
+                if indexed:
+                    indices.copy_((torch.arange(sample_capacity, device=device) * 3 + index) % rows)
+                    expected = expected[indices]
                 output.fill_(float("nan"))
                 torch.cuda.synchronize(device)
                 before = torch.cuda.memory_stats(device)
@@ -91,10 +97,12 @@ def _rank(rank, world, rendezvous, vocab):
                 for key in ("allocation.all.allocated", "allocation.all.freed",
                             "segment.all.allocated", "segment.all.freed"):
                     assert before[key] == after[key]
-                torch.testing.assert_close(output[:rows], expected, rtol=.016, atol=.002)
-                torch.testing.assert_close(output[:rows, rank * width:rank * width + valid_columns],
-                                           local[:rows, :valid_columns], rtol=0, atol=0)
-                if rows < capacity:
+                result = output if indexed else output[:rows]
+                torch.testing.assert_close(result, expected, rtol=.016, atol=.002)
+                selected_local = local[:rows] if indices is None else local[:rows][indices]
+                torch.testing.assert_close(result[:, rank * width:rank * width + valid_columns],
+                                           selected_local[:, :valid_columns], rtol=0, atol=0)
+                if not indexed and rows < capacity:
                     assert output[rows:].isnan().all()
                 dist.barrier(group=group)
             worker.close()
@@ -117,3 +125,10 @@ def test_sharded_vocabulary_native_replay(world, vocab, tmp_path):
     if torch.cuda.device_count() < world:
         pytest.skip(f"requires {world} assigned CUDA devices")
     mp.spawn(_rank, args=(world, (tmp_path / "rendezvous").as_uri(), vocab), nprocs=world, join=True)
+
+
+def test_sharded_vocabulary_expands_rows_after_gather_under_native_replay(tmp_path):
+    assert os.environ.get("CUDA_VISIBLE_DEVICES")
+    if torch.cuda.device_count() < 4:
+        pytest.skip("requires four assigned CUDA devices")
+    mp.spawn(_rank, args=(4, (tmp_path / "rendezvous").as_uri(), 129280, True), nprocs=4, join=True)
