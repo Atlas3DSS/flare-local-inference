@@ -218,7 +218,7 @@ performance results.
 
 The `deepseek-v4-flash` alias selects the lossless MXFP4-CSF checkpoint
 `local-inference-lab/DeepSeek-V4-Flash-Vision-Exp-lossless-CSF`.
-The `deepseek-v4.1-flash` alias selects `DeepSeek-AI/DeepSeek-V4.1-Flash-1017`,
+The `deepseek-v4.1-flash` alias selects `deepseek-ai/DeepSeek-V4.1-Flash-1017`,
 with native MXFP4 expert scales by default. `--expert-scale-compression csf`
 compresses its backbone and DSpark expert scales during preparation.
 Compressed routed-expert scales remain in GPU memory. Serialized layers reuse scale buffers by expert geometry;

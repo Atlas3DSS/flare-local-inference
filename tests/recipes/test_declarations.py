@@ -298,7 +298,7 @@ def test_deepseek41_native_checkpoint_and_scale_compression(monkeypatch, tmp_pat
     from ignition.recipes.deepseek41.bootstrap import PreparationConfig
 
     model = resolve("deepseek-v4.1-flash")
-    assert model.checkpoint.repository == "DeepSeek-AI/DeepSeek-V4.1-Flash-1017"
+    assert model.checkpoint.repository == "deepseek-ai/DeepSeek-V4.1-Flash-1017"
     assert resolve(model.checkpoint.repository).checkpoint is model.checkpoint
     assert model.recipe.sampling_defaults.as_dict() == {
         "temperature": 1., "top_p": 1., "top_k": -1, "seed": 0, "min_p": 0.,

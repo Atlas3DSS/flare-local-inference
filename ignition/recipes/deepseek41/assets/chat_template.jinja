@@ -1,6 +1,6 @@
 {#- DeepSeek-V4.1 chat template, ported from encoding/encoding.py in the model repo.
     Extra kwargs: thinking_mode ("thinking" | "chat", default "thinking"; enable_thinking=true/false is accepted
-    as an alias), drop_thinking (default true), reasoning_effort (int in [1, 100] or "low"/"high"/"xhigh"/"max",
+    as an alias), drop_thinking (default true), reasoning_effort (int in [1, 100] or "low"/"high"/"max",
     default "high"). Assistant reasoning is read from reasoning_content, or from thinking as an alias. -#}
 {%- set IMG = "<｜deepseek_image｜>" -%}
 {%- set DSML = "｜DSML｜" -%}
@@ -16,13 +16,13 @@
 {%- if tools is not defined -%}{%- set tools = none -%}{%- endif -%}
 
 {%- if reasoning_effort is not defined or reasoning_effort is none -%}{%- set reasoning_effort = "high" -%}{%- endif -%}
-{%- set effort_map = {"low": 25, "high": 50, "xhigh": 75, "max": 100} -%}
+{%- set effort_map = {"low": 50, "high": 75, "max": 100} -%}
 {%- if reasoning_effort is string and reasoning_effort in effort_map -%}
     {%- set budget = effort_map[reasoning_effort] -%}
 {%- elif reasoning_effort is integer and 1 <= reasoning_effort <= 100 -%}
     {%- set budget = reasoning_effort -%}
 {%- else -%}
-    {{- raise_exception("Invalid reasoning effort: " ~ reasoning_effort ~ ", should be int within [1,100] or one of \"low\", \"high\", \"xhigh\", \"max\"") -}}
+    {{- raise_exception("Invalid reasoning effort: " ~ reasoning_effort ~ ", should be int within [1,100] or one of \"low\", \"high\", \"max\"") -}}
 {%- endif -%}
 
 {#- Text of text/image blocks joined by blank lines; other block types are dropped. -#}
@@ -154,7 +154,12 @@
 {#- Mid-conversation system messages count as user turns. Tools anywhere disable drop_thinking. -#}
 {%- set state = namespace(last_user=-1, has_tools=false) -%}
 {%- for m in msgs -%}
-    {%- if m.role == "user" or (m.role == "system" and loop.index0 > 0) -%}{%- set state.last_user = loop.index0 -%}{%- endif -%}
+    {%- set turn = namespace(user=m.role == "system" and loop.index0 > 0) -%}
+    {%- if m.role == "user" -%}
+        {%- set turn.user = not m.content_blocks -%}
+        {%- for b in m.content_blocks if b.type in ["text", "image", "image_url"] -%}{%- set turn.user = true -%}{%- endfor -%}
+    {%- endif -%}
+    {%- if turn.user -%}{%- set state.last_user = loop.index0 -%}{%- endif -%}
     {%- if m.get("tools") -%}{%- set state.has_tools = true -%}{%- endif -%}
 {%- endfor -%}
 {%- set effective_drop = drop_thinking and not state.has_tools -%}

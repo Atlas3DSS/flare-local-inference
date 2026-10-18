@@ -194,7 +194,7 @@ use the same prepared model graphs; the flag selects table storage only.
 
 ## DeepSeek V4.1 Flash
 
-The `deepseek-v4.1-flash` alias selects `DeepSeek-AI/DeepSeek-V4.1-Flash-1017`
+The `deepseek-v4.1-flash` alias selects `deepseek-ai/DeepSeek-V4.1-Flash-1017`
 and supports TP4 text generation, reasoning, and DSML tool calls.
 Sampling defaults are temperature 1.0 and top-p 1.0, following the
 [model card](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017#minimal-inference).
