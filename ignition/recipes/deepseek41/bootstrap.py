@@ -19,7 +19,7 @@ from ignition.components.deepseek_vision import (PreparedVision, VisionInputs, V
     PrefillVisionInputs, PreparedVisionGeneration, VisionState)
 from ignition.preparation.checkpoint import inspect_indexed_checkpoint
 from ignition.preparation.collectives import (CollectivePreparation, create_all_gather_runtime,
-    create_all_reduce_runtime, create_dma_all_reduce_runtime)
+    create_all_reduce_runtime, create_dma_all_reduce_runtime, create_result_broadcast_runtime)
 from ignition.preparation.disposable import storage_ranges
 from ignition.preparation.execution import GraphSignature
 from ignition.preparation.host_memory import virtual_device_memory, release_unused
@@ -189,6 +189,16 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
             max_tokens=config.prefill_chunk_size, hidden_size=5120, ipc=ipc)
         vocabulary_collective = create_all_gather_runtime(group, device,
             max_rows=max(verification_samples, slots * config.draft_tokens), columns=129280, ipc=ipc)
+        result_collective = None
+        if config.dspark:
+            from ignition.components.draft_sampling import PreparedDraftDistribution
+            from ignition.components.speculation import SpeculativeAcceptance
+
+            batch = max(config.batch_capacities)
+            layouts = [SpeculativeAcceptance.storage_layout(batch, max(config.speculative_widths))]
+            if config.draft_tokens:
+                layouts.append(PreparedDraftDistribution.broadcast_layout(batch))
+            result_collective = create_result_broadcast_runtime(group, device, layouts=layouts, ipc=ipc)
         identity = hashlib.sha256(json.dumps({"config": json.loads((metadata_path / "config.json").read_text()),
             "headers": [s.header_sha256 for s in manifest.shards], "world_size": shard.world_size,
             "contract": "deepseek41.graph-inputs.v1"}, sort_keys=True).encode()).hexdigest()
@@ -233,8 +243,9 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                 draft_tokens=config.draft_tokens, records=records, frame=frame, sequence=sequence,
                 session=session, workspace=arena,
                 runtime=collective, vocabulary_runtime=vocabulary_collective,
-                markov_runtime=None, coordinator=coordinator,
-                forwards=DSparkForwards(decoder_factory,Scratch,_CONTEXT,PreparedDraft,PreparedMarkov))
+                markov_runtime=None, coordinator=coordinator, result_runtime=result_collective,
+                forwards=DSparkForwards(decoder_factory, Scratch, _CONTEXT,
+                    PreparedDraft, PreparedMarkov))
 
     del manifest
     modes = (True, False) if config.dspark else (False,)
@@ -437,9 +448,10 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         package_data=tables if rank == 0 else None,
         resources=(weights, tables, pool, requests, inputs, admission, commands, arena, forwards,
             prefill_storage, decoder_storage, scratch, metadata, compiled, stream, graph_pool, session,
-            collective, prefill_collective, vocabulary_collective, coordinator, speculation,
+            collective, prefill_collective, vocabulary_collective, result_collective, coordinator, speculation,
             vision_state, vision_storage, vision_inputs, vision_prefill, graph_buffers),
-        close_resources=tuple(c for c in (prefill_collective, vocabulary_collective, collective) if c is not None))
+        close_resources=tuple(c for c in (result_collective, prefill_collective, vocabulary_collective, collective)
+                              if c is not None))
     if split is not None:
         model.proposal_confidence = confidence.host_view
         model.proposal_state = split

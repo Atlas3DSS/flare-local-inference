@@ -43,15 +43,17 @@ def prepare_sampling_scratch(batch, width, vocab, device, *, buffers=None, propo
     return result
 
 
-def prepare_sampling_broadcasts(proposals, verification, *, collectives, session, name, buffers=None):
+def prepare_sampling_broadcasts(proposals, verification, *, collectives, session, name, buffers=None,
+                                result_runtime=None):
     """Synchronize proposals before dependent work and acceptance before state commits."""
     cursors = []
     operations = [(f"proposal{index}", proposal) for index, proposal in enumerate(proposals)]
     if verification is not None:
         operations.append(("acceptance", verification))
+    runtime = collectives["vocabulary_runtime"] if result_runtime is None else result_runtime
     for suffix, operation in operations:
         cursor = None if buffers is None else buffers.fork()
-        operation.prepare_broadcast(runtime=collectives["vocabulary_runtime"], session=session,
+        operation.prepare_broadcast(runtime=runtime, session=session,
             coordinator=collectives["coordinator"], name=f"{name}.{suffix}", buffers=cursor)
         if cursor is not None:
             cursors.append(cursor)
@@ -220,7 +222,8 @@ class PreparedParallelDraftRound:
             proposal.prepare()
         if self.proposal_only:
             prepare_sampling_broadcasts(proposals, None, collectives=o.collectives, session=o.session,
-                                        name=self.name, buffers=self.buffers)
+                                        name=self.name, buffers=self.buffers,
+                                        result_runtime=getattr(o, "result_runtime", None))
             self.operations = None, proposals, None, None
             return
         verify = PreparedStochasticVerification(
@@ -236,7 +239,8 @@ class PreparedParallelDraftRound:
         )
         verify.prepare()
         prepare_sampling_broadcasts(proposals, verify, collectives=o.collectives, session=o.session,
-                                    name=self.name, buffers=self.buffers)
+                                    name=self.name, buffers=self.buffers,
+                                    result_runtime=getattr(o, "result_runtime", None))
         commit = PreparedSpeculativeCommit(
             o.requests,
             verify.output,

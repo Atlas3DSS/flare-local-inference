@@ -21,6 +21,45 @@ def progress(key="reduce", ranks=(4, 7)):
         ready_collectives=(SimpleNamespace(key=key, ranks=ranks),))
 
 
+def test_result_broadcast_channel_uses_captured_payloads(monkeypatch):
+    import torch
+
+    from ignition.components.draft_sampling import PreparedDraftDistribution
+    from ignition.components.collectives import packed_broadcast_layout
+    from ignition.components.speculation import SpeculativeAcceptance
+    from ignition.preparation import collectives
+
+    catalog = SimpleNamespace(batch_capacities=(1, 2, 4, 8), request_capacity=64)
+    batch = max(catalog.batch_capacities)
+    assert batch < catalog.request_capacity
+    proposals = PreparedDraftDistribution.broadcast_layout(batch)
+    acceptance = SpeculativeAcceptance.storage_layout(batch, 6)
+    actual = SpeculativeAcceptance.allocate(batch, 6, "meta")
+    assert acceptance == {name: (tuple(tensor.shape), tensor.dtype) for name, tensor in vars(actual).items()}
+    assert packed_broadcast_layout(proposals.values()) == ((0, 4096, 6144, 6208), 6216)
+    calls = []
+    group, device, ipc, result = object(), object(), object(), object()
+    monkeypatch.setattr(dist, "get_world_size", lambda actual: 4)
+    monkeypatch.setattr(collectives, "create_all_gather_runtime",
+        lambda actual_group, actual_device, **kwargs: calls.append((actual_group, actual_device, kwargs)) or result)
+    assert collectives.create_result_broadcast_runtime(group, device, layouts=(proposals, acceptance), ipc=ipc) is result
+    assert calls == [(group, device, dict(max_rows=1, columns=12544, ipc=ipc))]
+    for rows in catalog.batch_capacities:
+        assert packed_broadcast_layout(PreparedDraftDistribution.broadcast_layout(rows).values())[1] <= 6272
+        for width in range(1, 7):
+            fields = SpeculativeAcceptance.storage_layout(rows, width)
+            assert packed_broadcast_layout(fields.values())[1] <= 6272
+    assert proposals["valid"] == ((8, 1), torch.bool)
+
+
+@pytest.mark.parametrize("layouts", [(), ({},)])
+def test_result_broadcast_channel_rejects_empty_payloads(layouts):
+    from ignition.preparation.collectives import create_result_broadcast_runtime
+
+    with pytest.raises(ValueError, match="nonempty payload layouts"):
+        create_result_broadcast_runtime(object(), object(), layouts=layouts)
+
+
 def test_waits_for_compiling_peer_before_authorizing_kernel(monkeypatch):
     owner = coordinator(monkeypatch)
     peers = [(), (("reduce", (4, 7)),)]

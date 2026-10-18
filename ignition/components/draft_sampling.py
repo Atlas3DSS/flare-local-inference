@@ -260,6 +260,12 @@ class PreparedDraftDistribution(PreparedSpeculativeDistributions):
     """A one-position conditional proposal whose filtering and draw use PreparedDraftProposal."""
 
     @staticmethod
+    def broadcast_layout(batch):
+        return dict(support_ids=((batch, DRAFT_CANDIDATES), torch.int64),
+                    support_probabilities=((batch, DRAFT_CANDIDATES), torch.float32),
+                    sampled=((batch,), torch.int64), valid=((batch, 1), torch.bool))
+
+    @staticmethod
     def scratch_layout(batch, width, vocab):
         return {**PreparedSpeculativeDistributions.scratch_layout(batch, width, vocab),
             "block_max": ((batch, triton.cdiv(vocab, _SCORE_BLOCK)), torch.float32),
@@ -291,9 +297,9 @@ class PreparedDraftDistribution(PreparedSpeculativeDistributions):
             return (torch.zeros(shape, dtype=dtype, device=self.logits.device) if buffers is None
                     else buffers.zeros(shape, dtype))
 
-        shape = self.proposal_selected.shape
-        self.support_ids = allocate(shape, torch.int64)
-        self.support_probabilities = allocate(shape, torch.float32)
+        layout = self.broadcast_layout(self.logits.shape[0])
+        self.support_ids = allocate(*layout["support_ids"])
+        self.support_probabilities = allocate(*layout["support_probabilities"])
         self.broadcast = PreparedBroadcast(
             (self.support_ids, self.support_probabilities, self.sampled, self.valid),
             runtime=runtime, session=session, coordinator=coordinator, name=name, buffers=buffers)
