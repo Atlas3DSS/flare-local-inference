@@ -16,6 +16,9 @@ use std::os::fd::{AsRawFd, FromRawFd};
 #[cfg(any(unix, test))]
 use std::path::Path;
 
+#[cfg(windows)]
+mod windows;
+
 const BLOCK: usize = 4096;
 const CHUNK: usize = 64 << 10;
 const DEPTH: usize = 128;
@@ -286,23 +289,46 @@ pub(crate) struct DiskReader {
     #[cfg(unix)]
     ring: IoUring,
     #[cfg(windows)]
-    ring: crate::os::completion::Queue,
+    windows: windows::Readers,
+    #[cfg(unix)]
     staging: Aligned,
+    #[cfg(unix)]
     files: Vec<Arc<File>>,
     fragments: Vec<Fragment>,
     reads: Vec<Read>,
     stats: Arc<Stats>,
 }
 
+// Accumulate locally so timing does not add atomic operations to each completion.
+// Drop also records completed phases when a gather exits with an I/O error.
+struct DiskTimings<'a> {
+    stats: &'a Stats,
+    plan: u64,
+    submit: u64,
+    wait: u64,
+    complete: u64,
+}
+
+impl Drop for DiskTimings<'_> {
+    fn drop(&mut self) {
+        for (counter, value) in [
+            (&self.stats.disk_plan_ns, self.plan),
+            (&self.stats.disk_submit_ns, self.submit),
+            (&self.stats.disk_wait_ns, self.wait),
+            (&self.stats.disk_complete_ns, self.complete),
+        ] {
+            counter.fetch_add(value, Ordering::Relaxed);
+        }
+    }
+}
+
 impl DiskReader {
-    fn from_files(files: &[Arc<File>], stats: Arc<Stats>) -> Result<Self> {
-        // Windows associates a file object with one completion port; each reader owns its objects.
-        #[cfg(windows)]
-        let files = files
-            .iter()
-            .map(|file| crate::os::direct_reopen(file).map(Arc::new))
-            .collect::<std::io::Result<Vec<_>>>()
-            .map_err(|e| format!("open Engram completion files: {e}"))?;
+    fn from_files(files: &[Arc<File>], stats: Arc<Stats>, workers: usize) -> Result<Self> {
+        #[cfg(unix)]
+        if workers != 1 {
+            return Err("parallel embedding disk workers require Windows".into());
+        }
+        #[cfg(unix)]
         let staging = Aligned::new(DEPTH * CHUNK)?;
         #[cfg(unix)]
         let ring = {
@@ -318,16 +344,15 @@ impl DiskReader {
             ring
         };
         #[cfg(windows)]
-        let ring = crate::os::completion::Queue::new(DEPTH)
-            .map_err(|e| format!("Engram completion port: {e}"))?;
-        #[cfg(windows)]
-        for file in &files {
-            ring.attach(file)
-                .map_err(|e| format!("attach Engram reader: {e}"))?;
-        }
+        let windows = windows::Readers::new(files, workers)?;
         Ok(Self {
+            #[cfg(windows)]
+            windows,
+            #[cfg(unix)]
             ring,
+            #[cfg(unix)]
             staging,
+            #[cfg(unix)]
             files: files.to_vec(),
             fragments: Vec::new(),
             reads: Vec::new(),
@@ -336,6 +361,14 @@ impl DiskReader {
     }
 
     pub fn gather(&mut self, planes: &[Plane; 2], ids: &[i64], output: &mut [u8]) -> Result<()> {
+        let mut timing = DiskTimings {
+            stats: &self.stats,
+            plan: 0,
+            submit: 0,
+            wait: 0,
+            complete: 0,
+        };
+        let begin = Instant::now();
         self.fragments.clear();
         let mut base = 0;
         for plane in planes {
@@ -385,8 +418,10 @@ impl DiskReader {
                 });
             }
         }
+        timing.plan = begin.elapsed().as_nanos() as u64;
         #[cfg(unix)]
         for batch in self.reads.chunks(DEPTH) {
+            let begin = Instant::now();
             for (slot, read) in batch.iter().enumerate() {
                 let entry = opcode::ReadFixed::new(
                     types::Fd(self.files[read.file].as_raw_fd()),
@@ -407,14 +442,19 @@ impl DiskReader {
                 batch.iter().map(|read| read.nbytes as u64).sum(),
                 Ordering::Relaxed,
             );
+            timing.submit += begin.elapsed().as_nanos() as u64;
             let mut completed = 0;
             let mut failure = None;
             while completed < batch.len() {
-                match self.ring.submit_and_wait(1) {
+                let begin = Instant::now();
+                let result = self.ring.submit_and_wait(1);
+                timing.wait += begin.elapsed().as_nanos() as u64;
+                match result {
                     Ok(_) => {}
                     Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
                     Err(error) => return Err(format!("submit Engram reads: {error}").into()),
                 }
+                let begin = Instant::now();
                 for entry in self.ring.completion() {
                     completed += 1;
                     let slot = entry.user_data() as usize;
@@ -440,75 +480,15 @@ impl DiskReader {
                             .copy_from_slice(source);
                     }
                 }
+                timing.complete += begin.elapsed().as_nanos() as u64;
             }
             if let Some(error) = failure {
                 return Err(error.into());
             }
         }
         #[cfg(windows)]
-        for batch in self.reads.chunks(DEPTH) {
-            let mut failure = None;
-            for (slot, read) in batch.iter().enumerate() {
-                if let Err(error) = unsafe {
-                    self.ring.submit(
-                        slot,
-                        &self.files[read.file],
-                        self.staging.at(slot) as usize,
-                        read.nbytes as u32,
-                        read.offset,
-                        false,
-                    )
-                } {
-                    failure = Some(format!("submit Engram read: {error}"));
-                    self.ring.cancel();
-                    break;
-                }
-                self.stats.disk_reads.fetch_add(1, Ordering::Relaxed);
-                self.stats
-                    .disk_bytes
-                    .fetch_add(read.nbytes as u64, Ordering::Relaxed);
-            }
-            while self.ring.pending() != 0 {
-                match self.ring.wait() {
-                    Err(error) => {
-                        failure.get_or_insert_with(|| format!("wait for Engram read: {error}"));
-                        self.ring.cancel();
-                        std::thread::sleep(std::time::Duration::from_millis(1));
-                    }
-                    Ok((slot, result)) => {
-                        let read = &batch[slot];
-                        match result {
-                            Ok(count) if count >= read.required => {
-                                for fragment in &self.fragments[read.fragments.clone()] {
-                                    let source = unsafe {
-                                        std::slice::from_raw_parts(
-                                            self.staging
-                                                .at(slot)
-                                                .add((fragment.source - read.offset) as usize),
-                                            fragment.nbytes,
-                                        )
-                                    };
-                                    output[fragment.destination
-                                        ..fragment.destination + fragment.nbytes]
-                                        .copy_from_slice(source);
-                                }
-                            }
-                            result => {
-                                failure.get_or_insert_with(|| {
-                                    format!(
-                                        "Engram read at {} requires {} bytes: {result:?}",
-                                        read.offset, read.required
-                                    )
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-            if let Some(error) = failure {
-                return Err(error.into());
-            }
-        }
+        self.windows
+            .gather(&self.reads, &self.fragments, output, &self.stats)?;
 
         Ok(())
     }
@@ -685,6 +665,7 @@ impl Reader {
             cache_bytes,
             max_rows,
             stats,
+            1,
         )
     }
     pub fn from_files(
@@ -694,6 +675,7 @@ impl Reader {
         cache_bytes: usize,
         max_rows: usize,
         stats: Arc<Stats>,
+        workers: usize,
     ) -> Result<Self> {
         if resident && cache_bytes != 0 {
             return Err("embedding row cache requires disk table storage".into());
@@ -707,7 +689,7 @@ impl Reader {
                 Arc::new(Resident::load(&files[planes[1].file], planes[1])?),
             ])
         } else {
-            let disk = DiskReader::from_files(files, stats.clone())?;
+            let disk = DiskReader::from_files(files, stats.clone(), workers)?;
             if cache_bytes != 0 {
                 Data::Cached(Box::new(CachedReader::new(
                     disk,
@@ -1104,7 +1086,7 @@ mod tests {
         }
         for (resident, cache) in [(false, 0), (false, 65536), (true, 0)] {
             let mut reader =
-                Reader::from_files(&files, &planes, resident, cache, 16, Arc::default()).unwrap();
+                Reader::from_files(&files, &planes, resident, cache, 16, Arc::default(), 1).unwrap();
             for _ in 0..3 {
                 let mut output = vec![0xa5; 4 * 90];
                 reader

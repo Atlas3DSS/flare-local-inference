@@ -236,6 +236,11 @@ pub struct Run {
     #[arg(long, value_name = "SIZE", value_parser = parse_size, default_value = "0", help_heading = "Serving options")]
     pub embedding_table_cache_size: u64,
 
+    /// Disk workers per embedding table; shares a fixed I/O budget [default: 4 on Windows, 1 elsewhere].
+    #[arg(long, value_name = "N", help_heading = "Advanced serving options",
+        value_parser = PossibleValuesParser::new(["1", "2", "4", "8"]).map(|value| value.parse::<usize>().unwrap()))]
+    pub embedding_table_workers: Option<usize>,
+
     /// Maximum drafts per round; 0 disables speculation [default: package setting].
     #[arg(long, value_name = "N", help_heading = "Speculation options")]
     pub mtp_draft_tokens: Option<usize>,
@@ -327,6 +332,9 @@ impl Run {
                 .into(),
             ]);
         }
+        if let Some(workers) = self.embedding_table_workers {
+            options.extend(["--embedding-table-workers".into(), workers.to_string()]);
+        }
         if self.embedding_table_cache_size != 0 {
             options.extend([
                 "--embedding-table-cache-size".into(),
@@ -342,6 +350,7 @@ impl Run {
             memory_limit: self.memory_limit,
             embedding_table_storage: self.embedding_table_storage,
             embedding_table_cache_bytes: self.embedding_table_cache_size,
+            embedding_table_workers: self.embedding_table_workers,
             max_concurrency: self.max_concurrency.map(NonZeroUsize::get),
             mtp_draft_tokens: self.mtp_draft_tokens,
             adaptive_verification: if self.mtp_adaptive_verification {
@@ -372,6 +381,47 @@ mod tests {
             panic!("expected run")
         };
         args
+    }
+
+    #[test]
+    fn embedding_workers_reach_loader_and_remote_arguments() {
+        assert_eq!(
+            run(&["flare", "run", "model.safetensors"])
+                .load_options()
+                .embedding_table_workers,
+            None
+        );
+        for workers in ["1", "2", "4", "8"] {
+            let args = run(&[
+                "flare",
+                "run",
+                "model.safetensors",
+                "--embedding-table-workers",
+                workers,
+            ]);
+            assert_eq!(
+                args.load_options().embedding_table_workers,
+                Some(workers.parse().unwrap())
+            );
+            assert_eq!(args.load_options().embedding_workers(), workers.parse::<usize>().unwrap());
+            assert!(
+                args.rank_options()
+                    .windows(2)
+                    .any(|pair| pair == ["--embedding-table-workers", workers])
+            );
+        }
+        for workers in ["0", "3", "5"] {
+            assert!(
+                Cli::try_parse_from([
+                    "flare",
+                    "run",
+                    "model.safetensors",
+                    "--embedding-table-workers",
+                    workers
+                ])
+                .is_err()
+            );
+        }
     }
 
     #[test]

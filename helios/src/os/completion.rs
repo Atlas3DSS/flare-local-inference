@@ -24,7 +24,7 @@ unsafe impl Send for Queue {}
 impl Queue {
     pub(crate) fn new(depth: usize) -> io::Result<Self> {
         let port =
-            unsafe { CreateIoCompletionPort(INVALID_HANDLE_VALUE, std::ptr::null_mut(), 0, 1) };
+            unsafe { CreateIoCompletionPort(INVALID_HANDLE_VALUE, std::ptr::null_mut(), 0, 0) };
         if port.is_null() {
             return Err(io::Error::last_os_error());
         }
@@ -41,7 +41,7 @@ impl Queue {
     }
 
     pub(crate) fn attach(&self, file: &File) -> io::Result<()> {
-        if unsafe { CreateIoCompletionPort(file.as_raw_handle(), self.port, 0, 1) }.is_null() {
+        if unsafe { CreateIoCompletionPort(file.as_raw_handle(), self.port, 0, 0) }.is_null() {
             return Err(io::Error::last_os_error());
         }
         Ok(())
@@ -154,10 +154,8 @@ impl Queue {
             }
         }
     }
-}
 
-impl Drop for Queue {
-    fn drop(&mut self) {
+    pub(crate) fn cancel_and_drain(&mut self) {
         self.cancel();
         // Cancellation is only a request. Keep buffers and OVERLAPPED records live until completion.
         while self.pending() != 0 {
@@ -165,6 +163,12 @@ impl Drop for Queue {
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
         }
+    }
+}
+
+impl Drop for Queue {
+    fn drop(&mut self) {
+        self.cancel_and_drain();
         unsafe {
             CloseHandle(self.port);
         }
