@@ -299,7 +299,7 @@ Help exits with status 0; usage errors go to stderr with status 2. Its options a
 | `--embedding-table-storage disk\|ram` | PLE and Engram table storage; both modes deliver compact GPU rows | `disk` |
 | `--embedding-table-cache-size SIZE` | Per-host budget for cached disk-backed PLE/Engram rows, including the index, usage counters and miss workspace; accepts sizes such as `1G` or `2GiB` | `0` (disabled) |
 
-`--embedding-table-workers 1|2|4` is an advanced Windows serving experiment.
+`--embedding-table-workers 1|2|4|8` is an advanced Windows serving experiment.
 Workers share 128 I/O slots and 8 MiB of direct-read staging per embedding table;
 the default remains one. Large gathers use scoped helper threads, whose startup
 cost is included in gather latency. Small gathers stay on the delivery thread.

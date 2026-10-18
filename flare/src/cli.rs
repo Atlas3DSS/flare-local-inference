@@ -233,7 +233,7 @@ pub struct Run {
 
     /// Windows disk workers per embedding table; shares a fixed I/O budget [default: 1].
     #[arg(long, value_name = "N", help_heading = "Advanced serving options",
-        value_parser = PossibleValuesParser::new(["1", "2", "4"]).map(|value| value.parse::<usize>().unwrap()))]
+        value_parser = PossibleValuesParser::new(["1", "2", "4", "8"]).map(|value| value.parse::<usize>().unwrap()))]
     pub embedding_table_workers: Option<usize>,
 
     /// Maximum drafts per round; 0 disables speculation [default: package setting].
@@ -386,7 +386,7 @@ mod tests {
                 .embedding_table_workers,
             None
         );
-        for workers in ["1", "2", "4"] {
+        for workers in ["1", "2", "4", "8"] {
             let args = run(&[
                 "flare",
                 "run",

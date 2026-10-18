@@ -41,8 +41,8 @@ impl Output {
 
 impl Readers {
     pub(super) fn new(source: &File, workers: usize) -> Result<Self> {
-        if !matches!(workers, 1 | 2 | 4) {
-            return Err("embedding table workers must be 1, 2, or 4".into());
+        if !matches!(workers, 1 | 2 | 4 | 8) {
+            return Err("embedding table workers must be 1, 2, 4, or 8".into());
         }
         let depth = DEPTH / workers;
         let mut lanes = Vec::with_capacity(workers);
@@ -257,7 +257,7 @@ mod tests {
                 })
                 .collect();
             let mut baseline_reads = None;
-            for workers in [1, 2, 4] {
+            for workers in [1, 2, 4, 8] {
                 let stats = Arc::new(Stats::default());
                 let file = File::open(&path).unwrap();
                 let mut reader =
@@ -318,7 +318,7 @@ mod tests {
             std::env::temp_dir().join(format!("flare-worker-budget-{}.bin", std::process::id()));
         std::fs::write(&path, [0; 4096]).unwrap();
         let file = File::open(&path).unwrap();
-        for workers in [1, 2, 4] {
+        for workers in [1, 2, 4, 8] {
             let readers = Readers::new(&file, workers).unwrap();
             assert_eq!(
                 readers.lanes.iter().map(|lane| lane.depth).sum::<usize>(),

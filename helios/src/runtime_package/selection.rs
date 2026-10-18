@@ -33,8 +33,8 @@ impl LoadOptions {
             limit.validate()?;
         }
         if let Some(workers) = self.embedding_table_workers {
-            if !matches!(workers, 1 | 2 | 4) {
-                return Err(invalid("embedding table workers must be 1, 2, or 4"));
+            if !matches!(workers, 1 | 2 | 4 | 8) {
+                return Err(invalid("embedding table workers must be 1, 2, 4, or 8"));
             }
             if self.embedding_table_storage == Some(crate::engram::Storage::Ram) {
                 return Err(invalid("embedding table workers require disk storage"));
