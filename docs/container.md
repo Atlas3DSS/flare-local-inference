@@ -31,6 +31,21 @@ or select it with Docker Buildx. ARM64 also includes libibverbs and its provider
 because Flare enables the RoCE transport on that architecture. Multi-host RoCE
 deployment additionally requires the host's RDMA devices and network setup.
 
+To build and publish both Linux architectures under one tag, use an existing
+Buildx builder configured for both platforms and log in to the destination
+registry, then run:
+
+```sh
+./scripts/build_container.sh
+```
+
+The script uses builder `flare-multi`, pushes
+`ghcr.io/local-inference-lab/flare:latest`, and displays the published manifest.
+Override these defaults with `--builder NAME` and `--tag IMAGE:TAG`. Build output
+uses plain progress logs, including when redirected. The script resolves the
+repository root from its own location, so it can run from any working directory.
+Docker selects the matching architecture when pulling the published tag.
+
 ## Run
 
 This example exposes host GPU 0 and mounts a directory containing a prepared

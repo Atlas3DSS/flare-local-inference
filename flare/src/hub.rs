@@ -143,6 +143,7 @@ fn fetch(api: &Api, cache: &Cache, repo: &Repo, requested: Option<&str>) -> Resu
     let path = if path.is_file() {
         path
     } else {
+        eprintln!("Downloading model: {filename}...");
         api.repo(pinned).download(&filename)?
     };
     cache.repo(repo.clone()).create_ref(&info.sha)?;
