@@ -33,9 +33,12 @@ def _convolve(X, Delta, Base, Y, N: tl.constexpr, H: tl.constexpr, GROUP: tl.con
 
 
 class PreparedGroupedConvolution:
-    def __init__(self, source, weights, *, block_size, group_size, session, name, buffers):
+    def __init__(self, source, weights, *, block_size, group_size, session, name, buffers, token_capacity=None):
         self.block_size, self.group_size = block_size, group_size
         self.base, self.tokens, self.hidden = weights["base"], *source.shape
+        capacity = self.tokens if token_capacity is None else token_capacity
+        if capacity < self.tokens:
+            raise ValueError("dynamic convolution scratch capacity must cover its input rows")
         if self.base.ndim != 3 or self.base.shape[0] != 2 or self.base.shape[2] != self.hidden:
             raise ValueError("dynamic convolution requires two sides of hidden-width tap weights")
         self.taps = self.base.shape[1]
@@ -44,7 +47,7 @@ class PreparedGroupedConvolution:
         channels = 2 * self.taps * self.hidden // group_size
         for key, width in (("coefficients", channels), ("before", self.hidden), ("after", self.hidden)):
             if key not in buffers:
-                buffers[key] = torch.zeros((self.tokens, width), dtype=torch.bfloat16, device=source.device)
+                buffers[key] = torch.zeros((capacity, width), dtype=torch.bfloat16, device=source.device)
         self.coefficients, self.before, self.after = (buffers[k][:self.tokens] for k in ("coefficients", "before", "after"))
         self.project = UnquantizedProjection(source, weights["projection"], self.coefficients,
                                              session=session, name=name + ".coefficients")

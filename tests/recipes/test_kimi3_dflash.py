@@ -230,7 +230,7 @@ def test_checkpoint_kda_verification_commits_only_accepted_prefix():
 
 @cuda
 @torch.no_grad()
-@pytest.mark.parametrize("batch", [1, 3])
+@pytest.mark.parametrize("batch", [1, 4])
 def test_complete_draft_and_context_replay_with_checkpoint_weights(batch):
     from types import SimpleNamespace
     from ignition.components.parallel import TensorParallelShard
@@ -267,18 +267,28 @@ def test_complete_draft_and_context_replay_with_checkpoint_weights(batch):
         kv=kda.flatten()[:129 * 576].view(129, 576),
         latent=mla.flatten()[:129 * 576].view(129, 576))
     context_meta = Metadata.allocate(129, 1, 2, device)
-    draft_meta = Metadata.allocate(8 * batch, batch, 2, device, samples=8 * batch)
     scratch = DraftScratch(Scratch.allocate(8 * batch, 8 * batch, c, 1, device,
-                                          activations=activation[:8 * batch]), {})
+                                          activations=activation[:8 * batch]), {}, 8 * batch)
     with RecordedPreparationSession(device=device, checkpoint="kimi-dflash2-forward",
             workload_schema="kimi-dflash2-forward", numerical_policy="default") as session:
         arena = ScratchArena(device)
         session.register_scratch(arena)
         context = PreparedContext(weights, auxiliary, context_meta, pool, session=session, name="context",
             workspace=arena, runtime=None, coordinator=None, buffers=context_buffers)
-        forward = PreparedDraft(weights, scratch, draft_meta, pool, session=session, name="draft",
-            workspace=arena, runtime=None, vocabulary_runtime=None, embedding_runtime=None,
-            router_runtime=None, vision_state=None, coordinator=None)
+        forwards = []
+        # Every draft batch shares storage sized for the maximum request batch.
+        for draft_batch in (1,) if batch == 1 else (1, 2, 4):
+            draft_meta = Metadata.allocate(8 * draft_batch, draft_batch, 2, device, samples=8 * draft_batch)
+            forward = PreparedDraft(weights, scratch.rows(8 * draft_batch, 8 * draft_batch), draft_meta,
+                pool, session=session, name=f"draft{draft_batch}", workspace=arena, runtime=None,
+                vocabulary_runtime=None, embedding_runtime=None, router_runtime=None, vision_state=None,
+                coordinator=None)
+            forwards.append(forward)
+            assert forward.layers[0][2].output.shape == (8 * draft_batch, c.hidden)
+            assert forward.layers[0][5].output.shape == (8 * draft_batch, c.hidden)
+        for prepared in forwards:
+            assert prepared.layers[0][2].output.data_ptr() == forward.layers[0][2].output.data_ptr()
+            assert prepared.layers[0][5].output.data_ptr() == forward.layers[0][5].output.data_ptr()
         session.tune(show_progress=False)
         context_meta.set(torch.zeros(1, device=device), torch.tensor([129], device=device),
             torch.ones(1, device=device), torch.tensor([[0, 1]], device=device),

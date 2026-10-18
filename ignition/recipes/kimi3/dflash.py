@@ -107,6 +107,7 @@ class PreparedContext:
 class DraftScratch:
     scratch: Scratch
     buffers: dict
+    token_capacity: int
 
     @property
     def logits(self):
@@ -117,7 +118,9 @@ class DraftScratch:
         return self.scratch.hidden
 
     def rows(self, tokens, samples):
-        return type(self)(self.scratch.rows(tokens, samples), self.buffers)
+        if not 0 < tokens <= self.token_capacity or samples != tokens:
+            raise ValueError("DFlash2 scratch requires complete draft rows within its token capacity")
+        return type(self)(self.scratch.rows(tokens, samples), self.buffers, self.token_capacity)
 
 
 class DraftAttention:
@@ -125,13 +128,16 @@ class DraftAttention:
     through its continuation ring, then their own block's BF16 latents, merged by log-sum-exp."""
 
     def __init__(self, weights, source, metadata, cache, config, window, *, session, name, workspace, buffers,
-                 page_tokens=PAGE_TOKENS):
+                 page_tokens=PAGE_TOKENS, token_capacity=None):
         self.weights, self.metadata = weights, metadata
         tokens, hidden = source.shape
+        capacity = tokens if token_capacity is None else token_capacity
+        if capacity < tokens:
+            raise ValueError("DFlash2 attention scratch capacity must cover its draft rows")
         heads = weights["key"].shape[0]
         def buffer(key, *shape, dtype=torch.bfloat16):
             if key not in buffers:
-                buffers[key] = torch.zeros((tokens, *shape), dtype=dtype, device=source.device)
+                buffers[key] = torch.zeros((capacity, *shape), dtype=dtype, device=source.device)
             return buffers[key][:tokens]
         self.input, self.qnorm = buffer("input", 2112), buffer("qnorm", 1536)
         self.query, self.latent = buffer("query", heads, 192), buffer("latent", 576)
@@ -202,23 +208,24 @@ class PreparedDraft:
         c, s = weights.config.draft, scratch.scratch
         source, storage = s.activations, scratch.buffers
         tokens, hidden = source.shape
+        capacity = scratch.token_capacity
         local = torch.zeros((tokens, hidden // weights.shard.world_size), dtype=source.dtype, device=source.device)
         self.embedding = PreparedShardedEmbedding(weights.embedding, metadata.token_ids, local, source,
             runtime=embedding_runtime, coordinator=coordinator, num_rows=metadata.live_counts[:1],
             session=session, name=name + ".embedding")
         if "partial" not in storage:
-            storage["partial"] = torch.zeros_like(source)
-            storage["total"] = torch.zeros_like(source)
-            storage["mlp"] = MLPScratch.allocate(tokens, hidden, c.text["intermediate_size"] // weights.shard.world_size, source.device)
+            storage["partial"] = torch.zeros((capacity, hidden), dtype=source.dtype, device=source.device)
+            storage["total"] = torch.zeros_like(storage["partial"])
+            storage["mlp"] = MLPScratch.allocate(capacity, hidden, c.text["intermediate_size"] // weights.shard.world_size, source.device)
         self.layers = []
         for i, w in enumerate(weights.draft.layers):
             prefix = f"{name}.{i}"
             attention = DraftAttention(w["attention"], source, metadata, pool.draft_attention(i), c,
                 c.text["sliding_window"] if c.text["layer_types"][i] == "sliding_attention" else 0,
                 session=session, name=prefix + ".attention", workspace=workspace, buffers=storage.setdefault("attention", {}),
-                page_tokens=page_tokens)
+                page_tokens=page_tokens, token_capacity=capacity)
             conv = {kind: PreparedGroupedConvolution(source, w[kind], block_size=c.block_size, group_size=16,
-                session=session, name=prefix + "." + kind, buffers=storage.setdefault(kind, {}))
+                session=session, name=prefix + "." + kind, buffers=storage.setdefault(kind, {}), token_capacity=capacity)
                 for kind in ("attention_conv", "mlp_conv")}
             mlp_s = storage["mlp"].rows(tokens)
             mlp = PreparedMLP(source, w["mlp"], mlp_s.gate_up, mlp_s.intermediate, mlp_s.output,
@@ -279,5 +286,6 @@ class SpeculativePreparation:
         self.rng = SpeculativeRngState.allocate(pool.backing.device, capacity=requests.capacity)
         self.generation, self.offset = torch.zeros_like(requests.generation), torch.zeros_like(requests.generation)
         self.block_size, self.logit_offset = weights.config.draft.block_size, 1
-        self.draft_scratch = DraftScratch(Scratch.allocate(requests.capacity * self.block_size,
-            requests.capacity * self.block_size, weights.config, weights.shard.world_size, pool.backing.device), {})
+        draft_rows = requests.capacity * self.block_size
+        self.draft_scratch = DraftScratch(Scratch.allocate(draft_rows,
+            draft_rows, weights.config, weights.shard.world_size, pool.backing.device), {}, draft_rows)
