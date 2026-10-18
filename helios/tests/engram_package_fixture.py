@@ -69,15 +69,19 @@ def prepare(root):
             with session.capture(), torch.cuda.graph(graph, pool=storage.graph_pool.id):
                 run()
             graph.instantiate()
-        tables = Tables(geometry, tuple(range(32)), {1: tuple(sources)}, {1: inputs}, {1: mailbox}, sequence)
-        buffers = dict(tables.buffers(), output=output, transfer_source=transfer_source, frame_index=frame,
-                       submission_sequence=sequence, completion_records=records)
-        prepared = PreparedExecution(device=0, graphs={'decode': graph}, buffers=buffers,
-            signatures={'decode': GraphSignature('decode', 4, 1, ('engram_1_hashes', 'transfer_source'))},
-            max_active=4, resources=(storage, lookup), export_events=tables.events())
-        prepared.server_config = server_config(root)
-        prepared.package_data = tables
-        export_model(prepared, images, storage, root / 'package', options={}, publisher=publisher())
+            # Session cleanup unloads compiled kernels; retain it until export has read the graph.
+            try:
+                tables = Tables(geometry, tuple(range(32)), {1: tuple(sources)}, {1: inputs}, {1: mailbox}, sequence)
+                buffers = dict(tables.buffers(), output=output, transfer_source=transfer_source, frame_index=frame,
+                               submission_sequence=sequence, completion_records=records)
+                prepared = PreparedExecution(device=0, graphs={'decode': graph}, buffers=buffers,
+                    signatures={'decode': GraphSignature('decode', 4, 1, ('engram_1_hashes', 'transfer_source'))},
+                    max_active=4, resources=(storage, lookup), export_events=tables.events())
+                prepared.server_config = server_config(root)
+                prepared.package_data = tables
+                export_model(prepared, images, storage, root / 'package', options={}, publisher=publisher())
+            finally:
+                graph.reset()
 
 
 if __name__ == '__main__':
