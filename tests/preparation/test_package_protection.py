@@ -658,6 +658,37 @@ def development_profile(signer):
             'public_key': list(signer.public_key)}
 
 
+def test_development_profile_requires_acceptance_and_remembers_the_key(flare, tmp_path):
+    signer = development_publisher()
+    path, _ = fixture(tmp_path, size=41, signer=signer)
+    profile = profiles(tmp_path / 'publisher.json', signer)
+    store = tmp_path / 'trust.toml'
+    first = launch(flare, path, profile, store)
+    assert 'Local development key' in first.stderr
+    assert 'unattended first use requires' in first.stderr and not store.exists()
+    accepted = launch(flare, path, profile, store, *approval(signer))
+    assert 'model rank count must match distinct selected devices' in accepted.stderr
+    assert store.exists()
+    remembered = launch(flare, path, None, store)
+    assert 'Signing key acceptance' not in remembered.stderr
+    assert 'model rank count must match distinct selected devices' in remembered.stderr
+
+
+def test_development_profile_must_match_the_signed_package(flare, tmp_path):
+    signer = development_publisher()
+    path, _ = fixture(tmp_path, size=41, signer=signer)
+    profile = profiles(tmp_path / 'publisher.json', development_publisher())
+    store = tmp_path / 'trust.toml'
+    wrong_key = launch(flare, path, profile, store, *approval(signer))
+    assert 'unknown package publisher' in wrong_key.stderr and not store.exists()
+    profiles(profile, signer)
+    value, payload = envelope(path)
+    value.groups[0].signature = bytes(64)
+    replace_envelope(path, value, payload)
+    invalid = launch(flare, path, profile, store, *approval(signer))
+    assert 'signature failed' in invalid.stderr and not store.exists()
+
+
 def test_promote_development_package_preserves_resources(native, tmp_path):
     from ignition.preparation.resign import resign as promote
 

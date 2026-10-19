@@ -340,7 +340,7 @@ Help exits with status 0; usage errors go to stderr with status 2. Its options a
 
 | Flag | Meaning | Default |
 |---|---|---|
-| `--publisher-keys PATH` | Additional JSON verification profiles; importing a key does not approve execution or verify identity | Embedded profiles and remembered keys |
+| `--publisher-keys PATH` | Additional JSON verification profiles; importing a key does not approve execution or verify identity | Embedded profiles, remembered keys, and the default development profile for development packages |
 | `--dangerously-approve-key FINGERPRINT` | Explicitly approve this full lowercase SHA-256 key fingerprint; requires the matching publisher flag | Interactive first use or remembered trust |
 | `--dangerously-accept-publisher NAMESPACE` | Accept this exact publisher namespace; requires the matching key flag | Interactive first use or remembered trust |
 | `--trust-store PATH` | Persistent key/namespace acceptance file | `~/.config/flare/trust.toml` |
@@ -536,6 +536,11 @@ With no publishing identity configured, Ignition creates and reuses
 permissions. It also writes `development-publisher.json` containing the public
 verification profile. These packages use the explicit namespace and source
 `local-development`, with no claim to be an official published checkpoint.
+When `--publisher-keys` is omitted for a development package, Flare looks for
+`~/.config/flare/development-publisher.json`. Explicit profile paths override
+this lookup, and `--trust-store` does not relocate it. A missing default profile
+leaves verification to embedded or remembered keys; an invalid profile is an
+error. The key must match the package's signer and pass signature verification.
 
 `ignition run` supplies Flare with the development profile when applicable and
 automatically passes the exact fingerprint and namespace from its export
@@ -572,12 +577,14 @@ Typing the publisher namespace agrees to the terms at that link and trusts the
 signing key; the typed string is the key material Helios derives executable
 decryption keys from, so acceptance is what decrypts the package's kernels.
 
-To load a locally exported package directly, supply its public profile:
+To load a locally exported development package using the default public profile:
 
 ```sh
-flare run model.safetensors \
-  --publisher-keys ~/.config/flare/development-publisher.json --gpus 0
+flare run model.safetensors --gpus 0
 ```
+
+For a profile beside a custom Ignition configuration file or from another host,
+pass its path with `--publisher-keys PATH`.
 
 First interactive use requires typing `local-development`. For unattended
 loading, supply both dangerous-approval flags with the exact fingerprint and

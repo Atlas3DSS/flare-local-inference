@@ -25,17 +25,38 @@ use std::{
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 const SLOT_SIZE: usize = 65536;
 
-pub fn publishers(paths: &[PathBuf]) -> Result<Vec<Publisher>> {
+fn publishers(
+    paths: &[PathBuf],
+    development: bool,
+    home: impl FnOnce() -> io::Result<PathBuf>,
+) -> Result<Vec<Publisher>> {
+    let default;
+    let paths = if development && paths.is_empty() {
+        default = home()?.join(".config/flare/development-publisher.json");
+        if !default.try_exists()? {
+            return Ok(Vec::new());
+        }
+        std::slice::from_ref(&default)
+    } else {
+        paths
+    };
     let mut publishers = Vec::new();
     for path in paths {
         let mut bytes = Vec::new();
-        File::open(path)?
+        File::open(path)
+            .map_err(|error| format!("cannot read publisher profile {}: {error}", path.display()))?
             .take((SLOT_SIZE + 1) as u64)
             .read_to_end(&mut bytes)?;
         if bytes.len() > SLOT_SIZE {
-            return Err("publisher profile file exceeds 64 KiB".into());
+            return Err(
+                format!("publisher profile file exceeds 64 KiB: {}", path.display()).into(),
+            );
         }
-        publishers.extend(serde_json::from_slice::<Vec<Publisher>>(&bytes)?);
+        publishers.extend(
+            serde_json::from_slice::<Vec<Publisher>>(&bytes).map_err(|error| {
+                format!("invalid publisher profile {}: {error}", path.display())
+            })?,
+        );
     }
     let mut unique = std::collections::HashMap::new();
     let mut result = Vec::new();
@@ -251,7 +272,11 @@ pub fn load(
         .iter()
         .find(|e| e.fingerprint == claim.signer && e.namespace == claim.namespace)
         .cloned();
-    let mut profiles = publishers(&args.publisher_keys)?;
+    let mut profiles = publishers(
+        &args.publisher_keys,
+        claim.development,
+        crate::environment::home_directory,
+    )?;
     // The publisher's repository is consulted on every load that is not offline, so a key the
     // publisher removed from publisher.json stops loading everywhere, remembered or not. When it
     // cannot be consulted, a previously confirmed identity stands.
@@ -549,6 +574,119 @@ pub fn revoke(fingerprint: &str, given: Option<&Path>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn development_publisher() -> Publisher {
+        Publisher {
+            name: "Local development signer".into(),
+            namespace: "local-development".into(),
+            public_key: [7; 32],
+            development: true,
+        }
+    }
+
+    #[test]
+    fn development_packages_find_the_default_public_profile() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join(".config/flare/development-publisher.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let publisher = development_publisher();
+        fs::write(&path, serde_json::to_vec(&[&publisher]).unwrap()).unwrap();
+        assert_eq!(
+            publishers(&[], true, || Ok(home.path().to_owned())).unwrap(),
+            vec![publisher]
+        );
+    }
+
+    #[test]
+    fn explicit_profiles_and_production_packages_skip_the_default_lookup() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("publisher.json");
+        let publisher = development_publisher();
+        fs::write(&path, serde_json::to_vec(&[&publisher]).unwrap()).unwrap();
+        for development in [false, true] {
+            assert_eq!(
+                publishers(std::slice::from_ref(&path), development, || {
+                    panic!("explicit profiles must not resolve the default directory")
+                })
+                .unwrap(),
+                vec![publisher.clone()]
+            );
+        }
+        assert!(
+            publishers(&[], false, || {
+                panic!("production packages must not resolve the default directory")
+            })
+            .unwrap()
+            .is_empty()
+        );
+        fs::write(&path, b"[]").unwrap();
+        assert!(
+            publishers(std::slice::from_ref(&path), true, || {
+                panic!("an empty explicit profile must not trigger the default lookup")
+            })
+            .unwrap()
+            .is_empty()
+        );
+        fs::remove_file(&path).unwrap();
+        assert!(
+            publishers(&[path], true, || {
+                panic!("a missing explicit profile must not trigger the default lookup")
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn a_missing_development_profile_leaves_other_keys_available() {
+        let home = tempfile::tempdir().unwrap();
+        assert!(
+            publishers(&[], true, || Ok(home.path().to_owned()))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn malformed_and_oversized_defaults_report_the_profile_path() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join(".config/flare/development-publisher.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        for (bytes, message) in [
+            (b"not json".to_vec(), "invalid publisher profile"),
+            (vec![b' '; SLOT_SIZE + 1], "exceeds 64 KiB"),
+        ] {
+            fs::write(&path, bytes).unwrap();
+            let error = publishers(&[], true, || Ok(home.path().to_owned()))
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(message), "{error}");
+            assert!(error.contains(path.to_str().unwrap()), "{error}");
+        }
+    }
+
+    #[test]
+    fn default_profiles_validate_keys_and_reject_conflicting_identities() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join(".config/flare/development-publisher.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let publisher = development_publisher();
+        let mut invalid = publisher.clone();
+        invalid.public_key = [0; 32];
+        fs::write(&path, serde_json::to_vec(&[invalid]).unwrap()).unwrap();
+        assert!(publishers(&[], true, || Ok(home.path().to_owned())).is_err());
+        let mut conflicting = publisher.clone();
+        conflicting.name = "Another signer".into();
+        fs::write(
+            &path,
+            serde_json::to_vec(&[publisher, conflicting]).unwrap(),
+        )
+        .unwrap();
+        let error = publishers(&[], true, || Ok(home.path().to_owned()))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("conflicting identities"), "{error}");
+    }
+
     #[test]
     fn acceptance_is_exact_and_requires_a_complete_bounded_line() {
         assert_eq!(

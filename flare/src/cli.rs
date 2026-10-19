@@ -104,6 +104,7 @@ pub enum TrustCommand {
 )]
 pub struct Run {
     /// Additional publisher verification profiles (JSON); does not grant execution trust.
+    /// Development packages default to ~/.config/flare/development-publisher.json.
     #[arg(long, value_name = "PATH", action = clap::ArgAction::Append)]
     pub publisher_keys: Vec<PathBuf>,
     /// Verify stored allocation and table ranges before loading model GPU resources.
