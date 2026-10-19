@@ -60,7 +60,7 @@ jobs:
           ' >/dev/null
           for arch in amd64 arm64; do
             docker pull --platform "linux/$arch" "$reference"
-            for command in version run agent fleet; do
+            for command in version run agent orbit; do
               if [[ "$command" == version ]]; then
                 args=(--version)
               else
