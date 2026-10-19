@@ -209,7 +209,8 @@ def _export_hosts(args, *, export_path) -> int:
         raise UsageError("multi-host ranks each use one GPU; --gpus names this host's")
     local = (host.gpus[selected[0]],)
     rendezvous = HostRendezvous(args.rendezvous, args.ranks, identity=source_identity(),
-                                topology=local_topology(local[0]))
+                                topology=local_topology(local[0]),
+                                checkpoint_token_file=configuration.get("preparation.checkpoint_token_file").value)
     with phase(progress, "Wait for tensor-parallel hosts") as stage:
         topologies = rendezvous.accept(report=stage.update)
     gpus = tuple(topology_gpu(topology, index) for index, topology in enumerate(topologies))
@@ -436,7 +437,8 @@ def serve(args) -> int:
             raise UsageError("multi-host ranks each use one GPU; --gpus names this host's")
         local = (host.gpus[selected[0]],)
         rendezvous = HostRendezvous(args.rendezvous, args.ranks, identity=source_identity(),
-                                    topology=local_topology(local[0]))
+                                    topology=local_topology(local[0]),
+                                    checkpoint_token_file=configuration.get("preparation.checkpoint_token_file").value)
         with phase(progress, "Wait for tensor-parallel hosts") as stage:
             topologies = rendezvous.accept(report=stage.update)
         gpus = tuple(topology_gpu(topology, index) for index, topology in enumerate(topologies))
@@ -557,7 +559,10 @@ def join(args) -> int:
         raise UsageError(f"--gpu {args.gpu} names a GPU this host does not have")
     gpu = host.gpus[args.gpu]
     environment.apply(configuration, (gpu,))
-    control, executor = knock(args.rendezvous, args.rank, args.ranks, identity=source_identity(),
+    identity = source_identity()
+    control, executor = knock(args.rendezvous, args.rank, args.ranks, identity=identity,
                               topology=local_topology(gpu), report=progress)
-    serve_peer(control, executor, args.rank, args.ranks, hub_cache=hub_cache, progress=progress)
+    serve_peer(control, executor, args.rank, args.ranks, hub_cache=hub_cache, progress=progress,
+               export_staging=configuration.directory("export_staging"), identity=identity,
+               checkpoint_token_file=configuration.get("preparation.checkpoint_token_file").value)
     return 0

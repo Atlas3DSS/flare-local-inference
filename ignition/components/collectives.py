@@ -178,9 +178,17 @@ class PreparedChunkedAllReduce:
     def __init__(self, source, output, *, runtime, session, coordinator, name):
         rows = source.shape[0]
         step = rows
-        if runtime is not None and not _roce(runtime):
+        if runtime is not None and _roce(runtime):
+            row_bytes = source[0].numel() * source.element_size()
+            step = min(rows, max(runtime.max_size, runtime.pipe_bytes) // row_bytes)
+            if step < 1:
+                raise ValueError("one reduction row exceeds the RoCE channel capacity")
+        elif runtime is not None:
+            from b12x.comm import pcie
+
             # One-shot pools answer through their stream channel; hierarchical runtimes directly.
-            accepts = (runtime.for_stream().should_allreduce if runtime.algorithm == "oneshot"
+            accepts = (runtime.for_stream().should_allreduce
+                       if not isinstance(runtime, pcie.DmaAllReduce) and runtime.algorithm == "oneshot"
                        else runtime.should_allreduce)
             while step > 1 and not accepts(source[:step]):
                 step = (step + 1) // 2

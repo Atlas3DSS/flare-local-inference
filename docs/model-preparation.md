@@ -214,14 +214,18 @@ DSpark is its learned draft method, defaulting to five draft tokens per round
 with separate proposal and verification graphs, using native conditional
 confidence and measured execution cost for adaptive verification. Image preprocessing
 preserves the checkpoint's row-major patch layout and 1024-token image limit.
-Its 188.8 GiB of Engram tables are
-stored once in the package and read on demand through bounded direct-I/O
-staging by default; `flare run --embedding-table-storage ram` loads them into
-ordinary resident memory instead.
-Both modes gather compact rows into shared pinned buffers, copy them to each
-rank, and signal captured consumer events. Preparation appends the immutable
-checkpoint slices without materializing the tables. Select four available
-GPUs explicitly:
+Its 188.8 GiB of Engram tables are stored once in the package, partitioned by
+hash head across TP ranks. Each TP4 rank owns six of the 24 heads and their
+projection input columns. Each rank reads its table rows, computes a partial
+projection, and reduces the result before residual mixing. Multi-host package
+distribution transfers only the table partitions owned by the receiving rank.
+Disk storage reads rows on demand through bounded direct-I/O staging;
+`flare run --embedding-table-storage ram` loads the assigned partitions into
+ordinary resident memory. Both modes copy compact rows into each rank's prepared
+buffers and signal captured consumer events. Preparation appends the immutable
+checkpoint slices without materializing the tables. Packages containing shared
+table planes retain their prepared replicated computation and shared row delivery.
+Select four available GPUs explicitly:
 
 ```sh
 .venv/bin/python -m ignition export deepseek-v4.1-flash --gpus 0,4,6,8 \
@@ -233,6 +237,15 @@ GPUs explicitly:
   /data/flare-runtime/deepseek-v41-flash-1017-csf-tp4-c4-dspark5.safetensors \
   --gpus 0,4,6,8 --host 127.0.0.1 --port 8001
 ```
+
+For four DGX Sparks with one GPU per host, replace `--gpus 0,4,6,8` during
+export with `--gpus 0 --ranks 4 --rendezvous 10.200.0.12:29630` and start an
+`ignition join` process on each peer. Rank zero retains the checkpoint; peers
+request their weight ranges during preparation. From a paired controller, use
+`flare fleet run maxwell:/data/flare-runtime/deepseek-v41-flash-1017-csf-tp4-c4-dspark5.safetensors --cluster sparks --gpus 0`
+with a four-node `sparks` cluster. The prepared model uses RoCEnante collectives
+across hosts. See [multi-host preparation and serving](multi-host.md) for
+preparation authentication, fleet setup, and rank placement.
 
 `--image-concurrency` defaults to the smaller of four and `--max-concurrency`.
 For example, add `--max-concurrency 64 --image-concurrency 4` during export to
@@ -568,9 +581,10 @@ A model too large for one Spark runs tensor-parallel across two or four Sparks,
 one rank per host, reducing through b12x RoCEnante over their ConnectX-7 ports:
 `ignition export --ranks N --rendezvous ADDR:PORT` on rank zero with
 `ignition join` on each peer writes one package on rank zero, and
-`flare run PACKAGE --hosts H1,...` serves it, starting each peer's rank through
-that host's `flare agent`. See [serving across DGX Sparks](multi-host.md)
-for setup, the agent's token, and failures.
+`flare fleet run NODE:PACKAGE --cluster NAME` serves it from any machine,
+starting every rank through its host's `flare agent`. See
+[serving across DGX Sparks](multi-host.md) for agent installation, pairing,
+and failures.
 
 ## Cached and development serving
 

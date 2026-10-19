@@ -23,7 +23,8 @@ pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
 
 
 @torch.no_grad()
-def test_graph_produced_hashes_publish_after_all_rows_are_visible():
+@pytest.mark.parametrize("rank", [None, 0, 1, 2, 3])
+def test_graph_produced_hashes_publish_after_all_rows_are_visible(rank):
     device = torch.device("cuda:0")
     tokens, rows = 12, 3
     token_map = tuple((i * 7) % 32 for i in range(32))
@@ -35,10 +36,16 @@ def test_graph_produced_hashes_publish_after_all_rows_are_visible():
     counts = torch.tensor([9, 3], dtype=torch.int32, device=device)
     sequence = torch.tensor([1], device=device)
     mailbox = MappedHostAllocation((tokens * 24 + 1,), torch.int64, device)
+    bounds = None
+    if rank is not None:
+        first = geometry.offsets[0][rank * 6]
+        last = geometry.offsets[0][(rank + 1) * 6] if rank < 3 else geometry.num_embeddings[0]
+        bounds = torch.tensor((first, last), device=device)
     try:
         with PreparationSession(device=device, autotune=False, compile_workers=2) as session:
             operation = PreparedEngramRequests(inputs, ids, starts, history, counts, mailbox.device_view, sequence,
-                layer=1, token_map=token_map, geometry=geometry, session=session, name="hash_requests")
+                layer=1, token_map=token_map, geometry=geometry, session=session, name="hash_requests",
+                row_bounds=bounds)
             compiled = compile_forward(operation)
             compiled()
             torch.cuda.synchronize()
@@ -53,6 +60,9 @@ def test_graph_produced_hashes_publish_after_all_rows_are_visible():
                 torch.cuda.synchronize()
                 expected = hash_reference(ids[:9].tolist(), [True] * 9, starts.tolist(), list(range(rows)),
                     history.tolist(), token_map, geometry, 1)
+                if bounds is not None:
+                    expected = torch.where((expected >= first) & (expected < last), expected - first, -1)
+                    assert expected.ge(0).sum().item() == 9 * 6
                 assert mailbox.host_view[-1].item() == generation
                 assert torch.equal(mailbox.host_view[:-1].view(tokens, 24)[:9], expected)
                 assert mailbox.host_view[:-1].view(tokens, 24)[9:].eq(-1).all()

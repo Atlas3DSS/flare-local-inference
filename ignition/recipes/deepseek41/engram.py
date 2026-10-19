@@ -9,6 +9,7 @@ from b12x.sequence import engram
 
 from ignition.components.engram import EngramInputs, PreparedEngramLookup, PreparedEngramRequests
 from ignition.components.linear import QuantizedProjection
+from ignition.components.collectives import PreparedChunkedAllReduce
 from ignition.components.state import gather_rows, save_hidden
 from ignition.preparation.runtime_package import FileSource
 from ignition.preparation.tuning import declare
@@ -23,10 +24,16 @@ class Tables:
     inputs: dict
     mailboxes: dict
     sequence: torch.Tensor
+    shard: object
+    row_bounds: dict
+    columns: torch.Tensor
 
     @classmethod
-    def prepare(cls, manifest, config, *, tokens, device, sequence, host_allocator, progress=None):
+    def prepare(cls, manifest, config, *, tokens, device, sequence, host_allocator, progress=None, shard=None):
         from transformers import PreTrainedTokenizerFast
+        from ignition.components.parallel import TensorParallelShard
+
+        shard = shard or TensorParallelShard(0, 1)
 
         tokenizer = PreTrainedTokenizerFast(tokenizer_file=str(manifest.metadata_path / "tokenizer.json"))
         token_map, size = engram.build_compressed_token_map(tokenizer)
@@ -37,7 +44,8 @@ class Tables:
             base_table_size=text["engram_vocab_size"], compressed_vocab_size=size)
         if geometry.num_embeddings != tuple(text["engram_num_embeddings"]):
             raise ValueError("Engram hash geometry differs from checkpoint tables")
-        sources, inputs, mailboxes = {}, {}, {}
+        sources, inputs, mailboxes, row_bounds = {}, {}, {}, {}
+        first, last = shard.partition(24)
         with phase(progress, "Prepare embedding tables") as stage:
             for index, layer in enumerate(geometry.layer_ids):
                 rows = geometry.num_embeddings[index]
@@ -49,11 +57,15 @@ class Tables:
                         raise ValueError(f"{name}: invalid Engram table geometry or dtype")
                     pair.append(FileSource(manifest.snapshot / metadata.shard, metadata.offset, rows * columns))
                 sources[layer] = tuple(pair)
+                start = geometry.offsets[index][first]
+                end = geometry.offsets[index][last] if last < 24 else rows
+                row_bounds[layer] = torch.tensor((start, end), dtype=torch.int64, device=device)
                 inputs[layer] = EngramInputs.allocate(tokens, device)
                 mailboxes[layer] = host_allocator(f"engram_{layer}_requests", (tokens * 24 + 1,), torch.int64)
                 mailboxes[layer].host_view.zero_()
             stage.update(f"{sum(source.nbytes for pair in sources.values() for source in pair) / (1 << 30):.1f} GiB in checkpoint spans")
-        return cls(geometry, tuple(token_map), sources, inputs, mailboxes, sequence)
+        columns = torch.arange(first * 256, last * 256, dtype=torch.int64, device=device)
+        return cls(geometry, tuple(token_map), sources, inputs, mailboxes, sequence, shard, row_bounds, columns)
 
     def buffers(self):
         return {**{name: tensor for layer, inputs in self.inputs.items() for name, tensor in inputs.buffers(layer).items()},
@@ -65,13 +77,21 @@ class Tables:
     def resident_catalog(self):
         """Source spans and native bindings for shared RAM delivery without package export."""
         return {"vocabulary": len(self.token_map), "tables": [
-            {"planes": [{"path": str(source.path), "offset": source.offset,
-                         "nbytes": source.nbytes, "row_bytes": row_bytes}
+            {"planes": [{"path": str(source.path), "offset": source.offset + first * row_bytes,
+                         "nbytes": (last - first) * row_bytes, "row_bytes": row_bytes}
                         for source, row_bytes in zip(self.sources[layer], (256, 8), strict=True)],
              "heads": 24, "weights": f"engram_{layer}_weights", "scales": f"engram_{layer}_scales",
              "hashes": f"engram_{layer}_hashes", "event": f"engram_{layer}_ready",
              "request": f"engram_{layer}_requests"}
-            for layer in self.geometry.layer_ids]}
+            for ordinal, layer in enumerate(self.geometry.layer_ids)
+            for first, last in (self.partition_rows(ordinal, self.shard.rank),)]}
+
+    def partition_rows(self, ordinal, rank):
+        """Contiguous table rows belonging to a rank's complete hash heads."""
+        count = 24 // self.shard.world_size
+        first, last = rank * count, (rank + 1) * count
+        offsets = self.geometry.offsets[ordinal]
+        return offsets[first], offsets[last] if last < 24 else self.geometry.num_embeddings[ordinal]
 
     def append(self, index, payload, cursor):
         from ignition.preparation.package_file import align
@@ -92,12 +112,16 @@ class Tables:
             table.hash.multipliers.extend(self.geometry.multipliers[ordinal])
             table.hash.primes.extend(self.geometry.primes[ordinal])
             table.hash.offsets.extend(self.geometry.offsets[ordinal])
-            for name, source in zip(("weights", "scales"), self.sources[layer], strict=True):
-                cursor = align(cursor)
-                span = getattr(table, name)
-                span.offset, span.nbytes = cursor, source.nbytes
-                payload.append((cursor, source.path, source.offset, source.nbytes))
-                cursor += source.nbytes
+            for rank in range(self.shard.world_size):
+                first, last = self.partition_rows(ordinal, rank)
+                planes = (table if self.shard.world_size == 1 else
+                          table.shards.add(rank=rank, first_row=first, rows=last - first))
+                for name, source, width in zip(("weights", "scales"), self.sources[layer], (256, 8), strict=True):
+                    cursor = align(cursor)
+                    span = getattr(planes, name)
+                    span.offset, span.nbytes = cursor, (last - first) * width
+                    payload.append((cursor, source.path, source.offset + first * width, span.nbytes))
+                    cursor += span.nbytes
         return cursor
 
 
@@ -112,7 +136,7 @@ class PreparedTableRequests:
         self.operations = tuple(PreparedEngramRequests(inputs, metadata.token_ids, metadata.query_start_loc,
             self.history, metadata.live_counts, tables.mailboxes[layer].device_view, tables.sequence,
             layer=layer, token_map=tables.token_map, geometry=tables.geometry, session=session,
-            name=f"{name}.{layer}") for layer, inputs in tables.inputs.items())
+            name=f"{name}.{layer}", row_bounds=tables.row_bounds[layer]) for layer, inputs in tables.inputs.items())
 
     def __call__(self):
         m = self.metadata
@@ -140,30 +164,47 @@ class EngramScratch:
 
     mask: torch.Tensor
     gathered: torch.Tensor
+    local: torch.Tensor
+    partial: torch.Tensor
     projected: torch.Tensor
 
     @classmethod
-    def allocate(cls, tokens, device):
-        return cls(torch.zeros(tokens, dtype=torch.bool, device=device),
-                   torch.zeros((tokens, 6144), dtype=torch.bfloat16, device=device),
-                   torch.zeros((tokens, 25600), dtype=torch.bfloat16, device=device))
+    def allocate(cls, tokens, device, *, buffers=None, world=1):
+        def zeros(shape, dtype):
+            return (torch.zeros(shape, dtype=dtype, device=device) if buffers is None
+                    else buffers.zeros(shape, dtype))
+        gathered = zeros((tokens, 6144), torch.bfloat16)
+        local = gathered if world == 1 else zeros((tokens, 6144 // world), torch.bfloat16)
+        partial = zeros((tokens, 25600), torch.bfloat16)
+        projected = partial if world == 1 else zeros((tokens, 25600), torch.bfloat16)
+        return cls(zeros(tokens, torch.bool), gathered, local, partial, projected)
 
 
 class PreparedEngram:
-    def __init__(self, layer, weights, tables, source, output, metadata, pool, *, scratch, session, name, workspace):
+    def __init__(self, layer, weights, tables, source, output, metadata, pool, *, scratch, session, name, workspace,
+                 runtime=None, coordinator=None):
         self.source, self.output, self.metadata, self.pool = source, output, metadata, pool
         tokens, device = metadata.token_ids.numel(), source.device
         self.mask, self.gathered, self.projected = scratch.mask, scratch.gathered, scratch.projected
+        self.local, self.partial = scratch.local, scratch.partial
+        self.columns = tables.columns
+        self.sharded = tables.shard.world_size > 1
+        if self.sharded and runtime is None:
+            raise ValueError("sharded Engram projection requires a collective runtime")
         for tensor, shape, dtype in ((self.mask, (tokens,), torch.bool),
                 (self.gathered, (tokens, 6144), torch.bfloat16),
+                (self.local, (tokens, 6144 // tables.shard.world_size), torch.bfloat16),
+                (self.partial, (tokens, 25600), torch.bfloat16),
                 (self.projected, (tokens, 25600), torch.bfloat16)):
             if tensor.shape != shape or tensor.dtype != dtype or tensor.device != device or not tensor.is_contiguous():
                 raise ValueError("Engram scratch must match the contiguous lookup and projection geometry")
         self.lookup = PreparedEngramLookup(tables.inputs[layer], self.gathered, metadata.live_counts[:1],
             layer=layer, token_map=tables.token_map, geometry=tables.geometry,
             session=session, name=name + ".lookup")
-        self.projection = QuantizedProjection(self.gathered, weights["projection"], self.projected,
+        self.projection = QuantizedProjection(self.local, weights["projection"], self.partial,
             session=session, name=name + ".projection", workspace=workspace, activation_mode="auto")
+        self.reduce = (PreparedChunkedAllReduce(self.partial.view(-1, 5120), self.projected.view(-1, 5120), runtime=runtime,
+            session=session, coordinator=coordinator, name=name + ".reduce") if self.sharded else None)
         self.norm_weight = weights["weight"].view(-1)
         self.eps = pool.config.text["rms_norm_eps"]
         self.mix_plan = hyperconnection.plan(hyperconnection.Caps(device=device, max_tokens=tokens, hidden_size=5120),
@@ -176,7 +217,11 @@ class PreparedEngram:
         m = self.metadata
         self.mask.copy_((m.positions >= 0) & (m.token_ids < 129280))
         self.lookup(source)
-        self.projection(self.gathered)
+        if self.sharded:
+            self.local.copy_(torch.index_select(self.gathered, 1, self.columns))
+        self.projection(self.local)
+        if self.sharded:
+            self.reduce(self.partial.view(-1, 5120))
         hyperconnection.run_engram_mix(source.view(source.shape[0], -1), self.projected, self.norm_weight,
             eps=self.eps, plan=self.mix_plan, out=self.output.view(source.shape[0], -1), token_mask=self.mask)
         return self.output

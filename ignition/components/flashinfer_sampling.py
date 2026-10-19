@@ -5,14 +5,22 @@ from flashinfer import sampling
 from flashinfer.utils import device_support_pdl
 
 
+def probability_filter_workspace(rows, vocabulary, device):
+    """Reserve FlashInfer's deterministic top-p workspace before graph capture."""
+    return torch.empty(sampling._top_p_renorm_workspace_size(rows, vocabulary, True),
+                       dtype=torch.uint8, device=device)
+
+
 @torch.compiler.allow_in_graph
-def filter_probabilities(logits, top_k, top_p, row_states, softmax_workspace):
-    # FX traces the operators; Dynamo does not inspect cached native module loading.
+def filter_probabilities_out(logits, top_k, top_p, row_states, softmax_workspace,
+                             output, top_p_workspace):
+    """Consume prepared scores and write filtered probabilities into caller storage."""
     module = sampling.get_sampling_module()
-    masked = module.top_k_mask_logits(logits, top_k, 0, row_states)
-    probabilities = module.softmax(softmax_workspace, masked, None, 1.,
+    torch.ops.flashinfer.top_k_mask_logits_out(logits, logits, top_k, 0, row_states)
+    probabilities = module.softmax(softmax_workspace, logits, None, 1.,
                                    device_support_pdl(logits.device))
-    return sampling.top_p_renorm_probs(probabilities, top_p, is_deterministic=True)
+    torch.ops.flashinfer.top_p_renorm_probs_out(
+        probabilities, output, top_p, 0., True, top_p_workspace)
 
 
 @torch.compiler.allow_in_graph

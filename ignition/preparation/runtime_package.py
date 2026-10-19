@@ -42,7 +42,9 @@ class FileSource:
     nbytes: int
 
     def __post_init__(self):
-        if self.offset < 0 or self.nbytes <= 0 or self.offset + self.nbytes > self.path.stat().st_size:
+        from .checkpoint_source import source_size
+
+        if self.offset < 0 or self.nbytes <= 0 or self.offset + self.nbytes > source_size(self.path):
             raise ValueError("tensor source must name a nonempty range within its checkpoint file")
 
 

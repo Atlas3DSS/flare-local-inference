@@ -30,6 +30,7 @@ def test_compacted_prefill_feedback_transitions_to_accepted_verification_under_n
     checkpoint = RECIPE.checkpoints[0]
     snapshot = Path.home() / ".cache/huggingface/hub" / (
         "models--" + checkpoint.repository.replace("/", "--")) / "snapshots" / checkpoint.revision
+    snapshot = Path(os.environ.get("FLARE_DS41_SNAPSHOT", snapshot))
     if not (snapshot / "model.safetensors.index.json").is_file():
         pytest.skip("DeepSeek V4.1 Flash checkpoint is unavailable")
     device = torch.device("cuda:0")

@@ -1,15 +1,13 @@
 //! Serve a prepared model package without a Python interpreter.
 
-#[cfg(unix)]
-mod agent;
 mod cli;
 mod cluster;
 mod environment;
+#[cfg(unix)]
+mod fleet;
 mod hardware;
 mod hub;
 mod identity;
-#[cfg(unix)]
-mod launch;
 mod trust;
 #[cfg(windows)]
 mod windows;
@@ -34,7 +32,7 @@ extern "C" fn stop(_: libc::c_int) {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = match cli::Cli::parse().command {
-        cli::Command::Run(args) => args,
+        cli::Command::Run(args) => *args,
         cli::Command::Download(args) => {
             environment::configure(&args.gpus)?;
             let path = hub::download(&args.repository, &args.hub, args.gpus.len())?;
@@ -45,16 +43,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cli::Command::Agent(_) => {
             return Err("multi-host serving is not supported on Windows".into());
         }
+        #[cfg(windows)]
+        cli::Command::Fleet(_) => {
+            return Err("fleet control is not supported on Windows".into());
+        }
         #[cfg(unix)]
         cli::Command::Agent(agent_args) => {
-            let token = agent::read_token(
-                &agent_args
-                    .token_file
-                    .unwrap_or_else(agent::default_token_path),
-            )
-            .map_err(|e| e.to_string())?;
-            return agent::serve(&agent_args.listen, token, agent::default_cache())
-                .map_err(|e| e.to_string().into());
+            return match agent_args.command {
+                None => fleet::agent::serve(
+                    &agent_args.listen,
+                    fleet::store::AgentDir::new(fleet::store::AgentDir::default_root()),
+                    fleet::cache::default_root(),
+                ),
+                Some(cli::AgentCommand::Install {
+                    join_code,
+                    accept_first,
+                    listen,
+                }) => fleet::agent::install(&listen, join_code.as_deref(), accept_first),
+                Some(cli::AgentCommand::Reset) => fleet::agent::reset(),
+            }
+            .map_err(|e| e.to_string().into());
+        }
+        #[cfg(unix)]
+        cli::Command::Fleet(fleet_args) => {
+            return fleet_command(fleet_args).map_err(|e| e.to_string().into());
         }
         cli::Command::Trust {
             command:
@@ -67,7 +79,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     #[cfg(windows)]
-    if !args.hosts.is_empty() || args.rank.is_some() || args.rendezvous.is_some() {
+    if !args.rank.is_some() || args.rendezvous.is_some() {
         return Err("multi-host serving is not supported on Windows".into());
     }
     #[cfg(windows)]
@@ -111,72 +123,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .transpose()?;
     let options = args.load_options();
     let roce_ring = args.roce_ring;
-    #[cfg(unix)]
-    let rank_options = args.rank_options();
     let devices = &args.gpus;
     let local_devices: Vec<i32> = (0..devices.len() as i32).collect();
     let mut progress = StartupProgress::stderr();
-    let (authorized, publisher) = trust::load(&root, &args, &mut progress, origin.as_deref())?;
-    #[cfg(windows)]
-    let _ = &publisher;
+    let (authorized, _publisher) = trust::load(&root, &args, &mut progress, origin.as_deref())?;
     if roce_ring
         && flare_helios::runtime_package::package_cluster(&authorized)
             .is_none_or(|(world, _)| !(2..=16).contains(&world))
     {
         return Err("--roce-ring requires a multi-host package with 2..16 ranks".into());
     }
-    // Rank zero of a multi-host package starts its peers first, so every host loads in parallel.
-    #[cfg(unix)]
-    let mut rendezvous = args.rendezvous;
-    #[cfg(windows)]
     let rendezvous = args.rendezvous;
-    #[cfg(unix)]
-    let _peers = if args.hosts.is_empty() {
-        None
-    } else {
-        let (world, export_id) = flare_helios::runtime_package::package_cluster(&authorized)
-            .ok_or("--hosts applies only to a multi-host package")?;
-        if args.hosts.len() + 1 != world {
-            return Err(format!(
-                "the package has {world} ranks; --hosts names {} peer hosts",
-                args.hosts.len()
-            )
-            .into());
-        }
-        if args.rank.is_some_and(|rank| rank != 0) {
-            return Err("--hosts starts peers from rank zero".into());
-        }
-        let listen = rendezvous.get_or_insert_with(|| "0.0.0.0:29800".into());
-        let port = listen
-            .rsplit_once(':')
-            .map(|(_, port)| port)
-            .ok_or("--rendezvous needs HOST:PORT")?;
-        let address = launch::address_toward(&args.hosts[0]).map_err(|e| e.to_string())?;
-        let token = agent::read_token(
-            args.agent_token_file
-                .as_deref()
-                .unwrap_or(&agent::default_token_path()),
-        )
-        .map_err(|e| e.to_string())?;
-        // Peers keep only the bytes their rank reads, which verify that rank completely.
-        let shares = (1..world)
-            .map(|rank| flare_helios::runtime_package::rank_ranges(&authorized, rank))
-            .collect::<flare_helios::Result<Vec<_>>>()?;
-        let phase = progress.phase("Start peer ranks", None);
-        let peers = launch::start(
-            &args.hosts,
-            &root,
-            &export_id,
-            &format!("{address}:{port}"),
-            &rank_options,
-            &token,
-            &publisher,
-            &shares,
-        )
-        .map_err(|e| e.to_string())?;
-        phase.finish(format!("{} at {address}:{port}", args.hosts.join(", ")));
-        Some(peers)
-    };
     // Ranks of a multi-host package join before loading, so every rank allocates the cache
     // capacity they agree on.
     let mut membership = match (
@@ -233,6 +190,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     config["api_key"] = key.unwrap_or_default().into();
     phase.finish(config["model_id"].as_str().unwrap_or_default());
     serve(owner, config, progress, cluster, roce_ring)
+}
+
+/// Run one `flare fleet` command as the controller on this machine.
+#[cfg(unix)]
+fn fleet_command(args: cli::FleetArgs) -> Result<(), fleet::Failure> {
+    let mut controller =
+        fleet::controller::Controller::open(args.fleet_file.as_deref(), args.key_file.as_deref())?;
+    match args.command {
+        cli::FleetCommand::Pair { hosts, code } => controller.pair(&hosts, code.as_deref()),
+        cli::FleetCommand::Controllers {
+            command: cli::ControllersCommand::Add { name, key },
+        } => controller.controllers_add(&name, &key),
+        cli::FleetCommand::Controllers {
+            command: cli::ControllersCommand::Remove { key },
+        } => controller.controllers_remove(&key),
+        cli::FleetCommand::Status { cluster } => controller.status(cluster.as_deref()),
+        cli::FleetCommand::Attach { cluster } => controller.attach(cluster.as_deref()),
+        cli::FleetCommand::Stop { cluster } => controller.stop(cluster.as_deref()),
+        cli::FleetCommand::Forget { node } => controller.forget(&node),
+        cli::FleetCommand::Run(run) => controller.run(
+            &run.package,
+            run.cluster.as_deref(),
+            fleet::controller::RunOptions {
+                serving: run.rank_options(),
+                rank_zero: run.rank_zero_options(),
+                roce_ring: run.roce_ring,
+                executable: run.executable.clone(),
+                detach: run.detach,
+                verify_weights: run.serving.verify_weights,
+                run_args: run.run_args(),
+            },
+        ),
+    }
 }
 
 /// Run a peer rank of a multi-host package: join rank zero and replay its coordinated steps until

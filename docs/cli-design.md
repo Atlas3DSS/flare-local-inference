@@ -96,6 +96,28 @@ cargo build --release --manifest-path flare/Cargo.toml
 flare/target/release/flare run PACKAGE --gpus 0 --host 127.0.0.1 --port 8000
 ```
 
+```
+flare run PACKAGE [flags]                 serve a package on this host
+flare download REPOSITORY [flags]         download a prepared package
+flare agent [--listen IP:PORT]            run this host's fleet agent
+flare agent install [--join-code CODE | --accept-first] [--listen IP:PORT]
+flare agent reset                         forget the host's controllers
+flare fleet pair HOST... [--code CODE]    pair this controller with hosts
+flare fleet controllers add NAME KEY | remove KEY
+flare fleet status [--cluster NAME]
+flare fleet run PACKAGE --cluster NAME [serving flags] [--detach]
+flare fleet attach | stop [--cluster NAME]
+flare fleet forget NODE                   remove a node from the fleet file
+flare trust revoke FINGERPRINT
+```
+
+`flare fleet` commands take `--fleet-file PATH` and `--key-file PATH`,
+defaulting to `~/.config/flare/fleet.toml` and
+`~/.config/flare/fleet/controller.key`. `flare fleet run` takes the serving
+flags of `flare run` and applies them to every rank; `--host`, `--port`,
+`--served-model-name`, `--scheduler-policy`, and `--api-key-file` apply to rank
+zero. See [fleet control](fleet.md).
+
 For MSVC cross-compilation, native Windows builds, and GPU compatibility
 requirements, see [Windows serving](windows.md).
 
@@ -278,12 +300,12 @@ Compressed routed-expert scales remain in GPU memory. Serialized layers reuse sc
 b12x prepares the scales needed by its selected MoE kernel before execution.
 Kernel autotuning remains enabled across the supported execution plans.
 
-DeepSeek V4.1 development serving keeps its Engram tables in shared RAM. Allow
-about 189 GiB of host RAM for the tables, in addition to preparation and serving
-memory. One rank loads the checkpoint spans into immutable resident storage;
-the other ranks share those bytes. Requests gather rows from RAM without reading
-the checkpoint files or calling Python. Each rank owns its delivery staging and
-CUDA events. This development path supports ranks on one host and uses RAM only.
+DeepSeek V4.1 development serving keeps its Engram table partitions in RAM. Allow
+about 189 GiB of host RAM across the four ranks, in addition to preparation and
+serving memory. Each rank loads the checkpoint spans for its six hash heads into
+immutable resident storage. Requests gather rows from RAM without reading the
+checkpoint files or calling Python. Each rank owns its delivery staging and CUDA
+events. This development path supports ranks on one host and uses RAM only.
 
 With four serving GPUs, run:
 
@@ -340,7 +362,7 @@ Help exits with status 0; usage errors go to stderr with status 2. Its options a
 
 | Flag | Meaning | Default |
 |---|---|---|
-| `--publisher-keys PATH` | Additional JSON verification profiles; importing a key does not approve execution or verify identity | Embedded profiles and remembered keys |
+| `--publisher-keys PATH` | Additional JSON verification profiles; importing a key does not approve execution or verify identity | Embedded profiles, remembered keys, and the default development profile for development packages |
 | `--dangerously-approve-key FINGERPRINT` | Explicitly approve this full lowercase SHA-256 key fingerprint; requires the matching publisher flag | Interactive first use or remembered trust |
 | `--dangerously-accept-publisher NAMESPACE` | Accept this exact publisher namespace; requires the matching key flag | Interactive first use or remembered trust |
 | `--trust-store PATH` | Persistent key/namespace acceptance file | `~/.config/flare/trust.toml` |
@@ -536,6 +558,11 @@ With no publishing identity configured, Ignition creates and reuses
 permissions. It also writes `development-publisher.json` containing the public
 verification profile. These packages use the explicit namespace and source
 `local-development`, with no claim to be an official published checkpoint.
+When `--publisher-keys` is omitted for a development package, Flare looks for
+`~/.config/flare/development-publisher.json`. Explicit profile paths override
+this lookup, and `--trust-store` does not relocate it. A missing default profile
+leaves verification to embedded or remembered keys; an invalid profile is an
+error. The key must match the package's signer and pass signature verification.
 
 `ignition run` supplies Flare with the development profile when applicable and
 automatically passes the exact fingerprint and namespace from its export
@@ -572,12 +599,14 @@ Typing the publisher namespace agrees to the terms at that link and trusts the
 signing key; the typed string is the key material Helios derives executable
 decryption keys from, so acceptance is what decrypts the package's kernels.
 
-To load a locally exported package directly, supply its public profile:
+To load a locally exported development package using the default public profile:
 
 ```sh
-flare run model.safetensors \
-  --publisher-keys ~/.config/flare/development-publisher.json --gpus 0
+flare run model.safetensors --gpus 0
 ```
+
+For a profile beside a custom Ignition configuration file or from another host,
+pass its path with `--publisher-keys PATH`.
 
 First interactive use requires typing `local-development`. For unattended
 loading, supply both dangerous-approval flags with the exact fingerprint and
@@ -885,8 +914,9 @@ cannot honor the settings reports a capacity error in the section 6 form.
 ### Experimental RoCE ring configuration
 
 `ignition export` and `ignition serve` accept `--roce-ring` with `--ranks N`;
-`flare run` accepts it with a multi-host package. Rank order defines the ring,
-including `--hosts` order when agents launch peers. The transport accepts 2..16
+`flare run` and `flare fleet run` accept it with a multi-host package. Rank
+order defines the ring, including the cluster's node order when agents launch
+ranks. The transport accepts 2..16
 ranks, while recipe validation retains each model's supported TP sizes. This
 option is recorded in the preparation plan, sent to preparation peers, and
 forwarded to serving peers. It changes native transport routing, not the

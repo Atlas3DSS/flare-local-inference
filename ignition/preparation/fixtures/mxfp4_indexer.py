@@ -18,9 +18,9 @@ class Inputs:
         a = self.arguments
         device = a["q_mxfp4"].device
         generator = torch.Generator(device=device).manual_seed(410512)
-        query = torch.randn((*a["q_mxfp4"].shape[:-1], 128), dtype=torch.bfloat16,
-                            device=device, generator=generator) * .2
-        state.quantize_query(query, q_mxfp4=a["q_mxfp4"], q_scales=a["q_scales"])
+        self.query = torch.randn((*a["q_mxfp4"].shape[:-1], 128), dtype=torch.bfloat16,
+                                 device=device, generator=generator) * .2
+        state.quantize_query(self.query, q_mxfp4=a["q_mxfp4"], q_scales=a["q_scales"])
         a["query_weights"].normal_(std=1 / 64, generator=generator)
         a["index_k_cache"] = torch.empty((pages, page_size * 68), dtype=torch.uint8, device=device)
         keys = torch.randn((pages * page_size, 128), dtype=torch.bfloat16, device=device, generator=generator) * .2
@@ -39,14 +39,18 @@ class Inputs:
 
     @property
     def nbytes(self):
-        return sum(t.nbytes for t in self.arguments.values() if t is not None)
+        return self.query.nbytes + sum(t.nbytes for t in self.arguments.values() if t is not None)
 
 
-def benchmark_call(state, *, arguments, session, workspace):
+def acquire_inputs(state, arguments, session):
     key = tuple((name, None if value is None else
         (value.shape if name != "index_k_cache" else value.shape[1:], value.dtype, value.device))
         for name, value in arguments.items())
-    inputs = benchmark_resource(session, ("mxfp4_indexer", key), lambda: Inputs(state, arguments))
+    return benchmark_resource(session, ("mxfp4_indexer", key), lambda: Inputs(state, arguments))
+
+
+def benchmark_call(state, *, arguments, session, workspace):
+    inputs = acquire_inputs(state, arguments, session)
     scratch = planned_scratch(state.layout.scratch_specs(), workspace)
     binding = state.bind(scratch=scratch, **inputs.arguments)
     return PreparedCall(run=lambda: state.run(binding), produce=inputs.producers[0],

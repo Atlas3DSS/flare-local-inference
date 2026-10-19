@@ -13,6 +13,8 @@ from ignition.components.mhc import MHCWeights, MHCScratch, PreparedMHC, Prepare
 from ignition.components.mlp import MLPScratch, PreparedMLP
 from ignition.components.moe import RouterScratch, PreparedRouter, PreparedRoutedExperts
 from ignition.components.vocabulary import PreparedVocabularyProjection
+from ignition.components.window_indices import PreparedWindowIndices
+from ignition.preparation.scratch import GraphBufferPool, GraphBuffers
 
 from .attention import AttentionScratch, PreparedAttention, PreparedGlobalKV, Rotary, normalize
 from .decoder_prefill import PreparedDecoderSuffix
@@ -40,11 +42,14 @@ class Scratch:
     hidden: torch.Tensor
     local_logits: torch.Tensor
     logits: torch.Tensor
+    buffers: GraphBuffers
 
     def rows(self, tokens, samples):
         def select(value, count):
             if isinstance(value, torch.Tensor):
                 return value[:count]
+            if isinstance(value, GraphBuffers):
+                return value.fork()
             if is_dataclass(value):
                 return type(value)(*(select(getattr(value, field.name), count) for field in fields(value)))
             raise TypeError("decoder scratch must contain tensors and tensor dataclasses")
@@ -52,17 +57,31 @@ class Scratch:
             ("hidden", "local_logits", "logits") else tokens) for field in fields(self)))
 
     @classmethod
-    def allocate(cls, tokens, samples, world, device, *, experts=384, top_k=6):
-        def zeros(*shape, dtype=torch.bfloat16):
-            return torch.zeros(shape, dtype=dtype, device=device)
-        return cls(zeros(tokens, 5120), zeros(tokens, 4, 5120), zeros(tokens, 4, 5120), EngramScratch.allocate(tokens, device),
-            zeros(tokens, 4, dtype=torch.float32), zeros(tokens, 4, dtype=torch.float32),
-            MHCScratch.allocate(tokens, 5120, device), MHCScratch.allocate(tokens, 5120, device),
-            AttentionScratch.allocate(tokens, world, device), zeros(tokens, 5120),
-            MLPScratch.allocate(tokens, 5120, 2304 // world, device), zeros(tokens, experts, dtype=torch.float32),
-            RouterScratch.allocate(tokens, device, experts=experts, top_k=top_k), zeros(tokens, 5120),
-            zeros(tokens, 5120), zeros(tokens, 5120), zeros(samples, 5120),
-            zeros(samples, 129280 // world), zeros(samples, 129280))
+    def allocate(cls, tokens, samples, world, device, *, experts=384, top_k=6, buffers=None,
+                 candidate_tokens=None):
+        if buffers is None:
+            buffers = GraphBufferPool(device, chunk_bytes=2 << 20).cursor()
+        def zeros(*shape, dtype=torch.bfloat16, cursor=buffers):
+            return cursor.zeros(shape, dtype)
+        residual, engram_residual = zeros(tokens, 4, 5120), zeros(tokens, 4, 5120)
+        pre_mix, attn_mix = zeros(tokens, 4, dtype=torch.float32), zeros(tokens, 4, dtype=torch.float32)
+        attention_hc = MHCScratch.allocate(tokens, 5120, device, buffers=buffers)
+        ffn_hc = MHCScratch.allocate(tokens, 5120, device, buffers=buffers)
+        attention = AttentionScratch.allocate(tokens, world, device, buffers=buffers, candidate_tokens=candidate_tokens)
+        attention_output, mlp_output = zeros(tokens, 5120), zeros(tokens, 5120)
+        hidden, local_logits, logits = zeros(samples, 5120), zeros(samples, 129280 // world), zeros(samples, 129280)
+        # Embedding, Engram projection, and feed-forward intermediates execute serially.
+        embed, lookup, ffn = buffers.fork(), buffers.fork(), buffers.fork()
+        embedding = zeros(tokens, 5120, cursor=embed)
+        engram = EngramScratch.allocate(tokens, device, buffers=lookup, world=world)
+        shared = MLPScratch.allocate(tokens, 5120, 2304 // world, device, buffers=ffn)
+        router_logits = zeros(tokens, experts, dtype=torch.float32, cursor=ffn)
+        router = RouterScratch.allocate(tokens, device, experts=experts, top_k=top_k, buffers=ffn)
+        routed, partial = zeros(tokens, 5120, cursor=ffn), zeros(tokens, 5120, cursor=ffn)
+        buffers.join(embed, lookup, ffn)
+        return cls(embedding, residual, engram_residual, engram, pre_mix, attn_mix, attention_hc, ffn_hc,
+            attention, attention_output, shared, router_logits, router, routed, partial, mlp_output,
+            hidden, local_logits, logits, buffers)
 
 
 def _mhc_weights(weights, kind, norm):
@@ -75,8 +94,9 @@ class PreparedDecoderBoundary:
     """Produce complete global KV, then gather the decoder's bounded replay rows."""
 
     def __init__(self, index, weights, source, target, packing, pool, rotary, *, carry,
-                 session, name, workspace):
+                 session, name, workspace, window_metadata, buffers=None):
         self.packing = packing
+        self.window_metadata = window_metadata
         self.incoming = ((source.mlp_output, source.ffn_hc.residual, source.ffn_hc.post, source.ffn_hc.comb)
                          if carry else (source.residual,))
         text = pool.config.text
@@ -86,13 +106,15 @@ class PreparedDecoderBoundary:
             norm_eps=text["rms_norm_eps"], hc_eps=text["hc_eps"], sinkhorn_iters=text["hc_sinkhorn_iters"])
         self.normalized = source.attention_hc.normalized
         self.global_kv = PreparedGlobalKV(index, weights.attention, self.normalized, source.attention,
-            packing.source, pool, rotary, session=session, name=name + ".global_kv")
+            packing.source, pool, rotary, session=session, name=name + ".global_kv", buffers=buffers)
         self.rows = tuple((getattr(source.attention_hc, field), getattr(target.attention_hc, field))
                           for field in ("normalized", "residual", "post", "comb"))
         self.rows += ((source.attn_mix, target.attn_mix),)
 
     def __call__(self, indexer):
         self.packing.begin()
+        # Packed positions and replay bounds must precede their shared addresses.
+        self.window_metadata()
         self.mhc(*self.incoming)
         self.global_kv(self.normalized, indexer)
         for source, output in self.rows:
@@ -102,18 +124,21 @@ class PreparedDecoderBoundary:
 class PreparedLayer:
     def __init__(self, index, weights, tables, scratch, metadata, pool, rotary, *, shard, mode,
                  runtime, coordinator, session, name, workspace, carry, defer_post,
-                 boundary=None, replay_start=None, window_staging=None, mla_compute_mode="auto"):
+                 boundary=None, replay_start=None, window_staging=None, mla_compute_mode="auto", buffers=None,
+                 window_metadata=None):
         s, text = scratch, pool.config.text
         self.scratch, self.carry = s, carry
         self.metadata = metadata
-        self.image_mask = (torch.zeros_like(metadata.token_ids, dtype=torch.bool)
+        buffers = scratch.buffers if buffers is None else buffers
+        self.image_mask = (buffers.zeros(metadata.token_ids.shape, torch.bool)
                            if mode == "prefill" and weights.experts.vision_correction is not None else None)
         self.boundary = boundary
         self.engram = None
         if weights.engram is not None:
             self.engram = PreparedEngram(index, weights.engram, tables, s.residual, s.engram_residual,
                 metadata, pool,
-                scratch=s.engram, session=session, name=name + ".engram", workspace=workspace)
+                scratch=s.engram, session=session, name=name + ".engram", workspace=workspace,
+                runtime=runtime, coordinator=coordinator)
         source = s.engram_residual if self.engram is not None else s.residual
         options = dict(rms_eps=text["rms_norm_eps"], norm_eps=text["rms_norm_eps"], hc_eps=text["hc_eps"],
                        sinkhorn_iters=text["hc_sinkhorn_iters"])
@@ -124,7 +149,8 @@ class PreparedLayer:
         self.attention = PreparedAttention(index, weights.attention, s.attention_hc.normalized, s.attention,
             metadata, pool, rotary, mode=mode, world=shard.world_size,
             session=session, name=name + ".attention", workspace=workspace, replay_start=replay_start,
-            window_staging=window_staging, mla_compute_mode=mla_compute_mode)
+            window_staging=window_staging, mla_compute_mode=mla_compute_mode, buffers=buffers,
+            window_metadata=window_metadata)
         self.attention_reduce = PreparedAllReduce(s.attention.output, s.attention_output, runtime=runtime,
             coordinator=coordinator, session=session, name=name + ".attention_reduce")
         self.ffn_hc = PreparedMHC((s.attention_output, s.attention_hc.residual, s.attention_hc.post, s.attention_hc.comb),
@@ -205,9 +231,9 @@ class PreparedDecoder:
         self.aux_layers = () if weights.draft is None else weights.config.draft.target_layers
         if self.packing is not None and any(layer <= decoder_start for layer in self.aux_layers):
             raise ValueError("bounded decoder feedback requires draft target layers after its global-KV boundary")
-        self.auxiliary = torch.zeros((self.output_metadata.token_ids.numel(), len(self.aux_layers) * 5120),
-                                    dtype=torch.bfloat16, device=scratch.embedding.device)
-        self.safe_tokens = torch.zeros_like(metadata.token_ids) if self.vision is not None else metadata.token_ids
+        buffers = scratch.buffers
+        self.auxiliary = buffers.zeros((self.output_metadata.token_ids.numel(), len(self.aux_layers) * 5120), torch.bfloat16)
+        self.safe_tokens = buffers.zeros(metadata.token_ids.shape, metadata.token_ids.dtype) if self.vision is not None else metadata.token_ids
         self.embedding = PreparedEmbedding(weights.embedding, self.safe_tokens, scratch.embedding,
             num_rows=metadata.live_counts[:1], session=session, name=name + ".embedding")
         self.rotary = Rotary(weights.config, scratch.embedding.device)
@@ -218,8 +244,23 @@ class PreparedDecoder:
                 metadata.state_rows, metadata.starts,
                 token_capacity=metadata.max_query_tokens,
                 window_tokens=128, record_bytes=528, staging=window_staging)
+        # These addresses stay live through every layer and precede reusable layer buffers.
+        self.window_metadata = PreparedWindowIndices(metadata, mode=mode,
+            tokens=metadata.positions.numel(),
+            page_size=128 if mode == "decode" else 128 + metadata.max_query_tokens, width=128,
+            buffers=buffers)
+        self.suffix_window_metadata = None
+        if self.packing is not None:
+            self.suffix_window_metadata = PreparedWindowIndices(self.output_metadata, mode=mode,
+                tokens=self.output_metadata.positions.numel(),
+                page_size=128 + self.output_metadata.max_query_tokens, width=128,
+                replay_start=self.packing.replay_start, buffers=buffers)
         self.layers, carry = [], False
+        layer_cursors = []
         for index, layer in enumerate(weights.layers):
+            # Prefill commits each layer before the following layer reuses its private buffers.
+            layer_buffers = buffers.fork() if mode == "prefill" else buffers
+            layer_cursors.append(layer_buffers)
             boundary = replay_start = None
             layer_scratch, layer_metadata = scratch, metadata
             if self.packing is not None and index >= decoder_start:
@@ -227,7 +268,8 @@ class PreparedDecoder:
                 replay_start = self.packing.replay_start
                 if index == decoder_start:
                     boundary = PreparedDecoderBoundary(index, layer, scratch, layer_scratch, self.packing,
-                        pool, self.rotary, carry=carry, session=session, name=f"{name}.layer{index}", workspace=workspace)
+                        pool, self.rotary, carry=carry, session=session, name=f"{name}.layer{index}", workspace=workspace,
+                        buffers=layer_buffers, window_metadata=self.suffix_window_metadata)
                     layer = replace(layer, attention={key: value for key, value in layer.attention.items()
                                                       if key not in ("compressor", "index_k", "index_norm")})
             defer = (index + 1 < len(weights.layers) and weights.layers[index + 1].engram is None
@@ -237,8 +279,10 @@ class PreparedDecoder:
                 coordinator=coordinator, session=session, name=f"{name}.layer{index}", workspace=workspace,
                 carry=carry, defer_post=defer, boundary=boundary, replay_start=replay_start,
                 window_staging=None if self.window_commit is None else self.window_commit.staging[index],
-                mla_compute_mode=mla_compute_mode))
+                mla_compute_mode=mla_compute_mode, buffers=layer_buffers,
+                window_metadata=(self.window_metadata if layer_metadata is metadata else self.suffix_window_metadata)))
             carry = defer
+        buffers.join(*layer_cursors)
         self.compact_head = scratch.hidden.shape[0] > self.output_metadata.token_ids.numel()
         head_rows = self.output_metadata.token_ids.numel() if self.compact_head else scratch.hidden.shape[0]
         self.head_hidden = scratch.hidden[:head_rows]
@@ -257,6 +301,7 @@ class PreparedDecoder:
         s.residual.copy_(s.embedding[:, None, :])
         s.pre_mix.zero_()
         s.pre_mix[:, 0].fill_(1)
+        self.window_metadata()
         for index, layer in enumerate(self.layers):
             if index in self.aux_layers:
                 column = self.aux_layers.index(index)

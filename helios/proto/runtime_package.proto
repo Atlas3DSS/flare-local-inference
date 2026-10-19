@@ -405,6 +405,16 @@ message EngramTable {
   // Mapped host int64 row IDs followed by the release-published submission sequence.
   string request_buffer = 13;
   float global_scale = 14;
+  // Disjoint row partitions owned by individual TP ranks. Empty retains the shared
+  // weights/scales planes above. Partitioned tables publish partition-local row IDs.
+  repeated EngramTableShard shards = 15;
+}
+message EngramTableShard {
+  uint32 rank = 1;
+  uint64 first_row = 2;
+  uint64 rows = 3;
+  Span weights = 4;
+  Span scales = 5;
 }
 message EngramHash {
   enum Method { UNSPECIFIED = 0; XOR_MODULO = 1; EOS_XOR_MODULO = 2; }

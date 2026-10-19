@@ -4,7 +4,7 @@ from dataclasses import fields, is_dataclass
 
 import torch
 
-from ignition.preparation.scratch import GraphBufferPool
+from ignition.preparation.scratch import GraphBufferPool, GraphBuffers
 
 
 def storage_ranges(values):
@@ -26,6 +26,8 @@ def storage_ranges(values):
                 visit(getattr(value, field.name))
         elif isinstance(value, GraphBufferPool):
             visit(value.chunks)
+        elif isinstance(value, GraphBuffers):
+            visit(value.pool)
         elif isinstance(value, dict):
             for child in value.values():
                 visit(child)

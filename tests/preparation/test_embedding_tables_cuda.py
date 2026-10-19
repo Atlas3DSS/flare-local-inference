@@ -22,6 +22,7 @@ def _rank(rank, sockets, root):
     from b12x.sequence import engram
     from b12x.sequence._shared.disk_table import MappedHostAllocation
     from ignition.components.engram import EngramInputs, PreparedEngramLookup
+    from ignition.components.parallel import TensorParallelShard
     from ignition.components.ngram_delivery import publish_requests
     from ignition.preparation.compilation import compile_forward
     from ignition.preparation.execution import GraphSignature, PreparedExecution
@@ -79,7 +80,9 @@ def _rank(rank, sockets, root):
             graph = torch.cuda.CUDAGraph()
             with session.capture(), torch.cuda.graph(graph):
                 compiled()
-            tables = Tables(geometry, tuple(range(32)), {1: sources}, {1: inputs}, {1: mailbox}, sequence)
+            tables = Tables(geometry, tuple(range(32)), {1: sources}, {1: inputs}, {1: mailbox}, sequence,
+                TensorParallelShard(0, 1), {1: torch.tensor((0, rows), device=device)},
+                torch.arange(6144, device=device))
             catalog = tables.resident_catalog()
             buffers = dict(tables.buffers(), output=output, live_count=count, frame_index=frame,
                 submission_sequence=sequence, completion_records=records)

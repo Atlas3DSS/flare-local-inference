@@ -15,7 +15,7 @@ pub struct NativeModel {
     pub(super) ranks: Vec<NativeResources>,
     _package_files: Vec<std::sync::Arc<std::fs::File>>,
     pub(super) server_config: serde_json::Value,
-    engram: Option<std::sync::Arc<crate::engram::Shared>>,
+    engram: Vec<(std::sync::Arc<crate::engram::Shared>, usize)>,
     offload: Option<std::sync::Arc<crate::offload::Shared>>,
     cluster: Option<ClusterRank>,
     roce: Vec<Option<RoceSpec>>,
@@ -274,12 +274,28 @@ impl NativeModel {
             .engram
             .as_ref()
             .map_or(0, |catalog| catalog.tables.len());
-        let engram = descriptor
-            .engram
-            .take()
-            .map(|value| super::engram::decode(value, &archive, &packages))
-            .transpose()?;
-        if options.embedding_table_cache_bytes != 0 && engram.is_none() {
+        let mut engram: Vec<(crate::engram::Index, Vec<usize>)> = Vec::new();
+        if let Some(catalog) = descriptor.engram.take() {
+            for (local, package) in packages.iter().enumerate() {
+                let (rank, world) = cluster
+                    .as_ref()
+                    .map_or((local, packages.len()), |c| (c.rank, c.world));
+                let index = super::engram::decode(
+                    catalog.clone(),
+                    &archive,
+                    std::slice::from_ref(package),
+                    rank,
+                    world,
+                )?;
+                if let Some((_, ranks)) = engram.iter_mut().find(|(existing, _)| existing == &index)
+                {
+                    ranks.push(local);
+                } else {
+                    engram.push((index, vec![local]));
+                }
+            }
+        }
+        if options.embedding_table_cache_bytes != 0 && engram.is_empty() {
             return Err(invalid(
                 "embedding row cache requires an embedding table catalog",
             ));
@@ -287,9 +303,8 @@ impl NativeModel {
         let embedding_host_bytes =
             if options.embedding_table_storage == Some(crate::engram::Storage::Ram) {
                 engram
-                    .as_ref()
-                    .into_iter()
-                    .flat_map(|index| &index.tables)
+                    .iter()
+                    .flat_map(|(index, _)| &index.tables)
                     .flat_map(|table| &table.planes)
                     .try_fold(0u64, |bytes, plane| {
                         bytes.checked_add(plane.nbytes as u64).ok_or_else(|| {
@@ -443,7 +458,7 @@ impl NativeModel {
             _package_files: package_files,
             ranks: Vec::new(),
             server_config,
-            engram: None,
+            engram: Vec::new(),
             offload: None,
             cluster,
             roce,
@@ -547,44 +562,60 @@ impl NativeModel {
                 rank.prepare_graphs(archive, package, &phase)
             })?;
             phase.finish(format!("concurrency {active}"));
-            if let Some(index) = engram {
+            if !engram.is_empty() {
                 let phase = progress.phase("Prepare embedding tables", None);
-                let tokens = packages[0]
-                    .execution
-                    .as_ref()
-                    .unwrap()
-                    .graphs
-                    .iter()
-                    .filter(|g| {
-                        matches!(
-                            g.kind.as_str(),
-                            "prefill" | "decode" | "speculative" | "mixed"
-                        )
-                    })
-                    .map(|g| (g.packed_tokens()) as usize)
-                    .max()
-                    .unwrap();
                 let storage = options.embedding_table_storage.unwrap_or_default();
-                model.engram = Some(crate::engram::Shared::new(
-                    index,
-                    &archive
-                        .files
-                        .values()
-                        .map(|file| file.direct())
-                        .collect::<Result<Vec<_>>>()?,
-                    devices.len(),
-                    tokens,
-                    model.ranks[0].context as usize,
-                    devices[0],
-                    storage,
-                    options.embedding_table_cache_bytes,
-                    options.embedding_workers(),
-                )?);
+                let group_budget = options.embedding_table_cache_bytes / engram.len() as u64;
+                let files = archive
+                    .files
+                    .values()
+                    .map(|file| file.direct())
+                    .collect::<Result<Vec<_>>>()?;
+                let mut bindings = Vec::new();
+                for (index, ranks) in engram {
+                    let first = ranks[0];
+                    let tokens = ranks
+                        .iter()
+                        .flat_map(|rank| packages[*rank].execution.as_ref().unwrap().graphs.iter())
+                        .filter(|g| {
+                            matches!(
+                                g.kind.as_str(),
+                                "prefill" | "decode" | "speculative" | "mixed"
+                            )
+                        })
+                        .map(|g| g.packed_tokens() as usize)
+                        .max()
+                        .unwrap();
+                    let shared = crate::engram::Shared::new(
+                        index,
+                        &files,
+                        ranks.len(),
+                        tokens,
+                        model.ranks[first].context as usize,
+                        devices[first],
+                        storage,
+                        group_budget,
+                        options.embedding_workers(),
+                    )?;
+                    for (delivery_rank, local) in ranks.into_iter().enumerate() {
+                        bindings.push((local, shared.clone(), delivery_rank));
+                    }
+                }
+                bindings.sort_by_key(|(local, _, _)| *local);
+                model.engram = bindings
+                    .into_iter()
+                    .map(|(_, shared, rank)| (shared, rank))
+                    .collect();
                 let label = match storage {
                     crate::engram::Storage::Disk => "disk",
                     crate::engram::Storage::Ram => "RAM",
                 };
-                let cache_bytes = model.engram.as_ref().unwrap().cache_bytes();
+                let cache_bytes: u64 = model
+                    .engram
+                    .iter()
+                    .filter(|(_, rank)| *rank == 0)
+                    .map(|(shared, _)| shared.cache_bytes())
+                    .sum();
                 phase.finish(if cache_bytes == 0 {
                     label.to_owned()
                 } else {
@@ -726,7 +757,7 @@ impl NativeModel {
                 if let Some(shared) = &self.offload {
                     manifest.offload = Some(crate::offload::Binding::new(shared.clone(), index));
                 }
-                if let Some(shared) = &self.engram {
+                if let Some((shared, delivery_rank)) = self.engram.get(index) {
                     let events = shared
                         .index
                         .tables
@@ -740,7 +771,7 @@ impl NativeModel {
                         .collect::<Result<_>>()?;
                     manifest.engram = Some(crate::engram::Binding {
                         shared: shared.clone(),
-                        rank: index,
+                        rank: *delivery_rank,
                         events,
                     });
                 }
@@ -767,7 +798,7 @@ impl NativeModel {
 impl Drop for NativeModel {
     fn drop(&mut self) {
         self.offload.take();
-        self.engram.take();
+        self.engram.clear();
         // Rank zero owns the shared reservations and releases them after every peer.
         while self.ranks.pop().is_some() {}
     }
@@ -863,7 +894,7 @@ mod tests {
             _package_files: Vec::new(),
             ranks: Vec::new(),
             server_config: serde_json::Value::Null,
-            engram: None,
+            engram: Vec::new(),
             offload: None,
             cluster: None,
             roce: Vec::new(),

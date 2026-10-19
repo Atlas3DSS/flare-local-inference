@@ -25,7 +25,7 @@ const DEPTH: usize = 128;
 const LOAD_CHUNK: usize = 4 << 20;
 const LOAD_READERS: usize = 4;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Plane {
     pub file: usize,
     pub offset: u64,

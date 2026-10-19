@@ -658,6 +658,37 @@ def development_profile(signer):
             'public_key': list(signer.public_key)}
 
 
+def test_development_profile_requires_acceptance_and_remembers_the_key(flare, tmp_path):
+    signer = development_publisher()
+    path, _ = fixture(tmp_path, size=41, signer=signer)
+    profile = profiles(tmp_path / 'publisher.json', signer)
+    store = tmp_path / 'trust.toml'
+    first = launch(flare, path, profile, store)
+    assert 'Local development key' in first.stderr
+    assert 'unattended first use requires' in first.stderr and not store.exists()
+    accepted = launch(flare, path, profile, store, *approval(signer))
+    assert 'model rank count must match distinct selected devices' in accepted.stderr
+    assert store.exists()
+    remembered = launch(flare, path, None, store)
+    assert 'Signing key acceptance' not in remembered.stderr
+    assert 'model rank count must match distinct selected devices' in remembered.stderr
+
+
+def test_development_profile_must_match_the_signed_package(flare, tmp_path):
+    signer = development_publisher()
+    path, _ = fixture(tmp_path, size=41, signer=signer)
+    profile = profiles(tmp_path / 'publisher.json', development_publisher())
+    store = tmp_path / 'trust.toml'
+    wrong_key = launch(flare, path, profile, store, *approval(signer))
+    assert 'unknown package publisher' in wrong_key.stderr and not store.exists()
+    profiles(profile, signer)
+    value, payload = envelope(path)
+    value.groups[0].signature = bytes(64)
+    replace_envelope(path, value, payload)
+    invalid = launch(flare, path, profile, store, *approval(signer))
+    assert 'signature failed' in invalid.stderr and not store.exists()
+
+
 def test_promote_development_package_preserves_resources(native, tmp_path):
     from ignition.preparation.resign import resign as promote
 
@@ -995,6 +1026,60 @@ def test_native_file_qualified_rank_ranges_verify_after_sparse_transfer(native, 
     result = read(native, destination / path.name, weights=True, rank=1)
     assert result.returncode == 0, result.stderr
     assert read(native, destination / path.name, weights=True).returncode != 0
+
+
+@pytest.mark.parametrize('shard_size', [0, 4096])
+def test_embedding_partitions_transfer_only_the_selected_rank(native, tmp_path, shard_size):
+    """Signed table partitions survive sparse transfer without any peer table bytes."""
+    index = proto.ModelIndex(version=4, ranks=[proto.BundleIndex() for _ in range(4)])
+    index.cluster.world, index.cluster.export_id = 4, 'partitioned-tables'
+    table = index.engram.tables.add(layer=1, rows=40, request_buffer='requests')
+    payload, cursor = [], 0
+    expected = {}
+    for rank in range(4):
+        shard = table.shards.add(rank=rank, first_row=rank * 10, rows=10)
+        for name, size in (('weights', 2560), ('scales', 80)):
+            data = bytes([rank * 2 + (name == 'scales') + 1]) * size
+            source = tmp_path / f'{rank}-{name}'
+            source.write_bytes(data)
+            getattr(shard, name).CopyFrom(proto.Span(offset=cursor, nbytes=size))
+            payload.append((cursor, source, 0, size))
+            expected[rank, name] = data
+            cursor = align(cursor + size)
+    path = tmp_path / 'tables.safetensors'
+    publish(path, index, payload, publisher=publisher(), shard_size=shard_size)
+    assert read(native, path, weights=True).returncode == 0
+    exported, _ = read_index(path)
+    for rank in range(4):
+        result = subprocess.run([str(native), str(path), 'ranges', str(rank)], capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+        ranges = json.loads(result.stdout)
+        destination = tmp_path / f'peer-{rank}'
+        destination.mkdir()
+        for name, (length, parts) in ranges.items():
+            source = path.with_name(name) if name else path
+            output = destination / (name or path.name)
+            with source.open('rb') as stream, output.open('wb') as copy:
+                copy.truncate(length)
+                for offset, size in parts:
+                    stream.seek(offset)
+                    copy.seek(offset)
+                    copy.write(stream.read(size))
+        result = read(native, destination / path.name, weights=True, rank=rank)
+        assert result.returncode == 0, result.stderr
+        assert read(native, destination / path.name, weights=True).returncode != 0
+        for other, shard in enumerate(exported.engram.tables[0].shards):
+            for name in ('weights', 'scales'):
+                span = getattr(shard, name)
+                source = destination / (span.filename or path.name)
+                if not source.exists():
+                    assert other != rank
+                    continue
+                with source.open('rb') as stream:
+                    start = 8 + struct.unpack('<Q', stream.read(8))[0]
+                    stream.seek(start + span.offset)
+                    data = stream.read(span.nbytes)
+                assert data == (expected[other, name] if other == rank else bytes(span.nbytes))
 
 
 @pytest.mark.parametrize('corruption', ['protected-filename', 'destination-filename', 'part-length',

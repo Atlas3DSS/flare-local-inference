@@ -39,6 +39,13 @@ def test_mixed_cache_writers_and_captured_attention(ratio, mode, window_size, ro
     table = torch.ones((rows, 1), device=device, dtype=torch.int32)
     sink = torch.randn(16, device=device)
     output = torch.empty_like(query)
+    metadata = (window_slots, compressed_slots, window_indices, compressed_indices,
+                lengths, indexed_lengths, table)
+    saved_metadata = [value.clone() for value in metadata]
+    for value in metadata:
+        value.fill_(2 ** 30)
+    backing.fill_(231)
+    compressed.fill_(231)
     with PreparationSession(device=device, autotune=False, compile_workers=2) as session:
         write_window = PreparedCompressedCacheWriter(window_values, window, window_slots,
             page_size=window_size, kind="swa", session=session, name="window")
@@ -49,6 +56,10 @@ def test_mixed_cache_writers_and_captured_attention(ratio, mode, window_size, ro
             page_table=table, indexed_page_size=128 // ratio, window_page_size=window_size,
             mode=mode, decode_row_capacity=rows if mode == "decode" else None,
             session=session, name="attention", workspace=None)
+        assert backing.eq(231).all() and compressed.eq(231).all()
+        for value, saved in zip(metadata, saved_metadata, strict=True):
+            assert value.eq(2 ** 30).all()
+            value.copy_(saved)
         def forward():
             write_window(window_values)
             write_compressed(compressed_values)

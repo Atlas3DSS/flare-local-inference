@@ -162,10 +162,16 @@ and acceptance state retain independent storage. GDN's chunked-prefill operands 
 allocated only for the SM103 execution path that consumes them.
 DeepSeek V4, MiMo, and Step share attention and FFN intermediates. Concurrent
 shared/routed expert branches allocate from one cursor to retain disjoint views.
-GLM's mHC carry, DeepSeek V4.1's replay boundary, and Kimi's named private buffers
-still require a stage-lifetime review. Nemotron reuses a cursor across serialized
-heterogeneous blocks.
-MiMo and Kimi draft-context projections retain dedicated intermediate tensors;
+DeepSeek V4.1 shares activation storage across text, draft, and vision graphs.
+Prefill layers commit window state before reusing private buffers; sequential
+indexer batches reuse packed queries and scales. The bounded decoder suffix
+gathers into destinations disjoint from the full prefill. Candidate rows follow
+the suffix capacity when hierarchical selection starts after that boundary.
+Verification compressor values and gates remain separate through acceptance.
+GLM's mHC carry and Kimi's named private buffers still require a stage-lifetime
+review. Nemotron reuses a cursor across serialized heterogeneous blocks.
+DeepSeek V4.1, MiMo, and Kimi draft-context projections retain dedicated
+intermediate tensors;
 review their consumption and history updates before sharing decoder storage.
 
 Allocated scratch bytes are an upper bound, not a measurement of simultaneously

@@ -804,6 +804,7 @@ dependencies = [
  "hf-hub",
  "libc",
  "libloading",
+ "ring",
  "serde",
  "serde_json",
  "sha2",

@@ -134,6 +134,13 @@ that call. Buffered requests receive HTTP 500; streams receive a terminal error
 and may already have delivered the first call. Combined with required mode, a
 successful response contains exactly one call. Generation uses ordinary sampling.
 
+Parallel tool results with unique IDs matching the preceding assistant's calls
+are normalized to call order before chat-template rendering. Each result's text
+and images move together; intervening non-tool messages keep their positions.
+Missing, duplicate, or unknown IDs leave that group in its supplied order.
+Results never move across another
+assistant message.
+
 Named tool selection and strict function schemas are rejected. Hosted search,
 computer execution, file stores, audio, and remote image downloads are unsupported. Images must be
 base64 PNG, JPEG, or static WebP data. Images are encoded sequentially and share

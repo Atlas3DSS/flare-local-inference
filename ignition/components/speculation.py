@@ -12,7 +12,7 @@ from dataclasses import dataclass
 
 import torch
 
-from ignition.components.flashinfer_sampling import filter_probabilities, verify_chain
+from ignition.components.flashinfer_sampling import filter_probabilities_out, probability_filter_workspace, verify_chain
 
 from ignition.components.capacity import BATCH_CAPACITIES
 from ignition.components.sampling import (
@@ -189,7 +189,6 @@ class PreparedSpeculativeDistributions:
     def scratch_layout(batch, width, vocab):
         return dict(scores=((batch, width, vocab), torch.float32),
             probabilities=((batch, width, vocab), torch.float32),
-            counts=((batch, width, vocab), torch.int32),
             maximum=((batch, width), torch.float32), valid=((batch, width), torch.bool),
             packed_top_k=((batch * width,), torch.int32), packed_top_p=((batch * width,), torch.float32))
 
@@ -231,7 +230,7 @@ class PreparedSpeculativeDistributions:
     def prepare_scores(self):
         state, columns = self.state, self.columns
         safe, live = _live(state, self.slots, self.generations, self.live_rows, self.rows)
-        self.counts.copy_(state.histogram[safe, None, :].expand_as(self.counts))
+        counts = state.histogram[safe, None, :]
         prefix = columns + self.prefix_offset
         prefix_valid = torch.ones_like(self.valid)
         for index in range(columns.numel() - 1 + self.prefix_offset):
@@ -239,15 +238,15 @@ class PreparedSpeculativeDistributions:
             used = index < prefix
             valid = (ids >= 0) & (ids < state.vocab_size)
             prefix_valid &= valid[:, None] | ~used[None, :]
-            indices = ids.clamp(0, state.vocab_size - 1)[:, None, None].expand(-1, columns.numel(), 1)
-            additions = (valid[:, None] & used[None, :]).to(torch.int32).unsqueeze(-1)
-            self.counts.scatter_add_(-1, indices, additions)
+            matches = self.vocab_ids[None, None, :] == ids[:, None, None]
+            additions = matches & valid[:, None, None] & used[None, :, None]
+            counts = counts + additions.to(torch.int32)
         params = state.parameters[safe]
         scores = self.logits.float()
         penalty = params[:, None, 3:4]
         adjusted = torch.where(scores > 0, scores / penalty, scores * penalty)
-        scores = torch.where(self.counts > 0, adjusted, scores)
-        scores = scores - (self.counts > 0) * params[:, None, 4:5] - self.counts * params[:, None, 5:6]
+        scores = torch.where(counts > 0, adjusted, scores)
+        scores = scores - (counts > 0) * params[:, None, 4:5] - counts * params[:, None, 5:6]
         temperature = params[:, None, :1]
         scores = scores / torch.where(temperature > 0, temperature, 1)
         if self.grammar_masks is None:
@@ -277,6 +276,8 @@ class PreparedSpeculativeDistributions:
             sampling._get_cache_buf(f"top_k_mask_logits_row_states_{self.logits.device}", 1024 * 1024, self.logits.device, zero_init=True),
             sampling._get_cache_buf("softmax_workspace", 1024 * 1024, self.logits.device),
         )
+        self.top_p_workspace = probability_filter_workspace(
+            self.packed_top_p.numel(), self.state.vocab_size, self.logits.device)
         self._prepared = True
         self()
 
@@ -287,9 +288,9 @@ class PreparedSpeculativeDistributions:
         dummy = torch.where(self.vocab_ids == 0, 0., -torch.inf)
         self.scores.copy_(torch.where(self.valid[:, :, None], self.scores, dummy))
         flat = self.scores.view(-1, self.state.vocab_size)
-        probabilities = filter_probabilities(flat, self.packed_top_k, self.packed_top_p,
-            *self.library_scratch).view_as(self.probabilities)
-        return self.normalization(probabilities, params)
+        filter_probabilities_out(flat, self.packed_top_k, self.packed_top_p,
+            *self.library_scratch, self.probabilities.view_as(flat), self.top_p_workspace)
+        return self.normalization(self.probabilities, params)
 
 
 class PreparedStochasticVerification:

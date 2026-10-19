@@ -253,6 +253,10 @@ impl VerifiedPackage {
     pub fn license(&self) -> Option<&PackageLicense> {
         self.archive.protection.license.as_ref()
     }
+    /// Digest the stored data of every verified rank against the signed index.
+    pub fn verify_stored_data(&self) -> Result<()> {
+        self.archive.protection.verify_data(&self.archive)
+    }
     /// Record the string the user applied to accept the publisher's terms. It derives every
     /// executable key, so a string other than the namespace the exporter encrypted under opens
     /// nothing; the caller obtains it from the user or from remembered acceptance.
@@ -606,16 +610,17 @@ impl Protection {
             }
             spans.push((3, span));
         }
-        if let Some(engram) = &index.engram {
-            for table in &engram.tables {
-                for span in [&table.weights, &table.scales] {
-                    let span = span
-                        .as_ref()
-                        .ok_or_else(|| invalid("missing table plane"))?;
-                    within(&self.data[0], span)?;
-                    spans.push((4, span));
-                }
-            }
+        for (owner, span) in super::engram::spans(index, self.rank)? {
+            let position = match owner {
+                None => 0,
+                Some(rank) => self.position(rank)? + 1,
+            };
+            let data = self
+                .data
+                .get(position)
+                .ok_or_else(|| invalid("embedding partition owner is absent"))?;
+            within(data, span)?;
+            spans.push((4, span));
         }
         spans.sort_by_key(|(_, s)| (&s.filename, s.offset));
         let mut end = 0;

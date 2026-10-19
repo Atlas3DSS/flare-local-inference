@@ -132,8 +132,8 @@ def resource_roles(index):
             raise ValueError('unclassified package resource')
         resources.extend((roles[name], owner, span) for name, span in rank.resources.items())
     resources.extend((3, None, asset.payload) for asset in index.assets)
-    resources.extend((4, None, span) for table in index.engram.tables for span in (table.weights, table.scales))
-    from .package_file import validate_filename
+    from .package_file import embedding_spans, validate_filename
+    resources.extend((4, owner, span) for owner, span in embedding_spans(index))
     for kind, _, span in resources:
         if span.filename:
             validate_filename(span.filename)

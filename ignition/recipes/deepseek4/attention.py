@@ -19,6 +19,7 @@ from ignition.components.projection_overlap import ConcurrentProjectionChain
 from ignition.components.fp8_indexer import PreparedFP8Indexer
 from ignition.components.rms_norm import PreparedRMSNorm
 from ignition.components.rotary import PreparedRotaryAngles
+from ignition.components.window_indices import PreparedWindowIndices
 
 from .config import Compressor
 from .pool import PAGE_TOKENS, latent_page_bytes
@@ -136,7 +137,6 @@ def rotate_index(source, destination):
 @dataclass(frozen=True)
 class AttentionScratch:
     projected: torch.Tensor
-    norm_input: torch.Tensor
     query_low: torch.Tensor
     query: torch.Tensor
     window_values: torch.Tensor
@@ -156,7 +156,6 @@ class AttentionScratch:
         return cls(
             zeros((tokens, 1536)),
             zeros((tokens, 1024)),
-            zeros((tokens, 1024)),
             zeros((tokens, 64 // world, 512)),
             zeros((tokens, 512)),
             zeros((tokens, 64 // world, 512)),
@@ -168,7 +167,7 @@ class AttentionScratch:
         )
 
 
-class AttentionIndices:
+class AttentionIndices(PreparedWindowIndices):
     """Window and compression indices that every attention layer of one forward shares.
 
     They depend only on the batch metadata, so the forward computes them once before its first layer
@@ -177,13 +176,11 @@ class AttentionIndices:
 
     def __init__(self, metadata, *, mode, tokens, visible, buffers):
         rows = metadata.starts.numel()
-        self.metadata, self.mode, self.visible, self.buffers = metadata, mode, visible, buffers
-        self.window_page_size = 128 if mode == "decode" else 128 + tokens // rows
-        width = self.window_page_size if mode == "draft" else 128 + (384 if visible is not None else 0)
-        self.offsets = torch.arange(width, device=metadata.positions.device)
-        self.window_slots = buffers.full((tokens,), -1, torch.int64)
-        self.window_indices = buffers.full((tokens, width), -1, torch.int32)
-        self.window_lengths = buffers.zeros((tokens,), torch.int32)
+        page_size = 128 if mode == "decode" else 128 + tokens // rows
+        width = page_size if mode == "draft" else 128 + (384 if visible is not None else 0)
+        super().__init__(metadata, mode=mode, tokens=tokens, page_size=page_size,
+            width=width, visible=visible, buffers=buffers)
+        self.buffers = buffers
         self.ratios, self.dense = {}, None
         self.angles = {}
 
@@ -218,35 +215,9 @@ class AttentionIndices:
         return self.dense
 
     def __call__(self):
+        super().__call__()
         m = self.metadata
         live, position = m.positions >= 0, m.positions.clamp_min(0)
-        rows, starts = m.state_rows[m.requests], m.starts[m.requests]
-        left = (position - 127).clamp_min(0)
-        right = position
-        if self.visible is not None:
-            image_left, image_right = self.visible
-            left = torch.minimum(left, position - image_left)
-            right = position + image_right
-        self.window_lengths.copy_(torch.where(live, right - left + 1, 0))
-        positions = left[:, None] + self.offsets
-        if self.mode == "decode":
-            slots = rows * 128 + position % 128
-            indices = rows[:, None] * 128 + positions % 128
-        else:
-            base = m.requests * self.window_page_size
-            slots = base + 128 + position - starts
-            indices = torch.where(
-                positions < starts[:, None], positions % 128, 128 + positions - starts[:, None]
-            )
-            indices = indices + base[:, None]
-            if self.mode == "draft":
-                context = starts.clamp(max=128)
-                self.window_lengths.copy_(torch.where(live, context + m.lengths[m.requests], 0))
-                indices = base[:, None] + torch.where(
-                    self.offsets < context[:, None], self.offsets, 128 + self.offsets - context[:, None]
-                )
-        self.window_slots.copy_(torch.where(live, slots, -1))
-        self.window_indices.copy_(torch.where(self.offsets < self.window_lengths[:, None], indices, -1))
         for ratio, shared in self.ratios.items():
             shared.lengths.copy_(torch.where(live, (position + 1) // ratio, 0))
             shared.index_lengths.copy_(shared.lengths.clamp(max=512) if ratio == 4 else shared.lengths)
@@ -346,7 +317,6 @@ class PreparedAttention:
             eps=self.eps,
             session=session,
             name=name + ".q_norm",
-            staging=scratch.norm_input,
         )
         self.kvnorm = PreparedRMSNorm(
             scratch.projected[:, 1024:],
@@ -355,7 +325,6 @@ class PreparedAttention:
             eps=self.eps,
             session=session,
             name=name + ".kv_norm",
-            staging=scratch.norm_input,
         )
         self.output_projection = PreparedGroupedOutputProjection(
             scratch.attended.view(tokens, 8 // world, 4096),

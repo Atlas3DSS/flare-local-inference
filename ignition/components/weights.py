@@ -336,8 +336,16 @@ class DirectWeightLoader:
             torch.set_num_threads(1)
             selected = self._selected_names()
             shards = {self.manifest.tensors[name].shard for name in selected}
-            read_mode = _checkpoint_read_mode(self.manifest.snapshot / shard for shard in shards)
-            self._session = stack.enter_context(DirectWeightSession(device=self.device.index, read_mode=read_mode))
+            from ignition.preparation.checkpoint_source import source_for
+
+            source = source_for(self.manifest.snapshot)
+            if source is None:
+                read_mode = _checkpoint_read_mode(self.manifest.snapshot / shard for shard in shards)
+                self._session = stack.enter_context(DirectWeightSession(device=self.device.index, read_mode=read_mode))
+            else:
+                from ignition.preparation.remote_weights import RemoteWeightSession
+
+                self._session = stack.enter_context(RemoteWeightSession(source, self.manifest, device=self.device.index))
             if self._display is not None:
                 self._display.source(len(shards))
 

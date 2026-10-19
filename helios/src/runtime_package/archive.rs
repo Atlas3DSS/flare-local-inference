@@ -205,12 +205,9 @@ pub fn package_companions(path: &Path) -> Result<Vec<String>> {
                 .filter_map(|asset| asset.payload.as_ref()),
         )
         .chain(
-            index
-                .engram
-                .iter()
-                .flat_map(|e| &e.tables)
-                .flat_map(|t| [&t.weights, &t.scales])
-                .filter_map(Option::as_ref),
+            super::engram::spans(&index, None)?
+                .into_iter()
+                .map(|(_, span)| span),
         )
         .chain(&parts)
     {
@@ -427,12 +424,9 @@ impl Archive {
                     .filter_map(|asset| asset.payload.as_ref()),
             )
             .chain(
-                index
-                    .engram
-                    .iter()
-                    .flat_map(|e| &e.tables)
-                    .flat_map(|t| [&t.weights, &t.scales])
-                    .filter_map(Option::as_ref),
+                super::engram::spans(&index, rank)?
+                    .into_iter()
+                    .map(|(_, span)| span),
             );
         let mut ends = BTreeMap::new();
         for span in spans {
@@ -495,12 +489,9 @@ impl Archive {
             .values()
             .chain(index.assets.iter().filter_map(|a| a.payload.as_ref()))
             .chain(
-                index
-                    .engram
-                    .iter()
-                    .flat_map(|e| &e.tables)
-                    .flat_map(|t| [&t.weights, &t.scales])
-                    .filter_map(Option::as_ref),
+                super::engram::spans(&index, Some(rank))?
+                    .into_iter()
+                    .map(|(_, span)| span),
             )
             .chain(&stored)
         {

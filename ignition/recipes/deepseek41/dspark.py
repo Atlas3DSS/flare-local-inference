@@ -1,9 +1,8 @@
 """Block drafts conditioned on accepted target states, with sequential Markov logits."""
 
-import torch
-
 from ignition.components.embedding import PreparedEmbedding
 from ignition.components.vocabulary import PreparedVocabularyProjection
+from ignition.components.window_indices import PreparedWindowIndices
 
 from .attention import Rotary, normalize
 from .decoder import PreparedLayer
@@ -16,12 +15,17 @@ class PreparedDraft:
         self.embedding = PreparedEmbedding(weights.embedding, metadata.token_ids, scratch.embedding,
             num_rows=metadata.live_counts[:1], session=session, name=name + ".embedding")
         rotary = Rotary(weights.config, scratch.embedding.device)
+        page_size = 128 + metadata.max_query_tokens
+        self.window_metadata = PreparedWindowIndices(metadata, mode="draft",
+            tokens=metadata.positions.numel(), page_size=page_size, width=page_size,
+            buffers=scratch.buffers)
         self.layers = tuple(PreparedLayer(i, layer, None, scratch, metadata, pool, rotary,
             shard=weights.shard, mode="draft", runtime=runtime, coordinator=coordinator,
             session=session, name=f"{name}.layer{i}", workspace=workspace, carry=i > 0,
-            defer_post=i + 1 < len(weights.draft.layers), mla_compute_mode=mla_compute_mode)
+            defer_post=i + 1 < len(weights.draft.layers), mla_compute_mode=mla_compute_mode,
+            window_metadata=self.window_metadata)
             for i, layer in enumerate(weights.draft.layers))
-        self.head_hidden = torch.zeros_like(scratch.hidden)
+        self.head_hidden = scratch.buffers.zeros(scratch.hidden.shape, scratch.hidden.dtype)
         self.head = PreparedVocabularyProjection(scratch.hidden, weights.head, scratch.local_logits, scratch.logits,
             runtime=vocabulary_runtime, coordinator=coordinator, session=session, name=name + ".head")
 
@@ -30,6 +34,7 @@ class PreparedDraft:
         s.residual.copy_(self.embedding()[:, None, :])
         s.pre_mix.zero_()
         s.pre_mix[:, 0].fill_(1)
+        self.window_metadata()
         for layer in self.layers:
             layer()
         self.head_hidden.copy_((s.residual[self.metadata.sample_indices].float()

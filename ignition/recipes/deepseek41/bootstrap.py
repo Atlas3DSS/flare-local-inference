@@ -19,7 +19,7 @@ from ignition.components.deepseek_vision import (PreparedVision, VisionInputs, V
     PrefillVisionInputs, PreparedVisionGeneration, VisionState)
 from ignition.preparation.checkpoint import inspect_indexed_checkpoint
 from ignition.preparation.collectives import (CollectivePreparation, create_all_gather_runtime,
-    create_all_reduce_runtime, create_dma_all_reduce_runtime, create_result_broadcast_runtime)
+    create_all_reduce_runtime, create_dma_all_reduce_runtime, create_result_broadcast_runtime, create_roce_runtime)
 from ignition.preparation.disposable import storage_ranges
 from ignition.preparation.execution import GraphSignature
 from ignition.preparation.host_memory import virtual_device_memory, release_unused
@@ -60,6 +60,9 @@ class PreparationConfig:
     compile_workers: int | None = None
     tuning_replica: TuningReplica | None = None
     devices: tuple[int, ...] = (0, 1, 2, 3)
+    # Device ordinals are host-local when each rank runs on its own Spark.
+    hosts: tuple[str, ...] | None = None
+    roce_ring: bool = False
     context: int = 1048576
     prefill_chunk_size: int = 4096
     max_active: int = 4
@@ -102,8 +105,13 @@ class PreparationConfig:
             raise ValueError("packed verification requires an adaptive retained-proposal catalog")
         if type(self.stream_overlap) is not bool:
             raise TypeError("stream_overlap must be a boolean")
-        if len(self.devices) != 4 or len(set(self.devices)) != 4 or any(d < 0 for d in self.devices):
+        placements = tuple(zip(self.hosts or ("",) * len(self.devices), self.devices))
+        if (not isinstance(self.devices, tuple) or len(self.devices) != 4 or len(set(placements)) != 4
+                or self.hosts is not None and (not isinstance(self.hosts, tuple) or len(self.hosts) != 4)
+                or any(type(d) is not int or d < 0 for d in self.devices)):
             raise ValueError("DeepSeek V4.1 Flash preparation requires four distinct GPUs")
+        if self.roce_ring and self.hosts is None:
+            raise ValueError("RoCE ring requires ranks on separate hosts")
         if not PAGE_TOKENS <= self.context <= 1048576 or self.context % PAGE_TOKENS:
             raise ValueError("DeepSeek context must be 128-aligned in [128,1048576]")
         if not 64 <= self.prefill_chunk_size <= self.context or self.prefill_chunk_size % 64:
@@ -143,6 +151,44 @@ class PreparationConfig:
     def draft_tokens(self):
         return max(self.speculative_widths) - 1 if self.dspark else 0
 
+    @property
+    def all_reduce_tokens(self):
+        return max(self.decode_tokens, self.request_capacity * self.draft_tokens,
+                   *(capacity for capacity in self.prefill_capacities if capacity < 128))
+
+
+def _collective_runtimes(config, group, device, *, coordinator, package_storage, verification_samples):
+    """Share one RoCE channel across ordered graph collectives on separate hosts."""
+    tokens = max(config.prefill_chunk_size, config.decode_tokens, config.request_capacity * config.draft_tokens)
+    sample_rows = max(verification_samples, config.request_capacity * config.draft_tokens)
+    layouts = ()
+    if config.dspark:
+        from ignition.components.draft_sampling import PreparedDraftDistribution
+        from ignition.components.speculation import SpeculativeAcceptance
+
+        batch = max(config.batch_capacities)
+        layouts = (SpeculativeAcceptance.storage_layout(batch, max(config.speculative_widths)),)
+        if config.draft_tokens:
+            layouts += (PreparedDraftDistribution.broadcast_layout(batch),)
+    if coordinator.spans_hosts:
+        from ignition.components.collectives import packed_broadcast_layout
+
+        # Vocabulary partitions and packed sampling results use the same serial gather channel.
+        result_bytes = max((packed_broadcast_layout(layout.values())[1] for layout in layouts), default=0)
+        gather_bytes = max(sample_rows * (129280 // len(config.devices)) * 2,
+                           (result_bytes + 15) // 16 * 16)
+        decode_tokens = config.all_reduce_tokens
+        runtime = create_roce_runtime(group, device, max_tokens=decode_tokens, pipe_tokens=tokens,
+            hidden_size=5120, gather_bytes=gather_bytes, ring=config.roce_ring, package_storage=package_storage)
+        return runtime, runtime, runtime, runtime if layouts else None
+    ipc = package_storage.peer_storage
+    collective = create_all_reduce_runtime(group, device, max_tokens=config.all_reduce_tokens, hidden_size=5120, ipc=ipc)
+    prefill = create_dma_all_reduce_runtime(group, device,
+        max_tokens=config.prefill_chunk_size, hidden_size=5120, ipc=ipc)
+    vocabulary = create_all_gather_runtime(group, device, max_rows=sample_rows, columns=129280, ipc=ipc)
+    result = create_result_broadcast_runtime(group, device, layouts=layouts, ipc=ipc) if layouts else None
+    return collective, prefill, vocabulary, result
+
 
 @torch.no_grad()
 def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storage=None):
@@ -165,7 +211,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         progress(f"Resident model tensors: {weights.allocated_bytes / (1 << 30):.3f} GiB per rank")
     sequence = torch.zeros(1, dtype=torch.int64, device=device)
     tables = Tables.prepare(manifest, weights.config, tokens=max(config.prefill_chunk_size, config.decode_tokens),
-        device=device, sequence=sequence, host_allocator=package_storage.host_allocate, progress=progress)
+        device=device, sequence=sequence, host_allocator=package_storage.host_allocate, progress=progress, shard=shard)
     with phase(progress, "Allocate model state and collectives"):
         layout = continuation_layout(weights.config, dspark=config.dspark)
         snapshots = layout.snapshot_capacity(config.snapshot_budget_bytes)
@@ -190,25 +236,11 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         frame = torch.zeros(1, dtype=torch.int32, device=device)
         records = torch.zeros((2, slots, 24 if config.dspark else 8), dtype=torch.int64, device=device)
         coordinator = CollectivePreparation(group)
-        ipc = package_storage.peer_storage
-        tokens = max(config.prefill_chunk_size, config.decode_tokens, slots * config.draft_tokens)
         verification_samples = (slots * max(config.speculative_widths)
                                 if config.packed_verification else config.decode_tokens)
-        collective = create_all_reduce_runtime(group, device, max_tokens=tokens, hidden_size=5120, ipc=ipc)
-        prefill_collective = create_dma_all_reduce_runtime(group, device,
-            max_tokens=config.prefill_chunk_size, hidden_size=5120, ipc=ipc)
-        vocabulary_collective = create_all_gather_runtime(group, device,
-            max_rows=max(verification_samples, slots * config.draft_tokens), columns=129280, ipc=ipc)
-        result_collective = None
-        if config.dspark:
-            from ignition.components.draft_sampling import PreparedDraftDistribution
-            from ignition.components.speculation import SpeculativeAcceptance
-
-            batch = max(config.batch_capacities)
-            layouts = [SpeculativeAcceptance.storage_layout(batch, max(config.speculative_widths))]
-            if config.draft_tokens:
-                layouts.append(PreparedDraftDistribution.broadcast_layout(batch))
-            result_collective = create_result_broadcast_runtime(group, device, layouts=layouts, ipc=ipc)
+        collective, prefill_collective, vocabulary_collective, result_collective = _collective_runtimes(
+            config, group, device, coordinator=coordinator, package_storage=package_storage,
+            verification_samples=verification_samples)
         identity = hashlib.sha256(json.dumps({"config": json.loads((metadata_path / "config.json").read_text()),
             "headers": [s.header_sha256 for s in manifest.shards], "world_size": shard.world_size,
             "contract": "deepseek41.graph-inputs.v1"}, sort_keys=True).encode()).hexdigest()
@@ -222,11 +254,20 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         arena = ScratchArena(device, overlap=config.stream_overlap)
         session.register_scratch(arena)
         graph_buffers = GraphBufferPool(device, chunk_bytes=2 << 20)
-        prefill_storage = Scratch.allocate(config.prefill_chunk_size, 1, shard.world_size, device)
-        decoder_storage = Scratch.allocate(config.decode_tokens, verification_samples, shard.world_size, device)
-        suffix_storage = Scratch.allocate(128, 1, shard.world_size, device)
-        window_staging = (torch.empty((len(weights.layers), slots, (128 + max(config.speculative_widths)) * 528),
-                                     dtype=torch.uint8, device=device) if config.dspark else None)
+        activation_buffers = GraphBufferPool(device, chunk_bytes=2 << 20)
+        candidate_tokens = config.prefill_chunk_size
+        if (weights.config.decoder_start is not None
+                and weights.config.text["candidate_source_layer_id"] >= weights.config.decoder_start):
+            candidate_tokens = min(candidate_tokens, 128)
+        prefill_storage = Scratch.allocate(config.prefill_chunk_size, 1, shard.world_size, device,
+            buffers=activation_buffers.cursor(), candidate_tokens=candidate_tokens)
+        # The suffix boundary gathers from the full prefill into disjoint destinations.
+        suffix_storage = Scratch.allocate(128, 1, shard.world_size, device, buffers=prefill_storage.buffers)
+        decoder_storage = Scratch.allocate(config.decode_tokens, verification_samples, shard.world_size, device,
+            buffers=activation_buffers.cursor())
+        window_staging = (decoder_storage.buffers.zeros(
+            (len(weights.layers), slots, (128 + max(config.speculative_widths)) * 528), torch.uint8)
+            if config.dspark else None)
         vision_state = vision_inputs = vision_prefill = vision_storage = None
         if weights.vision is not None:
             vision_inputs = VisionInputs.allocate(device, patches=max(PATCH_CAPACITIES))
@@ -254,6 +295,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                 session=session, workspace=arena,
                 runtime=collective, vocabulary_runtime=vocabulary_collective,
                 markov_runtime=None, coordinator=coordinator, result_runtime=result_collective,
+                buffers=activation_buffers.cursor(),
                 forwards=DSparkForwards(decoder_factory, Scratch, _CONTEXT,
                     draft_factory, PreparedMarkov))
 
@@ -288,7 +330,8 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                 for capacity in capacities:
                     rows = 1 if mode == "prefill" else capacity
                     name = f"{mode}{capacity}" + (suffix if mode == "prefill" else "")
-                    metadata[name] = Metadata.allocate(capacity, rows, blocks, device)
+                    cursor = graph_buffers.cursor()
+                    metadata[name] = Metadata.allocate(capacity, rows, blocks, device, buffers=cursor)
                     storage = prefill_storage if mode == "prefill" else decoder_storage
                     scratch[name] = storage.rows(capacity, rows)
                     decoder = decoder_factory(mode_weights, tables, scratch[name], metadata[name], pool,
@@ -297,9 +340,11 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                         coordinator=coordinator, session=session, name=name, workspace=arena)
                     batch = PreparedBatch(inputs, requests, metadata[name], mode=mode, shard=shard, pool=pool,
                         input_vocabulary=INPUT_VOCABULARY if vision_state is not None else None,
-                        validate_prefill=vision_state.validate_prefill if vision_state is not None and mode == "prefill" else None)
+                        validate_prefill=vision_state.validate_prefill if vision_state is not None and mode == "prefill" else None,
+                        buffers=cursor)
                     forward = PreparedGeneration(decoder, batch, records, frame, sequence, runtime=collective,
-                        coordinator=coordinator, session=session, name=name + ".generation", workspace=arena, context_factory=_CONTEXT)
+                        coordinator=coordinator, session=session, name=name + ".generation", workspace=arena,
+                        context_factory=_CONTEXT, buffers=cursor)
                     fields = (*forward_inputs, "vision_token_indices", "vision_feature_slot") if mode == "prefill" and vision_state is not None else forward_inputs
                     add(name, forward, mode, rows, capacity if mode == "prefill" else 1, fields, enabled=enabled)
         split = None
@@ -360,7 +405,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         if vision_state is not None:
             for capacity in reversed(PATCH_CAPACITIES):
                 name = f"vision{capacity}"
-                cursor = graph_buffers.cursor()
+                cursor = activation_buffers.cursor()
                 vision_storage[capacity] = VisionScratch.allocate(capacity, device, hidden=5120, buffers=cursor)
                 encoder = PreparedVision(weights.vision, vision_storage[capacity], vision_inputs,
                     session=session, workspace=arena, name=name, buffers=cursor)
@@ -374,7 +419,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                 name = f"resume{capacity}" + suffix
                 forward = PreparedResume(mode_weights, requests, pool, inputs, records, frame, sequence,
                     rows=capacity, runtime=collective, vocabulary_runtime=vocabulary_collective,
-                    coordinator=coordinator, session=session, name=name)
+                    coordinator=coordinator, session=session, name=name, buffers=graph_buffers.cursor())
                 add(name, forward, "resume", capacity, 1, (*row_inputs, "sampling_grammar_mask"), enabled=enabled)
                 for mode in ("init", "restore", "snapshot"):
                     name = f"{mode}{capacity}" + suffix
@@ -425,7 +470,8 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         "weights_bytes": weights.allocated_bytes, "mapped_host_bytes": 0,
         "expert_scale_compression": config.expert_scale_compression,
         "mla_compute_mode": config.mla_compute_mode,
-        "offloaded_bytes": sum(source.nbytes for pair in tables.sources.values() for source in pair),
+        "offloaded_bytes": sum((last - first) * 264 for ordinal in range(len(tables.sources))
+                               for first, last in (tables.partition_rows(ordinal, shard.rank),)),
         "continuation_bytes": pool.backing.nbytes, "state_rows": state_rows,
         "preparation_state_rows": int(pool.memory_capacity[0].item()),
         "preparation_state_bytes": int(pool.memory_capacity[0].item()) * layout.row_bytes,
@@ -442,7 +488,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
             speculative_token_capacity=speculative_token_capacity(config.max_active, max(config.speculative_widths), config.speculative_token_capacity),
             speculative_fixed_width=config.speculative_fixed_width)
         memory.update(speculative_shapes=config.speculative_shapes)
-    disposable = [prefill_storage, decoder_storage, arena.tensor, metadata, tables.buffers(), graph_buffers.chunks]
+    disposable = [activation_buffers, arena.tensor, metadata, tables.buffers(), graph_buffers]
     if vision_state is not None:
         disposable.extend((vision_storage, vision_state.arena))
     if speculation is not None:
@@ -460,9 +506,9 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         resources=(weights, tables, pool, requests, inputs, admission, commands, arena, forwards,
             prefill_storage, decoder_storage, scratch, metadata, compiled, stream, graph_pool, session,
             collective, prefill_collective, vocabulary_collective, result_collective, coordinator, speculation,
-            vision_state, vision_storage, vision_inputs, vision_prefill, graph_buffers),
-        close_resources=tuple(c for c in (result_collective, prefill_collective, vocabulary_collective, collective)
-                              if c is not None))
+            vision_state, vision_storage, vision_inputs, vision_prefill, graph_buffers, activation_buffers),
+        close_resources=tuple(dict.fromkeys(c for c in
+            (result_collective, prefill_collective, vocabulary_collective, collective) if c is not None)))
     if split is not None:
         model.proposal_confidence = confidence.host_view
         model.proposal_state = split

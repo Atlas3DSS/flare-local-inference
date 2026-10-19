@@ -8,7 +8,7 @@ import torch
 from ignition.components.mxfp4_indexer import PreparedMXFP4Indexer
 from ignition.preparation.compilation import compile_forward
 from ignition.preparation.graphs import PreparedGraphBundle
-from ignition.preparation.scratch import ScratchArena
+from ignition.preparation.scratch import GraphBufferPool, ScratchArena
 from ignition.preparation.tuning import RecordedPreparationSession
 from ignition.recipes.deepseek41.attention import INDEXER_QUERY_ROWS
 
@@ -61,17 +61,23 @@ def _check_topk(indices, scores, *, allowed=None):
 
 class BatchedSelection:
     def __init__(self, query, weights, cache, pages, lengths, active, output, *, page_size,
-                 session, arena, name, candidates=None, counts=None, produce=False):
+                 session, arena, name, candidates=None, counts=None, produce=False, buffers=None):
         self.operations = []
+        cursors = []
         for first in range(0, query.shape[0], INDEXER_QUERY_ROWS):
             last = min(first + INDEXER_QUERY_ROWS, query.shape[0])
             options = {}
             if candidates is not None:
                 options = (dict(candidates_out=candidates[first:last], counts_out=counts[first:last])
                            if produce else dict(candidates=candidates[first:last], counts=counts[first:last]))
+            cursor = None if buffers is None else buffers.fork()
+            if cursor is not None:
+                cursors.append(cursor)
             self.operations.append(PreparedMXFP4Indexer(query[first:last], weights[first:last],
                 cache, pages[first:last], lengths[first:last], active, output[first:last],
-                page_size=page_size, session=session, name=f"{name}.{first}", workspace=arena, **options))
+                page_size=page_size, session=session, name=f"{name}.{first}", workspace=arena, buffers=cursor, **options))
+        if buffers is not None:
+            buffers.join(*cursors)
 
     def __call__(self):
         for operation in self.operations:
@@ -111,6 +117,7 @@ def test_compiled_query_batches_match_independent_scores_with_candidate_reuse(pa
     outputs = {mode: torch.empty((rows, 512), device=device, dtype=torch.int32)
                for mode in ("full", "producer", "consumer")}
     arena = ScratchArena(device)
+    buffers = GraphBufferPool(device, chunk_bytes=2 << 20)
     operations, functions, graphs = {}, {}, {}
     worker = None
     with RecordedPreparationSession(device=device, checkpoint="ds41-index-batches",
@@ -122,7 +129,7 @@ def test_compiled_query_batches_match_independent_scores_with_candidate_reuse(pa
                 operations[mode] = BatchedSelection(queries[source], weights[source], cache, table,
                     lengths, active, outputs[mode], page_size=page_size, session=session, arena=arena,
                     name=mode, candidates=None if mode == "full" else candidates,
-                    counts=counts, produce=mode == "producer")
+                    counts=counts, produce=mode == "producer", buffers=buffers.cursor())
             session.tune()
             operations["full"].operations[0].write_keys(keys, slots)
             saved_cache = cache.clone()
@@ -154,6 +161,9 @@ def test_compiled_query_batches_match_independent_scores_with_candidate_reuse(pa
                 for mode in ("full", "producer", "consumer", "full"):
                     outputs[mode].fill_(-42)
                     arena.tensor.fill_(0x5A)
+                    for chunks in buffers.chunks.values():
+                        for chunk in chunks:
+                            chunk.fill_(0xA5)
                     torch.cuda.synchronize()
                     before = torch.cuda.memory_stats()
                     ticket = worker.submit(bundle.graph_indices[mode], repetitions=2)
