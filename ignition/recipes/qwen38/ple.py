@@ -28,6 +28,10 @@ def _read_small(manifest: CheckpointManifest, name: str) -> torch.Tensor:
     metadata = manifest.tensors[name]
     if metadata.nbytes > 1024:
         raise ValueError(f"{name} exceeds the PLE geometry/scalar read limit")
+    from ignition.preparation.checkpoint_source import read_small_tensor, source_for
+
+    if source_for(manifest.snapshot) is not None:
+        return read_small_tensor(manifest, name, limit=1024)
     with safe_open(
         manifest.snapshot / metadata.shard, framework="pt", device="cpu"
     ) as source:

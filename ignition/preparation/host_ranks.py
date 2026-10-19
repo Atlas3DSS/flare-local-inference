@@ -3,10 +3,10 @@
 Each host starts its own rank process. Rank zero listens on an address every
 peer can reach, such as a DGX Spark's RoCE fabric address. A peer knocks on
 that rendezvous with its rank, the world size, its source identity, and its
-host topology. Rank zero admits every rank once, sends each peer the checkpoint
-files it lacks, and hands each peer the preparation it runs. Ranks then form a
-Gloo group through a TCP store on rank zero, which collectives use to exchange
-their RDMA endpoints.
+host topology. Rank zero admits every rank once and serves authenticated
+checkpoint metadata and exact routed byte ranges while each peer prepares its
+own shard. Ranks form a Gloo group through a TCP store on rank zero, which
+collectives use to exchange their RDMA endpoints.
 
 Every peer holds two TCP connections to rank zero. The control connection
 carries the handshake, the preparation assignment, memory reports and the serve
@@ -33,9 +33,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 
-from .host_memory import release_page_cache
-
-PROTOCOL = 2
+PROTOCOL = 3
 # Peers wait here while rank zero compiles the complete serving catalog.
 _PREPARATION_TIMEOUT = timedelta(hours=2)
 _HANDSHAKE_SECONDS = 30
@@ -43,8 +41,6 @@ _MAX_MESSAGE = 1 << 30
 _SHUTDOWN_SECONDS = 120
 _JSON, _PICKLE = b"J", b"P"
 _COPY_BLOCK = 16 << 20
-# Free space a peer keeps beyond the checkpoint files it receives.
-_DISK_MARGIN = 4 << 30
 
 
 def _send(sock, kind, payload):
@@ -162,180 +158,7 @@ def parse_address(text):
     return host, int(port)
 
 
-def checkpoint_files(snapshot):
-    """Each file of a hub snapshot, in path order: its path in the snapshot, its size and its blob.
-
-    A Hugging Face cache links snapshot files to blobs named by their contents' SHA-256, or by
-    their Git object ID outside LFS. A file without a blob link has no blob name.
-    """
-    snapshot = Path(snapshot)
-    return tuple((path.relative_to(snapshot).as_posix(), path.stat().st_size,
-                  Path(os.readlink(path)).name if path.is_symlink() else None)
-                 for path in sorted(snapshot.rglob("*")) if path.is_file())
-
-
-def _digest(blob, size):
-    """A hash that must reproduce a blob's name from its contents, or None for an unnamed file."""
-    if blob is None or any(c not in "0123456789abcdef" for c in blob):
-        return None
-    if len(blob) == 64:
-        return hashlib.sha256()
-    if len(blob) == 40:
-        digest = hashlib.sha1()
-        digest.update(b"blob %d\0" % size)
-        return digest
-    return None
-
-
-def _content_matches(path, blob, size):
-    digest = _digest(blob, size)
-    if digest is None:
-        return True
-    with path.open("rb") as source:
-        while block := source.read(_COPY_BLOCK):
-            digest.update(block)
-        os.posix_fadvise(source.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
-    return digest.hexdigest() == blob
-
-
-def _snapshot_path(snapshot, name):
-    relative = Path(name)
-    if relative.is_absolute() or ".." in relative.parts or not relative.parts:
-        raise ValueError(f"checkpoint file {name!r} lies outside its snapshot")
-    return snapshot / relative
-
-
-def _link(target, blob_path):
-    """Point a snapshot file at its blob, replacing whatever the snapshot held there."""
-    target.parent.mkdir(parents=True, exist_ok=True)
-    link = target.with_name(f".{target.name}.flare-link")
-    link.unlink(missing_ok=True)
-    os.symlink(os.path.relpath(blob_path, target.parent), link)
-    os.replace(link, target)
-
-
-def _missing_files(snapshot, files):
-    """Names of rank zero's files this host's snapshot lacks, linking blobs it already holds."""
-    blobs = snapshot.parents[1] / "blobs"
-    missing = []
-    for name, size, blob in files:
-        target = _snapshot_path(snapshot, name)
-        if target.is_symlink() and blob is not None:
-            held = Path(os.readlink(target)).name == blob and target.is_file() and target.stat().st_size == size
-        else:
-            # A copied file names no blob: its contents must reproduce rank zero's blob name.
-            held = target.is_file() and target.stat().st_size == size and _content_matches(target, blob, size)
-        if not held and blob is not None and (blobs / blob).is_file() and (blobs / blob).stat().st_size == size:
-            _link(target, blobs / blob)
-            held = True
-        if not held:
-            missing.append(name)
-    return missing
-
-
-def _receive_file(sock, snapshot, name, size, blob):
-    """Write one checkpoint file as it arrives, under its blob when it has one, and verify its hash."""
-    target = _snapshot_path(snapshot, name)
-    destination = target if blob is None else snapshot.parents[1] / "blobs" / blob
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    partial = destination.with_name(f".{destination.name}.flare-incomplete")
-    digest = _digest(blob, size)
-    buffer = memoryview(bytearray(min(size, _COPY_BLOCK) or 1))
-    try:
-        with partial.open("wb") as output:
-            remaining = size
-            while remaining:
-                count = sock.recv_into(buffer[:min(remaining, len(buffer))])
-                if not count:
-                    raise ConnectionError("rank zero closed its connection while sending the checkpoint")
-                output.write(buffer[:count])
-                if digest is not None:
-                    digest.update(buffer[:count])
-                remaining -= count
-            # Written pages must reach the disk before release_page_cache can drop them.
-            output.flush()
-            os.fsync(output.fileno())
-        if digest is not None and digest.hexdigest() != blob:
-            raise ValueError(f"checkpoint file {name} arrived with contents that do not match blob {blob}")
-        os.replace(partial, destination)
-    finally:
-        partial.unlink(missing_ok=True)
-    if destination != target:
-        _link(target, destination)
-
-
-def hold_checkpoint(control, snapshot, files, *, report=None):
-    """Receive the files of rank zero's checkpoint this host lacks into `snapshot`, its hub location here.
-
-    Rank zero has sent `files`, as checkpoint_files lists them. Received files join the hub cache's
-    blobs, so revisions share unchanged files and the host keeps one copy of each.
-    """
-    snapshot = Path(snapshot)
-    try:
-        missing = _missing_files(snapshot, files)
-        sizes = {name: (size, blob) for name, size, blob in files}
-        needed = sum(sizes[name][0] for name in missing)
-        existing = next(path for path in (snapshot, *snapshot.parents) if path.exists())
-        free = shutil.disk_usage(existing).free
-        if missing and needed + _DISK_MARGIN > free:
-            raise OSError(f"the checkpoint needs {needed / (1 << 30):.1f} GiB more on this host; "
-                          f"{free / (1 << 30):.1f} GiB is free at {existing}")
-    except BaseException as error:
-        send_object(control, {"error": str(error)})
-        raise
-    send_object(control, {"missing": missing})
-    if missing and report is not None:
-        report(f"receiving {len(missing)} checkpoint files, {needed / (1 << 30):.1f} GiB, from rank zero")
-    for name in missing:
-        _receive_file(control, snapshot, name, *sizes[name])
-    # An integrated GPU counts page cache as used memory: received files would otherwise leave
-    # too little to create this rank's CUDA context.
-    release_page_cache(_snapshot_path(snapshot, name) for name in missing)
-    send_object(control, {"checkpoint": "held"})
-    return snapshot
-
-
-def share_checkpoint(controls, snapshot, checkpoint, *, report=None):
-    """Send every peer the files of rank zero's checkpoint it lacks, all peers at once.
-
-    Peers verify each file against its blob's content hash; one that cannot hold the checkpoint
-    fails preparation. Returns the bytes sent.
-    """
-    import concurrent.futures
-
-    snapshot = Path(snapshot)
-    files = checkpoint_files(snapshot)
-    sizes = {name: size for name, size, _ in files}
-    sent, lock = [0], threading.Lock()
-
-    def share(rank, control):
-        send_object(control, ("checkpoint", checkpoint, files))
-        reply = receive_object(control)
-        if "missing" not in reply:
-            raise RuntimeError(f"rank {rank} cannot hold the checkpoint: {reply.get('error', reply)}")
-        for name in reply["missing"]:
-            if name not in sizes:
-                raise RuntimeError(f"rank {rank} requested {name!r}, which the checkpoint does not hold")
-            with (snapshot / name).open("rb") as source:
-                control.sendfile(source, 0, sizes[name])
-            with lock:
-                sent[0] += sizes[name]
-                if report is not None:
-                    report(f"{sent[0] / (1 << 30):.1f} GiB sent")
-        reply = receive_object(control)
-        if reply != {"checkpoint": "held"}:
-            raise RuntimeError(f"rank {rank} did not store the checkpoint: {reply}")
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(controls)) as pool:
-        for future in [pool.submit(share, rank, control) for rank, control in enumerate(controls, 1)]:
-            future.result()
-    # Sending read the files into the page cache, which an integrated GPU counts as used memory.
-    if sent[0]:
-        release_page_cache(snapshot / name for name, _, _ in files)
-    return sent[0]
-
-
-def _watch_until_closed(sockets, finished, reason):
+def _watch_until_closed(sockets, finished, reason, *, cleanup=None):
     """Exit this process when another rank's connection closes before coordinated shutdown."""
     def watch():
         poller = select.poll()
@@ -347,6 +170,8 @@ def _watch_until_closed(sockets, finished, reason):
                 return
             if events:
                 print(f"flare: {reason}", flush=True)
+                if cleanup is not None:
+                    cleanup()
                 os._exit(1)
 
     thread = threading.Thread(target=watch, name="flare-rank-lifetime", daemon=True)
@@ -365,11 +190,12 @@ class _Peer:
 class HostRendezvous:
     """Rank zero's listener: admits one process per peer rank, each on its own host."""
 
-    def __init__(self, address, world, *, identity, topology):
+    def __init__(self, address, world, *, identity, topology, checkpoint_token_file="~/.config/flare/agent.token"):
         if world not in (2, 4):
             raise ValueError("multi-host tensor parallelism requires two or four ranks")
         self.address, self.world = parse_address(address), world
         self.identity, self.topology = identity, topology
+        self.checkpoint_token_file = checkpoint_token_file
         self.session = secrets.token_hex(16)
         self.listener = socket.create_server(self.address, reuse_port=False)
         self.peers = {}
@@ -461,15 +287,29 @@ class HostRendezvous:
         if dist.is_initialized():
             raise RuntimeError("rank preparation requires exclusive ownership of the control group")
         snapshot = Path(snapshot)
-        if snapshot.parent.name != "snapshots" or snapshot.name != checkpoint.revision:
+        local = Path(checkpoint.repository)
+        if local.is_absolute():
+            if snapshot.resolve() != local.resolve():
+                raise ValueError(f"local checkpoint directory differs from its declared source: {snapshot}")
+        elif snapshot.parent.name != "snapshots" or snapshot.name != checkpoint.revision:
             raise ValueError("multi-host preparation sends peers a Hugging Face checkpoint from the hub cache, "
                              f"not the directory {snapshot}")
         controls = [self.peers[rank].control for rank in range(1, self.world)]
         _watch_until_closed(controls, self.stopping, "a tensor-parallel peer disconnected before shutdown")
+        from .checkpoint_source import RootSource, SourceServer, token
+
+        source = RootSource(snapshot, checkpoint)
+        readers = []
         try:
-            with phase(progress, "Share checkpoint with peer ranks") as stage:
-                sent = share_checkpoint(controls, snapshot, checkpoint, report=stage.update)
-                stage.update(f"{sent / (1 << 30):.1f} GiB sent" if sent else "every peer holds it")
+            key = token(self.checkpoint_token_file)
+            with phase(progress, "Admit checkpoint range readers"):
+                for rank, control in enumerate(controls, 1):
+                    send_object(control, ("checkpoint-source", checkpoint))
+                    reader = SourceServer(source, control, key, rank, self.identity)
+                    readers.append(reader)
+                    reader.thread.start()
+                for reader in readers:
+                    reader.wait_ready()
             with phase(progress, "Connect tensor-parallel ranks"):
                 _use_interface(self.address[0])
                 # Peers connect only after receiving the store's port, so rank zero does not wait for them here.
@@ -484,6 +324,9 @@ class HostRendezvous:
             model = prepare(snapshot, config, rank=0, group=dist.group.WORLD, progress=progress,
                             **({} if package_storage is None else {"package_storage": package_storage}))
             model.manifest()
+            # Loading owns each socket's reader until its authenticated end marker is acknowledged.
+            for reader in readers:
+                reader.join()
             with phase(progress, "Wait for tensor-parallel ranks", total=len(controls)) as stage:
                 reports = []
                 for control in controls:
@@ -497,6 +340,8 @@ class HostRendezvous:
             traceback.print_exc()
             print("flare: terminating tensor-parallel rank group: preparation failed", flush=True)
             os._exit(1)
+        finally:
+            source.close()
 
     def finish(self):
         """Wait for every peer to report its exit, then release the rendezvous."""
@@ -675,8 +520,9 @@ def knock(address, rank, world, *, identity, topology, timeout=600.0, report=Non
     return control, executor
 
 
-def serve_peer(control, executor, rank, world, *, hub_cache, progress=None):
-    """Run one peer rank: hold rank zero's checkpoint in `hub_cache`, prepare its assignment, report
+def serve_peer(control, executor, rank, world, *, hub_cache, progress=None, export_staging=None,
+               checkpoint_token_file="~/.config/flare/agent.token", identity=None):
+    """Prepare one peer from owned checkpoint metadata and requested source ranges, report
     memory, and serve until coordinated drain.
 
     Any failure exits the process; rank zero then ends the group.
@@ -684,17 +530,24 @@ def serve_peer(control, executor, rank, world, *, hub_cache, progress=None):
     import signal
 
     finished = threading.Event()
-    _watch_until_closed([control], finished, "rank zero disconnected before shutdown")
+    owned_sources = []
+    _watch_until_closed([control], finished, "rank zero disconnected before shutdown",
+                        cleanup=lambda: [source.close() for source in owned_sources])
     # Rank zero coordinates shutdown; a terminal interrupt must not end a peer mid-drain.
     signal.signal(signal.SIGINT, signal.SIG_IGN)
+    source = source_scope = None
     try:
-        from ignition.recipes import snapshot_directory
+        from .checkpoint_source import RemoteSource, token
 
         command = receive_object(control)
-        if not (isinstance(command, tuple) and command[0] == "checkpoint"):
+        if not (isinstance(command, tuple) and command[0] == "checkpoint-source"):
             raise RuntimeError(f"rank zero sent {command!r} before its checkpoint")
-        _, checkpoint, files = command
-        snapshot = hold_checkpoint(control, snapshot_directory(hub_cache, checkpoint), files, report=progress)
+        _, checkpoint = command
+        source = RemoteSource(control, token(checkpoint_token_file), rank,
+                              source_identity() if identity is None else identity, checkpoint,
+                              directory=export_staging, on_created=owned_sources.append)
+        source_scope = source.activate()
+        snapshot = source_scope.__enter__()
         assignment = receive_object(control)
         config, prepare = assignment["config"], assignment["prepare"]
         store_host, store_port = assignment["store"]
@@ -719,6 +572,10 @@ def serve_peer(control, executor, rank, world, *, hub_cache, progress=None):
                                     package_storage=storage)
         else:
             model = prepare(snapshot, config, rank=rank, group=dist.group.WORLD, progress=progress)
+        source.finish()
+        model.memory_report["checkpoint_source"] = dict(source.stats)
+        if progress is not None:
+            progress(f"received {source.stats['payload_bytes'] / (1 << 30):.2f} GiB of checkpoint ranges")
         model.manifest()
         send_object(control, {"report": model.memory_report})
         command = receive_object(control)
@@ -728,7 +585,9 @@ def serve_peer(control, executor, rank, world, *, hub_cache, progress=None):
             from .runtime_package import export_model
 
             _, options = command
-            directory = Path(tempfile.mkdtemp(prefix="flare-rank-"))
+            if export_staging is not None:
+                Path(export_staging).mkdir(parents=True, exist_ok=True)
+            directory = Path(tempfile.mkdtemp(prefix="flare-rank-", dir=export_staging))
             try:
                 path = directory / f"rank-{rank}.safetensors"
                 if progress is not None:
@@ -737,8 +596,8 @@ def serve_peer(control, executor, rank, world, *, hub_cache, progress=None):
                 # Rank zero appends this file to its package as it arrives.
                 send_object(control, {"exported": path.stat().st_size,
                                       "memory_inventory": package.memory_inventory})
-                with path.open("rb") as source:
-                    control.sendfile(source)
+                with path.open("rb") as package_stream:
+                    control.sendfile(package_stream)
             finally:
                 shutil.rmtree(directory, ignore_errors=True)
             command = receive_object(control)
@@ -764,11 +623,18 @@ def serve_peer(control, executor, rank, world, *, hub_cache, progress=None):
             for region in storage.host_regions:
                 region.close()
         dist.destroy_process_group()
+        source_scope.__exit__(None, None, None)
+        source_scope = None
+        source.close()
         finished.set()
         send_object(control, {"exit": 0})
         control.close()
     except BaseException:  # noqa: BLE001 - Never unwind CUDA resources around a stranded collective.
         traceback.print_exc()
+        if source_scope is not None:
+            source_scope.__exit__(None, None, None)
+        if source is not None:
+            source.close()
         try:
             send_object(control, {"exit": 1, "error": traceback.format_exc(limit=3)})
         except OSError:

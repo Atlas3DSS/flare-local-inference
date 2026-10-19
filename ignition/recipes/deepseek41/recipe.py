@@ -7,7 +7,7 @@ from ignition.recipes.declaration import Checkpoint, RankCosts, RankUsage, Recip
 
 
 def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress, retain_graphs=False,
-            package_storage=None):
+            package_storage=None, ranks=None):
     from ignition.preparation.rank_group import prepare_group
     from .bootstrap import PreparationConfig, prepare_rank
 
@@ -17,7 +17,8 @@ def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress, retain_
         "speculative_fixed_width": speculation.fixed_width, "packed_verification": speculation.packed_verification}
     config = PreparationConfig(compile_workers=plan.compile_workers, tuning_replica=plan.tuning_replica,
         image_concurrency=plan.image_concurrency,
-        devices=tuple(range(plan.world_size)), compile_decoder=compile_forwards,
+        devices=tuple(range(plan.world_size)) if ranks is None else (0,) * plan.world_size,
+        hosts=None if ranks is None else ranks.hosts, roce_ring=plan.roce_ring, compile_decoder=compile_forwards,
         retain_graphs=retain_graphs, max_active=plan.concurrency, context=plan.context,
         prefill_chunk_size=plan.prefill_chunk, minimum_pages=plan.minimum_pages,
         snapshot_budget_bytes=plan.snapshots * plan.costs.state_row_bytes,
@@ -25,7 +26,8 @@ def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress, retain_
         dspark=speculation is not None, split_speculation=speculation is not None and speculation.draft_tokens > 0,
         stream_overlap=plan.stream_overlap, expert_scale_compression=plan.expert_scale_compression,
         mla_compute_mode=plan.mla_compute_mode, **drafting)
-    return prepare_group(snapshot, config, prepare_rank, progress=progress, package_storage=package_storage)
+    return prepare_group(snapshot, config, prepare_rank, progress=progress, package_storage=package_storage,
+                         ranks=ranks, checkpoint=plan.checkpoint)
 
 
 def usage(prepared):

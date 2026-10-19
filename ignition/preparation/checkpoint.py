@@ -184,17 +184,29 @@ _DTYPE_BYTES = {"BF16": 2, "F32": 4, "F8_E4M3": 1, "F8_E8M0": 1,
 
 
 def _read_header(path: Path, shard: str) -> tuple[ShardMetadata, dict[str, TensorMetadata]]:
-    with path.open("rb", buffering=0) as source:
-        size = os.fstat(source.fileno()).st_size
-        prefix = source.read(8)
-        if len(prefix) != 8:
-            raise CheckpointError(f"{shard}: truncated safetensors length")
+    from .checkpoint_source import source_for
+
+    remote = source_for(path)
+    if remote is not None:
+        name = remote.name(path)
+        size = remote.files[name]["bytes"]
+        content = remote.headers[name]
+        prefix, raw = content[:8], content[8:]
         length = int.from_bytes(prefix, "little")
-        if length == 0 or length > 100 << 20 or length > size - 8:
-            raise CheckpointError(f"{shard}: invalid safetensors header length {length}")
-        raw = source.read(length)
-        if len(raw) != length:
-            raise CheckpointError(f"{shard}: truncated safetensors header")
+        if len(prefix) != 8 or length == 0 or length > 100 << 20 or length > size - 8 or len(raw) != length:
+            raise CheckpointError(f"{shard}: invalid remote safetensors header")
+    else:
+        with path.open("rb", buffering=0) as source:
+            size = os.fstat(source.fileno()).st_size
+            prefix = source.read(8)
+            if len(prefix) != 8:
+                raise CheckpointError(f"{shard}: truncated safetensors length")
+            length = int.from_bytes(prefix, "little")
+            if length == 0 or length > 100 << 20 or length > size - 8:
+                raise CheckpointError(f"{shard}: invalid safetensors header length")
+            raw = source.read(length)
+            if len(raw) != length:
+                raise CheckpointError(f"{shard}: truncated safetensors header")
     header = _parse_json(raw, shard)
     tensors = {}
     data_start = 8 + length
@@ -328,6 +340,9 @@ def inspect_indexed_checkpoint(snapshot: str | Path) -> IndexedCheckpoint:
     The direct loader revalidates source file identity before moving payloads.
     """
     snapshot = Path(snapshot).expanduser().absolute()
+    from .checkpoint_source import source_for
+
+    remote = source_for(snapshot)
     container = snapshot / "manifest.json"
     if container.is_file():
         description = _parse_json(container.read_bytes(), "manifest.json")
@@ -335,7 +350,8 @@ def inspect_indexed_checkpoint(snapshot: str | Path) -> IndexedCheckpoint:
             from .csf_checkpoint import inspect_mxfp4_csf
 
             return inspect_mxfp4_csf(snapshot, description)
-    if not (snapshot / "model.safetensors.index.json").exists() and (snapshot / "model.safetensors").is_file():
+    if not (snapshot / "model.safetensors.index.json").exists() and (
+            (snapshot / "model.safetensors").is_file() or remote is not None and "model.safetensors" in remote.files):
         shard, tensors = _read_header(snapshot / "model.safetensors", "model.safetensors")
         return IndexedCheckpoint(snapshot, MappingProxyType(tensors), (shard,))
     index = _parse_json((snapshot / "model.safetensors.index.json").read_bytes(),

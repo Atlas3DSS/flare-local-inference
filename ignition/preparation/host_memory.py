@@ -160,6 +160,10 @@ def release_page_cache(paths) -> None:
     # Windows checkpoint reads bypass the filesystem cache.
     if os.name == "nt":
         return
+    from .checkpoint_source import source_for
+
     for path in paths:
+        if source_for(path) is not None:
+            continue
         with open(path, "rb") as file:
             os.posix_fadvise(file.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)

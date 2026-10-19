@@ -21,14 +21,14 @@ Flare executable and its prepared graphs without Python.
 ## Requirements
 
 - Two or four DGX Sparks, one GPU per host, with the same OS image and NVIDIA
-  driver. GLM-5.3 Flash and Qwen3.8 Flash support this preparation path. Qwen TP4
-  requires full-model validation; see [model preparation](model-preparation.md).
+  driver. GLM-5.3 Flash, Qwen3.8 Flash, and DeepSeek V4.1 Flash 1017 support
+  this preparation path. Qwen TP4 requires full-model validation; see [model preparation](model-preparation.md).
 - The same Flare, Ignition, and FlashInfer sources on every preparation host.
   Preparation rejects peers whose source identities differ. Follow the
   [build instructions](../AGENTS.md#build-and-run-model-checkpoints) on each host.
 - A source checkpoint in rank zero's Hugging Face hub cache, configured with
-  `[paths] hub_cache`. Multi-host export requires the checkpoint to be cached
-  before preparation starts.
+  `[paths] hub_cache`, or an absolute local checkpoint directory supplied as `MODEL`.
+  Only rank zero retains the complete source checkpoint.
 - Active RoCE ports with IPv4 RoCEv2 GIDs on every host. The ranks exchange
   tensors through RoCEnante, b12x's RoCE collectives, whose kernels are captured
   in the model graphs. This transport uses the Sparks' ConnectX-7 ports.
@@ -64,15 +64,15 @@ the weights, graphs, and other resources that Flare loads for serving.
 
 | Artifact | Rank zero | Each peer |
 | --- | --- | --- |
-| Source checkpoint | Retained in its hub cache | Missing files are copied into its hub cache during preparation and retained |
-| Temporary export | Stages all ranks before publication | Stages its own rank in the system temporary directory, then sends it to rank zero |
+| Source checkpoint | Retained in its hub cache or local checkpoint directory | Receives metadata and headers, then requests the byte ranges its weight loader needs |
+| Temporary export | Stages all ranks before publication | Stages its own rank under `[paths] export_staging`, then sends it to rank zero |
 | Signed serving package | Retains the complete package, including companion files | The agent caches its rank's resources and required shared data, fetched from rank zero's host and digested once on arrival |
 | Serving executable | The agent caches and runs the executable sent by the controller | The agent caches and runs the executable sent by the controller |
 
 On rank zero, allow roughly twice the final package size for staging and
 publication, in addition to checkpoint storage. On a preparation peer, allow
-space for the checkpoint and roughly twice its own exported rank size while
-that export is assembled. Temporary exports are removed after use.
+roughly twice its own exported rank size while that export is assembled.
+Temporary exports are removed after use.
 
 The agent stores packages under `~/.cache/flare/packages` and executables under
 `~/.cache/flare/bin`, in the account running the service. After a successful
@@ -166,12 +166,24 @@ On `hertz`, join the same rendezvous:
 For four hosts, use `--ranks 4` everywhere and run one join process per peer,
 with distinct ranks 1, 2, and 3.
 
-Rank zero admits each peer once and plans from all participating GPUs. It sends
-each peer the checkpoint files missing from that peer's hub cache. A peer with
-an empty cache receives the complete checkpoint; files already present with the
-expected content are reused. Each rank then loads its own weights and prepares
-its graphs. Forward compilation is divided across ranks, and compiled artifacts
-are shared with ranks that need them.
+Rank zero admits each peer once and plans from all participating GPUs. Each peer
+receives authenticated metadata and safetensors headers in a private temporary
+directory, then requests the byte ranges its weight loader needs. Strided column
+reads transfer selected row bytes without the intervening columns. Peers do not
+create full safetensor shards or sparse checkpoint placeholders. Compressed
+scale planes retain their exact encoding and existing selection rules.
+
+Preparation uses `[preparation] checkpoint_token_file`, defaulting to
+`~/.config/flare/agent.token`, for mutual authentication and sequenced HMAC frames.
+Provision this shared preparation token separately from the fleet's node and
+controller keys. Install identical contents of at least 32 random bytes on every
+preparation host, with file permissions `600`. Checkpoint paths,
+contents, and byte counts are authenticated; checkpoint bytes are not encrypted.
+Source files must remain unchanged while loading. File-backed auxiliary tables
+remain source spans on rank zero for publication; peers receive their headers
+during preparation. Each rank loads its weights and prepares its graphs.
+Forward compilation is divided across ranks, and compiled artifacts are shared
+with ranks that need them.
 
 Each peer exports its rank to a temporary file and streams that file to rank
 zero. Rank zero assembles all ranks, signs the package, encrypts its executable
@@ -269,7 +281,8 @@ distribution and process management to the operator.
 | `join code proof rejected` or `this node requires its join code` | The code matches what `flare agent install` printed and has not expired or been used. |
 | `peer speaks agent protocol N` | Every node and the controller run the same Flare build; run `flare agent install` with the matching executable. |
 | `group ... is running on this node` | Stop the running group with `flare fleet stop` before starting another. |
-| `rank R cannot hold the checkpoint` | The peer has space for missing checkpoint files, and received files pass content verification. |
+| `checkpoint peer authentication failed` | All preparation hosts use the same private checkpoint token. |
+| `checkpoint source changed after admission` | Checkpoint source files remain unchanged throughout preparation. |
 | `rank zero refused rank R` | Every serving rank uses the same package export and world size. |
 | `tensor-parallel rank identity or graph I/O schema differs` | All ranks use matching serving options and compatible executables. |
 | `package RoCE kernels use proxy ABI ...` | The package's FlashInfer RoCEnante ABI matches the one vendored by the Flare executable; rebuild Flare or re-export as needed. |

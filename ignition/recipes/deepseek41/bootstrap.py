@@ -19,7 +19,7 @@ from ignition.components.deepseek_vision import (PreparedVision, VisionInputs, V
     PrefillVisionInputs, PreparedVisionGeneration, VisionState)
 from ignition.preparation.checkpoint import inspect_indexed_checkpoint
 from ignition.preparation.collectives import (CollectivePreparation, create_all_gather_runtime,
-    create_all_reduce_runtime, create_dma_all_reduce_runtime, create_result_broadcast_runtime)
+    create_all_reduce_runtime, create_dma_all_reduce_runtime, create_result_broadcast_runtime, create_roce_runtime)
 from ignition.preparation.disposable import storage_ranges
 from ignition.preparation.execution import GraphSignature
 from ignition.preparation.host_memory import virtual_device_memory, release_unused
@@ -60,6 +60,9 @@ class PreparationConfig:
     compile_workers: int | None = None
     tuning_replica: TuningReplica | None = None
     devices: tuple[int, ...] = (0, 1, 2, 3)
+    # Device ordinals are host-local when each rank runs on its own Spark.
+    hosts: tuple[str, ...] | None = None
+    roce_ring: bool = False
     context: int = 1048576
     prefill_chunk_size: int = 4096
     max_active: int = 4
@@ -102,8 +105,13 @@ class PreparationConfig:
             raise ValueError("packed verification requires an adaptive retained-proposal catalog")
         if type(self.stream_overlap) is not bool:
             raise TypeError("stream_overlap must be a boolean")
-        if len(self.devices) != 4 or len(set(self.devices)) != 4 or any(d < 0 for d in self.devices):
+        placements = tuple(zip(self.hosts or ("",) * len(self.devices), self.devices))
+        if (not isinstance(self.devices, tuple) or len(self.devices) != 4 or len(set(placements)) != 4
+                or self.hosts is not None and (not isinstance(self.hosts, tuple) or len(self.hosts) != 4)
+                or any(type(d) is not int or d < 0 for d in self.devices)):
             raise ValueError("DeepSeek V4.1 Flash preparation requires four distinct GPUs")
+        if self.roce_ring and self.hosts is None:
+            raise ValueError("RoCE ring requires ranks on separate hosts")
         if not PAGE_TOKENS <= self.context <= 1048576 or self.context % PAGE_TOKENS:
             raise ValueError("DeepSeek context must be 128-aligned in [128,1048576]")
         if not 64 <= self.prefill_chunk_size <= self.context or self.prefill_chunk_size % 64:
@@ -147,6 +155,39 @@ class PreparationConfig:
     def all_reduce_tokens(self):
         return max(self.decode_tokens, self.request_capacity * self.draft_tokens,
                    *(capacity for capacity in self.prefill_capacities if capacity < 128))
+
+
+def _collective_runtimes(config, group, device, *, coordinator, package_storage, verification_samples):
+    """Share one RoCE channel across ordered graph collectives on separate hosts."""
+    tokens = max(config.prefill_chunk_size, config.decode_tokens, config.request_capacity * config.draft_tokens)
+    sample_rows = max(verification_samples, config.request_capacity * config.draft_tokens)
+    layouts = ()
+    if config.dspark:
+        from ignition.components.draft_sampling import PreparedDraftDistribution
+        from ignition.components.speculation import SpeculativeAcceptance
+
+        batch = max(config.batch_capacities)
+        layouts = (SpeculativeAcceptance.storage_layout(batch, max(config.speculative_widths)),)
+        if config.draft_tokens:
+            layouts += (PreparedDraftDistribution.broadcast_layout(batch),)
+    if coordinator.spans_hosts:
+        from ignition.components.collectives import packed_broadcast_layout
+
+        # Vocabulary partitions and packed sampling results use the same serial gather channel.
+        result_bytes = max((packed_broadcast_layout(layout.values())[1] for layout in layouts), default=0)
+        gather_bytes = max(sample_rows * (129280 // len(config.devices)) * 2,
+                           (result_bytes + 15) // 16 * 16)
+        decode_tokens = config.all_reduce_tokens
+        runtime = create_roce_runtime(group, device, max_tokens=decode_tokens, pipe_tokens=tokens,
+            hidden_size=5120, gather_bytes=gather_bytes, ring=config.roce_ring, package_storage=package_storage)
+        return runtime, runtime, runtime, runtime if layouts else None
+    ipc = package_storage.peer_storage
+    collective = create_all_reduce_runtime(group, device, max_tokens=config.all_reduce_tokens, hidden_size=5120, ipc=ipc)
+    prefill = create_dma_all_reduce_runtime(group, device,
+        max_tokens=config.prefill_chunk_size, hidden_size=5120, ipc=ipc)
+    vocabulary = create_all_gather_runtime(group, device, max_rows=sample_rows, columns=129280, ipc=ipc)
+    result = create_result_broadcast_runtime(group, device, layouts=layouts, ipc=ipc) if layouts else None
+    return collective, prefill, vocabulary, result
 
 
 @torch.no_grad()
@@ -195,24 +236,11 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         frame = torch.zeros(1, dtype=torch.int32, device=device)
         records = torch.zeros((2, slots, 24 if config.dspark else 8), dtype=torch.int64, device=device)
         coordinator = CollectivePreparation(group)
-        ipc = package_storage.peer_storage
         verification_samples = (slots * max(config.speculative_widths)
                                 if config.packed_verification else config.decode_tokens)
-        collective = create_all_reduce_runtime(group, device, max_tokens=config.all_reduce_tokens, hidden_size=5120, ipc=ipc)
-        prefill_collective = create_dma_all_reduce_runtime(group, device,
-            max_tokens=config.prefill_chunk_size, hidden_size=5120, ipc=ipc)
-        vocabulary_collective = create_all_gather_runtime(group, device,
-            max_rows=max(verification_samples, slots * config.draft_tokens), columns=129280, ipc=ipc)
-        result_collective = None
-        if config.dspark:
-            from ignition.components.draft_sampling import PreparedDraftDistribution
-            from ignition.components.speculation import SpeculativeAcceptance
-
-            batch = max(config.batch_capacities)
-            layouts = [SpeculativeAcceptance.storage_layout(batch, max(config.speculative_widths))]
-            if config.draft_tokens:
-                layouts.append(PreparedDraftDistribution.broadcast_layout(batch))
-            result_collective = create_result_broadcast_runtime(group, device, layouts=layouts, ipc=ipc)
+        collective, prefill_collective, vocabulary_collective, result_collective = _collective_runtimes(
+            config, group, device, coordinator=coordinator, package_storage=package_storage,
+            verification_samples=verification_samples)
         identity = hashlib.sha256(json.dumps({"config": json.loads((metadata_path / "config.json").read_text()),
             "headers": [s.header_sha256 for s in manifest.shards], "world_size": shard.world_size,
             "contract": "deepseek41.graph-inputs.v1"}, sort_keys=True).encode()).hexdigest()
@@ -478,8 +506,8 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
             prefill_storage, decoder_storage, scratch, metadata, compiled, stream, graph_pool, session,
             collective, prefill_collective, vocabulary_collective, result_collective, coordinator, speculation,
             vision_state, vision_storage, vision_inputs, vision_prefill, graph_buffers, activation_buffers),
-        close_resources=tuple(c for c in (result_collective, prefill_collective, vocabulary_collective, collective)
-                              if c is not None))
+        close_resources=tuple(dict.fromkeys(c for c in
+            (result_collective, prefill_collective, vocabulary_collective, collective) if c is not None)))
     if split is not None:
         model.proposal_confidence = confidence.host_view
         model.proposal_state = split
