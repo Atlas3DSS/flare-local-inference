@@ -93,6 +93,12 @@ For development without export, `ignition serve` requires Heliopause's
 `qualification` Cargo feature; follow the
 [development launch instructions](docs/cli-design.md#development-without-package-export).
 
+## Kernel and PyTorch modeling authorship
+
+Kernel and PyTorch modeling changes must not originate from Claude Opus 5.5.
+Do not use Claude Opus 5.5 to design or implement these changes, or incorporate
+its generated changes through another contributor or agent.
+
 ## Preserve canonical model implementations where they fit
 
 - Treat Transformers as the canonical source for model structure and semantics.
