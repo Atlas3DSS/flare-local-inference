@@ -320,7 +320,7 @@ mod tests {
             fleet.upsert(Node {
                 name: name.into(),
                 fingerprint: format!("f{name}"),
-                public_key: format!("{}", name.repeat(64)),
+                public_key: name.repeat(64),
                 address: format!("{name}:29900"),
             });
         }

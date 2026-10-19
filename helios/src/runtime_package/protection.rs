@@ -253,6 +253,10 @@ impl VerifiedPackage {
     pub fn license(&self) -> Option<&PackageLicense> {
         self.archive.protection.license.as_ref()
     }
+    /// Digest the stored data of every verified rank against the signed index.
+    pub fn verify_stored_data(&self) -> Result<()> {
+        self.archive.protection.verify_data(&self.archive)
+    }
     /// Record the string the user applied to accept the publisher's terms. It derives every
     /// executable key, so a string other than the namespace the exporter encrypted under opens
     /// nothing; the caller obtains it from the user or from remembered acceptance.

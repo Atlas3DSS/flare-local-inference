@@ -203,7 +203,7 @@ with a message; an ERROR closes the session.
 | HAVE | Controller or node to node | Kind, name, size | Whether the cache holds the entry at that size |
 | PUT | Controller to node | Kind, name, size, optional ranges, then bytes | Stores an executable or package bytes at their offsets in a sparse file of the package's length |
 | CONTROLLERS | Controller to node | Signed controller-set record | Applies a higher revision signed by a current member |
-| TRANSFER | Controller to node | Grant, source node, cache directory, files with sizes and ranges | The node fetches those ranges from the source node into its cache and replies when stored |
+| TRANSFER | Controller to node | Grant, publisher profile, source node, cache directory, files with sizes and ranges | The node fetches those ranges from the source node into its cache, verifies the directory's stored data unless it verified before, and replies when done |
 | FETCH | Node to node | Grant, file name, ranges | Streams the file's bytes to a node the grant names, from the package the node holds or its cache |
 | GET | Controller to node | Absolute path, offset, length | Streams up to 256 MiB of a node-local file, used to mirror a package's header and index |
 | STAT | Controller to node | Absolute path | The package file's size and its companions' names and sizes |
@@ -315,8 +315,11 @@ sequenceDiagram
 5. The controller ensures the package. If the controller holds it, rank zero
    receives the complete package and the shared data. If a node holds it, that
    node is the source. Each peer receives TRANSFER naming the source and its
-   ranges and fetches them over the hosts' own network, in parallel. Peers
-   whose package came from a node run with `--verify-weights`.
+   ranges and fetches them over the hosts' own network, in parallel. A node
+   then digests the directory's stored data against the signed index, removes
+   the directory if any byte differs, and otherwise writes a marker in it; a
+   later TRANSFER into a marked directory that needs no bytes verifies
+   nothing, and a PUT or fetch into it removes the marker first.
 6. The controller sends RUN to every node, rank zero first. Rank zero's agent
    starts `flare run PACKAGE --rank 0 --rendezvous 0.0.0.0:PORT` with the
    grant's serving options and HTTP bind; peers start with `--rank R
@@ -417,10 +420,14 @@ on every node of the fleet. The controller key is therefore protected like the
 signing key in [signing](signing.md): owner-only permissions, and an encrypted
 backup if the fleet must survive losing the machine.
 
-Packages are signed per rank. A rank whose bytes came from another node loads
-with `--verify-weights`, so a compromised source node that serves tampered
-weights makes that rank fail to load rather than run them. A compromised node
-cannot pair other nodes, issue grants, or advance the controller set.
+Packages are signed per rank. An agent digests bytes fetched from another node
+against the signed index before it will run them and keeps the result with the
+cache directory, so a compromised source node that serves tampered weights
+makes the transfer fail rather than a rank run them. Bytes the controller
+sends with PUT are the controller's own and are not digested on the node;
+`--verify-weights` makes every rank digest its stored data at load. A
+compromised node cannot pair other nodes, issue grants, or advance the
+controller set.
 
 Removing a controller reaches nodes when any remaining controller connects;
 until then the removed key can still launch on nodes it reaches. A node key is
@@ -459,10 +466,6 @@ specification are not in the tree:
    `[preparation] checkpoint_token_file`. Validation: a GLM TP4 export through
    agents whose rank signatures verify and which serves identically to a manual
    export.
-
-A peer verifies its cached rank files on every launch, whether they were
-fetched for this launch or reused; remembering a verified entry's digest would
-confine that to new transfers.
 
 ## Limitations
 

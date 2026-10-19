@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use flare_helios::runtime_package::Publisher;
+use flare_helios::runtime_package::{Publisher, VerifiedPackage};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -175,6 +175,25 @@ impl Group {
 
 // ---- state -------------------------------------------------------------------------------------
 
+/// Verifies a package's stored data at `primary` for `rank` (None for a complete copy) against
+/// the publisher's signing key.
+pub type Verifier =
+    Box<dyn Fn(&Path, Option<usize>, &Publisher) -> Result<(), Failure> + Send + Sync>;
+
+/// The marker a package cache directory holds once its stored data verified.
+const VERIFIED: &str = ".verified";
+
+fn verify_package(
+    primary: &Path,
+    rank: Option<usize>,
+    publisher: &Publisher,
+) -> Result<(), Failure> {
+    VerifiedPackage::open(primary, std::slice::from_ref(publisher), rank)
+        .and_then(|package| package.verify_stored_data())
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 pub struct Agent {
     pub dir: AgentDir,
     pub key: Key,
@@ -182,10 +201,20 @@ pub struct Agent {
     pub name: String,
     pins: Pins,
     group: Mutex<Option<Arc<Group>>>,
+    verifier: Verifier,
 }
 
 impl Agent {
     pub fn new(dir: AgentDir, cache: PathBuf) -> Result<Self, Failure> {
+        Self::with_verifier(dir, cache, Box::new(verify_package))
+    }
+
+    /// An agent verifying fetched packages with `verifier` instead of Helios.
+    pub fn with_verifier(
+        dir: AgentDir,
+        cache: PathBuf,
+        verifier: Verifier,
+    ) -> Result<Self, Failure> {
         let key = dir.key()?;
         for directory in ["bin", "packages", "publishers"] {
             fs::create_dir_all(cache.join(directory))?;
@@ -197,6 +226,7 @@ impl Agent {
             name: super::hostname(),
             pins: Pins::default(),
             group: Mutex::new(None),
+            verifier,
         })
     }
 
@@ -464,6 +494,9 @@ fn put(
     }
     let path = cache::store(&agent.cache, kind, name, size, &ranges, &mut body)?;
     let unit = cache::unit(&agent.cache, &path);
+    if kind == "package" {
+        let _ = fs::remove_file(unit.join(VERIFIED));
+    }
     pinned.pin(unit.clone());
     for removed in cache::evict(unit.parent().unwrap(), &agent.pins)? {
         eprintln!("removed superseded {}", removed.display());
@@ -473,11 +506,24 @@ fn put(
 
 /// Fetch the files of a package from another node under a grant into the cache.
 fn transfer(agent: &Agent, pinned: &mut Pinned, request: &Value) -> Result<Vec<u8>, Failure> {
-    agent.grant(&request["grant"])?;
+    let grant = agent.grant(&request["grant"])?;
+    let rank = grant
+        .member(&agent.key.public())
+        .map(|m| m.rank)
+        .ok_or("this node is not a member of the grant")?;
+    let publisher: Publisher = serde_json::from_value(request["publisher"].clone())
+        .map_err(|_| "TRANSFER lacks the publisher profile")?;
+    publisher.validate().map_err(|e| e.to_string())?;
     let source_key = PublicKey::from_hex(field(&request["source"], "public_key")?)?;
     let address = field(&request["source"], "address")?;
     let directory = field(request, "directory")?;
     let files = request["files"].as_array().ok_or("request lacks files")?;
+    let primary = cache::entry(
+        &agent.cache,
+        "packages",
+        &format!("{directory}/{}", grant.primary()),
+    )?;
+    let marker = primary.with_file_name(VERIFIED);
     let mut session = Session::connect(address, &agent.key)?;
     let theirs = exchange_hello(&mut session, &agent.hello()?)?;
     if session.remote() != source_key {
@@ -498,6 +544,8 @@ fn transfer(agent: &Agent, pinned: &mut Pinned, request: &Value) -> Result<Vec<u
             pinned.pin(cache::unit(&agent.cache, &path));
             continue;
         }
+        // Bytes are arriving, so whatever the directory held is no longer verified.
+        let _ = fs::remove_file(&marker);
         session.write_frame(
             frame::FETCH,
             &json!({"grant": request["grant"], "name": name, "ranges": ranges})
@@ -529,7 +577,27 @@ fn transfer(agent: &Agent, pinned: &mut Pinned, request: &Value) -> Result<Vec<u
     for removed in cache::evict(&agent.cache.join("packages"), &agent.pins)? {
         eprintln!("removed superseded {}", removed.display());
     }
-    Ok(json!({"received": received}).to_string().into_bytes())
+    // Fetched bytes are verified once, here, and the directory remembers it; a rank started from
+    // a marked directory loads without re-reading its stored data.
+    let verified = !marker.is_file();
+    if verified {
+        let complete = rank == 0;
+        if let Err(error) = (agent.verifier)(&primary, (!complete).then_some(rank), &publisher) {
+            let _ = fs::remove_dir_all(primary.parent().unwrap());
+            return Err(format!(
+                "{directory}: stored data fetched from {address} failed verification and was removed: {error}"
+            )
+            .into());
+        }
+        fs::write(
+            &marker,
+            format!("{} {}\n", grant.primary(), grant.package.length),
+        )?;
+        eprintln!("{directory}: stored data verified");
+    }
+    Ok(json!({"received": received, "verified": verified})
+        .to_string()
+        .into_bytes())
 }
 
 /// Serve byte ranges of a package file to a member of the grant.
@@ -647,8 +715,8 @@ fn run(agent: &Arc<Agent>, request: &Value) -> Result<Arc<Group>, Failure> {
     let primary = grant.primary();
     let mut pins = Pinned::new(&agent.pins);
     pins.pin(binary.clone());
-    let (package, fetched) = match &grant.package.source {
-        Some(source) if source.public_key == mine.to_hex() => (PathBuf::from(&source.path), false),
+    let package = match &grant.package.source {
+        Some(source) if source.public_key == mine.to_hex() => PathBuf::from(&source.path),
         _ => {
             let directory = if rank == 0 {
                 grant.complete_directory()
@@ -657,8 +725,7 @@ fn run(agent: &Arc<Agent>, request: &Value) -> Result<Arc<Group>, Failure> {
             };
             let path = cache::entry(&agent.cache, "packages", &format!("{directory}/{primary}"))?;
             pins.pin(cache::unit(&agent.cache, &path));
-            // Rank zero's complete copy came from the controller; a peer's from another node.
-            (path, rank != 0)
+            path
         }
     };
     if !package.is_file() {
@@ -692,10 +759,6 @@ fn run(agent: &Arc<Agent>, request: &Value) -> Result<Arc<Group>, Failure> {
     }
     if grant.roce_ring {
         command.arg("--roce-ring");
-    }
-    // Bytes fetched from another node are verified before loading.
-    if fetched && !grant.serving.iter().any(|a| a == "--verify-weights") {
-        command.arg("--verify-weights");
     }
     // The controller accepted the publisher at its own terminal; the rank still verifies the
     // package and matches the exact key and namespace before loading.
@@ -938,12 +1001,16 @@ pub mod tests {
     use crate::fleet::grant::{ControllerKey, ControllerSet, Member, Package, Source};
     use std::net::TcpListener;
 
+    pub type Verified = Arc<Mutex<Vec<(PathBuf, Option<usize>)>>>;
+
     /// An agent on a free port in a temporary directory, with its controller's key.
     pub struct Harness {
         pub address: String,
         pub agent: Arc<Agent>,
         pub controller: Key,
         pub temp: tempfile::TempDir,
+        /// Packages the fake verifier accepted: the primary and the rank verified.
+        pub verified: Verified,
     }
 
     pub fn harness(seed: u8) -> Harness {
@@ -951,7 +1018,25 @@ pub mod tests {
         let dir = AgentDir::new(temp.path().join("agent"));
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap().to_string();
-        let agent = Arc::new(Agent::new(dir, temp.path().join("cache")).unwrap());
+        let verified = Arc::new(Mutex::new(Vec::new()));
+        let record = verified.clone();
+        let agent = Arc::new(
+            Agent::with_verifier(
+                dir,
+                temp.path().join("cache"),
+                Box::new(move |primary, rank, publisher| {
+                    if !primary.is_file() {
+                        return Err(format!("{} is not a file", primary.display()).into());
+                    }
+                    if publisher.namespace == "reject" {
+                        return Err("stored-data content verification failed".into());
+                    }
+                    record.lock().unwrap().push((primary.to_owned(), rank));
+                    Ok(())
+                }),
+            )
+            .unwrap(),
+        );
         {
             let agent = agent.clone();
             thread::spawn(move || serve_on(listener, agent));
@@ -961,6 +1046,7 @@ pub mod tests {
             agent,
             controller: Key::from_seed(&[seed; 32]).unwrap(),
             temp,
+            verified,
         }
     }
 
@@ -1229,6 +1315,7 @@ pub mod tests {
             agent: harness.agent.clone(),
             controller: Key::from_seed(&[3; 32]).unwrap(),
             temp: tempfile::tempdir().unwrap(),
+            verified: harness.verified.clone(),
         };
         let harness = Harness {
             controller: second,
@@ -1439,6 +1526,7 @@ pub mod tests {
                     frame::TRANSFER,
                     &json!({
                         "grant": grant,
+                        "publisher": publisher(),
                         "source": {"public_key": source.agent.key.public().to_hex(), "address": source.address},
                         "directory": "export-100000-rank1",
                         "files": [{"name": "model.safetensors", "size": bytes.len(), "ranges": ranges}],
@@ -1448,6 +1536,56 @@ pub mod tests {
         )
         .unwrap();
         assert_eq!(reply["received"], 14096);
+        assert_eq!(reply["verified"], true);
+        let marker = peer
+            .agent
+            .cache
+            .join("packages/export-100000-rank1/.verified");
+        assert!(marker.is_file());
+        assert_eq!(
+            peer.verified.lock().unwrap().as_slice(),
+            [(marker.with_file_name("model.safetensors"), Some(1))]
+        );
+        // A repeated transfer of held files neither fetches nor verifies again.
+        let request = json!({
+            "grant": grant,
+            "publisher": publisher(),
+            "source": {"public_key": source.agent.key.public().to_hex(), "address": source.address},
+            "directory": "export-100000-rank1",
+            "files": [{"name": "model.safetensors", "size": bytes.len(), "ranges": ranges}],
+        });
+        let again: Value =
+            serde_json::from_slice(&session.request(frame::TRANSFER, &request).unwrap()).unwrap();
+        assert_eq!(
+            (again["received"].as_u64(), again["verified"].as_bool()),
+            (Some(0), Some(false))
+        );
+        assert_eq!(peer.verified.lock().unwrap().len(), 1);
+        // Bytes that fail verification are removed with their directory.
+        let mut rejecting = request.clone();
+        rejecting["directory"] = "export-100000-rank2".into();
+        rejecting["publisher"] = serde_json::to_value(Publisher {
+            namespace: "reject".into(),
+            ..publisher()
+        })
+        .unwrap();
+        let mut session = connect(&peer, &peer.controller);
+        let error = session
+            .request(frame::TRANSFER, &rejecting)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(
+            error.contains("failed verification and was removed"),
+            "{error}"
+        );
+        assert!(
+            !peer
+                .agent
+                .cache
+                .join("packages/export-100000-rank2")
+                .exists()
+        );
         let copy = fs::read(
             peer.agent
                 .cache

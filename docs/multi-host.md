@@ -66,7 +66,7 @@ the weights, graphs, and other resources that Flare loads for serving.
 | --- | --- | --- |
 | Source checkpoint | Retained in its hub cache | Missing files are copied into its hub cache during preparation and retained |
 | Temporary export | Stages all ranks before publication | Stages its own rank in the system temporary directory, then sends it to rank zero |
-| Signed serving package | Retains the complete package, including companion files | The agent caches its rank's resources and required shared data, fetched from rank zero's host |
+| Signed serving package | Retains the complete package, including companion files | The agent caches its rank's resources and required shared data, fetched from rank zero's host and digested once on arrival |
 | Serving executable | The agent caches and runs the executable sent by the controller | The agent caches and runs the executable sent by the controller |
 
 On rank zero, allow roughly twice the final package size for staging and
@@ -201,9 +201,11 @@ package's prepared rank count.
 
 The controller verifies the package's signed index and obtains publisher
 acceptance at its own terminal, then passes the accepted publisher profile and
-signing-key approval to each agent. Each rank independently verifies the
-package for its rank; a rank whose bytes came from another node also verifies
-the stored weight bytes, and `--verify-weights` does so on every rank.
+signing-key approval to each agent. An agent digests bytes it fetched from
+another host against the signed index before running them and remembers the
+result with its cached copy, so a repeated launch of the same package skips
+that step. Each rank independently verifies the package's signatures for its
+rank; `--verify-weights` makes every rank digest its stored data at load.
 
 Startup then proceeds as follows:
 

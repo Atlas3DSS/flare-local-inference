@@ -1,7 +1,6 @@
 [ ] Fleet control: mDNS discovery, the fabric check with a ring-order proposal,
-    preparation through agents (PREPARE, `flare fleet prepare`), and remembering
-    verified cache entries so peers do not re-verify reused rank files on every
-    launch. See fleet.md#unimplemented-parts.
+    and preparation through agents (PREPARE, `flare fleet prepare`). See
+    fleet.md#unimplemented-parts.
 
 [ ] Restore preparation/serving RoCE proxy parity once FlashInfer main includes
     the sequence-limit guard and protocol verification additions.

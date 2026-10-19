@@ -870,6 +870,7 @@ impl Controller {
                 &nodes[rank],
                 &statuses[rank],
                 &transfer_grant,
+                &package.publisher,
                 &source,
                 &directory,
                 &files,
@@ -1217,12 +1218,14 @@ fn put(
 }
 
 /// Have the node fetch `files` from `source` into its cache under `directory`, skipping files it
-/// already holds.
+/// already holds, and verify the directory's stored data unless it verified before.
+#[allow(clippy::too_many_arguments)]
 fn transfer(
     session: &mut Session,
     node: &Node,
     status: &NodeStatus,
     grant: &Signed,
+    publisher: &Publisher,
     source: &Node,
     directory: &str,
     files: &[RankFile],
@@ -1238,18 +1241,18 @@ fn transfer(
             needed += cache::range_bytes(&file.ranges);
         }
     }
-    if needed == 0 {
-        return Ok(());
-    }
     check_space(status, needed)?;
-    eprintln!(
-        "{}: fetching {} from {}",
-        node.name,
-        gib(needed),
-        source.name
-    );
+    if needed > 0 {
+        eprintln!(
+            "{}: fetching {} from {}, then verifying",
+            node.name,
+            gib(needed),
+            source.name
+        );
+    }
     let request = json!({
         "grant": grant,
+        "publisher": publisher,
         "source": {"public_key": source.public_key, "address": source.address},
         "directory": directory,
         "files": files
@@ -1258,11 +1261,13 @@ fn transfer(
             .collect::<Vec<_>>(),
     });
     let reply: Value = serde_json::from_slice(&session.request(frame::TRANSFER, &request)?)?;
-    eprintln!(
-        "{}: received {}",
-        node.name,
-        gib(reply["received"].as_u64().unwrap_or(0))
-    );
+    let received = reply["received"].as_u64().unwrap_or(0);
+    let verified = reply["verified"].as_bool().unwrap_or(false);
+    match (received > 0, verified) {
+        (true, _) => eprintln!("{}: received and verified {}", node.name, gib(received)),
+        (false, true) => eprintln!("{}: verified the cached package", node.name),
+        (false, false) => eprintln!("{}: holds the verified package", node.name),
+    }
     Ok(())
 }
 
