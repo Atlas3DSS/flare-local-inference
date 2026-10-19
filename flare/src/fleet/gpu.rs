@@ -1,8 +1,13 @@
 //! GPU inventory read through NVML (`libnvidia-ml.so.1`). NVML queries the driver without
 //! creating a CUDA context, so the agent can report every GPU on its host, including GPUs that
 //! running ranks own.
+//!
+//! The library is loaded and initialized once per process and stays initialized until exit:
+//! every `nvmlInit_v2` and `nvmlShutdown` cycle leaves an event descriptor open, so an agent
+//! sampling once a second would exhaust its descriptor limit within minutes.
 
 use std::ffi::{CStr, c_char, c_int, c_uint, c_void};
+use std::sync::OnceLock;
 
 use libloading::{Library, Symbol};
 use serde::{Deserialize, Serialize};
@@ -44,18 +49,39 @@ pub struct Gpu {
     pub clock_mhz: Option<u32>,
 }
 
+static NVML: OnceLock<Result<&'static Library, String>> = OnceLock::new();
+
+/// The NVML library, loaded and initialized on first use for the rest of the process.
+fn nvml() -> Result<&'static Library, Failure> {
+    NVML.get_or_init(|| {
+        // SAFETY: Only the system NVML library is loaded, and it is never unloaded.
+        let library = unsafe { Library::new(LIBRARY) }
+            .map_err(|error| format!("cannot load {LIBRARY}: {error}"))?;
+        let library: &'static Library = Box::leak(Box::new(library));
+        // SAFETY: The signatures match the NVML ABI in nvml.h.
+        unsafe {
+            let describe = library
+                .get::<ErrorString>(b"nvmlErrorString\0")
+                .map_err(|e| e.to_string())?;
+            let init = library
+                .get::<unsafe extern "C" fn() -> c_int>(b"nvmlInit_v2\0")
+                .map_err(|e| e.to_string())?;
+            check(&describe, "nvmlInit_v2", init()).map_err(|e| e.to_string())?;
+        }
+        Ok(library)
+    })
+    .clone()
+    .map_err(Failure::from)
+}
+
 /// Every GPU NVML reports, in NVML index order. Fails with an error naming `libnvidia-ml.so.1`
 /// when that library cannot be loaded.
 pub fn enumerate() -> Result<Vec<Gpu>, Failure> {
-    // SAFETY: Only the system NVML library is loaded, and it outlives every symbol taken below.
-    let library = unsafe { Library::new(LIBRARY) }
-        .map_err(|error| format!("cannot load {LIBRARY}: {error}"))?;
+    let library = nvml()?;
     // SAFETY: These signatures match the NVML ABI in nvml.h, the structures below match its
     // layouts, and every output pointer is valid for the duration of its call.
     unsafe {
         let describe = library.get::<ErrorString>(b"nvmlErrorString\0")?;
-        let init = library.get::<unsafe extern "C" fn() -> c_int>(b"nvmlInit_v2\0")?;
-        let shutdown = library.get::<unsafe extern "C" fn() -> c_int>(b"nvmlShutdown\0")?;
         let get_count = library
             .get::<unsafe extern "C" fn(*mut c_uint) -> c_int>(b"nvmlDeviceGetCount_v2\0")?;
         let get_handle = library.get::<unsafe extern "C" fn(c_uint, *mut Device) -> c_int>(
@@ -88,9 +114,6 @@ pub fn enumerate() -> Result<Vec<Gpu>, Failure> {
         let get_clock = library.get::<unsafe extern "C" fn(Device, c_uint, *mut c_uint) -> c_int>(
             b"nvmlDeviceGetClockInfo\0",
         )?;
-
-        check(&describe, "nvmlInit_v2", init())?;
-        let _initialized = Initialized { shutdown };
 
         let mut count: c_uint = 0;
         check(&describe, "nvmlDeviceGetCount_v2", get_count(&mut count))?;
@@ -184,6 +207,17 @@ pub fn enumerate() -> Result<Vec<Gpu>, Failure> {
     }
 }
 
+/// The Flare hardware revision of a compute capability: `gb10`, `gb202`, `gb300`, or
+/// `sm{major}{minor}`.
+pub fn capability_revision(major: i32, minor: i32) -> String {
+    match (major, minor) {
+        (12, 1) => "gb10".into(),
+        (12, 0) => "gb202".into(),
+        (10, 3) => "gb300".into(),
+        _ => format!("sm{major}{minor}"),
+    }
+}
+
 /// The `CUDA_VISIBLE_DEVICES` value that exposes exactly `uuids`, in that order.
 pub fn visible_devices(uuids: &[String]) -> String {
     uuids.join(",")
@@ -221,21 +255,6 @@ struct PciInfo {
     pci_device_id: c_uint,
     _pci_subsystem_id: c_uint,
     _bus_id: [c_char; 32],
-}
-
-/// Calls nvmlShutdown when dropped, balancing one successful nvmlInit_v2 on every exit path.
-struct Initialized<'library> {
-    shutdown: Symbol<'library, unsafe extern "C" fn() -> c_int>,
-}
-
-impl Drop for Initialized<'_> {
-    fn drop(&mut self) {
-        // SAFETY: NVML holds the reference taken by the matching nvmlInit_v2, and the library
-        // stays loaded for the symbol's lifetime.
-        unsafe {
-            (self.shutdown)();
-        }
-    }
 }
 
 fn check(describe: &Symbol<'_, ErrorString>, call: &str, code: c_int) -> Result<(), Failure> {

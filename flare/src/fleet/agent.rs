@@ -199,10 +199,15 @@ impl Group {
     /// Read the rank's metrics endpoint and keep the document.
     fn scrape(&self) {
         let Some(url) = &self.metrics_url else { return };
-        let document = ureq::get(url)
-            .config()
-            .timeout_global(Some(Duration::from_secs(2)))
-            .build()
+        static CLIENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+        let client = CLIENT.get_or_init(|| {
+            ureq::Agent::config_builder()
+                .timeout_global(Some(Duration::from_secs(2)))
+                .build()
+                .into()
+        });
+        let document = client
+            .get(url)
             .call()
             .ok()
             .and_then(|mut response| response.body_mut().read_to_string().ok())
