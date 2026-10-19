@@ -206,13 +206,25 @@ fn fleet_command(args: cli::FleetArgs) -> Result<(), fleet::Failure> {
             command: cli::ControllersCommand::Remove { key },
         } => controller.controllers_remove(&key),
         cli::FleetCommand::Status { cluster } => controller.status(cluster.as_deref()),
-        cli::FleetCommand::Attach { cluster } => controller.attach(cluster.as_deref()),
-        cli::FleetCommand::Stop { cluster } => controller.stop(cluster.as_deref()),
+        cli::FleetCommand::Ls { cluster } => controller.ls(cluster.as_deref()),
+        cli::FleetCommand::Attach { cluster, group } => {
+            controller.attach(cluster.as_deref(), group.as_deref())
+        }
+        cli::FleetCommand::Stop { cluster, group } => {
+            controller.stop(cluster.as_deref(), group.as_deref())
+        }
         cli::FleetCommand::Forget { node } => controller.forget(&node),
         cli::FleetCommand::Run(run) => controller.run(
             &run.package,
             run.cluster.as_deref(),
             fleet::controller::RunOptions {
+                name: run.name.clone(),
+                // GPU 0 is the serving default; any other list names the GPUs on every node.
+                gpus: if run.serving.gpus == [0] {
+                    Vec::new()
+                } else {
+                    run.serving.gpus.iter().map(|&g| g as u32).collect()
+                },
                 serving: run.rank_options(),
                 rank_zero: run.rank_zero_options(),
                 roce_ring: run.roce_ring,

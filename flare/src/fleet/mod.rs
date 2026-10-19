@@ -11,6 +11,7 @@
 pub mod agent;
 pub mod cache;
 pub mod controller;
+pub mod gpu;
 pub mod grant;
 pub mod identity;
 pub mod session;

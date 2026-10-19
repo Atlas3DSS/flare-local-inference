@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::cache::{self, Pinned, Pins};
+use super::gpu::{self, Gpu};
 use super::grant::{Grant, Signed};
 use super::identity::{Key, PublicKey};
 use super::session::{FRAME_LIMIT, Role, Session};
@@ -125,8 +126,11 @@ const RETAINED_BYTES: usize = 64 << 10;
 /// A rank process this agent started and supervises.
 pub struct Group {
     pub id: String,
+    pub name: String,
     pub rank: usize,
     pub package: String,
+    /// UUIDs of the GPUs the rank holds while it runs.
+    pub gpus: Vec<String>,
     pub pid: i32,
     started: Instant,
     log: Mutex<Log>,
@@ -182,6 +186,11 @@ pub type Verifier =
 
 /// The marker a package cache directory holds once its stored data verified.
 const VERIFIED: &str = ".verified";
+/// Finished groups the agent keeps for STATUS and ATTACH.
+const RETAINED_GROUPS: usize = 16;
+
+/// Enumerates the host's GPUs.
+pub type Gpus = Box<dyn Fn() -> Result<Vec<Gpu>, Failure> + Send + Sync>;
 
 fn verify_package(
     primary: &Path,
@@ -200,20 +209,29 @@ pub struct Agent {
     pub cache: PathBuf,
     pub name: String,
     pins: Pins,
-    group: Mutex<Option<Arc<Group>>>,
+    /// Groups started by this agent, oldest first; finished ones are retained up to a limit.
+    groups: Mutex<Vec<Arc<Group>>>,
     verifier: Verifier,
+    gpus: Gpus,
 }
 
 impl Agent {
     pub fn new(dir: AgentDir, cache: PathBuf) -> Result<Self, Failure> {
-        Self::with_verifier(dir, cache, Box::new(verify_package))
+        Self::with_fakes(
+            dir,
+            cache,
+            Box::new(verify_package),
+            Box::new(gpu::enumerate),
+        )
     }
 
-    /// An agent verifying fetched packages with `verifier` instead of Helios.
-    pub fn with_verifier(
+    /// An agent verifying fetched packages with `verifier` and enumerating GPUs with `gpus`
+    /// instead of Helios and NVML.
+    pub fn with_fakes(
         dir: AgentDir,
         cache: PathBuf,
         verifier: Verifier,
+        gpus: Gpus,
     ) -> Result<Self, Failure> {
         let key = dir.key()?;
         for directory in ["bin", "packages", "publishers"] {
@@ -225,8 +243,9 @@ impl Agent {
             cache,
             name: super::hostname(),
             pins: Pins::default(),
-            group: Mutex::new(None),
+            groups: Mutex::new(Vec::new()),
             verifier,
+            gpus,
         })
     }
 
@@ -261,8 +280,78 @@ impl Agent {
         Ok(grant)
     }
 
-    fn current_group(&self) -> Option<Arc<Group>> {
-        self.group.lock().unwrap().clone()
+    fn groups(&self) -> Vec<Arc<Group>> {
+        self.groups.lock().unwrap().clone()
+    }
+
+    /// The group a request names, or the only group when it names none.
+    fn find_group(&self, id: Option<&str>) -> Result<Arc<Group>, Failure> {
+        let groups = self.groups();
+        match id {
+            Some(id) => groups
+                .iter()
+                .find(|g| g.id == id)
+                .cloned()
+                .ok_or_else(|| format!("group {id} is not on this node").into()),
+            None => match groups.as_slice() {
+                [] => Err("no group has run on this node".into()),
+                [only] => Ok(only.clone()),
+                several => Err(format!(
+                    "several groups are on this node; name one: {}",
+                    several
+                        .iter()
+                        .map(|g| g.id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+                .into()),
+            },
+        }
+    }
+
+    /// Package cache directories with their files and verification state.
+    fn packages(&self) -> Vec<Value> {
+        use std::os::unix::fs::MetadataExt;
+        let mut packages = Vec::new();
+        let Ok(entries) = fs::read_dir(self.cache.join("packages")) else {
+            return packages;
+        };
+        let mut directories: Vec<PathBuf> = entries
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| {
+                p.is_dir()
+                    && !p
+                        .file_name()
+                        .is_none_or(|n| n.to_string_lossy().starts_with('.'))
+            })
+            .collect();
+        directories.sort();
+        for directory in directories {
+            let mut files = Vec::new();
+            let mut bytes = 0u64;
+            if let Ok(entries) = fs::read_dir(&directory) {
+                let mut names: Vec<PathBuf> =
+                    entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
+                names.sort();
+                for path in names {
+                    let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                    let Ok(metadata) = fs::metadata(&path) else {
+                        continue;
+                    };
+                    bytes += metadata.blocks() * 512;
+                    if !name.starts_with('.') {
+                        files.push(json!({"name": name, "size": metadata.len()}));
+                    }
+                }
+            }
+            packages.push(json!({
+                "name": directory.file_name().unwrap().to_string_lossy(),
+                "files": files,
+                "verified": directory.join(VERIFIED).is_file(),
+                "bytes": bytes,
+            }));
+        }
+        packages
     }
 }
 
@@ -772,21 +861,53 @@ fn run(agent: &Arc<Agent>, request: &Value) -> Result<Arc<Group>, Failure> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut slot = agent.group.lock().unwrap();
-    if let Some(current) = slot.as_ref().filter(|g| g.running()) {
-        return Err(format!(
-            "group {} is running on this node as rank {}",
-            current.id, current.rank
-        )
-        .into());
+    // The rank sees only its GPUs, in the grant's order; a member naming none takes the whole
+    // node, as a rank started by hand would.
+    let gpus = member.gpus.clone();
+    if !gpus.is_empty() {
+        let present = (agent.gpus)()?;
+        for uuid in &gpus {
+            if !present.iter().any(|g| &g.uuid == uuid) {
+                return Err(format!("this node has no GPU {uuid}").into());
+            }
+        }
+        command.env("CUDA_VISIBLE_DEVICES", gpu::visible_devices(&gpus));
+        command.arg("--gpus").arg(
+            (0..gpus.len())
+                .map(|i| i.to_string())
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+    }
+    let mut groups = agent.groups.lock().unwrap();
+    for current in groups.iter().filter(|g| g.running()) {
+        let conflict = gpus.is_empty()
+            || current.gpus.is_empty()
+            || current.gpus.iter().any(|held| gpus.contains(held));
+        if conflict {
+            return Err(format!(
+                "group {} ({}) runs on this node as rank {} and holds {}",
+                current.id,
+                current.name,
+                current.rank,
+                if current.gpus.is_empty() {
+                    "every GPU".to_owned()
+                } else {
+                    current.gpus.join(",")
+                }
+            )
+            .into());
+        }
     }
     let mut child = command
         .spawn()
         .map_err(|e| format!("cannot start {}: {e}", binary.display()))?;
     let group = Arc::new(Group {
         id: grant.group.clone(),
+        name: grant.name.clone(),
         rank,
         package: package.display().to_string(),
+        gpus,
         pid: child.id() as i32,
         started: Instant::now(),
         log: Mutex::new(Log {
@@ -797,9 +918,32 @@ fn run(agent: &Arc<Agent>, request: &Value) -> Result<Arc<Group>, Failure> {
             pins: Some(pins),
         }),
     });
-    *slot = Some(group.clone());
-    drop(slot);
-    eprintln!("group {} rank {rank}: started pid {}", group.id, group.pid);
+    groups.push(group.clone());
+    // Keep every running group and the most recent finished ones.
+    let finished = groups.iter().filter(|g| !g.running()).count();
+    if finished > RETAINED_GROUPS {
+        let mut drop = finished - RETAINED_GROUPS;
+        groups.retain(|g| {
+            if drop > 0 && !g.running() {
+                drop -= 1;
+                false
+            } else {
+                true
+            }
+        });
+    }
+    drop(groups);
+    eprintln!(
+        "group {} ({}) rank {rank}: started pid {} on {}",
+        group.id,
+        group.name,
+        group.pid,
+        if group.gpus.is_empty() {
+            "the node's GPUs".to_owned()
+        } else {
+            group.gpus.join(",")
+        }
+    );
     let mut forwarders = Vec::new();
     for output in [
         Box::new(child.stdout.take().unwrap()) as Box<dyn Read + Send>,
@@ -829,15 +973,7 @@ fn run(agent: &Arc<Agent>, request: &Value) -> Result<Arc<Group>, Failure> {
 }
 
 fn named_group(agent: &Agent, request: &Value) -> Result<Arc<Group>, Failure> {
-    let group = agent
-        .current_group()
-        .ok_or("no group has run on this node")?;
-    if let Some(wanted) = request["group"].as_str() {
-        if wanted != group.id {
-            return Err(format!("group {wanted} is not on this node; {} is", group.id).into());
-        }
-    }
-    Ok(group)
+    agent.find_group(request["group"].as_str())
 }
 
 fn attach(agent: &Agent, request: &Value) -> Result<Arc<Group>, Failure> {
@@ -881,17 +1017,43 @@ fn stop(agent: &Agent, request: &Value) -> Result<Vec<u8>, Failure> {
 }
 
 fn status(agent: &Agent, request: &Value) -> Result<Vec<u8>, Failure> {
-    let group = agent.current_group().map(|g| {
+    let groups = agent.groups();
+    let describe = |g: &Group| {
         json!({
             "id": g.id,
+            "name": g.name,
             "rank": g.rank,
             "package": g.package,
+            "gpus": g.gpus,
             "pid": g.pid,
             "running": g.running(),
             "exit": g.exit(),
             "uptime_seconds": g.started.elapsed().as_secs(),
         })
-    });
+    };
+    let (gpus, gpus_error) = match (agent.gpus)() {
+        Ok(gpus) => (
+            gpus.iter()
+                .map(|gpu| {
+                    let holder = groups
+                        .iter()
+                        .find(|g| g.running() && g.gpus.contains(&gpu.uuid))
+                        .map(|g| g.id.clone());
+                    json!({
+                        "index": gpu.index,
+                        "uuid": gpu.uuid,
+                        "name": gpu.name,
+                        "revision": gpu.revision,
+                        "memory_total": gpu.memory_total,
+                        "memory_free": gpu.memory_free,
+                        "group": holder,
+                    })
+                })
+                .collect::<Vec<_>>(),
+            Value::Null,
+        ),
+        Err(error) => (Vec::new(), error.to_string().into()),
+    };
     let mut reply = json!({
         "name": agent.name,
         "public_key": agent.key.public().to_hex(),
@@ -899,7 +1061,11 @@ fn status(agent: &Agent, request: &Value) -> Result<Vec<u8>, Failure> {
         "version": PROTOCOL_VERSION,
         "free_bytes": free_bytes(&agent.cache),
         "controllers_revision": agent.dir.controllers()?.map_or(0, |(_, s)| s.revision),
-        "group": group,
+        "group": groups.last().map(|g| describe(g)),
+        "groups": groups.iter().map(|g| describe(g)).collect::<Vec<_>>(),
+        "gpus": gpus,
+        "gpus_error": gpus_error,
+        "packages": agent.packages(),
     });
     if let Some(toward) = request["toward"].as_str() {
         reply["address_toward"] = super::address_toward(toward)?.to_string().into();
@@ -1021,7 +1187,7 @@ pub mod tests {
         let verified = Arc::new(Mutex::new(Vec::new()));
         let record = verified.clone();
         let agent = Arc::new(
-            Agent::with_verifier(
+            Agent::with_fakes(
                 dir,
                 temp.path().join("cache"),
                 Box::new(move |primary, rank, publisher| {
@@ -1034,6 +1200,7 @@ pub mod tests {
                     record.lock().unwrap().push((primary.to_owned(), rank));
                     Ok(())
                 }),
+                Box::new(|| Ok(fake_gpus())),
             )
             .unwrap(),
         );
@@ -1048,6 +1215,25 @@ pub mod tests {
             temp,
             verified,
         }
+    }
+
+    /// Two GPUs every test agent reports.
+    pub fn fake_gpus() -> Vec<Gpu> {
+        [
+            "GPU-aaaaaaaa-0000-0000-0000-000000000000",
+            "GPU-bbbbbbbb-0000-0000-0000-000000000000",
+        ]
+        .iter()
+        .enumerate()
+        .map(|(index, uuid)| Gpu {
+            index: index as u32,
+            uuid: (*uuid).into(),
+            name: "Fake GPU".into(),
+            revision: "gb10".into(),
+            memory_total: 128 << 30,
+            memory_free: 100 << 30,
+        })
+        .collect()
     }
 
     pub fn controller_hello(key: &Key) -> Hello {
@@ -1117,6 +1303,7 @@ pub mod tests {
             &harness.controller,
             &Grant {
                 group: "test-group".into(),
+                name: "test".into(),
                 package: Package {
                     export: "export".into(),
                     length: 13,
@@ -1128,6 +1315,7 @@ pub mod tests {
                     name: harness.agent.name.clone(),
                     public_key: harness.agent.key.public().to_hex(),
                     address: harness.address.clone(),
+                    gpus: vec![],
                 }],
                 rendezvous: "127.0.0.1:29800".into(),
                 serving: vec!["--max-concurrency".into(), "2".into()],
@@ -1439,7 +1627,7 @@ pub mod tests {
             .err()
             .unwrap()
             .to_string();
-        assert!(busy.contains("is running"), "{busy}");
+        assert!(busy.contains("runs on this node"), "{busy}");
         let mut attached = connect(&harness, &harness.controller);
         attached.request(frame::ATTACH, &json!({})).unwrap();
         let mut session = connect(&harness, &harness.controller);
@@ -1469,6 +1657,162 @@ pub mod tests {
         );
     }
 
+    fn grant_on_gpus(harness: &Harness, group: &str, gpus: &[&str]) -> Signed {
+        Signed::sign(
+            &harness.controller,
+            &Grant {
+                group: group.into(),
+                name: group.into(),
+                package: Package {
+                    export: "export".into(),
+                    length: 13,
+                    files: vec!["model.safetensors".into()],
+                    source: None,
+                },
+                members: vec![Member {
+                    rank: 0,
+                    name: harness.agent.name.clone(),
+                    public_key: harness.agent.key.public().to_hex(),
+                    address: harness.address.clone(),
+                    gpus: gpus.iter().map(|g| (*g).to_owned()).collect(),
+                }],
+                rendezvous: "127.0.0.1:29800".into(),
+                serving: vec![],
+                rank_zero: vec![],
+                roce_ring: false,
+                issued: now(),
+                expires: now() + 60,
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn groups_run_together_on_disjoint_gpus_and_status_lists_them() {
+        let harness = harness(8);
+        let mut session = pair_accept_first(&harness);
+        let script = "#!/bin/sh\necho \"gpus=$CUDA_VISIBLE_DEVICES args=$*\"\ntrap 'exit 0' TERM\nwhile true; do sleep 0.1; done\n";
+        let name = cache::binary_name(script.as_bytes());
+        put(&mut session, "binary", &name, script.as_bytes(), None);
+        put(
+            &mut session,
+            "package",
+            "export-13/model.safetensors",
+            b"package bytes",
+            None,
+        );
+        let [a, b] = [
+            "GPU-aaaaaaaa-0000-0000-0000-000000000000",
+            "GPU-bbbbbbbb-0000-0000-0000-000000000000",
+        ];
+        let first = grant_on_gpus(&harness, "first", &[a]);
+        let mut running_first = connect(&harness, &harness.controller);
+        running_first
+            .request(frame::RUN, &run_request(&first, 0, &name))
+            .unwrap();
+        let line = loop {
+            let (tag, body) = running_first.read_frame().unwrap();
+            if tag == frame::LOG && !body.is_empty() {
+                break String::from_utf8(body).unwrap();
+            }
+        };
+        assert!(
+            line.starts_with(&format!("gpus={a} args=run ")) && line.ends_with("--gpus 0"),
+            "{line}"
+        );
+        // A group on the held GPU, or on an unknown GPU, or on no GPU in particular, is refused.
+        let mut session = connect(&harness, &harness.controller);
+        let held = session
+            .request(
+                frame::RUN,
+                &run_request(&grant_on_gpus(&harness, "clash", &[a]), 0, &name),
+            )
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(held.contains("holds"), "{held}");
+        let mut session = connect(&harness, &harness.controller);
+        let unknown = session
+            .request(
+                frame::RUN,
+                &run_request(
+                    &grant_on_gpus(&harness, "where", &["GPU-cccccccc"]),
+                    0,
+                    &name,
+                ),
+            )
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(unknown.contains("no GPU"), "{unknown}");
+        let mut session = connect(&harness, &harness.controller);
+        assert!(
+            session
+                .request(
+                    frame::RUN,
+                    &run_request(&grant_on_gpus(&harness, "all", &[]), 0, &name)
+                )
+                .is_err()
+        );
+        // A group on the other GPU runs beside the first.
+        let mut running_second = connect(&harness, &harness.controller);
+        running_second
+            .request(
+                frame::RUN,
+                &run_request(&grant_on_gpus(&harness, "second", &[b]), 0, &name),
+            )
+            .unwrap();
+        let mut session = connect(&harness, &harness.controller);
+        let status: Value =
+            serde_json::from_slice(&session.request(frame::STATUS, &json!({})).unwrap()).unwrap();
+        let groups = status["groups"].as_array().unwrap();
+        assert_eq!(
+            groups
+                .iter()
+                .map(|g| g["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["first", "second"]
+        );
+        assert!(groups.iter().all(|g| g["running"] == true));
+        let gpus = status["gpus"].as_array().unwrap();
+        assert_eq!(gpus[0]["group"], "first");
+        assert_eq!(gpus[1]["group"], "second");
+        assert_eq!(gpus[1]["revision"], "gb10");
+        let packages = status["packages"].as_array().unwrap();
+        assert_eq!(packages[0]["name"], "export-13");
+        assert_eq!(packages[0]["verified"], false);
+        assert_eq!(packages[0]["files"][0]["size"], 13);
+        // With several groups, STOP and ATTACH must name one.
+        let ambiguous = session
+            .request(frame::STOP, &json!({}))
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(ambiguous.contains("several groups"), "{ambiguous}");
+        for group in ["first", "second"] {
+            let mut session = connect(&harness, &harness.controller);
+            let stopped: Value = serde_json::from_slice(
+                &session
+                    .request(frame::STOP, &json!({"group": group}))
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(stopped["stopped"], true);
+        }
+        assert_eq!(collect(&mut running_first).1, 0);
+        assert_eq!(collect(&mut running_second).1, 0);
+        let mut session = connect(&harness, &harness.controller);
+        let status: Value =
+            serde_json::from_slice(&session.request(frame::STATUS, &json!({})).unwrap()).unwrap();
+        assert!(
+            status["gpus"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|g| g["group"].is_null())
+        );
+    }
+
     #[test]
     fn nodes_fetch_package_ranges_from_a_source_node_under_a_grant() {
         let source = harness(6);
@@ -1486,6 +1830,7 @@ pub mod tests {
             &source.controller,
             &Grant {
                 group: "g".into(),
+                name: "g".into(),
                 package: Package {
                     export: "export".into(),
                     length: bytes.len() as u64,
@@ -1501,12 +1846,14 @@ pub mod tests {
                         name: "source".into(),
                         public_key: source.agent.key.public().to_hex(),
                         address: source.address.clone(),
+                        gpus: vec![],
                     },
                     Member {
                         rank: 1,
                         name: "peer".into(),
                         public_key: peer.agent.key.public().to_hex(),
                         address: peer.address.clone(),
+                        gpus: vec![],
                     },
                 ],
                 rendezvous: "127.0.0.1:29800".into(),

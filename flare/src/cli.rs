@@ -142,15 +142,26 @@ pub enum FleetCommand {
     },
     /// Launch a package across a cluster's nodes.
     Run(Box<FleetRun>),
-    /// Follow a running group's output.
-    Attach {
+    /// List every group on the cluster's nodes.
+    Ls {
         #[arg(long, value_name = "NAME")]
         cluster: Option<String>,
     },
-    /// Stop a running group.
+    /// Follow running groups' output.
+    Attach {
+        #[arg(long, value_name = "NAME")]
+        cluster: Option<String>,
+        /// Only the group with this name or identifier.
+        #[arg(value_name = "GROUP")]
+        group: Option<String>,
+    },
+    /// Stop running groups.
     Stop {
         #[arg(long, value_name = "NAME")]
         cluster: Option<String>,
+        /// Only the group with this name or identifier.
+        #[arg(value_name = "GROUP")]
+        group: Option<String>,
     },
     /// Remove a node from the fleet file.
     Forget {
@@ -184,6 +195,10 @@ pub struct FleetRun {
     /// Cluster to run on; optional when the fleet file has one cluster.
     #[arg(long, value_name = "NAME")]
     pub cluster: Option<String>,
+
+    /// The group's name, used by attach, stop and ls [default: the cluster's name].
+    #[arg(long, value_name = "NAME")]
+    pub name: Option<String>,
 
     /// Return once the group is serving instead of following its output.
     #[arg(long)]

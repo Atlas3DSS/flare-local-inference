@@ -55,6 +55,9 @@ pub struct Member {
     pub name: String,
     pub public_key: String,
     pub address: String,
+    /// UUIDs of the GPUs the rank uses on its node; empty leaves the choice to the rank.
+    #[serde(default)]
+    pub gpus: Vec<String>,
 }
 
 /// Where a node-held package lives: the node's public key and the primary file's absolute path.
@@ -80,6 +83,9 @@ pub struct Package {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Grant {
     pub group: String,
+    /// The operator's name for the group, stable across launches.
+    #[serde(default)]
+    pub name: String,
     pub package: Package,
     pub members: Vec<Member>,
     /// Rank zero's rendezvous address as peers reach it, `IP:PORT`.
@@ -191,6 +197,7 @@ mod tests {
     fn grant() -> Grant {
         Grant {
             group: "g".into(),
+            name: "g".into(),
             package: Package {
                 export: "export".into(),
                 length: 10,
@@ -202,6 +209,7 @@ mod tests {
                 name: "n".into(),
                 public_key: Key::from_seed(&[3; 32]).unwrap().public().to_hex(),
                 address: "n:29900".into(),
+                gpus: vec![],
             }],
             rendezvous: "10.0.0.1:29800".into(),
             serving: vec![],
