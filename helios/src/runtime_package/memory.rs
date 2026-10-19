@@ -614,22 +614,43 @@ impl NativeModel {
             "memory".into()
         };
         let gib = |values: &[u64]| {
-            values
-                .iter()
-                .map(|n| format!("{:.2}", *n as f64 / (1u64 << 30) as f64))
-                .collect::<Vec<_>>()
-                .join("/")
+            let format = |n: u64| format!("{:.2}", n as f64 / (1u64 << 30) as f64);
+            let low = format(*values.iter().min().unwrap());
+            let high = format(*values.iter().max().unwrap());
+            if low == high {
+                low
+            } else {
+                format!("{low}–{high}")
+            }
         };
-        progress.phase("Plan cache", None).finish(format!(
-            "KV {} · memory {} · loaded {} GiB · cache budget {} GiB per rank",
-            options.kv_cache_limit,
-            options
-                .memory_limit
-                .map(|limit| limit.to_string())
-                .unwrap_or_else(|| "available with package reserve".into()),
+        let mut summary = format!(
+            "per GPU: {} GiB loaded · {} GiB cache budget",
             gib(&loaded_bytes),
             gib(&available),
-        ));
+        );
+        match options
+            .memory_limit
+            .unwrap_or(MemoryLimit::Reserve(reserve - HEADROOM_BYTES))
+        {
+            MemoryLimit::Reserve(0) => {}
+            MemoryLimit::Reserve(bytes) => {
+                summary.push_str(&format!(" · reserve {}", MemoryLimit::Bytes(bytes)));
+            }
+            MemoryLimit::Bytes(bytes) => {
+                summary.push_str(&format!(" · limit {}", MemoryLimit::Bytes(bytes)));
+            }
+            MemoryLimit::Fraction(fraction) => {
+                summary.push_str(&format!(" · limit {}% of GPU memory", fraction * 100.0));
+            }
+        }
+        match options.kv_cache_limit {
+            KvCacheLimit::Memory => {}
+            KvCacheLimit::Context => summary.push_str(" · KV capped at 1 context"),
+            KvCacheLimit::Concurrency => {
+                summary.push_str(&format!(" · KV capped at {active} contexts"));
+            }
+        }
+        progress.phase("Plan cache", None).finish(summary);
         let execution = 1 + active as u64 * width;
         if rows > local_rows || pages > local_pages || rows < execution {
             return Err(invalid(
