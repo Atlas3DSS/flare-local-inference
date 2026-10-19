@@ -122,15 +122,9 @@ authorized controllers and returns it to unpaired.
 ```toml
 # ~/.config/flare/fleet.toml
 [controllers]
-revision = 3
-
-[[controllers.key]]
-name = "workstation"
-public_key = "a0b1…"
-
-[[controllers.key]]
-name = "laptop"
-public_key = "d4e5…"
+body = '{"revision":2,"keys":[{"name":"workstation","public_key":"a0b1…"},{"name":"laptop","public_key":"d4e5…"}]}'
+signer = "a0b1…"
+signature = "4665…"
 
 [[node]]
 name = "maxwell"
@@ -147,6 +141,12 @@ address = "10.100.0.13:29900"
 [cluster.sparks]
 nodes = ["maxwell", "hertz", "faraday", "ampere"]
 ```
+
+`controllers` is the signed controller-set record exactly as nodes store it:
+the JSON body the signer serialized, the signer's public key, and the
+signature, so a node verifies the same bytes the fleet file holds. Pairing
+writes revision 1; `flare fleet controllers` writes later revisions. The
+operator adds clusters by hand.
 
 A cluster is a named, ordered list of nodes. Its order is the rank order of
 every launch and, with `--roce-ring`, the ring. `flare fleet check` proposes an
@@ -202,13 +202,16 @@ with a message; an ERROR closes the session.
 | PAIR | Controller to node | Code proof | Authorizes the controller as described above |
 | HAVE | Controller or node to node | Kind, name, size | Whether the cache holds the entry at that size |
 | PUT | Controller to node | Kind, name, size, optional ranges, then bytes | Stores an executable or package bytes at their offsets in a sparse file of the package's length |
-| TRANSFER | Controller to node | Grant, source node, kind, name, ranges | The node fetches those ranges from the source node and replies when stored |
-| FETCH | Node to node | Grant, kind, name, ranges | Streams cached bytes to a node the grant names |
-| RUN | Controller to node | Grant, rank, publisher profile | Starts this host's rank under the agent's supervision |
+| CONTROLLERS | Controller to node | Signed controller-set record | Applies a higher revision signed by a current member |
+| TRANSFER | Controller to node | Grant, source node, cache directory, files with sizes and ranges | The node fetches those ranges from the source node into its cache and replies when stored |
+| FETCH | Node to node | Grant, file name, ranges | Streams the file's bytes to a node the grant names, from the package the node holds or its cache |
+| GET | Controller to node | Absolute path, offset, length | Streams up to 256 MiB of a node-local file, used to mirror a package's header and index |
+| STAT | Controller to node | Absolute path | The package file's size and its companions' names and sizes |
+| RUN | Controller to node | Grant, rank, executable name, publisher profile | Starts this host's rank under the agent's supervision, then streams LOG and EXIT |
 | ATTACH | Controller to node | Group identifier | Streams the rank's retained output, then live output |
 | STOP | Controller to node | Group identifier | Sends SIGTERM to the rank |
-| STATUS | Controller to node | Optional `toward` address | Running group, package, rank, uptime, cache contents, free disk, fabric endpoints, and the local address routing selects toward `toward` |
-| PREPARE | Controller to node | Preparation command, checkpoint token, rank | Runs `ignition export` or `ignition join` from the node's configured checkout |
+| STATUS | Controller to node | Optional `toward` address | Name, keys, controller-set revision, free cache space, the group running or last run with its rank, exit status and uptime, and the local address routing selects toward `toward` |
+| PREPARE | Controller to node | Preparation command, checkpoint token, rank | Runs `ignition export` or `ignition join` from the node's configured checkout (see [unimplemented parts](#unimplemented-parts)) |
 | LOG, EXIT | Node to controller | Line; exit status | Output and completion of a rank or preparation process |
 
 Executables are stored under their SHA-256 names and run only from the cache.
@@ -232,18 +235,30 @@ serving bytes to another node.
 ```json
 {
   "group": "sparks-20261019T153000Z-3f9c",
-  "package": {"export": "…", "index_sha256": "…", "files": ["glm53-spark-tp4.safetensors"]},
+  "package": {
+    "export": "…",
+    "length": 2122414256,
+    "files": ["glm53-spark-tp4.safetensors"],
+    "source": {"public_key": "7943…", "path": "/data/flare-runtime/glm53-spark-tp4.safetensors"}
+  },
   "members": [
     {"rank": 0, "name": "maxwell", "public_key": "7943…", "address": "maxwell:29900"},
     {"rank": 1, "name": "hertz", "public_key": "88e1…", "address": "10.100.0.13:29900"}
   ],
   "rendezvous": "10.100.0.12:29800",
   "serving": ["--gpus", "0", "--max-concurrency", "16"],
+  "rank_zero": ["--host", "0.0.0.0", "--port", "8000"],
   "roce_ring": false,
-  "issued": "2026-10-19T15:30:00Z",
-  "expires": "2026-10-19T15:40:00Z"
+  "issued": 1792420200,
+  "expires": 1792420800
 }
 ```
+
+`package.length` is the primary file's size, which names cache entries
+together with `export`. `source` names the node holding the package and is
+absent when the controller holds it. `issued` and `expires` are Unix seconds;
+a grant authorizes RUN for ten minutes, and the controller signs the grant
+again before RUN when transfers outlast that.
 
 The signature covers the canonical JSON encoding. A node accepts a RUN only
 when the grant names its own key at the requested rank, has not expired, and
@@ -283,8 +298,9 @@ sequenceDiagram
 ```
 
 1. The controller resolves PACKAGE. A local path is read directly. `NODE:PATH`
-   or a cache name refers to a package a node holds, from which the controller
-   fetches the signed index. The controller verifies the index and obtains
+   refers to a package a node holds, from which the controller fetches the
+   safetensors header, the signed index, and each companion's header into a
+   sparse mirror. The controller verifies the index and obtains
    publisher acceptance as `flare run` does, and computes each rank's byte
    ranges from the index with `runtime_package::rank_ranges`.
 2. The controller connects to every node in the cluster, agrees on protocol
@@ -380,19 +396,19 @@ serves it.
 | `flare agent install [--join-code CODE] [--accept-first] [--listen ADDR]` | Node | Writes the node key, the systemd user unit, enables linger, starts the service, prints name, fingerprint, and the join code |
 | `flare agent reset` | Node | Removes authorized controllers; the node becomes unpaired |
 | `flare agent --listen ADDR [--no-mdns]` | Node | Runs the service (the unit's command) |
-| `flare fleet discover` | Controller | Lists advertised agents |
+| `flare fleet discover` | Controller | Lists advertised agents (unimplemented) |
 | `flare fleet pair HOST... [--code CODE]` | Controller | Pairs and records nodes |
 | `flare fleet controllers add KEYFILE` / `remove FINGERPRINT` | Controller | Writes and distributes the next controller-set revision |
-| `flare fleet check --cluster NAME [--roce-ring] [--write]` | Controller | Fabric plan and rail check; optional rank-order proposal |
-| `flare fleet prepare RECIPE --cluster NAME ...` | Controller | Multi-host export through agents |
+| `flare fleet check --cluster NAME [--roce-ring] [--write]` | Controller | Fabric plan and rail check; optional rank-order proposal (unimplemented) |
+| `flare fleet prepare RECIPE --cluster NAME ...` | Controller | Multi-host export through agents (unimplemented) |
 | `flare fleet run PACKAGE --cluster NAME [--detach] ...` | Controller | Starts a group and attaches |
 | `flare fleet attach` / `stop` / `status --cluster NAME` | Controller | Operates a running group |
 | `flare fleet forget NODE` | Controller | Removes a node from the fleet file |
 
 `flare run --rank R --rendezvous ADDR` remains for operator-managed starts on
 hosts that already hold the executable and package. `flare run --hosts`,
-`--agent-token-file`, `flare agent --token-file`, and
-`[preparation] checkpoint_token_file` are removed.
+`--agent-token-file`, and `flare agent --token-file` are removed;
+`[preparation] checkpoint_token_file` remains until PREPARE replaces it.
 
 ## Security model
 
@@ -424,36 +440,29 @@ controllers of one fleet run the same Flare revision, and `flare fleet`
 refuses an agent whose HELLO reports another protocol version. The agent runs
 on Linux; the controller builds wherever Flare builds.
 
-## Delivery plan
+## Unimplemented parts
 
-Each step is usable on its own and leaves the previous steps working.
+Identity, the session transport, pairing, the controller set and its
+propagation, the fleet file, grants, executable and package placement with
+node-to-node fetches, `flare agent install` and `reset`, and `flare fleet
+pair`, `controllers`, `status`, `run`, `attach`, `stop`, and `forget` exist and
+are validated by unit tests and by serving a four-rank package on four DGX
+Sparks from a controller that is not a rank. The following parts of this
+specification are not in the tree:
 
-1. **Identity, transport, and launch from a non-member host.** Node and
-   controller keys, the session transport, pairing by join code and accept-first,
-   the controller-set record at revision 1, the fleet file,
-   `flare agent install`, HELLO, HAVE, PUT, RUN for every rank, STOP, ATTACH,
-   grants, and `flare fleet run` with the controller holding the package.
-   Validation: unit tests of the handshake, grant verification, and framing
-   without a network; a two-Spark GLM TP2 launch from a non-member
-   x86 host whose output matches an operator-managed start.
-2. **Node-to-node transfer and group operation.** TRANSFER, FETCH,
-   `NODE:PATH` package sources, STATUS, `flare fleet attach` and `stop`, and
-   detach survival. Validation: a four-Spark TP4 launch where only rank zero
-   holds the package; a controller disconnect during serving leaves the group
-   serving.
-3. **Discovery and fabric check.** mDNS advertisement, `flare fleet discover`,
+1. **Discovery and fabric check.** mDNS advertisement, `flare fleet discover`,
    fabric endpoints in STATUS, the rail check, and the ring-order proposal.
    Validation: check results agree with the rails serving selects, and a
    deliberately uncabled rail is reported before an export.
-4. **Preparation through agents.** PREPARE, `flare fleet prepare`, the
+2. **Preparation through agents.** PREPARE, `flare fleet prepare`, the
    `--checkpoint-token-file` flag, and removal of
    `[preparation] checkpoint_token_file`. Validation: a GLM TP4 export through
    agents whose rank signatures verify and which serves identically to a manual
    export.
-5. **Controller delegation.** Controller-set revisions above 1,
-   `flare agent reset`, and record propagation in HELLO. Validation: two
-   controllers on different machines operate one fleet, and a removed
-   controller is refused by every node.
+
+A peer verifies its cached rank files on every launch, whether they were
+fetched for this launch or reused; remembering a verified entry's digest would
+confine that to new transfers.
 
 ## Limitations
 
