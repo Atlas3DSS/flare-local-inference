@@ -5,16 +5,12 @@ Each host runs a process, called a rank, that executes its share of the model.
 Rank zero coordinates the ranks and serves the HTTP API. The other hosts run
 peer ranks.
 
-The Flare agent is the service that lets rank zero start and supervise a peer
-rank remotely. With `flare run PACKAGE --hosts HOSTS`, rank zero sends each agent
-its Flare executable and the package data that peer needs. The agent caches
-those files, launches the rank, forwards its output, and sends it SIGTERM if
-rank zero's connection closes. The rank process executes the model through
-Helios; the agent manages its files and process lifetime.
-
-[Fleet control](fleet.md) specifies the replacement for this shared-token agent
-and rank-zero launcher: paired node keys, an encrypted agent transport, and
-launching from a host that is not a rank.
+Every host of a serving group runs the Flare agent, a user service that pairs
+with the operator's controller machine, caches the Flare executable and package
+data, starts the host's rank, supervises it, and streams its output. The
+operator starts and stops groups with `flare fleet` commands from any machine
+with the Flare executable; that machine is not a rank. [Fleet control](fleet.md)
+specifies the agent protocol, pairing, grants, and process ownership.
 
 Model preparation runs through `ignition export` on rank zero and `ignition join`
 on each peer. Ignition loads weights, tunes kernels, captures graphs, and writes
@@ -46,8 +42,8 @@ Flare executable and its prepared graphs without Python.
 | --- | --- | --- |
 | Ignition preparation rendezvous | Rank zero | Selected by `--rendezvous`; examples use TCP 29630 |
 | Ignition preparation coordination | Participating hosts | Additional dynamically allocated TCPStore and Gloo ports |
-| Flare agent control and file transfer | Each peer | TCP 29900 by default |
-| Flare serving rendezvous | Rank zero | TCP 29800 by default |
+| Flare agent control and file transfer | Every host, from the controller and from other hosts | TCP 29900 by default |
+| Flare serving rendezvous | Rank zero | TCP 29800 |
 | HTTP API | Rank zero | TCP 8000 in these examples |
 
 Preparation and serving also require a working RoCE fabric between the ranks.
@@ -56,9 +52,10 @@ two rails per peer on a switch or supported point-to-point topology; the package
 does not pin the fabric used during preparation. On Spark, cabled port 0 commonly
 appears as `rocep1s0f0` and `roceP2p1s0f0`.
 
-Agent file transfers use ordinary TCP to the addresses named by `--hosts`.
-Choose hostnames or addresses that route over the intended transfer network.
-The RoCE device selection for model collectives does not select that TCP route.
+Agent file transfers use ordinary TCP to the addresses recorded in the fleet
+file at pairing. Choose hostnames or addresses that route over the intended
+transfer network. The RoCE device selection for model collectives does not
+select that TCP route.
 
 ### Checkpoint and package storage
 
@@ -69,8 +66,8 @@ the weights, graphs, and other resources that Flare loads for serving.
 | --- | --- | --- |
 | Source checkpoint | Retained in its hub cache | Missing files are copied into its hub cache during preparation and retained |
 | Temporary export | Stages all ranks before publication | Stages its own rank in the system temporary directory, then sends it to rank zero |
-| Signed serving package | Retains the complete package, including companion files | The agent caches its rank's resources and required shared data |
-| Serving executable | Uses the executable invoked by the operator | The agent caches and runs the executable sent by rank zero |
+| Signed serving package | Retains the complete package, including companion files | The agent caches its rank's resources and required shared data, fetched from rank zero's host |
+| Serving executable | The agent caches and runs the executable sent by the controller | The agent caches and runs the executable sent by the controller |
 
 On rank zero, allow roughly twice the final package size for staging and
 publication, in addition to checkpoint storage. On a preparation peer, allow
@@ -79,83 +76,72 @@ that export is assembled. Temporary exports are removed after use.
 
 The agent stores packages under `~/.cache/flare/packages` and executables under
 `~/.cache/flare/bin`, in the account running the service. After a successful
-upload, the agent removes unused entries of the same kind; active connections
-keep their entries pinned. This cleanup does not remove source checkpoints from
-the hub cache.
+transfer, the agent removes entries of the same kind that no running group and
+no open connection uses. This cleanup does not remove source checkpoints from
+the hub cache or packages outside the cache.
 
 ## One-time setup: the Flare agent
 
-Only serving peers need the agent service. Rank zero and all peers need the
-same cluster token. The agent authenticates rank zero through an HMAC challenge;
-the token itself is never transmitted. The agent connection uses TCP without
-transport encryption. Anyone holding the token can run code as the service user
-on the peer hosts, so keep the token private and use a trusted cluster network.
+Every host of a group runs the agent service. The agent holds a node key and a
+list of authorized controllers; a controller holds its own key and a fleet file
+listing the nodes it paired with and named clusters in rank order. Anyone
+holding an authorized controller key can run code as the service user on every
+node, so keep `~/.config/flare/fleet/controller.key` private.
 
-### Install the shared token
+### Install the agent on each host
 
-Create the token once on rank zero. This command refuses to overwrite an
-existing token; reuse that token when adding hosts to the same cluster.
-
-```sh
-install -d -m 700 ~/.config/flare
-(
-  umask 077
-  set -C
-  head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > ~/.config/flare/agent.token
-)
-```
-
-Copy the same file to each peer account. For a peer named `hertz`:
+From the repository root after building Flare:
 
 ```sh
-ssh hertz 'install -d -m 700 ~/.config/flare'
-scp -p ~/.config/flare/agent.token hertz:.config/flare/agent.token
-ssh hertz 'chmod 600 ~/.config/flare/agent.token'
+./flare/target/release/flare agent install
 ```
 
-The token must contain at least 32 bytes after trimming whitespace, with no
-group or other permission bits. Its default path is
-`~/.config/flare/agent.token`. For another path, use `flare agent --token-file PATH`
-on the peer and `flare run --agent-token-file PATH` on rank zero.
+This copies the executable to `~/.local/lib/flare-agent/flare`, writes and
+enables the `flare-agent` user service listening on `0.0.0.0:29900`, enables
+lingering so the service runs without a login session, creates the node key,
+and prints the node's name, fingerprint, and a one-time join code valid for 24
+hours. `--listen IP:PORT` changes the listening address; `--join-code CODE`
+installs a code of your own so one code covers several hosts;
+`--accept-first` admits the first controller that connects without a code, for
+a network you already trust. `journalctl --user -u flare-agent` shows the
+agent's log.
 
-### Install the peer service
+To update an agent, stop the group it serves, run `flare agent install` again
+with the new executable, and pair again only if the node was reset. Restarting
+the service stops any rank it runs.
 
-On each peer, run these commands from the repository root after building Flare:
+### Pair from the controller
+
+On the machine that will control the fleet, pair with each host using the code
+its installation printed:
 
 ```sh
-install -d ~/.local/lib/flare-agent ~/.config/systemd/user
-install -m 755 flare/target/release/flare ~/.local/lib/flare-agent/flare
-cat > ~/.config/systemd/user/flare-agent.service <<'UNIT'
-[Unit]
-Description=Flare agent for tensor-parallel peer ranks
-After=network-online.target
-
-[Service]
-ExecStart=%h/.local/lib/flare-agent/flare agent --listen 0.0.0.0:29900
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=default.target
-UNIT
-systemctl --user daemon-reload
-systemctl --user enable --now flare-agent
-loginctl enable-linger "$USER"
-journalctl --user -u flare-agent -n 20
+flare fleet pair maxwell hertz faraday ampere --code ABCD-EFGH-IJKL-MNOP-QRST-UVWX-YZ23-4567
 ```
 
-Lingering keeps the user service running without an active login session.
-The journal should report the agent's listening address and cache directory.
-For a different listening port, change `--listen` and include that port in
-rank zero's host list, for example `--hosts hertz:29901`.
+Pairing creates the controller key on first use, proves the join code to each
+node inside the encrypted session, records each node's name, fingerprint,
+public key, and address in `~/.config/flare/fleet.toml`, and installs the
+controller as the node's authorized controller. Compare the fingerprints it
+prints with what each host printed at installation. Hosts installed with
+`--accept-first` pair without `--code`.
 
-The installed agent manages transfers and processes; serving ranks use the
-executable sent by rank zero. Keep the agent compatible with rank zero's
-transfer protocol. Multi-file packages require agent protocol 3. Protocol 2
-supports rank byte ranges in a single-file package; protocol 1 receives the
-whole single-file package. To update an agent, stop serving, replace the
-installed executable, and restart `flare-agent`. Restart the agent after
-replacing its token as well, because it reads the token at startup.
+Then name a cluster in the fleet file, listing nodes in rank order:
+
+```toml
+[cluster.sparks]
+nodes = ["maxwell", "hertz", "faraday", "ampere"]
+```
+
+The first node is rank zero. With `--roce-ring`, the order is also the ring.
+`flare fleet status --cluster sparks` shows every node's free disk, controller
+revision, and running group. A fleet with one cluster needs no `--cluster`.
+
+To let another machine control the same fleet, run
+`flare fleet controllers add NAME PUBLIC_KEY` with the other controller's
+public key (the hex in its own fleet file); `flare fleet controllers remove KEY`
+revokes it. `flare agent reset` on a host forgets its controllers so it can be
+paired again.
 
 ## Prepare the package
 
@@ -201,38 +187,45 @@ diagnosing scheduling-dependent faults. These flags change the prepared graphs.
 
 ## Serve
 
-On rank zero, start the package with peers listed in rank order:
+From the controller, start the package on the cluster:
 
 ```sh
-./flare/target/release/flare run /data/flare-runtime/glm53-spark-tp2.safetensors \
-  --hosts hertz --gpus 0 --host 0.0.0.0 --port 8000
+flare fleet run maxwell:/data/flare-runtime/glm53-spark-tp2.safetensors \
+  --cluster sparks --gpus 0 --host 0.0.0.0 --port 8000
 ```
 
-A four-rank package needs three peers, for example
-`--hosts hertz,faraday,ampere`: Hertz is rank one, Faraday rank two, and Ampere
-rank three. The host count must match the package's prepared rank count.
+`NODE:PATH` names a package on a node's disk, normally rank zero's host where
+preparation wrote it. A plain path names a package on the controller, which is
+then sent to rank zero's host. The cluster's node count must match the
+package's prepared rank count.
 
-Rank zero validates the package and obtains publisher acceptance before
-launching peers. It passes the accepted publisher profile and signing-key
-approval to each agent. Each peer independently verifies the package for its
-rank; `--verify-weights` also verifies the stored weight bytes.
+The controller verifies the package's signed index and obtains publisher
+acceptance at its own terminal, then passes the accepted publisher profile and
+signing-key approval to each agent. Each rank independently verifies the
+package for its rank; a rank whose bytes came from another node also verifies
+the stored weight bytes, and `--verify-weights` does so on every rank.
 
 Startup then proceeds as follows:
 
-1. Rank zero connects to the agents and sends missing executable and package
-   data to peers in parallel. Each peer receives the signed index, its own rank's
-   resources, and the shared tables it needs.
-2. The agents launch their ranks with rank zero's serving options, including
-   concurrency, speculation, and embedding-table storage.
-3. All ranks join the serving rendezvous, agree on capacity, and load their
+1. The controller connects to every node's agent, checks that no group is
+   running and that disk suffices, and sends the Flare executable to nodes that
+   lack it.
+2. Rank zero's node holds the complete package. Each peer fetches the signed
+   index, its own rank's resources, and the shared tables it needs from rank
+   zero's host, in parallel, over the hosts' own network.
+3. The controller signs a grant naming the group, the package, every member in
+   rank order, the rendezvous address, and the serving options, and asks each
+   agent to run its rank. Agents accept a grant only from their authorized
+   controllers.
+4. All ranks join the serving rendezvous, agree on capacity, and load their
    assigned resources.
-4. The ranks exchange RoCE connection records and connect the transport. Rank
-   zero serves HTTP once the rank group is ready.
+5. The ranks exchange RoCE connection records and connect the transport. Rank
+   zero serves HTTP once the rank group is ready, and the controller prints
+   the address.
 
-The serving rendezvous listens on `0.0.0.0:29800` by default. Change its port
-with `--rendezvous 0.0.0.0:PORT`. Rank zero advertises the local address selected
-by its route to the first peer in `--hosts`; every peer must be able to reach
-that address. A more restrictive bind address must include that interface.
+The serving rendezvous listens on rank zero's port 29800 at the address rank
+zero's host uses to reach the first peer; every peer must be able to reach that
+address.
 
 Peer package files preserve the source files' logical lengths, with unwritten
 regions represented as sparse holes. Only transferred ranges occupy disk on a
@@ -241,19 +234,21 @@ filesystem supporting sparse files. Use `du` to inspect allocated space;
 companions stay together in one cache directory. Later starts reuse cached
 files whose cache names and sizes match, avoiding another transfer.
 
-Peer output appears on rank zero's terminal with a `[rank R host]` prefix.
-Stop serving with Ctrl-C or SIGTERM on rank zero so native work drains before
-resources are released. If the agent's connection to rank zero closes, the
-agent sends SIGTERM to its peer process. The agent service stays available for
-another launch. It does not restart a failed rank automatically; start the model
-again from rank zero after resolving the failure.
+Every rank's output appears on the controller's terminal with a `[rank R name]`
+prefix. Ctrl-C stops the group: rank zero receives SIGTERM first and drains
+native work, then peers still running after thirty seconds are stopped.
+`--detach` returns once every rank has started; `flare fleet attach` shows a
+running group's output, and `flare fleet stop` stops it. A controller that
+disconnects, sleeps, or crashes does not stop the group; agents keep the last
+64 KiB of each rank's output for a later attach. An agent does not restart a
+failed rank; start the group again after resolving the failure.
 
 ### Start ranks manually
 
 Manual startup requires the compatible executable and package files to be
 available on every host, with publisher trust configured on each. Start rank
-zero with `--rank 0 --rendezvous 0.0.0.0:29800` and no `--hosts`. Start each peer
-with its assigned `--rank` and rank zero's reachable address:
+zero with `--rank 0 --rendezvous 0.0.0.0:29800`. Start each peer with its
+assigned `--rank` and rank zero's reachable address:
 
 ```sh
 ./flare/target/release/flare run /data/flare-runtime/glm53-spark-tp2.safetensors \
@@ -267,10 +262,11 @@ distribution and process management to the operator.
 
 | Error or symptom | Check |
 | --- | --- |
-| `cannot reach flare agent` | The peer service is running; the hostname, listening port, route, and firewall allow rank zero to connect. |
-| `agent token mismatch` | Rank zero and the agent read the same token. Restart an agent after replacing its token. |
-| Token permission error | The token is private to its owner, normally mode `600`, and readable by the account running Flare. |
-| `multi-file packages require flare agent protocol 3` | Install a compatible agent build and restart the service. |
+| `cannot reach flare agent` | The service is running on the host; the address in the fleet file, route, and firewall allow the controller and the other hosts to connect. |
+| `is not an authorized controller of this node` | The node was paired with a different controller key; pair it, or add this controller with `flare fleet controllers add` from a controller it knows. |
+| `join code proof rejected` or `this node requires its join code` | The code matches what `flare agent install` printed and has not expired or been used. |
+| `peer speaks agent protocol N` | Every node and the controller run the same Flare build; run `flare agent install` with the matching executable. |
+| `group ... is running on this node` | Stop the running group with `flare fleet stop` before starting another. |
 | `rank R cannot hold the checkpoint` | The peer has space for missing checkpoint files, and received files pass content verification. |
 | `rank zero refused rank R` | Every serving rank uses the same package export and world size. |
 | `tensor-parallel rank identity or graph I/O schema differs` | All ranks use matching serving options and compatible executables. |
@@ -278,8 +274,8 @@ distribution and process management to the operator.
 | Missing IPv4 GID, rail link error, transport setup failure, or queue-pair connection failure | RoCE ports are active, have IPv4 addresses, and provide the required connectivity between hosts. |
 
 A collective timeout poisons the rank group's transport and shuts it down.
-The failed frame is not published. Check the rank-prefixed output on rank zero
-and the peer agent journals before restarting the group.
+The failed frame is not published. Check the rank-prefixed output on the
+controller and the agents' journals before restarting the group.
 
 ## Experimental rings
 

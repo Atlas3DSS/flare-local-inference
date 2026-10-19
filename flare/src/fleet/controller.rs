@@ -1,0 +1,1917 @@
+//! The controller side of fleet control: pairing nodes, distributing the controller set, and
+//! launching, attaching to, and stopping serving groups. See docs/fleet.md.
+//!
+//! A launch verifies the package at the controller, where the operator accepts its publisher;
+//! checks every node's STATUS; issues a grant in the cluster's rank order; gives every node the
+//! executable; places the package, either complete on rank zero from the controller or at the
+//! node that holds it, from where every other node fetches its ranks' byte ranges with TRANSFER;
+//! and sends RUN to rank zero and then to the peers. Each rank's output is printed with a
+//! `[rank R name]` prefix.
+//!
+//! Stopping sends STOP to rank zero and waits for it to exit, so its coordinated shutdown drains
+//! while every peer still participates in collectives. Peers still running 30 seconds after rank
+//! zero exits receive STOP.
+
+use std::collections::BTreeMap;
+use std::fs::{self, File};
+use std::io::Read;
+use std::net::{IpAddr, SocketAddr};
+use std::os::unix::fs::{DirBuilderExt, FileExt};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
+
+use flare_helios::runtime_package::{self, AuthorizedPackage, Publisher};
+use flare_helios::startup::StartupProgress;
+use serde::Deserialize;
+use serde_json::{Value, json};
+
+use super::agent::{Hello, exchange_hello};
+use super::cache;
+use super::grant::{ControllerKey, ControllerSet, Grant, Member, Package, Signed, Source};
+use super::identity::{Key, PublicKey};
+use super::session::{FRAME_LIMIT, Session};
+use super::store::{Fleet, Node, join_key};
+use super::{
+    Failure, PROTOCOL_VERSION, frame, hex, hmac_sha256, hostname, now, random, unhex, with_port,
+};
+
+/// Rank zero's rendezvous port, on the address its host routes toward its peers.
+pub const RENDEZVOUS_PORT: u16 = 29800;
+/// How long a grant authorizes RUN after it is issued.
+pub const GRANT_SECONDS: u64 = 600;
+/// How long peers may keep running after rank zero exits before they receive STOP.
+const PEER_GRACE: Duration = Duration::from_secs(30);
+/// An agent sends an empty LOG frame after 20 silent seconds, so an attachment silent for longer
+/// has lost its node.
+const ATTACH_TIMEOUT: Duration = Duration::from_secs(90);
+/// The largest safetensors header Helios accepts in a package file.
+const HEADER_LIMIT: u64 = 64 << 10;
+const GIB: f64 = (1u64 << 30) as f64;
+
+static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn interrupt(_: libc::c_int) {
+    INTERRUPTED.store(true, Ordering::Relaxed);
+}
+
+/// Record SIGINT and SIGTERM in [`INTERRUPTED`] instead of terminating, so that waiting loops
+/// can stop a group in order.
+fn catch_interrupts() {
+    INTERRUPTED.store(false, Ordering::Relaxed);
+    // SAFETY: the handler only stores to an atomic, which is async-signal-safe.
+    unsafe {
+        libc::signal(libc::SIGINT, interrupt as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGTERM, interrupt as *const () as libc::sighandler_t);
+    }
+}
+
+fn interrupted() -> bool {
+    INTERRUPTED.swap(false, Ordering::Relaxed)
+}
+
+/// What STATUS reports about a node.
+#[derive(Clone, Debug, Deserialize)]
+pub struct NodeStatus {
+    pub fingerprint: String,
+    pub free_bytes: u64,
+    pub controllers_revision: u64,
+    /// The group the node runs or last ran.
+    pub group: Option<GroupStatus>,
+    /// The local address the node routes toward the address a request named as `toward`.
+    #[serde(default)]
+    pub address_toward: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct GroupStatus {
+    pub id: String,
+    pub rank: usize,
+    pub running: bool,
+    pub exit: Option<i32>,
+    pub uptime_seconds: u64,
+}
+
+/// Options of `flare fleet run`.
+pub struct RunOptions {
+    /// Serving options every rank loads with.
+    pub serving: Vec<String>,
+    /// Options for rank zero alone: the HTTP bind and request handling.
+    pub rank_zero: Vec<String>,
+    pub roce_ring: bool,
+    /// The flare executable the nodes run; the running executable when absent.
+    pub executable: Option<PathBuf>,
+    /// Return once every rank has started instead of following the group.
+    pub detach: bool,
+    /// Every rank verifies the package's stored data before loading.
+    pub verify_weights: bool,
+    /// Package verification and publisher acceptance settings, as `flare run` takes them.
+    pub run_args: crate::cli::Run,
+}
+
+/// The launch settings a grant carries.
+#[derive(Clone, Debug, Default)]
+pub struct LaunchOptions {
+    pub serving: Vec<String>,
+    pub rank_zero: Vec<String>,
+    pub roce_ring: bool,
+}
+
+/// A `flare fleet run` package argument.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PackageReference {
+    Local(PathBuf),
+    /// A package a fleet node holds at an absolute path.
+    Node {
+        node: String,
+        path: String,
+    },
+}
+
+/// Where a launch's package comes from.
+#[derive(Clone, Debug)]
+pub enum Holder {
+    /// The controller holds the package; rank zero receives every file complete.
+    Controller { primary: PathBuf },
+    /// A node holds the package; every other node fetches from it.
+    Node { node: Node, path: String },
+}
+
+/// One file of a package: the primary or a companion.
+#[derive(Clone, Debug)]
+pub struct PackageEntry {
+    pub name: String,
+    pub size: u64,
+}
+
+/// The byte ranges of one package file that a rank reads, at their offsets in the file.
+#[derive(Clone, Debug)]
+pub struct RankFile {
+    pub name: String,
+    pub size: u64,
+    pub ranges: Vec<(u64, u64)>,
+}
+
+/// A verified multi-host package and what each rank reads of it.
+#[derive(Clone, Debug)]
+pub struct ResolvedPackage {
+    /// The export identity every rank's file records.
+    pub export: String,
+    /// The primary file, then its companions.
+    pub files: Vec<PackageEntry>,
+    /// Each rank's files and ranges, indexed by rank.
+    pub ranks: Vec<Vec<RankFile>>,
+    pub publisher: Publisher,
+    pub holder: Holder,
+}
+
+/// A started group: its grant and each rank's node with the session streaming its output, in
+/// rank order.
+pub struct Launch {
+    pub grant: Grant,
+    pub ranks: Vec<(Node, Session)>,
+}
+
+/// How a followed rank ended: its exit status, or why its output stopped arriving.
+pub struct RankEnd {
+    pub rank: usize,
+    pub node: String,
+    pub result: Result<i32, String>,
+}
+
+/// The controlling machine's identity and fleet file.
+pub struct Controller {
+    key: Key,
+    fleet: Fleet,
+    fleet_path: PathBuf,
+    name: String,
+}
+
+impl Controller {
+    /// Load the controller key, creating it on first use, and the fleet file.
+    pub fn open(fleet_path: Option<&Path>, key_path: Option<&Path>) -> Result<Self, Failure> {
+        let key_path = key_path.map_or_else(Fleet::default_key_path, Path::to_path_buf);
+        let fleet_path = fleet_path.map_or_else(Fleet::default_path, Path::to_path_buf);
+        let key = Key::load_or_create(&key_path)
+            .map_err(|e| format!("controller key {}: {e}", key_path.display()))?;
+        let fleet = Fleet::load(&fleet_path)?;
+        Ok(Self::new(key, fleet, fleet_path))
+    }
+
+    /// A controller with this key and fleet, saving the fleet to `fleet_path`.
+    pub fn new(key: Key, fleet: Fleet, fleet_path: PathBuf) -> Self {
+        Self {
+            key,
+            fleet,
+            fleet_path,
+            name: hostname(),
+        }
+    }
+
+    fn save(&self) -> Result<(), Failure> {
+        self.fleet.save(&self.fleet_path)
+    }
+
+    fn revision(&self) -> Result<u64, Failure> {
+        Ok(self.fleet.controller_set()?.map_or(0, |set| set.revision))
+    }
+
+    /// The fleet file's nodes of a cluster, in rank order.
+    fn cluster(&self, name: Option<&str>) -> Result<(String, Vec<Node>), Failure> {
+        let (name, nodes) = self.fleet.cluster(name)?;
+        Ok((name, nodes.into_iter().cloned().collect()))
+    }
+
+    // ---- sessions ------------------------------------------------------------------------------
+
+    fn node_session(&self, node: &Node) -> Result<(Session, Hello), Failure> {
+        let (mut session, mut hello) = self.handshake(&node.address)?;
+        let expected = node.key()?;
+        if session.remote() != expected {
+            return Err(format!(
+                "{} presents key {}, not the key this node paired with ({})",
+                node.address,
+                session.remote().fingerprint(),
+                expected.fingerprint()
+            )
+            .into());
+        }
+        hello.controllers_revision = self.synchronize(&mut session, &hello)?;
+        Ok((session, hello))
+    }
+
+    fn handshake(&self, address: &str) -> Result<(Session, Hello), Failure> {
+        let mut session = Session::connect(address, &self.key)?;
+        let mine = Hello {
+            version: PROTOCOL_VERSION,
+            kind: "controller".into(),
+            name: self.name.clone(),
+            public_key: self.key.public().to_hex(),
+            controllers_revision: self.revision()?,
+            free_bytes: 0,
+        };
+        let hello = exchange_hello(&mut session, &mine)?;
+        if hello.kind != "node" {
+            return Err(format!("{address} is a flare {}, not an agent node", hello.kind).into());
+        }
+        Ok((session, hello))
+    }
+
+    /// Send the fleet file's controller-set record to a paired node holding an older revision,
+    /// and return the revision the node holds afterwards. An unpaired node becomes paired only
+    /// through PAIR, so it never receives the record here.
+    fn synchronize(&self, session: &mut Session, hello: &Hello) -> Result<u64, Failure> {
+        let ours = self.revision()?;
+        let Some(record) = self.fleet.controllers.as_ref() else {
+            return Ok(hello.controllers_revision);
+        };
+        if hello.controllers_revision == 0 || hello.controllers_revision >= ours {
+            return Ok(hello.controllers_revision);
+        }
+        session.write_frame(frame::CONTROLLERS, &serde_json::to_vec(record)?)?;
+        let reply = session
+            .expect(frame::OK)
+            .map_err(|e| format!("controller set revision {ours} refused: {e}"))?;
+        let reply: Value = serde_json::from_slice(&reply)?;
+        Ok(reply["revision"].as_u64().unwrap_or(ours))
+    }
+
+    // ---- pairing and the controller set --------------------------------------------------------
+
+    /// Pair with the agents at `hosts` and record them in the fleet file. With `code`, both sides
+    /// prove the join code inside the session; without it, each node must accept the first
+    /// controller. Prints each node's name and fingerprint for comparison with what
+    /// `flare agent install` printed on the host.
+    pub fn pair(&mut self, hosts: &[String], code: Option<&str>) -> Result<(), Failure> {
+        let record = self.pairing_record()?;
+        let code_key = code.map(join_key);
+        let mut failed = Vec::new();
+        for host in hosts {
+            match self.pair_one(&with_port(host), &record, code_key.as_ref()) {
+                Ok(node) => println!(
+                    "paired {}  fingerprint {}  address {}",
+                    node.name, node.fingerprint, node.address
+                ),
+                Err(error) => {
+                    eprintln!("{host}: {error}");
+                    failed.push(host.as_str());
+                }
+            }
+        }
+        if self.fleet.cluster.is_empty() && self.fleet.node.len() >= 2 {
+            let names: Vec<String> = self
+                .fleet
+                .node
+                .iter()
+                .map(|n| format!("{:?}", n.name))
+                .collect();
+            println!(
+                "\nTo launch on these nodes, list them in rank order as a cluster in {}:\n\n[cluster.NAME]\nnodes = [{}]",
+                self.fleet_path.display(),
+                names.join(", ")
+            );
+        }
+        if !failed.is_empty() {
+            return Err(format!("pairing failed for {}", failed.join(", ")).into());
+        }
+        Ok(())
+    }
+
+    fn pair_one(
+        &mut self,
+        address: &str,
+        record: &Signed,
+        code_key: Option<&[u8; 32]>,
+    ) -> Result<Node, Failure> {
+        let (mut session, hello) = self.handshake(address)?;
+        let key = session.remote();
+        if let Some(known) = self
+            .fleet
+            .node
+            .iter()
+            .find(|n| n.name == hello.name && n.public_key != key.to_hex())
+        {
+            return Err(format!(
+                "the fleet file records another node named {} (fingerprint {}); remove it with \
+                 `flare fleet forget {}` before pairing this host",
+                known.name, known.fingerprint, known.name
+            )
+            .into());
+        }
+        let hash = *session.handshake_hash();
+        let mut request = json!({"controllers": record});
+        if let Some(code_key) = code_key {
+            let proof = hmac_sha256(code_key, &[b"controller".as_slice(), &hash].concat());
+            request["proof"] = hex(&proof).into();
+        }
+        let reply: Value = serde_json::from_slice(&session.request(frame::PAIR, &request)?)?;
+        let public_key = PublicKey::from_hex(
+            reply["public_key"]
+                .as_str()
+                .ok_or("PAIR reply lacks public_key")?,
+        )?;
+        if public_key != key {
+            return Err(
+                "the PAIR reply names a key other than the one the node authenticated".into(),
+            );
+        }
+        if let Some(code_key) = code_key {
+            let expected = hmac_sha256(code_key, &[b"node".as_slice(), &hash].concat());
+            let proof = reply["proof"].as_str().map(unhex).transpose()?;
+            if !proof.is_some_and(|proof| constant_time_equal(&proof, &expected)) {
+                return Err(
+                    "the node did not prove the join code, so it may not be the host where the \
+                     code was installed; it was not recorded"
+                        .into(),
+                );
+            }
+        }
+        let node = Node {
+            name: reply["name"].as_str().unwrap_or(&hello.name).to_owned(),
+            fingerprint: key.fingerprint(),
+            public_key: key.to_hex(),
+            address: address.to_owned(),
+        };
+        self.fleet.upsert(node.clone());
+        self.save()?;
+        Ok(node)
+    }
+
+    /// The fleet file's controller-set record, created at revision 1 with this controller alone
+    /// when the fleet file has none.
+    fn ensure_record(&mut self) -> Result<Signed, Failure> {
+        if let Some(record) = &self.fleet.controllers {
+            return Ok(record.clone());
+        }
+        let set = ControllerSet {
+            revision: 1,
+            keys: vec![ControllerKey {
+                name: self.name.clone(),
+                public_key: self.key.public().to_hex(),
+            }],
+        };
+        let record = Signed::sign(&self.key, &set)?;
+        self.fleet.controllers = Some(record.clone());
+        self.save()?;
+        Ok(record)
+    }
+
+    /// The record pairing hands a node. A node accepts a first record only from the controller
+    /// that signed it, so a record another controller signed is signed again here with the same
+    /// revision and keys.
+    fn pairing_record(&mut self) -> Result<Signed, Failure> {
+        let record = self.ensure_record()?;
+        if record.signer()? == self.key.public() {
+            return Ok(record);
+        }
+        let set: ControllerSet = record.verify(|_| true)?;
+        if !set.contains(&self.key.public()) {
+            return Err(self.not_a_member());
+        }
+        Signed::sign(&self.key, &set)
+    }
+
+    fn not_a_member(&self) -> Failure {
+        format!(
+            "this controller ({}) is not in the controller set of {}",
+            self.key.public().fingerprint(),
+            self.fleet_path.display()
+        )
+        .into()
+    }
+
+    /// Authorize another controller, given its public key as hex: write the next controller-set
+    /// revision, signed by this controller, and send it to every node in the fleet file.
+    pub fn controllers_add(&mut self, name: &str, public_key: &str) -> Result<(), Failure> {
+        let key = PublicKey::from_hex(public_key.trim())
+            .map_err(|e| format!("controller public key: {e}"))?;
+        self.ensure_record()?;
+        self.advance(|keys| {
+            if keys.iter().any(|k| k.public_key == key.to_hex()) {
+                return Err(
+                    format!("{} is already an authorized controller", key.fingerprint()).into(),
+                );
+            }
+            keys.push(ControllerKey {
+                name: name.to_owned(),
+                public_key: key.to_hex(),
+            });
+            Ok(())
+        })
+    }
+
+    /// Remove the controller named by its fingerprint, public key, or name: write the next
+    /// controller-set revision, signed by this controller, and send it to every node.
+    pub fn controllers_remove(&mut self, controller: &str) -> Result<(), Failure> {
+        self.advance(|keys| {
+            let before = keys.len();
+            keys.retain(|k| {
+                !(k.name == controller
+                    || k.public_key == controller
+                    || PublicKey::from_hex(&k.public_key)
+                        .is_ok_and(|p| p.fingerprint() == controller))
+            });
+            match before - keys.len() {
+                1 => Ok(()),
+                0 => Err(format!("no authorized controller matches {controller}").into()),
+                _ => Err(format!(
+                    "{controller} matches several controllers; name one by fingerprint"
+                )
+                .into()),
+            }
+        })
+    }
+
+    fn advance(
+        &mut self,
+        change: impl FnOnce(&mut Vec<ControllerKey>) -> Result<(), Failure>,
+    ) -> Result<(), Failure> {
+        let set = self
+            .fleet
+            .controller_set()?
+            .ok_or("the fleet file has no controller set; pair a node first")?;
+        if !set.contains(&self.key.public()) {
+            return Err(self.not_a_member());
+        }
+        let mut keys = set.keys.clone();
+        change(&mut keys)?;
+        if keys.is_empty() {
+            return Err("the controller set must keep at least one controller".into());
+        }
+        let next = ControllerSet {
+            revision: set.revision + 1,
+            keys,
+        };
+        self.fleet.controllers = Some(Signed::sign(&self.key, &next)?);
+        self.save()?;
+        println!("controller set revision {}:", next.revision);
+        for key in &next.keys {
+            let fingerprint = PublicKey::from_hex(&key.public_key)?.fingerprint();
+            println!("  {fingerprint}  {}", key.name);
+        }
+        self.distribute();
+        Ok(())
+    }
+
+    /// Bring every node in the fleet file to the fleet file's controller-set revision, reporting
+    /// nodes that cannot be reached; those receive it when any controller next connects.
+    fn distribute(&self) {
+        let nodes = &self.fleet.node;
+        let results = parallel(nodes, |_, node| self.node_session(node));
+        for (node, result) in nodes.iter().zip(results) {
+            match result {
+                Ok((_, hello)) => {
+                    println!("  {}: revision {}", node.name, hello.controllers_revision)
+                }
+                Err(error) => eprintln!("  {}: not updated: {error}", node.name),
+            }
+        }
+    }
+
+    /// Remove a node from the fleet file. Clusters that list it fail to resolve until edited.
+    pub fn forget(&mut self, name: &str) -> Result<(), Failure> {
+        let before = self.fleet.node.len();
+        self.fleet.node.retain(|n| n.name != name);
+        if self.fleet.node.len() == before {
+            return Err(format!("the fleet file has no node named {name}").into());
+        }
+        self.save()
+    }
+
+    // ---- status --------------------------------------------------------------------------------
+
+    /// One node's STATUS; `toward` asks for the local address the node routes toward it.
+    pub fn node_status(&self, node: &Node, toward: Option<&str>) -> Result<NodeStatus, Failure> {
+        self.query_status(node, toward)
+            .map_err(|e| at(&node.name, e))
+    }
+
+    fn query_status(&self, node: &Node, toward: Option<&str>) -> Result<NodeStatus, Failure> {
+        let (mut session, _) = self.node_session(node)?;
+        status_on(&mut session, toward)
+    }
+
+    /// Print every node of a cluster with its free cache space, controller-set revision, and the
+    /// group it runs or last ran.
+    pub fn status(&self, cluster: Option<&str>) -> Result<(), Failure> {
+        let (name, nodes) = self.cluster(cluster)?;
+        let results = parallel(&nodes, |_, node| self.query_status(node, None));
+        let width = nodes.iter().map(|n| n.name.len()).max().unwrap_or(0).max(4);
+        println!("cluster {name}");
+        println!(
+            "{:<width$}  {:<12}  {:>8}  {:>8}  GROUP",
+            "NODE", "FINGERPRINT", "FREE GiB", "REVISION"
+        );
+        for (node, result) in nodes.iter().zip(results) {
+            match result {
+                Ok(status) => println!(
+                    "{:<width$}  {:<12}  {:>8.1}  {:>8}  {}",
+                    node.name,
+                    status.fingerprint.get(..12).unwrap_or(&status.fingerprint),
+                    status.free_bytes as f64 / GIB,
+                    status.controllers_revision,
+                    describe_group(status.group.as_ref())
+                ),
+                Err(error) => println!("{:<width$}  unreachable: {error}", node.name),
+            }
+        }
+        Ok(())
+    }
+
+    // ---- launching -----------------------------------------------------------------------------
+
+    /// `flare fleet run`: launch a package on a cluster, then follow its output and stop the group
+    /// on Ctrl-C, or, with `detach`, return once every rank has started.
+    pub fn run(
+        &self,
+        package: &str,
+        cluster: Option<&str>,
+        mut options: RunOptions,
+    ) -> Result<(), Failure> {
+        let (cluster, nodes) = self.cluster(cluster)?;
+        let executable = read_executable(options.executable.as_deref())?;
+        let verify_weights = options.verify_weights || options.run_args.serving.verify_weights;
+        let resolved = self.resolve_package(package, &mut options.run_args, verify_weights)?;
+        let mut serving = options.serving;
+        if verify_weights && !serving.iter().any(|a| a == "--verify-weights") {
+            serving.push("--verify-weights".into());
+        }
+        let launch = self.launch(
+            &cluster,
+            &nodes,
+            &resolved,
+            &executable,
+            &LaunchOptions {
+                serving,
+                rank_zero: options.rank_zero.clone(),
+                roce_ring: options.roce_ring,
+            },
+        )?;
+        eprintln!(
+            "group {} started; once loaded, rank zero on {} serves {}",
+            launch.grant.group,
+            nodes[0].name,
+            serving_url(&options.rank_zero, &nodes[0].address)
+        );
+        if options.detach {
+            eprintln!(
+                "`flare fleet attach --cluster {cluster}` follows its output; \
+                 `flare fleet stop --cluster {cluster}` stops it"
+            );
+            return Ok(());
+        }
+        self.supervise(launch)
+    }
+
+    /// Resolve and verify a package reference, obtaining publisher acceptance at this terminal,
+    /// and compute every rank's byte ranges. A node-held package is verified from a local mirror
+    /// of its header, signed index, and companion headers; payload bytes stay holes there, so its
+    /// stored data is verified only by ranks that load with `--verify-weights`.
+    pub fn resolve_package(
+        &self,
+        reference: &str,
+        run_args: &mut crate::cli::Run,
+        verify_weights: bool,
+    ) -> Result<ResolvedPackage, Failure> {
+        // The controller computes every rank's ranges, so it verifies every rank's index.
+        run_args.rank = None;
+        match parse_package_reference(reference, |name| self.fleet.node(name).is_some()) {
+            PackageReference::Local(path) => {
+                let primary = path.canonicalize().map_err(|e| {
+                    format!("cannot access package {reference}: {e}; a node-held package is NODE:/ABSOLUTE/PATH with NODE a fleet node")
+                })?;
+                run_args.serving.verify_weights = verify_weights;
+                let (authorized, publisher) = verify(&primary, run_args)?;
+                describe(
+                    &authorized,
+                    &primary,
+                    publisher,
+                    Holder::Controller {
+                        primary: primary.clone(),
+                    },
+                )
+            }
+            PackageReference::Node { node, path } => {
+                let node = self
+                    .fleet
+                    .node(&node)
+                    .ok_or_else(|| format!("the fleet file has no node named {node}"))?
+                    .clone();
+                let mirror = Mirror::create()?;
+                let primary = self
+                    .mirror_package(&node, &path, &mirror.0)
+                    .map_err(|e| at(&node.name, e))?;
+                run_args.serving.verify_weights = false;
+                let (authorized, publisher) = verify(&primary, run_args)?;
+                describe(
+                    &authorized,
+                    &primary,
+                    publisher,
+                    Holder::Node { node, path },
+                )
+            }
+        }
+    }
+
+    /// Mirror a node-held package into `directory`: every file at its full length, holding only
+    /// the primary's safetensors header and signed index and each companion's header. Returns the
+    /// mirrored primary's path.
+    fn mirror_package(
+        &self,
+        node: &Node,
+        path: &str,
+        directory: &Path,
+    ) -> Result<PathBuf, Failure> {
+        let remote = Path::new(path);
+        if !remote.is_absolute() {
+            return Err(format!("{path}: a node-held package needs an absolute path").into());
+        }
+        let primary_name = remote
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| format!("{path} names no file"))?;
+        let (mut session, _) = self.node_session(node)?;
+        let stat: Value =
+            serde_json::from_slice(&session.request(frame::STAT, &json!({"path": path}))?)?;
+        let size = stat["size"].as_u64().ok_or("STAT reply lacks size")?;
+        let primary = directory.join(primary_name);
+        mirror_file(&mut session, path, &primary, size, true)?;
+        for companion in stat["companions"]
+            .as_array()
+            .ok_or("STAT reply lacks companions")?
+        {
+            let name = companion["name"]
+                .as_str()
+                .ok_or("STAT companion lacks name")?;
+            let size = companion["size"]
+                .as_u64()
+                .ok_or("STAT companion lacks size")?;
+            if name.is_empty() || name.starts_with('.') || name.contains('/') {
+                return Err(format!("invalid companion name {name:?}").into());
+            }
+            let companion_path = remote.with_file_name(name);
+            let companion_path = companion_path.to_str().ok_or("non-UTF-8 companion path")?;
+            mirror_file(
+                &mut session,
+                companion_path,
+                &directory.join(name),
+                size,
+                false,
+            )?;
+        }
+        Ok(primary)
+    }
+
+    /// Start a resolved package on `nodes`, given in rank order: check each node's STATUS, issue
+    /// the grant, place the executable and package, and send RUN to rank zero and then to the
+    /// peers. Returns the grant and each rank's session, which streams the rank's output.
+    pub fn launch(
+        &self,
+        cluster: &str,
+        nodes: &[Node],
+        package: &ResolvedPackage,
+        executable: &[u8],
+        options: &LaunchOptions,
+    ) -> Result<Launch, Failure> {
+        let world = package.ranks.len();
+        if nodes.len() != world {
+            return Err(format!(
+                "cluster {cluster} lists {} nodes; the package has {world} ranks",
+                nodes.len()
+            )
+            .into());
+        }
+        if options.roce_ring && !(2..=16).contains(&world) {
+            return Err("--roce-ring requires a multi-host package with 2..16 ranks".into());
+        }
+
+        // Every node must be free. Rank zero reports the address it routes toward its peers,
+        // where they reach its rendezvous.
+        let toward = nodes.get(1).unwrap_or(&nodes[0]).address.clone();
+        let opened = parallel(nodes, |rank, node| {
+            (|| -> Result<(Session, NodeStatus), Failure> {
+                let (mut session, _) = self.node_session(node)?;
+                let status = status_on(&mut session, (rank == 0).then_some(toward.as_str()))?;
+                if let Some(group) = status.group.as_ref().filter(|g| g.running) {
+                    return Err(format!(
+                        "group {} runs there as rank {}; stop it with `flare fleet stop`",
+                        group.id, group.rank
+                    )
+                    .into());
+                }
+                Ok((session, status))
+            })()
+            .map_err(|e| at(&node.name, e))
+        });
+        let (mut sessions, statuses): (Vec<Session>, Vec<NodeStatus>) =
+            all(opened)?.into_iter().unzip();
+        let routed = statuses[0].address_toward.as_deref().ok_or_else(|| {
+            format!(
+                "{}: STATUS reported no address toward {toward}",
+                nodes[0].name
+            )
+        })?;
+        let rendezvous = SocketAddr::new(routed.parse::<IpAddr>()?, RENDEZVOUS_PORT).to_string();
+
+        let issued = now();
+        let mut grant = Grant {
+            group: group_id(cluster, issued, &random(2)?),
+            package: Package {
+                export: package.export.clone(),
+                length: package.files[0].size,
+                files: package.files.iter().map(|f| f.name.clone()).collect(),
+                source: match &package.holder {
+                    Holder::Controller { .. } => None,
+                    Holder::Node { node, path } => Some(Source {
+                        public_key: node.public_key.clone(),
+                        path: path.clone(),
+                    }),
+                },
+            },
+            members: nodes
+                .iter()
+                .enumerate()
+                .map(|(rank, node)| Member {
+                    rank,
+                    name: node.name.clone(),
+                    public_key: node.public_key.clone(),
+                    address: node.address.clone(),
+                })
+                .collect(),
+            rendezvous,
+            serving: options.serving.clone(),
+            rank_zero: options.rank_zero.clone(),
+            roce_ring: options.roce_ring,
+            issued,
+            expires: issued + GRANT_SECONDS,
+        };
+        let transfer_grant = Signed::sign(&self.key, &grant)?;
+        eprintln!(
+            "group {}: {world} ranks, rendezvous {}",
+            grant.group, grant.rendezvous
+        );
+
+        // Every node gets the executable; with the package at the controller, rank zero gets
+        // every file of it complete.
+        let binary = cache::binary_name(executable);
+        let complete = grant.complete_directory();
+        all(parallel_mut(&mut sessions, |rank, session| {
+            (|| -> Result<(), Failure> {
+                let mut needed = 0;
+                let send_binary = !have(session, "binary", &binary, executable.len() as u64)?;
+                if send_binary {
+                    needed += executable.len() as u64;
+                }
+                let mut sends = Vec::new();
+                if let (0, Holder::Controller { primary }) = (rank, &package.holder) {
+                    for file in &package.files {
+                        let name = format!("{complete}/{}", file.name);
+                        if !have(session, "package", &name, file.size)? {
+                            needed += file.size;
+                            sends.push((primary.with_file_name(&file.name), name, file.size));
+                        }
+                    }
+                }
+                check_space(&statuses[rank], needed)?;
+                if send_binary {
+                    put(
+                        session,
+                        "binary",
+                        &binary,
+                        executable.len() as u64,
+                        &mut &executable[..],
+                    )?;
+                    eprintln!("{}: received flare executable {binary}", nodes[rank].name);
+                }
+                for (path, name, size) in sends {
+                    let mut source = File::open(&path)
+                        .map_err(|e| format!("cannot open {}: {e}", path.display()))?;
+                    eprintln!(
+                        "{}: sending {} ({})",
+                        nodes[rank].name,
+                        path.display(),
+                        gib(size)
+                    );
+                    put(session, "package", &name, size, &mut source)?;
+                }
+                Ok(())
+            })()
+            .map_err(|e| at(&nodes[rank].name, e))
+        }))?;
+
+        // Every node other than the source fetches from it: rank zero the complete package,
+        // peers their ranks' ranges.
+        let source = match &package.holder {
+            Holder::Controller { .. } => nodes[0].clone(),
+            Holder::Node { node, .. } => node.clone(),
+        };
+        all(parallel_mut(&mut sessions, |rank, session| {
+            if nodes[rank].public_key == source.public_key {
+                return Ok(());
+            }
+            let (directory, files) = if rank == 0 {
+                let files: Vec<RankFile> = package
+                    .files
+                    .iter()
+                    .map(|f| RankFile {
+                        name: f.name.clone(),
+                        size: f.size,
+                        ranges: vec![(0, f.size)],
+                    })
+                    .collect();
+                (complete.clone(), files)
+            } else {
+                (grant.cache_directory(rank), package.ranks[rank].clone())
+            };
+            transfer(
+                session,
+                &nodes[rank],
+                &statuses[rank],
+                &transfer_grant,
+                &source,
+                &directory,
+                &files,
+            )
+            .map_err(|e| at(&nodes[rank].name, e))
+        }))?;
+
+        // Transfers can outlast a grant's launch window, so RUN carries a grant issued now.
+        grant.issued = now();
+        grant.expires = grant.issued + GRANT_SECONDS;
+        let signed = Signed::sign(&self.key, &grant)?;
+        let publisher = serde_json::to_value(&package.publisher)?;
+        for rank in 0..world {
+            let request = json!({
+                "grant": signed,
+                "rank": rank,
+                "binary": binary,
+                "publisher": publisher,
+            });
+            if let Err(error) = sessions[rank].request(frame::RUN, &request) {
+                let error = at(&nodes[rank].name, error);
+                if rank > 0 {
+                    eprintln!("{error}; stopping the ranks already started");
+                    let started: Vec<(usize, Node)> =
+                        (0..rank).map(|r| (r, nodes[r].clone())).collect();
+                    if let Err(stop) = self.stop_group(&grant.group, &started) {
+                        eprintln!("{stop}");
+                    }
+                }
+                return Err(error);
+            }
+        }
+        Ok(Launch {
+            grant,
+            ranks: nodes.iter().cloned().zip(sessions).collect(),
+        })
+    }
+
+    /// Print a launched group's output until every rank exits. The first Ctrl-C stops rank zero,
+    /// a second stops every peer at once, and a third returns without waiting.
+    fn supervise(&self, launch: Launch) -> Result<(), Failure> {
+        let group = launch.grant.group;
+        let nodes: Vec<Node> = launch.ranks.iter().map(|(node, _)| node.clone()).collect();
+        let events = follow(
+            launch
+                .ranks
+                .into_iter()
+                .enumerate()
+                .map(|(rank, (node, session))| (rank, node.name, session))
+                .collect(),
+        );
+        catch_interrupts();
+        let mut ended: BTreeMap<usize, Result<i32, String>> = BTreeMap::new();
+        let mut rank_zero_exit: Option<Instant> = None;
+        let mut interrupts = 0;
+        let mut peers_stopped = false;
+        while ended.len() < nodes.len() {
+            match events.recv_timeout(Duration::from_millis(250)) {
+                Ok(end) => {
+                    report_end(&end);
+                    if end.rank == 0 && end.result.is_ok() {
+                        rank_zero_exit = Some(Instant::now());
+                    }
+                    ended.insert(end.rank, end.result);
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+            if interrupted() {
+                interrupts += 1;
+                match interrupts {
+                    1 => {
+                        eprintln!(
+                            "stopping group {group}: rank 0 drains first; Ctrl-C again stops every rank now"
+                        );
+                        self.request_stop(&nodes[0], &group);
+                    }
+                    2 => {
+                        eprintln!(
+                            "stopping every rank of group {group}; Ctrl-C again leaves without waiting"
+                        );
+                        for (rank, node) in nodes.iter().enumerate().skip(1) {
+                            if !ended.contains_key(&rank) {
+                                self.request_stop(node, &group);
+                            }
+                        }
+                        peers_stopped = true;
+                    }
+                    _ => {
+                        return Err(format!("left group {group} before every rank exited").into());
+                    }
+                }
+            }
+            if !peers_stopped && rank_zero_exit.is_some_and(|t| t.elapsed() >= PEER_GRACE) {
+                peers_stopped = true;
+                for (rank, node) in nodes.iter().enumerate().skip(1) {
+                    if !ended.contains_key(&rank) {
+                        eprintln!(
+                            "rank {rank} on {} still runs 30 seconds after rank 0 exited; stopping it",
+                            node.name
+                        );
+                        self.request_stop(node, &group);
+                    }
+                }
+            }
+        }
+        let failed: Vec<String> = nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(rank, node)| match ended.get(&rank) {
+                Some(Ok(0)) => None,
+                Some(Ok(code)) => Some(format!(
+                    "rank {rank} on {} exited with status {code}",
+                    node.name
+                )),
+                Some(Err(error)) => Some(format!("rank {rank} on {}: {error}", node.name)),
+                None => Some(format!("rank {rank} on {}: exit not observed", node.name)),
+            })
+            .collect();
+        if failed.is_empty() {
+            eprintln!("group {group} exited");
+            Ok(())
+        } else {
+            Err(format!("group {group}: {}", failed.join("; ")).into())
+        }
+    }
+
+    // ---- attaching and stopping ----------------------------------------------------------------
+
+    /// Follow the group each node of a cluster runs or last ran: its retained output, then live
+    /// output until every rank exits. Ctrl-C detaches and leaves the group running.
+    pub fn attach(&self, cluster: Option<&str>) -> Result<(), Failure> {
+        let (name, nodes) = self.cluster(cluster)?;
+        let attached = parallel(&nodes, |_, node| {
+            (|| -> Result<Option<(usize, String, Session)>, Failure> {
+                let (mut session, _) = self.node_session(node)?;
+                let Some(group) = status_on(&mut session, None)?.group else {
+                    return Ok(None);
+                };
+                session.request(frame::ATTACH, &json!({"group": group.id}))?;
+                Ok(Some((group.rank, node.name.clone(), session)))
+            })()
+            .map_err(|e| at(&node.name, e))
+        });
+        let mut ranks = Vec::new();
+        for result in attached {
+            match result {
+                Ok(Some(rank)) => ranks.push(rank),
+                Ok(None) => {}
+                Err(error) => eprintln!("{error}"),
+            }
+        }
+        if ranks.is_empty() {
+            return Err(format!("no node of cluster {name} has run a group").into());
+        }
+        let count = ranks.len();
+        let events = follow(ranks);
+        catch_interrupts();
+        let mut ended = 0;
+        while ended < count {
+            match events.recv_timeout(Duration::from_millis(250)) {
+                Ok(end) => {
+                    report_end(&end);
+                    ended += 1;
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    if interrupted() {
+                        eprintln!("detached from cluster {name}; its group keeps running");
+                        return Ok(());
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        Ok(())
+    }
+
+    /// Stop the groups running on a cluster's nodes, rank zero first.
+    pub fn stop(&self, cluster: Option<&str>) -> Result<(), Failure> {
+        let (name, nodes) = self.cluster(cluster)?;
+        let mut groups: BTreeMap<String, Vec<(usize, Node)>> = BTreeMap::new();
+        let results = parallel(&nodes, |_, node| self.node_status(node, None));
+        for (node, result) in nodes.iter().zip(results) {
+            match result {
+                Ok(status) => {
+                    if let Some(group) = status.group.filter(|g| g.running) {
+                        groups
+                            .entry(group.id)
+                            .or_default()
+                            .push((group.rank, node.clone()));
+                    }
+                }
+                Err(error) => eprintln!("{error}"),
+            }
+        }
+        if groups.is_empty() {
+            eprintln!("no group runs on cluster {name}");
+            return Ok(());
+        }
+        for (group, mut members) in groups {
+            members.sort_by_key(|(rank, _)| *rank);
+            self.stop_group(&group, &members)?;
+            eprintln!("group {group} stopped");
+        }
+        Ok(())
+    }
+
+    /// Stop a group given its members as (rank, node): STOP rank zero and wait for it to exit,
+    /// then STOP the peers still running 30 seconds later. Ctrl-C while rank zero drains stops
+    /// the peers at once.
+    pub fn stop_group(&self, group: &str, members: &[(usize, Node)]) -> Result<(), Failure> {
+        catch_interrupts();
+        let peers: Vec<&Node> = members
+            .iter()
+            .filter(|(rank, _)| *rank != 0)
+            .map(|(_, node)| node)
+            .collect();
+        let mut grace = Duration::ZERO;
+        if let Some((_, zero)) = members.iter().find(|(rank, _)| *rank == 0) {
+            let stopping = self.send_stop(zero, group).unwrap_or_else(|error| {
+                eprintln!("{error}");
+                false
+            });
+            if stopping {
+                eprintln!(
+                    "stopping rank 0 on {}; waiting for it to drain (Ctrl-C stops every rank now)",
+                    zero.name
+                );
+                grace = PEER_GRACE;
+                loop {
+                    match self.group_running(zero, group) {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            eprintln!("rank 0 on {} exited", zero.name);
+                            break;
+                        }
+                        Err(error) => {
+                            eprintln!("{error}");
+                            break;
+                        }
+                    }
+                    if interrupted() {
+                        grace = Duration::ZERO;
+                        break;
+                    }
+                    thread::sleep(Duration::from_secs(1));
+                }
+            }
+        }
+        let running = self.wait_for_exit(group, &peers, grace);
+        for node in &running {
+            self.request_stop(node, group);
+        }
+        let remaining = self.wait_for_exit(group, &running, PEER_GRACE);
+        if remaining.is_empty() {
+            Ok(())
+        } else {
+            let names: Vec<&str> = remaining.iter().map(|n| n.name.as_str()).collect();
+            Err(format!("group {group} still runs on {}", names.join(", ")).into())
+        }
+    }
+
+    /// Poll `nodes` until none runs `group`, `limit` passes, or Ctrl-C; returns those still
+    /// running. A node that cannot be queried counts as not running.
+    fn wait_for_exit<'a>(&self, group: &str, nodes: &[&'a Node], limit: Duration) -> Vec<&'a Node> {
+        let deadline = Instant::now() + limit;
+        let mut running = nodes.to_vec();
+        loop {
+            running.retain(|node| {
+                self.group_running(node, group).unwrap_or_else(|error| {
+                    eprintln!("{error}");
+                    false
+                })
+            });
+            if running.is_empty() || Instant::now() >= deadline || interrupted() {
+                return running;
+            }
+            thread::sleep(Duration::from_secs(1));
+        }
+    }
+
+    fn group_running(&self, node: &Node, group: &str) -> Result<bool, Failure> {
+        Ok(self
+            .node_status(node, None)?
+            .group
+            .is_some_and(|g| g.id == group && g.running))
+    }
+
+    /// Send STOP for `group` to a node; whether the node's rank was running.
+    pub fn send_stop(&self, node: &Node, group: &str) -> Result<bool, Failure> {
+        (|| -> Result<bool, Failure> {
+            let (mut session, _) = self.node_session(node)?;
+            let reply: Value =
+                serde_json::from_slice(&session.request(frame::STOP, &json!({"group": group}))?)?;
+            Ok(reply["stopped"].as_bool().unwrap_or(false))
+        })()
+        .map_err(|e| at(&node.name, e))
+    }
+
+    fn request_stop(&self, node: &Node, group: &str) {
+        if let Err(error) = self.send_stop(node, group) {
+            eprintln!("{error}");
+        }
+    }
+}
+
+// ---- requests ----------------------------------------------------------------------------------
+
+fn status_on(session: &mut Session, toward: Option<&str>) -> Result<NodeStatus, Failure> {
+    let request = match toward {
+        Some(toward) => json!({"toward": toward}),
+        None => json!({}),
+    };
+    Ok(serde_json::from_slice(
+        &session.request(frame::STATUS, &request)?,
+    )?)
+}
+
+/// Whether the node's cache holds the entry at `size` bytes; a held entry stays pinned for the
+/// session.
+fn have(session: &mut Session, kind: &str, name: &str, size: u64) -> Result<bool, Failure> {
+    let reply = session.request(
+        frame::HAVE,
+        &json!({"kind": kind, "name": name, "size": size}),
+    )?;
+    Ok(reply == [1])
+}
+
+/// Store `size` bytes read from `source` as a complete cache entry on the node.
+fn put(
+    session: &mut Session,
+    kind: &str,
+    name: &str,
+    size: u64,
+    source: &mut dyn Read,
+) -> Result<(), Failure> {
+    let header = json!({"kind": kind, "name": name, "size": size}).to_string();
+    let mut prefix = (header.len() as u32).to_le_bytes().to_vec();
+    prefix.extend(header.as_bytes());
+    let length = prefix.len() as u64 + size;
+    let mut body = prefix.as_slice().chain(source);
+    session.write_frame_from(frame::PUT, length, &mut body)?;
+    session.expect(frame::OK)?;
+    Ok(())
+}
+
+/// Have the node fetch `files` from `source` into its cache under `directory`, skipping files it
+/// already holds.
+fn transfer(
+    session: &mut Session,
+    node: &Node,
+    status: &NodeStatus,
+    grant: &Signed,
+    source: &Node,
+    directory: &str,
+    files: &[RankFile],
+) -> Result<(), Failure> {
+    let mut needed = 0;
+    for file in files {
+        if !have(
+            session,
+            "package",
+            &format!("{directory}/{}", file.name),
+            file.size,
+        )? {
+            needed += cache::range_bytes(&file.ranges);
+        }
+    }
+    if needed == 0 {
+        return Ok(());
+    }
+    check_space(status, needed)?;
+    eprintln!(
+        "{}: fetching {} from {}",
+        node.name,
+        gib(needed),
+        source.name
+    );
+    let request = json!({
+        "grant": grant,
+        "source": {"public_key": source.public_key, "address": source.address},
+        "directory": directory,
+        "files": files
+            .iter()
+            .map(|f| json!({"name": f.name, "size": f.size, "ranges": f.ranges}))
+            .collect::<Vec<_>>(),
+    });
+    let reply: Value = serde_json::from_slice(&session.request(frame::TRANSFER, &request)?)?;
+    eprintln!(
+        "{}: received {}",
+        node.name,
+        gib(reply["received"].as_u64().unwrap_or(0))
+    );
+    Ok(())
+}
+
+fn check_space(status: &NodeStatus, needed: u64) -> Result<(), Failure> {
+    if needed > status.free_bytes {
+        return Err(format!(
+            "{} free under the agent cache; this launch stores {} there",
+            gib(status.free_bytes),
+            gib(needed)
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// Read `nbytes` at `offset` of the node-local file `path` with GET.
+fn get_bytes(
+    session: &mut Session,
+    path: &str,
+    offset: u64,
+    nbytes: u64,
+) -> Result<Vec<u8>, Failure> {
+    let mut bytes = Vec::with_capacity(nbytes as usize);
+    let mut append = |chunk: &[u8], _: u64| -> Result<(), Failure> {
+        bytes.extend_from_slice(chunk);
+        Ok(())
+    };
+    get(session, path, offset, nbytes, &mut append)?;
+    Ok(bytes)
+}
+
+/// Receives each chunk of a GET reply with its file offset.
+type Sink<'a> = &'a mut dyn FnMut(&[u8], u64) -> Result<(), Failure>;
+
+/// Read `nbytes` at `offset` of the node-local file `path` with GET, passing each chunk and its
+/// file offset to `sink`.
+fn get(
+    session: &mut Session,
+    path: &str,
+    offset: u64,
+    nbytes: u64,
+    sink: Sink<'_>,
+) -> Result<(), Failure> {
+    session.write_frame(
+        frame::GET,
+        &serde_json::to_vec(&json!({"path": path, "offset": offset, "nbytes": nbytes}))?,
+    )?;
+    let (tag, length) = session.read_header()?;
+    if tag == frame::ERROR {
+        let message = session.read_body(length, FRAME_LIMIT)?;
+        return Err(String::from_utf8_lossy(&message).into_owned().into());
+    }
+    if tag != frame::OK || length != nbytes {
+        return Err(format!("unexpected reply to GET {path}").into());
+    }
+    let mut body = session.body();
+    let mut buffer = vec![0u8; 1 << 20];
+    let mut position = offset;
+    loop {
+        let count = body.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        sink(&buffer[..count], position)?;
+        position += count as u64;
+    }
+    if position != offset + nbytes {
+        return Err(format!("GET {path} ended early").into());
+    }
+    Ok(())
+}
+
+/// Create `local` at `size` bytes holding the safetensors header of the node-local file `remote`
+/// and, for a primary, its signed index; every other byte is a hole.
+fn mirror_file(
+    session: &mut Session,
+    remote: &str,
+    local: &Path,
+    size: u64,
+    primary: bool,
+) -> Result<(), Failure> {
+    let file = File::create(local)?;
+    file.set_len(size)?;
+    if size < 8 {
+        return Err(format!("{remote} is too short for a package file").into());
+    }
+    let prefix = get_bytes(session, remote, 0, 8)?;
+    let header_size = u64::from_le_bytes(prefix[..8].try_into().unwrap());
+    if header_size == 0 || header_size > HEADER_LIMIT || 8 + header_size > size {
+        return Err(format!("{remote} has an invalid safetensors header size").into());
+    }
+    let header = get_bytes(session, remote, 8, header_size)?;
+    file.write_all_at(&prefix, 0)?;
+    file.write_all_at(&header, 8)?;
+    if primary {
+        let header: Value = serde_json::from_slice(&header)
+            .map_err(|e| format!("{remote}: invalid safetensors header: {e}"))?;
+        let offsets = &header["flare.metadata"]["data_offsets"];
+        let (Some(begin), Some(end)) = (offsets[0].as_u64(), offsets[1].as_u64()) else {
+            return Err(format!("{remote} is not a Flare package").into());
+        };
+        let start = 8 + header_size;
+        if end <= begin || start.checked_add(end).is_none_or(|e| e > size) {
+            return Err(format!("{remote} has an invalid model index range").into());
+        }
+        get(
+            session,
+            remote,
+            start + begin,
+            end - begin,
+            &mut |chunk: &[u8], position: u64| -> Result<(), Failure> {
+                Ok(file.write_all_at(chunk, position)?)
+            },
+        )?;
+    }
+    Ok(())
+}
+
+// ---- following output --------------------------------------------------------------------------
+
+/// Print each session's LOG lines as `[rank R name] line` on stderr until its EXIT, on a thread
+/// per rank; each rank's end arrives on the returned channel.
+pub fn follow(ranks: Vec<(usize, String, Session)>) -> mpsc::Receiver<RankEnd> {
+    let (sender, receiver) = mpsc::channel();
+    for (rank, node, mut session) in ranks {
+        let sender = sender.clone();
+        thread::spawn(move || {
+            let result = read_output(&mut session, rank, &node);
+            let _ = sender.send(RankEnd { rank, node, result });
+        });
+    }
+    receiver
+}
+
+fn read_output(session: &mut Session, rank: usize, node: &str) -> Result<i32, String> {
+    session
+        .set_read_timeout(Some(ATTACH_TIMEOUT))
+        .map_err(|e| e.to_string())?;
+    loop {
+        match session
+            .read_frame()
+            .map_err(|e| format!("output lost: {e}"))?
+        {
+            (frame::LOG, line) if line.is_empty() => {}
+            (frame::LOG, line) => {
+                eprintln!("[rank {rank} {node}] {}", String::from_utf8_lossy(&line))
+            }
+            (frame::EXIT, code) => {
+                return <[u8; 4]>::try_from(code.as_slice())
+                    .map(i32::from_le_bytes)
+                    .map_err(|_| String::from("malformed EXIT frame"));
+            }
+            (frame::ERROR, message) => return Err(String::from_utf8_lossy(&message).into_owned()),
+            (tag, _) => return Err(format!("unexpected frame {tag}")),
+        }
+    }
+}
+
+fn report_end(end: &RankEnd) {
+    match &end.result {
+        Ok(code) => eprintln!("[rank {} {}] exited with status {code}", end.rank, end.node),
+        Err(error) => eprintln!("[rank {} {}] {error}", end.rank, end.node),
+    }
+}
+
+// ---- packages ----------------------------------------------------------------------------------
+
+/// Parse `NODE:/ABSOLUTE/PATH`, where NODE is a node name `is_node` accepts; anything else is a
+/// local path.
+pub fn parse_package_reference(text: &str, is_node: impl Fn(&str) -> bool) -> PackageReference {
+    match text.split_once(':') {
+        Some((node, path))
+            if !node.is_empty()
+                && !node.contains('/')
+                && path.starts_with('/')
+                && is_node(node) =>
+        {
+            PackageReference::Node {
+                node: node.to_owned(),
+                path: path.to_owned(),
+            }
+        }
+        _ => PackageReference::Local(PathBuf::from(text)),
+    }
+}
+
+/// Verify a package and obtain publisher acceptance as `flare run` does.
+fn verify(
+    primary: &Path,
+    args: &crate::cli::Run,
+) -> Result<(AuthorizedPackage, Publisher), Failure> {
+    let mut progress = StartupProgress::silent();
+    crate::trust::load(primary, args, &mut progress, None).map_err(|e| Failure::from(e.to_string()))
+}
+
+/// A verified package's files and every rank's byte ranges.
+fn describe(
+    authorized: &AuthorizedPackage,
+    primary: &Path,
+    publisher: Publisher,
+    holder: Holder,
+) -> Result<ResolvedPackage, Failure> {
+    let (world, export) = runtime_package::package_cluster(authorized)
+        .ok_or_else(|| format!("{} is not a multi-host package", primary.display()))?;
+    let primary_name = primary
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or("the package path names no file")?
+        .to_owned();
+    let mut files = vec![PackageEntry {
+        name: primary_name.clone(),
+        size: fs::metadata(primary)?.len(),
+    }];
+    for name in runtime_package::package_companions(primary).map_err(|e| e.to_string())? {
+        let size = fs::metadata(primary.with_file_name(&name))?.len();
+        files.push(PackageEntry { name, size });
+    }
+    let mut ranks = Vec::with_capacity(world);
+    for rank in 0..world {
+        let mut rank_files = Vec::new();
+        for file in runtime_package::rank_ranges(authorized, rank).map_err(|e| e.to_string())? {
+            rank_files.push(RankFile {
+                name: if file.filename.is_empty() {
+                    primary_name.clone()
+                } else {
+                    file.filename
+                },
+                size: file.file.metadata()?.len(),
+                ranges: file.ranges,
+            });
+        }
+        ranks.push(rank_files);
+    }
+    Ok(ResolvedPackage {
+        export,
+        files,
+        ranks,
+        publisher,
+        holder,
+    })
+}
+
+/// A private temporary directory, removed when dropped.
+struct Mirror(PathBuf);
+
+impl Mirror {
+    fn create() -> Result<Self, Failure> {
+        let path = std::env::temp_dir().join(format!(
+            "flare-fleet-{}-{}",
+            std::process::id(),
+            hex(&random(4)?)
+        ));
+        fs::DirBuilder::new().mode(0o700).create(&path)?;
+        Ok(Self(path))
+    }
+}
+
+impl Drop for Mirror {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+/// The executable nodes run: `path`, or this executable on a Linux aarch64 controller.
+fn read_executable(path: Option<&Path>) -> Result<Vec<u8>, Failure> {
+    let path = match path {
+        Some(path) => path.to_owned(),
+        None if cfg!(all(target_os = "linux", target_arch = "aarch64")) => std::env::current_exe()?,
+        None => {
+            return Err(
+                "nodes run a Linux aarch64 flare and this controller is another build; supply one with --executable PATH"
+                    .into(),
+            );
+        }
+    };
+    fs::read(&path).map_err(|e| format!("cannot read executable {}: {e}", path.display()).into())
+}
+
+// ---- formatting --------------------------------------------------------------------------------
+
+/// A group identifier: the cluster name, the UTC launch time, and `suffix` as hex.
+pub fn group_id(cluster: &str, seconds: u64, suffix: &[u8]) -> String {
+    format!("{cluster}-{}-{}", compact_utc(seconds), hex(suffix))
+}
+
+/// `YYYYMMDDTHHMMSSZ` for seconds since the Unix epoch.
+pub fn compact_utc(seconds: u64) -> String {
+    let (days, time) = (seconds / 86_400, seconds % 86_400);
+    // The civil date of a day count since 1970-01-01, in 400-year eras that start on March 1 so
+    // that leap days fall at the end of each year.
+    let z = days + 719_468;
+    let era = z / 146_097;
+    let day_of_era = z - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let shifted_month = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * shifted_month + 2) / 5 + 1;
+    let month = if shifted_month < 10 {
+        shifted_month + 3
+    } else {
+        shifted_month - 9
+    };
+    let year = year_of_era + era * 400 + u64::from(month <= 2);
+    format!(
+        "{year:04}{month:02}{day:02}T{:02}{:02}{:02}Z",
+        time / 3600,
+        time % 3600 / 60,
+        time % 60
+    )
+}
+
+/// The URL rank zero serves, from its `--host` and `--port` options or `flare run`'s defaults;
+/// an unspecified bind address is shown as its node's host.
+pub fn serving_url(rank_zero: &[String], node_address: &str) -> String {
+    let mut host = "127.0.0.1".to_owned();
+    let mut port = "8000".to_owned();
+    let mut arguments = rank_zero.iter();
+    while let Some(argument) = arguments.next() {
+        if let Some(value) = argument.strip_prefix("--host=") {
+            host = value.to_owned();
+        } else if let Some(value) = argument.strip_prefix("--port=") {
+            port = value.to_owned();
+        } else if argument == "--host" {
+            if let Some(value) = arguments.next() {
+                host = value.clone();
+            }
+        } else if argument == "--port" {
+            if let Some(value) = arguments.next() {
+                port = value.clone();
+            }
+        }
+    }
+    let host = match host.parse::<IpAddr>() {
+        Ok(ip) if ip.is_unspecified() => node_address
+            .rsplit_once(':')
+            .map_or(node_address, |(host, _)| host)
+            .to_owned(),
+        Ok(IpAddr::V6(ip)) => format!("[{ip}]"),
+        _ => host,
+    };
+    format!("http://{host}:{port}")
+}
+
+fn describe_group(group: Option<&GroupStatus>) -> String {
+    match group {
+        None => "-".into(),
+        Some(g) if g.running => format!(
+            "{} rank {} running {}",
+            g.id,
+            g.rank,
+            uptime(g.uptime_seconds)
+        ),
+        Some(g) => format!(
+            "{} rank {} exited with status {}",
+            g.id,
+            g.rank,
+            g.exit
+                .map_or_else(|| "unknown".into(), |code| code.to_string())
+        ),
+    }
+}
+
+fn uptime(seconds: u64) -> String {
+    match seconds {
+        s if s >= 86_400 => format!("{}d{:02}h", s / 86_400, s % 86_400 / 3600),
+        s if s >= 3600 => format!("{}h{:02}m", s / 3600, s % 3600 / 60),
+        s => format!("{}m{:02}s", s / 60, s % 60),
+    }
+}
+
+fn gib(bytes: u64) -> String {
+    format!("{:.1} GiB", bytes as f64 / GIB)
+}
+
+// ---- helpers -----------------------------------------------------------------------------------
+
+/// Prefix an error with the node it concerns.
+fn at(node: &str, error: Failure) -> Failure {
+    format!("{node}: {error}").into()
+}
+
+fn constant_time_equal(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0, |d, (x, y)| d | (x ^ y)) == 0
+}
+
+/// Every value, or one error listing every failure.
+fn all<T>(results: Vec<Result<T, Failure>>) -> Result<Vec<T>, Failure> {
+    let mut values = Vec::with_capacity(results.len());
+    let mut errors = Vec::new();
+    for result in results {
+        match result {
+            Ok(value) => values.push(value),
+            Err(error) => errors.push(error.to_string()),
+        }
+    }
+    if errors.is_empty() {
+        Ok(values)
+    } else {
+        Err(errors.join("; ").into())
+    }
+}
+
+/// Apply `work` to every item, each on its own thread; results keep the items' order.
+fn parallel<T: Sync, R: Send>(items: &[T], work: impl Fn(usize, &T) -> R + Sync) -> Vec<R> {
+    thread::scope(|scope| {
+        let work = &work;
+        let handles: Vec<_> = items
+            .iter()
+            .enumerate()
+            .map(|(index, item)| scope.spawn(move || work(index, item)))
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            })
+            .collect()
+    })
+}
+
+/// [`parallel`] with exclusive access to each item.
+fn parallel_mut<T: Send, R: Send>(
+    items: &mut [T],
+    work: impl Fn(usize, &mut T) -> R + Sync,
+) -> Vec<R> {
+    thread::scope(|scope| {
+        let work = &work;
+        let handles: Vec<_> = items
+            .iter_mut()
+            .enumerate()
+            .map(|(index, item)| scope.spawn(move || work(index, item)))
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            })
+            .collect()
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fleet::agent::tests::{harness, pair_accept_first};
+    use std::sync::Arc;
+
+    /// A controller over two in-process agents paired with its key, a script as the executable,
+    /// and a two-rank package whose "primary" is a plain file: rank 0 reads all of it, rank 1
+    /// two ranges. Launching exercises PUT, TRANSFER, FETCH, RUN and output following end to
+    /// end; only the rank processes are fakes.
+    #[test]
+    fn launching_places_the_executable_and_package_and_runs_every_rank() {
+        let zero = harness(21);
+        let one = crate::fleet::agent::tests::Harness {
+            controller: Key::from_seed(&[21; 32]).unwrap(),
+            ..harness(22)
+        };
+        let record = {
+            let mut session = pair_accept_first(&zero);
+            session.request(frame::STATUS, &json!({})).unwrap();
+            pair_accept_first(&one);
+            crate::fleet::agent::tests::record(&zero.controller)
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let node = |h: &crate::fleet::agent::tests::Harness, name: &str| Node {
+            name: name.into(),
+            fingerprint: h.agent.key.public().fingerprint(),
+            public_key: h.agent.key.public().to_hex(),
+            address: h.address.clone(),
+        };
+        let nodes = vec![node(&zero, "zero"), node(&one, "one")];
+        let mut fleet = Fleet {
+            controllers: Some(record),
+            node: nodes.clone(),
+            cluster: Default::default(),
+        };
+        fleet.cluster.insert(
+            "pair".into(),
+            crate::fleet::store::Cluster {
+                nodes: vec!["zero".into(), "one".into()],
+            },
+        );
+        let controller = Controller::new(
+            Key::from_seed(&[21; 32]).unwrap(),
+            fleet,
+            temp.path().join("fleet.toml"),
+        );
+
+        let primary = temp.path().join("model.safetensors");
+        let bytes: Vec<u8> = (0..50_000u32).map(|i| (i % 241) as u8).collect();
+        fs::write(&primary, &bytes).unwrap();
+        let script = "#!/bin/sh\necho \"$@\"\nod -An -tx1 -j 40000 -N 4 \"$2\"\nexit 0\n";
+        let package = ResolvedPackage {
+            export: "export".into(),
+            files: vec![PackageEntry {
+                name: "model.safetensors".into(),
+                size: bytes.len() as u64,
+            }],
+            ranks: vec![
+                vec![RankFile {
+                    name: "model.safetensors".into(),
+                    size: bytes.len() as u64,
+                    ranges: vec![(0, bytes.len() as u64)],
+                }],
+                vec![RankFile {
+                    name: "model.safetensors".into(),
+                    size: bytes.len() as u64,
+                    ranges: vec![(0, 4096), (40_000, 8_000)],
+                }],
+            ],
+            publisher: Publisher {
+                name: "Test".into(),
+                namespace: "test-publisher".into(),
+                public_key: [1; 32],
+                development: false,
+            },
+            holder: Holder::Controller {
+                primary: primary.clone(),
+            },
+        };
+        let launch = controller
+            .launch(
+                "pair",
+                &nodes,
+                &package,
+                script.as_bytes(),
+                &LaunchOptions {
+                    serving: vec!["--gpus".into(), "0".into()],
+                    rank_zero: vec!["--port".into(), "8001".into()],
+                    roce_ring: true,
+                },
+            )
+            .unwrap();
+        assert_eq!(launch.grant.members.len(), 2);
+        assert_eq!(launch.grant.rendezvous, "127.0.0.1:29800");
+        let events = follow(
+            launch
+                .ranks
+                .into_iter()
+                .enumerate()
+                .map(|(rank, (node, session))| (rank, node.name, session))
+                .collect(),
+        );
+        let mut exits = BTreeMap::new();
+        for _ in 0..2 {
+            let end = events.recv_timeout(Duration::from_secs(20)).unwrap();
+            exits.insert(end.rank, end.result.unwrap());
+        }
+        assert_eq!(exits, BTreeMap::from([(0, 0), (1, 0)]));
+
+        // Rank zero holds the complete package; rank one holds only its ranges, fetched from
+        // rank zero, and loads with --verify-weights.
+        let complete = zero.agent.cache.join(format!(
+            "packages/{}/model.safetensors",
+            launch.grant.complete_directory()
+        ));
+        assert_eq!(fs::read(&complete).unwrap(), bytes);
+        let partial = one.agent.cache.join(format!(
+            "packages/{}/model.safetensors",
+            launch.grant.cache_directory(1)
+        ));
+        let copy = fs::read(&partial).unwrap();
+        assert_eq!(copy[..4096], bytes[..4096]);
+        assert_eq!(copy[40_000..48_000], bytes[40_000..48_000]);
+        assert!(copy[4096..40_000].iter().all(|&b| b == 0));
+        let binary = cache::binary_name(script.as_bytes());
+        assert!(zero.agent.cache.join("bin").join(&binary).is_file());
+        assert!(one.agent.cache.join("bin").join(&binary).is_file());
+
+        // A second launch is refused while a group runs; after exit it reuses the cache.
+        let again = controller
+            .launch(
+                "pair",
+                &nodes,
+                &package,
+                script.as_bytes(),
+                &LaunchOptions::default(),
+            )
+            .unwrap();
+        let (zero_session, one_session): (Vec<_>, Vec<_>) =
+            again.ranks.into_iter().partition(|(n, _)| n.name == "zero");
+        drop(zero_session);
+        drop(one_session);
+        let _ = Arc::clone(&zero.agent);
+    }
+
+    #[test]
+    fn launch_times_format_as_compact_utc_in_group_identifiers() {
+        assert_eq!(compact_utc(0), "19700101T000000Z");
+        assert_eq!(compact_utc(951_782_400), "20000229T000000Z");
+        assert_eq!(compact_utc(1_792_423_800), "20261019T153000Z");
+        assert_eq!(compact_utc(4_107_628_799), "21000301T235959Z");
+        assert_eq!(
+            group_id("sparks", 1_792_423_800, &[0x3f, 0x9c]),
+            "sparks-20261019T153000Z-3f9c"
+        );
+    }
+
+    #[test]
+    fn package_references_name_a_fleet_node_and_an_absolute_path() {
+        let is_node = |name: &str| name == "maxwell";
+        assert_eq!(
+            parse_package_reference("maxwell:/data/glm.safetensors", is_node),
+            PackageReference::Node {
+                node: "maxwell".into(),
+                path: "/data/glm.safetensors".into(),
+            }
+        );
+        for local in [
+            "/data/glm.safetensors",
+            "glm.safetensors",
+            "hertz:/data/glm.safetensors",
+            "maxwell:glm.safetensors",
+            "./maxwell:/glm.safetensors",
+        ] {
+            assert_eq!(
+                parse_package_reference(local, is_node),
+                PackageReference::Local(local.into())
+            );
+        }
+    }
+
+    #[test]
+    fn rank_zero_urls_follow_its_bind_options() {
+        let options = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(serving_url(&[], "maxwell:29900"), "http://127.0.0.1:8000");
+        assert_eq!(
+            serving_url(
+                &options(&["--host", "0.0.0.0", "--port=8001"]),
+                "maxwell:29900"
+            ),
+            "http://maxwell:8001"
+        );
+        assert_eq!(
+            serving_url(&options(&["--host=::"]), "[fd00::1]:29900"),
+            "http://[fd00::1]:8000"
+        );
+        assert_eq!(
+            serving_url(
+                &options(&["--host", "10.0.0.2", "--port", "9000"]),
+                "maxwell:29900"
+            ),
+            "http://10.0.0.2:9000"
+        );
+    }
+}

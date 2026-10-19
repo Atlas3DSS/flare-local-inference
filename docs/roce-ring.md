@@ -20,11 +20,12 @@ unqualified.
 
 ## Rank order and routes
 
-Ranks form the cycle `0,1,...,N-1,0`. Rank zero is the launching host, and
-`flare run --hosts` lists the remaining hosts in rank order. During preparation,
-each peer's `ignition join --rank` assigns the corresponding position.
+Ranks form the cycle `0,1,...,N-1,0`. The cluster's node list in the
+controller's fleet file gives the rank order: its first node is rank zero.
+During preparation, each peer's `ignition join --rank` assigns the
+corresponding position.
 
-For example, launch on `maxwell` with `--hosts ampere,faraday,hertz`:
+For example, a cluster listing `maxwell, ampere, faraday, hertz`:
 
 ```mermaid
 flowchart LR
@@ -148,18 +149,17 @@ Rank zero sends the preparation option to peers. The plan records `roce_ring`,
 and the package cache key includes it. `ignition serve` also accepts the option
 with `--ranks` for development without package export.
 
-### Serve through peer agents
+### Serve through the agents
 
-On `maxwell`:
+From the controller, with a cluster listing `maxwell, ampere, faraday, hertz`:
 
 ```sh
-./flare/target/release/flare run /data/flare-runtime/glm53-ring-tp4.safetensors \
-  --hosts ampere,faraday,hertz --gpus 0 --roce-ring \
-  --host 127.0.0.1 --port 8001
+flare fleet run maxwell:/data/flare-runtime/glm53-ring-tp4.safetensors \
+  --cluster ring --gpus 0 --roce-ring --host 127.0.0.1 --port 8001
 ```
 
-Rank zero forwards `--roce-ring` to every agent-started rank. If starting peers
-manually, pass it to every rank along with the usual rank and rendezvous options.
+The grant carries `--roce-ring` to every rank. If starting ranks manually, pass
+it to every rank along with the usual rank and rendezvous options.
 Ranks that disagree about ring mode fail during transport record exchange.
 
 Select ring mode explicitly during serving, including for a package prepared

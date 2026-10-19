@@ -568,9 +568,10 @@ A model too large for one Spark runs tensor-parallel across two or four Sparks,
 one rank per host, reducing through b12x RoCEnante over their ConnectX-7 ports:
 `ignition export --ranks N --rendezvous ADDR:PORT` on rank zero with
 `ignition join` on each peer writes one package on rank zero, and
-`flare run PACKAGE --hosts H1,...` serves it, starting each peer's rank through
-that host's `flare agent`. See [serving across DGX Sparks](multi-host.md)
-for setup, the agent's token, and failures.
+`flare fleet run NODE:PACKAGE --cluster NAME` serves it from any machine,
+starting every rank through its host's `flare agent`. See
+[serving across DGX Sparks](multi-host.md) for agent installation, pairing,
+and failures.
 
 ## Cached and development serving
 

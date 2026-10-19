@@ -25,11 +25,13 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Serve a local package or download a prepared package from Hugging Face.
-    Run(Run),
+    Run(Box<Run>),
     /// Download a prepared package from the hardware's Hugging Face revision.
     Download(Download),
-    /// Accept rank zero's packages and executables and run its peer ranks on this host.
+    /// Run this host's agent, which pairs with controllers and runs its rank of a fleet's serving group.
     Agent(AgentArgs),
+    /// Control a fleet of agents from this machine.
+    Fleet(FleetArgs),
     /// Manage remembered publisher trust.
     Trust {
         #[command(subcommand)]
@@ -37,7 +39,7 @@ pub enum Command {
     },
 }
 
-#[derive(Debug, Args, Default)]
+#[derive(Debug, Args, Default, Clone)]
 pub struct HubOptions {
     /// Hub revision; defaults to gb10 or gb202 detected from the selected GPUs.
     #[arg(long, value_name = "REVISION", help_heading = "Download options")]
@@ -78,13 +80,198 @@ pub struct Download {
 
 #[derive(Debug, Args)]
 pub struct AgentArgs {
+    #[command(subcommand)]
+    pub command: Option<AgentCommand>,
+
     /// Address and port to listen on.
     #[arg(long, value_name = "IP:PORT", default_value = "0.0.0.0:29900")]
     pub listen: String,
+}
 
-    /// The cluster's shared token, readable only by its owner [default: ~/.config/flare/agent.token].
+#[derive(Debug, Subcommand)]
+pub enum AgentCommand {
+    /// Install the agent as a service on this host and pair its first controller.
+    Install {
+        /// One-time code a controller presents to pair.
+        #[arg(long, value_name = "CODE")]
+        join_code: Option<String>,
+        /// Pair the first controller that connects, without a code.
+        #[arg(long)]
+        accept_first: bool,
+        /// Address and port the installed agent listens on.
+        #[arg(long, value_name = "IP:PORT", default_value = "0.0.0.0:29900")]
+        listen: String,
+    },
+    /// Remove this host's pairings and cached files.
+    Reset,
+}
+
+#[derive(Debug, Args)]
+pub struct FleetArgs {
+    #[command(subcommand)]
+    pub command: FleetCommand,
+
+    /// The fleet file listing clusters and nodes [default: ~/.config/flare/fleet.toml].
+    #[arg(long, value_name = "PATH", global = true)]
+    pub fleet_file: Option<PathBuf>,
+
+    /// This controller's private key [default: ~/.config/flare/fleet/controller.key].
+    #[arg(long, value_name = "PATH", global = true)]
+    pub key_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum FleetCommand {
+    /// Pair this controller with the agents on HOSTS.
+    Pair {
+        #[arg(required = true, value_name = "HOST")]
+        hosts: Vec<String>,
+        /// The join code shown when the agent was installed.
+        #[arg(long, value_name = "CODE")]
+        code: Option<String>,
+    },
+    /// Manage the controllers a paired agent trusts.
+    Controllers {
+        #[command(subcommand)]
+        command: ControllersCommand,
+    },
+    /// Show each node's state and its running group.
+    Status {
+        #[arg(long, value_name = "NAME")]
+        cluster: Option<String>,
+    },
+    /// Launch a package across a cluster's nodes.
+    Run(Box<FleetRun>),
+    /// Follow a running group's output.
+    Attach {
+        #[arg(long, value_name = "NAME")]
+        cluster: Option<String>,
+    },
+    /// Stop a running group.
+    Stop {
+        #[arg(long, value_name = "NAME")]
+        cluster: Option<String>,
+    },
+    /// Remove a node from the fleet file.
+    Forget {
+        #[arg(value_name = "NODE")]
+        node: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ControllersCommand {
+    /// Authorize another controller on every paired node.
+    Add {
+        name: String,
+        /// The controller's public key, in hex.
+        key: String,
+    },
+    /// Revoke a controller on every paired node.
+    Remove {
+        /// The controller's public key, in hex.
+        key: String,
+    },
+}
+
+#[derive(Debug, Args)]
+#[command(args_override_self = true)]
+pub struct FleetRun {
+    /// A local package path or NODE:/absolute/path on a node.
+    #[arg(value_name = "PACKAGE")]
+    pub package: String,
+
+    /// Cluster to run on; optional when the fleet file has one cluster.
+    #[arg(long, value_name = "NAME")]
+    pub cluster: Option<String>,
+
+    /// Return once the group is serving instead of following its output.
+    #[arg(long)]
+    pub detach: bool,
+
+    /// Flare executable to send to nodes that run a different build [default: this executable].
     #[arg(long, value_name = "PATH")]
-    pub token_file: Option<PathBuf>,
+    pub executable: Option<PathBuf>,
+
+    /// Experimental ring in rank order: only neighbor RoCE QPs connect;
+    /// native CPU relays forward non-neighbor traffic. Also emulates a ring on a switch.
+    #[arg(long, help_heading = "Multi-host options")]
+    pub roce_ring: bool,
+
+    /// IP address for the HTTP server on rank zero.
+    #[arg(
+        long,
+        value_name = "ADDR",
+        default_value = "127.0.0.1",
+        help_heading = "Serving options"
+    )]
+    pub host: IpAddr,
+
+    /// Port for the HTTP server on rank zero.
+    #[arg(
+        long,
+        value_name = "N",
+        default_value = "8000",
+        help_heading = "Serving options"
+    )]
+    pub port: u16,
+
+    /// Replace the package's serving alias; the canonical model ID remains accepted.
+    #[arg(long, value_name = "ALIAS", value_parser = served_model_name, help_heading = "Serving options")]
+    pub served_model_name: Option<String>,
+
+    /// Favor token throughput or balance it with output cadence; both retain token-service fairness.
+    #[arg(long, value_name = "MODE", default_value = "balanced",
+        value_parser = ["balanced", "throughput"], help_heading = "Serving options")]
+    pub scheduler_policy: String,
+
+    /// File on rank zero's node containing the serving API key; omit to disable authentication.
+    #[arg(long, value_name = "PATH", help_heading = "Serving options")]
+    pub api_key_file: Option<PathBuf>,
+
+    #[command(flatten)]
+    pub serving: ServingOptions,
+}
+
+impl FleetRun {
+    /// Serving options every rank loads with.
+    pub fn rank_options(&self) -> Vec<String> {
+        self.serving.rank_options(self.roce_ring)
+    }
+
+    /// Options only rank zero's HTTP server takes.
+    pub fn rank_zero_options(&self) -> Vec<String> {
+        let mut options = vec![
+            "--host".into(),
+            self.host.to_string(),
+            "--port".into(),
+            self.port.to_string(),
+        ];
+        if let Some(name) = &self.served_model_name {
+            options.extend(["--served-model-name".into(), name.clone()]);
+        }
+        options.extend(["--scheduler-policy".into(), self.scheduler_policy.clone()]);
+        if let Some(path) = &self.api_key_file {
+            options.extend(["--api-key-file".into(), path.display().to_string()]);
+        }
+        options
+    }
+
+    /// The equivalent single-host arguments, for publisher trust resolution of the package.
+    pub fn run_args(&self) -> Run {
+        Run {
+            package: PathBuf::from(&self.package),
+            host: self.host,
+            port: self.port,
+            served_model_name: self.served_model_name.clone(),
+            roce_ring: self.roce_ring,
+            rendezvous: None,
+            rank: None,
+            api_key_file: self.api_key_file.clone(),
+            scheduler_policy: self.scheduler_policy.clone(),
+            serving: self.serving.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -103,33 +290,9 @@ pub enum TrustCommand {
     after_help = "Examples:\n  flare run model.safetensors --gpus 0 --host 127.0.0.1 --port 8000\n  flare run model.safetensors --embedding-table-storage ram --mtp-draft-tokens 3\n\nConcurrency and draft limits must fit the package's prepared capacities.\nOmitted concurrency and speculation options use package defaults."
 )]
 pub struct Run {
-    /// Additional publisher verification profiles (JSON); does not grant execution trust.
-    /// Development packages default to ~/.config/flare/development-publisher.json.
-    #[arg(long, value_name = "PATH", action = clap::ArgAction::Append)]
-    pub publisher_keys: Vec<PathBuf>,
-    /// Verify stored allocation and table ranges before loading model GPU resources.
-    #[arg(long)]
-    pub verify_weights: bool,
-    /// Permanently accept this exact signing key together with --dangerously-accept-publisher.
-    #[arg(
-        long,
-        requires = "dangerously_accept_publisher",
-        value_name = "FINGERPRINT"
-    )]
-    pub dangerously_approve_key: Option<String>,
-    /// Exact Hugging Face publisher namespace acknowledged for unattended first use.
-    #[arg(long, requires = "dangerously_approve_key", value_name = "NAMESPACE")]
-    pub dangerously_accept_publisher: Option<String>,
-    /// Persistent trust file [default: ~/.config/flare/trust.toml].
-    #[arg(long, value_name = "PATH")]
-    pub trust_store: Option<PathBuf>,
-
     /// Local prepared .safetensors package or Hugging Face ORG/NAME[@REVISION].
     #[arg(value_name = "PACKAGE")]
     pub package: PathBuf,
-
-    #[command(flatten)]
-    pub hub: HubOptions,
 
     /// IP address for the HTTP server.
     #[arg(
@@ -152,6 +315,60 @@ pub struct Run {
     /// Replace the package's serving alias; the canonical model ID remains accepted.
     #[arg(long, value_name = "ALIAS", value_parser = served_model_name, help_heading = "Serving options")]
     pub served_model_name: Option<String>,
+
+    /// Experimental ring in rank order: only neighbor RoCE QPs connect;
+    /// native CPU relays forward non-neighbor traffic. Also emulates a ring on a switch.
+    #[arg(long, help_heading = "Multi-host options")]
+    pub roce_ring: bool,
+
+    /// Rank zero's rendezvous address: where rank zero listens, or on a peer, where it joins rank zero.
+    #[arg(long, value_name = "HOST:PORT", help_heading = "Multi-host options")]
+    pub rendezvous: Option<String>,
+
+    /// This host's rank of a multi-host package.
+    #[arg(long, value_name = "N", help_heading = "Multi-host options")]
+    pub rank: Option<usize>,
+
+    /// File containing the serving API key; omit to disable authentication.
+    #[arg(long, value_name = "PATH", help_heading = "Serving options")]
+    pub api_key_file: Option<PathBuf>,
+
+    /// Favor token throughput or balance it with output cadence; both retain token-service fairness.
+    #[arg(long, value_name = "MODE", default_value = "balanced",
+        value_parser = ["balanced", "throughput"], help_heading = "Serving options")]
+    pub scheduler_policy: String,
+
+    #[command(flatten)]
+    pub serving: ServingOptions,
+}
+
+/// Options that select a package's trust, loading, speculation and caching; every rank of a
+/// multi-host package loads with the same values.
+#[derive(Debug, Args, Clone)]
+pub struct ServingOptions {
+    /// Additional publisher verification profiles (JSON); does not grant execution trust.
+    /// Development packages default to ~/.config/flare/development-publisher.json.
+    #[arg(long, value_name = "PATH", action = clap::ArgAction::Append)]
+    pub publisher_keys: Vec<PathBuf>,
+    /// Verify stored allocation and table ranges before loading model GPU resources.
+    #[arg(long)]
+    pub verify_weights: bool,
+    /// Permanently accept this exact signing key together with --dangerously-accept-publisher.
+    #[arg(
+        long,
+        requires = "dangerously_accept_publisher",
+        value_name = "FINGERPRINT"
+    )]
+    pub dangerously_approve_key: Option<String>,
+    /// Exact Hugging Face publisher namespace acknowledged for unattended first use.
+    #[arg(long, requires = "dangerously_approve_key", value_name = "NAMESPACE")]
+    pub dangerously_accept_publisher: Option<String>,
+    /// Persistent trust file [default: ~/.config/flare/trust.toml].
+    #[arg(long, value_name = "PATH")]
+    pub trust_store: Option<PathBuf>,
+
+    #[command(flatten)]
+    pub hub: HubOptions,
 
     /// GPUs in rank order, relative to CUDA_VISIBLE_DEVICES when set.
     #[arg(long, value_name = "N[,N...]", value_delimiter = ',', action = clap::ArgAction::Set,
@@ -184,47 +401,9 @@ pub struct Run {
     )]
     pub memory_limit: Option<MemoryLimit>,
 
-    /// Peer hosts of a multi-host package, ranks 1 onward, each running `flare agent`. Flare sends
-    /// the package and itself to hosts that lack them, starts their ranks with these serving
-    /// options, and serves as rank zero.
-    #[arg(
-        long,
-        value_name = "HOST[,HOST...]",
-        value_delimiter = ',',
-        help_heading = "Multi-host options"
-    )]
-    pub hosts: Vec<String>,
-
-    /// Experimental ring in rank order: only neighbor RoCE QPs connect;
-    /// native CPU relays forward non-neighbor traffic. Also emulates a ring on a switch.
-    #[arg(long, help_heading = "Multi-host options")]
-    pub roce_ring: bool,
-
-    /// The cluster's shared agent token [default: ~/.config/flare/agent.token].
-    #[arg(long, value_name = "PATH", help_heading = "Multi-host options")]
-    pub agent_token_file: Option<PathBuf>,
-
-    /// Rank zero's rendezvous address: with --hosts, where rank zero listens [default:
-    /// 0.0.0.0:29800]; on a peer, where it joins rank zero.
-    #[arg(long, value_name = "HOST:PORT", help_heading = "Multi-host options")]
-    pub rendezvous: Option<String>,
-
-    /// This host's rank of a multi-host package; rank zero's launcher sets it for each peer.
-    #[arg(long, value_name = "N", help_heading = "Multi-host options")]
-    pub rank: Option<usize>,
-
-    /// File containing the serving API key; omit to disable authentication.
-    #[arg(long, value_name = "PATH", help_heading = "Serving options")]
-    pub api_key_file: Option<PathBuf>,
-
     /// Maximum simultaneous requests [default: package setting].
     #[arg(long, value_name = "N", help_heading = "Serving options")]
     pub max_concurrency: Option<NonZeroUsize>,
-
-    /// Favor token throughput or balance it with output cadence; both retain token-service fairness.
-    #[arg(long, value_name = "MODE", default_value = "balanced",
-        value_parser = ["balanced", "throughput"], help_heading = "Serving options")]
-    pub scheduler_policy: String,
 
     /// Storage for auxiliary embedding tables (PLE/Engram) [default: disk].
     #[arg(long, value_name = "MODE", help_heading = "Serving options",
@@ -255,8 +434,12 @@ pub struct Run {
     /// Advanced: retain all captured packed verification capacities up to N total rows,
     /// including pending inputs [default: all captured capacities]. Requires adaptive
     /// prefix selection at the captured draft depth.
-    #[arg(long, value_name = "N", conflicts_with = "mtp_verification_token_budget",
-        help_heading = "Advanced speculation options")]
+    #[arg(
+        long,
+        value_name = "N",
+        conflicts_with = "mtp_verification_token_budget",
+        help_heading = "Advanced speculation options"
+    )]
     pub mtp_max_verification_token_budget: Option<NonZeroUsize>,
 
     /// Adapt verification width to acceptance estimates and execution cost [default: package setting].
@@ -302,6 +485,14 @@ fn served_model_name(value: &str) -> Result<String, String> {
     }
 }
 
+impl std::ops::Deref for Run {
+    type Target = ServingOptions;
+
+    fn deref(&self) -> &ServingOptions {
+        &self.serving
+    }
+}
+
 impl Run {
     pub fn bind_address(&self) -> SocketAddr {
         SocketAddr::new(self.host, self.port)
@@ -309,7 +500,19 @@ impl Run {
 
     /// Serving options every rank of a multi-host package must load with: they select the same
     /// graphs and capacities on every host.
+    #[cfg(test)]
     pub fn rank_options(&self) -> Vec<String> {
+        self.serving.rank_options(self.roce_ring)
+    }
+
+    pub fn load_options(&self) -> LoadOptions {
+        self.serving.load_options(self.rank)
+    }
+}
+
+impl ServingOptions {
+    /// Serving options every rank of a multi-host package must load with.
+    pub fn rank_options(&self, roce_ring: bool) -> Vec<String> {
         let mut options = Vec::new();
         if self.kv_cache_limit != KvCacheLimit::Memory {
             options.extend(["--kv-cache-limit".into(), self.kv_cache_limit.to_string()]);
@@ -317,7 +520,7 @@ impl Run {
         if let Some(limit) = self.memory_limit {
             options.push(format!("--memory-limit={limit}"));
         }
-        if self.roce_ring {
+        if roce_ring {
             options.push("--roce-ring".into());
         }
         if self.verify_weights {
@@ -364,7 +567,7 @@ impl Run {
         options
     }
 
-    pub fn load_options(&self) -> LoadOptions {
+    pub fn load_options(&self, cluster_rank: Option<usize>) -> LoadOptions {
         LoadOptions {
             kv_cache_limit: self.kv_cache_limit,
             memory_limit: self.memory_limit,
@@ -373,8 +576,12 @@ impl Run {
             embedding_table_workers: self.embedding_table_workers,
             max_concurrency: self.max_concurrency.map(NonZeroUsize::get),
             mtp_draft_tokens: self.mtp_draft_tokens,
-            mtp_verification_token_budget: self.mtp_verification_token_budget.map(NonZeroUsize::get),
-            mtp_max_verification_token_budget: self.mtp_max_verification_token_budget.map(NonZeroUsize::get),
+            mtp_verification_token_budget: self
+                .mtp_verification_token_budget
+                .map(NonZeroUsize::get),
+            mtp_max_verification_token_budget: self
+                .mtp_max_verification_token_budget
+                .map(NonZeroUsize::get),
             adaptive_verification: if self.mtp_adaptive_verification {
                 Some(true)
             } else if self.no_mtp_adaptive_verification {
@@ -389,7 +596,7 @@ impl Run {
                 disk_limit: self.prefix_cache_disk_limit,
                 transport: self.prefix_cache_disk_transport,
             },
-            cluster_rank: self.rank,
+            cluster_rank,
         }
     }
 }
@@ -402,7 +609,7 @@ mod tests {
         let Command::Run(args) = Cli::try_parse_from(arguments).unwrap().command else {
             panic!("expected run")
         };
-        args
+        *args
     }
 
     #[test]
@@ -425,7 +632,10 @@ mod tests {
                 args.load_options().embedding_table_workers,
                 Some(workers.parse().unwrap())
             );
-            assert_eq!(args.load_options().embedding_workers(), workers.parse::<usize>().unwrap());
+            assert_eq!(
+                args.load_options().embedding_workers(),
+                workers.parse::<usize>().unwrap()
+            );
             assert!(
                 args.rank_options()
                     .windows(2)
@@ -468,9 +678,27 @@ mod tests {
 
     #[test]
     fn scheduling_preference_is_explicit_and_validated() {
-        assert_eq!(run(&["flare", "run", "model.safetensors", "--scheduler-policy", "throughput"]).scheduler_policy,
-                   "throughput");
-        assert!(Cli::try_parse_from(["flare", "run", "model.safetensors", "--scheduler-policy", "unknown"]).is_err());
+        assert_eq!(
+            run(&[
+                "flare",
+                "run",
+                "model.safetensors",
+                "--scheduler-policy",
+                "throughput"
+            ])
+            .scheduler_policy,
+            "throughput"
+        );
+        assert!(
+            Cli::try_parse_from([
+                "flare",
+                "run",
+                "model.safetensors",
+                "--scheduler-policy",
+                "unknown"
+            ])
+            .is_err()
+        );
     }
 
     #[test]
@@ -530,32 +758,79 @@ mod tests {
     #[test]
     fn verification_token_budget_reaches_loader_and_peer_ranks() {
         for budget in ["24", "32"] {
-            let args = run(&["flare", "run", "model.safetensors",
-                "--mtp-verification-token-budget", budget]);
-            assert_eq!(args.load_options().mtp_verification_token_budget, Some(budget.parse().unwrap()));
-            assert_eq!(args.rank_options(), vec!["--mtp-verification-token-budget", budget]);
+            let args = run(&[
+                "flare",
+                "run",
+                "model.safetensors",
+                "--mtp-verification-token-budget",
+                budget,
+            ]);
+            assert_eq!(
+                args.load_options().mtp_verification_token_budget,
+                Some(budget.parse().unwrap())
+            );
+            assert_eq!(
+                args.rank_options(),
+                vec!["--mtp-verification-token-budget", budget]
+            );
         }
         for invalid in ["0", "-1", "unbounded"] {
-            assert!(Cli::try_parse_from(["flare", "run", "model.safetensors",
-                "--mtp-verification-token-budget", invalid]).is_err());
+            assert!(
+                Cli::try_parse_from([
+                    "flare",
+                    "run",
+                    "model.safetensors",
+                    "--mtp-verification-token-budget",
+                    invalid
+                ])
+                .is_err()
+            );
         }
     }
 
     #[test]
     fn maximum_verification_token_budget_reaches_loader_and_peer_ranks() {
         for budget in ["24", "32"] {
-            let args = run(&["flare", "run", "model.safetensors",
-                "--mtp-max-verification-token-budget", budget]);
-            assert_eq!(args.load_options().mtp_max_verification_token_budget, Some(budget.parse().unwrap()));
-            assert_eq!(args.rank_options(), vec!["--mtp-max-verification-token-budget", budget]);
+            let args = run(&[
+                "flare",
+                "run",
+                "model.safetensors",
+                "--mtp-max-verification-token-budget",
+                budget,
+            ]);
+            assert_eq!(
+                args.load_options().mtp_max_verification_token_budget,
+                Some(budget.parse().unwrap())
+            );
+            assert_eq!(
+                args.rank_options(),
+                vec!["--mtp-max-verification-token-budget", budget]
+            );
         }
         for invalid in ["0", "-1", "unbounded"] {
-            assert!(Cli::try_parse_from(["flare", "run", "model.safetensors",
-                "--mtp-max-verification-token-budget", invalid]).is_err());
+            assert!(
+                Cli::try_parse_from([
+                    "flare",
+                    "run",
+                    "model.safetensors",
+                    "--mtp-max-verification-token-budget",
+                    invalid
+                ])
+                .is_err()
+            );
         }
-        assert!(Cli::try_parse_from(["flare", "run", "model.safetensors",
-            "--mtp-verification-token-budget", "24",
-            "--mtp-max-verification-token-budget", "24"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "flare",
+                "run",
+                "model.safetensors",
+                "--mtp-verification-token-budget",
+                "24",
+                "--mtp-max-verification-token-budget",
+                "24"
+            ])
+            .is_err()
+        );
     }
 
     #[test]

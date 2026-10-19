@@ -387,6 +387,7 @@ serves it.
 | `flare fleet prepare RECIPE --cluster NAME ...` | Controller | Multi-host export through agents |
 | `flare fleet run PACKAGE --cluster NAME [--detach] ...` | Controller | Starts a group and attaches |
 | `flare fleet attach` / `stop` / `status --cluster NAME` | Controller | Operates a running group |
+| `flare fleet forget NODE` | Controller | Removes a node from the fleet file |
 
 `flare run --rank R --rendezvous ADDR` remains for operator-managed starts on
 hosts that already hold the executable and package. `flare run --hosts`,
