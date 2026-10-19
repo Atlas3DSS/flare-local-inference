@@ -141,7 +141,7 @@ def test_glm_kda_gate_chain_overlaps_input_projections_or_follows_them(monkeypat
     layer = object.__new__(kda.PreparedGlmKDA)
     layer.scratch, layer.tokens, layer.mode = scratch, 2, "decode"
     layer.verification = layer.records = None
-    layer.conv_binding, layer.recurrent_binding, layer.run_options = "conv", "recurrence", {}
+    layer.conv_binding, layer.recurrence, layer.options = "conv", "recurrence", {}
     layer.projections = {key: Projection(key, input, output) for key, input, output in (
         ("input_proj", source, scratch.projected_input),
         ("f_b_proj", scratch.forget_input, scratch.raw_g),

@@ -209,7 +209,14 @@ flare fleet run maxwell:/data/flare-runtime/glm53-spark-tp2.safetensors \
 `NODE:PATH` names a package on a node's disk, normally rank zero's host where
 preparation wrote it. A plain path names a package on the controller, which is
 then sent to rank zero's host. The cluster's node count must match the
-package's prepared rank count.
+package's prepared rank count. Without `--cluster`, the controller places the
+ranks on free GPUs of the right kind anywhere in the fleet, preferring nodes
+whose caches already hold their rank; `--nodes` names candidates in rank
+order, `--name` names the group for `attach`, `stop` and `ls`, and
+`--dry-run` prints the placement without starting anything. A `[[group]]` in
+the fleet file supplies the package, serving options and constraints for a
+name, so `flare fleet run --name ds41` is a complete command; see
+[fleet control](fleet.md#desired-state).
 
 The controller verifies the package's signed index and obtains publisher
 acceptance at its own terminal, then passes the accepted publisher profile and
@@ -252,7 +259,9 @@ Every rank's output appears on the controller's terminal with a `[rank R name]`
 prefix. Ctrl-C stops the group: rank zero receives SIGTERM first and drains
 native work, then peers still running after thirty seconds are stopped.
 `--detach` returns once every rank has started; `flare fleet attach` shows a
-running group's output, and `flare fleet stop` stops it. A controller that
+running group's output, `flare fleet stop` stops it, and `flare fleet
+dashboard` shows the live metrics dashboard for every group and GPU on the
+cluster. A controller that
 disconnects, sleeps, or crashes does not stop the group; agents keep the last
 64 KiB of each rank's output for a later attach. An agent does not restart a
 failed rank; start the group again after resolving the failure.

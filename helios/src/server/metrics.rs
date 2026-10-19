@@ -5,6 +5,8 @@ use std::{
 
 pub(super) mod scheduler;
 
+use serde::{Deserialize, Serialize};
+
 use crate::{
     execution::{CompletionRecord, GraphKind},
     offload::StoreStats,
@@ -26,30 +28,127 @@ struct ProposalMetrics {
     gpu_ns: AtomicU64,
 }
 
-#[derive(Clone, Copy, Default)]
-pub(super) struct Snapshot {
+/// Point-in-time serving counters and gauges for dashboards.
+///
+/// `GET /metrics?format=json` serializes this structure with its field names as
+/// keys. Totals count from server start; `active`, `pending`, the page fields,
+/// and the host record fields are instantaneous gauges. Fields absent from a
+/// serialized snapshot deserialize as zero.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Snapshot {
+    /// Prompt tokens consumed by completed prefill work, excluding padding and prefix reuse.
     pub prefill_tokens: u64,
+    /// Committed generated tokens, including EOS and tokens withheld by text stops.
     pub generated_tokens: u64,
+    /// Draft positions run by the learned drafter; zero for models without one.
     pub draft_steps: u64,
+    /// Completed speculative or verification graphs, including terminal no-op rounds.
     pub verify_steps: u64,
+    /// Draft positions those graphs verified: verification width minus one per graph.
     pub verification_drafts: u64,
+    /// Accepted draft tokens from progressing request rounds, excluding the bonus token.
     pub accepted_drafts: u64,
+    /// Progressing request rounds that offered at least one draft.
     pub draft_rounds: u64,
+    /// Physical model slots with a live request.
     pub active: u64,
+    /// Requests waiting inside the model scheduler, excluding its ingress channel.
     pub pending: u64,
+    /// Requests whose generation completed successfully.
     pub completed: u64,
+    /// Requests failed by admission, execution, grammar, or output backpressure.
     pub failed: u64,
+    /// Tokens covered by checkpoints returned from GPU prefix lookups.
     pub reused_tokens: u64,
+    /// KV pages owned by immutable checkpoints.
     pub cached_pages: u64,
+    /// KV pages reusable after completed GPU fences.
     pub free_pages: u64,
+    /// Pages in the per-rank KV pool.
     pub total_pages: u64,
+    /// Logical history tokens per KV page.
     pub page_tokens: u64,
+    /// Host prefix store lookups whose chain admission fetched.
     pub host_hits: u64,
+    /// Tokens covered by host prefix store chains beyond the GPU checkpoint.
     pub host_reused_tokens: u64,
+    /// Checkpoint records resident in the host store's registered memory.
     pub host_memory_records: u64,
+    /// Checkpoint records in the host store's record directory.
     pub host_disk_records: u64,
+    /// Bytes copied from GPU checkpoints to the host store.
     pub host_bytes_out: u64,
+    /// Bytes copied from the host store into GPU pages and rows.
     pub host_bytes_in: u64,
+}
+
+impl Snapshot {
+    /// JSON object of every field plus `learned_drafter`, which reports whether
+    /// the model has a learned drafter; `draft_steps` is zero without one.
+    pub(super) fn json(&self, learned_drafter: bool) -> serde_json::Value {
+        let mut value = serde_json::to_value(self).unwrap_or_default();
+        if let Some(fields) = value.as_object_mut() {
+            fields.insert("learned_drafter".into(), learned_drafter.into());
+        }
+        value
+    }
+}
+
+/// Response body formats of `GET /metrics`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Format {
+    /// Prometheus text exposition format 0.0.4 of every Helios counter and gauge.
+    Prometheus,
+    /// The [`Snapshot`] fields as one JSON object.
+    Json,
+}
+
+impl Format {
+    /// Selects the format from the `format` query parameter (`json` or
+    /// `prometheus`), else from whichever of `application/json` and
+    /// `text/plain` the `Accept` header ranks higher, else Prometheus text.
+    /// Equal quality values keep the earlier media range.
+    pub(super) fn negotiate(query: Option<&str>, accept: Option<&str>) -> Result<Self, String> {
+        if let Some(format) = query
+            .into_iter()
+            .flat_map(|query| query.split('&'))
+            .find_map(|pair| pair.strip_prefix("format="))
+        {
+            return match format {
+                "json" => Ok(Self::Json),
+                "prometheus" => Ok(Self::Prometheus),
+                _ => Err(format!(
+                    "unsupported metrics format {format:?}; use json or prometheus"
+                )),
+            };
+        }
+        let mut selected = (0.0, Self::Prometheus);
+        for range in accept.unwrap_or_default().split(',') {
+            let mut parameters = range.split(';');
+            let media = parameters.next().unwrap_or_default().trim();
+            let format = if media.eq_ignore_ascii_case("application/json") {
+                Self::Json
+            } else if media.eq_ignore_ascii_case("text/plain") {
+                Self::Prometheus
+            } else {
+                continue;
+            };
+            let quality = parameters
+                .find_map(|parameter| {
+                    let (name, value) = parameter.split_once('=')?;
+                    name.trim()
+                        .eq_ignore_ascii_case("q")
+                        .then(|| value.trim().parse::<f32>().ok())
+                        .flatten()
+                })
+                .unwrap_or(1.0);
+            if quality > selected.0 {
+                selected = (quality, format);
+            }
+        }
+        Ok(selected.1)
+    }
 }
 
 #[derive(Default)]
@@ -821,6 +920,86 @@ mod tests {
         assert!(text.contains("flare_proposal_rounds_total{batch=\"4\",depth=\"7\"} 1"));
         assert!(text.contains("flare_proposal_gpu_nanoseconds_total{batch=\"4\",depth=\"7\"} 700"));
         assert!(text.contains("flare_speculative_gpu_nanoseconds_total{batch=\"2\",width=\"3\"} 300"));
+    }
+
+    #[test]
+    fn snapshot_json_round_trips_beside_the_prometheus_counters() {
+        let metrics = Metrics::new(100, 128);
+        metrics.progress(40, 3, 2, 1);
+        metrics.scheduler(SchedulerStats {
+            active_requests: 2,
+            free_pages: 10,
+            cached_pages: 3,
+            ..SchedulerStats::default()
+        });
+        let snapshot = metrics.snapshot(true);
+        let json = snapshot.json(true);
+        assert_eq!(json["generated_tokens"], 3);
+        assert_eq!(json["free_pages"], 10);
+        assert_eq!(json["learned_drafter"], true);
+        assert_eq!(serde_json::from_value::<Snapshot>(json).unwrap(), snapshot);
+        assert_eq!(
+            serde_json::from_str::<Snapshot>(r#"{"generated_tokens":5}"#).unwrap(),
+            Snapshot {
+                generated_tokens: 5,
+                ..Snapshot::default()
+            }
+        );
+        let text = metrics.render();
+        for line in [
+            "flare_generated_tokens_total 3",
+            "flare_prefill_tokens_total 40",
+            "flare_active_requests 2",
+            "flare_free_kv_pages 10",
+            "flare_total_kv_pages 100",
+        ] {
+            assert!(text.lines().any(|value| value == line), "{line}");
+        }
+    }
+
+    #[test]
+    fn metrics_format_follows_query_then_ranked_accept_then_prometheus() {
+        for (query, accept, format) in [
+            (None, None, Format::Prometheus),
+            (None, Some("*/*"), Format::Prometheus),
+            (None, Some("application/json"), Format::Json),
+            (
+                None,
+                Some("application/json, text/plain, */*"),
+                Format::Json,
+            ),
+            (
+                None,
+                Some("text/plain, application/json"),
+                Format::Prometheus,
+            ),
+            (
+                None,
+                Some("text/plain;q=0.5, Application/JSON; Q=0.9"),
+                Format::Json,
+            ),
+            (None, Some("application/json;q=0"), Format::Prometheus),
+            (
+                None,
+                Some(
+                    "application/openmetrics-text;version=1.0.0;q=0.5,text/plain;version=0.0.4;q=0.3,*/*;q=0.2",
+                ),
+                Format::Prometheus,
+            ),
+            (Some("format=json"), Some("text/plain"), Format::Json),
+            (
+                Some("x=1&format=prometheus"),
+                Some("application/json"),
+                Format::Prometheus,
+            ),
+        ] {
+            assert_eq!(
+                Format::negotiate(query, accept),
+                Ok(format),
+                "{query:?} {accept:?}"
+            );
+        }
+        assert!(Format::negotiate(Some("format=yaml"), None).is_err());
     }
 
     #[test]

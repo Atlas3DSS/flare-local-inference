@@ -33,7 +33,7 @@ def disposable_ranges(*, cache, scratch, workspaces, vision_scratch, decoders, o
                 target, proposals, verify, _, _ = operation.operations
                 for distribution in (target, *proposals):
                     values.extend(getattr(distribution, name) for name in (
-                        "scores", "probabilities", "counts", "maximum", "valid",
+                        "scores", "probabilities", "maximum", "valid",
                         "packed_top_k", "packed_top_p"))
                 for proposal in proposals:
                     values.extend((proposal.proposal.candidates, proposal.proposal.selected))

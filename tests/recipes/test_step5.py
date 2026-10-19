@@ -124,7 +124,12 @@ def test_vision_text_and_draft_scratch_share_storage(checkpoint_config):
         footprints.append(sum(t.nbytes for t in values))
         assert all(t.untyped_storage()._cdata in owners for t in values)
         if execution is vision:
-            stages = [values]
+            persistent = [vision.patches, vision.hidden, vision.normalized,
+                          vision.projected, vision.reduced]
+            stages = [persistent + [vision.qkv, vision.query, vision.key, vision.value, vision.attended],
+                      persistent + [vision.mlp_up, vision.activated],
+                      persistent + [vision.first_input, vision.first_output, vision.second_input,
+                                    vision.second_output, vision.second_reduced, vision.output]]
         else:
             private = {"attention", "dense", "shared", "router_logits", "router", "experts", "partial"}
             persistent = [t for field in fields(execution) if field.name not in private

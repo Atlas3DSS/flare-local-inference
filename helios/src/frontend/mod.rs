@@ -1,5 +1,6 @@
 //! Native tokenization and rendering over verified Hugging Face assets.
 
+mod deepseek;
 #[cfg(feature = "images")]
 pub mod images;
 mod json;
@@ -78,7 +79,7 @@ impl Asset {
 pub struct FrontendAssets {
     pub tokenizer: Asset,
     pub tokens: TokenizerSettings,
-    pub chat_template: Asset,
+    pub chat_template: Option<Asset>,
 }
 
 #[cfg(any(test, feature = "test-tools"))]
@@ -107,12 +108,42 @@ pub struct TokenList {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FrontendSettings {
+    #[serde(default)]
+    pub prompt_encoder: PromptEncoder,
+    #[serde(default)]
+    pub image_placeholder_token_id: Option<u32>,
     pub tokenizer: TokenizerSettings,
     pub eos_token_ids: Vec<u32>,
     #[serde(default)]
     pub template_encoding: TemplateEncoding,
     #[cfg(feature = "images")]
     pub image: Option<images::ImageSettings>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "i32", into = "i32")]
+pub enum PromptEncoder {
+    #[default]
+    Jinja = 0,
+    DeepseekV4 = 1,
+    DeepseekV41 = 2,
+}
+
+impl From<PromptEncoder> for i32 {
+    fn from(value: PromptEncoder) -> Self {
+        value as i32
+    }
+}
+impl TryFrom<i32> for PromptEncoder {
+    type Error = &'static str;
+    fn try_from(value: i32) -> std::result::Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::Jinja),
+            1 => Ok(Self::DeepseekV4),
+            2 => Ok(Self::DeepseekV41),
+            _ => Err("unsupported prompt encoder"),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
@@ -148,11 +179,14 @@ struct TokenSegment {
 }
 
 pub struct RenderedPrompt {
+    pub image_sources: Vec<String>,
     pub text: String,
     pub token_ids: Vec<u32>,
 }
 
 pub struct Frontend {
+    prompt_encoder: PromptEncoder,
+    image_placeholder_token_id: Option<u32>,
     tokenizer: Tokenizer,
     ordinary_tokenizer: Option<Tokenizer>,
     environment: Environment<'static>,
@@ -164,6 +198,9 @@ pub struct Frontend {
 }
 
 impl Frontend {
+    pub fn prompt_encoder(&self) -> PromptEncoder {
+        self.prompt_encoder
+    }
     pub fn with_template_encoding(mut self, encoding: TemplateEncoding) -> Self {
         self.ordinary_tokenizer = match encoding {
             TemplateEncoding::Text => None,
@@ -181,6 +218,13 @@ impl Frontend {
 
     /// Resolves advisory effort against the vocabulary accepted by the prepared template.
     pub fn resolve_effort<'a>(&self, candidates: &'a [&str]) -> Result<&'a str> {
+        if self.prompt_encoder != PromptEncoder::Jinja {
+            return candidates
+                .iter()
+                .copied()
+                .find(|level| matches!(*level, "low" | "high" | "xhigh" | "max"))
+                .ok_or_else(|| deepseek::invalid("unsupported reasoning effort"));
+        }
         let accepted = self.effort_levels.get_or_init(|| {
             let mut context = self.defaults.clone();
             context.insert(
@@ -223,6 +267,9 @@ impl Frontend {
     }
 
     pub fn normalize_inline_system_messages(&self, messages: &mut [Json]) -> Result<()> {
+        if self.prompt_encoder != PromptEncoder::Jinja {
+            return Ok(());
+        }
         if !messages.iter().skip(1).any(|m| m["role"] == "system") {
             return Ok(());
         }
@@ -278,6 +325,41 @@ impl Frontend {
     }
 
     pub fn load(assets: FrontendAssets, template_defaults: Map<String, Json>) -> Result<Self> {
+        Self::load_encoder(assets, template_defaults, PromptEncoder::Jinja, None)
+    }
+
+    pub fn load_with_settings(
+        assets: FrontendAssets,
+        template_defaults: Map<String, Json>,
+        settings: &FrontendSettings,
+    ) -> Result<Self> {
+        if settings.prompt_encoder != PromptEncoder::Jinja && assets.chat_template.is_some() {
+            return Err(deepseek::invalid(
+                "official prompt encoding does not use a chat template asset",
+            ));
+        }
+        if settings.prompt_encoder != PromptEncoder::Jinja
+            && matches!(settings.template_encoding, TemplateEncoding::TokenSegments)
+        {
+            return Err(deepseek::invalid(
+                "official prompt encoding requires text template encoding",
+            ));
+        }
+        Self::load_encoder(
+            assets,
+            template_defaults,
+            settings.prompt_encoder,
+            settings.image_placeholder_token_id,
+        )
+        .map(|frontend| frontend.with_template_encoding(settings.template_encoding))
+    }
+
+    fn load_encoder(
+        assets: FrontendAssets,
+        template_defaults: Map<String, Json>,
+        prompt_encoder: PromptEncoder,
+        image_placeholder_token_id: Option<u32>,
+    ) -> Result<Self> {
         let mut tokenizer = Tokenizer::from_bytes(assets.tokenizer.read()?).map_err(|error| {
             Error::frontend(FrontendError::Tokenizer(Failure::boxed(
                 format!("invalid tokenizer: {error}"),
@@ -291,7 +373,23 @@ impl Frontend {
             )))
         })?;
         tokenizer.with_padding(None);
-        let template_source = String::from_utf8(assets.chat_template.read()?).map_err(|error| {
+        if prompt_encoder != PromptEncoder::Jinja
+            && image_placeholder_token_id.is_some_and(|id| tokenizer.id_to_token(id).is_none())
+        {
+            return Err(deepseek::invalid(
+                "image placeholder token ID is absent from the checkpoint tokenizer",
+            ));
+        }
+        let template_bytes = match assets.chat_template {
+            Some(asset) if prompt_encoder == PromptEncoder::Jinja => asset.read()?,
+            _ if prompt_encoder != PromptEncoder::Jinja => Vec::new(),
+            _ => {
+                return Err(deepseek::invalid(
+                    "Jinja prompt encoding requires a chat template asset",
+                ));
+            }
+        };
+        let template_source = String::from_utf8(template_bytes).map_err(|error| {
             Error::frontend(FrontendError::Template(Failure::caused_by(
                 format!("chat template is not UTF-8: {error}"),
                 error,
@@ -350,11 +448,16 @@ impl Frontend {
                 Json::Array(tokens.values.into_iter().map(Json::String).collect()),
             );
         }
-        defaults.insert("add_generation_prompt".into(), Json::Bool(false));
+        defaults.insert(
+            "add_generation_prompt".into(),
+            Json::Bool(prompt_encoder != PromptEncoder::Jinja),
+        );
         defaults.insert("tools".into(), Json::Null);
         defaults.insert("documents".into(), Json::Null);
         defaults.extend(template_defaults);
-        Ok(Self {
+        let frontend = Self {
+            prompt_encoder,
+            image_placeholder_token_id,
             bos_token_id,
             effort_levels: Default::default(),
             inline_system_messages: Default::default(),
@@ -363,7 +466,11 @@ impl Frontend {
             environment,
             template_source,
             defaults,
-        })
+        };
+        if prompt_encoder != PromptEncoder::Jinja {
+            deepseek::validate_defaults(&frontend)?;
+        }
+        Ok(frontend)
     }
 
     pub fn encode(&self, text: &str, add_special_tokens: bool) -> Result<Vec<u32>> {
@@ -394,6 +501,9 @@ impl Frontend {
         messages: &[Json],
         options: &Map<String, Json>,
     ) -> Result<RenderedPrompt> {
+        if self.prompt_encoder != PromptEncoder::Jinja {
+            return deepseek::render(self, messages, options);
+        }
         if messages.is_empty() {
             return Err(Error::frontend(FrontendError::Input(Failure::new(
                 "Cannot apply chat template to an empty conversation. Provide at least one message.",
@@ -439,6 +549,30 @@ impl Frontend {
             }
         }
         let mut messages = messages.to_vec();
+        let mut image_sources = Vec::new();
+        for message in &mut messages {
+            if !message.is_object() {
+                return Err(deepseek::invalid("messages must contain objects"));
+            }
+            if let Some(parts) = message.get_mut("content").and_then(Json::as_array_mut) {
+                for part in parts {
+                    let kind = part
+                        .get("type")
+                        .and_then(Json::as_str)
+                        .ok_or_else(|| deepseek::invalid("message content part requires type"))?;
+                    if kind == "text" && !part.get("text").is_some_and(Json::is_string) {
+                        return Err(deepseek::invalid("text content must be a string"));
+                    }
+                    if kind == "image_url" {
+                        let url = part["image_url"]["url"]
+                            .as_str()
+                            .ok_or_else(|| deepseek::invalid("image_url.url must be a string"))?;
+                        image_sources.push(url.to_owned());
+                        *part = serde_json::json!({"type":"image"});
+                    }
+                }
+            }
+        }
         let final_text = continuation
             .map(|field| self.mark_continuation(&mut messages, &field))
             .transpose()?;
@@ -511,7 +645,11 @@ impl Frontend {
                 break;
             }
         }
-        Ok(RenderedPrompt { text, token_ids })
+        Ok(RenderedPrompt {
+            text,
+            token_ids,
+            image_sources,
+        })
     }
 
     fn mark_continuation(&self, messages: &mut [Json], field: &str) -> Result<String> {
@@ -650,6 +788,8 @@ mod tests {
             .add_template_owned("chat", source.clone())
             .unwrap();
         Frontend {
+            prompt_encoder: PromptEncoder::Jinja,
+            image_placeholder_token_id: None,
             ordinary_tokenizer: None,
             tokenizer: Tokenizer::new(tokenizers::models::bpe::BPE::default()),
             environment,
@@ -758,6 +898,8 @@ mod tests {
                 .add_template_owned("chat", source.clone())
                 .unwrap();
             let frontend = Frontend {
+                prompt_encoder: PromptEncoder::Jinja,
+                image_placeholder_token_id: None,
                 ordinary_tokenizer: None,
                 tokenizer: Tokenizer::new(tokenizers::models::bpe::BPE::default()),
                 environment,
@@ -823,6 +965,8 @@ mod tests {
             .add_template_owned("chat", "{{ raise_exception() }}".to_owned())
             .unwrap();
         let frontend = Frontend {
+            prompt_encoder: PromptEncoder::Jinja,
+            image_placeholder_token_id: None,
             bos_token_id: None,
             effort_levels: Default::default(),
             inline_system_messages: Default::default(),

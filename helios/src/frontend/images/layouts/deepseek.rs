@@ -95,14 +95,14 @@ fn prepare(
     images: Vec<RgbImage>,
     block: fn(usize, usize, usize, usize, usize) -> (Vec<u32>, Vec<i32>, usize),
 ) -> Result<PreparedInput> {
-    let placeholder = frontend.encode("<｜deepseek_image｜>", false)?;
-    if placeholder.len() != 1 || rendered.token_ids.iter().any(|t| *t as usize >= vocabulary) {
+    let placeholder = frontend.image_placeholder_token_id()?;
+    if rendered.token_ids.iter().any(|t| *t as usize >= vocabulary) {
         return Err("invalid DeepSeek image placeholder or prompt vocabulary".into());
     }
     if rendered
         .token_ids
         .iter()
-        .filter(|t| **t == placeholder[0])
+        .filter(|t| **t == placeholder)
         .count()
         != images.len()
     {
@@ -123,7 +123,7 @@ fn prepare(
     let mut image_index = 0;
     let mut feature_offset = 0;
     for token in &rendered.token_ids {
-        if *token != placeholder[0] {
+        if *token != placeholder {
             tokens.push(*token);
             data.vision_token_indices.push(-1);
             continue;

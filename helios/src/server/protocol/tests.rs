@@ -181,7 +181,7 @@ fn required_tool_choice_fails_without_a_completed_call_for_every_termination() {
                         .to_string()
                         .contains("did not produce a completed tool call")
                 );
-                let failure = enc.failure(error);
+                let failure = enc.failure(&error);
                 assert!(!failure.done);
                 match protocol {
                     Protocol::Chat => {
@@ -317,7 +317,7 @@ fn disabled_parallel_calls_fail_before_the_second_call_is_emitted() {
                     let error = second.unwrap_err();
                     assert!(error.to_string().contains("more than one tool call"));
                     assert_eq!(enc.outputs[0].blocks, first);
-                    let failed = enc.failure(error);
+                    let failed = enc.failure(&error);
                     assert!(!failed.done);
                     if protocol == Protocol::Responses {
                         assert_eq!(failed.data["type"], "response.failed");
@@ -622,7 +622,7 @@ fn custom_tool_input_requires_a_string_before_completion() {
         } else {
             assert!(result.is_err());
             assert_eq!(
-                e.failure("invalid tool input").data["type"],
+                e.failure(&"invalid tool input".into()).data["type"],
                 "response.failed"
             );
         }
@@ -963,7 +963,7 @@ fn failures_have_no_success_terminal_and_stops_remain_exact() {
         let mut enc = encoder(protocol);
         enc.apply(0, vec![Event::Content("partial".into())])
             .unwrap();
-        let frame = enc.failure("broken");
+        let frame = enc.failure(&"broken".into());
         assert!(!frame.done);
         if protocol == Protocol::Responses {
             assert_eq!(frame.data["type"], "response.failed");
@@ -975,6 +975,75 @@ fn failures_have_no_success_terminal_and_stops_remain_exact() {
         .unwrap();
     assert_eq!(enc.response()["stop_sequence"], "世界");
     assert_eq!(enc.response()["stop_reason"], "stop_sequence");
+}
+
+#[test]
+fn stream_errors_preserve_typed_codes_and_protocol_envelopes() {
+    use crate::{AdmissionError, Error, ExecutionError};
+    for (error, kind, code) in [
+        (
+            Error::admission(AdmissionError::Capacity, "full"),
+            "server_error",
+            "capacity_exhausted",
+        ),
+        (
+            Error::admission(AdmissionError::Unavailable, "stopped"),
+            "server_error",
+            "server_unavailable",
+        ),
+        (
+            Error::admission(AdmissionError::Context, "too long"),
+            "invalid_request_error",
+            "context_length_exceeded",
+        ),
+        (
+            Error::execution(ExecutionError::Capacity, "slow consumer"),
+            "server_error",
+            "execution_capacity_exceeded",
+        ),
+        (
+            Error::execution(ExecutionError::State, "unregistered tool"),
+            "server_error",
+            "server_error",
+        ),
+    ] {
+        for protocol in [
+            Protocol::Chat,
+            Protocol::Completions,
+            Protocol::Responses,
+            Protocol::Messages,
+        ] {
+            let mut enc = encoder(protocol);
+            let frame = enc.failure(&error);
+            assert!(!frame.done);
+            let body = if protocol == Protocol::Responses {
+                assert_eq!(frame.event.as_deref(), Some("response.failed"));
+                assert_eq!(frame.data["response"]["status"], "failed");
+                &frame.data["response"]["error"]
+            } else {
+                &frame.data["error"]
+            };
+            assert_eq!(body["message"], error.to_string());
+            if protocol == Protocol::Messages {
+                assert_eq!(frame.event.as_deref(), Some("error"));
+                assert_eq!(
+                    body["type"],
+                    if kind == "server_error" {
+                        "api_error"
+                    } else {
+                        kind
+                    }
+                );
+                assert!(body.get("code").is_none());
+            } else {
+                assert_eq!(body["code"], code);
+                if protocol != Protocol::Responses {
+                    assert_eq!(body["type"], kind);
+                    assert_eq!(body.get("param"), Some(&Value::Null));
+                }
+            }
+        }
+    }
 }
 
 #[test]

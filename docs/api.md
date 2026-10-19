@@ -44,8 +44,7 @@ The additional `flare` object reports prepared and selected serving metadata:
 | `output_modalities` | `text` |
 
 Generation requests always use the loaded model, regardless of the request's
-`model` string. Returned generation objects identify the loaded model. `/health`
-and `/metrics` retain their existing behavior.
+`model` string. Returned generation objects identify the loaded model.
 
 ## Transport and admission
 
@@ -55,8 +54,8 @@ execution, and hosted tools are unsupported. Anthropic requests require
 
 When a serving key is configured, OpenAI routes use `Authorization: Bearer KEY`.
 Anthropic routes also accept `x-api-key: KEY`; supplying both headers requires
-both to match. `/health` remains unauthenticated. Flare reads its serving key
-from `--api-key-file`, independently of client configuration.
+both to match. `/health` and `/metrics` are unauthenticated. Flare reads its
+serving key from `--api-key-file`, independently of client configuration.
 
 Request bodies support `identity`, `gzip`, zlib `deflate`, `br`, and `zstd` content
 encodings. Both encoded and decoded bodies are bounded by `max_body_bytes`
@@ -69,6 +68,59 @@ child is prepared and validated before the group is submitted to the native
 worker. An oversized group is rejected; temporary admission exhaustion returns
 429. Disconnecting a stream cancels all unfinished children, and native work
 drains before its resources are reclaimed. Output queues remain bounded.
+
+## Health and metrics
+
+`GET /health` returns `{"status":"ok"}` while the model runtime is healthy and
+HTTP 503 with an error object otherwise. Neither this route nor `/metrics`
+requires the serving key: both report aggregate state without request content.
+
+`GET /metrics` returns Prometheus text exposition format 0.0.4 by default.
+Counter and gauge names start with `flare_`, such as
+`flare_generated_tokens_total`, `flare_active_requests`, and
+`flare_free_kv_pages`; there are no histograms. Beyond the JSON fields below, the
+text includes speculative and proposal counters by batch, width, or depth, graph
+launches by kind, embedding row-cache counters, HTTP admission gauges, and
+uptime.
+
+The route returns one JSON object instead when the query contains `format=json`,
+or when the `Accept` header gives `application/json` a higher quality than
+`text/plain`; at equal quality the earlier media range wins. `format=prometheus`
+selects text regardless of `Accept`, and any other `format` value returns HTTP
+400. Requests without an `Accept` header, and Prometheus scrapers, receive text.
+`flare_helios::server::Snapshot` deserializes the object, reading absent fields
+as zero, and `flare_helios::server::view` holds the rate history and plots of
+the serving terminal dashboard.
+
+JSON fields are integers except `learned_drafter`. Totals count from server
+start; `active`, `pending`, the page fields, and the host record fields are
+instantaneous gauges.
+
+| Field | Meaning | Prometheus metric |
+| --- | --- | --- |
+| `prefill_tokens` | Prompt tokens consumed by completed prefill, excluding padding and prefix reuse | `flare_prefill_tokens_total` |
+| `generated_tokens` | Committed generated tokens, including EOS and tokens withheld by text stops | `flare_generated_tokens_total` |
+| `draft_steps` | Draft positions run by the learned drafter; zero without one | none |
+| `verify_steps` | Completed speculative or verification graphs | sum of `flare_speculative_rounds_total` |
+| `verification_drafts` | Draft positions verified: verification width minus one per graph | sum of `flare_speculative_rounds_total` × (`width` − 1) |
+| `accepted_drafts` | Accepted draft tokens, excluding the bonus token | `flare_accepted_draft_tokens_total` |
+| `draft_rounds` | Request rounds that offered at least one draft | `flare_draft_request_rounds_total` |
+| `active` | Model slots with a live request | `flare_active_requests` |
+| `pending` | Requests waiting in the model scheduler | `flare_pending_requests` |
+| `completed` | Requests whose generation completed successfully | `flare_requests_completed_total` |
+| `failed` | Requests failed by admission, execution, grammar, or output backpressure | `flare_requests_failed_total` |
+| `reused_tokens` | Tokens covered by GPU prefix-cache hits | `flare_cache_reused_tokens_total` |
+| `cached_pages` | KV pages owned by immutable checkpoints | `flare_cached_kv_pages` |
+| `free_pages` | KV pages reusable after completed GPU fences | `flare_free_kv_pages` |
+| `total_pages` | Pages in the per-rank KV pool | `flare_total_kv_pages` |
+| `page_tokens` | Logical history tokens per KV page | `flare_kv_page_tokens` |
+| `host_hits` | Host prefix-store lookups whose chain admission fetched | `flare_host_cache_hits_total` |
+| `host_reused_tokens` | Tokens covered by host prefix-store chains beyond the GPU checkpoint | `flare_host_cache_reused_tokens_total` |
+| `host_memory_records` | Checkpoint records in the host store's registered memory | `flare_host_cache_memory_records` |
+| `host_disk_records` | Checkpoint records in the host store's record directory | `flare_host_cache_disk_records` |
+| `host_bytes_out` | Bytes copied from GPU checkpoints to the host store | `flare_host_cache_bytes_out_total` |
+| `host_bytes_in` | Bytes copied from the host store into GPU pages and rows | `flare_host_cache_bytes_in_total` |
+| `learned_drafter` | Boolean: the model has a learned drafter | none |
 
 ## Conversation and tool semantics
 
@@ -95,7 +147,17 @@ the same accumulated output for buffered responses and SSE. Tool arguments are
 JSON objects, bounded to 8 MiB. Existing model parsers buffer tool envelopes until
 they are complete, so argument events do not imply incremental generation of an
 unfinished call. Truncated tool envelopes are omitted and the response reports
-its output limit; malformed envelopes at natural completion are errors.
+its output limit; recognized but incomplete calls at natural completion are errors.
+
+DeepSeek reasoning and both DSML tool syntaxes use the pinned official
+`deepseek-recipe` state machine. Helios adapts its actions into the same neutral
+events, validates registered tool names and JSON objects with nonempty, unique
+argument names, and publishes each call when its arguments complete. Closing the
+outer calls block ends parsed output; subsequent generated text is discarded.
+The official parser owns markup recognition, including its tolerance of omitted
+or partial tags. Structured answers become verbatim when ordinary answer content
+begins, preserving scalar JSON, Lark output, and markup inside string values.
+Shared runtime handling owns token accounting, stop filtering, and termination.
 
 Qwen treats `<tool_call>` as an implicit end to reasoning. Function-tag calls
 complete at `</function>` and accept omitted outer tool tags in answer content.
@@ -198,8 +260,11 @@ budgets. Budgets up to 5,000 map to low effort, up to 20,000 to high effort, and
 larger budgets to maximum effort. Responses and Anthropic named effort settings
 map into the same neutral levels. The frontend resolves those levels against the
 effort vocabulary accepted by the packaged template: for example Qwen uses
-`low/medium/xhigh`, while DeepSeek uses `low/high/max`. Explicit native
-`reasoning_effort` or `chat_template_kwargs` values pass through unchanged.
+`low/medium/xhigh`. Native DeepSeek V4 and V4.1 prompt encoders accept
+`low/high/xhigh/max` and default to thinking enabled and high effort. They reject numeric
+effort, `drop_thinking`, assistant continuation, and `add_generation_prompt=false`.
+Explicit values are validated by the selected encoder. Packages exported with
+Jinja templates retain their packaged template semantics.
 Kimi K3 always uses thinking: its template ignores `enable_thinking=false` and
 `thinking=false` without an error, preserves assistant reasoning history, and
 accepts `low`, `high`, or `max` effort (default `max`).

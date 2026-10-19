@@ -505,17 +505,15 @@ impl Encoder {
             }
         }
     }
-    pub fn failure(&mut self, error: impl std::fmt::Display) -> Frame {
-        let body = self
-            .protocol
-            .error(axum::http::StatusCode::INTERNAL_SERVER_ERROR, error);
+    pub fn failure(&mut self, error: &crate::Error) -> Frame {
+        let body = self.protocol.failure(error);
         match self.protocol {
             Protocol::Messages => Frame::named("error", body),
             Protocol::Responses => {
                 let mut response = self.response();
                 response["status"] = json!("failed");
                 response["error"] =
-                    json!({"code":"server_error","message":body["error"]["message"]});
+                    json!({"code":body["error"]["code"],"message":body["error"]["message"]});
                 self.named("response.failed", json!({"response":response}))
             }
             _ => Frame::json(body),

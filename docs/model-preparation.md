@@ -203,6 +203,10 @@ use the same prepared model graphs; the flag selects table storage only.
 The `deepseek-v4.1-flash` alias selects `deepseek-ai/DeepSeek-V4.1-Flash-1017`
 and supports TP4 text generation, reasoning, DSML tool calls, and images
 when the checkpoint contains its vision encoder.
+Exports use the native DeepSeek V4.1 prompt encoder and include only the tokenizer
+asset. Vision exports bind the atomic `<｜deepseek_image｜>` token as ID 129264,
+which must agree with checkpoint `image_token_id`. Packages without explicit
+prompt-encoder metadata continue to use their tokenizer and Jinja template.
 Sampling defaults are temperature 1.0 and top-p 1.0, following the
 [model card](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017#minimal-inference).
 Add `--expert-scale-compression csf` to losslessly compress backbone and DSpark
@@ -269,6 +273,14 @@ DeepSeek V4 Flash uses `local-inference-lab/DeepSeek-V4-Flash-Vision-Exp-lossles
 vision encoder and checkpoint-integrated DSpark model. The `deepseek-v4-flash`
 alias prepares five draft tokens by default, with adaptive verification. It
 accepts images within its visual-token budget and has no offloaded embedding tables.
+Exports use the native DeepSeek V4 prompt encoder, carry only the tokenizer asset,
+and bind the atomic `<｜deepseek_image｜>` placeholder as token 129264.
+Both native DeepSeek encoders default to thinking enabled and high effort, accept
+`low`, `high`, `xhigh`, and `max`, and reject numeric effort, `drop_thinking`,
+assistant continuation, and `add_generation_prompt=false`. System-prefix caching
+derives reusable token prefixes from the official encoder's rendered conversations.
+Previously exported Jinja packages retain their
+packaged rendering behavior and require both tokenizer and template assets.
 Use two or four available GPUs for preparation and serving:
 
 ```sh

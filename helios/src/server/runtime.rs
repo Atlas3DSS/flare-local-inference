@@ -8,7 +8,7 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-use tokio::sync::mpsc as async_mpsc;
+use tokio::sync::{mpsc as async_mpsc, oneshot};
 
 use crate::{
     AdmissionError, Error, ExecutionError, Failure, Result, Shutdown,
@@ -64,9 +64,41 @@ pub enum GenerationEvent {
 
 pub struct Generation {
     pub events: async_mpsc::Receiver<GenerationEvent>,
+    admission: oneshot::Receiver<Result<()>>,
     cancelled: Arc<AtomicBool>,
     failure: Arc<Mutex<Option<Error>>>,
     pub(super) enqueue_ns: Option<u64>,
+}
+
+/// A grouped response can start when one choice is admitted. Waiting for every
+/// choice would leave admitted choices' bounded output queues undrained.
+pub(super) async fn await_admission(generations: &mut [Generation]) -> Result<()> {
+    use std::{future::Future, pin::Pin, task::Poll};
+    std::future::poll_fn(|cx| {
+        let mut admitted = generations.is_empty();
+        for generation in generations.iter_mut() {
+            if let Some(error) = generation
+                .failure
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+            {
+                return Poll::Ready(Err(error));
+            }
+            match Pin::new(&mut generation.admission).poll(cx) {
+                Poll::Ready(Ok(Ok(()))) => admitted = true,
+                Poll::Ready(Ok(Err(error))) => return Poll::Ready(Err(error)),
+                Poll::Ready(Err(_)) => return Poll::Ready(Err(generation.failure())),
+                Poll::Pending => {}
+            }
+        }
+        if admitted {
+            Poll::Ready(Ok(()))
+        } else {
+            Poll::Pending
+        }
+    })
+    .await
 }
 
 impl Generation {
@@ -95,6 +127,7 @@ struct Incoming {
     publications: std::cell::Cell<u64>,
     prompt: Prompt,
     events: async_mpsc::Sender<GenerationEvent>,
+    admission: Mutex<Option<oneshot::Sender<Result<()>>>>,
     cancelled: Arc<AtomicBool>,
     failure: Arc<Mutex<Option<Error>>>,
     metrics: Arc<super::metrics::Metrics>,
@@ -103,8 +136,20 @@ struct Incoming {
     host_lookup: bool,
     /// Admitted once already, so the admission counter is not advanced again.
     readmitted: bool,
+    /// Retry capacity admission only after the scheduler's resources change.
+    blocked: Option<(crate::cache::Fence, usize, usize, usize)>,
 }
 impl Incoming {
+    fn notify_admission(&self, result: Result<()>) {
+        if let Some(sender) = self
+            .admission
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
+            let _ = sender.send(result);
+        }
+    }
     fn fail(&self, error: Error) {
         self.finish_error(error, GenerationEvent::Error);
     }
@@ -117,6 +162,7 @@ impl Incoming {
             return;
         }
         *failure = Some(error.clone());
+        self.notify_admission(Err(error.clone()));
         self.metrics.failed.fetch_add(1, Ordering::Relaxed);
         let _ = self.events.try_send(event(error));
     }
@@ -569,6 +615,7 @@ impl ModelRuntime {
             crate::model::admission::validate_prompt(&self.config, &prompt)
                 .map_err(|error| error.admission_context(AdmissionError::Invalid))?;
             let (events, receiver) = async_mpsc::channel(self.event_capacity);
+            let (admission, admitted) = oneshot::channel();
             let cancelled = Arc::new(AtomicBool::new(false));
             let failure = Arc::new(Mutex::new(None));
             let incoming = Incoming {
@@ -577,12 +624,14 @@ impl ModelRuntime {
                 publications: Default::default(),
                 prompt,
                 events,
+                admission: Mutex::new(Some(admission)),
                 cancelled: cancelled.clone(),
                 failure: failure.clone(),
                 metrics: self.metrics.clone(),
                 observation,
                 host_lookup: true,
                 readmitted: false,
+                blocked: None,
             };
             let enqueue_ns = observation
                 .filter(|timestamps| *timestamps)
@@ -590,6 +639,7 @@ impl ModelRuntime {
             incoming_group.push(incoming);
             generations.push(Generation {
                 events: receiver,
+                admission: admitted,
                 cancelled,
                 failure,
                 enqueue_ns,
@@ -658,9 +708,6 @@ struct Worker<'a> {
     pending: VecDeque<Incoming>,
     /// Preempted requests, readmitted before new ones.
     parked: VecDeque<(Incoming, Parked<'a>)>,
-    /// Scheduler resources when a request without an output limit last waited for
-    /// pages; admission retries only once they change.
-    blocked: Option<(crate::cache::Fence, usize, usize, usize)>,
     active: Vec<Option<Active<'a>>>,
     admissions: Vec<Option<crate::model::Admission>>,
     inputs: Option<crate::model::Inputs>,
@@ -693,7 +740,6 @@ impl<'a> Worker<'a> {
             store: None,
             pending: VecDeque::with_capacity(queue_capacity),
             parked: VecDeque::new(),
-            blocked: None,
             active: (0..config.limits.max_active).map(|_| None).collect(),
             admissions: (0..config.limits.max_active).map(|_| None).collect(),
             inputs: None,
@@ -848,15 +894,29 @@ impl<'a> Worker<'a> {
         }
         while self.scheduler.has_available_slot() {
             let images_available = self.scheduler.has_available_image_slot();
-            let parked = self.parked.iter().position(|(incoming, _)|
-                images_available || incoming.prompt.images.is_none());
-            let (incoming, parked) = match parked.and_then(|index| self.parked.remove(index)) {
-                Some((incoming, parked)) => (incoming, Some(parked)),
-                None => match self.pending.iter().position(|incoming|
-                    images_available || incoming.prompt.images.is_none()).and_then(|index| self.pending.remove(index)) {
-                    Some(incoming) => (incoming, None),
-                    None => break,
-                },
+            let stats = self.scheduler.stats();
+            let resources = (
+                self.scheduler.completed(),
+                stats.free_pages,
+                stats.free_snapshots,
+                stats.free_slots,
+            );
+            let eligible = |incoming: &Incoming| {
+                (images_available || incoming.prompt.images.is_none())
+                    && incoming.blocked != Some(resources)
+            };
+            let parked = self.parked.iter().position(|(incoming, _)| eligible(incoming));
+            let (mut incoming, parked, position) = match parked {
+                Some(index) => {
+                    let (incoming, parked) = self.parked.remove(index).unwrap();
+                    (incoming, Some(parked), index)
+                }
+                None => {
+                    let Some(index) = self.pending.iter().position(eligible) else {
+                        break;
+                    };
+                    (self.pending.remove(index).unwrap(), None, index)
+                }
             };
             if incoming.cancelled.load(Ordering::Acquire) {
                 self.metrics.cancelled.fetch_add(1, Ordering::Relaxed);
@@ -866,20 +926,6 @@ impl<'a> Worker<'a> {
             // Image-feature replay across readmission requires retained frontend state.
             let growable =
                 incoming.prompt.images.is_none() && incoming.prompt.conditioning.is_empty();
-            let stats = self.scheduler.stats();
-            let resources = (
-                self.scheduler.completed(),
-                stats.free_pages,
-                stats.free_snapshots,
-                stats.free_slots,
-            );
-            if growable && self.blocked == Some(resources) {
-                match parked {
-                    Some(parked) => self.parked.push_front((incoming, parked)),
-                    None => self.pending.push_front(incoming),
-                }
-                break;
-            }
             let spec = RequestSpec {
                 system_boundary: incoming.prompt.system_boundary,
                 prompt: incoming.prompt.tokens.clone(),
@@ -901,20 +947,20 @@ impl<'a> Worker<'a> {
             let handle = match admission {
                 Ok(handle) => handle,
                 // Pages are short: wait for running requests to finish or yield theirs.
-                Err(Error::Admission(AdmissionError::Capacity(_))) if growable => {
-                    self.blocked = Some(resources);
+                Err(Error::Admission(AdmissionError::Capacity(_))) => {
+                    incoming.blocked = Some(resources);
                     match parked {
-                        Some(parked) => self.parked.push_front((incoming, parked)),
-                        None => self.pending.push_front(incoming),
+                        Some(parked) => self.parked.insert(position, (incoming, parked)),
+                        None => self.pending.insert(position, incoming),
                     }
-                    break;
+                    continue;
                 }
                 Err(error) => {
                     incoming.reject_admission(error);
                     continue;
                 }
             };
-            self.blocked = None;
+            incoming.blocked = None;
             self.scheduler.set_arrival(handle, incoming.arrival_ns)?;
             let slot = handle.slot as usize;
             if !incoming.readmitted {
@@ -968,6 +1014,7 @@ impl<'a> Worker<'a> {
                     carried: Carried::default(),
                 },
             };
+            incoming.notify_admission(Ok(()));
             self.active[slot] = Some(Active {
                 request: handle,
                 stops: parked.stops,
@@ -1976,6 +2023,7 @@ mod tests {
 
     fn stream(capacity: usize) -> (Incoming, Generation) {
         let (events, receiver) = async_mpsc::channel(capacity);
+        let (admission, admitted) = oneshot::channel();
         let cancelled = Arc::new(AtomicBool::new(false));
         let failure = Arc::new(Mutex::new(None));
         let incoming = Incoming {
@@ -2000,17 +2048,20 @@ mod tests {
                 grammar: None,
             },
             events,
+            admission: Mutex::new(Some(admission)),
             cancelled: cancelled.clone(),
             failure: failure.clone(),
             metrics: Arc::new(super::super::metrics::Metrics::default()),
             observation: None,
             host_lookup: true,
             readmitted: false,
+            blocked: None,
         };
         (
             incoming,
             Generation {
                 events: receiver,
+                admission: admitted,
                 cancelled,
                 failure,
                 enqueue_ns: None,
@@ -2037,6 +2088,55 @@ mod tests {
             generation.events.try_recv(),
             Ok(GenerationEvent::Token(7))
         ));
+    }
+
+    #[tokio::test]
+    async fn admission_waits_for_one_choice_and_preserves_later_failures() {
+        let (first, first_generation) = stream(2);
+        let (second, second_generation) = stream(2);
+        let mut generations = [first_generation, second_generation];
+        let mut admission = Box::pin(await_admission(&mut generations));
+        assert!(futures_util::poll!(&mut admission).is_pending());
+        first.notify_admission(Ok(()));
+        admission.await.unwrap();
+        second.reject_admission(Error::admission(AdmissionError::Capacity, "full"));
+        assert!(matches!(
+            generations[1].events.recv().await,
+            Some(GenerationEvent::AdmissionRejected(Error::Admission(
+                AdmissionError::Capacity(_)
+            )))
+        ));
+        first.fail(Error::execution(ExecutionError::Worker, "stopped"));
+        assert!(matches!(
+            generations[0].events.recv().await,
+            Some(GenerationEvent::Error(Error::Execution(
+                ExecutionError::Worker(_)
+            )))
+        ));
+    }
+
+    #[tokio::test]
+    async fn admission_reports_rejection_and_worker_disconnect_before_output() {
+        let (incoming, generation) = stream(2);
+        incoming.reject_admission(Error::admission(AdmissionError::Context, "too long"));
+        assert!(matches!(
+            await_admission(&mut [generation]).await,
+            Err(Error::Admission(AdmissionError::Context(_)))
+        ));
+        let (incoming, generation) = stream(2);
+        drop(incoming);
+        assert!(matches!(
+            await_admission(&mut [generation]).await,
+            Err(Error::Execution(ExecutionError::Worker(_)))
+        ));
+        let (incoming, generation) = stream(2);
+        incoming.notify_admission(Ok(()));
+        incoming.fail(Error::execution(ExecutionError::Worker, "stopped"));
+        assert!(matches!(
+            await_admission(&mut [generation]).await,
+            Err(Error::Execution(ExecutionError::Worker(_)))
+        ));
+        await_admission(&mut []).await.unwrap();
     }
 
     fn retirement_scheduler() -> RequestScheduler {

@@ -57,7 +57,7 @@ impl Fixture {
                     tokenizer.to_string(false).unwrap().as_bytes(),
                 ),
                 tokens: Default::default(),
-                chat_template: asset("chat.jinja", b"{{ messages[0].content }}"),
+                chat_template: Some(asset("chat.jinja", b"{{ messages[0].content }}")),
             },
             Default::default(),
         )
@@ -170,6 +170,7 @@ impl Fixture {
         data: crate::model::PromptData,
     ) -> (Incoming, Generation) {
         let (events, receiver) = async_mpsc::channel(64);
+        let (admission, admitted) = oneshot::channel();
         let cancelled = Arc::new(AtomicBool::new(false));
         let failure = Arc::new(Mutex::new(None));
         (
@@ -191,15 +192,18 @@ impl Fixture {
                     grammar: None,
                 },
                 events,
+                admission: Mutex::new(Some(admission)),
                 cancelled: cancelled.clone(),
                 failure: failure.clone(),
                 metrics: self.metrics.clone(),
                 observation: Some(false),
                 host_lookup: true,
                 readmitted: false,
+                blocked: None,
             },
             Generation {
                 events: receiver,
+                admission: admitted,
                 cancelled,
                 failure,
                 enqueue_ns: None,
@@ -1570,6 +1574,304 @@ fn text_admission_waits_for_pages_and_conditioned_requests_reserve_their_limit()
     assert!(worker.active.iter().all(Option::is_none));
     assert!(matches!(
         generation.events.try_recv().unwrap(),
-        GenerationEvent::AdmissionRejected(_)
+        GenerationEvent::AdmissionRejected(Error::Admission(AdmissionError::Context(_)))
     ));
+    assert!(matches!(
+        generation.admission.try_recv().unwrap(),
+        Err(Error::Admission(AdmissionError::Context(_)))
+    ));
+}
+
+#[test]
+fn full_reservations_wait_for_capacity_without_blocking_smaller_requests() {
+    for page_tokens in [64, 128, 256] {
+        let mut fixture = Fixture::new();
+        fixture.config.contract.cache.page_tokens = page_tokens;
+        fixture.config.prepared_sequence_tokens = 2048;
+        fixture.config.limits.max_sequence_tokens = 2048;
+        fixture.config.limits.pages = 4;
+        let (sender, receiver) = mpsc::channel();
+        let (first, mut first_generation) = fixture.incoming(vec![0; 60], 1024);
+        let (mut waiting, mut waiting_generation) =
+            fixture.incoming(vec![1; 60], (page_tokens * 3 - 60) as u32);
+        waiting.prompt.conditioning.push(ConditioningEvent {
+            position: 0,
+            identity: [3; 32],
+        });
+        let (small, mut small_generation) = fixture.incoming(vec![2], 1);
+        sender.send(vec![first, waiting, small]).unwrap();
+        let mut worker = fixture.worker(receiver);
+        assert_eq!(worker.admit().unwrap(), ControlFlow::Continue(true));
+        assert_eq!(worker.active.iter().flatten().count(), 2);
+        assert_eq!(worker.pending.len(), 1);
+        assert_eq!(worker.scheduler.free_page_count(), 1);
+        assert!(first_generation.admission.try_recv().unwrap().is_ok());
+        assert!(small_generation.admission.try_recv().unwrap().is_ok());
+        assert!(matches!(
+            waiting_generation.admission.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(waiting_generation.events.try_recv().is_err());
+        assert_eq!(worker.admit().unwrap(), ControlFlow::Continue(false));
+        let first = worker.active[0].as_ref().unwrap().request;
+        worker.retire(&[first]).unwrap();
+        assert_eq!(worker.admit().unwrap(), ControlFlow::Continue(true));
+        assert!(worker.pending.is_empty());
+        assert!(waiting_generation.admission.try_recv().unwrap().is_ok());
+        assert_eq!(worker.scheduler.free_page_count(), 0);
+        assert_eq!(worker.metrics.failed.load(Ordering::Relaxed), 0);
+    }
+}
+
+#[test]
+fn cancelling_a_capacity_waiter_releases_it_without_admission() {
+    let mut fixture = Fixture::new();
+    fixture.config.limits.pages = 2;
+    let (sender, receiver) = mpsc::channel();
+    let (first, _first_generation) = fixture.incoming(vec![0; 60], 60);
+    let (waiting, waiting_generation) = fixture.incoming(vec![1], 1);
+    sender.send(vec![first, waiting]).unwrap();
+    let mut worker = fixture.worker(receiver);
+    assert_eq!(worker.admit().unwrap(), ControlFlow::Continue(true));
+    assert_eq!(worker.pending.len(), 1);
+    drop(waiting_generation);
+    assert_eq!(worker.admit().unwrap(), ControlFlow::Continue(true));
+    assert!(worker.pending.is_empty());
+    assert_eq!(worker.metrics.admitted.load(Ordering::Relaxed), 1);
+    assert_eq!(worker.metrics.cancelled.load(Ordering::Relaxed), 1);
+    assert_eq!(worker.metrics.failed.load(Ordering::Relaxed), 0);
+}
+
+/// HTTP state over an idle model runtime whose requests arrive on `sender`.
+fn http_state(
+    sender: mpsc::SyncSender<Vec<Incoming>>,
+    api_key: Option<String>,
+) -> Arc<super::super::HttpState> {
+    use super::super::HttpState;
+    use tokio::sync::Semaphore;
+    let mut fixture = Fixture::new();
+    fixture.config.contract.vocabulary = 6;
+    fixture.config.contract.input_vocabulary = 6;
+    fixture.config.sampling_defaults.top_k = -1;
+    let grammar = crate::grammar::GrammarCompiler::new(
+        fixture.frontend.tokenizer(),
+        6,
+        &fixture.config.eos_token_ids,
+    )
+    .unwrap();
+    let model = Arc::new(ModelRuntime {
+        sender,
+        stop: Arc::new(AtomicBool::new(false)),
+        healthy: Arc::new(AtomicBool::new(true)),
+        config: Arc::new(fixture.config),
+        event_capacity: 64,
+        capacity: Arc::new(Semaphore::new(4)),
+        thread: Mutex::new(None),
+        shutdown: Mutex::new(Some(Shutdown {
+            drained: true,
+            error: None,
+        })),
+        finished: Arc::new((Mutex::new(true), Condvar::new())),
+        metrics: fixture.metrics,
+    });
+    Arc::new(HttpState {
+        model,
+        frontend: Arc::new(fixture.frontend),
+        images: None,
+        grammar: Arc::new(grammar),
+        frontend_slots: Arc::new(Semaphore::new(1)),
+        ingress_slots: Arc::new(Semaphore::new(4)),
+        max_body_bytes: 65536,
+        frontend_capacity: 1,
+        ingress_capacity: 4,
+        ids: Default::default(),
+        api_key,
+        context_hint: String::new(),
+        capacity_hint: String::new(),
+        started: std::time::Instant::now(),
+        generated: Default::default(),
+    })
+}
+
+async fn http_generation(
+    stream: bool,
+    choices: usize,
+) -> (
+    tokio::task::JoinHandle<axum::response::Response>,
+    Vec<Incoming>,
+) {
+    use super::super::http;
+    use axum::{Extension, extract::State};
+    let (sender, receiver) = mpsc::sync_channel(4);
+    let state = http_state(sender, None);
+    let ingress = Arc::new(state.ingress_slots.clone().acquire_owned().await.unwrap());
+    let request = axum::http::Request::builder()
+        .method("POST")
+        .uri("/v1/completions")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(
+            serde_json::json!({
+                "model": "qwen-worker-phases", "prompt": "a", "max_tokens": 2,
+                "stream": stream, "n": choices,
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let response = tokio::spawn(http::generate(State(state), Extension(ingress), request));
+    let incoming = tokio::task::spawn_blocking(move || {
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    (response, incoming)
+}
+
+#[tokio::test]
+async fn http_waits_for_admission_and_rejects_before_stream_headers() {
+    use axum::http::StatusCode;
+    for stream in [false, true] {
+        for (error, status, code) in [
+            (
+                Error::admission(AdmissionError::Capacity, "full"),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "capacity_exhausted",
+            ),
+            (
+                Error::admission(AdmissionError::Unavailable, "stopped"),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "server_unavailable",
+            ),
+            (
+                Error::admission(AdmissionError::Context, "too long"),
+                StatusCode::BAD_REQUEST,
+                "context_length_exceeded",
+            ),
+        ] {
+            let (mut response, incoming) = http_generation(stream, 1).await;
+            assert!(futures_util::poll!(&mut response).is_pending());
+            incoming[0].reject_admission(error);
+            let response = response.await.unwrap();
+            assert_eq!(response.status(), status);
+            assert_eq!(response.headers()["content-type"], "application/json");
+            assert!(
+                response.headers()["x-request-id"]
+                    .to_str()
+                    .unwrap()
+                    .starts_with("cmpl-")
+            );
+            let bytes = axum::body::to_bytes(response.into_body(), 65536)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body["error"]["code"], code);
+            assert!(body["error"]["param"].is_null());
+            assert!(incoming[0].cancelled.load(Ordering::Acquire));
+        }
+    }
+}
+
+#[tokio::test]
+async fn http_stream_starts_on_one_admission_and_late_failure_has_no_success_terminal() {
+    let (response, incoming) = http_generation(true, 2).await;
+    incoming[0].notify_admission(Ok(()));
+    let response = tokio::time::timeout(std::time::Duration::from_secs(5), response)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "text/event-stream");
+    assert!(!incoming[1].cancelled.load(Ordering::Acquire));
+    incoming[0].emit_token(1);
+    incoming[1].reject_admission(Error::admission(
+        AdmissionError::Unavailable,
+        "worker stopped",
+    ));
+    let bytes = axum::body::to_bytes(response.into_body(), 65536)
+        .await
+        .unwrap();
+    let body = std::str::from_utf8(&bytes).unwrap();
+    assert!(body.contains("\"text\":\"b\""), "{body}");
+    assert!(body.contains("\"code\":\"server_unavailable\""), "{body}");
+    assert!(!body.contains("[DONE]"), "{body}");
+    assert!(!body.contains("\"finish_reason\":\"stop\""), "{body}");
+    assert!(incoming.iter().all(|i| i.cancelled.load(Ordering::Acquire)));
+}
+
+#[tokio::test]
+async fn http_disconnect_while_waiting_cancels_queued_generation() {
+    let (response, incoming) = http_generation(true, 1).await;
+    response.abort();
+    assert!(response.await.unwrap_err().is_cancelled());
+    assert!(incoming[0].cancelled.load(Ordering::Acquire));
+}
+
+#[tokio::test]
+async fn metrics_route_serves_prometheus_or_json_without_the_api_key() {
+    use std::io::{Read, Write};
+    let (sender, _receiver) = mpsc::sync_channel(4);
+    let state = http_state(sender, Some("serving-key".into()));
+    state.model.metrics().progress(10, 3, 0, 0);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let router = super::super::router(state, &[], 65536);
+    let server = tokio::spawn(async move { axum::serve(listener, router).await });
+    let get = |path: &'static str, accept: Option<&'static str>| {
+        tokio::task::spawn_blocking(move || {
+            let mut stream = std::net::TcpStream::connect(address).unwrap();
+            let accept = accept.map_or_else(String::new, |accept| format!("Accept: {accept}\r\n"));
+            write!(
+                stream,
+                "GET {path} HTTP/1.1\r\nHost: localhost\r\n{accept}Connection: close\r\n\r\n"
+            )
+            .unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).unwrap();
+            let (head, body) = response.split_once("\r\n\r\n").unwrap();
+            let status: u16 = head.split(' ').nth(1).unwrap().parse().unwrap();
+            let content_type = head
+                .lines()
+                .find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("content-type: ")
+                        .map(str::to_owned)
+                })
+                .unwrap_or_default();
+            (status, content_type, body.to_owned())
+        })
+    };
+    let (status, content_type, body) = get("/metrics", None).await.unwrap();
+    assert_eq!(status, 200);
+    assert!(
+        content_type.starts_with("text/plain; version=0.0.4"),
+        "{content_type}"
+    );
+    assert!(
+        body.contains("\nflare_generated_tokens_total 3\n"),
+        "{body}"
+    );
+    assert!(body.contains("\nflare_prefill_tokens_total 10\n"));
+    for (path, accept) in [
+        ("/metrics", Some("application/json")),
+        ("/metrics?format=json", Some("text/plain")),
+    ] {
+        let (status, content_type, body) = get(path, accept).await.unwrap();
+        assert_eq!(
+            (status, content_type.as_str()),
+            (200, "application/json"),
+            "{path}"
+        );
+        let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(value["learned_drafter"], false);
+        let snapshot: super::super::Snapshot = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            (snapshot.prefill_tokens, snapshot.generated_tokens),
+            (10, 3)
+        );
+    }
+    assert_eq!(get("/metrics?format=yaml", None).await.unwrap().0, 400);
+    assert_eq!(get("/health", None).await.unwrap().0, 200);
+    assert_eq!(get("/v1/models", None).await.unwrap().0, 401);
+    server.abort();
 }

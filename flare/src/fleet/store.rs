@@ -175,6 +175,30 @@ pub struct Cluster {
     pub nodes: Vec<String>,
 }
 
+/// A group the operator wants: `flare fleet run --name NAME` takes its package and options
+/// from here, and the fields are constraints for placement.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GroupSpec {
+    pub name: String,
+    /// A local path on the controller or `NODE:/absolute/path`.
+    pub package: String,
+    /// Serving options every rank loads with, as command-line words.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub serving: Vec<String>,
+    /// Rank zero's HTTP bind and request options, as command-line words.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rank_zero: Vec<String>,
+    /// Candidate nodes in rank order; empty lets placement choose from the pool.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nodes: Vec<String>,
+    /// NVML indices every member uses on its node; empty lets placement choose.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gpus: Vec<u32>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub roce_ring: bool,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Fleet {
@@ -184,6 +208,8 @@ pub struct Fleet {
     pub node: Vec<Node>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub cluster: BTreeMap<String, Cluster>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub group: Vec<GroupSpec>,
 }
 
 impl Node {
@@ -231,6 +257,10 @@ impl Fleet {
 
     pub fn node(&self, name: &str) -> Option<&Node> {
         self.node.iter().find(|n| n.name == name)
+    }
+
+    pub fn group(&self, name: &str) -> Option<&GroupSpec> {
+        self.group.iter().find(|g| g.name == name)
     }
 
     /// Record or update a node; a node is identified by its key.

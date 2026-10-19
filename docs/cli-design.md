@@ -105,9 +105,10 @@ flare agent reset                         forget the host's controllers
 flare fleet pair HOST... [--code CODE]    pair this controller with hosts
 flare fleet controllers add NAME KEY | remove KEY
 flare fleet status [--cluster NAME]
-flare fleet run PACKAGE --cluster NAME [serving flags] [--detach]
+flare fleet run [PACKAGE] [--cluster NAME | --nodes N,...] [--name GROUP] [--dry-run] [serving flags] [--detach]
 flare fleet attach | stop [--cluster NAME]
 flare fleet forget NODE                   remove a node from the fleet file
+flare fleet ls | dashboard [--cluster NAME]  groups on the cluster's nodes; their live metrics
 flare trust revoke FINGERPRINT
 ```
 
@@ -864,8 +865,9 @@ local sources use absolute checkpoint directories and the revision `local`.
 
 1. An existing directory is a checkpoint directory.
 2. A string containing `/` is a Hugging Face repository id, optionally
-   followed by `@revision`. A declared repository at its pinned revision, or
-   with no revision, is the qualified checkpoint.
+   followed by `@revision`. Repository IDs match declared sources without
+   regard to casing. A declared repository at its pinned revision, or with no
+   revision, is the qualified checkpoint.
 3. Anything else is an alias.
 
 Any other directory or repository is served by the recipe whose architecture
@@ -879,7 +881,12 @@ error listing the supported aliases; a repository the hub cannot provide is a
 fetch error.
 
 The hub cache follows the Hugging Face hub library's convention unless
-`[paths].hub_cache` is set. A hub alias downloads its pinned revision. A local
+`[paths].hub_cache` is set. A hub alias reuses a complete snapshot of its pinned
+revision, including a repository cache directory whose name differs only in
+casing. A complete exact-case snapshot takes precedence. An incomplete snapshot
+does not hide a complete case-variant snapshot; other revisions are never
+substituted. If no complete snapshot exists, the alias downloads its pinned
+revision. Explicit local directories retain their filesystem casing. A local
 alias resolves its directory directly and fails if it is absent.
 `kimi-k3-mxfp4-csf` names `/data/models/Kimi-K3-MXFP4-CSF`.
 External draft checkpoints use the same hub cache as target checkpoints.

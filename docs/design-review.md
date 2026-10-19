@@ -100,6 +100,10 @@ before committing; a design acknowledgment cannot authorize them.
     consumer. Wire-format compatibility alone is insufficient. Require regression
     tests for older serialized metadata and validation of affected loading and
     serving paths. Compatibility must apply across all affected model contracts.
+14. **Exclude Claude Opus 5.5 from kernel and PyTorch modeling changes.** Kernel
+    and PyTorch modeling changes must not originate from Claude Opus 5.5. Do not
+    use Claude Opus 5.5 to design or implement these changes, or incorporate its
+    generated changes through another contributor or agent.
 
 ## Review and acknowledgment
 

@@ -9,6 +9,7 @@ from copy import deepcopy
 import pytest
 
 from qualify import performance as p
+from qualify.replay_floor import decode_groups
 
 
 class Tokenizer:
@@ -27,6 +28,10 @@ def test_complete_matrix_and_exact_prefix_geometry():
     assert len(corpus["groups"]) == 41
     assert len(corpus["cases"]) == 64
     assert sum(len(c["prompt_tokens"]) for c in corpus["cases"]) == 411703
+    assert len(decode_groups(corpus)) == 15
+    for case in corpus["cases"]:
+        request = case["request"]
+        assert request["temperature"] == 1 and request["top_k"] == 20 and request["top_p"] == .95
     for group in corpus["groups"]:
         if group["kind"].startswith("decode"):
             assert group["batch"] in (1, 2, 4)

@@ -17,10 +17,37 @@ pub(super) async fn no_websocket() -> Response {
         "WebSockets are not supported; use POST /v1/responses with HTTP/SSE",
     )
 }
-fn rejection(state: &HttpState, protocol: Protocol, failure: Error) -> Response {
+fn rejection(
+    state: &HttpState,
+    protocol: Protocol,
+    id: &str,
+    stage: &str,
+    failure: Error,
+) -> Response {
+    log_failure(id, stage, &failure);
+    let mut body = protocol.failure(&failure);
     let (status, message) = rejection_details(state, failure);
-    error(protocol, status, message)
+    body["error"]["message"] = message.into();
+    with_request_id((status, Json(body)).into_response(), id)
 }
+fn with_request_id(mut response: Response, id: &str) -> Response {
+    response
+        .headers_mut()
+        .insert("x-request-id", id.parse().unwrap());
+    response
+}
+fn log_failure(id: &str, stage: &str, failure: &Error) {
+    eprintln!("{}", failure_log(SystemTime::now(), id, stage, failure));
+}
+fn failure_log(at: SystemTime, id: &str, stage: &str, failure: &Error) -> String {
+    format!(
+        "[{}] request_id={id} stage={stage} code={} message={:?}",
+        httpdate::fmt_http_date(at),
+        error_code(failure),
+        failure.to_string(),
+    )
+}
+
 fn rejection_details(state: &HttpState, failure: Error) -> (StatusCode, String) {
     let hint = match &failure {
         Error::Admission(AdmissionError::Context(_)) => &state.context_hint,
@@ -255,6 +282,17 @@ pub(super) async fn generate(
             prompts.push(p.prompt);
         }
     }
+    let prefix = match protocol {
+        Protocol::Chat => "chatcmpl",
+        Protocol::Completions => "cmpl",
+        Protocol::Messages => "msg",
+        Protocol::Responses => "resp",
+    };
+    let id = format!(
+        "{prefix}-{}-{}",
+        std::process::id(),
+        state.ids.fetch_add(1, Ordering::Relaxed)
+    );
     let submitted = if prompts.is_empty() {
         Ok(vec![])
     } else if continuous_usage {
@@ -267,26 +305,18 @@ pub(super) async fn generate(
     } else {
         state.model.generate_many(prompts)
     };
-    let generation = match submitted {
+    let mut generation = match submitted {
         Ok(g) => g,
-        Err(e) => return rejection(&state, protocol, e),
+        Err(e) => return rejection(&state, protocol, &id, "admission", e),
     };
+    if let Err(e) = runtime::await_admission(&mut generation).await {
+        return rejection(&state, protocol, &id, "admission", e);
+    }
     let enqueue_ns = generation.first().and_then(|g| g.enqueue_ns);
     let mut iter = generation.into_iter();
     let mut generations: Vec<Option<Generation>> = (0..size)
         .map(|i| if zero.contains(&i) { None } else { iter.next() })
         .collect();
-    let prefix = match protocol {
-        Protocol::Chat => "chatcmpl",
-        Protocol::Completions => "cmpl",
-        Protocol::Messages => "msg",
-        Protocol::Responses => "resp",
-    };
-    let id = format!(
-        "{prefix}-{}-{}",
-        std::process::id(),
-        state.ids.fetch_add(1, Ordering::Relaxed)
-    );
     let created = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -308,7 +338,9 @@ pub(super) async fn generate(
     encoder.set_continuous_usage(continuous_usage);
     let streaming = decoded.stream;
     let stream_state = state.clone();
+    let stream_id = id.clone();
     let delivery = async_stream::stream! {
+        let id = stream_id;
         let state = stream_state;
         let _ingress = ingress;
         let _extra = extra;
@@ -492,25 +524,30 @@ pub(super) async fn generate(
         yield Delivery::Complete(response);
     };
     if streaming {
-        let events = delivery.filter_map(|event| async move {
-            match event {
+        let request_id = id.clone();
+        let events = delivery.filter_map(move |event| {
+            let event = match event {
                 Delivery::Frame(frame) => Some(Ok::<_, Infallible>(frame.sse())),
                 Delivery::Failed(error, frame) => {
-                    eprintln!("streaming generation failed: {error}");
+                    log_failure(&request_id, "stream", &error);
                     Some(Ok::<_, Infallible>(frame.sse()))
                 }
                 Delivery::Complete(_) => None,
-            }
+            };
+            std::future::ready(event)
         });
-        Sse::new(events)
-            .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
-            .into_response()
+        with_request_id(
+            Sse::new(events)
+                .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
+                .into_response(),
+            &id,
+        )
     } else {
         futures_util::pin_mut!(delivery);
         while let Some(event) = delivery.next().await {
             match event {
-                Delivery::Complete(body) => return Json(body).into_response(),
-                Delivery::Failed(e, _) => return rejection(&state, protocol, e),
+                Delivery::Complete(body) => return with_request_id(Json(body).into_response(), &id),
+                Delivery::Failed(e, _) => return rejection(&state, protocol, &id, "generation", e),
                 _ => {}
             }
         }
@@ -526,6 +563,14 @@ pub(super) async fn generate(
 mod tests {
     use super::*;
     use std::io::Write;
+    #[test]
+    fn failure_logs_include_utc_time_request_stage_and_typed_code() {
+        let error = Error::admission(AdmissionError::Capacity, "full\nretry");
+        assert_eq!(
+            failure_log(UNIX_EPOCH, "chatcmpl-1-2", "admission", &error),
+            "[Thu, 01 Jan 1970 00:00:00 GMT] request_id=chatcmpl-1-2 stage=admission code=capacity_exhausted message=\"full\\nretry\"",
+        );
+    }
     #[test]
     fn compressed_bodies_share_json_and_decoded_size_limits() {
         let body = br#"{"input":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}"#;

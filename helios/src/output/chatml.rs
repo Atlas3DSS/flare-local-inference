@@ -246,7 +246,7 @@ mod tests {
     fn config() -> OutputConfig {
         OutputConfig {
             structured: false,
-            reasoning: true,
+            start: crate::output::tagged::OutputStart::Reasoning,
             tools: vec![
                 json!({"type":"function","function":{"name":"lookup","parameters":{"type":"object","properties":{"city":{"type":"string"},"n":{"type":"integer"},"data":{"type":"object"}}}}}),
             ],
@@ -292,7 +292,7 @@ mod tests {
         let mut parser = Harness::new(
             OutputConfig {
                 structured: false,
-                reasoning: false,
+                start: crate::output::tagged::OutputStart::Content,
                 ..config()
             },
             "x".into(),
@@ -322,7 +322,7 @@ mod tests {
             for split in text.char_indices().map(|(index, _)| index) {
                 let mut parser = Harness::new(
                     OutputConfig {
-                        reasoning: false,
+                        start: crate::output::tagged::OutputStart::Content,
                         ..config()
                     },
                     "quirk".into(),
@@ -439,7 +439,7 @@ mod tests {
         let mut parser = Harness::new(
             OutputConfig {
                 structured: false,
-                reasoning: false,
+                start: crate::output::tagged::OutputStart::Content,
                 tools: vec![],
             },
             "x".into(),
@@ -469,7 +469,7 @@ mod tests {
         let end = assistant.find("</tool_call>").unwrap() + "</tool_call>".len();
         let mut parser = Harness::new(
             OutputConfig {
-                reasoning: false,
+                start: crate::output::tagged::OutputStart::Content,
                 tools: case["options"]["tools"].as_array().unwrap().clone(),
                 structured: false,
             },
@@ -502,7 +502,7 @@ mod tests {
             let mut parser = Harness::new(
                 OutputConfig {
                     structured: true,
-                    reasoning: false,
+                    start: crate::output::tagged::OutputStart::Content,
                     ..config()
                 },
                 "json".into(),
@@ -525,7 +525,7 @@ mod tests {
             let mut parser = Harness::new(
                 OutputConfig {
                     structured: true,
-                    reasoning: true,
+                    start: crate::output::tagged::OutputStart::Reasoning,
                     ..config()
                 },
                 "structured".into(),
@@ -544,7 +544,7 @@ mod tests {
     fn terminal_cause_preserves_incomplete_call_errors_and_never_fabricates_calls() {
         for cause in [Termination::Eos, Termination::OutputLimit] {
             let mut parser = ChatMlOutput::new(OutputConfig {
-                reasoning: false,
+                start: crate::output::tagged::OutputStart::Content,
                 ..config()
             });
             assert!(
@@ -565,7 +565,7 @@ mod tests {
             Termination::UserStop,
         ] {
             let mut parser = ChatMlOutput::new(OutputConfig {
-                reasoning: false,
+                start: crate::output::tagged::OutputStart::Content,
                 ..config()
             });
             parser

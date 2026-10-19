@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from ignition.preparation.fixtures import varlen_attention as attention_fixtures
+from ignition.components import varlen_attention
 from ignition.recipes.qwen38 import attention, ple, vision
 from ignition.preparation.scratch import ScratchArena
 
@@ -55,7 +56,6 @@ class Materialized:
 class Session:
     def __init__(self):
         self.requests, self.finalizers, self.arenas = {}, [], []
-        self.benchmark_resources = {}
 
     def declare(self, requests, *, coordinator=None):
         for request in requests:
@@ -82,17 +82,11 @@ def session(monkeypatch):
         else:
             session.finalizers.append(callback)
 
-    for module in (attention, vision, ple):
+    for module in (attention, vision, ple, varlen_attention):
         monkeypatch.setattr(module, "register_finalizer", finalizer)
     for module in (attention, vision):
         monkeypatch.setattr(module, "QuantizedProjection", lambda *args, **kwargs: None)
 
-    def resource(session, key, factory):
-        if key not in session.benchmark_resources:
-            session.benchmark_resources[key] = factory()
-        return session.benchmark_resources[key]
-
-    monkeypatch.setattr(attention_fixtures, "benchmark_resource", resource)
     return value
 
 
@@ -178,12 +172,7 @@ def test_vision_benchmark_owns_active_operands_and_aliases_follow_selected_bindi
     monkeypatch, session
 ):
     plan = Plan()
-    monkeypatch.setattr(vision.varlen, "plan", lambda *args, **kwargs: plan)
-    monkeypatch.setattr(
-        vision.varlen,
-        "bind",
-        lambda plan, **kwargs: SimpleNamespace(version=plan.version, **kwargs),
-    )
+    monkeypatch.setattr(varlen_attention.varlen, "plan", lambda *args, **kwargs: plan)
     module = SimpleNamespace(
         qkv=SimpleNamespace(bias=None),
         proj=SimpleNamespace(bias=None),
@@ -210,13 +199,13 @@ def test_vision_benchmark_owns_active_operands_and_aliases_follow_selected_bindi
         )
         for i in range(2)
     ]
-    assert not hasattr(owner, "binding")
-    assert all(not hasattr(alias, "binding") for alias in aliases)
+    assert not hasattr(owner.attention, "scratch")
+    assert all(alias.attention is owner.attention for alias in aliases)
     assert arena.nbytes == 0
     request = session.requests["vision.owner"]
     candidates = [Materialized(plan, nbytes=64) for _ in range(2)]
     calls = [request.benchmark_call(candidate) for candidate in candidates]
-    inputs = next(iter(session.benchmark_resources.values()))
+    inputs = calls[0].owners[0]
     for candidate, call in zip(candidates, calls, strict=True):
         bound = candidate.bindings[-1]
         assert bound.scratch.numel() == 64
@@ -241,7 +230,7 @@ def test_vision_benchmark_owns_active_operands_and_aliases_follow_selected_bindi
             assert torch.isfinite(seed).all() and seed.count_nonzero() > 0
             assert torch.equal(value, seed)
         call.run()
-    assert len(session.benchmark_resources) == 1
+    assert all(call.owners[0] is inputs for call in calls)
     assert inputs.nbytes == 6 * 256 * 16 * 72 * 2 + 3 * 4
     for name in ("q", "k", "v"):
         assert getattr(candidates[0].bindings[-1], name) is getattr(
@@ -261,14 +250,18 @@ def test_vision_benchmark_owns_active_operands_and_aliases_follow_selected_bindi
         == 0
     )
     plan.version, plan.nbytes = 2, 32
+    plan.handle = 123
     grown = arena.reserve(512)
     session.finalize()
-    assert owner.binding.version == 2
-    assert owner.binding.scratch.data_ptr() == grown.data_ptr()
-    assert owner.binding.scratch.shape == (32,)
-    assert all(
-        alias.binding is owner.binding and alias.workspace.data_ptr() == grown.data_ptr() for alias in aliases
-    )
+    assert owner.attention.plan is plan
+    assert owner.attention.scratch.data_ptr() == grown.data_ptr()
+    assert owner.attention.scratch.shape == (32,)
+    launches = []
+    monkeypatch.setattr(varlen_attention, "_attention", lambda *args: launches.append(args))
+    for operator in (owner, *aliases):
+        assert operator.attention() is owner.attention.out
+    assert len(launches) == 3
+    assert all(args[5] is owner.attention.scratch and args[7] == 123 for args in launches)
 
 
 def test_vision_private_producer_preserves_padded_operand_strides():
@@ -277,6 +270,7 @@ def test_vision_private_producer_preserves_padded_operand_strides():
         for name in ("q", "k", "v")
     }
     arguments["cu_seqlens_q"] = torch.zeros(2, dtype=torch.int32)
+    arguments["max_seqlen_q"] = 8
     inputs = attention_fixtures.attention_benchmark_inputs(arguments)
     seeds = {name: getattr(inputs, "seed_" + name).clone() for name in ("q", "k", "v")}
     for name in seeds:

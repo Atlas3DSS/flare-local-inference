@@ -20,8 +20,8 @@ pub enum OutputPipeline {
     FunctionTags(TaggedOutput<super::chatml::FunctionTags<true>>),
     CompactFunctionTags(TaggedOutput<super::chatml::FunctionTags<false>>),
     ArgumentTags(TaggedOutput<super::argument_tags::ArgumentTags>),
-    Dsml(TaggedOutput<super::dsml::Dsml<false>>),
-    SpacedDsml(TaggedOutput<super::dsml::Dsml<true>>),
+    Dsml(super::dsml::DsmlOutput<false>),
+    SpacedDsml(super::dsml::DsmlOutput<true>),
     Xtml(super::xtml::XtmlOutput),
     Text(TaggedOutput<PlainText>),
 }
@@ -70,10 +70,10 @@ impl OutputPipeline {
                 Self::ArgumentTags(TaggedOutput::new(config.content).with_reasoning(reasoning))
             }
             Some((ToolParserKind::Dsml, _, " ")) => {
-                Self::SpacedDsml(TaggedOutput::new(config.content).with_reasoning(reasoning))
+                Self::SpacedDsml(super::dsml::DsmlOutput::new(config.content))
             }
             Some((ToolParserKind::Dsml, _, _)) => {
-                Self::Dsml(TaggedOutput::new(config.content).with_reasoning(reasoning))
+                Self::Dsml(super::dsml::DsmlOutput::new(config.content))
             }
             Some((ToolParserKind::Xtml, _, _)) => Self::Xtml(super::xtml::XtmlOutput::new(
                 config.content,
@@ -104,28 +104,32 @@ impl OutputPipeline {
                 )
             }
             Some((ToolParserKind::Dsml, _, " ")) => {
-                TaggedOutput::<super::dsml::Dsml<true>>::grammar_envelope(&config.content)
+                super::dsml::DsmlOutput::<true>::grammar_envelope(&config.content)
             }
             Some((ToolParserKind::Dsml, _, _)) => {
-                TaggedOutput::<super::dsml::Dsml<false>>::grammar_envelope(&config.content)
+                super::dsml::DsmlOutput::<false>::grammar_envelope(&config.content)
             }
             Some((ToolParserKind::Xtml, _, _)) => Some(crate::grammar::OutputEnvelope {
                 reasoning_end: config
                     .content
-                    .reasoning
+                    .start
+                    .eq(&super::tagged::OutputStart::Reasoning)
                     .then_some("<|close|>think<|sep|><|open|>response<|sep|>"),
                 tool: (!config.content.tools.is_empty())
                     .then_some((super::xtml::TOOLS_OPEN, super::xtml::TOOLS_CLOSE)),
                 function: None,
                 tool_ends_reasoning: false,
                 response: Some(("", super::xtml::RESPONSE_CLOSE)),
+                tool_body_start: false,
             }),
             None => Some(crate::grammar::OutputEnvelope {
-                reasoning_end: config.content.reasoning.then_some("</think>"),
+                reasoning_end: (config.content.start == super::tagged::OutputStart::Reasoning)
+                    .then_some("</think>"),
                 tool: None,
                 function: None,
                 tool_ends_reasoning: false,
                 response: None,
+                tool_body_start: false,
             }),
         }?;
         envelope.tool_ends_reasoning = config.syntax.reasoning.as_ref().is_some_and(|r| {
@@ -178,7 +182,7 @@ mod tests {
             control_tokens: vec![],
             content: TaggedConfig {
                 structured,
-                reasoning: false,
+                start: crate::output::tagged::OutputStart::Content,
                 tools,
             },
         });

@@ -142,15 +142,31 @@ pub enum FleetCommand {
     },
     /// Launch a package across a cluster's nodes.
     Run(Box<FleetRun>),
-    /// Follow a running group's output.
-    Attach {
+    /// Show the live metrics dashboard for every group and GPU on the cluster's nodes.
+    Dashboard {
         #[arg(long, value_name = "NAME")]
         cluster: Option<String>,
     },
-    /// Stop a running group.
+    /// List every group on the cluster's nodes.
+    Ls {
+        #[arg(long, value_name = "NAME")]
+        cluster: Option<String>,
+    },
+    /// Follow running groups' output.
+    Attach {
+        #[arg(long, value_name = "NAME")]
+        cluster: Option<String>,
+        /// Only the group with this name or identifier.
+        #[arg(value_name = "GROUP")]
+        group: Option<String>,
+    },
+    /// Stop running groups.
     Stop {
         #[arg(long, value_name = "NAME")]
         cluster: Option<String>,
+        /// Only the group with this name or identifier.
+        #[arg(value_name = "GROUP")]
+        group: Option<String>,
     },
     /// Remove a node from the fleet file.
     Forget {
@@ -177,13 +193,28 @@ pub enum ControllersCommand {
 #[derive(Debug, Args)]
 #[command(args_override_self = true)]
 pub struct FleetRun {
-    /// A local package path or NODE:/absolute/path on a node.
+    /// A local package path or NODE:/absolute/path on a node; omitted when --name names a
+    /// [[group]] of the fleet file, which supplies it.
     #[arg(value_name = "PACKAGE")]
-    pub package: String,
+    pub package: Option<String>,
 
-    /// Cluster to run on; optional when the fleet file has one cluster.
+    /// Cluster whose nodes serve the ranks in order; without it placement chooses from every
+    /// node of the fleet.
     #[arg(long, value_name = "NAME")]
     pub cluster: Option<String>,
+
+    /// The group's name, used by attach, stop and ls [default: the cluster's name, or the
+    /// package's file name].
+    #[arg(long, value_name = "NAME")]
+    pub name: Option<String>,
+
+    /// Candidate nodes in rank order, instead of a cluster or the whole fleet.
+    #[arg(long, value_name = "NODE[,NODE...]", value_delimiter = ',')]
+    pub nodes: Vec<String>,
+
+    /// Print the placement and what would be transferred, then exit.
+    #[arg(long)]
+    pub dry_run: bool,
 
     /// Return once the group is serving instead of following its output.
     #[arg(long)]
@@ -260,7 +291,7 @@ impl FleetRun {
     /// The equivalent single-host arguments, for publisher trust resolution of the package.
     pub fn run_args(&self) -> Run {
         Run {
-            package: PathBuf::from(&self.package),
+            package: PathBuf::from(self.package.as_deref().unwrap_or_default()),
             host: self.host,
             port: self.port,
             served_model_name: self.served_model_name.clone(),

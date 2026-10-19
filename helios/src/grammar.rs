@@ -20,6 +20,7 @@ pub struct OutputEnvelope {
     pub tool: Option<(&'static str, &'static str)>,
     pub function: Option<(&'static str, &'static str)>,
     pub tool_ends_reasoning: bool,
+    pub tool_body_start: bool,
     pub response: Option<(&'static str, &'static str)>,
 }
 
@@ -188,6 +189,7 @@ impl GrammarCompiler {
         if envelope.reasoning_end.is_none()
             && envelope.tool.is_none()
             && envelope.response.is_none()
+            && !envelope.tool_body_start
         {
             return self.compile(grammar);
         }
@@ -228,7 +230,12 @@ impl GrammarCompiler {
         } else {
             "wrapped_answer"
         };
-        if let Some(end) = envelope.reasoning_end {
+        if envelope.tool_body_start {
+            if envelope.tool.is_none() {
+                return Err("tool-body output start requires tool syntax".into());
+            }
+            rules.push_str("start: tool_after_open tools_suffix ws\n");
+        } else if let Some(end) = envelope.reasoning_end {
             if let Some((open, _)) = envelope.tool.filter(|_| envelope.tool_ends_reasoning) {
                 rules.push_str(&self.delimited_region("reasoning_done", end, &[end, open]));
                 rules.push_str(&self.delimited_region("reasoning_tool", open, &[end, open]));
@@ -769,6 +776,7 @@ mod tests {
                 function: None,
                 tool_ends_reasoning: false,
                 response: None,
+                tool_body_start: false,
             };
             for (text, expected) in [
                 (r#"{"ok":true}"#, true),
@@ -813,6 +821,7 @@ mod tests {
                 function: None,
                 tool_ends_reasoning: false,
                 response: Some(("", "<|close|>response<|sep|>")),
+                tool_body_start: false,
             };
             for (body, expected) in [
                 (r#"{"ok":true}<|close|>response<|sep|>"#, true),
@@ -851,6 +860,7 @@ mod tests {
             function: Some(("<function=", "</function>")),
             tool_ends_reasoning: true,
             response: None,
+            tool_body_start: false,
         };
         for (text, accepted) in [
             ("thought</think>{\"ok\":true}", true),
@@ -895,6 +905,7 @@ mod tests {
             function: Some(("<function=", "</function>")),
             tool_ends_reasoning: true,
             response: None,
+            tool_body_start: false,
         };
         let schema = json!({"const":7});
         let text = "thought<tool_call><function=f></function></tool_call>7";
@@ -929,6 +940,7 @@ mod tests {
                 function: Some(("<function=", "</function>")),
                 tool_ends_reasoning: true,
                 response: None,
+                tool_body_start: false,
             };
             for text in [
                 r#"{"literal":"<think>東京</think><tool_call>literal</tool_call>"}"#,
@@ -1388,5 +1400,51 @@ mod tests {
             std::fs::write(path, serde_json::to_string_pretty(&trace).unwrap() + "\n").unwrap();
         }
         trace
+    }
+
+    #[test]
+    fn prefixed_dsml_tool_body_preserves_json_and_lark_answer_constraints() {
+        let compiler = GrammarCompiler::new(&byte_tokenizer(), 320, &[256, 257]).unwrap();
+        for (open, close, separator) in [
+            ("<｜DSML｜tool_calls>", "</｜DSML｜tool_calls>", ""),
+            ("<｜DSML｜ calls>", "</｜DSML｜ calls>", " "),
+        ] {
+            let envelope = OutputEnvelope {
+                reasoning_end: None,
+                tool: Some((open, close)),
+                function: None,
+                tool_ends_reasoning: false,
+                tool_body_start: true,
+                response: None,
+            };
+            let body = format!(
+                "\n<｜DSML｜{separator}invoke name=\"lookup\"></｜DSML｜{separator}invoke>{close}"
+            );
+            for lark in [false, true] {
+                for (suffix, expected) in [
+                    ("", true),
+                    (" true", true),
+                    (" false", false),
+                    (" junk", false),
+                ] {
+                    let mut grammar = if lark {
+                        compiler
+                            .compile_lark_in("start: \"true\"", Some(&envelope))
+                            .unwrap()
+                    } else {
+                        compiler
+                            .compile_json_schema_in(&json!({"const": true}), Some(&envelope))
+                            .unwrap()
+                    };
+                    let text = format!("{body}{suffix}");
+                    let accepted = text
+                        .bytes()
+                        .map(u32::from)
+                        .chain([256])
+                        .all(|token| grammar.advance(token).is_ok());
+                    assert_eq!(accepted, expected, "lark={lark}: {text}");
+                }
+            }
+        }
     }
 }

@@ -18,19 +18,20 @@ def tensors(value):
             yield from tensors(getattr(value, field.name))
 
 
-@pytest.mark.parametrize("recipe,large,small,sharded", [
-    ("qwen38", 1024, 256, False),
-    ("deepseek4", 576, 144, False),
-    ("mimo_v2", 1024, 256, True),
-    ("kimi3", 1024, 256, False),
-    ("nemotron_h", 256, 64, False),
-    ("step5", 256, 64, True),
+@pytest.mark.parametrize("module,large,small,sharded,options", [
+    ("recipes.qwen38.vision", 1024, 256, False, {}),
+    ("components.deepseek_vision", 576, 144, False, {"hidden": 4096}),
+    ("components.deepseek_vision", 576, 144, False, {"hidden": 5120}),
+    ("recipes.mimo_v2.vision", 1024, 256, True, {}),
+    ("recipes.kimi3.vision", 1024, 256, False, {}),
+    ("recipes.nemotron_h.vision", 256, 64, False, {}),
+    ("recipes.step5.vision", 256, 64, True, {}),
 ])
-def test_vision_capacities_reuse_pool_storage(recipe, large, small, sharded):
-    scratch_type = import_module(f"ignition.recipes.{recipe}.vision").VisionScratch
+def test_vision_capacities_reuse_pool_storage(module, large, small, sharded, options):
+    scratch_type = import_module(f"ignition.{module}").VisionScratch
     pool = GraphBufferPool("cpu", chunk_bytes=1 << 20)
     args = (TensorParallelShard(0, 4), "cpu") if sharded else ("cpu",)
-    first = scratch_type.allocate(large, *args, buffers=pool.cursor())
+    first = scratch_type.allocate(large, *args, buffers=pool.cursor(), **options)
     capacity = pool.nbytes
     storage = {chunk.untyped_storage()._cdata for chunks in pool.chunks.values() for chunk in chunks}
     assert all(t.untyped_storage()._cdata in storage for t in tensors(first))
@@ -38,7 +39,7 @@ def test_vision_capacities_reuse_pool_storage(recipe, large, small, sharded):
         for chunks in pool.chunks.values():
             for chunk in chunks:
                 chunk.fill_(float("nan"))
-        scratch = scratch_type.allocate(size, *args, buffers=pool.cursor())
+        scratch = scratch_type.allocate(size, *args, buffers=pool.cursor(), **options)
         assert pool.nbytes == capacity
         assert all(t.untyped_storage()._cdata in storage for t in tensors(scratch))
         assert all(torch.count_nonzero(t) == 0 for t in tensors(scratch))

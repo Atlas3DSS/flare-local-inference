@@ -488,8 +488,11 @@ streams restart on the device with a seed derived from the request's seed and
 the number of tokens generated before preemption. A request whose history
 exceeds the whole pool ends at that length. Requests with image inputs or
 conditioning retain full reservations because readmission does not reconstruct
-their image-feature execution. This restriction concerns retained frontend
-inputs, not the attention mechanism.
+their image-feature execution. They wait in the bounded admission queue until
+their full reservation fits. Waiting for initial capacity does not require
+preemption support. A blocked reservation does not prevent smaller queued
+requests from using available resources. Requests whose required reservation
+exceeds the entire pool fail admission.
 
 For Qwen's target cache, BF16 KV and compressed selector keys cost 24.75 KiB
 per token; MTP pages, continuation rows, and graph resources add separate
@@ -1061,9 +1064,18 @@ and frontend failures. Cloneable failures retain their underlying source chain;
 CUDA failures retain the operation, numeric code, name, and description. Dispatch
 and error assertions use variants rather than message substrings. Request
 validation maps to HTTP 400, model admission capacity or worker unavailability
-to 503, and execution failure to 500. After SSE headers are sent, failure terminates the
-stream with an error event. Workers retain the first failure, and a failed CUDA
-drain retains the graph and buffer owners.
+to 503, and execution failure to 500. Generation responses wait for scheduler
+admission before sending HTTP 200 or initial SSE frames. A grouped completion
+starts when its first choice is admitted so its bounded output queue can drain
+while other choices wait. Requests with zero output tokens need no scheduler
+admission. Failures observed before response headers use the corresponding HTTP
+error status; failures after SSE headers terminate the stream with an error event
+and no successful terminal marker. Chat and completion errors include `type`,
+`message`, `param`, and a typed `code`; Responses uses `response.failed`, and
+Messages uses its `error` event envelope. After frontend preparation, generation
+responses carry an `x-request-id` header matching failure logs, which include a
+GMT timestamp, request identifier, failure stage, and typed error code. Workers
+retain the first failure, and a failed CUDA drain retains the graph and buffer owners.
 
 ### Native frontend dependencies
 

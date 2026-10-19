@@ -35,7 +35,7 @@ fn jpeg_and_oriented_png_use_actual_checkpoint_request_preparation() {
         FrontendAssets {
             tokenizer: asset("tokenizer.json"),
             tokens: support::tokens(&asset("tokenizer_config.json")).unwrap(),
-            chat_template: asset("chat_template.jinja"),
+            chat_template: Some(asset("chat_template.jinja")),
         },
         Map::new(),
     )

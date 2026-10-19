@@ -5,10 +5,17 @@ use crate::Result;
 use serde_json::Value;
 use std::sync::Arc;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OutputStart {
+    Content,
+    Reasoning,
+    ToolBody,
+}
+
 #[derive(Clone)]
 pub struct OutputConfig {
     pub structured: bool,
-    pub reasoning: bool,
+    pub start: OutputStart,
     pub tools: Vec<Value>,
 }
 
@@ -214,18 +221,19 @@ impl<D: ToolDialect> ModelOutput for TaggedOutput<D> {
     type Config = OutputConfig;
     fn new(config: OutputConfig) -> Self {
         let tools = !config.tools.is_empty();
+        let definitions: Arc<[Value]> = config.tools.into();
         Self {
             reasoning_enabled: true,
-            mode: if config.reasoning {
-                Mode::Reasoning
-            } else {
-                Mode::Content
+            mode: match config.start {
+                OutputStart::Content => Mode::Content,
+                OutputStart::Reasoning => Mode::Reasoning,
+                OutputStart::ToolBody => Mode::Tool,
             },
             structured: config.structured,
             outer_tool_pending: false,
             buffer: String::new(),
             trim_newlines: 0,
-            tools: config.tools.into(),
+            tools: definitions.clone(),
             reasoning: ThinkReasoning {
                 buffer: String::new(),
                 trim_newlines: 0,
@@ -234,18 +242,24 @@ impl<D: ToolDialect> ModelOutput for TaggedOutput<D> {
                 tool_ends_reasoning: D::TOOL_ENDS_REASONING,
                 dialect: std::marker::PhantomData,
             },
-            tool: None,
+            tool: (config.start == OutputStart::ToolBody).then(|| TaggedTools {
+                dialect: std::marker::PhantomData,
+                buffer: String::new(),
+                tools: definitions,
+                index: 0,
+            }),
             calls: 0,
         }
     }
     #[cfg(feature = "server")]
     fn grammar_envelope(config: &Self::Config) -> Option<crate::grammar::OutputEnvelope> {
         Some(crate::grammar::OutputEnvelope {
-            reasoning_end: config.reasoning.then_some("</think>"),
+            reasoning_end: (config.start == OutputStart::Reasoning).then_some("</think>"),
             tool: (!config.tools.is_empty()).then_some((D::OPEN, D::CLOSE)),
             function: D::FUNCTION,
             tool_ends_reasoning: D::TOOL_ENDS_REASONING,
             response: None,
+            tool_body_start: config.start == OutputStart::ToolBody,
         })
     }
     fn push(&mut self, input: Input<'_>) -> Result<Vec<Event>> {

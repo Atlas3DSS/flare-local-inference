@@ -3,7 +3,18 @@ import hashlib
 import pytest
 import torch
 
-from qualify.replay_floor import _byte_view, _hash
+from qualify.replay_floor import _byte_view, _hash, decode_groups
+
+
+@pytest.mark.parametrize('field,value', [('temperature', 0), ('top_k', 1), ('top_p', 1)])
+def test_decode_groups_reject_different_sampling(field, value):
+    request = dict(temperature=1, top_k=20, top_p=.95)
+    request[field] = value
+    corpus = dict(cases=[dict(id='case', request=request, output_tokens=256,
+                             expected_cache='cold', prompt_tokens=[17])],
+                  groups=[dict(kind='decode-b1', measured=True, batch=1, cases=['case'])])
+    with pytest.raises(ValueError, match='temperature=1, top_k=20, top_p=0.95'):
+        decode_groups(corpus)
 
 
 @pytest.mark.parametrize('dtype', [torch.int64, torch.uint64, torch.float32, torch.bfloat16])
@@ -53,6 +64,9 @@ def test_init_stages_exact_empty_endpoint_before_first_replay(batch):
 
     def execute(name):
         assert name == f'init{batch}'
+        torch.testing.assert_close(runner.host['admission_parameters'][:batch, :2],
+                                   torch.tensor([[1., .95]]).expand(batch, -1), rtol=0, atol=0)
+        assert runner.host['admission_top_k'][:batch].tolist() == [20] * batch
         assert runner.host['state_expected_consumed'].tolist() == [0] * batch + [-1] * (4 - batch)
         assert runner.host['state_source_slots'].tolist() == list(range(1, batch + 1)) + [0] * (4 - batch)
         assert runner.host['state_destination_slots'].tolist() == runner.host['state_source_slots'].tolist()

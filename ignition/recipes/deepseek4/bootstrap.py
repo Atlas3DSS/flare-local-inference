@@ -33,7 +33,7 @@ from ignition.preparation.collectives import (
 from ignition.preparation.disposable import storage_ranges
 from ignition.preparation.execution import GraphSignature
 from ignition.preparation.host_memory import virtual_device_memory, release_unused
-from ignition.preparation.frontend import prepare_frontend
+from ignition.preparation.frontend import PromptEncoder, prepare_frontend
 from ignition.preparation.model import PreparedModel
 from ignition.preparation.scratch import GraphBufferPool, ScratchArena
 from ignition.preparation.tuning import RecordedPreparationSession
@@ -473,7 +473,6 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         role: {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
         for role, path in (
             ("tokenizer", metadata_path / "tokenizer.json"),
-            ("chat_template", frontend / "chat_template.jinja"),
         )
     }
     buffers["request_pending_token"] = requests.pending_token
@@ -486,7 +485,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         "state_rows": state_rows,
         "snapshots": snapshots,
         "page_tokens": PAGE_TOKENS,
-        "frontend": prepare_frontend(metadata_path, eos_token_ids=[1], image_profile="deepseek4",
+        "frontend": prepare_frontend(metadata_path, eos_token_ids=[1], prompt_encoder=PromptEncoder.DEEPSEEK_V4, image_profile="deepseek4",
             preprocessor=frontend / "preprocessor_config.json"),
         "sampling_defaults": RECIPE.sampling_defaults.as_dict(),
         "assets": assets,

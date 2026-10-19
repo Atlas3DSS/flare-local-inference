@@ -44,7 +44,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 snapshot.join("tokenizer_config.json"),
             ))
             .unwrap(),
-            chat_template: asset(assets.join("chat_template.jinja")),
+            chat_template: Some(asset(assets.join("chat_template.jinja"))),
         },
         Map::new(),
     )?;
@@ -64,6 +64,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .collect();
     let prompt = RenderedPrompt {
+        image_sources: Vec::new(),
         text: case["prompt"].as_str().unwrap().into(),
         token_ids: frontend.encode(case["prompt"].as_str().unwrap(), false)?,
     };

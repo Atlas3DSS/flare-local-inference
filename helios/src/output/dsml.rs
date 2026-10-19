@@ -1,86 +1,286 @@
-use crate::Result;
-use serde_json::{Map, Value};
+//! Translate the official DeepSeek parser's actions into shared output events.
 
-pub(crate) fn parse(body: &str, tools: &[Value], separator: &str) -> Result<Vec<(String, String)>> {
-    let mut rest = body.trim();
-    let mut calls = Vec::new();
-    while !rest.is_empty() {
-        let invoke = rest
-            .strip_prefix(&format!("<｜DSML｜{separator}invoke name=\""))
-            .ok_or("DSML call requires an invoke tag")?;
-        let (name, tail) = invoke
-            .split_once("\">")
-            .ok_or("unterminated DSML function name")?;
-        if name.is_empty()
-            || !tools
-                .iter()
-                .any(|tool| tool["function"]["name"].as_str() == Some(name))
-        {
-            return Err(format!("model called unregistered tool {name:?}").into());
-        }
-        let (mut parameters, tail) = tail
-            .split_once(&format!("</｜DSML｜{separator}invoke>"))
-            .ok_or("unterminated DSML invocation")?;
-        let mut arguments = Map::new();
-        while !parameters.trim().is_empty() {
-            let parameter = parameters
-                .trim_start()
-                .strip_prefix(&format!("<｜DSML｜{separator}parameter name=\""))
-                .ok_or("DSML invocation requires parameter tags")?;
-            let (key, parameter) = parameter
-                .split_once("\" string=\"")
-                .ok_or("DSML parameter requires a string attribute")?;
-            let (string, parameter) = parameter
-                .split_once("\">")
-                .ok_or("unterminated DSML parameter attributes")?;
-            let (raw, next) = parameter
-                .split_once(&format!("</｜DSML｜{separator}parameter>"))
-                .ok_or("unterminated DSML parameter")?;
-            if key.is_empty() || arguments.contains_key(key) {
-                return Err("DSML parameter names must be nonempty and unique".into());
-            }
-            let value = match string {
-                "true" => Value::String(raw.into()),
-                "false" => serde_json::from_str(raw)
-                    .map_err(|e| format!("invalid DSML JSON parameter: {e}"))?,
-                _ => return Err("DSML string attribute must be true or false".into()),
-            };
-            arguments.insert(key.into(), value);
-            parameters = next;
-        }
-        calls.push((name.into(), Value::Object(arguments).to_string()));
-        rest = tail.trim_start();
-    }
-    if calls.is_empty() {
-        return Err("DSML calls block is empty".into());
-    }
-    Ok(calls)
+use super::{
+    Event, Input, ModelOutput, Termination,
+    tagged::{OutputConfig, OutputStart},
+};
+use crate::Result;
+use deepseek_recipe::stream::state_machine::{
+    OutputAction, OutputActionSegment, ParsingOptions, ReasoningStage, StateMachine,
+};
+use serde::de::{Deserializer, MapAccess, Visitor};
+use serde_json::Value;
+use std::collections::HashSet;
+
+const BUFFER_LIMIT: usize = 1024 * 1024;
+
+#[derive(Default)]
+struct Call {
+    name: String,
+    arguments: String,
 }
 
-pub struct Dsml<const SPACED: bool>;
-impl<const SPACED: bool> crate::output::tagged::ToolDialect for Dsml<SPACED> {
-    const NAME: &'static str = "DSML";
-    const TRIM_NEWLINES: bool = false;
-    const OPEN: &'static str = if SPACED {
-        "<｜DSML｜ calls>"
-    } else {
-        "<｜DSML｜tool_calls>"
-    };
-    const CLOSE: &'static str = if SPACED {
-        "</｜DSML｜ calls>"
-    } else {
-        "</｜DSML｜tool_calls>"
-    };
-    fn parse(body: &str, tools: &[serde_json::Value]) -> crate::Result<Vec<(String, String)>> {
-        parse(body, tools, if SPACED { " " } else { "" })
+pub struct DsmlOutput<const SPACED: bool> {
+    machine: Option<StateMachine>,
+    pending: String,
+    last_action: OutputAction,
+    call: Option<Call>,
+    tools: Vec<Value>,
+    calls: usize,
+    structured: bool,
+    verbatim: bool,
+}
+
+impl<const SPACED: bool> DsmlOutput<SPACED> {
+    fn apply(&mut self, actions: Vec<OutputActionSegment>, events: &mut Vec<Event>) -> Result<()> {
+        let mut consumed = 0;
+        for segment in actions {
+            let end = consumed + segment.len;
+            let source = self
+                .pending
+                .get(consumed..end)
+                .ok_or("DeepSeek parser returned an invalid source span")?;
+            let repeated = self.last_action == segment.action;
+            self.last_action = segment.action;
+            match segment.action {
+                OutputAction::Raw => {
+                    if !source.is_empty() {
+                        events.push(Event::Content(source.to_owned()));
+                        self.verbatim = self.structured && !source.trim().is_empty();
+                    }
+                }
+                OutputAction::Reasoning => {
+                    if !source.is_empty() {
+                        events.push(Event::Reasoning(source.to_owned()));
+                    }
+                }
+                OutputAction::ToolCallBegin if !repeated => {
+                    if self.call.is_some() {
+                        return Err(
+                            "DeepSeek parser began a tool call before completing its predecessor"
+                                .into(),
+                        );
+                    }
+                    self.call = Some(Call::default());
+                }
+                OutputAction::ToolName => {
+                    self.call
+                        .as_mut()
+                        .ok_or("DeepSeek tool name has no call")?
+                        .name
+                        .push_str(source);
+                }
+                OutputAction::ToolNameEnd if !repeated => {
+                    let name = &self
+                        .call
+                        .as_ref()
+                        .ok_or("DeepSeek tool name has no call")?
+                        .name;
+                    if name.is_empty()
+                        || !self
+                            .tools
+                            .iter()
+                            .any(|tool| tool["function"]["name"].as_str() == Some(name))
+                    {
+                        return Err(format!("model called unregistered tool {name:?}").into());
+                    }
+                }
+                OutputAction::LabelToolCallArguments { label, .. } if !repeated => {
+                    self.call
+                        .as_mut()
+                        .ok_or("DeepSeek tool arguments have no call")?
+                        .arguments
+                        .push_str(label);
+                }
+                OutputAction::RawToolCallArguments { string } => {
+                    let arguments = &mut self
+                        .call
+                        .as_mut()
+                        .ok_or("DeepSeek tool arguments have no call")?
+                        .arguments;
+                    if string {
+                        let escaped = serde_json::to_string(source)
+                            .expect("serializing a string cannot fail");
+                        arguments.push_str(&escaped[1..escaped.len() - 1]);
+                    } else {
+                        arguments.push_str(source);
+                    }
+                }
+                OutputAction::ToolCallArgumentsEnd { output } if !repeated => {
+                    let mut call = self
+                        .call
+                        .take()
+                        .ok_or("DeepSeek tool arguments have no call")?;
+                    call.arguments.push_str(output.unwrap_or_default());
+                    validate_arguments(&call.arguments)?;
+                    let index = self.calls;
+                    events.extend([
+                        Event::ToolBegin {
+                            index,
+                            name: call.name,
+                            id: None,
+                        },
+                        Event::ToolArguments {
+                            index,
+                            text: call.arguments,
+                        },
+                        Event::ToolEnd { index },
+                    ]);
+                    self.calls += 1;
+                }
+                OutputAction::Label(label) if !repeated => {
+                    events.push(Event::Content(label.into()))
+                }
+                OutputAction::ToSpace => events.push(Event::Content(" ".into())),
+                _ => {}
+            }
+            if self.call.as_ref().is_some_and(|call| {
+                call.name.len().saturating_add(call.arguments.len()) > BUFFER_LIMIT
+            }) {
+                return Err("DeepSeek tool call exceeds the 1 MiB buffer bound".into());
+            }
+            consumed = end;
+            if self.verbatim {
+                break;
+            }
+        }
+        self.pending.drain(..consumed);
+        if self.verbatim && !self.pending.is_empty() {
+            events.push(Event::Content(std::mem::take(&mut self.pending)));
+        }
+        if self.pending.len() > BUFFER_LIMIT {
+            return Err("DeepSeek parser exceeds the 1 MiB buffer bound".into());
+        }
+        Ok(())
     }
+
+    fn feed(&mut self, text: &str, events: &mut Vec<Event>) -> Result<()> {
+        self.pending.push_str(text);
+        let actions = self.machine.as_mut().unwrap().feed(text);
+        self.apply(actions, events)
+    }
+}
+
+impl<const SPACED: bool> ModelOutput for DsmlOutput<SPACED> {
+    type Config = OutputConfig;
+
+    fn new(config: OutputConfig) -> Self {
+        Self {
+            machine: Some(StateMachine::new(ParsingOptions {
+                parse_tool_calls: !config.tools.is_empty(),
+                tool_call_initial_stage: config.start == OutputStart::ToolBody,
+                // Helios grammars also support scalar JSON and non-JSON languages.
+                parse_json_output: false,
+                reasoning_initial_stage: (config.start == OutputStart::Reasoning)
+                    .then_some(ReasoningStage::Start),
+                stop_sequences: vec![],
+            })),
+            pending: String::new(),
+            last_action: OutputAction::Skip,
+            call: None,
+            tools: config.tools,
+            calls: 0,
+            structured: config.structured,
+            verbatim: false,
+        }
+    }
+
+    fn grammar_envelope(config: &Self::Config) -> Option<crate::grammar::OutputEnvelope> {
+        Some(crate::grammar::OutputEnvelope {
+            reasoning_end: (config.start == OutputStart::Reasoning).then_some("</think>"),
+            tool: (!config.tools.is_empty()).then_some(if SPACED {
+                ("<｜DSML｜ calls>", "</｜DSML｜ calls>")
+            } else {
+                ("<｜DSML｜tool_calls>", "</｜DSML｜tool_calls>")
+            }),
+            function: None,
+            tool_ends_reasoning: false,
+            response: None,
+            tool_body_start: config.start == OutputStart::ToolBody,
+        })
+    }
+
+    fn push(&mut self, input: Input<'_>) -> Result<Vec<Event>> {
+        if self.machine.is_none() {
+            return Err("output presentation is finished".into());
+        }
+        let Input::Text(text) = input else {
+            return Ok(vec![]);
+        };
+        let mut events = Vec::new();
+        let mut rest = text;
+        // Stop interpreting markup as soon as a grammar-constrained answer begins.
+        while self.structured && !self.verbatim && !rest.is_empty() {
+            let length = rest.chars().next().unwrap().len_utf8();
+            self.feed(&rest[..length], &mut events)?;
+            rest = &rest[length..];
+        }
+        if !rest.is_empty() {
+            if self.verbatim {
+                events.push(Event::Content(rest.to_owned()));
+            } else {
+                self.feed(rest, &mut events)?;
+            }
+        }
+        Ok(events)
+    }
+
+    fn finish(&mut self, cause: Termination) -> Result<Vec<Event>> {
+        let machine = self
+            .machine
+            .take()
+            .ok_or("output presentation is finished")?;
+        if matches!(cause, Termination::Cancelled | Termination::ExecutionError) {
+            self.pending.clear();
+            self.call = None;
+            return Ok(vec![]);
+        }
+        let mut events = Vec::new();
+        if !self.verbatim {
+            self.apply(machine.finish(), &mut events)?;
+        }
+        if self.call.take().is_some() && cause == Termination::Eos {
+            return Err("incomplete DeepSeek tool call at end of response".into());
+        }
+        Ok(events)
+    }
+}
+
+fn validate_arguments(arguments: &str) -> Result<()> {
+    struct Arguments;
+    impl<'de> Visitor<'de> for Arguments {
+        type Value = ();
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a tool argument object with nonempty, unique keys")
+        }
+        fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> std::result::Result<(), M::Error> {
+            let mut keys = HashSet::new();
+            while let Some(key) = map.next_key::<String>()? {
+                if key.is_empty() || !keys.insert(key) {
+                    return Err(serde::de::Error::custom(
+                        "tool argument names must be nonempty and unique",
+                    ));
+                }
+                map.next_value::<Value>()?;
+            }
+            Ok(())
+        }
+    }
+    let mut decoder = serde_json::Deserializer::from_str(arguments);
+    decoder
+        .deserialize_map(Arguments)
+        .map_err(|error| format!("invalid DeepSeek tool arguments: {error}"))?;
+    decoder
+        .end()
+        .map_err(|error| format!("invalid DeepSeek tool arguments: {error}"))?;
+    Ok(())
 }
 
 #[cfg(test)]
 mod deepseek41_syntax_tests {
     use super::*;
-    use crate::output::tagged::{OutputConfig, TaggedOutput};
-    type DeepSeekOutput = TaggedOutput<Dsml<true>>;
+    use crate::output::tagged::OutputConfig;
+    type DeepSeekOutput = DsmlOutput<true>;
     use crate::output::{Input, ModelOutput, Termination};
     use crate::server::output::Accumulator;
     use serde_json::json;
@@ -91,7 +291,7 @@ mod deepseek41_syntax_tests {
         for split in text.char_indices().map(|(offset, _)| offset) {
             let mut parser = DeepSeekOutput::new(OutputConfig {
                 structured: false,
-                reasoning: true,
+                start: crate::output::tagged::OutputStart::Reasoning,
                 tools: vec![json!({"type":"function", "function":{"name":"lookup"}})],
             });
             let mut output = Accumulator::new("request".into());
@@ -110,11 +310,11 @@ mod deepseek41_syntax_tests {
             assert_eq!(message["tool_calls"].as_array().unwrap().len(), 2);
             assert_eq!(
                 message["tool_calls"][0]["function"]["arguments"],
-                "{\"city\":\"東京\"}"
+                "{\"city\": \"東京\"}"
             );
             assert_eq!(
                 message["tool_calls"][1]["function"]["arguments"],
-                "{\"n\":3}"
+                "{\"n\": 3}"
             );
         }
     }
@@ -123,8 +323,8 @@ mod deepseek41_syntax_tests {
 #[cfg(test)]
 mod deepseek4_syntax_tests {
     use super::*;
-    use crate::output::tagged::{OutputConfig, TaggedOutput};
-    type DeepSeekOutput = TaggedOutput<Dsml<false>>;
+    use crate::output::tagged::OutputConfig;
+    type DeepSeekOutput = DsmlOutput<false>;
     use crate::output::{Input, ModelOutput, Termination};
     use crate::server::output::Accumulator;
     use serde_json::json;
@@ -135,7 +335,7 @@ mod deepseek4_syntax_tests {
         for split in text.char_indices().map(|(offset, _)| offset) {
             let mut parser = DeepSeekOutput::new(OutputConfig {
                 structured: false,
-                reasoning: true,
+                start: crate::output::tagged::OutputStart::Reasoning,
                 tools: vec![json!({"type":"function", "function":{"name":"lookup"}})],
             });
             let mut output = Accumulator::new("request".into());
@@ -154,12 +354,72 @@ mod deepseek4_syntax_tests {
             assert_eq!(message["tool_calls"].as_array().unwrap().len(), 2);
             assert_eq!(
                 message["tool_calls"][0]["function"]["arguments"],
-                "{\"city\":\"東京\"}"
+                "{\"city\": \"東京\"}"
             );
             assert_eq!(
                 message["tool_calls"][1]["function"]["arguments"],
-                "{\"n\":3}"
+                "{\"n\": 3}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod prefixed_tool_tests {
+    use super::*;
+    use crate::output::tagged::{OutputConfig, OutputStart};
+    use crate::output::{Input, ModelOutput, Termination};
+    use crate::server::output::Accumulator;
+    use serde_json::json;
+
+    fn check<const SPACED: bool>() {
+        let separator = if SPACED { " " } else { "" };
+        let close = if SPACED {
+            "</｜DSML｜ calls>"
+        } else {
+            "</｜DSML｜tool_calls>"
+        };
+        let text = format!(
+            "\n<｜DSML｜{separator}invoke name=\"lookup\"><｜DSML｜{separator}parameter name=\"city\" string=\"true\">東京</｜DSML｜{separator}parameter></｜DSML｜{separator}invoke>{close}"
+        );
+        for split in text
+            .char_indices()
+            .map(|(offset, _)| offset)
+            .chain([text.len()])
+        {
+            let mut parser = DsmlOutput::<SPACED>::new(OutputConfig {
+                structured: true,
+                start: OutputStart::ToolBody,
+                tools: vec![json!({"type":"function", "function":{"name":"lookup"}})],
+            });
+            let mut output = Accumulator::new("request".into());
+            output
+                .apply(parser.push(Input::Text(&text[..split])).unwrap())
+                .unwrap();
+            output
+                .apply(parser.push(Input::Text(&text[split..])).unwrap())
+                .unwrap();
+            output
+                .apply(parser.finish(Termination::Eos).unwrap())
+                .unwrap();
+            output.finish().unwrap();
+            let message = output.message();
+            assert_eq!(message["tool_calls"][0]["function"]["name"], "lookup");
+            assert_eq!(
+                message["tool_calls"][0]["function"]["arguments"],
+                "{\"city\": \"東京\"}"
+            );
+            assert!(message.get("reasoning_content").is_none_or(Value::is_null));
+        }
+    }
+
+    #[test]
+    fn compact_tool_body_accepts_every_utf8_split() {
+        check::<false>();
+    }
+
+    #[test]
+    fn spaced_tool_body_accepts_every_utf8_split() {
+        check::<true>();
     }
 }

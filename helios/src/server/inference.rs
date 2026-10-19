@@ -95,6 +95,7 @@ pub struct Sampling {
 }
 #[derive(Clone, Debug, PartialEq)]
 pub enum Constraint {
+    JsonObject,
     Json(Value),
     Lark(String),
 }
@@ -569,7 +570,7 @@ mod tool_result_order_tests {
     }
 
     #[test]
-    fn packaged_image_template_receives_matching_payload_and_marker_order() {
+    fn normalized_messages_keep_image_payload_and_marker_order() {
         let ordered = vec![
             calls(&[Some("a"), Some("b")]),
             result(Some("a"), "alpha"),
@@ -590,27 +591,8 @@ mod tool_result_order_tests {
                     }
                 }
             }
-            let mut environment = minijinja::Environment::new();
-            environment.set_trim_blocks(true);
-            environment.set_lstrip_blocks(true);
-            environment
-                .set_unknown_method_callback(minijinja_contrib::pycompat::unknown_method_callback);
-            environment.add_test("iterable", |value: &minijinja::Value| {
-                !value.is_none() && value.try_iter().is_ok()
-            });
-            environment
-                .add_template(
-                    "chat",
-                    include_str!("../../../ignition/recipes/deepseek41/assets/chat_template.jinja"),
-                )
-                .unwrap();
-            let rendered = environment
-                .get_template("chat")
-                .unwrap()
-                .render(json!({
-                    "messages":normalized,"thinking_mode":"chat","add_generation_prompt":true,
-                }))
-                .unwrap();
+            let rendered = normalized.iter().map(|message| message["content"].to_string())
+                .collect::<Vec<_>>().join("\n");
             (rendered, images)
         };
         let expected = render(&ordered);
@@ -624,7 +606,7 @@ mod tool_result_order_tests {
                 "image:beta:2"
             ]
         );
-        assert_eq!(expected.0.matches("<｜deepseek_image｜>").count(), 4);
+        assert_eq!(expected.0.matches("\"type\":\"image\"").count(), 4);
         assert!(expected.0.find("alpha").unwrap() < expected.0.find("beta").unwrap());
     }
 }

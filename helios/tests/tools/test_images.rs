@@ -76,7 +76,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             tokenizer: asset("tokenizer.json"),
             tokens: flare_helios::frontend::test_support::tokens(&asset("tokenizer_config.json"))
                 .unwrap(),
-            chat_template: asset("chat_template.jinja"),
+            chat_template: Some(asset("chat_template.jinja")),
         },
         Map::new(),
     )?;

@@ -44,7 +44,8 @@ def test_native_radio_images(reference, tmp_path, sizes, mode, format):
     expected = processor(images=images, return_tensors="pt")
     prompt = "Describe " + " and ".join(["<image>"] * len(images)) + "."
     case = tmp_path / "case.json"
-    case.write_text(json.dumps(dict(images=inputs, prompt=prompt, frontend=FRONTEND, vision=VISION)))
+    case.write_text(json.dumps(dict(images=inputs, prompt=prompt, frontend=FRONTEND,
+                                    vision={**VISION, "feature_slots": 4})))
     subprocess.run([str(ROOT / "helios/target/debug/test_radio_images"), str(CHECKPOINT), str(CHECKPOINT),
                     str(case), str(tmp_path)], check=True)
     actual = json.loads((tmp_path / "metadata.json").read_text())

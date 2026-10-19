@@ -3,7 +3,7 @@ name = "flare-helios"
 version = "0.1.0"
 license = "Apache-2.0"
 edition = "2024"
-rust-version = "1.87"
+rust-version = "1.88"
 publish = false
 
 [lib]
@@ -14,14 +14,18 @@ crate-type = ["rlib"]
 default = []
 test-tools = []
 runtime-package = ["dep:serde", "dep:serde_json", "dep:prost", "dep:prost-build", "dep:ring"]
-frontend = ["dep:serde", "dep:tokenizers", "dep:minijinja", "dep:minijinja-contrib", "dep:serde_json", "dep:sha2", "dep:ryu"]
+frontend = ["dep:serde", "dep:tokenizers", "dep:minijinja", "dep:minijinja-contrib", "dep:serde_json", "dep:sha2", "dep:ryu", "dep:deepseek-recipe-core", "dep:deepseek-recipe-encoding"]
 images = ["frontend", "dep:png", "dep:turbojpeg", "dep:image-webp"]
 grammar = ["frontend", "dep:llguidance"]
-server = ["dep:serde", "images", "grammar", "dep:axum", "dep:tokio", "dep:async-stream", "dep:base64", "dep:ratatui", "dep:crossterm", "dep:futures-util", "dep:flate2", "dep:zstd", "dep:brotli"]
+server = ["dep:serde", "images", "grammar", "dep:axum", "dep:tokio", "dep:async-stream", "dep:base64", "dep:ratatui", "dep:crossterm", "dep:futures-util", "dep:flate2", "dep:zstd", "dep:brotli", "dep:httpdate", "dep:deepseek-recipe"]
 # RoCEnante's RDMA proxy for ranks on separate hosts; links libibverbs.
 roce = ["dep:cc", "runtime-package"]
 
 [dependencies]
+deepseek-recipe = { git = "https://github.com/deepseek-ai/deepseek-recipe", rev = "8cadfede7063c896b944e7bae05daa3549ae97ea", optional = true }
+deepseek-recipe-core = { git = "https://github.com/deepseek-ai/deepseek-recipe", rev = "8cadfede7063c896b944e7bae05daa3549ae97ea", optional = true }
+deepseek-recipe-encoding = { git = "https://github.com/deepseek-ai/deepseek-recipe", rev = "8cadfede7063c896b944e7bae05daa3549ae97ea", optional = true }
+httpdate = { version = "1.0", optional = true }
 futures-util = { version = "0.3", optional = true }
 flate2 = { version = "1", optional = true }
 zstd = { version = "0.13", optional = true }

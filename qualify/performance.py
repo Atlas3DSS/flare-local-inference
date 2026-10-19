@@ -39,7 +39,7 @@ from .provenance import digest, write_json
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA = "flare-http-performance-v1"
 VOCABULARY = 248320
-SAMPLING = {"temperature": 0, "top_p": 1, "top_k": 0, "min_p": 0,
+SAMPLING = {"temperature": 1, "top_p": .95, "top_k": 20, "min_p": 0,
             "repetition_penalty": 1, "presence_penalty": 0, "frequency_penalty": 0,
             "seed": 42}
 

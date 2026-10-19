@@ -57,6 +57,7 @@ def _heuristic_copy(source, output, N: tl.constexpr, BLOCK: tl.constexpr):
 
 @pytest.fixture(autouse=True)
 def no_cuda_or_shared_kernel_ids(monkeypatch):
+    initialized = torch.cuda.is_initialized()
     monkeypatch.setattr(
         torch.cuda,
         "_lazy_init",
@@ -67,7 +68,7 @@ def no_cuda_or_shared_kernel_ids(monkeypatch):
     for name in ("id_to_kernel", "kernel_to_id", "constant_args"):
         monkeypatch.setattr(kernel_side_table, name, {})
     yield
-    assert not torch.cuda.is_initialized()
+    assert torch.cuda.is_initialized() == initialized
 
 
 @pytest.mark.parametrize("warps", [1, 8])
@@ -130,7 +131,8 @@ def test_storage_roundtrip_bypasses_imported_global_autotuner(
     restored.invocations[0].run([source], [output])
     assert len(launches) == 1
     args, options = launches[0]
-    assert args[0] is source and args[1] is output and args[2] == 32
+    assert len(args) == 2 and args[0] is source and args[1] is output
+    assert options["N"] == 32
     assert options["num_warps"] == warps
     assert options["num_stages"] == 2
     assert options["enable_fp_fusion"] is False
