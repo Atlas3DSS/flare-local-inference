@@ -12,6 +12,10 @@ those files, launches the rank, forwards its output, and sends it SIGTERM if
 rank zero's connection closes. The rank process executes the model through
 Helios; the agent manages its files and process lifetime.
 
+[Fleet control](fleet.md) specifies the replacement for this shared-token agent
+and rank-zero launcher: paired node keys, an encrypted agent transport, and
+launching from a host that is not a rank.
+
 Model preparation runs through `ignition export` on rank zero and `ignition join`
 on each peer. Ignition loads weights, tunes kernels, captures graphs, and writes
 a signed package on rank zero. These preparation processes run directly on the

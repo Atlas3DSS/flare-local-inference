@@ -1,3 +1,7 @@
+[ ] Implement fleet control: node and controller keys, Noise agent transport,
+    pairing, grants, and `flare fleet run` from a non-member host, replacing the
+    shared-token agent and `flare run --hosts`. See fleet.md#delivery-plan.
+
 [ ] Restore preparation/serving RoCE proxy parity once FlashInfer main includes
     the sequence-limit guard and protocol verification additions.
     See roce-ring.md#protocol-model-and-runtime-checks.
