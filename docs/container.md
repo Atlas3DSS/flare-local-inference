@@ -56,6 +56,47 @@ uses plain progress logs, including when redirected. The script resolves the
 repository root from its own location, so it can run from any working directory.
 Docker selects the matching architecture when pulling the published tag.
 
+## Continuous publication
+
+The [serving-container workflow](../.github/workflows/container.yml) builds Linux
+AMD64 and ARM64 images on pushes to `main`. It can also be started manually with
+GitHub Actions' **Run workflow** control on `main`. A push containing several
+commits builds its tip commit, rather than a separate image for every intermediate
+commit. There is no path filter or pull-request trigger.
+
+The workflow first publishes a staging tag of the form
+`ghcr.io/local-inference-lab/flare:sha-COMMIT-RUN-ATTEMPT`. It checks the image
+index and runs `--version`, `run --help`, `agent --help`, and `fleet --help` for
+both architectures, without GPUs, networking, ports, or host mounts. These CPU
+checks validate executable startup and CLI parsing; they do not validate model
+serving. Only a successful build whose commit still matches remote `main` is
+promoted to `ghcr.io/local-inference-lab/flare:latest`. Promotion uses the tested
+index digest and verifies the resulting digest. A superseded build retains its
+staging tag. The workflow does not change `beta` or `release`.
+
+Register a dedicated, trusted Linux X64 self-hosted runner for the Flare
+repository with label `lil-flare-builder`. An existing runner registered only
+for another repository cannot accept this workflow. The runner needs `gh`,
+`jq`, `flock`, Docker, and a system-installed Buildx plugin. Its rootless Docker
+daemon must be reachable at
+`unix:///run/lil-flashinfer-docker/docker.sock`, with the containerd image store
+and ARM64 emulation configured. The workflow uses builder `default` to retain
+that daemon's BuildKit caches; it does not install emulation or create a builder.
+
+The runner user must be able to open
+`/var/lib/github-flashinfer/locks/cu134-sm120-build.lock`. The workflow holds this
+shared lock through building, smoke tests, and promotion, waiting up to six
+hours for other builds. GitHub Actions queues runs without canceling the active
+build; a remote `main` check prevents queued, superseded commits from replacing
+`latest`. Docker credentials live in a temporary per-run configuration directory
+and are removed when the build step exits.
+
+The workflow grants its `GITHUB_TOKEN` repository-content read access and package
+write access. The existing GHCR `flare` package must also grant the Flare
+repository Actions write access through inherited repository permissions or
+the package's **Manage Actions access** settings. Public pull access and an OCI
+source label alone do not establish that write permission.
+
 ## Run
 
 This example exposes host GPU 0 and mounts a directory containing a prepared
