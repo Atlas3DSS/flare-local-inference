@@ -605,8 +605,18 @@ class ForwardCache:
                 for name, forward in functions.items():
                     with _guard_code_cache(self.root / 'guards'):
                         compiled[name] = self._load(forward, paths[name], required=True)
-                    with warmup():
-                        compiled[name]()
+                    try:
+                        with warmup():
+                            compiled[name]()
+                    except BindingMismatch:
+                        # A cached forward from a catalog with another storage layout binds the same
+                        # signature to other aliases; it is recompiled in place and replaces the cached one.
+                        with _guard_code_cache(self.root / 'guards'):
+                            bound = BoundForward(aot_forward(forward, options=self.options), forward, False)
+                            with warmup():
+                                bound()
+                            bound.artifact.save_compiled_function(str(paths[name]))
+                        compiled[name] = bound
                     stage.update(advance=1)
         release_unused()
         return compiled
