@@ -462,6 +462,20 @@ fn status(failure: &Error) -> StatusCode {
     }
 }
 
+fn error_code(failure: &Error) -> &'static str {
+    match failure {
+        Error::Admission(AdmissionError::Capacity(_)) => "capacity_exhausted",
+        Error::Admission(AdmissionError::Unavailable(_)) => "server_unavailable",
+        Error::Admission(AdmissionError::Context(_)) => "context_length_exceeded",
+        Error::Admission(AdmissionError::Feature(_)) => "unsupported_feature",
+        Error::Admission(AdmissionError::Grammar(_)) => "invalid_grammar",
+        Error::Admission(AdmissionError::Image(_)) => "invalid_image",
+        Error::Admission(AdmissionError::Invalid(_)) => "invalid_request",
+        Error::Execution(ExecutionError::Capacity(_)) => "execution_capacity_exceeded",
+        _ => "server_error",
+    }
+}
+
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     left.len() == right.len()
         && left

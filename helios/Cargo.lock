@@ -614,6 +614,7 @@ dependencies = [
  "crossterm",
  "flate2",
  "futures-util",
+ "httpdate",
  "image-webp",
  "io-uring",
  "libc",

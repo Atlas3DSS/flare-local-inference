@@ -17,11 +17,12 @@ runtime-package = ["dep:serde", "dep:serde_json", "dep:prost", "dep:prost-build"
 frontend = ["dep:serde", "dep:tokenizers", "dep:minijinja", "dep:minijinja-contrib", "dep:serde_json", "dep:sha2", "dep:ryu"]
 images = ["frontend", "dep:png", "dep:turbojpeg", "dep:image-webp"]
 grammar = ["frontend", "dep:llguidance"]
-server = ["dep:serde", "images", "grammar", "dep:axum", "dep:tokio", "dep:async-stream", "dep:base64", "dep:ratatui", "dep:crossterm", "dep:futures-util", "dep:flate2", "dep:zstd", "dep:brotli"]
+server = ["dep:serde", "images", "grammar", "dep:axum", "dep:tokio", "dep:async-stream", "dep:base64", "dep:ratatui", "dep:crossterm", "dep:futures-util", "dep:flate2", "dep:zstd", "dep:brotli", "dep:httpdate"]
 # RoCEnante's RDMA proxy for ranks on separate hosts; links libibverbs.
 roce = ["dep:cc", "runtime-package"]
 
 [dependencies]
+httpdate = { version = "1.0", optional = true }
 futures-util = { version = "0.3", optional = true }
 flate2 = { version = "1", optional = true }
 zstd = { version = "0.13", optional = true }

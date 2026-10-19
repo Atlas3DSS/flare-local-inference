@@ -37,6 +37,16 @@ impl Protocol {
         let mut body = serde_json::json!({"error":{"type":kind,"message":message.to_string()}});
         if self == Self::Messages {
             body["type"] = "error".into();
+        } else {
+            body["error"]["param"] = Value::Null;
+            body["error"]["code"] = kind.into();
+        }
+        body
+    }
+    pub fn failure(self, failure: &crate::Error) -> Value {
+        let mut body = self.error(super::status(failure), failure);
+        if self != Self::Messages {
+            body["error"]["code"] = super::error_code(failure).into();
         }
         body
     }
