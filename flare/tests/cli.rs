@@ -8,6 +8,59 @@ fn flare(arguments: &[&str]) -> Output {
 }
 
 #[test]
+fn single_host_run_reaches_package_loading() {
+    let temp = tempfile::tempdir().unwrap();
+    let package = temp.path().join("missing.safetensors");
+    for options in [
+        vec![],
+        vec![
+            "--publisher-keys",
+            "development-publisher.json",
+            "--prefix-cache-disk",
+            temp.path().to_str().unwrap(),
+            "--kv-cache-limit",
+            "concurrency",
+            "--host",
+            "0.0.0.0",
+            "--served-model-name",
+            "qwen3.8-flash",
+        ],
+        vec!["--gpus", "0,1"],
+    ] {
+        let mut arguments = vec!["run", package.to_str().unwrap()];
+        arguments.extend(options);
+        let output = flare(&arguments);
+        assert!(!output.status.success(), "{arguments:?}: {output:?}");
+        let error = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            error.contains("cannot access package"),
+            "{arguments:?}: {error}"
+        );
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_rejects_multi_host_options_before_loading() {
+    for options in [
+        vec!["--rank", "0"],
+        vec!["--rank", "1"],
+        vec!["--rendezvous", "127.0.0.1:29630"],
+        vec!["--rank", "0", "--rendezvous", "127.0.0.1:29630"],
+    ] {
+        let mut arguments = vec!["run", "/nonexistent/model.safetensors"];
+        arguments.extend(options);
+        let output = flare(&arguments);
+        assert!(!output.status.success(), "{arguments:?}: {output:?}");
+        let error = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            error.contains("multi-host serving is not supported on Windows"),
+            "{arguments:?}: {error}"
+        );
+    }
+}
+
+#[test]
 fn help_exits_successfully_before_accessing_files() {
     for arguments in [
         vec!["--help"],

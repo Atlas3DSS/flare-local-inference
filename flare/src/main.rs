@@ -79,7 +79,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     #[cfg(windows)]
-    if !args.rank.is_some() || args.rendezvous.is_some() {
+    if args.rank.is_some() || args.rendezvous.is_some() {
         return Err("multi-host serving is not supported on Windows".into());
     }
     #[cfg(windows)]
