@@ -108,6 +108,8 @@ flare orbit status [--cluster NAME]
 flare orbit run [PACKAGE] [--cluster NAME | --nodes N,...] [--name GROUP] [--dry-run] [serving flags] [--detach]
 flare orbit attach | stop [--cluster NAME]
 flare orbit forget NODE                   remove a node from the orbit file
+flare orbit push PACKAGE --to NODE,...    stage and verify a package on nodes
+flare orbit packages [--cluster NAME]     what each node's cache holds
 flare orbit ls | dashboard [--cluster NAME]  groups on the cluster's nodes; their live metrics
 flare trust revoke FINGERPRINT
 ```

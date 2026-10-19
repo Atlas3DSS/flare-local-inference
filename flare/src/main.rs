@@ -217,6 +217,10 @@ fn orbit_command(args: cli::OrbitArgs) -> Result<(), orbit::Failure> {
             controller.stop(cluster.as_deref(), group.as_deref())
         }
         cli::OrbitCommand::Forget { node } => controller.forget(&node),
+        cli::OrbitCommand::Push(push) => {
+            controller.push(&push.package, &push.to, &mut push.run_args())
+        }
+        cli::OrbitCommand::Packages { cluster } => controller.packages(cluster.as_deref()),
         cli::OrbitCommand::Run(run) => controller.run(
             run.package.as_deref(),
             run.cluster.as_deref(),

@@ -1,6 +1,6 @@
 [ ] Orbit: mDNS discovery, the fabric check with a ring-order proposal,
-    and preparation through agents (PREPARE, `flare orbit prepare`). See
-    orbit.md#unimplemented-parts.
+    preparation through agents (PREPARE, `flare orbit prepare`), and
+    reconciliation (`flare orbit apply`). See orbit.md#unimplemented-parts.
 
 [ ] Restore preparation/serving RoCE proxy parity once FlashInfer main includes
     the sequence-limit guard and protocol verification additions.

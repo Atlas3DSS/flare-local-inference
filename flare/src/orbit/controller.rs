@@ -177,6 +177,9 @@ pub struct LaunchOptions {
     pub serving: Vec<String>,
     pub rank_zero: Vec<String>,
     pub roce_ring: bool,
+    /// Place and verify the package on the members without sending the executable or
+    /// starting ranks; the returned launch then has no rank sessions.
+    pub stage_only: bool,
 }
 
 /// A `flare orbit run` package argument.
@@ -897,6 +900,7 @@ impl Controller {
                 serving,
                 rank_zero: rank_zero.clone(),
                 roce_ring,
+                stage_only: false,
             },
         )?;
         eprintln!(
@@ -912,6 +916,118 @@ impl Controller {
             return Ok(());
         }
         self.supervise(launch)
+    }
+
+    /// `flare orbit push`: place a package's ranks on nodes, in rank order, or its complete
+    /// copy on one node, verifying it there, without starting anything.
+    pub fn push(
+        &self,
+        package: &str,
+        to: &[String],
+        run_args: &mut crate::cli::Run,
+    ) -> Result<(), Failure> {
+        let resolved = self.resolve_package(package, run_args, false)?;
+        let world = resolved.ranks.len();
+        let nodes: Vec<Node> = to
+            .iter()
+            .map(|name| {
+                self.orbit
+                    .node(name)
+                    .cloned()
+                    .ok_or_else(|| format!("the orbit file has no node named {name}").into())
+            })
+            .collect::<Result<_, Failure>>()?;
+        let name = Path::new(package)
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "package".into());
+        let options = LaunchOptions {
+            name: format!("push-{name}"),
+            placements: vec![Vec::new(); world],
+            stage_only: true,
+            ..LaunchOptions::default()
+        };
+        if nodes.len() == world {
+            let launch = self.launch("push", &nodes, &resolved, &[], &options)?;
+            eprintln!(
+                "{} staged on {}",
+                launch.grant.name,
+                nodes
+                    .iter()
+                    .enumerate()
+                    .map(|(rank, n)| format!("{} (rank {rank})", n.name))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            return Ok(());
+        }
+        // Fewer or more nodes than ranks: each listed node gets the complete package, which
+        // serves rank zero of a multi-host package or a single-host package entirely.
+        let complete = ResolvedPackage {
+            ranks: vec![
+                resolved
+                    .files
+                    .iter()
+                    .map(|f| RankFile {
+                        name: f.name.clone(),
+                        size: f.size,
+                        ranges: vec![(0, f.size)],
+                    })
+                    .collect(),
+            ],
+            ..resolved.clone()
+        };
+        let options = LaunchOptions {
+            placements: vec![Vec::new()],
+            ..options
+        };
+        for node in &nodes {
+            if let Holder::Node { node: holder, .. } = &resolved.holder
+                && holder.public_key == node.public_key
+            {
+                eprintln!("{}: holds the package", node.name);
+                continue;
+            }
+            self.launch("push", std::slice::from_ref(node), &complete, &[], &options)?;
+            eprintln!("{}: complete package staged", node.name);
+        }
+        Ok(())
+    }
+
+    /// Print what every node of a cluster holds in its package cache.
+    pub fn packages(&self, cluster: Option<&str>) -> Result<(), Failure> {
+        let (name, nodes) = self.cluster(cluster)?;
+        let results = parallel(&nodes, |_, node| self.query_status(node, None));
+        println!("cluster {name}");
+        println!(
+            "{:<10}  {:<52}  {:>5}  {:>10}  STATE",
+            "NODE", "PACKAGE", "FILES", "ON DISK"
+        );
+        for (node, result) in nodes.iter().zip(results) {
+            match result {
+                Ok(status) if status.packages.is_empty() => {
+                    println!("{:<10}  -", node.name)
+                }
+                Ok(status) => {
+                    for package in &status.packages {
+                        println!(
+                            "{:<10}  {:<52}  {:>5}  {:>10}  {}",
+                            node.name,
+                            package.name,
+                            package.files.len(),
+                            gib(package.bytes),
+                            if package.verified {
+                                "verified"
+                            } else {
+                                "unverified"
+                            }
+                        );
+                    }
+                }
+                Err(error) => println!("{:<10}  unreachable: {error}", node.name),
+            }
+        }
+        Ok(())
     }
 
     /// Resolve and verify a package reference, obtaining publisher acceptance at this terminal,
@@ -1055,7 +1171,11 @@ impl Controller {
         let (mut sessions, statuses): (Vec<Session>, Vec<NodeStatus>) =
             all(opened)?.into_iter().unzip();
         let placements = &options.placements;
-        for (rank, placement) in placements.iter().enumerate() {
+        for (rank, placement) in placements
+            .iter()
+            .enumerate()
+            .filter(|_| !options.stage_only)
+        {
             for uuid in placement {
                 match statuses[rank].gpus.iter().find(|g| &g.uuid == uuid) {
                     Some(gpu) => {
@@ -1137,7 +1257,8 @@ impl Controller {
         all(parallel_mut(&mut sessions, |rank, session| {
             (|| -> Result<(), Failure> {
                 let mut needed = 0;
-                let send_binary = !have(session, "binary", &binary, executable.len() as u64)?;
+                let send_binary = !options.stage_only
+                    && !have(session, "binary", &binary, executable.len() as u64)?;
                 if send_binary {
                     needed += executable.len() as u64;
                 }
@@ -1215,6 +1336,12 @@ impl Controller {
             .map_err(|e| at(&nodes[rank].name, e))
         }))?;
 
+        if options.stage_only {
+            return Ok(Launch {
+                grant,
+                ranks: Vec::new(),
+            });
+        }
         // Transfers can outlast a grant's launch window, so RUN carries a grant issued now.
         grant.issued = now();
         grant.expires = grant.issued + GRANT_SECONDS;
@@ -2226,6 +2353,7 @@ mod tests {
                     serving: vec![],
                     rank_zero: vec!["--port".into(), "8001".into()],
                     roce_ring: true,
+                    stage_only: false,
                 },
             )
             .unwrap();
@@ -2272,6 +2400,46 @@ mod tests {
         let binary = cache::binary_name(script.as_bytes());
         assert!(zero.agent.cache.join("bin").join(&binary).is_file());
         assert!(one.agent.cache.join("bin").join(&binary).is_file());
+
+        // Staging places and verifies the package without executables or ranks.
+        let staged = ResolvedPackage {
+            export: "export2".into(),
+            ..package.clone()
+        };
+        let launch = controller
+            .launch(
+                "push",
+                &nodes,
+                &staged,
+                &[],
+                &LaunchOptions {
+                    name: "push-model".into(),
+                    placements: vec![vec![], vec![]],
+                    stage_only: true,
+                    ..LaunchOptions::default()
+                },
+            )
+            .unwrap();
+        assert!(launch.ranks.is_empty());
+        assert_eq!(launch.grant.name, "push-model");
+        assert_eq!(
+            fs::read(zero.agent.cache.join(format!(
+                "packages/{}/model.safetensors",
+                launch.grant.complete_directory()
+            )))
+            .unwrap(),
+            bytes
+        );
+        let staged_rank = one.agent.cache.join(format!(
+            "packages/{}/model.safetensors",
+            launch.grant.cache_directory(1)
+        ));
+        assert_eq!(
+            fs::read(&staged_rank).unwrap()[40_000..48_000],
+            bytes[40_000..48_000]
+        );
+        assert!(staged_rank.with_file_name(".verified").is_file());
+        assert_eq!(one.verified.lock().unwrap().len(), 2);
 
         // A second launch is refused while a group runs; after exit it reuses the cache.
         let again = controller

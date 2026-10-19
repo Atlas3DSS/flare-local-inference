@@ -173,6 +173,50 @@ pub enum OrbitCommand {
         #[arg(value_name = "NODE")]
         node: String,
     },
+    /// Place a package on nodes and verify it there without starting it.
+    Push(Box<OrbitPush>),
+    /// List what every node's package cache holds.
+    Packages {
+        #[arg(long, value_name = "NAME")]
+        cluster: Option<String>,
+    },
+}
+
+#[derive(Debug, Args)]
+pub struct OrbitPush {
+    /// A local package path or NODE:/absolute/path on a node.
+    #[arg(value_name = "PACKAGE")]
+    pub package: String,
+
+    /// Target nodes: one per rank in rank order, or any number to receive the complete package.
+    #[arg(
+        long,
+        value_name = "NODE[,NODE...]",
+        value_delimiter = ',',
+        required = true
+    )]
+    pub to: Vec<String>,
+
+    #[command(flatten)]
+    pub serving: ServingOptions,
+}
+
+impl OrbitPush {
+    /// What package verification and publisher acceptance need, as `flare run` takes them.
+    pub fn run_args(&self) -> Run {
+        Run {
+            package: PathBuf::from(&self.package),
+            host: "127.0.0.1".parse().unwrap(),
+            port: 8000,
+            served_model_name: None,
+            roce_ring: false,
+            rendezvous: None,
+            rank: None,
+            api_key_file: None,
+            scheduler_policy: "balanced".into(),
+            serving: self.serving.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]

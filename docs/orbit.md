@@ -203,7 +203,7 @@ with a message; an ERROR closes the session.
 | HAVE | Controller or node to node | Kind, name, size | Whether the cache holds the entry at that size |
 | PUT | Controller to node | Kind, name, size, optional ranges, then bytes | Stores an executable or package bytes at their offsets in a sparse file of the package's length |
 | CONTROLLERS | Controller to node | Signed controller-set record | Applies a higher revision signed by a current member |
-| TRANSFER | Controller to node | Grant, publisher profile, source node, cache directory, files with sizes and ranges | The node fetches those ranges from the source node into its cache, verifies the directory's stored data unless it verified before, and replies when done |
+| TRANSFER | Controller to node | Grant, publisher profile, source node, cache directory, files with sizes and ranges | The node fetches those ranges from the source node into its cache, verifies the directory's stored data unless it verified before, and replies when done; a push's grant authorizes transfers alone |
 | FETCH | Node to node | Grant, file name, ranges | Streams the file's bytes to a node the grant names, from the package the node holds or its cache |
 | GET | Controller to node | Absolute path, offset, length | Streams up to 256 MiB of a node-local file, used to mirror a package's header and index |
 | STAT | Controller to node | Absolute path | The package file's size and its companions' names and sizes |
@@ -460,6 +460,19 @@ group, so two groups sharing a node's GPUs divide memory as the operator's
 serving options say, and it does not check ring adjacency, so a ring package
 takes the listed order.
 
+## Prestaging
+
+`flare orbit push PACKAGE --to NODE...` places a package on nodes ahead of
+any launch and verifies it there, under a grant whose group starts nothing
+and sends no executable. With one node per rank, each node receives its
+rank's bytes in the listed order, as a launch would place them; with any
+other number of nodes, each receives the complete package, which serves rank
+zero of a multi-host package or a single-host package entirely. A node that
+holds the package outside its cache is skipped. `flare orbit packages` lists
+every node's cache directories with their file counts, bytes on disk and
+verification state. A launch whose ranks are already staged and verified
+starts without transfers.
+
 ## Metrics and the dashboard
 
 A sampler thread in the agent reads the GPUs once a second and, for every
@@ -538,6 +551,8 @@ serves it.
 | `flare orbit dashboard [--cluster NAME]` | Controller | The serving process's live metrics dashboard for every group and GPU of the cluster |
 | `flare orbit attach [GROUP]` / `stop [GROUP]` / `status --cluster NAME` | Controller | Operates running groups, or the one named |
 | `flare orbit forget NODE` | Controller | Removes a node from the orbit file |
+| `flare orbit push PACKAGE --to NODE,...` | Controller | Places and verifies a package on nodes without starting it |
+| `flare orbit packages [--cluster NAME]` | Controller | Every node's cache directories with their verification state |
 
 `flare run --rank R --rendezvous ADDR` remains for operator-managed starts on
 hosts that already hold the executable and package. `flare run --hosts`,
@@ -589,8 +604,7 @@ dashboard, `flare agent install` and `reset`, and `flare orbit pair`,
 `forget` exist and are validated by unit tests and by serving a four-rank
 package on four DGX Sparks from a controller that is not a rank. The
 following parts of this specification are not in the tree, and the
-[proposal](#proposal-prestaging-and-reconciliation) describes prestaging and
-reconciliation:
+[proposal](#proposal-reconciliation) describes reconciliation:
 
 1. **Discovery and fabric check.** mDNS advertisement, `flare orbit discover`,
    fabric endpoints in STATUS, the rail check, and the ring-order proposal.
@@ -602,19 +616,10 @@ reconciliation:
    agents whose rank signatures verify and which serves identically to a manual
    export.
 
-## Proposal: prestaging and reconciliation
+## Proposal: reconciliation
 
 This section proposes the next form of orbit. Nothing in it is in the
 tree.
-
-### Prestaging
-
-`flare orbit push PACKAGE --to NODE...` places a package's ranks, or complete
-copies, on nodes ahead of any launch and verifies them there, under a grant
-whose group runs nothing. `flare orbit packages` lists what every node holds
-and whether it verified. A re-composition whose packages are already staged
-starts in the seconds a verified cache takes, not in the hours a transfer and
-verification take.
 
 ### Reconciliation
 
@@ -630,23 +635,20 @@ stay available by hand.
 
 | Command | Effect |
 | --- | --- |
-| `flare orbit push PACKAGE --to NODE...` | Stages and verifies a package without starting it |
-| `flare orbit packages` | What each node's cache holds |
 | `flare orbit apply [--dry-run]` | Reconciles the orbit file's groups with the agents |
 
 ### Unchanged
 
 Identity, the session transport, pairing, the controller set, grants as the
 authority for every launch and transfer, verification of fetched bytes in the
-agent, placement, the sampler and the dashboard, and one rank zero per group
+agent, placement, prestaging, the sampler and the dashboard, and one rank zero per group
 chosen by placement. There is no scheduler service, no lease, and no
 consensus; two controllers driving one pool see the same actual state from
 the agents and the same desired state when they share a orbit file.
 
 ### Order of work
 
-1. `push` and `packages`.
-2. `apply` with plan and dry-run.
+1. `apply` with plan and dry-run.
 
 ## Limitations
 
