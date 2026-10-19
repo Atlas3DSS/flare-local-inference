@@ -28,7 +28,7 @@ def disposable_ranges(scratch, arena, forwards):
             target, proposals, verify, _ = forward.operations
             for distribution in (target, *proposals):
                 values.extend(getattr(distribution, name) for name in (
-                    "scores", "probabilities", "counts", "maximum", "valid",
+                    "scores", "probabilities", "maximum", "valid",
                     "packed_top_k", "packed_top_p"))
             values.extend(getattr(verify, name) for name in (
                 "safe_draft_probs", "safe_target_probs", "safe_ids", "seed_bits", "offset",
