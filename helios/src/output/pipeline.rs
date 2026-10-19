@@ -20,8 +20,8 @@ pub enum OutputPipeline {
     FunctionTags(TaggedOutput<super::chatml::FunctionTags<true>>),
     CompactFunctionTags(TaggedOutput<super::chatml::FunctionTags<false>>),
     ArgumentTags(TaggedOutput<super::argument_tags::ArgumentTags>),
-    Dsml(TaggedOutput<super::dsml::Dsml<false>>),
-    SpacedDsml(TaggedOutput<super::dsml::Dsml<true>>),
+    Dsml(super::dsml::DsmlOutput<false>),
+    SpacedDsml(super::dsml::DsmlOutput<true>),
     Xtml(super::xtml::XtmlOutput),
     Text(TaggedOutput<PlainText>),
 }
@@ -70,10 +70,10 @@ impl OutputPipeline {
                 Self::ArgumentTags(TaggedOutput::new(config.content).with_reasoning(reasoning))
             }
             Some((ToolParserKind::Dsml, _, " ")) => {
-                Self::SpacedDsml(TaggedOutput::new(config.content).with_reasoning(reasoning))
+                Self::SpacedDsml(super::dsml::DsmlOutput::new(config.content))
             }
             Some((ToolParserKind::Dsml, _, _)) => {
-                Self::Dsml(TaggedOutput::new(config.content).with_reasoning(reasoning))
+                Self::Dsml(super::dsml::DsmlOutput::new(config.content))
             }
             Some((ToolParserKind::Xtml, _, _)) => Self::Xtml(super::xtml::XtmlOutput::new(
                 config.content,
@@ -104,10 +104,10 @@ impl OutputPipeline {
                 )
             }
             Some((ToolParserKind::Dsml, _, " ")) => {
-                TaggedOutput::<super::dsml::Dsml<true>>::grammar_envelope(&config.content)
+                super::dsml::DsmlOutput::<true>::grammar_envelope(&config.content)
             }
             Some((ToolParserKind::Dsml, _, _)) => {
-                TaggedOutput::<super::dsml::Dsml<false>>::grammar_envelope(&config.content)
+                super::dsml::DsmlOutput::<false>::grammar_envelope(&config.content)
             }
             Some((ToolParserKind::Xtml, _, _)) => Some(crate::grammar::OutputEnvelope {
                 reasoning_end: config

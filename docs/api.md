@@ -95,7 +95,17 @@ the same accumulated output for buffered responses and SSE. Tool arguments are
 JSON objects, bounded to 8 MiB. Existing model parsers buffer tool envelopes until
 they are complete, so argument events do not imply incremental generation of an
 unfinished call. Truncated tool envelopes are omitted and the response reports
-its output limit; malformed envelopes at natural completion are errors.
+its output limit; recognized but incomplete calls at natural completion are errors.
+
+DeepSeek reasoning and both DSML tool syntaxes use the pinned official
+`deepseek-recipe` state machine. Helios adapts its actions into the same neutral
+events, validates registered tool names and JSON objects with nonempty, unique
+argument names, and publishes each call when its arguments complete. Closing the
+outer calls block ends parsed output; subsequent generated text is discarded.
+The official parser owns markup recognition, including its tolerance of omitted
+or partial tags. Structured answers become verbatim when ordinary answer content
+begins, preserving scalar JSON, Lark output, and markup inside string values.
+Shared runtime handling owns token accounting, stop filtering, and termination.
 
 Qwen treats `<tool_call>` as an implicit end to reasoning. Function-tag calls
 complete at `</function>` and accept omitted outer tool tags in answer content.

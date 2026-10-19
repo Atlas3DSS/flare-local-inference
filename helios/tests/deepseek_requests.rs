@@ -263,9 +263,11 @@ fn required_tools_in_chat_mode_start_inside_the_dsml_envelope() {
                 text: "{}".into()
             })
         );
-        assert!(events.contains(&flare_helios::output::Event::Content(
-            "{\"ok\":true}".into()
-        )));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, flare_helios::output::Event::Content(_)))
+        );
     }
 }
 

@@ -89,4 +89,5 @@ pub trait ModelOutput {
     fn finish(&mut self, cause: Termination) -> Result<Vec<Event>>;
 }
 
+#[cfg(feature = "server")]
 pub(crate) mod dsml;
