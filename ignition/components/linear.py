@@ -14,6 +14,7 @@ from ignition.preparation.fixtures import bf16_gemv as bf16_fixtures
 from ignition.preparation.fixtures import blockscaled_gemm as gemm_fixtures
 from ignition.preparation.fixtures.projection import input_factory
 from ignition.preparation.scratch import ScratchArena, prime_owners, scratch_storage
+from ignition.preparation.tensor_metadata import record_numeric_tensor
 from ignition.preparation.tuning import declare, register_finalizer
 
 
@@ -30,6 +31,9 @@ class UnquantizedProjection:
     ) -> None:
         if any(t.dtype not in (torch.bfloat16, torch.float32) for t in (source, weight, output)):
             raise TypeError("unquantized projections require BF16 or FP32 operands")
+        for tensor in (weight, bias):
+            if tensor is not None:
+                record_numeric_tensor(tensor)
         # FlashInfer's GEMMs read and write contiguous rows; column slices of wider rows keep b12x's GEMV.
         rows = source.numel() // source.shape[-1]
         self.dense = (sm103_projection.is_sm103(source.device) and bias is None
@@ -82,7 +86,7 @@ class QuantizedProjection:
         workspace: ScratchArena | torch.Tensor | None = None,
     ) -> None:
         from b12x.gemm.blockscaled._a16 import NVFP4LinearWeight, _overlap, _weight_parts
-        from b12x.gemm.blockscaled._linear import _validate_bias
+        from b12x.gemm.blockscaled._linear import MXFP8LinearWeight, _validate_bias
 
         # Address-dependent bias checks run before metadata-only forward compilation.
         _validate_bias(bias, out_features=weight.out_features, out_dtype=output.dtype, device=source.device)
@@ -116,6 +120,14 @@ class QuantizedProjection:
             # Operators receive UE8M0 scales as bytes, as b12x's own packed operators do.
             scales = scales.view(torch.uint8)
         self.parts = values, scales, gain
+        # Packing can replace the checkpoint storage, including integer payloads
+        # and byte-encoded scales. Their bits must not become export dependencies.
+        planes = (*self.parts, self.activation_scale)
+        if isinstance(weight, MXFP8LinearWeight):
+            planes += (weight.weight.scale_rows, weight.weight.values_tiled)
+        for tensor in planes:
+            if tensor is not None:
+                record_numeric_tensor(tensor)
 
         def selected_workspace(nbytes=None):
             if workspace is None:
@@ -197,6 +209,8 @@ class BatchedQuantizedProjection:
         if source.ndim != 3 or output.ndim != 3 or source.shape[:2] != output.shape[:2]:
             raise ValueError("batched projections require matching batch and row dimensions")
         self.weight, self.output, self.major = weight, output, major
+        for tensor in weight:
+            record_numeric_tensor(tensor)
         self.expanded = None
         if sm103_projection.is_sm103(source.device):
             if major not in ("n", "k"):

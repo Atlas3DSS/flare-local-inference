@@ -7,6 +7,7 @@ from b12x.gemm import blockscaled
 from b12x.preparation import PreparedCall, plan_from_handle
 from flashinfer.quantization import per_token_group_quant_8bit
 
+from ignition.preparation.tensor_metadata import record_numeric_tensor
 from ignition.preparation.tuning import declare
 
 
@@ -37,6 +38,8 @@ class BlockFP8Projection:
                 or not weight.values.is_contiguous() or not weight.scales.is_contiguous()):
             raise ValueError("block-FP8 projection requires BF16 activations, E4M3 weights and FP32 block-128 scales")
         self.weight = weight
+        for tensor in (weight.values, weight.scales):
+            record_numeric_tensor(tensor)
         self.output = output
         if output is not None and (output.shape != (source.shape[0], n) or output.dtype != source.dtype
                                    or output.device != source.device):

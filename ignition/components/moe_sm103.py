@@ -31,6 +31,7 @@ from b12x.preparation import PreparedCall
 from b12x.preparation.types import plan_from_handle, require_prepared
 
 from ignition.preparation.scratch import ScratchArena, planned_scratch, prime_owners
+from ignition.preparation.tensor_metadata import record_numeric_tensor
 from ignition.preparation.tuning import benchmark_resource, declare, register_finalizer
 
 from .native_operator import native_contract, native_plan
@@ -611,6 +612,12 @@ class Sm103RoutedExperts:
             raise ValueError("SM103 routed experts do not provide A4 prefill for A16 experts")
         if source.ndim != 2 or source.shape[1] != experts.hidden_size or ids.ndim != 2:
             raise ValueError("SM103 routed experts require [tokens, hidden] source and [tokens, top_k] routes")
+        for field in ("w13", "w13_scale", "w2", "w2_scale", "w13_alpha", "w2_alpha",
+                      "input_global_scale", "output1_scale", "output1_gate_scale", "output2_scale",
+                      "gate_alpha", "gate_beta", "clamp_limit"):
+            tensor = getattr(experts, field, None)
+            if tensor is not None:
+                record_numeric_tensor(tensor)
         self.source, self.output, self.scratch = source, output, None
         self.plan = plan_routed_experts(experts, tokens=source.shape[0], top_k=ids.shape[1])
         plan = self.plan

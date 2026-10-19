@@ -159,6 +159,66 @@ def test_resized_checkpoint_storage_invalidates_numeric_metadata():
 
 @pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
                     reason="explicit CUDA assignment required")
+@pytest.mark.parametrize("codec", ["iq2_xxs", "q8_0"])
+@pytest.mark.parametrize("kind", ["projection", "experts"])
+def test_repacked_weight_planes_remain_numeric_leaves(codec, kind):
+    from b12x._lib.quant.block_codec import block_codec
+    from b12x.gemm.blockscaled import pack_weight
+    from b12x.moe import fused_moe
+    from ignition.components.linear import QuantizedProjection
+    from ignition.components.moe import PreparedRoutedExperts
+    from ignition.preparation.tensor_metadata import record_numeric_tensor
+    from ignition.preparation.tuning import RecordedPreparationSession
+
+    spec = block_codec(codec)
+    source = torch.zeros((1, 256), dtype=torch.bfloat16, device="cuda")
+    raw = torch.zeros((2, 256, 256 // spec.block_weights, spec.block_bytes),
+                      dtype=torch.uint8, device=source.device)
+    raw[..., :2] = torch.full((*raw.shape[:-1], 1), .003, dtype=torch.float16,
+                             device=source.device).view(torch.uint8)
+    session = RecordedPreparationSession(device=source.device, checkpoint="synthetic",
+        workload_schema="numeric-weight-storage", numerical_policy="exact")
+    with NumericStorage() as numeric:
+        # Direct checkpoint copies classify the source; b12x replaces its storage.
+        record_numeric_tensor(raw)
+        if kind == "projection":
+            weight = pack_weight(raw[0], recipe=codec)
+            planes = (weight.values, weight.metadata)
+            QuantizedProjection(source, weight, torch.empty_like(source), session=session,
+                                name="projection", activation_mode="a16")
+        else:
+            plan = fused_moe.plan_weights(source=fused_moe.PackedSource(format=codec),
+                activation=fused_moe.ActivationSpec(mode="a16", nonlinearity="relu2", io_dtype=torch.bfloat16),
+                geometry=fused_moe.MoEGeometry(num_experts=2, hidden_size=256, intermediate_size=256))
+            experts = fused_moe.prepare_weights(plan=plan,
+                weights=fused_moe.BlockQuantWeights(raw, raw, codec=codec))
+            planes = tuple(getattr(experts._impl, name) for name in
+                           ("w1_fp4", "w2_fp4", "w1_blockscale", "w2_blockscale"))
+            PreparedRoutedExperts(source, experts,
+                torch.zeros((1, 1), dtype=torch.int32, device=source.device),
+                torch.ones((1, 1), device=source.device), torch.empty_like(source),
+                session=session, name="experts")
+    assert all(plane.untyped_storage().data_ptr() != raw.untyped_storage().data_ptr() for plane in planes)
+    del raw
+    gc.collect()
+    unrelated = Allocation("unrelated", 0xee9f4a000000, 10 * 1024 * 1024)
+    for plane in planes:
+        owner = Allocation("weight", plane.data_ptr(), plane.nbytes)
+        # The Windows-failing package had this unaligned address-shaped numeric word.
+        data = b"\0" * 6 + struct.pack("<Q", unrelated.address + 0x31451f) + b"\0" * 2
+        payload = plane.view(torch.uint8).reshape(-1)[:len(data)]
+        payload.copy_(torch.tensor(list(data), dtype=torch.uint8, device=plane.device))
+        data = payload.cpu().numpy().tobytes()
+        raw_scan = Reachability([owner, unrelated], roots=("weight",))
+        raw_scan.contents(owner, 0, data)
+        assert raw_scan.reached == {"weight", "unrelated"}
+        typed_scan = Reachability([owner, unrelated], roots=("weight",), numeric=numeric.ranges())
+        typed_scan.contents(owner, 0, data)
+        assert typed_scan.reached == {"weight"}
+
+
+@pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
+                    reason="explicit CUDA assignment required")
 def test_triton_launch_metadata_distinguishes_scalar_values_from_pointers():
     import triton
     import triton.language as tl
