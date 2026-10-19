@@ -13,6 +13,7 @@ from ignition.components.mhc import MHCWeights, MHCScratch, PreparedMHC, Prepare
 from ignition.components.mlp import MLPScratch, PreparedMLP
 from ignition.components.moe import RouterScratch, PreparedRouter, PreparedRoutedExperts
 from ignition.components.vocabulary import PreparedVocabularyProjection
+from ignition.components.window_indices import PreparedWindowIndices
 from ignition.preparation.scratch import GraphBufferPool, GraphBuffers
 
 from .attention import AttentionScratch, PreparedAttention, PreparedGlobalKV, Rotary, normalize
@@ -93,8 +94,9 @@ class PreparedDecoderBoundary:
     """Produce complete global KV, then gather the decoder's bounded replay rows."""
 
     def __init__(self, index, weights, source, target, packing, pool, rotary, *, carry,
-                 session, name, workspace, buffers=None):
+                 session, name, workspace, window_metadata, buffers=None):
         self.packing = packing
+        self.window_metadata = window_metadata
         self.incoming = ((source.mlp_output, source.ffn_hc.residual, source.ffn_hc.post, source.ffn_hc.comb)
                          if carry else (source.residual,))
         text = pool.config.text
@@ -111,6 +113,8 @@ class PreparedDecoderBoundary:
 
     def __call__(self, indexer):
         self.packing.begin()
+        # Packed positions and replay bounds must precede their shared addresses.
+        self.window_metadata()
         self.mhc(*self.incoming)
         self.global_kv(self.normalized, indexer)
         for source, output in self.rows:
@@ -120,7 +124,8 @@ class PreparedDecoderBoundary:
 class PreparedLayer:
     def __init__(self, index, weights, tables, scratch, metadata, pool, rotary, *, shard, mode,
                  runtime, coordinator, session, name, workspace, carry, defer_post,
-                 boundary=None, replay_start=None, window_staging=None, mla_compute_mode="auto", buffers=None):
+                 boundary=None, replay_start=None, window_staging=None, mla_compute_mode="auto", buffers=None,
+                 window_metadata=None):
         s, text = scratch, pool.config.text
         self.scratch, self.carry = s, carry
         self.metadata = metadata
@@ -143,7 +148,8 @@ class PreparedLayer:
         self.attention = PreparedAttention(index, weights.attention, s.attention_hc.normalized, s.attention,
             metadata, pool, rotary, mode=mode, world=shard.world_size,
             session=session, name=name + ".attention", workspace=workspace, replay_start=replay_start,
-            window_staging=window_staging, mla_compute_mode=mla_compute_mode, buffers=buffers)
+            window_staging=window_staging, mla_compute_mode=mla_compute_mode, buffers=buffers,
+            window_metadata=window_metadata)
         self.attention_reduce = PreparedAllReduce(s.attention.output, s.attention_output, runtime=runtime,
             coordinator=coordinator, session=session, name=name + ".attention_reduce")
         self.ffn_hc = PreparedMHC((s.attention_output, s.attention_hc.residual, s.attention_hc.post, s.attention_hc.comb),
@@ -237,6 +243,17 @@ class PreparedDecoder:
                 metadata.state_rows, metadata.starts,
                 token_capacity=metadata.max_query_tokens,
                 window_tokens=128, record_bytes=528, staging=window_staging)
+        # These addresses stay live through every layer and precede reusable layer buffers.
+        self.window_metadata = PreparedWindowIndices(metadata, mode=mode,
+            tokens=metadata.positions.numel(),
+            page_size=128 if mode == "decode" else 128 + metadata.max_query_tokens, width=128,
+            buffers=buffers)
+        self.suffix_window_metadata = None
+        if self.packing is not None:
+            self.suffix_window_metadata = PreparedWindowIndices(self.output_metadata, mode=mode,
+                tokens=self.output_metadata.positions.numel(),
+                page_size=128 + self.output_metadata.max_query_tokens, width=128,
+                replay_start=self.packing.replay_start, buffers=buffers)
         self.layers, carry = [], False
         layer_cursors = []
         for index, layer in enumerate(weights.layers):
@@ -251,7 +268,7 @@ class PreparedDecoder:
                 if index == decoder_start:
                     boundary = PreparedDecoderBoundary(index, layer, scratch, layer_scratch, self.packing,
                         pool, self.rotary, carry=carry, session=session, name=f"{name}.layer{index}", workspace=workspace,
-                        buffers=layer_buffers)
+                        buffers=layer_buffers, window_metadata=self.suffix_window_metadata)
                     layer = replace(layer, attention={key: value for key, value in layer.attention.items()
                                                       if key not in ("compressor", "index_k", "index_norm")})
             defer = (index + 1 < len(weights.layers) and weights.layers[index + 1].engram is None
@@ -261,7 +278,8 @@ class PreparedDecoder:
                 coordinator=coordinator, session=session, name=f"{name}.layer{index}", workspace=workspace,
                 carry=carry, defer_post=defer, boundary=boundary, replay_start=replay_start,
                 window_staging=None if self.window_commit is None else self.window_commit.staging[index],
-                mla_compute_mode=mla_compute_mode, buffers=layer_buffers))
+                mla_compute_mode=mla_compute_mode, buffers=layer_buffers,
+                window_metadata=(self.window_metadata if layer_metadata is metadata else self.suffix_window_metadata)))
             carry = defer
         buffers.join(*layer_cursors)
         self.compact_head = scratch.hidden.shape[0] > self.output_metadata.token_ids.numel()
@@ -282,6 +300,7 @@ class PreparedDecoder:
         s.residual.copy_(s.embedding[:, None, :])
         s.pre_mix.zero_()
         s.pre_mix[:, 0].fill_(1)
+        self.window_metadata()
         for index, layer in enumerate(self.layers):
             if index in self.aux_layers:
                 column = self.aux_layers.index(index)

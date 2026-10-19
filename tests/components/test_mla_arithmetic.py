@@ -1,7 +1,6 @@
 """Arithmetic metadata reaches prepared MLA without changing its cache ABI."""
 
 from types import SimpleNamespace
-import inspect
 
 import pytest
 import torch
@@ -9,16 +8,16 @@ import torch
 from ignition.components import compressed_mla
 
 
-def test_auto_omits_selector_for_flashinfer_without_the_constraint_api(monkeypatch):
+def test_auto_passes_selector_to_the_constraint_api(monkeypatch):
     calls = []
 
-    def legacy_caps(*, device, num_q_heads, max_q_rows, max_width, swa_width, indexed_width,
+    def recording_caps(*, device, num_q_heads, max_q_rows, max_width, swa_width, indexed_width,
                     max_page_table_width, swa_page_size, indexed_page_size, cache_format, mode,
-                    decode_row_capacity):
+                    decode_row_capacity, compute_mode):
         calls.append(locals())
         return object()
 
-    monkeypatch.setattr(compressed_mla.mla, "Caps", legacy_caps)
+    monkeypatch.setattr(compressed_mla.mla, "Caps", recording_caps)
     monkeypatch.setattr(compressed_mla.mla, "plan", lambda *args, **kwargs: SimpleNamespace(request=lambda **kwargs: object()))
     monkeypatch.setattr(compressed_mla, "declare", lambda *args, **kwargs: None)
     monkeypatch.setattr(compressed_mla, "register_finalizer", lambda *args, **kwargs: None)
@@ -30,14 +29,11 @@ def test_auto_omits_selector_for_flashinfer_without_the_constraint_api(monkeypat
         session=object(), name="attention", workspace=object())
     assert calls[0]["cache_format"] == "deepseek_v41"
     assert operation.window is cache and cache.dtype == torch.uint8
-    with pytest.raises(ValueError, match="Caps.v41_compute_mode preparation API"):
-        compressed_mla.validate_mla_compute_mode("bf16")
+    assert calls[0]["compute_mode"] == "auto"
 
 
 @pytest.mark.parametrize("mode", ["decode", "extend"])
 def test_explicit_bf16_is_operator_metadata_and_has_no_complete_override(monkeypatch, mode):
-    if "v41_compute_mode" not in inspect.signature(compressed_mla.mla.Caps).parameters:
-        pytest.skip("requires the arithmetic-constraint preparation API")
     monkeypatch.setattr(compressed_mla, "declare", lambda *args, **kwargs: None)
     monkeypatch.setattr(compressed_mla, "register_finalizer", lambda *args, **kwargs: None)
     q = torch.empty((3, 16, 512), dtype=torch.bfloat16)
@@ -46,7 +42,7 @@ def test_explicit_bf16_is_operator_metadata_and_has_no_complete_override(monkeyp
     lengths = torch.empty(3, dtype=torch.int32)
     operation = compressed_mla.PreparedCompressedMLA(q, cache, indices, lengths, None, torch.empty_like(q),
         session=object(), name="attention", workspace=object(), compute_mode="bf16", mode=mode)
-    assert operation.plan.query.v41_compute_mode == "bf16"
+    assert operation.plan.query.compute_mode == "bf16"
     assert operation.plan.override is None
     assert operation.window is cache and operation.plan.query.kv_dtype == "uint8"
 

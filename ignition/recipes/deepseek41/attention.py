@@ -14,6 +14,7 @@ from ignition.components.linear import QuantizedProjection, UnquantizedProjectio
 from ignition.components.mxfp4_indexer import PreparedMXFP4Indexer
 from ignition.components.rms_norm import PreparedRMSNorm
 from ignition.components.state import gather_rows, save_hidden
+from ignition.components.window_indices import PreparedWindowIndices
 from ignition.preparation.tuning import declare, register_finalizer
 
 from ignition.components.rotary import CompressedRotary as Rotary
@@ -33,7 +34,6 @@ def normalize(source, weight, out, eps):
 @dataclass(frozen=True)
 class AttentionScratch:
     projected: torch.Tensor
-    norm_input: torch.Tensor
     query_low: torch.Tensor
     query: torch.Tensor
     window_values: torch.Tensor
@@ -55,7 +55,7 @@ class AttentionScratch:
         def zeros(shape, dtype=torch.bfloat16):
             return (torch.zeros(shape, dtype=dtype, device=device) if buffers is None
                     else buffers.zeros(shape, dtype))
-        return cls(zeros((tokens, 1792)), zeros((tokens, 1280)),
+        return cls(zeros((tokens, 1792)),
             zeros((tokens, 1280)), zeros((tokens, 64 // world, 512)),
             zeros((tokens, 512)), zeros((tokens, 64 // world, 512)),
             zeros((tokens, 5120)), zeros((tokens, 512), torch.int32).fill_(-1),
@@ -191,7 +191,7 @@ def _commit_window(Staged, Window, State, Starts, Lengths, STRIDE: tl.constexpr,
 class PreparedAttention:
     def __init__(self, layer, weights, source, scratch, metadata, pool, rotary, *, mode,
                  world, session, name, workspace, replay_start=None, window_staging=None,
-                 mla_compute_mode="auto", buffers=None):
+                 mla_compute_mode="auto", buffers=None, window_metadata=None):
         self.layer, self.weights, self.scratch, self.metadata = layer, weights, scratch, metadata
         self.pool, self.rotary, self.mode = pool, rotary, mode
         self.replay_start = replay_start
@@ -216,11 +216,21 @@ class PreparedAttention:
         else:
             self.window_cache = self.window if mode == "decode" else zeros(
                 (rows, self.window_page_size * 528), torch.uint8)
-        self.window_slots = zeros(tokens, torch.int64).fill_(-1)
         window_width = self.window_page_size if draft else 128
-        self.window_indices = zeros((tokens, window_width), torch.int32).fill_(-1)
-        self.window_lengths = zeros(tokens, torch.int32)
-        self.offsets = torch.arange(window_width, device=device)
+        self.owns_window_metadata = window_metadata is None
+        if window_metadata is None:
+            window_metadata = PreparedWindowIndices(metadata, mode=mode, tokens=tokens,
+                page_size=self.window_page_size, width=window_width, replay_start=replay_start,
+                buffers=buffers)
+        elif (window_metadata.metadata is not metadata or window_metadata.mode != mode
+                or window_metadata.window_page_size != self.window_page_size
+                or window_metadata.window_indices.shape != (tokens, window_width)
+                or window_metadata.replay_start is not replay_start or window_metadata.visible is not None):
+            raise ValueError("shared window indices must match the attention metadata and cache geometry")
+        self.window_metadata = window_metadata
+        self.window_slots = window_metadata.window_slots
+        self.window_indices = window_metadata.window_indices
+        self.window_lengths = window_metadata.window_lengths
         self.token_offsets = torch.arange(tokens, device=device)
         self.lengths = zeros(tokens, torch.int32)
         self.active_width = zeros(1, torch.int32)
@@ -233,9 +243,9 @@ class PreparedAttention:
             self.projections[key] = QuantizedProjection(values, weights[key], out,
                 session=session, name=f"{name}.{key}", workspace=workspace, activation_mode="auto")
         self.query_norm = PreparedRMSNorm(scratch.projected[:, :1280], weights["q_norm"], scratch.query_low,
-            eps=self.eps, session=session, name=name + ".q_norm", staging=scratch.norm_input)
+            eps=self.eps, session=session, name=name + ".q_norm")
         self.window_norm = PreparedRMSNorm(scratch.projected[:, 1280:], weights["kv_norm"], scratch.window_values,
-            eps=self.eps, session=session, name=name + ".kv_norm", staging=scratch.norm_input)
+            eps=self.eps, session=session, name=name + ".kv_norm")
         self.output_projection = PreparedGroupedOutputProjection(scratch.attended.view(tokens, 8 // world, 4096),
             weights["output"], scratch.output, session=session, name=name + ".output", workspace=workspace)
         self.window_writer = PreparedCompressedCacheWriter(scratch.window_values, self.window_cache,
@@ -292,31 +302,12 @@ class PreparedAttention:
 
     def __call__(self, source):
         m, s = self.metadata, self.scratch
+        if self.owns_window_metadata:
+            self.window_metadata()
         live = m.positions >= 0
         position = m.positions.clamp(min=0)
-        rows = m.state_rows[m.requests]
-        starts = m.starts[m.requests]
-        available = position + 1
-        if self.replay_start is not None:
-            available = available - self.replay_start[m.requests]
-        self.window_lengths.copy_(torch.where(live, available.clamp(0, 128), 0))
-        positions = position[:, None] - self.window_lengths[:, None] + 1 + self.offsets
-        if self.mode == "decode":
-            slots = rows * 128 + position % 128
-            indices = rows[:, None] * 128 + positions % 128
-        else:
+        if self.mode != "decode":
             gather_rows(self.window, m.state_rows, self.window_cache[:, :128 * 528])
-            base = m.requests * self.window_page_size
-            slots = base + 128 + position - starts
-            indices = torch.where(positions < starts[:, None], positions % 128, 128 + positions - starts[:, None])
-            indices = indices + base[:, None]
-            if self.mode == "draft":
-                context = starts.clamp(max=128)
-                self.window_lengths.copy_(torch.where(live, context + m.lengths[m.requests], 0))
-                indices = base[:, None] + torch.where(self.offsets < context[:, None],
-                    self.offsets, 128 + self.offsets - context[:, None])
-        self.window_slots.copy_(torch.where(live, slots, -1))
-        self.window_indices.copy_(torch.where(self.offsets < self.window_lengths[:, None], indices, -1))
         self.projections["qkv_a"](source)
         self.query_norm(s.projected[:, :1280])
         self.window_norm(s.projected[:, 1280:])

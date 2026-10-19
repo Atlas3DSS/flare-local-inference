@@ -9,7 +9,7 @@ from ignition.preparation.tuning import benchmark_resource, declare
 
 
 class PreparedRMSNorm:
-    def __init__(self, source, weight, output, *, eps, session, name, zero_centered=False, residual=None, staging=None):
+    def __init__(self, source, weight, output, *, eps, session, name, zero_centered=False, residual=None):
         if (source.ndim != 2 or source.shape != output.shape or weight.shape != source.shape[1:]
                 or source.dtype not in (torch.bfloat16, torch.float32) or output.dtype != torch.bfloat16
                 or weight.dtype not in (torch.bfloat16, torch.float32)
@@ -20,14 +20,22 @@ class PreparedRMSNorm:
         self.zero_centered, self.add_residual = bool(zero_centered), residual is not None
         if residual is not None and (residual.shape != source.shape or residual.dtype not in (torch.bfloat16, torch.float32)):
             raise ValueError("normalization residual must match the input matrix")
-        self.staging = None
-        if not source.is_contiguous():
-            if staging is None:
-                staging = torch.empty(source.shape, dtype=source.dtype, device=source.device)
-            if (not staging.is_contiguous() or staging.dtype != source.dtype
-                    or staging.device != source.device or staging.numel() < source.numel()):
-                raise ValueError("RMS normalization staging must hold a contiguous input matrix")
-            self.staging = staging.view(-1)[:source.numel()].view(source.shape)
+        # A private accumulator preserves inputs when normalization writes an
+        # overlapping output or adds a residual alias. Disjoint projection
+        # slices retain their row strides through the prepared kernel.
+        def byte_interval(tensor):
+            start = tensor.data_ptr()
+            extent = (0 if tensor.numel() == 0 else 1 + sum(
+                (size - 1) * stride for size, stride in zip(tensor.shape, tensor.stride())))
+            return start, start + extent * tensor.element_size()
+
+        start, end = byte_interval(source)
+        aliases = (output,) if residual is None else (weight, output, residual)
+        overlap = any(start < other_end and other_start < end
+                      for other_start, other_end in map(byte_interval, aliases))
+        self.staging = (torch.empty(source.shape, dtype=source.dtype, device=source.device)
+                        if not source.is_contiguous() and overlap else None)
+        if self.staging is not None:
             self.staging.copy_(source)
         prepared_source = source if self.staging is None else self.staging
         self.plan = hyperconnection.plan(hyperconnection.Caps(device=source.device,
