@@ -144,7 +144,7 @@ pub enum Storage {
     Ram,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Table {
     pub(crate) planes: [Plane; 2],
     pub(crate) heads: usize,
@@ -155,7 +155,7 @@ pub(crate) struct Table {
     pub(crate) request: Option<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Index {
     pub(crate) tables: Vec<Table>,
 }

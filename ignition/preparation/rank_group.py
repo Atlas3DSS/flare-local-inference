@@ -69,13 +69,15 @@ def _peer(parent, snapshot, config, rank, rendezvous, connection, control, prepa
             from multiprocessing.reduction import recv_handle
 
             _, catalog, count = command
-            if catalog != model.embedding_catalog or count != 2 * len(catalog["tables"]):
-                raise ValueError("shared embedding catalog differs between prepared ranks")
+            if count != 2 * len(catalog["tables"]):
+                raise ValueError("shared embedding descriptor count differs from its catalog")
             descriptors = []
             try:
                 for _ in range(count):
                     descriptors.append(recv_handle(control))
-                model.prepare_embedding_tables(descriptors=descriptors)
+                # Equal catalogs share physical RAM. Disjoint table partitions load their
+                # own checkpoint spans and have independent delivery mailboxes.
+                model.prepare_embedding_tables(descriptors=descriptors if catalog == model.embedding_catalog else None)
             finally:
                 for descriptor in descriptors:
                     os.close(descriptor)
@@ -153,9 +155,9 @@ class PreparedRankGroup:
             if self.model.embedding_catalog is not None:
                 from multiprocessing.reduction import send_handle
 
-                with phase(self.progress, "Load embedding tables into shared RAM") as stage:
+                with phase(self.progress, "Load resident embedding tables") as stage:
                     tables = self.model.prepare_embedding_tables()
-                    stage.update(f"{tables.nbytes / (1 << 30):.1f} GiB shared across {len(self.processes) + 1} ranks")
+                    stage.update(f"{tables.nbytes / (1 << 30):.1f} GiB on rank zero; binding {len(self.processes)} peers")
                 descriptors = tables.descriptors
                 for control, process in zip(self.controls, self.processes, strict=True):
                     control.send(("embedding_tables", self.model.embedding_catalog, len(descriptors)))

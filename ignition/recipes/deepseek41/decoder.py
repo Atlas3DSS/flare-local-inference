@@ -73,7 +73,7 @@ class Scratch:
         # Embedding, Engram projection, and feed-forward intermediates execute serially.
         embed, lookup, ffn = buffers.fork(), buffers.fork(), buffers.fork()
         embedding = zeros(tokens, 5120, cursor=embed)
-        engram = EngramScratch.allocate(tokens, device, buffers=lookup)
+        engram = EngramScratch.allocate(tokens, device, buffers=lookup, world=world)
         shared = MLPScratch.allocate(tokens, 5120, 2304 // world, device, buffers=ffn)
         router_logits = zeros(tokens, experts, dtype=torch.float32, cursor=ffn)
         router = RouterScratch.allocate(tokens, device, experts=experts, top_k=top_k, buffers=ffn)
@@ -137,7 +137,8 @@ class PreparedLayer:
         if weights.engram is not None:
             self.engram = PreparedEngram(index, weights.engram, tables, s.residual, s.engram_residual,
                 metadata, pool,
-                scratch=s.engram, session=session, name=name + ".engram", workspace=workspace)
+                scratch=s.engram, session=session, name=name + ".engram", workspace=workspace,
+                runtime=runtime, coordinator=coordinator)
         source = s.engram_residual if self.engram is not None else s.residual
         options = dict(rms_eps=text["rms_norm_eps"], norm_eps=text["rms_norm_eps"], hc_eps=text["hc_eps"],
                        sinkhorn_iters=text["hc_sinkhorn_iters"])

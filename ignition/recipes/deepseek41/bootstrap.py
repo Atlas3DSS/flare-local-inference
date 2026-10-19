@@ -211,7 +211,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         progress(f"Resident model tensors: {weights.allocated_bytes / (1 << 30):.3f} GiB per rank")
     sequence = torch.zeros(1, dtype=torch.int64, device=device)
     tables = Tables.prepare(manifest, weights.config, tokens=max(config.prefill_chunk_size, config.decode_tokens),
-        device=device, sequence=sequence, host_allocator=package_storage.host_allocate, progress=progress)
+        device=device, sequence=sequence, host_allocator=package_storage.host_allocate, progress=progress, shard=shard)
     with phase(progress, "Allocate model state and collectives"):
         layout = continuation_layout(weights.config, dspark=config.dspark)
         snapshots = layout.snapshot_capacity(config.snapshot_budget_bytes)
@@ -470,7 +470,8 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         "weights_bytes": weights.allocated_bytes, "mapped_host_bytes": 0,
         "expert_scale_compression": config.expert_scale_compression,
         "mla_compute_mode": config.mla_compute_mode,
-        "offloaded_bytes": sum(source.nbytes for pair in tables.sources.values() for source in pair),
+        "offloaded_bytes": sum((last - first) * 264 for ordinal in range(len(tables.sources))
+                               for first, last in (tables.partition_rows(ordinal, shard.rank),)),
         "continuation_bytes": pool.backing.nbytes, "state_rows": state_rows,
         "preparation_state_rows": int(pool.memory_capacity[0].item()),
         "preparation_state_bytes": int(pool.memory_capacity[0].item()) * layout.row_bytes,

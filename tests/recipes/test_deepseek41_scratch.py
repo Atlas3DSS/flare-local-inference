@@ -27,7 +27,10 @@ def test_serial_stages_share_storage_without_overwriting_live_residuals_or_selec
         assert all(not _overlap(value, other) for other in (*retained, *concurrent[:index]))
     assert any(_overlap(value, other) for value in concurrent
                for other in (scratch.embedding, scratch.engram.gathered, scratch.engram.projected))
-    for value in (scratch.embedding, scratch.engram.gathered, scratch.engram.projected, *concurrent):
+    engram = (scratch.engram.gathered, scratch.engram.local, scratch.engram.partial, scratch.engram.projected)
+    for index, value in enumerate(engram):
+        assert all(not _overlap(value, other) for other in engram[:index])
+    for value in (scratch.embedding, *engram, *concurrent):
         value.fill_(42)
     for index, value in enumerate(retained):
         assert value.eq(index + 1).all()

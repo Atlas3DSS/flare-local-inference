@@ -297,7 +297,13 @@ adjacent host allocations to its CUDA allocation granularity while preserving
 each buffer's address and extent in the package. No OS-specific mailbox graph or
 package encoding is required.
 
-A shared reader gathers each step's rows once. The default, `--embedding-table-storage disk`, uses
+Ranks with identical table planes share a reader that gathers each step's rows once.
+`EngramTable.shards` declares disjoint, contiguous row ranges in rank order, with
+separate weight and scale spans for each owner. These partitions cover the full
+table and publish partition-local row IDs; excluded lookup lanes publish `-1`.
+Each distinct partition has its own reader, staging, and submission state. An
+absent partition list retains the shared planes and delivery semantics of
+previously exported packages. The default, `--embedding-table-storage disk`, uses
 direct I/O, deduplicated 4 KiB blocks, and a 128-entry queue with 64 KiB
 registered buffers per table. `--embedding-table-storage ram` holds tables in ordinary
 resident memory and gathers the same rows; on GB300, Qwen's disk reads lengthened
@@ -307,7 +313,9 @@ construct row lookups, zero-fill the table, or copy through row staging while
 loading. Both modes write bounded pinned
 staging buffers. At 4,096 tokens, Qwen needs 5.625 MiB of row staging and a
 512 KiB request mailbox per rank. The two DeepSeek V4.1 tables need 49.5 MiB of
-pinned row staging. Direct-I/O buffers add 8 MiB per table in disk mode.
+pinned row staging per reader group. Partitioned DeepSeek tables retain the
+24-lane compact buffer layout, with unowned lanes zero-filled. Direct-I/O buffers
+add 8 MiB per table in disk mode.
 
 `--embedding-table-cache-size SIZE` adds a bounded cache on each host above the
 disk reader. Each entry holds one immutable packed-weight row and its scale row.
@@ -318,9 +326,10 @@ counter-array length in observations, allowing workload changes to retire prior
 popularity. An incoming row with a lower score than every resident in its set
 is served without admission. Misses use the same coalesced direct-I/O reader and
 enter the cache only after a successful gather. The budget includes payload,
-index, usage counters and preallocated miss workspace, and is divided across
-tables in proportion to their stored bytes. A table reader owns its cache for
-the loaded package's lifetime; local tensor-parallel ranks share that reader.
+index, usage counters and preallocated miss workspace. The host budget is divided
+equally among distinct table catalogs, then across each catalog's tables in
+proportion to their stored bytes. A table reader owns its cache for the loaded
+package's lifetime; ranks with identical catalogs share that reader.
 Each server start creates an empty row cache, populated by successful request
 gathers.
 
@@ -403,10 +412,10 @@ resources:
 |---|---|---|
 | 1 | Model index without rank bundles, publisher namespace, source URL, development marker, model license name and link when recorded, rank count, and SHA-256 commitments to groups 2–3 | Before publisher acceptance or CUDA initialization |
 | 2 | Frontend asset spans and hashes | Before those contents are consumed |
-| 3 | Ranges and SHA-256 of the stored embedding tables, including padding | With `flare run --verify-weights` |
-| Rank *r* | Rank *r*'s bundle; its cubin and graph spans, plaintext and ciphertext sizes, and ciphertext chunk hashes; its module global spans and hashes; and the ranges and SHA-256 of its stored allocations, including padding | Bundle before loading; resources as for groups 2–3 |
+| 3 | Ranges and SHA-256 of shared embedding tables, including padding | With `flare run --verify-weights` |
+| Rank *r* | Rank *r*'s bundle; its cubin and graph spans, plaintext and ciphertext sizes, and ciphertext chunk hashes; its module global spans and hashes; and the ranges and SHA-256 of its stored allocations and embedding partitions, including padding | Bundle before loading; resources as for groups 2–3 |
 
-Stored data is ordered by owner: shared tables, then each rank's allocations.
+Stored data is ordered by owner: shared tables, then each rank's allocations and table partitions.
 Each owner's signed parts describe its contiguous ranges across files. Every signature
 of the ranks a process serves is mandatory even when the stored-data scan is
 omitted. A process verifies every rank, except a host serving one rank of a

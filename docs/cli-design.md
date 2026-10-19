@@ -300,12 +300,12 @@ Compressed routed-expert scales remain in GPU memory. Serialized layers reuse sc
 b12x prepares the scales needed by its selected MoE kernel before execution.
 Kernel autotuning remains enabled across the supported execution plans.
 
-DeepSeek V4.1 development serving keeps its Engram tables in shared RAM. Allow
-about 189 GiB of host RAM for the tables, in addition to preparation and serving
-memory. One rank loads the checkpoint spans into immutable resident storage;
-the other ranks share those bytes. Requests gather rows from RAM without reading
-the checkpoint files or calling Python. Each rank owns its delivery staging and
-CUDA events. This development path supports ranks on one host and uses RAM only.
+DeepSeek V4.1 development serving keeps its Engram table partitions in RAM. Allow
+about 189 GiB of host RAM across the four ranks, in addition to preparation and
+serving memory. Each rank loads the checkpoint spans for its six hash heads into
+immutable resident storage. Requests gather rows from RAM without reading the
+checkpoint files or calling Python. Each rank owns its delivery staging and CUDA
+events. This development path supports ranks on one host and uses RAM only.
 
 With four serving GPUs, run:
 

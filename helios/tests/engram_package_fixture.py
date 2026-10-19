@@ -12,13 +12,14 @@ from ignition.preparation.runtime_package import FileSource, export_model
 
 
 @torch.no_grad()
-def prepare(root, shard_size=64 << 30):
+def prepare(root, shard_size=64 << 30, table_world=1):
     root.mkdir(parents=True, exist_ok=False)
     torch.cuda.set_device(0)
     with ModuleImages() as images, PackageStorage() as storage:
         from b12x.preparation import PreparationSession
         from b12x.sequence import engram
         from ignition.components.engram import EngramInputs, PreparedEngramLookup
+        from ignition.components.parallel import TensorParallelShard
         from ignition.components.ngram_delivery import publish_requests
         from ignition.preparation.execution import PreparedExecution, GraphSignature
         from ignition.recipes.deepseek41.engram import Tables
@@ -71,7 +72,9 @@ def prepare(root, shard_size=64 << 30):
             graph.instantiate()
             # Session cleanup unloads compiled kernels; retain it until export has read the graph.
             try:
-                tables = Tables(geometry, tuple(range(32)), {1: tuple(sources)}, {1: inputs}, {1: mailbox}, sequence)
+                tables = Tables(geometry, tuple(range(32)), {1: tuple(sources)}, {1: inputs}, {1: mailbox}, sequence,
+                    TensorParallelShard(0, table_world), {1: torch.tensor((0, rows), device=device)},
+                    torch.arange(6144, device=device))
                 buffers = dict(tables.buffers(), output=output, transfer_source=transfer_source, frame_index=frame,
                                submission_sequence=sequence, completion_records=records)
                 prepared = PreparedExecution(device=0, graphs={'decode': graph}, buffers=buffers,
@@ -79,8 +82,24 @@ def prepare(root, shard_size=64 << 30):
                     max_active=4, resources=(storage, lookup), export_events=tables.events())
                 prepared.server_config = server_config(root)
                 prepared.package_data = tables
-                export_model(prepared, images, storage, root / 'package', options={}, publisher=publisher(),
-                             shard_size=shard_size)
+                if table_world == 1:
+                    export_model(prepared, images, storage, root / 'package', options={}, publisher=publisher(),
+                                 shard_size=shard_size)
+                else:
+                    from ignition.preparation import runtime_package_pb2 as proto
+                    from ignition.preparation.package_file import publish, read_index
+                    from ignition.preparation.protection import resource_roles
+
+                    staged = root / 'table-source'
+                    export_model(prepared, images, storage, staged, options={})
+                    index, start = read_index(staged)
+                    # The replay test binds one graph to each partition separately. Empty
+                    # peer bundles provide storage owners without allocating more GPUs.
+                    index.ranks.extend(proto.BundleIndex() for _ in range(table_world - 1))
+                    payload = sorted((span.offset, staged, start + span.offset, span.nbytes)
+                                     for _, _, span in resource_roles(index))
+                    publish(root / 'package', index, payload, publisher=publisher(), shard_size=shard_size)
+                    staged.unlink()
             finally:
                 graph.reset()
 
@@ -90,5 +109,6 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("directory", type=Path)
     parser.add_argument("--shard-size", type=int, default=64 << 30)
+    parser.add_argument("--table-world", type=int, choices=(1, 4), default=1)
     args = parser.parse_args()
-    prepare(args.directory, args.shard_size)
+    prepare(args.directory, args.shard_size, args.table_world)

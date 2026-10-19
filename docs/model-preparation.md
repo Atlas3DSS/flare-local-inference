@@ -214,14 +214,18 @@ DSpark is its learned draft method, defaulting to five draft tokens per round
 with separate proposal and verification graphs, using native conditional
 confidence and measured execution cost for adaptive verification. Image preprocessing
 preserves the checkpoint's row-major patch layout and 1024-token image limit.
-Its 188.8 GiB of Engram tables are
-stored once in the package and read on demand through bounded direct-I/O
-staging by default; `flare run --embedding-table-storage ram` loads them into
-ordinary resident memory instead.
-Both modes gather compact rows into shared pinned buffers, copy them to each
-rank, and signal captured consumer events. Preparation appends the immutable
-checkpoint slices without materializing the tables. Select four available
-GPUs explicitly:
+Its 188.8 GiB of Engram tables are stored once in the package, partitioned by
+hash head across TP ranks. Each TP4 rank owns six of the 24 heads and their
+projection input columns. Each rank reads its table rows, computes a partial
+projection, and reduces the result before residual mixing. Multi-host package
+distribution transfers only the table partitions owned by the receiving rank.
+Disk storage reads rows on demand through bounded direct-I/O staging;
+`flare run --embedding-table-storage ram` loads the assigned partitions into
+ordinary resident memory. Both modes copy compact rows into each rank's prepared
+buffers and signal captured consumer events. Preparation appends the immutable
+checkpoint slices without materializing the tables. Packages containing shared
+table planes retain their prepared replicated computation and shared row delivery.
+Select four available GPUs explicitly:
 
 ```sh
 .venv/bin/python -m ignition export deepseek-v4.1-flash --gpus 0,4,6,8 \

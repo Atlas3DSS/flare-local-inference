@@ -142,13 +142,29 @@ def stored_parts(data):
     return [proto.Span(offset=data.offset, nbytes=data.nbytes)] if data.nbytes else []
 
 
+def embedding_spans(index):
+    """Yield each table plane with its owning rank, or None for shared planes."""
+    for table in index.engram.tables:
+        if table.shards:
+            if table.HasField("weights") or table.HasField("scales"):
+                raise ValueError("partitioned embedding tables cannot also hold shared planes")
+            for shard in table.shards:
+                for name in ("weights", "scales"):
+                    if not shard.HasField(name):
+                        raise ValueError("embedding partition lacks a payload plane")
+                    yield shard.rank, getattr(shard, name)
+        else:
+            for name in ("weights", "scales"):
+                yield None, getattr(table, name)
+
+
 def _validate_spans(index, length):
     if index.version not in (4, 5) or not index.ranks:
         raise ValueError("unsupported model index")
     spans = chain(
         (span for rank in index.ranks for span in rank.resources.values()),
         (asset.payload for asset in index.assets),
-        (span for table in index.engram.tables for span in (table.weights, table.scales)),
+        (span for _, span in embedding_spans(index)),
     )
     for span in spans:
         if span.filename:
@@ -437,9 +453,8 @@ def combine(path, ranks, peer_memory, *, publisher=None, shard_size=DEFAULT_SHAR
                 result.frontend.CopyFrom(index.frontend)
             if index.HasField("engram"):
                 result.engram.CopyFrom(index.engram)
-                for table in result.engram.tables:
-                    for span in (table.weights, table.scales):
-                        storage.append((span, source(span)))
+                for _, span in embedding_spans(result):
+                    storage.append((span, source(span)))
             for asset in index.assets:
                 copied = result.assets.add()
                 copied.CopyFrom(asset)
