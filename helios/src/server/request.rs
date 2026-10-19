@@ -105,6 +105,7 @@ pub(super) fn prepare_inference(
         }
     }
     let mut images = Vec::new();
+    let mut image_patches = 0usize;
     for message in &mut normalized {
         if !message.is_object() {
             return Err("messages must contain objects".into());
@@ -128,20 +129,25 @@ pub(super) fn prepare_inference(
                                 "prepared model does not support image inputs",
                             )
                         })?;
+                        processor
+                            .check_batch(images.len() + 1, image_patches)
+                            .map_err(|error| error.admission_context(AdmissionError::Image))?;
                         let url = part
                             .get("image_url")
                             .and_then(|value| value.get("url"))
                             .and_then(Value::as_str)
                             .ok_or("image_url.url must be a string")?;
-                        let (data, jpeg) =
+                        let (data, decode): (_, fn(&ImageProcessor, &[u8]) -> Result<_>) =
                             if let Some(data) = url.strip_prefix("data:image/png;base64,") {
-                                (data, false)
+                                (data, ImageProcessor::decode_png)
                             } else if let Some(data) = url.strip_prefix("data:image/jpeg;base64,") {
-                                (data, true)
+                                (data, ImageProcessor::decode_jpeg)
+                            } else if let Some(data) = url.strip_prefix("data:image/webp;base64,") {
+                                (data, ImageProcessor::decode_webp)
                             } else {
                                 return Err(Error::admission(
                                     AdmissionError::Image,
-                                    "image input requires a base64 PNG or JPEG data URL",
+                                    "image input requires a base64 PNG, JPEG, or WebP data URL",
                                 ));
                             };
                         if data.len() > processor.max_encoded_bytes().div_ceil(3).saturating_mul(4)
@@ -159,15 +165,22 @@ pub(super) fn prepare_inference(
                                     error,
                                 )))
                             })?;
-                        images.push(if jpeg {
-                            processor
-                                .decode_jpeg(&bytes)
-                                .map_err(|error| error.admission_context(AdmissionError::Image))?
-                        } else {
-                            processor
-                                .decode_png(&bytes)
-                                .map_err(|error| error.admission_context(AdmissionError::Image))?
-                        });
+                        let image = decode(processor, &bytes)
+                            .map_err(|error| error.admission_context(AdmissionError::Image))?;
+                        let geometry = processor
+                            .geometry(image.width(), image.height())
+                            .map_err(|error| error.admission_context(AdmissionError::Image))?;
+                        image_patches =
+                            image_patches.checked_add(geometry.patches).ok_or_else(|| {
+                                Error::admission(
+                                    AdmissionError::Image,
+                                    "image patch count overflow",
+                                )
+                            })?;
+                        processor
+                            .check_batch(images.len() + 1, image_patches)
+                            .map_err(|error| error.admission_context(AdmissionError::Image))?;
+                        images.push(image);
                         *part = serde_json::json!({"type":"image"});
                     }
                     _ => {}

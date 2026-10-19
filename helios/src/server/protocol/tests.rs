@@ -396,6 +396,23 @@ fn response_history_retains_reasoning_calls_results_and_namespaces() {
     assert_eq!(native[1]["tool_call_id"], "c");
 }
 #[test]
+fn messages_accept_webp_image_sources() {
+    let req = request(
+        Protocol::Messages,
+        json!({"max_tokens":4,"messages":[{"role":"user",
+        "content":[{"type":"image","source":{"type":"base64","media_type":"image/webp","data":"AA=="}}]}]}),
+    );
+    let Input::Conversation(messages) = req.input else {
+        panic!()
+    };
+    let native = template_messages(&messages, ToolChoice::Auto).unwrap();
+    assert_eq!(
+        native[0]["content"][0]["image_url"]["url"],
+        "data:image/webp;base64,AA=="
+    );
+}
+
+#[test]
 fn messages_preserve_mixed_tool_results_and_images() {
     let req = request(
         Protocol::Messages,

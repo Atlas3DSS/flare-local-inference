@@ -58,7 +58,7 @@ def answer(result):
     return result["choices"][0]["message"]["content"].strip()
 
 
-def image(color, label, size=(640, 384)):
+def image(color, label, size=(640, 384), format="PNG"):
     from PIL import Image, ImageDraw, ImageFont
 
     picture = Image.new("RGB", size, color)
@@ -66,8 +66,8 @@ def image(color, label, size=(640, 384)):
     draw.rectangle((32, 128, 608, 240), fill="white")
     draw.text((48, 144), label, fill="black", font=ImageFont.load_default(size=64))
     buffer = io.BytesIO()
-    picture.save(buffer, format="PNG")
-    return dict(type="image_url", image_url=dict(url="data:image/png;base64,"
+    picture.save(buffer, format=format)
+    return dict(type="image_url", image_url=dict(url=f"data:image/{format.lower()};base64,"
                 + base64.b64encode(buffer.getvalue()).decode()))
 
 
@@ -140,6 +140,31 @@ def test_images_and_chunked_prefill(service):
         result = answer(response)
         assert "FIRST 128" in result and "SECOND 256" in result
         assert result.index("FIRST 128") < result.index("SECOND 256")
+
+
+@pytest.mark.parametrize("format", ["PNG", "WEBP"])
+def test_five_images_share_the_visual_token_budget(service, format):
+    labels = ["FIRST 128", "SECOND 256", "THIRD 512", "FOURTH 768", "FIFTH 1024"]
+    content = [image(color, label, format=format) for color, label in
+               zip(("red", "blue", "green", "orange", "purple"), labels)]
+    result = answer(service(content + [dict(type="text",
+        text="Read every image label in its original order. Only output the labels.")]))
+    assert all(label in result for label in labels), result
+    assert [result.index(label) for label in labels] == sorted(result.index(label) for label in labels)
+
+
+def test_image_budget_rejection_preserves_service(service):
+    url = os.environ["FLARE_KIMI3_TEST_URL"].rstrip("/")
+    content = [image("red", "CAPACITY", (3584, 3584))] * 2
+    body = dict(messages=[dict(role="user", content=content)], max_tokens=16)
+    request = urllib.request.Request(url + "/v1/chat/completions", json.dumps(body).encode(),
+                                     {"Content-Type": "application/json"})
+    with pytest.raises(urllib.error.HTTPError) as rejected:
+        urllib.request.urlopen(request, timeout=60)
+    assert rejected.value.code == 400
+    detail = rejected.value.read().decode()
+    assert "131072 visual patches" in detail and "65536" in detail
+    assert answer(service("What is 17 times 23? Reply with only the integer.")) == "391"
 
 
 def test_long_context_and_reused_prefix(service):

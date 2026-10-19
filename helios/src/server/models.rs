@@ -67,7 +67,8 @@ impl ModelCatalog {
                 "prefill_chunk_size": model.limits.prefill_chunk_size,
                 "default_max_tokens": model.max_new_tokens,
                 "sampling_defaults": model.sampling_defaults,
-                "max_images_per_prompt": model.contract.vision.max_images,
+                "max_images_per_prompt": model.contract.vision.image_count_capacity(),
+                "max_image_tokens_per_prompt": model.contract.vision.features_per_request,
                 "input_modalities": if model.contract.vision.enabled() {
                     vec!["text", "image"]
                 } else {
@@ -195,7 +196,14 @@ mod tests {
             vision["flare"]["input_modalities"],
             json!(["text", "image"])
         );
-        assert_eq!(vision["flare"]["max_images_per_prompt"], 4);
+        assert_eq!(
+            vision["flare"]["max_images_per_prompt"],
+            model.contract.vision.features_per_request
+        );
+        assert_eq!(
+            vision["flare"]["max_image_tokens_per_prompt"],
+            model.contract.vision.features_per_request
+        );
     }
 
     #[test]

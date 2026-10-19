@@ -91,11 +91,11 @@ fn plain_parts(value: &Value, protocol: Protocol) -> Result<Vec<Part>> {
             "image" if protocol == Protocol::Messages => {
                 let source = &part["source"];
                 if field(source, "type")? != "base64" {
-                    return Err(unsupported("images require base64 PNG or JPEG"));
+                    return Err(unsupported("images require base64 PNG, JPEG, or WebP"));
                 }
                 let media = field(source, "media_type")?;
-                if !["image/png", "image/jpeg"].contains(&media) {
-                    return Err(unsupported("images require PNG or JPEG"));
+                if !["image/png", "image/jpeg", "image/webp"].contains(&media) {
+                    return Err(unsupported("images require PNG, JPEG, or WebP"));
                 }
                 Ok(Part::Image(format!(
                     "data:{media};base64,{}",

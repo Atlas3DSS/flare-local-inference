@@ -1078,10 +1078,16 @@ image content.
 The [native image processor](../helios/src/frontend/images/mod.rs) is checked
 against the checkpoint's Transformers processor. Compare resized and normalized
 pixels, patch order, image grids, placeholder expansion, and positions before
-admitting image requests. PNG and JPEG decoding apply all eight EXIF
-orientations before resize. JPEG RGB values use a per-channel tolerance of
-two against Pillow fixtures; resize, normalization, and patch formation must
+admitting image requests. PNG, JPEG, and static WebP decoding preserve the
+prepared profile's alpha and EXIF orientation semantics. JPEG and lossy WebP
+RGB values use a per-channel tolerance of two against Pillow fixtures;
+resize, normalization, and patch formation must
 match exactly when given the same decoded pixels.
+
+Images replay individually into a shared request feature buffer. Admission bounds
+each image by the prepared patch graphs and their combined features by that
+buffer's capacity. The serialized image-support count remains readable in existing
+packages; runtime image counts follow feature storage rather than a four-image cap.
 
 ### Prepared graph bundle
 

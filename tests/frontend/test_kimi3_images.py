@@ -34,18 +34,22 @@ def reference(tmp_path_factory):
 
 @pytest.mark.parametrize('mode,size', [('RGB', (1, 1)), ('RGB', (403, 207)), ('RGBA', (83, 127)),
     ('RGBA', (8000, 37)), ('RGB', (8000, 37)), ('P', (8000, 37)), ('LA', (8000, 37)),
-    ('RGB_transparency', (83, 127)), ('L', (503, 701)), ('1', (8000, 37)), ('JPEG', (701, 503)), ('CMYK', (8000, 37))])
+    ('RGB_transparency', (83, 127)), ('L', (503, 701)), ('1', (8000, 37)), ('JPEG', (701, 503)), ('CMYK', (8000, 37)),
+    ('WEBP_RGB', (403, 207)), ('WEBP_RGBA', (83, 127))])
 def test_native_processor(reference, tmp_path, mode, size):
     processor, assets, tokenizer = reference
     width, height = size
     rng = np.random.default_rng(41)
     rgba = rng.integers(0, 256, (height, width, 4), dtype=np.uint8)
-    image = Image.fromarray(rgba, 'RGBA').convert('RGB' if mode in ('JPEG', 'RGB_transparency') else mode)
+    image = Image.fromarray(rgba, 'RGBA').convert('RGB' if mode in ('JPEG', 'RGB_transparency') else mode.removeprefix('WEBP_'))
     if mode == 'RGB_transparency':
         image.info['transparency'] = image.getpixel((0, 0))
     if mode == 'P':
         image.info['transparency'] = bytes(range(256))
-    if mode in ('JPEG', 'CMYK'):
+    if mode.startswith('WEBP_'):
+        exif = Image.Exif(); exif[274] = 6
+        path = tmp_path / 'image.webp'; image.save(path, lossless=True, exact=True, exif=exif)
+    elif mode in ('JPEG', 'CMYK'):
         exif = Image.Exif(); exif[274] = 6
         path = tmp_path / 'image.jpg'; image.save(path, exif=exif)
     else:
@@ -53,7 +57,7 @@ def test_native_processor(reference, tmp_path, mode, size):
     encoded = path.read_bytes()
     expected = processor.preprocess([{'type': 'image', 'image': encoded}], return_tensors='pt')
     case = tmp_path / 'case.json'
-    case.write_text(json.dumps({'images': [{'path': str(path), 'format': 'jpeg' if mode in ('JPEG', 'CMYK') else 'png'}],
+    case.write_text(json.dumps({'images': [{'path': str(path), 'format': 'webp' if mode.startswith('WEBP_') else 'jpeg' if mode in ('JPEG', 'CMYK') else 'png'}],
         'prompt': 'Look: <|media_pad|> describe.'}))
     subprocess.run([str(ROOT / 'helios/target/debug/test_kimi3_images'), str(assets), str(assets), str(case), str(tmp_path)], check=True)
     actual = json.loads((tmp_path / 'metadata.json').read_text())

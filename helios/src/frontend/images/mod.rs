@@ -40,10 +40,25 @@ impl Default for ImageLimits {
         Self {
             max_input_pixels: 64 * 1024 * 1024,
             max_encoded_bytes: 32 * 1024 * 1024,
-            max_images: 4,
+            max_images: 16_384,
             max_patches_per_image: 16_384,
             max_total_patches: 16_384,
         }
+    }
+}
+
+impl ImageLimits {
+    pub(crate) fn check_batch(&self, images: usize, patches: usize) -> Result<()> {
+        let message = if images == 0 {
+            "image input must contain at least one image".to_owned()
+        } else if images > self.max_images {
+            format!("request has {images} images; image capacity is {}", self.max_images)
+        } else if patches > self.max_total_patches {
+            format!("images require {patches} visual patches; request budget is {}", self.max_total_patches)
+        } else {
+            return Ok(());
+        };
+        Err(Error::frontend(FrontendError::Input(Failure::new(message))))
     }
 }
 
@@ -226,6 +241,10 @@ impl ImageProcessor {
         self.limits.max_encoded_bytes
     }
 
+    pub(crate) fn check_batch(&self, images: usize, patches: usize) -> Result<()> {
+        self.limits.check_batch(images, patches)
+    }
+
     /// Decodes PNG with the prepared profile’s alpha and orientation semantics.
     /// Animated PNG and 16-bit samples are rejected.
     pub fn decode_png(&self, bytes: &[u8]) -> Result<RgbImage> {
@@ -391,6 +410,59 @@ impl ImageProcessor {
         Ok(orientation::orient(image, orientation))
     }
 
+    /// Decodes static WebP with the prepared profile's alpha and orientation semantics.
+    pub fn decode_webp(&self, bytes: &[u8]) -> Result<RgbImage> {
+        if bytes.len() > self.limits.max_encoded_bytes {
+            return Err(Error::frontend(FrontendError::Input(Failure::new(
+                "encoded image exceeds the configured byte limit",
+            ))));
+        }
+        let error = |e| {
+            Error::frontend(FrontendError::ImageDecode(Failure::caused_by(
+                format!("invalid WebP: {e}"),
+                e,
+            )))
+        };
+        let mut decoder = image_webp::WebPDecoder::new(Cursor::new(bytes)).map_err(error)?;
+        let (width, height) = decoder.dimensions();
+        self.check_input_extent(width as usize, height as usize)?;
+        decoder.set_memory_limit(self.limits.max_input_pixels.saturating_mul(8));
+        if decoder.is_animated() {
+            return Err(Error::frontend(FrontendError::ImageDecode(Failure::new(
+                "animated WebP is unsupported; provide a still image",
+            ))));
+        }
+        let orientation = if matches!(self.profile, Profile::Moonvit | Profile::DeepseekRowMajor(_)) {
+            1
+        } else {
+            decoder
+                .exif_metadata()
+                .map_err(error)?
+                .as_deref()
+                .map(|data| orientation::exif_orientation(data.strip_prefix(b"Exif\0\0").unwrap_or(data)))
+                .transpose()?
+                .unwrap_or(1)
+        };
+        let size = decoder.output_buffer_size().ok_or_else(|| {
+            Error::frontend(FrontendError::ImageDecode(Failure::new(
+                "WebP decoded extent overflow",
+            )))
+        })?;
+        let mut decoded = vec![0; size];
+        decoder.read_image(&mut decoded).map_err(error)?;
+        let (rgb, alpha) = if decoder.has_alpha() {
+            let rgb = decoded.chunks_exact(4).flat_map(|pixel| pixel[..3].iter().copied()).collect();
+            let alpha = matches!(self.profile, Profile::Moonvit)
+                .then(|| decoded.chunks_exact(4).map(|pixel| pixel[3]).collect());
+            (rgb, alpha)
+        } else {
+            (decoded, None)
+        };
+        let mut image = RgbImage::new(width as usize, height as usize, rgb)?;
+        image.alpha = alpha;
+        Ok(orientation::orient(image, orientation))
+    }
+
     pub fn geometry(&self, width: usize, height: usize) -> Result<ImageGeometry> {
         match &self.profile {
             Profile::Qwen(profile) => profile.patches.geometry(width, height),
@@ -534,6 +606,33 @@ mod tests {
         ));
         assert!(processor.geometry(usize::MAX, 2).is_err());
         assert!(processor.geometry(0, 256).is_err());
+    }
+
+    #[test]
+    fn image_profiles_accept_five_images_within_the_total_patch_budget() {
+        let settings = [
+            ImageSettings::Qwen(QwenImageSettings { min_pixels: 65536, max_pixels: 16777216,
+                position_side: 48, image_token_id: 248056, video_token_id: 248057 }),
+            ImageSettings::Mimo(MimoImageSettings { min_pixels: 65536, max_pixels: 16777216,
+                image_mean: [0.5; 3], image_std: [0.5; 3] }),
+            ImageSettings::Deepseek4 {},
+            ImageSettings::DeepseekRowMajor(DeepseekRowMajorImageSettings { min_pixels: 46656,
+                max_tokens: 1024, max_width_height_ratio: None }),
+            ImageSettings::Moonvit {}, ImageSettings::Step {}, ImageSettings::Radio {},
+        ];
+        for settings in settings {
+            let limits = ImageLimits { max_patches_per_image: 65536, max_total_patches: 65536,
+                ..ImageLimits::default() };
+            let processor = ImageProcessor::load(settings.clone(), limits).unwrap();
+            let patches = processor.geometry(64, 64).unwrap().patches;
+            let processor = ImageProcessor::load(settings, ImageLimits {
+                max_total_patches: 5 * patches, ..limits }).unwrap();
+            let images: Vec<_> = (0..6).map(|_| RgbImage::new(64, 64, vec![127; 64 * 64 * 3]).unwrap()).collect();
+            let processed = processor.process(&images[..5]).unwrap();
+            assert_eq!(processed.geometry.len(), 5);
+            assert_eq!(processed.geometry.iter().map(|g| g.patches).sum::<usize>(), 5 * patches);
+            assert!(processor.process(&images).err().unwrap().to_string().contains("request budget"));
+        }
     }
 
     #[test]

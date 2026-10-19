@@ -156,16 +156,12 @@ fn append_view(result: &mut ProcessedImages, pixels: &[u8], side: usize) {
 }
 
 pub(super) fn process(limits: ImageLimits, images: &[RgbImage]) -> Result<ProcessedImages> {
-    if images.is_empty() || images.len() > limits.max_images {
-        return Err("image count exceeds prepared capacity".into());
-    }
+    limits.check_batch(images.len(), 0)?;
     let geometry: Vec<_> = images
         .iter()
         .map(|image| geometry(limits, image.width, image.height))
         .collect::<Result<_>>()?;
-    if geometry.iter().map(|g| g.patches).sum::<usize>() > limits.max_total_patches {
-        return Err("images exceed prepared total patch capacity".into());
-    }
+    limits.check_batch(images.len(), geometry.iter().map(|g| g.patches).sum())?;
     let mut result = ProcessedImages {
         pixel_values: vec![],
         geometry,

@@ -38,7 +38,8 @@ The additional `flare` object reports prepared and selected serving metadata:
 | `prefill_chunk_size` | Maximum tokens in a prefill chunk, not the context limit |
 | `default_max_tokens` | Default output-token budget when a request omits it; remaining context still bounds output |
 | `sampling_defaults` | Packaged seed, temperature, filters, and penalties used for omitted request fields |
-| `max_images_per_prompt` | Prepared image count limit; zero for text-only packages |
+| `max_images_per_prompt` | Upper bound from feature storage; actual image sizes and the total visual-token budget bound admission; zero for text-only packages |
+| `max_image_tokens_per_prompt` | Total visual-token budget shared by every image in a request; zero for text-only packages |
 | `input_modalities` | `text`, plus `image` when vision is prepared |
 | `output_modalities` | `text` |
 
@@ -135,7 +136,10 @@ successful response contains exactly one call. Generation uses ordinary sampling
 
 Named tool selection and strict function schemas are rejected. Hosted search,
 computer execution, file stores, audio, and remote image downloads are unsupported. Images must be
-base64 PNG/JPEG data and fit the loaded package's prepared image capacities.
+base64 PNG, JPEG, or static WebP data. Images are encoded sequentially and share
+the loaded package's visual-token budget; there is no separate four-image limit.
+Each image must fit a prepared vision graph, and the whole request must fit the
+HTTP body limit and text context. Animated images are unsupported.
 
 Anthropic histories accept inline system text and preserve text, thinking, tool
 use/results, errors, and image blocks. Message-level control metadata, including

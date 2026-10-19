@@ -56,9 +56,7 @@ fn position(index: usize, extent: usize) -> ([i64; 2], [f32; 2]) {
 }
 
 pub(super) fn process(limits: ImageLimits, images: &[RgbImage]) -> Result<ProcessedImages> {
-    if images.is_empty() || images.len() > limits.max_images {
-        return Err("image count exceeds prepared capacity".into());
-    }
+    limits.check_batch(images.len(), 0)?;
     let mut result = ProcessedImages {
         pixel_values: vec![],
         geometry: vec![],
@@ -71,9 +69,7 @@ pub(super) fn process(limits: ImageLimits, images: &[RgbImage]) -> Result<Proces
     for image in images {
         let geometry = geometry(limits, image.width, image.height)?;
         total += geometry.patches;
-        if total > limits.max_total_patches {
-            return Err("images exceed prepared total patch capacity".into());
-        }
+        limits.check_batch(images.len(), total)?;
         let pixels = resize::float_bicubic(image, geometry.width, geometry.height);
         let (h, w) = (geometry.height / 16, geometry.width / 16);
         // RADIO interpolates to a square and crops its top-left rectangle.

@@ -32,6 +32,7 @@ pub use prompt::{prepare_input, prepare_output, system_boundary};
 pub struct VisionCapabilities {
     pub feature_slots: usize,
     pub features_per_request: usize,
+    /// Serialized image-support declaration; admission uses the feature capacity.
     pub max_images: usize,
     pub patches_per_feature: usize,
     pub patch_capacities: Vec<usize>,
@@ -50,6 +51,11 @@ impl VisionCapabilities {
 
     pub fn enabled(&self) -> bool {
         self.max_images > 0
+    }
+
+    pub fn image_count_capacity(&self) -> usize {
+        // Every image consumes at least one feature in the shared request buffer.
+        if self.enabled() { self.features_per_request } else { 0 }
     }
 
     pub fn validate(&self) -> Result<()> {

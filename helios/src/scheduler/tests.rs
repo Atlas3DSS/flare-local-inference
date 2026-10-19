@@ -241,6 +241,25 @@ fn init(scheduler: &mut RequestScheduler, fence: u64) {
 }
 
 #[test]
+fn vision_image_count_is_bounded_by_shared_feature_storage() {
+    let mut scheduler = scheduler(1, 8, 2);
+    scheduler.capabilities.vision.features_per_request = 5 * 64;
+    let handle = scheduler.admit(spec(65, 2)).unwrap();
+    assert!(scheduler.set_vision_images(handle, &[256; 6]).is_err());
+    scheduler.set_vision_images(handle, &[256; 5]).unwrap();
+    init(&mut scheduler, 1);
+    for fence in 2..7 {
+        let step = scheduler.plan().unwrap();
+        assert_eq!((step.kind, step.token_capacity), (GraphKind::Vision, 256));
+        scheduler.commit(&step, Fence(fence)).unwrap();
+        scheduler.complete(Fence(fence), &records(handle, fence, 0, 0, -1, 1), Default::default()).unwrap();
+    }
+    assert_eq!(scheduler.plan().unwrap().kind, GraphKind::Prefill);
+    scheduler.cancel(handle).unwrap();
+    assert!(scheduler.has_available_image_slot());
+}
+
+#[test]
 fn vision_images_run_after_admission_before_prefill_and_cancel_waits_for_copy() {
     let mut scheduler = scheduler(1, 8, 2);
     let handle = scheduler.admit(spec(65, 2)).unwrap();
@@ -1914,7 +1933,7 @@ fn declared_model_capabilities_drive_state_slots_vision_buckets_and_copy_validat
         })
         .unwrap();
     assert_eq!(s.request(handle).unwrap().state_slot, StateSlotId(1));
-    assert!(s.set_vision_images(handle, &[4, 4, 4]).is_err());
+    assert!(s.set_vision_images(handle, &[16, 16, 4]).is_err());
     assert!(s.set_vision_images(handle, &[3]).is_err());
     s.set_vision_images(handle, &[4]).unwrap();
     init(&mut s, 1);

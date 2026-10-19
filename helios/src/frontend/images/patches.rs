@@ -65,11 +65,7 @@ impl PatchProcessor {
     }
 
     pub fn process(&self, images: &[RgbImage]) -> Result<ProcessedImages> {
-        if images.is_empty() || images.len() > self.limits.max_images {
-            return Err(Error::frontend(FrontendError::Input(Failure::new(
-                "image count is empty or exceeds the configured limit",
-            ))));
-        }
+        self.limits.check_batch(images.len(), 0)?;
         let geometry: Vec<_> = images
             .iter()
             .map(|image| self.geometry(image.width, image.height))
@@ -80,11 +76,7 @@ impl PatchProcessor {
             .ok_or_else(|| {
                 Error::frontend(FrontendError::Input(Failure::new("patch count overflow")))
             })?;
-        if total > self.limits.max_total_patches {
-            return Err(Error::frontend(FrontendError::Input(Failure::new(
-                "images exceed the configured total patch limit",
-            ))));
-        }
+        self.limits.check_batch(images.len(), total)?;
         let mut result = ProcessedImages {
             pixel_values: Vec::with_capacity(total.checked_mul(FEATURES).ok_or(
                 Error::frontend(FrontendError::Input(Failure::new(

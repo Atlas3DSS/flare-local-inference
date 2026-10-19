@@ -1451,14 +1451,18 @@ impl RequestScheduler {
             .patch_capacities
             .last()
             .ok_or("vision is unsupported")?;
-        let maximum_images = vision.max_images;
+        let maximum_features = vision.features_per_request;
         let merge = vision.patches_per_feature;
+        if patches.iter().try_fold(0usize, |total, count| total.checked_add(count / merge))
+            .is_none_or(|total| total > maximum_features)
+        {
+            return Err("images exceed prepared feature storage".into());
+        }
         let request = self.request_mut(handle)?;
         if request.last_use != Fence(0)
             || !request.vision_patches.is_empty()
             || request.image_slot.is_some()
             || patches.is_empty()
-            || patches.len() > maximum_images
             || patches
                 .iter()
                 .any(|count| *count == 0 || *count > maximum || *count % merge != 0)

@@ -118,6 +118,59 @@ fn exif(value: u16, little: bool) -> Vec<u8> {
 }
 
 #[test]
+fn webp_preserves_rgb_alpha_and_profile_orientation() {
+    use super::{ImageProcessor, ImageSettings};
+    let pixels = [10, 20, 30, 127, 90, 80, 70, 255];
+    for value in 1..=8 {
+        for prefix in [false, true] {
+            let mut metadata = if prefix { b"Exif\0\0".to_vec() } else { vec![] };
+            metadata.extend(exif(value, true));
+            let mut bytes = vec![];
+            let mut encoder = image_webp::WebPEncoder::new(&mut bytes);
+            encoder.set_exif_metadata(metadata);
+            encoder.encode(&pixels, 2, 1, image_webp::ColorType::Rgba8).unwrap();
+            let decoded = processor(ImageLimits::default()).decode_webp(&bytes).unwrap();
+            let expected = orientation::orient(RgbImage::new(2, 1, vec![10, 20, 30, 90, 80, 70]).unwrap(), value);
+            assert_eq!((decoded.width(), decoded.height()), (expected.width(), expected.height()));
+            assert_eq!(decoded.pixels(), expected.pixels());
+            let moonvit = ImageProcessor::load(ImageSettings::Moonvit {}, ImageLimits::default()).unwrap();
+            let decoded = moonvit.decode_webp(&bytes).unwrap();
+            assert_eq!((decoded.width(), decoded.height()), (2, 1));
+            assert_eq!(decoded.pixels(), &[10, 20, 30, 90, 80, 70]);
+            assert_eq!(decoded.alpha.as_deref(), Some([127, 255].as_slice()));
+        }
+    }
+}
+
+#[test]
+fn webp_limits_and_malformed_or_animated_inputs_are_rejected() {
+    let mut bytes = vec![];
+    image_webp::WebPEncoder::new(&mut bytes)
+        .encode(&[10, 20, 30, 90, 80, 70], 2, 1, image_webp::ColorType::Rgb8).unwrap();
+    assert!(processor(ImageLimits { max_encoded_bytes: bytes.len() - 1, ..ImageLimits::default() })
+        .decode_webp(&bytes).is_err());
+    assert!(processor(ImageLimits { max_input_pixels: 1, ..ImageLimits::default() })
+        .decode_webp(&bytes).is_err());
+    let normal = processor(ImageLimits::default());
+    for end in [0, 1, 12, bytes.len() / 2, bytes.len() - 2] {
+        assert!(normal.decode_webp(&bytes[..end]).is_err(), "truncated length {end}");
+    }
+    assert!(normal.decode_webp(include_bytes!("../../../../tests/frontend/webp-inputs/animated.webp"))
+        .err().unwrap().to_string().contains("animated WebP"));
+}
+
+#[test]
+fn lossy_webp_rgb_matches_pillow() {
+    let decoded = processor(ImageLimits::default())
+        .decode_webp(include_bytes!("../../../../tests/frontend/webp-inputs/lossy.webp")).unwrap();
+    let expected = include_bytes!("../../../../tests/frontend/webp-inputs/lossy.rgb");
+    assert_eq!((decoded.width(), decoded.height()), (37, 29));
+    assert_eq!(decoded.pixels().len(), expected.len());
+    let maximum = decoded.pixels().iter().zip(expected).map(|(a, b)| a.abs_diff(*b)).max().unwrap();
+    assert!(maximum <= 2, "maximum channel error {maximum}");
+}
+
+#[test]
 fn exif_reads_both_endian_orders_and_rejects_ambiguous_or_truncated_orientation() {
     for little in [false, true] {
         for value in 1..=8 {
