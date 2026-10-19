@@ -97,6 +97,55 @@ repository Actions write access through inherited repository permissions or
 the package's **Manage Actions access** settings. Public pull access and an OCI
 source label alone do not establish that write permission.
 
+## Discord changelog
+
+The [published-changes workflow](../.github/workflows/changelog.yml) checks for
+unannounced changes after a successful container workflow and hourly at minute
+17. It resolves `latest` through GHCR and requires both image architectures to
+identify the same source commit. A private repository token reads commit
+metadata; source files, patches, and commit bodies are not sent to the model.
+The model receives sanitized commit subjects and produces short English notes.
+The notes describe changes in `main`, including preparation changes that are
+not part of the serving container.
+
+At most one announcement is sent in six hours. Commits accumulate while that
+interval is active, and the hourly check flushes them even without another push.
+State is stored outside the checkout at
+`/var/lib/github-flashinfer/state/flare-announcements`. Its runner-owned directory
+must survive job cleanup and host restarts. A separate file lock serializes
+updates. A successful Discord acknowledgment advances the commit cursor; a
+transport failure triggers message-history reconciliation before another send.
+
+Configure the repository secret `FLARE_DISCORD_BOT_TOKEN` and these repository
+variables before enabling publication:
+
+| Variable | Meaning |
+| --- | --- |
+| `FLARE_DISCORD_CHANNEL_ID` | Destination channel the bot can view and send to |
+| `FLARE_ANNOUNCE_BASE_SHA` | Complete source SHA covered by the preceding announcement |
+| `FLARE_ANNOUNCE_BASE_TIME` | That announcement's timestamp with a UTC offset |
+| `FLARE_CHANGELOG_MODEL_URL` | OpenAI-compatible API base URL reachable from the runner |
+| `FLARE_CHANGELOG_MODEL` | Model name served by that API |
+
+The baseline variables initialize an absent state file. They do not reset an
+existing cursor. The bot does not automatically mention users or roles. Preview
+an explicitly selected range without sending a Discord message or changing state:
+
+```sh
+GH_TOKEN="$(gh auth token)" python3 scripts/announce_changes.py \
+  --repository local-inference-lab/flare \
+  --channel-id "$FLARE_DISCORD_CHANNEL_ID" \
+  --preview --base "$FLARE_ANNOUNCE_BASE_SHA" \
+  --image ghcr.io/local-inference-lab/flare:latest \
+  --model-url "$FLARE_CHANGELOG_MODEL_URL" --model "$FLARE_CHANGELOG_MODEL"
+```
+
+If an uncertain send cannot be found in channel history, the job stops rather
+than risking a duplicate. An operator can retry through **Run workflow**, using
+the exact `pending.nonce` and `pending.head` from the state file as `retry_nonce`
+and `retry_head`. This rechecks the channel history and still requires six hours
+since the uncertain attempt; it preserves the frozen message and commit range.
+
 ## Run
 
 This example exposes host GPU 0 and mounts a directory containing a prepared
