@@ -144,6 +144,62 @@ def test_cached_requires_the_index_and_every_tensor_file(tmp_path):
     model.verify(tmp_path)
 
 
+def cache_checkpoint(snapshot, checkpoint):
+    write_checkpoint(snapshot, checkpoint.architecture, checkpoint.stored_bytes)
+    (snapshot / "model.safetensors.index.json").write_text(json.dumps({
+        "metadata": {"total_size": checkpoint.stored_bytes},
+        "weight_map": {"a": "one.safetensors", "b": "two.safetensors"}}))
+    for name in ("one.safetensors", "two.safetensors"):
+        (snapshot / name).touch()
+
+
+@pytest.mark.parametrize("exact_state", ["absent", "partial", "complete"])
+def test_cached_snapshot_matches_repository_case_and_prefers_complete_shards(tmp_path, exact_state):
+    model = resolve("deepseek-v4.1-flash")
+    checkpoint = model.checkpoint
+    exact = model.snapshot(tmp_path)
+    alternate = (tmp_path / f"models--{checkpoint.repository.swapcase().replace('/', '--')}"
+                 / "snapshots" / checkpoint.revision)
+    cache_checkpoint(alternate, checkpoint)
+    if exact_state != "absent":
+        cache_checkpoint(exact, checkpoint)
+        if exact_state == "partial":
+            (exact / "two.safetensors").unlink()
+    assert model.snapshot(tmp_path) == (exact if exact_state == "complete" else alternate)
+    assert model.cached(tmp_path)
+    model.verify(tmp_path)
+    assert model.directory is None and model.checkpoint is checkpoint
+
+
+@pytest.mark.parametrize("mismatch", ["revision", "repository", "missing_shard", "invalid_index"])
+def test_cache_lookup_requires_the_requested_repository_revision_and_all_shards(tmp_path, mismatch):
+    model = resolve("deepseek-v4.1-flash")
+    checkpoint = model.checkpoint
+    exact = model.snapshot(tmp_path)
+    repository = checkpoint.repository.swapcase() + ("-other" if mismatch == "repository" else "")
+    revision = "0" * 40 if mismatch == "revision" else checkpoint.revision
+    alternate = tmp_path / f"models--{repository.replace('/', '--')}" / "snapshots" / revision
+    cache_checkpoint(alternate, checkpoint)
+    if mismatch == "missing_shard":
+        (alternate / "two.safetensors").unlink()
+    elif mismatch == "invalid_index":
+        (alternate / "model.safetensors.index.json").write_text("{")
+    assert model.snapshot(tmp_path) == exact
+    assert not model.cached(tmp_path)
+
+
+@pytest.mark.parametrize("pinned", [False, True])
+def test_declared_repository_casing_preserves_the_pinned_checkpoint_without_hub_requests(hub, tmp_path, pinned):
+    _, requests = hub
+    checkpoint = resolve("deepseek-v4.1-flash").checkpoint
+    name = checkpoint.repository.swapcase()
+    if pinned:
+        name += f"@{checkpoint.revision}"
+    model = resolve(name, tmp_path)
+    assert model.checkpoint is checkpoint
+    assert requests == []
+
+
 def test_local_export_size_is_validated_by_recipe(tmp_path):
     (tmp_path / "config.json").write_text(json.dumps({"architectures": ["Qwen4ExpForConditionalGeneration"]}))
     model = resolve(str(tmp_path))

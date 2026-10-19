@@ -34,8 +34,17 @@ def snapshot_directory(hub_cache: Path, checkpoint: Checkpoint) -> Path:
     """Resolve a checkpoint's local source or pinned hub-cache directory."""
     if Path(checkpoint.repository).is_absolute():
         return Path(checkpoint.repository)
-    return (Path(hub_cache) / f"models--{checkpoint.repository.replace('/', '--')}"
-            / "snapshots" / checkpoint.revision)
+    hub_cache = Path(hub_cache)
+    name = f"models--{checkpoint.repository.replace('/', '--')}"
+    exact = hub_cache / name / "snapshots" / checkpoint.revision
+    if _snapshot_cached(exact) or not hub_cache.is_dir():
+        return exact
+    for repository in sorted(hub_cache.iterdir()):
+        if repository.name != name and repository.name.casefold() == name.casefold():
+            snapshot = repository / "snapshots" / checkpoint.revision
+            if _snapshot_cached(snapshot):
+                return snapshot
+    return exact
 
 
 def _csf_container(snapshot: Path):
@@ -51,6 +60,20 @@ def _csf_stored_bytes(container, snapshot):
     if type(stored) is not int or stored <= 0:
         raise UsageError(f"{snapshot} has an invalid compressed checkpoint size: {stored!r}")
     return stored
+
+
+def _snapshot_cached(snapshot: Path) -> bool:
+    """Report whether the index and every tensor file it names are present."""
+    try:
+        if _csf_container(snapshot) is not None:
+            from ignition.preparation.checkpoint import inspect_indexed_checkpoint
+
+            inspect_indexed_checkpoint(snapshot)
+            return True
+        index = json.loads((snapshot / "model.safetensors.index.json").read_text())
+        return all((snapshot / shard).is_file() for shard in set(index["weight_map"].values()))
+    except (OSError, ValueError, KeyError, AttributeError, TypeError):
+        return False
 
 
 @dataclass(frozen=True)
@@ -99,17 +122,7 @@ class ResolvedModel:
 
     def cached(self, hub_cache: Path) -> bool:
         """Report whether the index and every tensor file it names are present."""
-        snapshot = self.snapshot(hub_cache)
-        try:
-            if _csf_container(snapshot) is not None:
-                from ignition.preparation.checkpoint import inspect_indexed_checkpoint
-
-                inspect_indexed_checkpoint(snapshot)
-                return True
-            index = json.loads((snapshot / "model.safetensors.index.json").read_text())
-            return all((snapshot / shard).is_file() for shard in set(index["weight_map"].values()))
-        except (OSError, ValueError, KeyError, AttributeError, TypeError):
-            return False
+        return _snapshot_cached(self.snapshot(hub_cache))
 
 
 def aliases() -> tuple[str, ...]:
@@ -209,7 +222,9 @@ def resolve(model: str, hub_cache: Path | None = None) -> ResolvedModel:
         raise _unsupported(f"unknown model {model!r}{hint}")
     for recipe in recipes():
         for checkpoint in recipe.checkpoints:
-            if checkpoint.repository == repository and revision in ("", checkpoint.revision):
+            matches = (checkpoint.repository == repository if Path(checkpoint.repository).is_absolute()
+                       else checkpoint.repository.casefold() == repository.casefold())
+            if matches and revision in ("", checkpoint.revision):
                 return ResolvedModel(recipe, checkpoint)
     config_path, index_path = _hub_metadata(repository, revision or None, hub_cache)
     recipe, qualified = _supporting(config_path, model)
