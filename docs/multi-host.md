@@ -209,7 +209,14 @@ flare fleet run maxwell:/data/flare-runtime/glm53-spark-tp2.safetensors \
 `NODE:PATH` names a package on a node's disk, normally rank zero's host where
 preparation wrote it. A plain path names a package on the controller, which is
 then sent to rank zero's host. The cluster's node count must match the
-package's prepared rank count.
+package's prepared rank count. Without `--cluster`, the controller places the
+ranks on free GPUs of the right kind anywhere in the fleet, preferring nodes
+whose caches already hold their rank; `--nodes` names candidates in rank
+order, `--name` names the group for `attach`, `stop` and `ls`, and
+`--dry-run` prints the placement without starting anything. A `[[group]]` in
+the fleet file supplies the package, serving options and constraints for a
+name, so `flare fleet run --name ds41` is a complete command; see
+[fleet control](fleet.md#desired-state).
 
 The controller verifies the package's signed index and obtains publisher
 acceptance at its own terminal, then passes the accepted publisher profile and

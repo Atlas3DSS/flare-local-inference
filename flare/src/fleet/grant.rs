@@ -95,6 +95,10 @@ pub struct Grant {
     /// Options for rank zero alone: the HTTP bind and request handling.
     pub rank_zero: Vec<String>,
     pub roce_ring: bool,
+    /// True for a single-host tensor-parallel package: one member runs every rank in one process
+    /// over its GPUs, with no rendezvous.
+    #[serde(default)]
+    pub single_host: bool,
     pub issued: u64,
     pub expires: u64,
 }
@@ -215,6 +219,7 @@ mod tests {
             serving: vec![],
             rank_zero: vec![],
             roce_ring: false,
+            single_host: false,
             issued: 100,
             expires: 700,
         }

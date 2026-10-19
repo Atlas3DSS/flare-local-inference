@@ -961,18 +961,19 @@ fn run(agent: &Arc<Agent>, request: &Value) -> Result<Arc<Group>, Failure> {
         .join(format!("{}.json", publisher.fingerprint()));
     fs::write(&profile, serde_json::to_vec(&vec![&publisher])?)?;
     let mut command = Command::new(&binary);
-    command
-        .arg("run")
-        .arg(&package)
-        .arg("--rank")
-        .arg(rank.to_string())
-        .arg("--rendezvous")
-        .arg(if rank == 0 {
-            format!("0.0.0.0:{port}")
-        } else {
-            grant.rendezvous.clone()
-        })
-        .args(&grant.serving);
+    command.arg("run").arg(&package);
+    if !grant.single_host {
+        command
+            .arg("--rank")
+            .arg(rank.to_string())
+            .arg("--rendezvous")
+            .arg(if rank == 0 {
+                format!("0.0.0.0:{port}")
+            } else {
+                grant.rendezvous.clone()
+            });
+    }
+    command.args(&grant.serving);
     if rank == 0 {
         command.args(&grant.rank_zero);
     }
@@ -1456,6 +1457,7 @@ pub mod tests {
                 serving: vec!["--max-concurrency".into(), "2".into()],
                 rank_zero: vec!["--port".into(), "8001".into()],
                 roce_ring: false,
+                single_host: false,
                 issued: now(),
                 expires: now() + 60,
             },
@@ -1815,6 +1817,7 @@ pub mod tests {
                 serving: vec![],
                 rank_zero: vec![],
                 roce_ring: false,
+                single_host: false,
                 issued: now(),
                 expires: now() + 60,
             },
@@ -2034,6 +2037,7 @@ pub mod tests {
                     port.to_string(),
                 ],
                 roce_ring: false,
+                single_host: false,
                 issued: now(),
                 expires: now() + 60,
             },
@@ -2110,6 +2114,7 @@ pub mod tests {
                 serving: vec![],
                 rank_zero: vec![],
                 roce_ring: false,
+                single_host: false,
                 issued: now(),
                 expires: now() + 60,
             },

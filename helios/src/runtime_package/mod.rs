@@ -26,7 +26,10 @@ mod selection;
 mod serving;
 pub use archive::{PackageFile, package_companions};
 pub use limits::{KvCacheLimit, MemoryLimit};
-pub use model::{CacheAgreement, ClusterRank, NativeModel, RoceSpec, package_cluster, rank_ranges};
+pub use model::{
+    CacheAgreement, ClusterRank, NativeModel, RankNeeds, RoceSpec, package_cluster, rank_needs,
+    rank_ranges, reserve_bytes,
+};
 pub use selection::LoadOptions;
 
 use std::collections::HashMap;

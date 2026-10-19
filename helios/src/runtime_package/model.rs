@@ -113,6 +113,50 @@ pub fn package_cluster(package: &AuthorizedPackage) -> Option<(usize, String)> {
         .map(|c| (c.world as usize, c.export_id.clone()))
 }
 
+/// What one rank's bundle needs from its GPU before its KV cache is allocated.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RankNeeds {
+    /// The compute capability the bundle was prepared for, as (major, minor).
+    pub architecture: [i32; 2],
+    /// Device bytes of the bundle's fixed allocations; capacity-sized allocations add their KV
+    /// and state storage at load.
+    pub device_bytes: u64,
+}
+
+/// Every rank bundle's needs, in index order: one entry per host of a multi-host package, or
+/// one per GPU of a single-host tensor-parallel package.
+pub fn rank_needs(package: &AuthorizedPackage) -> Vec<RankNeeds> {
+    package
+        .index
+        .ranks
+        .iter()
+        .map(|bundle| RankNeeds {
+            architecture: [
+                bundle.architecture.first().copied().unwrap_or(0),
+                bundle.architecture.get(1).copied().unwrap_or(0),
+            ],
+            device_bytes: bundle
+                .allocations
+                .iter()
+                .filter(|a| {
+                    protobuf::wire::Memory::try_from(a.memory) == Ok(protobuf::wire::Memory::Device)
+                })
+                .map(|a| a.nbytes)
+                .sum(),
+        })
+        .collect()
+}
+
+/// Bytes the package's serving contract reserves on each GPU beyond its allocations.
+pub fn reserve_bytes(package: &AuthorizedPackage) -> u64 {
+    package
+        .index
+        .contract
+        .as_ref()
+        .and_then(|c| c.reserve_bytes)
+        .unwrap_or(0)
+}
+
 /// The byte ranges of an authorized multi-host package, in offset order, that the host serving
 /// `rank` reads. A copy holding only these, at the same offsets and length, verifies completely
 /// and loads as that rank.

@@ -218,10 +218,12 @@ fn fleet_command(args: cli::FleetArgs) -> Result<(), fleet::Failure> {
         }
         cli::FleetCommand::Forget { node } => controller.forget(&node),
         cli::FleetCommand::Run(run) => controller.run(
-            &run.package,
+            run.package.as_deref(),
             run.cluster.as_deref(),
             fleet::controller::RunOptions {
                 name: run.name.clone(),
+                nodes: run.nodes.clone(),
+                dry_run: run.dry_run,
                 // GPU 0 is the serving default; any other list names the GPUs on every node.
                 gpus: if run.serving.gpus == [0] {
                     Vec::new()

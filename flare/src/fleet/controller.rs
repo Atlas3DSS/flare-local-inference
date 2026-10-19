@@ -32,6 +32,7 @@ use super::agent::{Hello, exchange_hello};
 use super::cache;
 use super::grant::{ControllerKey, ControllerSet, Grant, Member, Package, Signed, Source};
 use super::identity::{Key, PublicKey};
+use super::plan;
 use super::session::{FRAME_LIMIT, Session};
 use super::store::{Fleet, Node, join_key};
 use super::{
@@ -135,11 +136,6 @@ pub struct PackageFileStatus {
 }
 
 impl NodeStatus {
-    /// GPUs no running group holds, in index order.
-    pub fn free_gpus(&self) -> Vec<&GpuStatus> {
-        self.gpus.iter().filter(|g| g.group.is_none()).collect()
-    }
-
     pub fn running(&self) -> impl Iterator<Item = &GroupStatus> {
         self.groups.iter().filter(|g| g.running)
     }
@@ -147,10 +143,15 @@ impl NodeStatus {
 
 /// Options of `flare fleet run`.
 pub struct RunOptions {
-    /// The operator's name for the group; the cluster's name when absent.
+    /// The operator's name for the group, and the fleet file's `[[group]]` of that name when
+    /// one exists; the cluster's name or the package's stem when absent.
     pub name: Option<String>,
+    /// Candidate nodes in rank order; empty leaves them to the cluster, the group, or the pool.
+    pub nodes: Vec<String>,
     /// NVML indices of the GPUs each member uses on its node; empty lets placement pick.
     pub gpus: Vec<u32>,
+    /// Print the placement and exit without starting anything.
+    pub dry_run: bool,
     /// Serving options every rank loads with.
     pub serving: Vec<String>,
     /// Options for rank zero alone: the HTTP bind and request handling.
@@ -170,8 +171,9 @@ pub struct RunOptions {
 #[derive(Clone, Debug, Default)]
 pub struct LaunchOptions {
     pub name: String,
-    /// NVML indices of the GPUs each member uses; empty takes the first free GPU per node.
-    pub gpus: Vec<u32>,
+    /// The GPU UUIDs each member uses on its node, in rank order; an empty list for a member
+    /// leaves the GPUs to the rank.
+    pub placements: Vec<Vec<String>>,
     pub serving: Vec<String>,
     pub rank_zero: Vec<String>,
     pub roce_ring: bool,
@@ -212,17 +214,34 @@ pub struct RankFile {
     pub ranges: Vec<(u64, u64)>,
 }
 
-/// A verified multi-host package and what each rank reads of it.
+/// What a package needs from the GPUs that serve it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PackageNeeds {
+    /// The hardware revision every GPU of the group must have.
+    pub revision: String,
+    /// True when the ranks run on separate hosts over RoCEnante; false for a single-host
+    /// tensor-parallel package whose ranks run in one process over PCIe.
+    pub multi_host: bool,
+    /// Device bytes each rank bundle allocates before its KV cache, in rank order.
+    pub rank_bytes: Vec<u64>,
+    /// Bytes the serving contract reserves on every GPU beyond the allocations.
+    pub reserve_bytes: u64,
+}
+
+/// A verified package and what each member reads of it: one member per host of a multi-host
+/// package, or one member holding the complete package for a single-host one.
 #[derive(Clone, Debug)]
 pub struct ResolvedPackage {
-    /// The export identity every rank's file records.
+    /// The export identity every rank's file records, or the primary's stem for a single-host
+    /// package; with the primary's length it names cache directories.
     pub export: String,
     /// The primary file, then its companions.
     pub files: Vec<PackageEntry>,
-    /// Each rank's files and ranges, indexed by rank.
+    /// Each member's files and ranges, indexed by rank.
     pub ranks: Vec<Vec<RankFile>>,
     pub publisher: Publisher,
     pub holder: Holder,
+    pub needs: PackageNeeds,
 }
 
 /// A started group: its grant and each rank's node with the session streaming its output, in
@@ -725,41 +744,158 @@ impl Controller {
     /// on Ctrl-C, or, with `detach`, return once every rank has started.
     pub fn run(
         &self,
-        package: &str,
+        package: Option<&str>,
         cluster: Option<&str>,
         mut options: RunOptions,
     ) -> Result<(), Failure> {
-        let (cluster, nodes) = self.cluster(cluster)?;
-        let executable = read_executable(options.executable.as_deref())?;
+        // A [[group]] of the fleet file supplies what the command line leaves out: its package,
+        // its serving options before the command line's, its rank-zero options after them, and
+        // its node and GPU constraints.
+        let spec = options
+            .name
+            .as_deref()
+            .and_then(|name| self.fleet.group(name))
+            .cloned();
+        let package = match (package, &spec) {
+            (Some(package), _) => package.to_owned(),
+            (None, Some(spec)) => spec.package.clone(),
+            (None, None) => {
+                return Err(
+                    "PACKAGE is required unless --name names a [[group]] of the fleet file".into(),
+                );
+            }
+        };
+        let (label, candidates): (String, Vec<String>) = if !options.nodes.is_empty() {
+            ("nodes".into(), options.nodes.clone())
+        } else if let Some(cluster) = cluster {
+            let (name, nodes) = self.cluster(Some(cluster))?;
+            (name, nodes.into_iter().map(|n| n.name).collect())
+        } else if let Some(spec) = spec.as_ref().filter(|s| !s.nodes.is_empty()) {
+            (spec.name.clone(), spec.nodes.clone())
+        } else {
+            ("fleet".into(), Vec::new())
+        };
+        let name = options.name.clone().unwrap_or_else(|| {
+            if cluster.is_some() {
+                label.clone()
+            } else {
+                Path::new(&package)
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "group".into())
+            }
+        });
+        let mut serving = spec.as_ref().map_or_else(Vec::new, |s| s.serving.clone());
+        serving.extend(options.serving.iter().cloned());
         let verify_weights = options.verify_weights || options.run_args.serving.verify_weights;
-        let resolved = self.resolve_package(package, &mut options.run_args, verify_weights)?;
-        let mut serving = options.serving;
         if verify_weights && !serving.iter().any(|a| a == "--verify-weights") {
             serving.push("--verify-weights".into());
         }
+        let mut rank_zero = options.rank_zero.clone();
+        if let Some(spec) = &spec {
+            rank_zero.extend(spec.rank_zero.iter().cloned());
+        }
+        let roce_ring = options.roce_ring || spec.as_ref().is_some_and(|s| s.roce_ring);
+        let gpus = if options.gpus.is_empty() {
+            spec.as_ref().map_or_else(Vec::new, |s| s.gpus.clone())
+        } else {
+            options.gpus.clone()
+        };
+
+        let executable = read_executable(options.executable.as_deref())?;
+        let resolved = self.resolve_package(&package, &mut options.run_args, verify_weights)?;
+
+        // The pool: the candidates in order, or every node of the fleet that answers.
+        let pool: Vec<Node> = if candidates.is_empty() {
+            self.fleet.node.clone()
+        } else {
+            candidates
+                .iter()
+                .map(|name| {
+                    self.fleet
+                        .node(name)
+                        .cloned()
+                        .ok_or_else(|| format!("the fleet file has no node named {name}").into())
+                })
+                .collect::<Result<_, Failure>>()?
+        };
+        if pool.is_empty() {
+            return Err("the fleet file lists no nodes; pair some first".into());
+        }
+        let results = parallel(&pool, |_, node| self.query_status(node, None));
+        let mut nodes = Vec::new();
+        let mut statuses = Vec::new();
+        for (node, result) in pool.into_iter().zip(results) {
+            match result {
+                Ok(status) => {
+                    nodes.push(node);
+                    statuses.push(status);
+                }
+                Err(error) if candidates.is_empty() => {
+                    eprintln!("{}: not a candidate: {error}", node.name)
+                }
+                Err(error) => return Err(at(&node.name, error)),
+            }
+        }
+        let names: Vec<String> = nodes.iter().map(|n| n.name.clone()).collect();
+        let length = resolved.files[0].size;
+        let needs = plan::Needs {
+            revision: resolved.needs.revision.clone(),
+            multi_host: resolved.needs.multi_host,
+            rank_bytes: resolved.needs.rank_bytes.clone(),
+            reserve_bytes: resolved.needs.reserve_bytes,
+            complete_directory: format!("{}-{length}", resolved.export),
+            rank_directories: (0..resolved.needs.rank_bytes.len())
+                .map(|rank| format!("{}-{length}-rank{rank}", resolved.export))
+                .collect(),
+            source_node: match &resolved.holder {
+                Holder::Node { node, .. } => Some(node.name.clone()),
+                Holder::Controller { .. } => None,
+            },
+        };
+        let constraints = plan::Constraints {
+            nodes: candidates.clone(),
+            gpus,
+        };
+        let placements = plan::plan(&needs, &names, &statuses, &constraints)?;
+        eprintln!(
+            "placement of {} ({}, {}):\n{}",
+            name,
+            needs.revision,
+            if needs.multi_host {
+                format!("{} hosts", needs.rank_bytes.len())
+            } else {
+                format!("{} GPUs on one host", needs.rank_bytes.len())
+            },
+            plan::describe(&placements, &names, &statuses)
+        );
+        if options.dry_run {
+            eprintln!("dry run: nothing started");
+            return Ok(());
+        }
+        let members: Vec<Node> = placements.iter().map(|p| nodes[p.node].clone()).collect();
         let launch = self.launch(
-            &cluster,
-            &nodes,
+            &label,
+            &members,
             &resolved,
             &executable,
             &LaunchOptions {
-                name: options.name.clone().unwrap_or_else(|| cluster.clone()),
-                gpus: options.gpus.clone(),
+                name: name.clone(),
+                placements: placements.iter().map(|p| p.gpus.clone()).collect(),
                 serving,
-                rank_zero: options.rank_zero.clone(),
-                roce_ring: options.roce_ring,
+                rank_zero: rank_zero.clone(),
+                roce_ring,
             },
         )?;
         eprintln!(
             "group {} started; once loaded, rank zero on {} serves {}",
             launch.grant.group,
-            nodes[0].name,
-            serving_url(&options.rank_zero, &nodes[0].address)
+            members[0].name,
+            serving_url(&rank_zero, &members[0].address)
         );
         if options.detach {
             eprintln!(
-                "`flare fleet attach --cluster {cluster}` follows its output; \
-                 `flare fleet stop --cluster {cluster}` stops it"
+                "`flare fleet attach {name}` follows its output; `flare fleet stop {name}` stops it"
             );
             return Ok(());
         }
@@ -884,7 +1020,12 @@ impl Controller {
             )
             .into());
         }
-        if options.roce_ring && !(2..=16).contains(&world) {
+        if options.placements.len() != world {
+            return Err(
+                format!("{} placements for {world} ranks", options.placements.len()).into(),
+            );
+        }
+        if options.roce_ring && !(package.needs.multi_host && (2..=16).contains(&world)) {
             return Err("--roce-ring requires a multi-host package with 2..16 ranks".into());
         }
 
@@ -901,20 +1042,33 @@ impl Controller {
         });
         let (mut sessions, statuses): (Vec<Session>, Vec<NodeStatus>) =
             all(opened)?.into_iter().unzip();
-        let placements: Vec<Vec<String>> = statuses
-            .iter()
-            .enumerate()
-            .map(|(rank, status)| {
-                place_gpus(status, &options.gpus).map_err(|e| at(&nodes[rank].name, e))
-            })
-            .collect::<Result<_, _>>()?;
-        let routed = statuses[0].address_toward.as_deref().ok_or_else(|| {
-            format!(
-                "{}: STATUS reported no address toward {toward}",
-                nodes[0].name
-            )
-        })?;
-        let rendezvous = SocketAddr::new(routed.parse::<IpAddr>()?, RENDEZVOUS_PORT).to_string();
+        let placements = &options.placements;
+        for (rank, placement) in placements.iter().enumerate() {
+            for uuid in placement {
+                match statuses[rank].gpus.iter().find(|g| &g.uuid == uuid) {
+                    Some(gpu) => {
+                        if let Some(holder) = &gpu.group {
+                            return Err(at(
+                                &nodes[rank].name,
+                                format!("GPU {} is held by group {holder}", gpu.index).into(),
+                            ));
+                        }
+                    }
+                    None => return Err(at(&nodes[rank].name, format!("no GPU {uuid}").into())),
+                }
+            }
+        }
+        let rendezvous = if package.needs.multi_host {
+            let routed = statuses[0].address_toward.as_deref().ok_or_else(|| {
+                format!(
+                    "{}: STATUS reported no address toward {toward}",
+                    nodes[0].name
+                )
+            })?;
+            SocketAddr::new(routed.parse::<IpAddr>()?, RENDEZVOUS_PORT).to_string()
+        } else {
+            String::new()
+        };
 
         let issued = now();
         let mut grant = Grant {
@@ -947,6 +1101,7 @@ impl Controller {
             serving: options.serving.clone(),
             rank_zero: options.rank_zero.clone(),
             roce_ring: options.roce_ring,
+            single_host: !package.needs.multi_host,
             issued,
             expires: issued + GRANT_SECONDS,
         };
@@ -1649,13 +1804,45 @@ fn describe(
     publisher: Publisher,
     holder: Holder,
 ) -> Result<ResolvedPackage, Failure> {
-    let (world, export) = runtime_package::package_cluster(authorized)
-        .ok_or_else(|| format!("{} is not a multi-host package", primary.display()))?;
+    let rank_needs = runtime_package::rank_needs(authorized);
+    let Some(first) = rank_needs.first() else {
+        return Err(format!("{} holds no rank bundle", primary.display()).into());
+    };
+    if rank_needs
+        .iter()
+        .any(|r| r.architecture != first.architecture)
+    {
+        return Err(format!("{} mixes GPU architectures", primary.display()).into());
+    }
     let primary_name = primary
         .file_name()
         .and_then(|n| n.to_str())
         .ok_or("the package path names no file")?
         .to_owned();
+    let cluster = runtime_package::package_cluster(authorized);
+    let needs = PackageNeeds {
+        revision: super::gpu::capability_revision(first.architecture[0], first.architecture[1]),
+        multi_host: cluster.is_some(),
+        rank_bytes: rank_needs.iter().map(|r| r.device_bytes).collect(),
+        reserve_bytes: runtime_package::reserve_bytes(authorized),
+    };
+    let (world, export) = match cluster {
+        Some((world, export)) => (world, export),
+        None => (
+            1,
+            primary_name
+                .trim_end_matches(".safetensors")
+                .chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
+                .collect(),
+        ),
+    };
     let mut files = vec![PackageEntry {
         name: primary_name.clone(),
         size: fs::metadata(primary)?.len(),
@@ -1665,25 +1852,40 @@ fn describe(
         files.push(PackageEntry { name, size });
     }
     let mut ranks = Vec::with_capacity(world);
-    for rank in 0..world {
-        let mut rank_files = Vec::new();
-        for file in runtime_package::rank_ranges(authorized, rank).map_err(|e| e.to_string())? {
-            rank_files.push(RankFile {
-                name: if file.filename.is_empty() {
-                    primary_name.clone()
-                } else {
-                    file.filename
-                },
-                size: file.file.metadata()?.len(),
-                ranges: file.ranges,
-            });
+    if needs.multi_host {
+        for rank in 0..world {
+            let mut rank_files = Vec::new();
+            for file in runtime_package::rank_ranges(authorized, rank).map_err(|e| e.to_string())? {
+                rank_files.push(RankFile {
+                    name: if file.filename.is_empty() {
+                        primary_name.clone()
+                    } else {
+                        file.filename
+                    },
+                    size: file.file.metadata()?.len(),
+                    ranges: file.ranges,
+                });
+            }
+            ranks.push(rank_files);
         }
-        ranks.push(rank_files);
+    } else {
+        // One member runs every rank from the complete package.
+        ranks.push(
+            files
+                .iter()
+                .map(|f| RankFile {
+                    name: f.name.clone(),
+                    size: f.size,
+                    ranges: vec![(0, f.size)],
+                })
+                .collect(),
+        );
     }
     Ok(ResolvedPackage {
         export,
         files,
         ranks,
+        needs,
         publisher,
         holder,
     })
@@ -1774,10 +1976,10 @@ pub fn serving_url(rank_zero: &[String], node_address: &str) -> String {
             if let Some(value) = arguments.next() {
                 host = value.clone();
             }
-        } else if argument == "--port" {
-            if let Some(value) = arguments.next() {
-                port = value.clone();
-            }
+        } else if argument == "--port"
+            && let Some(value) = arguments.next()
+        {
+            port = value.clone();
         }
     }
     let host = match host.parse::<IpAddr>() {
@@ -1789,38 +1991,6 @@ pub fn serving_url(rank_zero: &[String], node_address: &str) -> String {
         _ => host,
     };
     format!("http://{host}:{port}")
-}
-
-/// The GPUs a member uses on a node: explicit NVML indices mapped to UUIDs, or the first free
-/// GPU. A node reporting no GPUs leaves the choice to the rank.
-fn place_gpus(status: &NodeStatus, indices: &[u32]) -> Result<Vec<String>, Failure> {
-    if status.gpus.is_empty() {
-        if status.running().next().is_some() {
-            return Err("a group runs there and the node reports no GPUs to share".into());
-        }
-        return Ok(Vec::new());
-    }
-    if !indices.is_empty() {
-        return indices
-            .iter()
-            .map(|index| {
-                let gpu = status
-                    .gpus
-                    .iter()
-                    .find(|g| g.index == *index)
-                    .ok_or_else(|| format!("the node has no GPU {index}"))?;
-                if let Some(holder) = &gpu.group {
-                    return Err(format!("GPU {index} is held by group {holder}").into());
-                }
-                Ok(gpu.uuid.clone())
-            })
-            .collect();
-    }
-    status
-        .free_gpus()
-        .first()
-        .map(|gpu| vec![gpu.uuid.clone()])
-        .ok_or_else(|| "every GPU is held by a running group".into())
 }
 
 fn describe_gpus(status: &NodeStatus, uuids: &[String]) -> String {
@@ -1977,6 +2147,7 @@ mod tests {
             controllers: Some(record),
             node: nodes.clone(),
             cluster: Default::default(),
+            group: Vec::new(),
         };
         fleet.cluster.insert(
             "pair".into(),
@@ -2021,6 +2192,12 @@ mod tests {
             holder: Holder::Controller {
                 primary: primary.clone(),
             },
+            needs: PackageNeeds {
+                revision: "gb10".into(),
+                multi_host: true,
+                rank_bytes: vec![1 << 30, 1 << 30],
+                reserve_bytes: 0,
+            },
         };
         let launch = controller
             .launch(
@@ -2030,7 +2207,10 @@ mod tests {
                 script.as_bytes(),
                 &LaunchOptions {
                     name: "pair".into(),
-                    gpus: vec![],
+                    placements: vec![
+                        vec!["GPU-aaaaaaaa-0000-0000-0000-000000000000".into()],
+                        vec!["GPU-aaaaaaaa-0000-0000-0000-000000000000".into()],
+                    ],
                     serving: vec![],
                     rank_zero: vec!["--port".into(), "8001".into()],
                     roce_ring: true,
@@ -2088,7 +2268,11 @@ mod tests {
                 &nodes,
                 &package,
                 script.as_bytes(),
-                &LaunchOptions::default(),
+                &LaunchOptions {
+                    name: "pair".into(),
+                    placements: vec![vec![], vec![]],
+                    ..LaunchOptions::default()
+                },
             )
             .unwrap();
         let (zero_session, one_session): (Vec<_>, Vec<_>) =

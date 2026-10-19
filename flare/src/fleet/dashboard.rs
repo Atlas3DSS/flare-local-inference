@@ -144,26 +144,24 @@ impl FleetView {
                 .collect();
             view.groups
                 .push((id.clone(), name.clone(), rank, running, gpus));
-            if rank == 0 {
-                if let Some(at) = g["metrics_at"].as_u64() {
-                    let entry = self.groups.entry(id).or_insert_with(|| GroupView {
-                        name,
-                        members: Vec::new(),
-                        running,
-                        history: None,
-                        metrics_at: None,
-                    });
-                    if entry.metrics_at != Some(at) {
-                        if let Ok(snapshot) =
-                            serde_json::from_value::<Snapshot>(g["metrics"].clone())
-                        {
-                            match entry.history.as_mut() {
-                                Some(history) => history.sample(now, snapshot),
-                                None => entry.history = Some(History::new(now, snapshot)),
-                            }
-                            entry.metrics_at = Some(at);
-                        }
+            if rank == 0
+                && let Some(at) = g["metrics_at"].as_u64()
+            {
+                let entry = self.groups.entry(id).or_insert_with(|| GroupView {
+                    name,
+                    members: Vec::new(),
+                    running,
+                    history: None,
+                    metrics_at: None,
+                });
+                if entry.metrics_at != Some(at)
+                    && let Ok(snapshot) = serde_json::from_value::<Snapshot>(g["metrics"].clone())
+                {
+                    match entry.history.as_mut() {
+                        Some(history) => history.sample(now, snapshot),
+                        None => entry.history = Some(History::new(now, snapshot)),
                     }
+                    entry.metrics_at = Some(at);
                 }
             }
         }
@@ -314,24 +312,24 @@ fn draw(fleet: &mut FleetView, updates: &mpsc::Receiver<Update>) -> Result<(), F
             fleet.apply(update);
         }
         terminal.draw(|frame| render(frame, fleet))?;
-        if event::poll(REFRESH)? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind != KeyEventKind::Press {
-                    continue;
+        if event::poll(REFRESH)?
+            && let Event::Key(key) = event::read()?
+        {
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
+            match key.code {
+                KeyCode::Char('q') | KeyCode::Esc => return finish(),
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    return finish();
                 }
-                match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc => return finish(),
-                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        return finish();
-                    }
-                    KeyCode::Left | KeyCode::Up => {
-                        fleet.selected = fleet.selected.saturating_sub(1);
-                    }
-                    KeyCode::Right | KeyCode::Down if fleet.selected + 1 < fleet.groups.len() => {
-                        fleet.selected += 1;
-                    }
-                    _ => {}
+                KeyCode::Left | KeyCode::Up => {
+                    fleet.selected = fleet.selected.saturating_sub(1);
                 }
+                KeyCode::Right | KeyCode::Down if fleet.selected + 1 < fleet.groups.len() => {
+                    fleet.selected += 1;
+                }
+                _ => {}
             }
         }
     }

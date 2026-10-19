@@ -105,7 +105,7 @@ flare agent reset                         forget the host's controllers
 flare fleet pair HOST... [--code CODE]    pair this controller with hosts
 flare fleet controllers add NAME KEY | remove KEY
 flare fleet status [--cluster NAME]
-flare fleet run PACKAGE --cluster NAME [serving flags] [--detach]
+flare fleet run [PACKAGE] [--cluster NAME | --nodes N,...] [--name GROUP] [--dry-run] [serving flags] [--detach]
 flare fleet attach | stop [--cluster NAME]
 flare fleet forget NODE                   remove a node from the fleet file
 flare fleet ls | dashboard [--cluster NAME]  groups on the cluster's nodes; their live metrics

@@ -15,6 +15,7 @@ pub mod dashboard;
 pub mod gpu;
 pub mod grant;
 pub mod identity;
+pub mod plan;
 pub mod session;
 pub mod store;
 

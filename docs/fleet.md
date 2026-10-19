@@ -283,7 +283,9 @@ at the agent boundary, and the ranks trust the fabric network.
 
 ## Launching a group
 
-`flare fleet run PACKAGE --cluster sparks [serving options]` proceeds as follows.
+`flare fleet run PACKAGE [--cluster NAME | --nodes NODE,...] [--name NAME]
+[serving options]` proceeds as follows, after [placement](#placement) has
+chosen the member nodes and their GPUs.
 
 ```mermaid
 sequenceDiagram
@@ -388,11 +390,72 @@ finished groups; STOP and ATTACH name a group when several are on the node.
 `flare fleet ls` lists every group on a cluster's nodes with its GPUs and
 state, and `attach` and `stop` take a group name or identifier.
 
-A launch takes, on each node of the cluster, the first GPU no running group
-holds, or the NVML indices `--gpus` names on every node. A single-host
-tensor-parallel package of N ranks, which runs as one process over PCIe
-collectives, is not launched through the fleet; [placement](#placement) in
-the proposal below covers it.
+A package is one of two kinds, and the package says which. A multi-host
+package of N ranks needs N nodes, each giving its rank one GPU, and runs over
+RoCEnante. A single-host tensor-parallel package of N ranks needs one node
+with N free GPUs and runs as one process over PCIe collectives; its grant
+names one member with those GPUs and `single_host`, and the agent starts it
+without a rank or rendezvous. [Placement](#placement) chooses the nodes and
+GPUs of either kind.
+
+## Desired state
+
+The fleet file may describe the groups the operator wants:
+
+```toml
+[[group]]
+name = "ds41"
+package = "maxwell:/data/flare-runtime/deepseek-tp4.safetensors"
+serving = ["--max-concurrency", "16", "--mtp-draft-tokens", "5"]
+rank_zero = ["--host", "0.0.0.0", "--port", "8000"]
+
+[[group]]
+name = "glm-a"
+package = "maxwell:/data/flare-runtime/glm53-tp2.safetensors"
+nodes = ["maxwell", "hertz"]
+```
+
+`flare fleet run --name ds41` takes the package from the group of that name
+when the command names none, puts the group's `serving` words before the
+command line's serving options so the command line overrides them, puts the
+group's `rank_zero` words after the command line's bind options so the group
+decides where rank zero listens, and takes `nodes`, `gpus`, and `roce_ring`
+as constraints when the command line gives none. `nodes` lists candidate
+nodes in rank order; `gpus` lists the NVML indices every member uses on its
+node. A group without them is placed from the whole fleet.
+
+## Placement
+
+`flare fleet run` places a package on the candidate nodes: those `--nodes`
+lists, else the cluster `--cluster` names, else the group's `nodes`, else
+every node of the fleet that answers STATUS. The planner turns the package's
+needs, read from its signed index, and the nodes' STATUS reports into
+members with GPUs, or an explanation naming the node or GPU that cannot
+serve. It applies these rules in order:
+
+1. Only GPUs whose revision equals the package's are candidates.
+2. A GPU is free when no running group holds it and its free memory covers
+   the rank's recorded device bytes plus the package's serving reserve.
+3. A multi-host package takes one node per rank; a single-host package takes
+   its rank count of free GPUs on one node, the set with the most adjacent
+   indices and the lowest indices on ties, or exactly the indices `gpus`
+   names.
+4. With a candidate list, its order is the rank order: rank r takes the
+   earliest listed node after rank r−1's that can serve it. Without one, rank
+   zero prefers the node holding the complete package verified or the node
+   the `NODE:PATH` reference names, and every other rank prefers a node whose
+   cache holds its rank verified; ties go to the GPU with the most free
+   memory, then the node name. When that greedy choice leaves a rank without
+   a node, earlier ranks are reassigned, so the planner fails only when no
+   assignment exists.
+5. On a node, a rank takes the lowest-index free GPU of the right revision.
+
+The controller prints the placement, one member per line with its node, GPU
+and whether the node already holds its rank, before transferring anything.
+`--dry-run` stops there. The planner does not set `--memory-limit` for a
+group, so two groups sharing a node's GPUs divide memory as the operator's
+serving options say, and it does not check ring adjacency, so a ring package
+takes the listed order.
 
 ## Metrics and the dashboard
 
@@ -467,7 +530,7 @@ serves it.
 | `flare fleet controllers add KEYFILE` / `remove FINGERPRINT` | Controller | Writes and distributes the next controller-set revision |
 | `flare fleet check --cluster NAME [--roce-ring] [--write]` | Controller | Fabric plan and rail check; optional rank-order proposal (unimplemented) |
 | `flare fleet prepare RECIPE --cluster NAME ...` | Controller | Multi-host export through agents (unimplemented) |
-| `flare fleet run PACKAGE --cluster NAME [--name GROUP] [--gpus N,...] [--detach] ...` | Controller | Starts a group on one free GPU per node, or the GPUs named, and attaches |
+| `flare fleet run [PACKAGE] [--cluster NAME \| --nodes NODE,...] [--name GROUP] [--gpus N,...] [--dry-run] [--detach] ...` | Controller | Places a group on the candidate nodes' GPUs, starts it and attaches; `--dry-run` prints the placement only |
 | `flare fleet ls [--cluster NAME]` | Controller | Every group on the cluster's nodes with its GPUs and state |
 | `flare fleet dashboard [--cluster NAME]` | Controller | The serving process's live metrics dashboard for every group and GPU of the cluster |
 | `flare fleet attach [GROUP]` / `stop [GROUP]` / `status --cluster NAME` | Controller | Operates running groups, or the one named |
@@ -516,14 +579,15 @@ on Linux; the controller builds wherever Flare builds.
 
 Identity, the session transport, pairing, the controller set and its
 propagation, the fleet file, grants, executable and package placement with
-node-to-node fetches, GPU inventory and several groups per agent, the
-metrics sampler and the fleet dashboard, `flare agent install` and `reset`,
-and `flare fleet pair`, `controllers`, `status`, `ls`, `dashboard`, `run`,
-`attach`, `stop`, and `forget` exist and are validated by unit tests and by
-serving a four-rank package on four DGX Sparks from a controller that is not
-a rank. The following parts of this specification are not in the tree, and
-the [proposal](#proposal-placement-and-desired-state) describes placement and
-desired state:
+node-to-node fetches, GPU inventory and several groups per agent, placement
+with desired state in the fleet file, the metrics sampler and the fleet
+dashboard, `flare agent install` and `reset`, and `flare fleet pair`,
+`controllers`, `status`, `ls`, `dashboard`, `run`, `attach`, `stop`, and
+`forget` exist and are validated by unit tests and by serving a four-rank
+package on four DGX Sparks from a controller that is not a rank. The
+following parts of this specification are not in the tree, and the
+[proposal](#proposal-prestaging-and-reconciliation) describes prestaging and
+reconciliation:
 
 1. **Discovery and fabric check.** mDNS advertisement, `flare fleet discover`,
    fabric endpoints in STATUS, the rail check, and the ring-order proposal.
@@ -535,75 +599,10 @@ desired state:
    agents whose rank signatures verify and which serves identically to a manual
    export.
 
-## Proposal: placement and desired state
+## Proposal: prestaging and reconciliation
 
 This section proposes the next form of fleet control. Nothing in it is in the
 tree.
-
-### What changes
-
-A launch binds to a cluster: a fixed, ordered list of nodes, one per rank,
-chosen by the operator, each giving its first free GPU. The proposal makes
-the fleet a pool of GPUs and has the controller place each group on free GPUs
-of the right kind: four single-GPU Qwen groups on four Sparks now, two GLM
-TP2 groups later, one DeepSeek TP4 group tonight, or any mix that fits, each
-started by name without naming nodes. The controller stays a machine that
-runs `flare fleet` and holds no daemon and no database: desired state lives
-in the fleet file, actual state is what the agents report.
-
-A package is one of two kinds, and the package says which. A single-host
-tensor-parallel package of N ranks needs one node with N free GPUs of its
-hardware revision and runs as one process over PCIe collectives. A multi-host
-package of N ranks needs N nodes, each giving its rank the GPUs that rank was
-prepared with, and runs over RoCEnante.
-
-### Desired state
-
-The fleet file gains groups:
-
-```toml
-[[group]]
-name = "ds41"
-package = "maxwell:/data/flare-runtime/deepseek-tp4.safetensors"
-serving = ["--max-concurrency", "16", "--mtp-draft-tokens", "5"]
-rank_zero = ["--host", "0.0.0.0", "--port", "8000"]
-
-[[group]]
-name = "glm-a"
-package = "maxwell:/data/flare-runtime/glm53-tp2.safetensors"
-nodes = ["maxwell", "hertz"]
-```
-
-`nodes` and `gpus` on a group are constraints, not requirements for every
-group; a group without them is placed by the planner.
-
-### Placement
-
-The planner turns a package and the pool into members with GPUs, or an
-explanation of why it cannot. It applies these rules in order:
-
-1. Only GPUs of the package's hardware revision are candidates.
-2. A single-host package takes N GPUs on one node; a multi-host package takes
-   one node per rank.
-3. A GPU is free when no group holds it and its free memory covers the rank's
-   recorded device bytes plus the smallest KV allocation the package accepts.
-   The grant sets `--memory-limit` for the group so that two groups sharing a
-   node divide its memory deterministically.
-4. Among feasible choices, a node whose cache already holds the rank verified
-   is preferred, then a node holding the complete package, then the node with
-   the most free memory.
-5. A group's `nodes` or `gpus` constraint, or `--nodes` and `--gpus` on the
-   command line, narrows the candidates; a named cluster does the same and
-   fixes rank order.
-6. A ring package takes nodes with a physical link between every pair of
-   neighbors, which the fabric check establishes; on a switched fabric any
-   nodes serve.
-7. On a node with several GPUs, a single-host group prefers contiguous
-   indices. Preferring GPUs under one PCIe switch, as `nvidia-smi topo`
-   reports them, is a later refinement.
-
-The controller prints the plan before acting: each member, its node and GPUs,
-what will be transferred, and from where. `--dry-run` stops there.
 
 ### Prestaging
 
@@ -628,27 +627,23 @@ stay available by hand.
 
 | Command | Effect |
 | --- | --- |
-| `flare fleet run PACKAGE --name NAME [--nodes N,...] [--gpus ...]` | Places and starts a group without a cluster |
 | `flare fleet push PACKAGE --to NODE...` | Stages and verifies a package without starting it |
 | `flare fleet packages` | What each node's cache holds |
 | `flare fleet apply [--dry-run]` | Reconciles the fleet file's groups with the agents |
-
-`--cluster` remains as a placement constraint that also fixes rank order.
 
 ### Unchanged
 
 Identity, the session transport, pairing, the controller set, grants as the
 authority for every launch and transfer, verification of fetched bytes in the
-agent, several groups per agent, the sampler and the dashboard, and one rank
-zero per group chosen by placement. There is no scheduler service, no lease,
-and no consensus; two controllers driving one pool see the same actual state
-from the agents and the same desired state when they share a fleet file.
+agent, placement, the sampler and the dashboard, and one rank zero per group
+chosen by placement. There is no scheduler service, no lease, and no
+consensus; two controllers driving one pool see the same actual state from
+the agents and the same desired state when they share a fleet file.
 
 ### Order of work
 
-1. `[[group]]` in the fleet file, the planner, and `run` without a cluster.
-2. `push` and `packages`.
-3. `apply` with plan and dry-run.
+1. `push` and `packages`.
+2. `apply` with plan and dry-run.
 
 ## Limitations
 
