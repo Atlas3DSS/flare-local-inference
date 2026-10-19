@@ -94,6 +94,10 @@ message ServingContract {
   string context_hint = 22;
   string capacity_hint = 23;
   uint64 speculative_token_capacity = 24;
+  // Bytes of weights one decode step reads for one request, as the recipe declares for the
+  // checkpoint; absent when the recipe declares none. Multiplied by steps per second it is the
+  // memory bandwidth the model consumes, which integrated GPUs do not measure.
+  optional uint64 decode_weight_bytes = 25;
 }
 message ModelContract {
   uint32 version = 1;

@@ -83,6 +83,7 @@ impl Fixture {
                 speculative_widths: vec![],
                 speculative_fixed_width: None,
                 speculative_token_capacity: 512,
+                decode_weight_bytes: 0,
                 history_drafts: false,
                 speculative_proposal_source: Default::default(),
             },
@@ -115,7 +116,8 @@ impl Fixture {
                 GraphKind::Prefill,
             ] {
                 for width in 1..=if kind == GraphKind::Speculative { 8 } else { 1 } {
-                    graphs.push(crate::execution::GraphDescriptor { packed_token_capacity: 0,
+                    graphs.push(crate::execution::GraphDescriptor {
+                        packed_token_capacity: 0,
                         name: format!("{kind:?}-{batch}-{width}"),
                         kind,
                         sampling_mode: crate::execution::SamplingMode::General,
@@ -223,8 +225,8 @@ fn image_admission_queues_excess_images_and_admits_text() {
         patches_per_feature: 4,
         patch_capacities: vec![256],
     };
-    let vision_contract: crate::model::contract::PreparedContract = serde_json::from_str(
-        include_str!("../../../tests/support/contracts/qwen38.json")).unwrap();
+    let vision_contract: crate::model::contract::PreparedContract =
+        serde_json::from_str(include_str!("../../../tests/support/contracts/qwen38.json")).unwrap();
     fixture.config.contract.frontend = vision_contract.frontend;
     let (sender, receiver) = mpsc::channel();
     let mut worker = fixture.worker(receiver);
@@ -233,9 +235,15 @@ fn image_admission_queues_excess_images_and_admits_text() {
         incoming.prompt.images = Some(ProcessedImages {
             pixel_values: vec![],
             geometry: vec![ImageGeometry {
-                height: 32, width: 32, grid_thw: [1, 16, 16], patches: 256, tokens: 64,
+                height: 32,
+                width: 32,
+                grid_thw: [1, 16, 16],
+                patches: 256,
+                tokens: 64,
             }],
-            position_ids: vec![], interpolation_indices: vec![], interpolation_weights: vec![],
+            position_ids: vec![],
+            interpolation_indices: vec![],
+            interpolation_weights: vec![],
             cu_seqlens: vec![0, 256],
         });
         (incoming, generation)
@@ -244,18 +252,33 @@ fn image_admission_queues_excess_images_and_admits_text() {
     let (waiting, waiting_generation) = image();
     let (text, text_generation) = fixture.incoming(vec![2, 3], 1);
     sender.send(vec![first, waiting, text]).unwrap();
-    assert!(matches!(worker.admit().unwrap(), ControlFlow::Continue(true)));
+    assert!(matches!(
+        worker.admit().unwrap(),
+        ControlFlow::Continue(true)
+    ));
     assert_eq!(worker.pending.len(), 1);
     assert_eq!(worker.active.iter().flatten().count(), 2);
-    assert!(worker.active.iter().flatten().any(|r| r.incoming.prompt.images.is_none()));
+    assert!(
+        worker
+            .active
+            .iter()
+            .flatten()
+            .any(|r| r.incoming.prompt.images.is_none())
+    );
     assert!(!worker.scheduler.has_available_image_slot());
     first_generation.cancelled.store(true, Ordering::Release);
-    assert!(matches!(worker.admit().unwrap(), ControlFlow::Continue(true)));
+    assert!(matches!(
+        worker.admit().unwrap(),
+        ControlFlow::Continue(true)
+    ));
     assert!(worker.pending.is_empty());
     assert_eq!(worker.active.iter().flatten().count(), 2);
     assert!(!worker.scheduler.has_available_image_slot());
     waiting_generation.cancelled.store(true, Ordering::Release);
-    assert!(matches!(worker.admit().unwrap(), ControlFlow::Continue(true)));
+    assert!(matches!(
+        worker.admit().unwrap(),
+        ControlFlow::Continue(true)
+    ));
     assert!(worker.scheduler.has_available_image_slot());
     assert_eq!(worker.active.iter().flatten().count(), 1);
     drop(text_generation);

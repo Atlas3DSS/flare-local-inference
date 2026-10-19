@@ -81,6 +81,10 @@ pub struct Snapshot {
     pub host_bytes_out: u64,
     /// Bytes copied from the host store into GPU pages and rows.
     pub host_bytes_in: u64,
+    /// Bytes of weights one decode step reads for one request, as the package declares; zero
+    /// when it declares none. Times verification steps per second, the weight bandwidth consumed.
+    #[serde(default)]
+    pub decode_weight_bytes: u64,
 }
 
 impl Snapshot {
@@ -156,6 +160,7 @@ pub(super) struct Metrics {
     pub scheduler_trace: scheduler::SchedulerMetrics,
     total_pages: u64,
     page_tokens: u64,
+    decode_weight_bytes: u64,
     pub engram: Option<std::sync::Arc<crate::engram::Stats>>,
     prefill_tokens: AtomicU64,
     generated_tokens: AtomicU64,
@@ -214,10 +219,11 @@ pub(super) struct Metrics {
 }
 
 impl Metrics {
-    pub fn new(total_pages: u32, page_tokens: usize) -> Self {
+    pub fn new(total_pages: u32, page_tokens: usize, decode_weight_bytes: u64) -> Self {
         Self {
             total_pages: total_pages as u64,
             page_tokens: page_tokens as u64,
+            decode_weight_bytes,
             ..Self::default()
         }
     }
@@ -257,6 +263,7 @@ impl Metrics {
             host_disk_records: self.host_disk_records.load(Ordering::Relaxed),
             host_bytes_out: self.host_bytes_out.load(Ordering::Relaxed),
             host_bytes_in: self.host_bytes_in.load(Ordering::Relaxed),
+            decode_weight_bytes: self.decode_weight_bytes,
             ..Snapshot::default()
         };
         for widths in &self.speculative {
@@ -813,6 +820,11 @@ impl Metrics {
                 self.page_tokens,
             ),
             (
+                "decode_weight_bytes",
+                "Bytes of weights one decode step reads for one request, as the package declares; zero when undeclared.",
+                self.decode_weight_bytes,
+            ),
+            (
                 "total_kv_tokens",
                 "Logical token capacity of the per-rank KV pool before checkpoint retention.",
                 self.total_pages.saturating_mul(self.page_tokens),
@@ -924,7 +936,7 @@ mod tests {
 
     #[test]
     fn snapshot_json_round_trips_beside_the_prometheus_counters() {
-        let metrics = Metrics::new(100, 128);
+        let metrics = Metrics::new(100, 128, 0);
         metrics.progress(40, 3, 2, 1);
         metrics.scheduler(SchedulerStats {
             active_requests: 2,
@@ -1004,7 +1016,7 @@ mod tests {
 
     #[test]
     fn counters_expose_fixed_names_without_request_payloads() {
-        let metrics = Metrics::new(100, 128);
+        let metrics = Metrics::new(100, 128, 0);
         metrics.scheduler(SchedulerStats {
             cache_lookups: 5,
             cache_hits: 2,

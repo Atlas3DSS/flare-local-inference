@@ -915,7 +915,12 @@ For the command line to stay this small, every recipe declares:
 - its speculation settings, whether drafts can be copied from request history,
   the draft model's share of weights and pages, and its costs with speculation
   disabled;
-- image limits.
+- image limits;
+- per checkpoint, optionally, the bytes of weights one decode step reads for
+  one request across every rank, dense weights plus the experts one token
+  activates at their stored precision, which the serving contract records as
+  `decode_weight_bytes` and the dashboards multiply by verification steps per
+  second to show weight bandwidth.
 
 Model-specific validation lives here, not in the entrypoint. A recipe that
 cannot honor the settings reports a capacity error in the section 6 form.

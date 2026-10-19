@@ -58,6 +58,10 @@ class Checkpoint:
     # Per-rank costs replacing the recipe's `ranks` and `plain_ranks` when this checkpoint's draft or state
     # layout differs, such as a draft model that only this checkpoint carries.
     ranks: Mapping[int, "RankCosts"] | None = None
+    # Bytes of weights one decode step reads for one request across every rank: dense weights
+    # plus the experts one token activates, at their stored precision. Zero leaves the serving
+    # contract without the value, and dashboards then show no weight bandwidth.
+    decode_weight_bytes: int = 0
     plain_ranks: Mapping[int, "RankCosts"] | None = None
 
 

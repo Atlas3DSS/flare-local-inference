@@ -94,6 +94,7 @@ pub fn model_config(contract: crate::model::PreparedContract) -> crate::model::M
         speculative_widths: vec![],
         speculative_fixed_width: None,
         speculative_token_capacity: 512,
+        decode_weight_bytes: 0,
         history_drafts: false,
         speculative_proposal_source: Default::default(),
     }

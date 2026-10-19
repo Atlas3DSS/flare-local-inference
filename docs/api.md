@@ -100,6 +100,7 @@ instantaneous gauges.
 | --- | --- | --- |
 | `prefill_tokens` | Prompt tokens consumed by completed prefill, excluding padding and prefix reuse | `flare_prefill_tokens_total` |
 | `generated_tokens` | Committed generated tokens, including EOS and tokens withheld by text stops | `flare_generated_tokens_total` |
+| `decode_weight_bytes` | Bytes of weights one decode step reads for one request, as the package's recipe declares for its checkpoint; zero when undeclared. Times verification steps per second it is the weight bandwidth the model consumes, shown as WEIGHTS on the dashboards | `flare_decode_weight_bytes` |
 | `draft_steps` | Draft positions run by the learned drafter; zero without one | none |
 | `verify_steps` | Completed speculative or verification graphs | sum of `flare_speculative_rounds_total` |
 | `verification_drafts` | Draft positions verified: verification width minus one per graph | sum of `flare_speculative_rounds_total` × (`width` − 1) |

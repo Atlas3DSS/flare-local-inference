@@ -95,6 +95,9 @@ pub struct ModelConfig {
     pub speculative_fixed_width: Option<usize>,
     /// Maximum target-token rows in wider speculative graphs.
     pub speculative_token_capacity: usize,
+    /// Bytes of weights one decode step reads for one request, as the package declares; zero
+    /// when it declares none.
+    pub decode_weight_bytes: u64,
     pub history_drafts: bool,
     pub speculative_proposal_source: crate::scheduler::speculation::ProposalSource,
 }

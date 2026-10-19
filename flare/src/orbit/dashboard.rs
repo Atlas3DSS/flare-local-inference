@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use flare_helios::server::view::{
     BACKGROUND, CYAN, GOLD, GREEN, History, MUTED, PURPLE, Snapshot, TEXT, crossterm, gibibytes,
-    kv_cache_lines, plot, ratatui, rate,
+    kv_cache_lines, plot, ratatui, rate, weight_bandwidth,
 };
 use serde_json::{Value, json};
 
@@ -58,6 +58,7 @@ struct GpuView {
     memory_total: u64,
     memory_free: u64,
     utilization: Option<u64>,
+    memory_utilization: Option<u64>,
     temperature: Option<u64>,
     group: Option<String>,
 }
@@ -117,6 +118,7 @@ impl OrbitView {
                         memory_total: g["memory_total"].as_u64().unwrap_or(0),
                         memory_free: g["memory_free"].as_u64().unwrap_or(0),
                         utilization: g["utilization"].as_u64(),
+                        memory_utilization: g["memory_utilization"].as_u64(),
                         temperature: g["temperature"].as_u64(),
                         group: g["group"].as_str().map(str::to_owned),
                     })
@@ -417,8 +419,8 @@ fn render_header(frame: &mut Frame, orbit: &OrbitView, area: Rect) {
 fn render_groups(frame: &mut Frame, orbit: &OrbitView, area: Rect) {
     let mut lines = vec![
         Line::from(format!(
-            " {:<14} {:<10} {:>10} {:>12} {:>7} {:>7} {:>7}  KV TOKENS",
-            "GROUP", "RANK 0", "PREFILL", "GENERATION", "ACTIVE", "QUEUED", "ACCEPT"
+            " {:<14} {:<10} {:>10} {:>12} {:>7} {:>7} {:>7} {:>10}  KV TOKENS",
+            "GROUP", "RANK 0", "PREFILL", "GENERATION", "ACTIVE", "QUEUED", "ACCEPT", "WEIGHTS"
         ))
         .style(Style::default().fg(MUTED)),
     ];
@@ -430,7 +432,7 @@ fn render_groups(frame: &mut Frame, orbit: &OrbitView, area: Rect) {
             .members
             .first()
             .map_or("-", |(node, _, _)| orbit.nodes[*node].name.as_str());
-        let (prefill, generation, active, queued, accept, kv) = match &group.history {
+        let (prefill, generation, active, queued, accept, weights, kv) = match &group.history {
             Some(history) => {
                 let r = history.rates();
                 let s = history.snapshot();
@@ -441,6 +443,7 @@ fn render_groups(frame: &mut Frame, orbit: &OrbitView, area: Rect) {
                     s.pending.to_string(),
                     r.acceptance
                         .map_or_else(|| "—".into(), |v| format!("{v:.2}")),
+                    weight_bandwidth(s, r),
                     format!(
                         "{} / {}",
                         s.cached_pages.saturating_mul(s.page_tokens),
@@ -449,6 +452,7 @@ fn render_groups(frame: &mut Frame, orbit: &OrbitView, area: Rect) {
                 )
             }
             None => (
+                "—".into(),
                 "—".into(),
                 "—".into(),
                 "—".into(),
@@ -471,8 +475,8 @@ fn render_groups(frame: &mut Frame, orbit: &OrbitView, area: Rect) {
         };
         lines.push(
             Line::from(format!(
-                "{marker}{:<14} {:<10} {:>10} {:>12} {:>7} {:>7} {:>7}  {kv}",
-                group.name, rank_zero, prefill, generation, active, queued, accept
+                "{marker}{:<14} {:<10} {:>10} {:>12} {:>7} {:>7} {:>7} {:>10}  {kv}",
+                group.name, rank_zero, prefill, generation, active, queued, accept, weights
             ))
             .style(style),
         );
@@ -599,8 +603,8 @@ fn render_plots(frame: &mut Frame, orbit: &OrbitView, area: Rect) {
 fn render_nodes(frame: &mut Frame, orbit: &OrbitView, area: Rect) {
     let mut lines = vec![
         Line::from(format!(
-            " {:<10} {:<5} {:<34} {:>5} {:>18} {:>6}  HELD BY",
-            "NODE", "GPU", "", "UTIL", "MEMORY FREE", "TEMP"
+            " {:<10} {:<5} {:<30} {:>5} {:>8} {:>18} {:>6}  HELD BY",
+            "NODE", "GPU", "", "UTIL", "MEM BUS", "MEMORY FREE", "TEMP"
         ))
         .style(Style::default().fg(MUTED)),
     ];
@@ -632,7 +636,7 @@ fn render_nodes(frame: &mut Frame, orbit: &OrbitView, area: Rect) {
             };
             lines.push(
                 Line::from(format!(
-                    " {:<10} {:<5} {:<34} {:>5} {:>18} {:>6}  {holder}",
+                    " {:<10} {:<5} {:<30} {:>5} {:>8} {:>18} {:>6}  {holder}",
                     if position == 0 {
                         node.name.as_str()
                     } else {
@@ -641,9 +645,11 @@ fn render_nodes(frame: &mut Frame, orbit: &OrbitView, area: Rect) {
                     format!("gpu{}", gpu.index),
                     format!("{} ({})", gpu.name, gpu.revision)
                         .chars()
-                        .take(34)
+                        .take(30)
                         .collect::<String>(),
                     gpu.utilization
+                        .map_or_else(|| "—".into(), |u| format!("{u}%")),
+                    gpu.memory_utilization
                         .map_or_else(|| "—".into(), |u| format!("{u}%")),
                     format!(
                         "{} / {}",

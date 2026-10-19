@@ -1366,6 +1366,7 @@ pub mod tests {
             memory_total: 128 << 30,
             memory_free: 100 << 30,
             utilization: Some(7),
+            memory_utilization: Some(63),
             temperature: Some(41),
             clock_mhz: None,
         })

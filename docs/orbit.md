@@ -367,9 +367,14 @@ GPU; a workstation with sixteen RTX PRO 6000 GPUs is a node with sixteen,
 running one agent. The agent reads its GPUs through NVML, loaded dynamically
 like the CUDA driver, without creating a context: index, UUID, name, hardware
 revision (`gb10`, `gb202`, `gb300` from the PCI device id or compute
-capability), memory total and free, and utilization, temperature and SM clock
-where NVML reports them. A GB10 reports host memory, since NVML has no device
-memory for it, and reports no utilization or temperature.
+capability), memory total and free, and utilization, memory-controller
+utilization (the share of the sample period the memory controller was busy,
+which approximates the share of peak memory bandwidth in use), temperature and
+SM clock where NVML reports them. A GB10 reports host memory, since NVML has
+no device memory for it, and reports no utilization of either kind or
+temperature; its firmware exposes no memory-fabric counters and NVIDIA's
+counter sampling offers it no bandwidth metric, so a GB10's memory traffic is
+only known from what the model declares it reads.
 
 STATUS carries three lists beside the node's identity and free cache space.
 
@@ -485,10 +490,12 @@ latest document.
 cluster twice a second, reconnecting to a node that stops answering, and
 draws the serving process's terminal dashboard for the orbit through the view
 Helios exports: one row per group with prefill and generation rates, active
-and queued requests, acceptance and KV tokens; the four plots of the selected
+and queued requests, acceptance, weight bandwidth (verification steps per
+second times the decode weight bytes the package declares, or a dash when it
+declares none) and KV tokens; the four plots of the selected
 group, derived from successive documents with the same rate history the
-serving dashboard uses; and one row per GPU with utilization, free memory,
-temperature and the group holding it. Groups and nodes appear and disappear
+serving dashboard uses; and one row per GPU with utilization, memory-controller
+utilization, free memory, temperature and the group holding it. Groups and nodes appear and disappear
 as the agents report them, a node that stops answering is shown as
 unreachable until it answers again, the arrow keys select the group, and `q`
 leaves.

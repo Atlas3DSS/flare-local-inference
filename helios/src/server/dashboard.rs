@@ -51,7 +51,7 @@ static VISIBLE: AtomicBool = AtomicBool::new(false);
 pub mod view {
     pub use super::{
         BACKGROUND, CYAN, GOLD, GREEN, History, MUTED, PURPLE, Rates, Series, TEXT, gibibytes,
-        kv_cache_lines, plot, rate,
+        kv_cache_lines, plot, rate, weight_bandwidth,
     };
     pub use crate::server::metrics::Snapshot;
     pub use {crossterm, ratatui};
@@ -336,6 +336,9 @@ pub struct Rates {
     pub acceptance: Option<f64>,
     /// Verified draft positions per verification graph; `None` without verification.
     pub depth: Option<f64>,
+    /// Weight bytes read per second: verification graphs per second times the bytes one decode
+    /// step reads, as the package declares; zero when it declares none.
+    pub weights: f64,
 }
 
 /// Rates derived from successive [`Snapshot`]s, with 120 seconds of rate points.
@@ -391,6 +394,8 @@ impl History {
                     .saturating_sub(before.accepted_drafts) as f64
                     / rounds as f64
             }),
+            weights: per_second(snapshot.verify_steps, before.verify_steps)
+                * snapshot.decode_weight_bytes as f64,
         };
         let time = now.duration_since(self.start).as_secs_f64();
         self.points.push_back((time, self.rates));
@@ -434,6 +439,15 @@ pub fn rate(value: f64) -> String {
 /// Formats a byte count in GiB with one decimal.
 pub fn gibibytes(bytes: u64) -> String {
     format!("{:.1} GiB", bytes as f64 / (1u64 << 30) as f64)
+}
+
+/// Weight bandwidth as `N GB/s`, or a dash when the package declares no decode weight bytes.
+pub fn weight_bandwidth(s: Snapshot, r: Rates) -> String {
+    if s.decode_weight_bytes == 0 {
+        "—".into()
+    } else {
+        format!("{:.0} GB/s", r.weights / 1e9)
+    }
 }
 
 /// Muted summary line of cached, free, and total KV capacity in tokens.
@@ -504,6 +518,7 @@ fn render_overview(frame: &mut Frame, history: &History, area: Rect) {
                 Line::from(format!(" Verify       {} steps/s", rate(r.verify))),
                 Line::from(format!(" Acceptance   {acceptance} drafts/round")),
                 Line::from(format!(" Verify depth {depth} drafts/step")),
+                Line::from(format!(" Weights      {}", weight_bandwidth(s, r))),
                 Line::from(format!(" Active {}  Queued {}", s.active, s.pending)),
                 kv_tokens,
                 Line::from(" Enlarge terminal for history plots.")
@@ -516,7 +531,7 @@ fn render_overview(frame: &mut Frame, history: &History, area: Rect) {
     let rows = Layout::vertical([
         Constraint::Min(8),
         Constraint::Min(8),
-        Constraint::Length(4),
+        Constraint::Length(5),
     ])
     .split(area);
     let top =
@@ -563,6 +578,16 @@ fn render_overview(frame: &mut Frame, history: &History, area: Rect) {
             Line::from(format!(
                 " PREFILL {}   GENERATED {}   REUSED {}",
                 s.prefill_tokens, s.generated_tokens, s.reused_tokens
+            ))
+            .style(Style::default().fg(MUTED)),
+            Line::from(format!(
+                " WEIGHTS {}   {} per decode step",
+                weight_bandwidth(s, r),
+                if s.decode_weight_bytes == 0 {
+                    "undeclared bytes".to_owned()
+                } else {
+                    gibibytes(s.decode_weight_bytes)
+                }
             ))
             .style(Style::default().fg(MUTED)),
             kv_tokens,
@@ -779,7 +804,7 @@ mod tests {
     #[test]
     fn terminal_renders_braille_and_handles_resize_without_nonfinite_rates() {
         let start = Instant::now();
-        let metrics = Metrics::new(100, 128);
+        let metrics = Metrics::new(100, 128, 0);
         metrics.scheduler(crate::scheduler::SchedulerStats {
             cached_pages: 3,
             free_pages: 20,

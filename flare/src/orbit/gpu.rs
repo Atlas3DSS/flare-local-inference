@@ -41,6 +41,10 @@ pub struct Gpu {
     /// Percent of the sample period in which a kernel ran; absent when NVML does not report it.
     #[serde(default)]
     pub utilization: Option<u32>,
+    /// Percent of the sample period in which the memory controller was busy, the share of the
+    /// GPU's peak memory bandwidth in use; absent when NVML does not report it.
+    #[serde(default)]
+    pub memory_utilization: Option<u32>,
     /// GPU temperature in degrees Celsius; absent when NVML does not report it.
     #[serde(default)]
     pub temperature: Option<u32>,
@@ -182,8 +186,10 @@ pub fn enumerate() -> Result<Vec<Gpu>, Failure> {
                     Ok(Some(value))
                 }
             };
-            let mut utilization = Utilization { gpu: 0, _memory: 0 };
-            let utilization = optional(get_utilization(device, &mut utilization), utilization.gpu)?;
+            let mut rates = Utilization { gpu: 0, memory: 0 };
+            let code = get_utilization(device, &mut rates);
+            let utilization = optional(code, rates.gpu)?;
+            let memory_utilization = optional(code, rates.memory)?;
             let mut temperature: c_uint = 0;
             // NVML_TEMPERATURE_GPU is sensor 0.
             let temperature = optional(get_temperature(device, 0, &mut temperature), temperature)?;
@@ -199,6 +205,7 @@ pub fn enumerate() -> Result<Vec<Gpu>, Failure> {
                 memory_total,
                 memory_free,
                 utilization,
+                memory_utilization,
                 temperature,
                 clock_mhz,
             });
@@ -232,7 +239,7 @@ type ErrorString = unsafe extern "C" fn(c_int) -> *const c_char;
 #[repr(C)]
 struct Utilization {
     gpu: c_uint,
-    _memory: c_uint,
+    memory: c_uint,
 }
 
 /// nvmlMemory_t, the version 1 layout that nvmlDeviceGetMemoryInfo fills.

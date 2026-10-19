@@ -148,6 +148,7 @@ impl Bootstrap {
             eos_token_ids: frontend_settings.eos_token_ids.clone(),
             sampling_defaults,
             speculative_token_capacity: usize::try_from(integer("speculative_token_capacity", Some(0))?).map_err(|_| "speculative token capacity exceeds usize")?,
+            decode_weight_bytes: integer("decode_weight_bytes", Some(0))?,
             speculative_fixed_width: object
                 .get("speculative_fixed_width")
                 .filter(|v| !v.is_null())

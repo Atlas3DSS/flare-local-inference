@@ -303,7 +303,11 @@ impl ModelRuntime {
         let finished = Arc::new((Mutex::new(false), Condvar::new()));
         let worker_finished = finished.clone();
         let mut metrics =
-            super::metrics::Metrics::new(config.limits.pages, config.contract.cache.page_tokens);
+            super::metrics::Metrics::new(
+                config.limits.pages,
+                config.contract.cache.page_tokens,
+                config.decode_weight_bytes,
+            );
         metrics.engram = manifest
             .engram
             .as_ref()
