@@ -56,6 +56,13 @@ class MetadataValues(TorchDispatchMode):
         ):
             return result
         operands = [x for x in tree_leaves((args, kwargs)) if isinstance(x, FakeTensor)]
+        if (func in (torch.ops.aten.zero_.default, torch.ops.aten.fill_.Scalar)
+                and getattr(args[0], "_construction_value", None) is None):
+            with _disable_current_modes():
+                args[0]._construction_value = torch.full(
+                    args[0].shape, 0 if func == torch.ops.aten.zero_.default else args[1],
+                    dtype=args[0].dtype, device="cpu")
+            return result
         if any(getattr(x, "_construction_value", None) is None for x in operands):
             return result
 
@@ -305,33 +312,39 @@ def _install_boundaries(monkeypatch, checkpoint):
     from ignition.components import flashinfer_sampling
 
     monkeypatch.setattr(sampling, "get_sampling_module", lambda: SimpleNamespace(
-        top_k_mask_logits=lambda tensor, *a: torch.empty_like(tensor),
         softmax=lambda workspace, tensor, *a: torch.empty_like(tensor)))
     monkeypatch.setattr(flashinfer_sampling, "device_support_pdl", lambda device: False)
+    for name in ("top_k_mask_logits_out", "top_p_renorm_probs_out"):
+        monkeypatch.setattr(torch.ops.flashinfer, name,
+            lambda source, output, *args: output.copy_(source), raising=False)
 
+    addresses = {}
+    next_address = 256
     old_storage_pointer = torch.UntypedStorage.data_ptr
-    monkeypatch.setattr(
-        torch.UntypedStorage,
-        "data_ptr",
-        lambda storage: (
-            storage._cdata * 256
-            if storage.device.type == "meta"
-            else old_storage_pointer(storage)
-        ),
-    )
+
+    def storage_pointer(storage):
+        nonlocal next_address
+        if storage.device.type != "meta":
+            return old_storage_pointer(storage)
+        if storage._cdata not in addresses:
+            addresses[storage._cdata] = (storage, next_address)
+            next_address += ((storage.nbytes() + 255) // 256 + 1) * 256
+        return addresses[storage._cdata][1]
+
+    monkeypatch.setattr(torch.UntypedStorage, "data_ptr", storage_pointer)
     old_pointer = torch.Tensor.data_ptr
     monkeypatch.setattr(
         torch.Tensor,
         "data_ptr",
         lambda t: (
-            t.untyped_storage()._cdata * 256 + t.storage_offset() * t.element_size()
+            storage_pointer(t.untyped_storage()) + t.storage_offset() * t.element_size()
             if isinstance(t, FakeTensor)
             else old_pointer(t)
         ),
     )
 
     def warmup(kernel, *args, **kwargs):
-        launch_options = {"grid", "num_warps", "num_stages", "enable_fp_fusion"}
+        launch_options = {"grid", "num_warps", "num_stages", "num_ctas", "enable_fp_fusion"}
         inspect.signature(kernel.fn).bind(
             *args,
             **{
@@ -782,6 +795,13 @@ def test_recording_metadata_preserves_values_and_rejects_unknown_scalars():
         assert metadata[2].item() == 7
         assert metadata.any().item() is True
         assert metadata[0].item() == 0
+        pooled = torch.empty(1 << 20, dtype=torch.int32)[:4]
+        pooled.zero_()
+        assert pooled.any().item() is False
+        pooled.fill_(3)
+        assert pooled[0].item() == 3
+        pooled[:2].zero_()
+        assert pooled[0].item() == 0 and pooled[2].item() == 3
         with pytest.raises(AssertionError, match="no recorded metadata value"):
             torch.empty(1, dtype=torch.float32).item()
 

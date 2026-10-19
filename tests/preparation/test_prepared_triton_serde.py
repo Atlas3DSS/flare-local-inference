@@ -25,10 +25,13 @@ def _copy_launch(source, output, N: tl.constexpr):
 
 @pytest.fixture(autouse=True)
 def no_cuda(monkeypatch):
+    initialized = torch.cuda.is_initialized()
     monkeypatch.setattr(torch.cuda, "_lazy_init",
         lambda *args, **kwargs: pytest.fail("launch-config CPU tests must not initialize CUDA"))
     for name in ("id_to_kernel", "kernel_to_id", "constant_args"):
         monkeypatch.setattr(kernel_side_table, name, {})
+    yield
+    assert torch.cuda.is_initialized() == initialized
 
 
 def tuner(config=None):
@@ -77,7 +80,6 @@ def test_prepared_launch_traces_through_torch_fixed_config_without_cuda(monkeypa
     assert traced.fn is _copy_launch
     assert traced.configs[0].all_kwargs() == Config({}, num_warps=warps).all_kwargs()
     assert warmups == [dict(grid=(1,), **_launch_options(options))]
-    assert not torch.cuda.is_initialized()
 
 
 def test_plain_backend_options_are_not_promoted_to_an_autotuner_config():

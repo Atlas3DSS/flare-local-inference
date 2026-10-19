@@ -52,7 +52,15 @@ def test_complete_scenario_uses_live_exact_snapshots_and_keeps_original_branch(t
     scenario = make_scenario(tmp_path, cap).build()
     commands = [c for g in scenario.groups for c in g]
     assert set(c['graph'] for c in commands) == set(scenario.model.graphs)
+    assert all(t > 0 for c in commands for t in c['temperatures'])
+    assert any(len(set(c['temperatures'])) > 1 for c in commands if c['graph'].startswith('decode'))
     for command in commands:
+        if command['graph'].startswith(('init', 'restore')):
+            rows = len(command['slots'])
+            parameters = uploaded(scenario, command, 'admission_parameters', torch.float32).reshape(-1, 6)
+            torch.testing.assert_close(parameters[:rows, :2],
+                torch.tensor([[t, .95] for t in command['temperatures']]), rtol=0, atol=0)
+            assert uploaded(scenario, command, 'admission_top_k', torch.int32)[:rows].tolist() == [20] * rows
         for transfer in command.get('transfers', []):
             assert transfer['consumed'] == command['expected_records'][str(transfer['slot'])]['consumed']
             if command['graph'].startswith('snapshot'):

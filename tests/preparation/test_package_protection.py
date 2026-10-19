@@ -3,6 +3,7 @@
 import hashlib
 from itertools import chain
 import json
+import os
 from pathlib import Path
 import struct
 import subprocess
@@ -365,7 +366,8 @@ def launch(flare, path, profile, store, *args):
     keys = [] if profile is None else ['--publisher-keys', str(profile)]
     return subprocess.run([str(flare), 'run', str(path), *keys, '--offline',
         '--trust-store', str(store), '--gpus', '0,1', *args],
-        capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        capture_output=True, text=True, stdin=subprocess.DEVNULL,
+        env={**os.environ, 'CUDA_VISIBLE_DEVICES': '0,1'})
 
 
 def approval(signer):

@@ -21,9 +21,10 @@ def decode_groups(corpus):
         for row in rows:
             request = row['request']
             if (row['output_tokens'] != 256 or row['expected_cache'] != 'cold'
-                    or request.get('temperature') != 0
+                    or request.get('temperature') != 1
+                    or request.get('top_k') != 20 or request.get('top_p') != .95
                     or not row['prompt_tokens']):
-                raise ValueError('replay floor requires cold greedy 256-token cases')
+                raise ValueError('replay floor requires cold 256-token cases with temperature=1, top_k=20, top_p=0.95')
         groups.append((group, rows))
     if not groups:
         raise ValueError('performance corpus has no measured decode groups')
@@ -147,7 +148,7 @@ class ReplayCase:
         for slot, case in enumerate(cases):
             request = case['request']
             admission = RequestAdmission(generation=1, seed=request.get('seed', 0),
-                max_new_tokens=case['output_tokens'], temperature=request.get('temperature', 0),
+                max_new_tokens=case['output_tokens'], temperature=request.get('temperature', 1),
                 top_k=request.get('top_k', 20), top_p=request.get('top_p', .95),
                 min_p=request.get('min_p', 0),
                 repetition_penalty=request.get('repetition_penalty', 1),

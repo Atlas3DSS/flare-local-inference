@@ -22,11 +22,17 @@ class Query:
 
 def projection_fixture(monkeypatch):
     from b12x.gemm.blockscaled import _a16
+    from b12x.gemm.blockscaled import _linear
 
     requests = []
     calls = []
     values = torch.arange(30, dtype=torch.float32).view(5, 6).to(torch.bfloat16) / 32
-    weight = object()
+    weight = SimpleNamespace(out_features=values.shape[0])
+
+    def check_fixture_tensor(name, tensor):
+        assert isinstance(tensor, torch.Tensor) and tensor.device.type == "cpu", name
+
+    monkeypatch.setattr(_linear, "_check_gpu_tensor", check_fixture_tensor)
     monkeypatch.setattr(_a16, "_weight_parts", lambda value: (values, None, None, False))
     monkeypatch.setattr(linear.blockscaled, "query_from_call", lambda *args, **kwargs: Query())
     plan = SimpleNamespace(request=lambda **kwargs: SimpleNamespace(**kwargs),

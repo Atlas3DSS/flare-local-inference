@@ -35,7 +35,7 @@ def restored_reduction(monkeypatch):
     tuner.autotune_cache_info = {"autotune_cache_state": "hit"}
     tuner.device_props = SimpleNamespace(type="cuda", major=10,
         regs_per_multiprocessor=65536, max_threads_per_multi_processor=2048,
-        multi_processor_count=152, warp_size_or_default=32)
+        multi_processor_count=152, warp_size=32, warp_size_or_default=32)
     tuner.size_hints = {"x": 16384, "r0_": 4096}
     tuner.heuristic_type = HeuristicType.REDUCTION
     tuner.deterministic_mode = False
@@ -66,7 +66,7 @@ def test_static_restore_reintroduces_candidates_without_preserved_winner(monkeyp
     future = StaticAutotunerFuture(tuner)
     future.reload_kernel_from_src = lambda: tuner
     assert future.result() is tuner
-    assert tuner.autotune_cache_info["autotune_cache_state"] == "only 1 config"
+    assert tuner.autotune_cache_info["autotune_cache_state"] == "miss"
     assert [result.config.kwargs["R0_BLOCK"] for result in tuner.compile_results] == [256, 128, 64]
     assert tuner.compile_results[0].config is selected
     assert len(tuner.launchers) == 3

@@ -561,7 +561,7 @@ class Scenario:
                 max_new, consumed, temperature=temperature)
             self.requests[slot] = request
             self.admission.stage(row, slot, RequestAdmission(generation, seed, max_new_tokens=max_new,
-                temperature=temperature, top_k=20, top_p=0.9, repetition_penalty=1.05,
+                temperature=temperature, top_k=20, top_p=0.95, repetition_penalty=1.05,
                 presence_penalty=0.05, frequency_penalty=0.02, eos_token_ids=()), prompt)
             for name, value in (("source_slots", 5 + source if source is not None else slot + 1),
                     ("destination_slots", slot + 1), ("operation", 0 if source is not None else 1),
@@ -700,7 +700,7 @@ class Scenario:
         prompts = {3: self.tokens(128, "greedy-aligned"), 0: self.tokens(513, "greedy-chunked"),
             2: self.tokens(255, "greedy-wide-tail"), 1: self.tokens(77, "greedy-split-tail")}
         self.admit("init", 4, [(slot, prompts[slot], 201, 12000 + slot, None, 32) for slot in (3, 0, 2, 1)],
-            temperatures={slot: 0. for slot in range(4)})
+            temperatures={slot: 1. for slot in range(4)})
         self.prefill(3, 64, 128, sample=False)
         self.prefill(3, 128, 128, sample=False)
         self.prefill(0, 512, 512, sample=False)
@@ -717,14 +717,14 @@ class Scenario:
         self.forward("decode", 2, [2, 0])
         self.forward("decode", 1, [0])
         self.admit("restore", 2, [(slot, list(self.snapshots[source][0]), 202, 13000 + slot, source, 32)
-            for slot, source in ((1, 3), (0, 2))], temperatures={1: 0., 0: 0.7})
+            for slot, source in ((1, 3), (0, 2))], temperatures={1: 1., 0: 0.7})
         self.forward("resume", 2, [1, 0])
         self.forward("decode", 2, [0, 1])
         self.forward("decode", 1, [1], pair=True)
-        self.admit("restore", 1, [(2, list(self.snapshots[0][0]), 202, 14002, 0, 32)], temperatures={2: 0.})
+        self.admit("restore", 1, [(2, list(self.snapshots[0][0]), 202, 14002, 0, 32)], temperatures={2: 1.})
         self.forward("resume", 2, [2])
         self.admit("restore", 4, [(slot, list(self.snapshots[source][0]), 203, 15000 + slot, source, 32)
-            for slot, source in ((3, 3), (2, 1), (1, 2), (0, 0))], temperatures={slot: 0. for slot in range(4)})
+            for slot, source in ((3, 3), (2, 1), (1, 2), (0, 0))], temperatures={slot: 1. for slot in range(4)})
         self.forward("resume", 4, [2, 0, 3, 1])
         self.forward("decode", 4, [3, 1, 0, 2])
         self.extended_prefills()
@@ -734,17 +734,17 @@ class Scenario:
             raise ValueError("scenario must execute every prepared graph variant")
         if not any(len(group) == 2 for group in self.groups):
             raise ValueError("scenario requires two-frame execution")
-        if not any(0. in command["temperatures"]
-                and any(value > 0 for value in command["temperatures"])
+        if not any(len(set(command["temperatures"])) > 1
+                and all(value > 0 for value in command["temperatures"])
                 for group in self.groups for command in group if self.model.signatures[command["graph"]].kind == "decode"):
-            raise ValueError("scenario requires mixed zero/nonzero-temperature decode")
+            raise ValueError("scenario requires distinct positive temperatures in one decode batch")
         return self
 
     def extended_prefills(self):
         for capacity in self.prefill_capacities:
             if capacity <= 512:
                 continue
-            for temperature, fixture_label in ((0.7, "general"), (0., "greedy")):
+            for temperature, fixture_label in ((0.7, "general"), (1., "greedy")):
                 index = len(self.extended_cases)
                 slot, restored_slot = index % 4, (index + 1) % 4
                 generation, seed = 300 + 2 * index, 17000 + index
