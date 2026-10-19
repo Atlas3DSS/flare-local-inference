@@ -212,9 +212,16 @@ pub fn template_messages(messages: &[Message], tool_choice: ToolChoice) -> Resul
         }
         out.push(json!({"role":"system","content":sections.join("\n\n")}));
     }
+    let mut assistant_start = None;
     for message in messages {
         if lower_instructions && matches!(message.role, Role::System | Role::Developer) {
             continue;
+        }
+        if message.role == Role::Assistant {
+            if let Some(start) = assistant_start {
+                order_tool_result_batch(&mut out[start..]);
+            }
+            assistant_start = Some(out.len());
         }
         let before = out.len();
         let mut current = json!({"role": message.role, "content": ""});
@@ -289,11 +296,65 @@ pub fn template_messages(messages: &[Message], tool_choice: ToolChoice) -> Resul
             out.push(json!({"role":message.role,"content":""}));
         }
     }
+    if let Some(start) = assistant_start {
+        order_tool_result_batch(&mut out[start..]);
+    }
     if tool_choice == ToolChoice::Required {
         let instruction = "You must call at least one of the provided tools in your next response. Choose the appropriate tool and arguments.";
         append_system_instruction(&mut out, instruction)?;
     }
     Ok(out)
+}
+
+/// Keeps result payloads in call order before templates can reorder their markers.
+fn order_tool_result_batch(messages: &mut [Value]) {
+    let mut ranks = std::collections::HashMap::new();
+    // One semantic assistant turn can lower to several template messages when
+    // text follows a call. All of its calls belong to the same result batch.
+    for call in messages
+        .iter()
+        .filter(|message| message["role"] == "assistant")
+        .filter_map(|message| message.get("tool_calls").and_then(Value::as_array))
+        .flatten()
+    {
+        let Some(id) = call
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+        else {
+            return;
+        };
+        if ranks.insert(id, ranks.len()).is_some() {
+            return;
+        }
+    }
+    let mut slots = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for (index, message) in messages.iter().enumerate().skip(1) {
+        if message["role"] != "tool" {
+            continue;
+        }
+        let Some(id) = message.get("tool_call_id").and_then(Value::as_str) else {
+            return;
+        };
+        let Some(&rank) = ranks.get(id) else {
+            return;
+        };
+        if !seen.insert(id) {
+            return;
+        }
+        slots.push((index, rank));
+    }
+    // ID-less or ambiguous histories retain their template-defined behavior.
+    // Only complete messages move; intervening text and each payload stay intact.
+    let mut results: Vec<_> = slots
+        .iter()
+        .map(|&(index, rank)| (rank, std::mem::take(&mut messages[index])))
+        .collect();
+    results.sort_by_key(|&(rank, _)| rank);
+    for ((index, _), (_, result)) in slots.into_iter().zip(results) {
+        messages[index] = result;
+    }
 }
 
 pub(super) fn append_system_instruction(
@@ -313,4 +374,257 @@ pub(super) fn append_system_instruction(
         messages.insert(0, json!({"role":"system","content":instruction}));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tool_result_order_tests {
+    use super::*;
+
+    fn calls(ids: &[Option<&str>]) -> Message {
+        Message {
+            role: Role::Assistant,
+            parts: ids
+                .iter()
+                .enumerate()
+                .map(|(index, id)| Part::ToolCall {
+                    id: id.map(str::to_owned),
+                    name: format!("lookup_{index}"),
+                    arguments: json!({}),
+                })
+                .collect(),
+            phase: None,
+        }
+    }
+
+    fn result(id: Option<&str>, label: &str) -> Message {
+        Message {
+            role: Role::Tool,
+            parts: vec![Part::ToolResult {
+                id: id.map(str::to_owned),
+                content: vec![
+                    Part::Text(label.into()),
+                    Part::Image(format!("image:{label}:1")),
+                    Part::Image(format!("image:{label}:2")),
+                ],
+                is_error: false,
+            }],
+            phase: None,
+        }
+    }
+
+    fn user(text: &str) -> Message {
+        Message {
+            role: Role::User,
+            parts: vec![Part::Text(text.into())],
+            phase: None,
+        }
+    }
+
+    fn lower(messages: &[Message]) -> Vec<Value> {
+        template_messages(messages, ToolChoice::Auto).unwrap()
+    }
+
+    #[test]
+    fn complete_payloads_follow_call_order_across_fixed_text_slots() {
+        let assistant = calls(&[Some("a"), Some("b")]);
+        let a = result(Some("a"), "alpha");
+        let b = result(Some("b"), "beta");
+        let text = Message {
+            role: Role::User,
+            parts: vec![
+                Part::Text("between".into()),
+                Part::Image("image:user".into()),
+            ],
+            phase: None,
+        };
+        let reversed = lower(&[assistant.clone(), b, text.clone(), a]);
+        let expected = lower(&[
+            assistant,
+            result(Some("a"), "alpha"),
+            text,
+            result(Some("b"), "beta"),
+        ]);
+        assert_eq!(reversed, expected);
+        assert_eq!(
+            reversed[1]["content"][1]["image_url"]["url"],
+            "image:alpha:1"
+        );
+        assert_eq!(
+            reversed[1]["content"][2]["image_url"]["url"],
+            "image:alpha:2"
+        );
+        assert_eq!(reversed[2]["content"][1]["image_url"]["url"], "image:user");
+        assert_eq!(reversed[3]["content"][0]["text"], "beta");
+    }
+
+    #[test]
+    fn reused_ids_are_bound_to_their_own_assistant_batch() {
+        let messages = lower(&[
+            calls(&[Some("a"), Some("b")]),
+            result(Some("b"), "first beta"),
+            result(Some("a"), "first alpha"),
+            calls(&[Some("b"), Some("a")]),
+            result(Some("a"), "second alpha"),
+            result(Some("b"), "second beta"),
+        ]);
+        assert_eq!(messages[1]["content"][0]["text"], "first alpha");
+        assert_eq!(messages[2]["content"][0]["text"], "first beta");
+        assert_eq!(messages[4]["content"][0]["text"], "second beta");
+        assert_eq!(messages[5]["content"][0]["text"], "second alpha");
+    }
+
+    #[test]
+    fn partial_batches_sort_without_requiring_all_results() {
+        let messages = lower(&[
+            calls(&[Some("a"), Some("b"), Some("c")]),
+            result(Some("c"), "gamma"),
+            user("fixed"),
+            result(Some("a"), "alpha"),
+        ]);
+        assert_eq!(messages[1]["tool_call_id"], "a");
+        assert_eq!(messages[2]["content"], "fixed");
+        assert_eq!(messages[3]["tool_call_id"], "c");
+    }
+
+    #[test]
+    fn split_assistant_fragments_share_the_originating_call_batch() {
+        let mut assistant = calls(&[Some("a"), Some("b"), Some("c")]);
+        assistant.parts.insert(1, Part::Text("continuing".into()));
+        let messages = lower(&[
+            assistant,
+            result(Some("c"), "gamma"),
+            result(Some("a"), "alpha"),
+            result(Some("b"), "beta"),
+        ]);
+        assert_eq!(messages[0]["tool_calls"][0]["id"], "a");
+        assert_eq!(messages[1]["tool_calls"][0]["id"], "b");
+        assert_eq!(messages[2]["tool_call_id"], "a");
+        assert_eq!(messages[3]["tool_call_id"], "b");
+        assert_eq!(messages[4]["tool_call_id"], "c");
+    }
+
+    #[test]
+    fn ambiguous_batches_retain_every_message_in_arrival_order() {
+        let valid = json!({"role":"assistant", "tool_calls":[{"id":"a"},{"id":"b"}]});
+        for (assistant, results) in [
+            (
+                json!({"role":"assistant","tool_calls":[{}, {"id":"b"}]}),
+                vec![
+                    json!({"role":"tool","tool_call_id":"b"}),
+                    json!({"role":"tool"}),
+                ],
+            ),
+            (
+                json!({"role":"assistant","tool_calls":[{"id":"a"},{"id":"a"}]}),
+                vec![
+                    json!({"role":"tool","tool_call_id":"a"}),
+                    json!({"role":"tool","tool_call_id":"a"}),
+                ],
+            ),
+            (
+                valid.clone(),
+                vec![
+                    json!({"role":"tool","tool_call_id":"b"}),
+                    json!({"role":"tool"}),
+                ],
+            ),
+            (
+                valid.clone(),
+                vec![
+                    json!({"role":"tool","tool_call_id":"b"}),
+                    json!({"role":"tool","tool_call_id":"unknown"}),
+                ],
+            ),
+            (
+                valid,
+                vec![
+                    json!({"role":"tool","tool_call_id":"b"}),
+                    json!({"role":"tool","tool_call_id":"a"}),
+                    json!({"role":"tool","tool_call_id":"b"}),
+                ],
+            ),
+        ] {
+            let mut messages = vec![assistant];
+            messages.extend(results);
+            let original = messages.clone();
+            order_tool_result_batch(&mut messages);
+            assert_eq!(messages, original);
+        }
+    }
+
+    #[test]
+    fn assistant_without_calls_ends_the_binding_scope() {
+        let messages = lower(&[
+            calls(&[Some("a"), Some("b")]),
+            Message {
+                role: Role::Assistant,
+                parts: vec![Part::Text("done".into())],
+                phase: None,
+            },
+            result(Some("b"), "beta"),
+            result(Some("a"), "alpha"),
+        ]);
+        assert_eq!(messages[2]["tool_call_id"], "b");
+        assert_eq!(messages[3]["tool_call_id"], "a");
+    }
+
+    #[test]
+    fn packaged_image_template_receives_matching_payload_and_marker_order() {
+        let ordered = vec![
+            calls(&[Some("a"), Some("b")]),
+            result(Some("a"), "alpha"),
+            result(Some("b"), "beta"),
+        ];
+        let mut reversed = ordered.clone();
+        reversed.swap(1, 2);
+        let render = |messages: &[Message]| {
+            let mut normalized = lower(messages);
+            let mut images = Vec::new();
+            for message in &mut normalized {
+                if let Some(parts) = message["content"].as_array_mut() {
+                    for part in parts {
+                        if part["type"] == "image_url" {
+                            images.push(part["image_url"]["url"].as_str().unwrap().to_owned());
+                            *part = json!({"type":"image"});
+                        }
+                    }
+                }
+            }
+            let mut environment = minijinja::Environment::new();
+            environment.set_trim_blocks(true);
+            environment.set_lstrip_blocks(true);
+            environment
+                .set_unknown_method_callback(minijinja_contrib::pycompat::unknown_method_callback);
+            environment.add_test("iterable", |value: &minijinja::Value| {
+                !value.is_none() && value.try_iter().is_ok()
+            });
+            environment
+                .add_template(
+                    "chat",
+                    include_str!("../../../ignition/recipes/deepseek41/assets/chat_template.jinja"),
+                )
+                .unwrap();
+            let rendered = environment
+                .get_template("chat")
+                .unwrap()
+                .render(json!({
+                    "messages":normalized,"thinking_mode":"chat","add_generation_prompt":true,
+                }))
+                .unwrap();
+            (rendered, images)
+        };
+        let expected = render(&ordered);
+        assert_eq!(render(&reversed), expected);
+        assert_eq!(
+            expected.1,
+            [
+                "image:alpha:1",
+                "image:alpha:2",
+                "image:beta:1",
+                "image:beta:2"
+            ]
+        );
+        assert_eq!(expected.0.matches("<｜deepseek_image｜>").count(), 4);
+        assert!(expected.0.find("alpha").unwrap() < expected.0.find("beta").unwrap());
+    }
 }
