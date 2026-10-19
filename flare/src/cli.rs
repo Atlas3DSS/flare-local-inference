@@ -142,6 +142,11 @@ pub enum FleetCommand {
     },
     /// Launch a package across a cluster's nodes.
     Run(Box<FleetRun>),
+    /// Show the live metrics dashboard for every group and GPU on the cluster's nodes.
+    Dashboard {
+        #[arg(long, value_name = "NAME")]
+        cluster: Option<String>,
+    },
     /// List every group on the cluster's nodes.
     Ls {
         #[arg(long, value_name = "NAME")]

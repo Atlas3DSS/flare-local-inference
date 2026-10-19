@@ -207,6 +207,9 @@ fn fleet_command(args: cli::FleetArgs) -> Result<(), fleet::Failure> {
         } => controller.controllers_remove(&key),
         cli::FleetCommand::Status { cluster } => controller.status(cluster.as_deref()),
         cli::FleetCommand::Ls { cluster } => controller.ls(cluster.as_deref()),
+        cli::FleetCommand::Dashboard { cluster } => {
+            fleet::dashboard::run(&controller, cluster.as_deref())
+        }
         cli::FleetCommand::Attach { cluster, group } => {
             controller.attach(cluster.as_deref(), group.as_deref())
         }

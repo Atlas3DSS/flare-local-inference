@@ -211,6 +211,7 @@ with a message; an ERROR closes the session.
 | ATTACH | Controller to node | Group identifier, required when several groups are on the node | Streams the rank's retained output, then live output |
 | STOP | Controller to node | Group identifier, required when several groups are on the node | Sends SIGTERM to the rank |
 | STATUS | Controller to node | Optional `toward` address | Name, keys, controller-set revision, free cache space, every GPU with its UUID, revision, memory and holding group, every group the agent runs or retains with its name, rank, GPUs, state and uptime, every package cache directory with its files and verification state, and the local address routing selects toward `toward` |
+| METRICS | Controller to node | None | The GPUs as the agent's sampler last read them, with utilization, temperature, clock and holding group, and every group with the metrics document its rank-zero process last served |
 | PREPARE | Controller to node | Preparation command, checkpoint token, rank | Runs `ignition export` or `ignition join` from the node's configured checkout (see [unimplemented parts](#unimplemented-parts)) |
 | LOG, EXIT | Node to controller | Line; exit status | Output and completion of a rank or preparation process |
 
@@ -415,6 +416,7 @@ serves it.
 | `flare fleet prepare RECIPE --cluster NAME ...` | Controller | Multi-host export through agents (unimplemented) |
 | `flare fleet run PACKAGE --cluster NAME [--name GROUP] [--gpus N,...] [--detach] ...` | Controller | Starts a group on one free GPU per node, or the GPUs named, and attaches |
 | `flare fleet ls [--cluster NAME]` | Controller | Every group on the cluster's nodes with its GPUs and state |
+| `flare fleet dashboard [--cluster NAME]` | Controller | The serving process's live metrics dashboard for every group and GPU of the cluster |
 | `flare fleet attach [GROUP]` / `stop [GROUP]` / `status --cluster NAME` | Controller | Operates running groups, or the one named |
 | `flare fleet forget NODE` | Controller | Removes a node from the fleet file |
 
@@ -505,12 +507,23 @@ STATUS gains three lists.
 
 | List | Entry |
 | --- | --- |
-| `gpus` | Index, UUID, name, hardware revision (`gb10`, `gb202`, `gb300`), memory total and free, and the group holding the GPU, if any |
+| `gpus` | Index, UUID, name, hardware revision (`gb10`, `gb202`, `gb300`), memory total and free, utilization, temperature and SM clock where NVML reports them, and the group holding the GPU, if any |
 | `groups` | Every group the agent runs or last ran: identifier, name, package, rank, GPUs, state, exit status, uptime |
 | `packages` | Every cache directory: name, files with sizes, whether its stored data verified, bytes on disk |
 
-GPU memory comes from NVML through the dynamic loading Helios already uses
-for the CUDA driver, without creating a context in the agent. An agent runs any
+GPU readings come from NVML through the dynamic loading Helios already uses
+for the CUDA driver, without creating a context in the agent. A sampler thread
+in the agent reads the GPUs once a second and, for every running group whose
+rank zero it hosts, fetches that process's `/metrics` document as JSON from
+the loopback address of its HTTP bind; METRICS returns the latest of both.
+`flare fleet dashboard` polls METRICS on every node of a cluster twice a
+second and draws the serving process's terminal dashboard for the fleet: one
+row per group with prefill and generation rates, active and queued requests,
+acceptance and KV use; the plots of the selected group, derived from
+successive documents with the same rate history the serving dashboard uses;
+and one row per GPU with utilization, free memory, temperature and the group
+holding it. Groups and nodes come and go as the agents report them, and a
+node that stops answering is shown as unreachable until it answers again. An agent runs any
 number of groups on disjoint GPU sets, each a separate process with its own
 retained output; STOP and ATTACH name the group.
 

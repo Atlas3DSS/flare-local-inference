@@ -252,7 +252,9 @@ Every rank's output appears on the controller's terminal with a `[rank R name]`
 prefix. Ctrl-C stops the group: rank zero receives SIGTERM first and drains
 native work, then peers still running after thirty seconds are stopped.
 `--detach` returns once every rank has started; `flare fleet attach` shows a
-running group's output, and `flare fleet stop` stops it. A controller that
+running group's output, `flare fleet stop` stops it, and `flare fleet
+dashboard` shows the live metrics dashboard for every group and GPU on the
+cluster. A controller that
 disconnects, sleeps, or crashes does not stop the group; agents keep the last
 64 KiB of each rank's output for a later attach. An agent does not restart a
 failed rank; start the group again after resolving the failure.

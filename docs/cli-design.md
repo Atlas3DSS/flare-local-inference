@@ -108,6 +108,7 @@ flare fleet status [--cluster NAME]
 flare fleet run PACKAGE --cluster NAME [serving flags] [--detach]
 flare fleet attach | stop [--cluster NAME]
 flare fleet forget NODE                   remove a node from the fleet file
+flare fleet ls | dashboard [--cluster NAME]  groups on the cluster's nodes; their live metrics
 flare trust revoke FINGERPRINT
 ```
 

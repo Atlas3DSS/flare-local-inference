@@ -11,6 +11,7 @@
 pub mod agent;
 pub mod cache;
 pub mod controller;
+pub mod dashboard;
 pub mod gpu;
 pub mod grant;
 pub mod identity;
@@ -45,6 +46,7 @@ pub mod frame {
     pub const GET: u8 = 15;
     pub const STAT: u8 = 16;
     pub const CONTROLLERS: u8 = 17;
+    pub const METRICS: u8 = 18;
 }
 
 pub fn hex(bytes: &[u8]) -> String {

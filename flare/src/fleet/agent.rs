@@ -79,6 +79,32 @@ pub fn exchange_hello(session: &mut Session, mine: &Hello) -> Result<Hello, Fail
     }
 }
 
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// The URL of rank zero's metrics endpoint for its `--host` and `--port` options; a wildcard
+/// bind is reached through the loopback address.
+pub fn metrics_url(rank_zero: &[String]) -> String {
+    let option = |name: &str| {
+        rank_zero
+            .iter()
+            .position(|a| a == name)
+            .and_then(|i| rank_zero.get(i + 1))
+            .cloned()
+    };
+    let host = match option("--host").as_deref() {
+        None | Some("0.0.0.0") | Some("::") => "127.0.0.1".to_owned(),
+        Some(host) if host.contains(':') => format!("[{host}]"),
+        Some(host) => host.to_owned(),
+    };
+    let port = option("--port").unwrap_or_else(|| "8000".into());
+    format!("http://{host}:{port}/metrics?format=json")
+}
+
 /// Free bytes on the filesystem holding `path`.
 pub fn free_bytes(path: &Path) -> u64 {
     let Ok(path) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) else {
@@ -132,8 +158,12 @@ pub struct Group {
     /// UUIDs of the GPUs the rank holds while it runs.
     pub gpus: Vec<String>,
     pub pid: i32,
+    /// Rank zero's metrics URL, derived from its HTTP bind options; None for a peer rank.
+    pub metrics_url: Option<String>,
     started: Instant,
     log: Mutex<Log>,
+    /// The latest metrics document scraped from the rank, with the Unix millisecond it was read.
+    metrics: Mutex<Option<(u64, Value)>>,
 }
 
 impl Group {
@@ -164,6 +194,22 @@ impl Group {
 
     pub fn exit(&self) -> Option<i32> {
         self.log.lock().unwrap().exit
+    }
+
+    /// Read the rank's metrics endpoint and keep the document.
+    fn scrape(&self) {
+        let Some(url) = &self.metrics_url else { return };
+        let document = ureq::get(url)
+            .config()
+            .timeout_global(Some(Duration::from_secs(2)))
+            .build()
+            .call()
+            .ok()
+            .and_then(|mut response| response.body_mut().read_to_string().ok())
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok());
+        if let Some(document) = document {
+            *self.metrics.lock().unwrap() = Some((now_millis(), document));
+        }
     }
 
     /// The retained output, the exit status if finished, and a receiver of later events.
@@ -213,7 +259,12 @@ pub struct Agent {
     groups: Mutex<Vec<Arc<Group>>>,
     verifier: Verifier,
     gpus: Gpus,
+    /// The GPU inventory the sampler last read, with the Unix millisecond it was read.
+    sampled_gpus: Mutex<Option<(u64, Vec<Gpu>)>>,
 }
+
+/// How often the sampler reads GPUs and scrapes running rank-zero groups.
+const SAMPLE_PERIOD: Duration = Duration::from_secs(1);
 
 impl Agent {
     pub fn new(dir: AgentDir, cache: PathBuf) -> Result<Self, Failure> {
@@ -246,6 +297,67 @@ impl Agent {
             groups: Mutex::new(Vec::new()),
             verifier,
             gpus,
+            sampled_gpus: Mutex::new(None),
+        })
+    }
+
+    /// Read the GPUs and every running rank zero's metrics once.
+    pub fn sample(&self) {
+        if let Ok(gpus) = (self.gpus)() {
+            *self.sampled_gpus.lock().unwrap() = Some((now_millis(), gpus));
+        }
+        for group in self.groups().iter().filter(|g| g.running()) {
+            group.scrape();
+        }
+    }
+
+    /// The METRICS reply: the sampled GPUs with their holders, and every group with its latest
+    /// metrics document.
+    fn metrics(&self) -> Value {
+        let groups = self.groups();
+        let (gpus_at, gpus) = self
+            .sampled_gpus
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or((0, Vec::new()));
+        json!({
+            "at": now_millis(),
+            "gpus_at": gpus_at,
+            "gpus": gpus
+                .iter()
+                .map(|gpu| {
+                    let holder = groups
+                        .iter()
+                        .find(|g| g.running() && g.gpus.contains(&gpu.uuid))
+                        .map(|g| g.id.clone());
+                    let mut value = serde_json::to_value(gpu).unwrap_or(Value::Null);
+                    value["group"] = holder.into();
+                    value
+                })
+                .collect::<Vec<_>>(),
+            "groups": groups
+                .iter()
+                .map(|g| {
+                    let (metrics_at, metrics) = g
+                        .metrics
+                        .lock()
+                        .unwrap()
+                        .clone()
+                        .map_or((Value::Null, Value::Null), |(at, m)| (at.into(), m));
+                    json!({
+                        "id": g.id,
+                        "name": g.name,
+                        "rank": g.rank,
+                        "gpus": g.gpus,
+                        "running": g.running(),
+                        "exit": g.exit(),
+                        "uptime_seconds": g.started.elapsed().as_secs(),
+                        "metrics_at": metrics_at,
+                        "metrics": metrics,
+                    })
+                })
+                .collect::<Vec<_>>(),
         })
     }
 
@@ -375,6 +487,15 @@ pub fn serve(listen: &str, dir: AgentDir, cache: PathBuf) -> Result<(), Failure>
 }
 
 pub fn serve_on(listener: TcpListener, agent: Arc<Agent>) -> Result<(), Failure> {
+    {
+        let agent = agent.clone();
+        thread::spawn(move || {
+            loop {
+                agent.sample();
+                thread::sleep(SAMPLE_PERIOD);
+            }
+        });
+    }
     for connection in listener.incoming() {
         let Ok(stream) = connection else { continue };
         let agent = agent.clone();
@@ -458,6 +579,10 @@ fn session(agent: &Arc<Agent>, stream: TcpStream) -> Result<(), Failure> {
             frame::STATUS => {
                 let request = json_body(&mut session, length)?;
                 status(agent, &request)
+            }
+            frame::METRICS => {
+                session.read_body(length, FRAME_LIMIT)?;
+                Ok(agent.metrics().to_string().into_bytes())
             }
             frame::GET => {
                 let request = json_body(&mut session, length)?;
@@ -909,7 +1034,9 @@ fn run(agent: &Arc<Agent>, request: &Value) -> Result<Arc<Group>, Failure> {
         package: package.display().to_string(),
         gpus,
         pid: child.id() as i32,
+        metrics_url: (rank == 0).then(|| metrics_url(&grant.rank_zero)),
         started: Instant::now(),
+        metrics: Mutex::new(None),
         log: Mutex::new(Log {
             lines: VecDeque::new(),
             bytes: 0,
@@ -1232,6 +1359,9 @@ pub mod tests {
             revision: "gb10".into(),
             memory_total: 128 << 30,
             memory_free: 100 << 30,
+            utilization: Some(7),
+            temperature: Some(41),
+            clock_mhz: None,
         })
         .collect()
     }
@@ -1811,6 +1941,121 @@ pub mod tests {
                 .iter()
                 .all(|g| g["group"].is_null())
         );
+    }
+
+    #[test]
+    fn metrics_urls_follow_rank_zero_bind_options() {
+        assert_eq!(
+            metrics_url(&[]),
+            "http://127.0.0.1:8000/metrics?format=json"
+        );
+        assert_eq!(
+            metrics_url(&[
+                "--host".into(),
+                "0.0.0.0".into(),
+                "--port".into(),
+                "8001".into()
+            ]),
+            "http://127.0.0.1:8001/metrics?format=json"
+        );
+        assert_eq!(
+            metrics_url(&["--host".into(), "10.1.2.3".into()]),
+            "http://10.1.2.3:8000/metrics?format=json"
+        );
+        assert_eq!(
+            metrics_url(&["--host".into(), "::1".into(), "--port".into(), "9".into()]),
+            "http://[::1]:9/metrics?format=json"
+        );
+    }
+
+    #[test]
+    fn the_sampler_scrapes_rank_zero_metrics_and_reports_gpus_with_holders() {
+        let harness = harness(9);
+        let mut session = pair_accept_first(&harness);
+        // A stand-in for rank zero's HTTP server: every request gets one JSON document.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let mut stream = stream;
+                let mut buffer = [0u8; 1024];
+                let _ = std::io::Read::read(&mut stream, &mut buffer);
+                let body = r#"{"generated_tokens":1234,"active":2}"#;
+                let _ = std::io::Write::write_all(
+                    &mut stream,
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        let script = "#!/bin/sh\ntrap 'exit 0' TERM\nwhile true; do sleep 0.1; done\n";
+        let name = cache::binary_name(script.as_bytes());
+        put(&mut session, "binary", &name, script.as_bytes(), None);
+        put(
+            &mut session,
+            "package",
+            "export-13/model.safetensors",
+            b"package bytes",
+            None,
+        );
+        let a = "GPU-aaaaaaaa-0000-0000-0000-000000000000";
+        let grant = Signed::sign(
+            &harness.controller,
+            &Grant {
+                group: "serving".into(),
+                name: "serving".into(),
+                package: Package {
+                    export: "export".into(),
+                    length: 13,
+                    files: vec!["model.safetensors".into()],
+                    source: None,
+                },
+                members: vec![Member {
+                    rank: 0,
+                    name: harness.agent.name.clone(),
+                    public_key: harness.agent.key.public().to_hex(),
+                    address: harness.address.clone(),
+                    gpus: vec![a.into()],
+                }],
+                rendezvous: "127.0.0.1:29800".into(),
+                serving: vec![],
+                rank_zero: vec![
+                    "--host".into(),
+                    "0.0.0.0".into(),
+                    "--port".into(),
+                    port.to_string(),
+                ],
+                roce_ring: false,
+                issued: now(),
+                expires: now() + 60,
+            },
+        )
+        .unwrap();
+        let mut running = connect(&harness, &harness.controller);
+        running
+            .request(frame::RUN, &run_request(&grant, 0, &name))
+            .unwrap();
+        harness.agent.sample();
+        let mut session = connect(&harness, &harness.controller);
+        let metrics: Value =
+            serde_json::from_slice(&session.request(frame::METRICS, &json!({})).unwrap()).unwrap();
+        assert!(metrics["at"].as_u64().unwrap() > 0);
+        let gpus = metrics["gpus"].as_array().unwrap();
+        assert_eq!(gpus[0]["utilization"], 7);
+        assert_eq!(gpus[0]["group"], "serving");
+        assert!(gpus[1]["group"].is_null());
+        let group = &metrics["groups"][0];
+        assert_eq!(group["name"], "serving");
+        assert_eq!(group["metrics"]["generated_tokens"], 1234);
+        assert!(group["metrics_at"].as_u64().unwrap() > 0);
+        let mut session = connect(&harness, &harness.controller);
+        session
+            .request(frame::STOP, &json!({"group": "serving"}))
+            .unwrap();
+        assert_eq!(collect(&mut running).1, 0);
     }
 
     #[test]

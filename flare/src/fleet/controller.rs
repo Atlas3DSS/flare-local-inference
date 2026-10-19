@@ -277,6 +277,11 @@ impl Controller {
     }
 
     /// The fleet file's nodes of a cluster, in rank order.
+    pub fn cluster_nodes(&self, name: Option<&str>) -> Result<(String, Vec<Node>), Failure> {
+        self.cluster(name)
+    }
+
+    /// The fleet file's nodes of a cluster, in rank order.
     fn cluster(&self, name: Option<&str>) -> Result<(String, Vec<Node>), Failure> {
         let (name, nodes) = self.fleet.cluster(name)?;
         Ok((name, nodes.into_iter().cloned().collect()))
@@ -284,7 +289,7 @@ impl Controller {
 
     // ---- sessions ------------------------------------------------------------------------------
 
-    fn node_session(&self, node: &Node) -> Result<(Session, Hello), Failure> {
+    pub(super) fn node_session(&self, node: &Node) -> Result<(Session, Hello), Failure> {
         let (mut session, mut hello) = self.handshake(&node.address)?;
         let expected = node.key()?;
         if session.remote() != expected {

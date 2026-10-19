@@ -33,6 +33,15 @@ pub struct Gpu {
     pub memory_total: u64,
     /// Unallocated device memory in bytes, or the host's `MemAvailable` for an integrated GPU.
     pub memory_free: u64,
+    /// Percent of the sample period in which a kernel ran; absent when NVML does not report it.
+    #[serde(default)]
+    pub utilization: Option<u32>,
+    /// GPU temperature in degrees Celsius; absent when NVML does not report it.
+    #[serde(default)]
+    pub temperature: Option<u32>,
+    /// SM clock in MHz; absent when NVML does not report it.
+    #[serde(default)]
+    pub clock_mhz: Option<u32>,
 }
 
 /// Every GPU NVML reports, in NVML index order. Fails with an error naming `libnvidia-ml.so.1`
@@ -68,6 +77,17 @@ pub fn enumerate() -> Result<Vec<Gpu>, Failure> {
             library.get::<unsafe extern "C" fn(Device, *mut c_int, *mut c_int) -> c_int>(
                 b"nvmlDeviceGetCudaComputeCapability\0",
             )?;
+        let get_utilization = library
+            .get::<unsafe extern "C" fn(Device, *mut Utilization) -> c_int>(
+                b"nvmlDeviceGetUtilizationRates\0",
+            )?;
+        let get_temperature = library
+            .get::<unsafe extern "C" fn(Device, c_uint, *mut c_uint) -> c_int>(
+                b"nvmlDeviceGetTemperature\0",
+            )?;
+        let get_clock = library.get::<unsafe extern "C" fn(Device, c_uint, *mut c_uint) -> c_int>(
+            b"nvmlDeviceGetClockInfo\0",
+        )?;
 
         check(&describe, "nvmlInit_v2", init())?;
         let _initialized = Initialized { shutdown };
@@ -130,6 +150,24 @@ pub fn enumerate() -> Result<Vec<Gpu>, Failure> {
                 (memory.total, memory.free)
             };
 
+            // Readings a GPU does not support are absent rather than failing the inventory.
+            let optional = |code: c_int, value: u32| -> Result<Option<u32>, Failure> {
+                if code == NOT_SUPPORTED {
+                    Ok(None)
+                } else {
+                    check(&describe, "nvml reading", code)?;
+                    Ok(Some(value))
+                }
+            };
+            let mut utilization = Utilization { gpu: 0, _memory: 0 };
+            let utilization = optional(get_utilization(device, &mut utilization), utilization.gpu)?;
+            let mut temperature: c_uint = 0;
+            // NVML_TEMPERATURE_GPU is sensor 0.
+            let temperature = optional(get_temperature(device, 0, &mut temperature), temperature)?;
+            let mut clock: c_uint = 0;
+            // NVML_CLOCK_SM is clock type 1.
+            let clock_mhz = optional(get_clock(device, 1, &mut clock), clock)?;
+
             gpus.push(Gpu {
                 index,
                 uuid: text(&uuid),
@@ -137,6 +175,9 @@ pub fn enumerate() -> Result<Vec<Gpu>, Failure> {
                 revision: revision(pci.pci_device_id, major, minor),
                 memory_total,
                 memory_free,
+                utilization,
+                temperature,
+                clock_mhz,
             });
         }
         Ok(gpus)
@@ -151,6 +192,14 @@ pub fn visible_devices(uuids: &[String]) -> String {
 /// nvmlDevice_t, an opaque handle owned by NVML.
 type Device = *mut c_void;
 type ErrorString = unsafe extern "C" fn(c_int) -> *const c_char;
+
+/// nvmlUtilization_t: percent of the last sample period with a kernel running, and with memory
+/// traffic.
+#[repr(C)]
+struct Utilization {
+    gpu: c_uint,
+    _memory: c_uint,
+}
 
 /// nvmlMemory_t, the version 1 layout that nvmlDeviceGetMemoryInfo fills.
 #[repr(C)]
