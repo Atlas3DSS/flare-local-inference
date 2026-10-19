@@ -12,6 +12,7 @@ from b12x.preparation import FrozenMapping, PreparationSession, PreparedCall
 
 from ignition.preparation.fixtures import fused_moe as moe_fixtures
 from ignition.preparation.scratch import ScratchArena, planned_scratch, prime_owners
+from ignition.preparation.tensor_metadata import record_numeric_tensor
 from ignition.preparation.tuning import declare, register_finalizer
 
 
@@ -110,6 +111,30 @@ class PreparedRoutedExperts:
     def __init__(self, source, experts, ids, weights, output, *, session: PreparationSession, name: str,
                  workspace: ScratchArena | torch.Tensor | None = None, router_plan=None,
                  a4_prefill=False, routing=None):
+        # b12x owns the final weight/scale planes after repacking. Classify those
+        # exact tensors, not opaque execution scratch or the discarded source.
+        for field in ("w1_fp4", "w2_fp4", "w1_blockscale", "w2_blockscale",
+                      "w1_alphas", "w2_alphas", "a1_gscale", "a2_gscale"):
+            record_numeric_tensor(getattr(experts._impl, field))
+        representation = experts._impl.representation
+        if representation is not None:
+            # A plan can keep alternate scale layouts beside its canonical planes.
+            for field in ("w13_scale", "w2_scale", "w13_sfb", "w2_sfb",
+                          "w13_global_scale", "w2_global_scale", "micro_w13_scale", "micro_w2_scale",
+                          "micro_w13_global_scale", "micro_w2_global_scale"):
+                tensor = getattr(representation.value, field, None)
+                if tensor is not None:
+                    record_numeric_tensor(tensor)
+        decoder = experts._impl.nvfp4_csf
+        if decoder is not None:
+            # Compressed records contain numeric offsets, not device pointers.
+            for plane in (decoder.first, decoder.second):
+                for tensor in (plane.fixed, plane.exceptions, plane.task_offsets, plane.value_lut):
+                    if tensor is not None:
+                        record_numeric_tensor(tensor)
+            record_numeric_tensor(decoder.active)
+            for plane in decoder.indexed_scales or ():
+                record_numeric_tensor(plane.storage)
         # A16 experts prepared with A4 capability run large prefill calls with quantized activations.
         precision = {"a4_prefill": True} if a4_prefill else {}
         self.source = source

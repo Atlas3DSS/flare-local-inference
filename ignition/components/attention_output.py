@@ -8,6 +8,7 @@ from b12x.preparation import PreparedCall
 from b12x.preparation.types import plan_from_handle
 
 from ignition.preparation.scratch import planned_scratch, prime_owners
+from ignition.preparation.tensor_metadata import record_numeric_tensor
 from ignition.preparation.tuning import declare, register_finalizer
 
 
@@ -42,6 +43,8 @@ class PreparedGroupedOutputProjection:
         self.operands = [tensor for packed in (weights.wo_a, weights.wo_b)
                          for tensor in (packed.values, packed.scale_rows.view(torch.uint8),
                                         packed.scale_mma.view(torch.uint8))]
+        for tensor in self.operands:
+            record_numeric_tensor(tensor)
 
         def call(state, values, out, *, produce=None, owners=()):
             scratch = planned_scratch(state._scratch_state.scratch_specs(), workspace)

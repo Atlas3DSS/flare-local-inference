@@ -14,6 +14,11 @@
     Qwen Flash TP1 disk-only and RAM/disk round trips pass. See
     windows.md#serve-a-prepared-package.
 
+[ ] Validate numeric weight metadata in complete model exports across packed
+    formats and TP ranks, including a fresh Nemotron Bolt Spark export and
+    Windows text/image/speculative replay. SM103 execution and CSF repacking
+    need GPU validation beyond metadata tests. See windows.md#serve-a-prepared-package.
+
 [ ] Review scratch-memory lifetimes and sharing across every supported recipe
     and shared component, including Qwen, GLM, DeepSeek, MiMo, Kimi, Step, and
     Nemotron. Review contiguous-buffer placement within typed pools and weight

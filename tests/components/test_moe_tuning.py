@@ -18,7 +18,11 @@ def test_candidate_cohort_reuses_exact_operands_and_one_arena(monkeypatch, token
     ids = torch.zeros((tokens, 10), dtype=torch.int32)
     weights = torch.zeros((tokens, 10), dtype=torch.float32)
     output = torch.zeros_like(source)
-    experts = SimpleNamespace(num_experts=512, has_csf_blocks=False)
+    planes = {name: torch.zeros(16, dtype=torch.uint8) for name in
+              ("w1_fp4", "w2_fp4", "w1_blockscale", "w2_blockscale",
+               "w1_alphas", "w2_alphas", "a1_gscale", "a2_gscale")}
+    experts = SimpleNamespace(num_experts=512, has_csf_blocks=False,
+                              _impl=SimpleNamespace(**planes, representation=None, nvfp4_csf=None))
     arena = ScratchArena("cpu")
     arena.reserve(256)
     arena.freeze()
