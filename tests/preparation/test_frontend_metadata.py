@@ -158,3 +158,68 @@ def test_kimi3_agentic_sampling_defaults():
     defaults = next(recipe for recipe in recipes() if recipe.name == 'kimi3').sampling_defaults
     assert defaults.as_dict() == dict(seed=0, temperature=1., top_p=1., top_k=-1,
         min_p=0., repetition_penalty=1., presence_penalty=0., frequency_penalty=0.)
+
+
+@pytest.mark.parametrize("encoder", ["DEEPSEEK_V4", "DEEPSEEK_V41", 1, 2])
+def test_native_prompt_assets_and_presence_roundtrip(encoder):
+    source = server()
+    source["frontend"].update(prompt_encoder=encoder, image_placeholder_token_id=129264)
+    source["assets"] = {"tokenizer": {}}
+    index = ModelIndex()
+    serving(index, source)
+    restored = ModelIndex.FromString(index.SerializeToString())
+    assert restored.frontend.prompt_encoder in (1, 2)
+    assert restored.frontend.HasField("image_placeholder_token_id")
+    assert restored.frontend.image_placeholder_token_id == 129264
+    source["assets"]["chat_template"] = {}
+    with pytest.raises(ValueError, match="runtime assets"):
+        serving(ModelIndex(), source)
+
+
+def test_absent_prompt_encoder_preserves_jinja_assets():
+    source = server()
+    index = ModelIndex()
+    serving(index, source)
+    restored = ModelIndex.FromString(index.SerializeToString())
+    assert restored.frontend.prompt_encoder == 0
+    assert not restored.frontend.HasField("image_placeholder_token_id")
+    del source["assets"]["chat_template"]
+    with pytest.raises(ValueError, match="runtime assets"):
+        serving(ModelIndex(), source)
+
+
+@pytest.mark.parametrize("encoder", ["DEEPSEEK_V4", 1, True, None])
+def test_preparation_requires_typed_prompt_encoder(tmp_path, encoder):
+    with pytest.raises(ValueError, match="PromptEncoder"):
+        prepare_frontend(tmp_path, eos_token_ids=1, prompt_encoder=encoder)
+
+
+@pytest.mark.parametrize("token_id,encoded,size,configured", [
+    (None, [], 129280, 129264), (129263, [129263], 129280, 129264),
+    (129264, [1, 2], 129280, 129264), (129264, [129264], 129264, 129264),
+    (129264, [129264], 129280, 42), (129264, [129264], 129280, True),
+])
+def test_native_image_token_validation(tmp_path, monkeypatch, token_id, encoded, size, configured):
+    import tokenizers
+    from ignition.preparation.frontend import PromptEncoder, _native_image_placeholder
+
+    class Tokenizer:
+        @staticmethod
+        def from_file(path):
+            assert Path(path) == tmp_path / "tokenizer.json"
+            return Tokenizer()
+
+        def token_to_id(self, token):
+            assert token == "<｜deepseek_image｜>"
+            return token_id
+
+        def get_vocab_size(self):
+            return size
+
+        def encode(self, token, *, add_special_tokens):
+            assert not add_special_tokens
+            return type("Encoding", (), {"ids": encoded})()
+
+    monkeypatch.setattr(tokenizers, "Tokenizer", Tokenizer)
+    with pytest.raises(ValueError, match="image"):
+        _native_image_placeholder(tmp_path, {"image_token_id": configured}, PromptEncoder.DEEPSEEK_V41)

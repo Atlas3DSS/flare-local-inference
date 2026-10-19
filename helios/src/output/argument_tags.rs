@@ -79,7 +79,7 @@ mod tests {
     fn config() -> OutputConfig {
         OutputConfig {
             structured: false,
-            reasoning: true,
+            start: crate::output::tagged::OutputStart::Reasoning,
             tools: vec![json!({"type":"function", "function": {
             "name":"run", "parameters":{"type":"object", "properties":{
                 "text":{"type":"string"}, "count":{"type":"integer"}, "enabled":{"type":"boolean"},
@@ -150,7 +150,7 @@ mod tests {
         assert!(parser.finish(Termination::OutputLimit).unwrap().is_empty());
         let mut parser = ArgumentTagOutput::new(OutputConfig {
             structured: true,
-            reasoning: false,
+            start: crate::output::tagged::OutputStart::Content,
             ..config()
         });
         assert_eq!(

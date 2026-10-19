@@ -112,20 +112,24 @@ impl OutputPipeline {
             Some((ToolParserKind::Xtml, _, _)) => Some(crate::grammar::OutputEnvelope {
                 reasoning_end: config
                     .content
-                    .reasoning
+                    .start
+                    .eq(&super::tagged::OutputStart::Reasoning)
                     .then_some("<|close|>think<|sep|><|open|>response<|sep|>"),
                 tool: (!config.content.tools.is_empty())
                     .then_some((super::xtml::TOOLS_OPEN, super::xtml::TOOLS_CLOSE)),
                 function: None,
                 tool_ends_reasoning: false,
                 response: Some(("", super::xtml::RESPONSE_CLOSE)),
+                tool_body_start: false,
             }),
             None => Some(crate::grammar::OutputEnvelope {
-                reasoning_end: config.content.reasoning.then_some("</think>"),
+                reasoning_end: (config.content.start == super::tagged::OutputStart::Reasoning)
+                    .then_some("</think>"),
                 tool: None,
                 function: None,
                 tool_ends_reasoning: false,
                 response: None,
+                tool_body_start: false,
             }),
         }?;
         envelope.tool_ends_reasoning = config.syntax.reasoning.as_ref().is_some_and(|r| {
@@ -178,7 +182,7 @@ mod tests {
             control_tokens: vec![],
             content: TaggedConfig {
                 structured,
-                reasoning: false,
+                start: crate::output::tagged::OutputStart::Content,
                 tools,
             },
         });

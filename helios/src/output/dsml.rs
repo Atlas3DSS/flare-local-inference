@@ -91,7 +91,7 @@ mod deepseek41_syntax_tests {
         for split in text.char_indices().map(|(offset, _)| offset) {
             let mut parser = DeepSeekOutput::new(OutputConfig {
                 structured: false,
-                reasoning: true,
+                start: crate::output::tagged::OutputStart::Reasoning,
                 tools: vec![json!({"type":"function", "function":{"name":"lookup"}})],
             });
             let mut output = Accumulator::new("request".into());
@@ -135,7 +135,7 @@ mod deepseek4_syntax_tests {
         for split in text.char_indices().map(|(offset, _)| offset) {
             let mut parser = DeepSeekOutput::new(OutputConfig {
                 structured: false,
-                reasoning: true,
+                start: crate::output::tagged::OutputStart::Reasoning,
                 tools: vec![json!({"type":"function", "function":{"name":"lookup"}})],
             });
             let mut output = Accumulator::new("request".into());
@@ -161,5 +161,65 @@ mod deepseek4_syntax_tests {
                 "{\"n\":3}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod prefixed_tool_tests {
+    use super::*;
+    use crate::output::tagged::{OutputConfig, OutputStart, TaggedOutput};
+    use crate::output::{Input, ModelOutput, Termination};
+    use crate::server::output::Accumulator;
+    use serde_json::json;
+
+    fn check<const SPACED: bool>() {
+        let separator = if SPACED { " " } else { "" };
+        let close = if SPACED {
+            "</｜DSML｜ calls>"
+        } else {
+            "</｜DSML｜tool_calls>"
+        };
+        let text = format!(
+            "\n<｜DSML｜{separator}invoke name=\"lookup\"><｜DSML｜{separator}parameter name=\"city\" string=\"true\">東京</｜DSML｜{separator}parameter></｜DSML｜{separator}invoke>{close}"
+        );
+        for split in text
+            .char_indices()
+            .map(|(offset, _)| offset)
+            .chain([text.len()])
+        {
+            let mut parser = TaggedOutput::<Dsml<SPACED>>::new(OutputConfig {
+                structured: true,
+                start: OutputStart::ToolBody,
+                tools: vec![json!({"type":"function", "function":{"name":"lookup"}})],
+            });
+            let mut output = Accumulator::new("request".into());
+            output
+                .apply(parser.push(Input::Text(&text[..split])).unwrap())
+                .unwrap();
+            output
+                .apply(parser.push(Input::Text(&text[split..])).unwrap())
+                .unwrap();
+            output
+                .apply(parser.finish(Termination::Eos).unwrap())
+                .unwrap();
+            output.finish().unwrap();
+            let message = output.message();
+            assert_eq!(message["tool_calls"][0]["function"]["name"], "lookup");
+            assert_eq!(
+                message["tool_calls"][0]["function"]["arguments"],
+                "{\"city\":\"東京\"}"
+            );
+            assert!(message.get("reasoning_content").is_none_or(Value::is_null));
+        }
+    }
+
+    #[test]
+    fn compact_tool_body_accepts_every_utf8_split() {
+        check::<false>();
+    }
+
+    #[test]
+    fn spaced_tool_body_accepts_every_utf8_split() {
+        check::<true>();
     }
 }

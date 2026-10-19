@@ -42,7 +42,11 @@ pub fn prepare_input(
         )?,
         Some(ImageLayoutKind::DeepseekRowMajor) => {
             crate::frontend::images::layouts::deepseek::prepare_row_major_input(
-                config.contract.vocabulary, frontend, processor, rendered, images,
+                config.contract.vocabulary,
+                frontend,
+                processor,
+                rendered,
+                images,
             )?
         }
         Some(ImageLayoutKind::Deepseek) => {
@@ -109,7 +113,7 @@ pub fn system_boundary(
         "continue_final_message".into(),
         rule.continue_final_message.into(),
     );
-    let prefix = frontend.render_chat(&messages, &options).ok()?;
+    let prefix = frontend.render_boundary(&messages, &options).ok()?;
     let length = prefix.token_ids.len();
     (length > 0
         && length < tokens.len()
@@ -203,12 +207,30 @@ pub fn prepare_output(
     } else {
         vec![]
     };
+    let start = if !tools.is_empty()
+        && syntax.tools.as_ref().is_some_and(|tool| {
+            tool.kind == super::contract::ToolParserKind::Dsml
+                && prefix.is_some_and(|suffix| {
+                    let open = if tool.tag_separator == " " {
+                        "<｜DSML｜ calls>"
+                    } else {
+                        "<｜DSML｜tool_calls>"
+                    };
+                    suffix.trim_end().ends_with(open)
+                })
+        }) {
+        crate::output::tagged::OutputStart::ToolBody
+    } else if reasoning {
+        crate::output::tagged::OutputStart::Reasoning
+    } else {
+        crate::output::tagged::OutputStart::Content
+    };
     Ok(crate::output::OutputConfig {
         syntax: syntax.clone(),
         control_tokens,
         content: crate::output::tagged::OutputConfig {
             structured,
-            reasoning,
+            start,
             tools,
         },
     })
@@ -257,7 +279,7 @@ mod tests {
                     tokenizer.to_string(false).unwrap().as_bytes(),
                 ),
                 tokens: Default::default(),
-                chat_template: asset("chat_template.jinja", b"{{ messages[0].content }}"),
+                chat_template: Some(asset("chat_template.jinja", b"{{ messages[0].content }}")),
             },
             Map::new(),
         )
@@ -298,6 +320,7 @@ mod tests {
             let mut token_ids = frontend.encode(&prefix, false).unwrap();
             token_ids.extend(literal.bytes().map(u32::from));
             let rendered = RenderedPrompt {
+                image_sources: vec![],
                 text: prefix + literal,
                 token_ids,
             };
@@ -310,7 +333,11 @@ mod tests {
                 false,
             )
             .unwrap();
-            assert_eq!(output.content.reasoning, expected, "{literal}");
+            assert_eq!(
+                output.content.start == crate::output::tagged::OutputStart::Reasoning,
+                expected,
+                "{literal}"
+            );
         }
     }
 
@@ -342,6 +369,7 @@ mod tests {
                 .find(|case| case["name"] == name)
                 .unwrap();
             let rendered = RenderedPrompt {
+                image_sources: vec![],
                 text: case["rendered"].as_str().unwrap().into(),
                 token_ids: vec![],
             };
@@ -354,7 +382,11 @@ mod tests {
                 false,
             )
             .unwrap();
-            assert_eq!(output.content.reasoning, reasoning, "{name}");
+            assert_eq!(
+                output.content.start == crate::output::tagged::OutputStart::Reasoning,
+                reasoning,
+                "{name}"
+            );
         }
         for role in ["user", "tool"] {
             let messages = vec![json!({"role":role,"content":"literal <think>"})];
@@ -372,6 +404,7 @@ mod tests {
                 ),
             ] {
                 let rendered = RenderedPrompt {
+                    image_sources: vec![],
                     text: format!("<|im_start|>{role}\nliteral <think><|im_end|>\n{suffix}"),
                     token_ids: vec![],
                 };
@@ -386,18 +419,20 @@ mod tests {
                     )
                     .unwrap()
                     .content
-                    .reasoning,
+                    .start
+                        == crate::output::tagged::OutputStart::Reasoning,
                     expected
                 );
             }
         }
         let messages = vec![json!({"role":"user","content":"<think>"})];
         let rendered = RenderedPrompt {
+            image_sources: vec![],
             text: "<|im_start|>user\n<think>".into(),
             token_ids: vec![],
         };
         assert!(
-            !prepare_output(
+            prepare_output(
                 &config,
                 &frontend,
                 &rendered,
@@ -407,7 +442,59 @@ mod tests {
             )
             .unwrap()
             .content
-            .reasoning
+            .start
+                != crate::output::tagged::OutputStart::Reasoning
         );
+    }
+
+    #[test]
+    fn output_start_follows_the_open_dsml_assistant_suffix() {
+        use crate::output::tagged::OutputStart;
+        let frontend = crate::server::output::tests::frontend(&["x"]);
+        let mut config = super::super::tests::config();
+        let prepared: crate::model::PreparedContract = serde_json::from_str(include_str!(
+            "../../tests/support/contracts/deepseek41.json"
+        ))
+        .unwrap();
+        config.contract.frontend = prepared.frontend;
+        let tools = json!([{"type":"function","function":{"name":"lookup"}}]);
+        for separator in ["", " "] {
+            config
+                .contract
+                .frontend
+                .tools
+                .as_mut()
+                .unwrap()
+                .tag_separator = separator.into();
+            let open = if separator.is_empty() {
+                "<｜DSML｜tool_calls>"
+            } else {
+                "<｜DSML｜ calls>"
+            };
+            for (suffix, expected) in [
+                (format!("</think>\n\n{open}\n"), OutputStart::ToolBody),
+                ("<think>".into(), OutputStart::Reasoning),
+                ("</think>".into(), OutputStart::Content),
+            ] {
+                let rendered = RenderedPrompt {
+                    image_sources: vec![],
+                    text: format!("<｜User｜>Hello<｜Assistant｜>{suffix}"),
+                    token_ids: vec![],
+                };
+                let options = json!({"add_generation_prompt":true,"tools":tools});
+                let output = prepare_output(
+                    &config,
+                    &frontend,
+                    &rendered,
+                    &[json!({"role":"user","content":"Hello"})],
+                    options.as_object().unwrap(),
+                    true,
+                )
+                .unwrap();
+                assert_eq!(output.content.start, expected, "{suffix}");
+                let envelope = crate::output::OutputPipeline::grammar_envelope(&output).unwrap();
+                assert_eq!(envelope.tool_body_start, expected == OutputStart::ToolBody);
+            }
+        }
     }
 }

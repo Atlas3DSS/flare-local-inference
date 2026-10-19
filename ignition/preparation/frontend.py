@@ -1,7 +1,14 @@
 """Extract and validate the structural frontend fields consumed by Helios."""
 
 import json
+from enum import IntEnum
 from pathlib import Path
+
+
+class PromptEncoder(IntEnum):
+    PROMPT_JINJA = 0
+    DEEPSEEK_V4 = 1
+    DEEPSEEK_V41 = 2
 
 
 TOKEN_FIELDS = ("bos_token", "eos_token", "unk_token", "sep_token", "pad_token", "cls_token", "mask_token")
@@ -103,8 +110,28 @@ def image_settings(config, model, profile):
     return {profile: result}
 
 
-def prepare_frontend(snapshot, *, eos_token_ids, image_profile=None, preprocessor=None):
+def _native_image_placeholder(snapshot, model, encoder):
+    from tokenizers import Tokenizer
+
+    token = "<｜deepseek_image｜>"
+    tokenizer = Tokenizer.from_file(str(snapshot / "tokenizer.json"))
+    token_id = tokenizer.token_to_id(token)
+    if (token_id != 129264 or token_id >= tokenizer.get_vocab_size()
+            or tokenizer.encode(token, add_special_tokens=False).ids != [token_id]):
+        raise ValueError("DeepSeek image placeholder must be atomic vocabulary token 129264")
+    vocabulary_size = model.get("vocab_size")
+    if vocabulary_size is not None and (type(vocabulary_size) is not int or token_id >= vocabulary_size):
+        raise ValueError("DeepSeek image placeholder is outside the model vocabulary")
+    if encoder == PromptEncoder.DEEPSEEK_V41:
+        _expected(model, {"image_token_id": token_id}, "DeepSeek image configuration")
+    return token_id
+
+
+def prepare_frontend(snapshot, *, eos_token_ids, image_profile=None, preprocessor=None,
+                     prompt_encoder=PromptEncoder.PROMPT_JINJA):
     """Resolve checkpoint structure during preparation; sampling is recipe-owned."""
+    if not isinstance(prompt_encoder, PromptEncoder):
+        raise ValueError("prompt_encoder must be a PromptEncoder")
     snapshot = Path(snapshot)
     if type(eos_token_ids) is int:
         eos_token_ids = [eos_token_ids]
@@ -114,7 +141,16 @@ def prepare_frontend(snapshot, *, eos_token_ids, image_profile=None, preprocesso
         raise ValueError("EOS token IDs must be one through eight distinct uint32 values")
     result = {"tokenizer": tokenizer_settings(json.loads((snapshot / "tokenizer_config.json").read_text())),
               "eos_token_ids": eos_token_ids}
+    if prompt_encoder != PromptEncoder.PROMPT_JINJA:
+        result["prompt_encoder"] = int(prompt_encoder)
     if image_profile is not None:
+        expected_profile = {PromptEncoder.DEEPSEEK_V4: "deepseek4",
+                            PromptEncoder.DEEPSEEK_V41: "deepseek_row_major"}.get(prompt_encoder)
+        if expected_profile is not None:
+            if image_profile != expected_profile:
+                raise ValueError("image profile differs from the prompt encoder")
+            result["image_placeholder_token_id"] = _native_image_placeholder(
+                snapshot, json.loads((snapshot / "config.json").read_text()), prompt_encoder)
         path = snapshot / "preprocessor_config.json" if preprocessor is None else Path(preprocessor)
         result["image"] = image_settings({} if image_profile == "deepseek_row_major" else json.loads(path.read_text()),
             json.loads((snapshot / "config.json").read_text()), image_profile)

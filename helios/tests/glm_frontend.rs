@@ -33,7 +33,7 @@ fn checkpoint_template_tokenization_requests_and_instruction_prefix_match_transf
         FrontendAssets {
             tokenizer: asset("tokenizer.json"),
             tokens: support::tokens(&asset("tokenizer_config.json")).unwrap(),
-            chat_template: asset("chat_template.jinja"),
+            chat_template: Some(asset("chat_template.jinja")),
         },
         json!({"add_generation_prompt":true})
             .as_object()
@@ -94,13 +94,14 @@ fn checkpoint_template_tokenization_requests_and_instruction_prefix_match_transf
             "{name}"
         );
         assert_eq!(
-            prepared.output.content.reasoning,
+            prepared.output.content.start == flare_helios::output::tagged::OutputStart::Reasoning,
             case["reasoning"].as_bool().unwrap(),
             "{name}"
         );
         assert!(!prepared.output.content.structured, "{name}");
         assert!(prepared.prompt.grammar.is_none(), "{name}");
-        let reasoning = prepared.output.content.reasoning;
+        let reasoning =
+            prepared.output.content.start == flare_helios::output::tagged::OutputStart::Reasoning;
         let mut output = flare_helios::output::OutputPipeline::new(prepared.output);
         let text = if reasoning {
             "analysis</think>result"
@@ -138,7 +139,7 @@ fn checkpoint_template_tokenization_requests_and_instruction_prefix_match_transf
                     control_tokens: vec![],
                     content: flare_helios::output::tagged::OutputConfig {
                         structured: false,
-                        reasoning: false,
+                        start: flare_helios::output::tagged::OutputStart::Content,
                         tools,
                     },
                 });
@@ -172,7 +173,9 @@ fn checkpoint_template_tokenization_requests_and_instruction_prefix_match_transf
     let structured = prepare_request(&frontend, None, &compiler, &config,
         json!({"model":"glm53", "messages":[{"role":"user", "content":"JSON please"}], "response_format":{"type":"json_object"}})
     ).unwrap();
-    assert!(structured.output.content.reasoning);
+    assert!(
+        structured.output.content.start == flare_helios::output::tagged::OutputStart::Reasoning
+    );
     assert!(structured.output.content.structured);
     assert!(structured.prompt.grammar.is_some());
 }

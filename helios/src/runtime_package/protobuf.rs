@@ -70,6 +70,8 @@ pub(super) fn sampling_defaults(
 }
 
 pub(super) fn frontend_settings(value: wire::FrontendSettings) -> Result<serde_json::Value> {
+    wire::PromptEncoder::try_from(value.prompt_encoder)
+        .map_err(|_| invalid("unsupported prompt encoder"))?;
     let tokens = required(value.tokenizer, "tokenizer settings")?;
     if value.eos_token_ids.is_empty()
         || value.eos_token_ids.len() > 8
@@ -117,7 +119,9 @@ pub(super) fn frontend_settings(value: wire::FrontendSettings) -> Result<serde_j
         .transpose()?;
     Ok(
         serde_json::json!({"tokenizer": tokenizer, "image": image, "eos_token_ids": value.eos_token_ids,
-                          "template_encoding": value.template_encoding}),
+                          "template_encoding": value.template_encoding,
+                          "prompt_encoder": value.prompt_encoder,
+                          "image_placeholder_token_id": value.image_placeholder_token_id}),
     )
 }
 fn required<T>(value: Option<T>, name: &str) -> Result<T> {
@@ -290,19 +294,18 @@ mod tests {
         assert_eq!(packed.packed_tokens(), 24);
         assert_eq!(packed.token_capacity, 6);
         let mut json = serde_json::to_value(&legacy).unwrap();
-        json.as_object_mut().unwrap().remove("packed_token_capacity");
+        json.as_object_mut()
+            .unwrap()
+            .remove("packed_token_capacity");
         let restored: wire::ExecutionGraph = serde_json::from_value(json).unwrap();
         assert_eq!(restored.packed_tokens(), 48);
     }
 
     #[test]
     fn omitted_vision_slots_inherit_prepared_concurrency() {
-        for (prepared, slots, images, expected) in [
-            (16, 0, 4, 16),
-            (3, 0, 4, 3),
-            (16, 4, 4, 4),
-            (16, 0, 0, 0),
-        ] {
+        for (prepared, slots, images, expected) in
+            [(16, 0, 4, 16), (3, 0, 4, 3), (16, 4, 4, 4), (16, 0, 0, 0)]
+        {
             let value = wire::ServingContract {
                 max_active: Some(2),
                 model_contract: Some(wire::ModelContract {
@@ -374,6 +377,8 @@ mod tests {
     fn frontend_round_trip_keeps_eos_and_empty_special_token_list_distinct_from_absence() {
         let value = wire::FrontendSettings {
             template_encoding: 0,
+            prompt_encoder: 0,
+            image_placeholder_token_id: None,
             tokenizer: Some(wire::TokenizerSettings {
                 bos_token: Some("<bos>".into()),
                 eos_token: Some("<eos>".into()),
@@ -412,11 +417,16 @@ mod tests {
         // use the wire representation exported before row-major image profiles.
         for (bytes, image) in [
             (&[0x0a, 0x00, 0x1a, 0x01, 0x01][..], false),
-            (&[0x0a, 0x00, 0x12, 0x02, 0x1a, 0x00, 0x1a, 0x01, 0x01][..], true),
+            (
+                &[0x0a, 0x00, 0x12, 0x02, 0x1a, 0x00, 0x1a, 0x01, 0x01][..],
+                true,
+            ),
         ] {
             let decoded = wire::FrontendSettings::decode(bytes).unwrap();
             let json = frontend_settings(decoded).unwrap();
             assert_eq!(json["eos_token_ids"], serde_json::json!([1]));
+            assert_eq!(json["prompt_encoder"], 0);
+            assert!(json["image_placeholder_token_id"].is_null());
             if image {
                 assert_eq!(json["image"], serde_json::json!({"deepseek4": {}}));
             } else {
@@ -424,9 +434,17 @@ mod tests {
             }
             #[cfg(feature = "server")]
             {
-                let frontend: crate::frontend::FrontendSettings = serde_json::from_value(json).unwrap();
+                let frontend: crate::frontend::FrontendSettings =
+                    serde_json::from_value(json).unwrap();
+                assert_eq!(
+                    frontend.prompt_encoder,
+                    crate::frontend::PromptEncoder::Jinja
+                );
+                assert_eq!(frontend.image_placeholder_token_id, None);
                 if let Some(settings) = frontend.image {
-                    let processor = crate::frontend::images::ImageProcessor::load(settings, Default::default()).unwrap();
+                    let processor =
+                        crate::frontend::images::ImageProcessor::load(settings, Default::default())
+                            .unwrap();
                     assert!(processor.geometry(701, 503).unwrap().tokens <= 384);
                 }
             }
@@ -434,9 +452,41 @@ mod tests {
     }
 
     #[test]
+    fn prompt_encoder_round_trip_preserves_explicit_image_token_and_rejects_unknown_encoder() {
+        for encoder in [1, 2] {
+            let value = wire::FrontendSettings {
+                tokenizer: Some(wire::TokenizerSettings::default()),
+                eos_token_ids: vec![1],
+                prompt_encoder: encoder,
+                image_placeholder_token_id: Some(129264),
+                ..Default::default()
+            };
+            let decoded = wire::FrontendSettings::decode(value.encode_to_vec().as_slice()).unwrap();
+            let json = frontend_settings(decoded).unwrap();
+            assert_eq!(json["prompt_encoder"], encoder);
+            assert_eq!(json["image_placeholder_token_id"], 129264);
+            #[cfg(feature = "server")]
+            {
+                let frontend: crate::frontend::FrontendSettings =
+                    serde_json::from_value(json).unwrap();
+                assert_eq!(frontend.prompt_encoder as i32, encoder);
+                assert_eq!(frontend.image_placeholder_token_id, Some(129264));
+            }
+        }
+        let error = frontend_settings(wire::FrontendSettings {
+            prompt_encoder: 37,
+            ..Default::default()
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("unsupported prompt encoder"));
+    }
+
+    #[test]
     fn image_contract_contains_only_the_selected_profile() {
         let value = wire::FrontendSettings {
             template_encoding: 0,
+            prompt_encoder: 0,
+            image_placeholder_token_id: None,
             tokenizer: Some(wire::TokenizerSettings::default()),
             eos_token_ids: vec![1],
             image: Some(wire::ImageSettings {

@@ -331,7 +331,7 @@ pub(crate) mod tests {
                     tokenizer.to_string(false).unwrap().as_bytes(),
                 ),
                 tokens: Default::default(),
-                chat_template: asset("chat_template.jinja", b"{{ messages[0].content }}"),
+                chat_template: Some(asset("chat_template.jinja", b"{{ messages[0].content }}")),
             },
             Default::default(),
         )
@@ -388,7 +388,7 @@ pub(crate) mod tests {
         ];
         let frontend = frontend(&pieces);
         let config = OutputConfig {
-            reasoning: false,
+            start: crate::output::tagged::OutputStart::Content,
             structured: false,
             tools: vec![
                 json!({"function":{"name":"lookup","parameters":{"properties":{"query":{"type":"string"},"data":{"type":"object"}}}}}),
@@ -664,7 +664,7 @@ pub(crate) mod tests {
         ];
         let frontend = frontend(&pieces);
         let config = OutputConfig {
-            reasoning: false,
+            start: crate::output::tagged::OutputStart::Content,
             structured: false,
             tools: vec![
                 json!({"function":{"name":"lookup","parameters":{"properties":{"query":{"type":"string"}}}}}),
@@ -767,7 +767,7 @@ pub(crate) mod tests {
         let frontend = frontend(&["x"]);
         for worker_first in [false, true] {
             let config = OutputConfig {
-                reasoning: false,
+                start: crate::output::tagged::OutputStart::Content,
                 structured: false,
                 tools: vec![],
             };

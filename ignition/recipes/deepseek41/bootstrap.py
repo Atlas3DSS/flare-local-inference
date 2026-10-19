@@ -23,7 +23,7 @@ from ignition.preparation.collectives import (CollectivePreparation, create_all_
 from ignition.preparation.disposable import storage_ranges
 from ignition.preparation.execution import GraphSignature
 from ignition.preparation.host_memory import virtual_device_memory, release_unused
-from ignition.preparation.frontend import prepare_frontend
+from ignition.preparation.frontend import PromptEncoder, prepare_frontend
 from ignition.preparation.model import PreparedModel
 from ignition.preparation.scratch import GraphBufferPool, ScratchArena
 from ignition.preparation.tuning import RecordedPreparationSession
@@ -451,15 +451,13 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
     if group is not None:
         torch.distributed.barrier(group=group)
     free, total = torch.cuda.mem_get_info(device)
-    frontend = Path(__file__).parent / "assets"
     assets = {role: {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
-        for role, path in (("tokenizer", metadata_path / "tokenizer.json"),
-            ("chat_template", frontend / "chat_template.jinja"))}
+        for role, path in (("tokenizer", metadata_path / "tokenizer.json"),)}
     buffers["request_pending_token"] = requests.pending_token
     server_config = {"identity": identity, "model_id": snapshot.name,
         "max_sequence_tokens": config.context, "prefill_chunk_size": config.prefill_chunk_size,
         "pages": pages, "state_rows": state_rows, "snapshots": snapshots, "page_tokens": PAGE_TOKENS,
-        "frontend": prepare_frontend(metadata_path, eos_token_ids=[1],
+        "frontend": prepare_frontend(metadata_path, eos_token_ids=[1], prompt_encoder=PromptEncoder.DEEPSEEK_V41,
             image_profile="deepseek_row_major" if vision_state is not None else None),
         "sampling_defaults": RECIPE.sampling_defaults.as_dict(), "assets": assets,
         "model_contract": prepare_contract(signatures, buffers, pool, image_slots=config.image_concurrency,

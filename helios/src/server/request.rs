@@ -86,16 +86,34 @@ pub(super) fn prepare_inference(
     }
     let object = &object;
     let structured = opts.constraint.is_some();
+    let legacy_prompt = matches!(
+        frontend.prompt_encoder(),
+        crate::frontend::PromptEncoder::Jinja
+    );
     let (mut normalized, raw) = match &request.input {
         Input::Conversation(messages) => (
-            super::inference::template_messages(messages, request.tool_choice)?,
+            super::inference::template_messages(
+                messages,
+                if legacy_prompt {
+                    request.tool_choice
+                } else {
+                    ToolChoice::Auto
+                },
+            )?,
             None,
         ),
         Input::Raw(prompts) => (vec![], Some(&prompts[index / request.choices])),
     };
     frontend.normalize_inline_system_messages(&mut normalized)?;
     if raw.is_none() {
-        if let Some(Constraint::Json(schema)) = &opts.constraint {
+        let schema = match &opts.constraint {
+            Some(Constraint::Json(schema)) => Some(schema.clone()),
+            Some(Constraint::JsonObject) if legacy_prompt => {
+                Some(serde_json::json!({"type":"object"}))
+            }
+            _ => None,
+        };
+        if let Some(schema) = schema {
             super::inference::append_system_instruction(
                 &mut normalized,
                 &format!(
@@ -104,91 +122,10 @@ pub(super) fn prepare_inference(
             )?;
         }
     }
-    let mut images = Vec::new();
-    let mut image_patches = 0usize;
-    for message in &mut normalized {
-        if !message.is_object() {
-            return Err("messages must contain objects".into());
-        }
-        if let Some(parts) = message.get_mut("content").and_then(Value::as_array_mut) {
-            for part in parts {
-                let kind = part
-                    .get("type")
-                    .and_then(Value::as_str)
-                    .ok_or("message content part requires type")?;
-                match kind {
-                    "text" => {
-                        if !part.get("text").is_some_and(Value::is_string) {
-                            return Err("text content must be a string".into());
-                        }
-                    }
-                    "image_url" => {
-                        let processor = processor.ok_or_else(|| {
-                            Error::admission(
-                                AdmissionError::Feature,
-                                "prepared model does not support image inputs",
-                            )
-                        })?;
-                        processor
-                            .check_batch(images.len() + 1, image_patches)
-                            .map_err(|error| error.admission_context(AdmissionError::Image))?;
-                        let url = part
-                            .get("image_url")
-                            .and_then(|value| value.get("url"))
-                            .and_then(Value::as_str)
-                            .ok_or("image_url.url must be a string")?;
-                        let (data, decode): (_, fn(&ImageProcessor, &[u8]) -> Result<_>) =
-                            if let Some(data) = url.strip_prefix("data:image/png;base64,") {
-                                (data, ImageProcessor::decode_png)
-                            } else if let Some(data) = url.strip_prefix("data:image/jpeg;base64,") {
-                                (data, ImageProcessor::decode_jpeg)
-                            } else if let Some(data) = url.strip_prefix("data:image/webp;base64,") {
-                                (data, ImageProcessor::decode_webp)
-                            } else {
-                                return Err(Error::admission(
-                                    AdmissionError::Image,
-                                    "image input requires a base64 PNG, JPEG, or WebP data URL",
-                                ));
-                            };
-                        if data.len() > processor.max_encoded_bytes().div_ceil(3).saturating_mul(4)
-                        {
-                            return Err(Error::admission(
-                                AdmissionError::Image,
-                                "encoded image exceeds the configured byte limit",
-                            ));
-                        }
-                        let bytes = base64::engine::general_purpose::STANDARD
-                            .decode(data)
-                            .map_err(|error| {
-                                Error::Admission(AdmissionError::Image(Failure::caused_by(
-                                    format!("invalid image base64: {error}"),
-                                    error,
-                                )))
-                            })?;
-                        let image = decode(processor, &bytes)
-                            .map_err(|error| error.admission_context(AdmissionError::Image))?;
-                        let geometry = processor
-                            .geometry(image.width(), image.height())
-                            .map_err(|error| error.admission_context(AdmissionError::Image))?;
-                        image_patches =
-                            image_patches.checked_add(geometry.patches).ok_or_else(|| {
-                                Error::admission(
-                                    AdmissionError::Image,
-                                    "image patch count overflow",
-                                )
-                            })?;
-                        processor
-                            .check_batch(images.len() + 1, image_patches)
-                            .map_err(|error| error.admission_context(AdmissionError::Image))?;
-                        images.push(image);
-                        *part = serde_json::json!({"type":"image"});
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
     let mut options = opts.template.clone();
+    if !legacy_prompt && matches!(opts.constraint, Some(Constraint::JsonObject)) {
+        options.insert("response_format".into(), "json_object".into());
+    }
     let tool_choice = match request.tool_choice {
         ToolChoice::Auto => None,
         ToolChoice::None => Some("none"),
@@ -252,12 +189,14 @@ pub(super) fn prepare_inference(
             crate::frontend::RenderedPrompt {
                 text: frontend.decode(&token_ids, false)?,
                 token_ids,
+                image_sources: Vec::new(),
             },
             echo,
         )
     } else {
         (frontend.render_chat(&normalized, &options)?, String::new())
     };
+    let images = decode_images(&rendered.image_sources, processor)?;
     let output = if raw.is_some() {
         None
     } else {
@@ -274,6 +213,10 @@ pub(super) fn prepare_inference(
         .as_ref()
         .and_then(crate::output::OutputPipeline::grammar_envelope);
     let grammar = match &opts.constraint {
+        Some(Constraint::JsonObject) => Some(
+            compiler
+                .compile_json_schema_in(&serde_json::json!({"type":"object"}), envelope.as_ref())?,
+        ),
         Some(Constraint::Json(schema)) => {
             Some(compiler.compile_json_schema_in(schema, envelope.as_ref())?)
         }
@@ -562,4 +505,63 @@ mod tests {
             ));
         }
     }
+}
+
+fn decode_images(
+    sources: &[String],
+    processor: Option<&ImageProcessor>,
+) -> Result<Vec<crate::frontend::images::RgbImage>> {
+    let mut images = Vec::new();
+    let mut image_patches = 0usize;
+    for url in sources {
+        let processor = processor.ok_or_else(|| {
+            Error::admission(
+                AdmissionError::Feature,
+                "prepared model does not support image inputs",
+            )
+        })?;
+        processor
+            .check_batch(images.len() + 1, image_patches)
+            .map_err(|error| error.admission_context(AdmissionError::Image))?;
+        let (data, decode): (_, fn(&ImageProcessor, &[u8]) -> Result<_>) =
+            if let Some(data) = url.strip_prefix("data:image/png;base64,") {
+                (data, ImageProcessor::decode_png)
+            } else if let Some(data) = url.strip_prefix("data:image/jpeg;base64,") {
+                (data, ImageProcessor::decode_jpeg)
+            } else if let Some(data) = url.strip_prefix("data:image/webp;base64,") {
+                (data, ImageProcessor::decode_webp)
+            } else {
+                return Err(Error::admission(
+                    AdmissionError::Image,
+                    "image input requires a base64 PNG, JPEG, or WebP data URL",
+                ));
+            };
+        if data.len() > processor.max_encoded_bytes().div_ceil(3).saturating_mul(4) {
+            return Err(Error::admission(
+                AdmissionError::Image,
+                "encoded image exceeds the configured byte limit",
+            ));
+        }
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .map_err(|error| {
+                Error::Admission(AdmissionError::Image(Failure::caused_by(
+                    format!("invalid image base64: {error}"),
+                    error,
+                )))
+            })?;
+        let image = decode(processor, &bytes)
+            .map_err(|error| error.admission_context(AdmissionError::Image))?;
+        let geometry = processor
+            .geometry(image.width(), image.height())
+            .map_err(|error| error.admission_context(AdmissionError::Image))?;
+        image_patches = image_patches
+            .checked_add(geometry.patches)
+            .ok_or_else(|| Error::admission(AdmissionError::Image, "image patch count overflow"))?;
+        processor
+            .check_batch(images.len() + 1, image_patches)
+            .map_err(|error| error.admission_context(AdmissionError::Image))?;
+        images.push(image);
+    }
+    Ok(images)
 }

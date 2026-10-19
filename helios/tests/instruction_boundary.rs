@@ -47,7 +47,7 @@ impl Fixture {
             FrontendAssets {
                 tokenizer: asset("tokenizer.json"),
                 tokens: support::tokens(&asset("tokenizer_config.json")).unwrap(),
-                chat_template: asset("chat_template.jinja"),
+                chat_template: Some(asset("chat_template.jinja")),
             },
             defaults,
         )
@@ -141,7 +141,7 @@ fn inline_system_messages_render_in_place_without_changing_the_prefix() {
         FrontendAssets {
             tokenizer: asset("tokenizer.json"),
             tokens: support::tokens(&asset("tokenizer_config.json")).unwrap(),
-            chat_template: asset("chat_template.jinja"),
+            chat_template: Some(asset("chat_template.jinja")),
         },
         Map::new(),
     )

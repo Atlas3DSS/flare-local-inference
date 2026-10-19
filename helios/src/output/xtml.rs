@@ -36,7 +36,7 @@ pub struct XtmlOutput {
 impl XtmlOutput {
     pub fn new(config: OutputConfig, control_tokens: Vec<(u32, String)>) -> Self {
         Self {
-            channel: if config.reasoning {
+            channel: if config.start == crate::output::tagged::OutputStart::Reasoning {
                 Channel::Reasoning
             } else {
                 Channel::Response
@@ -346,7 +346,7 @@ mod tests {
         let mut parser = XtmlOutput::new(
             OutputConfig {
                 structured: false,
-                reasoning: false,
+                start: crate::output::tagged::OutputStart::Content,
                 tools: vec![json!({"function":{"name":"lookup"}})],
             },
             markers
@@ -445,7 +445,7 @@ mod tests {
             let mut parser = XtmlOutput::new(
                 OutputConfig {
                     structured: false,
-                    reasoning: true,
+                    start: crate::output::tagged::OutputStart::Reasoning,
                     tools: vec![json!({"function":{"name":"lookup"}})],
                 },
                 vec![],
@@ -518,7 +518,7 @@ mod tests {
             let mut parser = XtmlOutput::new(
                 OutputConfig {
                     structured: false,
-                    reasoning: false,
+                    start: crate::output::tagged::OutputStart::Content,
                     tools: vec![],
                 },
                 vec![],

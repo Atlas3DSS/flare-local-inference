@@ -416,7 +416,7 @@ fn options(body: &Value, protocol: Protocol) -> Result<Options> {
     if !format.is_null() {
         options.constraint = match field(format, "type")? {
             "text" => None,
-            "json_object" => Some(Constraint::Json(json!({"type":"object"}))),
+            "json_object" => Some(Constraint::JsonObject),
             "json_schema" => Some(Constraint::Json(
                 if protocol == Protocol::Chat {
                     &format["json_schema"]["schema"]
@@ -741,6 +741,186 @@ mod tests {
             let mut message =
                 serde_json::json!({"tool_calls":[{"function":{"arguments":invalid}}]});
             assert!(normalize_tool_arguments(&mut message).is_err());
+        }
+    }
+}
+#[cfg(test)]
+mod native_prompt_tests {
+    use super::*;
+    use crate::{
+        frontend::{
+            Asset, Frontend, FrontendAssets, FrontendSettings, PromptEncoder, TokenizerSettings,
+        },
+        grammar::GrammarCompiler,
+    };
+    use sha2::{Digest, Sha256};
+    use tokenizers::{AddedToken, Tokenizer};
+
+    fn native(encoder: PromptEncoder) -> (Frontend, GrammarCompiler, crate::model::ModelConfig) {
+        let mut alphabet: Vec<_> = tokenizers::pre_tokenizers::byte_level::ByteLevel::alphabet()
+            .into_iter()
+            .collect();
+        alphabet.sort_unstable();
+        let model = tokenizers::models::bpe::BPE::builder()
+            .vocab_and_merges(
+                alphabet
+                    .into_iter()
+                    .enumerate()
+                    .map(|(id, c)| (c.to_string(), id as u32))
+                    .collect::<tokenizers::models::bpe::Vocab>(),
+                vec![],
+            )
+            .build()
+            .unwrap();
+        let mut tokenizer = Tokenizer::new(model);
+        tokenizer.with_pre_tokenizer(Some(
+            tokenizers::pre_tokenizers::byte_level::ByteLevel::new(false, true, false),
+        ));
+        tokenizer.with_decoder(Some(tokenizers::decoders::byte_level::ByteLevel::default()));
+        tokenizer.add_special_tokens(
+            [
+                "<｜begin▁of▁sentence｜>",
+                "<｜end▁of▁sentence｜>",
+                "<｜Assistant｜>",
+                "<think>",
+                "</think>",
+            ]
+            .map(|s| AddedToken::from(s, true)),
+        ).unwrap();
+        let eos = tokenizer.token_to_id("<｜end▁of▁sentence｜>").unwrap();
+        let bytes = tokenizer.to_string(false).unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "flare-native-protocol-{}-{:?}.json",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::write(&path, &bytes).unwrap();
+        let settings: FrontendSettings = serde_json::from_value(
+            json!({"tokenizer":{},"eos_token_ids":[eos],"prompt_encoder":i32::from(encoder)}),
+        )
+        .unwrap();
+        let frontend = Frontend::load_with_settings(
+            FrontendAssets {
+                tokenizer: Asset {
+                    path: path.clone(),
+                    sha256: format!("{:x}", Sha256::digest(bytes.as_bytes())),
+                    range: None,
+                },
+                tokens: TokenizerSettings::default(),
+                chat_template: None,
+            },
+            Default::default(),
+            &settings,
+        )
+        .unwrap();
+        std::fs::remove_file(path).unwrap();
+        let mut config = crate::frontend::test_support::model_config(
+            crate::frontend::test_support::contract("deepseek41"),
+        );
+        config.eos_token_ids = vec![eos];
+        let compiler = GrammarCompiler::new(
+            frontend.tokenizer(),
+            config.contract.vocabulary,
+            &config.eos_token_ids,
+        )
+        .unwrap();
+        (frontend, compiler, config)
+    }
+
+    #[test]
+    fn raw_completion_bypasses_native_conversation_options_and_keeps_token_ids() {
+        for encoder in [PromptEncoder::DeepseekV4, PromptEncoder::DeepseekV41] {
+            let (frontend, compiler, config) = native(encoder);
+            for (prompt, expected) in [
+                (
+                    json!("Raw prompt"),
+                    frontend.encode("Raw prompt", true).unwrap(),
+                ),
+                (json!([7, 42, 3]), vec![7, 42, 3]),
+            ] {
+                let decoded = decode(
+                    Protocol::Completions,
+                    json!({"model":config.model_id,"prompt":prompt,"max_tokens":0,"echo":true,
+                    "chat_template_kwargs":{"drop_thinking":true,"add_generation_prompt":false}}),
+                    false,
+                )
+                .unwrap();
+                let prepared = crate::server::request::prepare_inference(
+                    &frontend,
+                    None,
+                    &compiler,
+                    &config,
+                    &decoded.request,
+                    0,
+                    false,
+                )
+                .unwrap();
+                assert_eq!(prepared.prompt.tokens, expected);
+                assert_eq!(prepared.prompt.max_new_tokens, 0);
+                assert!(prepared.output.is_none());
+                assert!(prepared.prompt.system_boundary.is_none());
+                assert!(prepared.prompt.grammar.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn anthropic_assistant_prefill_is_rejected_by_native_prompt_preparation() {
+        for encoder in [PromptEncoder::DeepseekV4, PromptEncoder::DeepseekV41] {
+            let (frontend, compiler, config) = native(encoder);
+            let decoded = decode(
+                Protocol::Messages,
+                json!({"model":config.model_id,"max_tokens":32,"messages":[
+                {"role":"user","content":"Hello"},{"role":"assistant","content":"Prefix"}]}),
+                false,
+            )
+            .unwrap();
+            assert_eq!(
+                decoded.request.options.template["continue_final_message"],
+                true
+            );
+            let error = crate::server::request::prepare_inference(
+                &frontend,
+                None,
+                &compiler,
+                &config,
+                &decoded.request,
+                0,
+                false,
+            )
+            .err()
+            .unwrap();
+            assert!(error.to_string().contains("does not support continue_final_message"), "{error}");
+        }
+    }
+
+    #[test]
+    fn anthropic_thinking_budget_maps_to_native_effort_without_continuation() {
+        for encoder in [PromptEncoder::DeepseekV4, PromptEncoder::DeepseekV41] {
+            let (frontend, compiler, config) = native(encoder);
+            let decoded = decode(
+                Protocol::Messages,
+                json!({"model":config.model_id,"max_tokens":32,
+                "thinking":{"type":"enabled","budget_tokens":4000},
+                "messages":[{"role":"user","content":"Hello"}]}),
+                false,
+            )
+            .unwrap();
+            let prepared = crate::server::request::prepare_inference(
+                &frontend,
+                None,
+                &compiler,
+                &config,
+                &decoded.request,
+                0,
+                false,
+            )
+            .unwrap();
+            assert!(prepared.rendered_prompt.ends_with("<｜Assistant｜><think>"));
+            assert_eq!(
+                prepared.output.unwrap().content.start,
+                crate::output::tagged::OutputStart::Reasoning
+            );
         }
     }
 }

@@ -198,8 +198,11 @@ budgets. Budgets up to 5,000 map to low effort, up to 20,000 to high effort, and
 larger budgets to maximum effort. Responses and Anthropic named effort settings
 map into the same neutral levels. The frontend resolves those levels against the
 effort vocabulary accepted by the packaged template: for example Qwen uses
-`low/medium/xhigh`, while DeepSeek uses `low/high/max`. Explicit native
-`reasoning_effort` or `chat_template_kwargs` values pass through unchanged.
+`low/medium/xhigh`. Native DeepSeek V4 and V4.1 prompt encoders accept
+`low/high/xhigh/max` and default to thinking enabled and high effort. They reject numeric
+effort, `drop_thinking`, assistant continuation, and `add_generation_prompt=false`.
+Explicit values are validated by the selected encoder. Packages exported with
+Jinja templates retain their packaged template semantics.
 Kimi K3 always uses thinking: its template ignores `enable_thinking=false` and
 `thinking=false` without an error, preserves assistant reasoning history, and
 accepts `low`, `high`, or `max` effort (default `max`).

@@ -37,7 +37,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             tokenizer: asset("tokenizer.json"),
             tokens: flare_helios::frontend::test_support::tokens(&asset("tokenizer_config.json"))
                 .unwrap(),
-            chat_template: asset("chat_template.jinja"),
+            chat_template: Some(asset("chat_template.jinja")),
         },
         Map::new(),
     )?;
@@ -265,7 +265,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             &config,
             body.clone(),
         )?;
-        if prepared.output.content.reasoning || !prepared.output.content.structured {
+        if prepared.output.content.start == flare_helios::output::tagged::OutputStart::Reasoning
+            || !prepared.output.content.structured
+        {
             return Err("structured request entered reasoning mode".into());
         }
         let grammar = prepared
@@ -295,7 +297,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             FrontendAssets {
                 tokenizer: asset("tokenizer.json"),
                 tokens: flare_helios::frontend::test_support::tokens(&asset("tokenizer_config.json")).unwrap(),
-                chat_template: asset("chat_template.jinja"),
+                chat_template: Some(asset("chat_template.jinja")),
             },
             json!({"continue_final_message":continuation,"add_generation_prompt":false,"enable_thinking":false})
                 .as_object()

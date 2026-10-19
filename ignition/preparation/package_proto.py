@@ -8,8 +8,12 @@ def serving(index, server):
     """Encode complete recipe defaults and the structural native frontend contract."""
     from google.protobuf.json_format import ParseDict
 
-    if set(server["assets"]) != {"tokenizer", "chat_template"}:
-        raise ValueError("runtime assets must contain only tokenizer and chat_template")
+    encoder = server["frontend"].get("prompt_encoder", "PROMPT_JINJA")
+    if type(encoder) not in (str, int) or encoder not in ("PROMPT_JINJA", "DEEPSEEK_V4", "DEEPSEEK_V41", 0, 1, 2):
+        raise ValueError("unsupported prompt encoder")
+    expected_assets = {"tokenizer", "chat_template"} if encoder in ("PROMPT_JINJA", 0) else {"tokenizer"}
+    if set(server["assets"]) != expected_assets:
+        raise ValueError("runtime assets must match the prompt encoder: " + ", ".join(sorted(expected_assets)))
     if any(key in server for key in ("generation_defaults", "eos_token_ids")):
         raise ValueError("sampling and token defaults require typed package fields")
     sampling = server["sampling_defaults"]

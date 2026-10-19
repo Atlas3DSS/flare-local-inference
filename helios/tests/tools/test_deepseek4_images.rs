@@ -2,7 +2,7 @@ use flare_helios::{frontend, model, scheduler};
 #[path = "../support/frontend.rs"]
 mod support;
 use flare_helios::frontend::{
-    Asset, Frontend, FrontendAssets, RenderedPrompt,
+    Asset, Frontend, FrontendAssets, FrontendSettings, PromptEncoder, RenderedPrompt,
     images::{ImageLimits, ImageProcessor, RgbImage},
 };
 use serde_json::{Map, Value, json};
@@ -37,20 +37,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             flare_helios::frontend::test_support::image(
                 &asset(assets.join("preprocessor_config.json")),
                 &asset(snapshot.join("config.json")),
-            ).unwrap()
+            )
+            .unwrap()
         },
         ImageLimits::default(),
     )?;
-    let frontend = Frontend::load(
+    let tokenizer_asset = asset(snapshot.join("tokenizer.json"));
+    let tokenizer = tokenizers::Tokenizer::from_bytes(fs::read(&tokenizer_asset.path)?)
+        .map_err(|error| error.to_string())?;
+    let placeholder = tokenizer
+        .token_to_id("<｜deepseek_image｜>")
+        .ok_or("checkpoint tokenizer lacks the DeepSeek image placeholder")?;
+    let tokens = flare_helios::frontend::test_support::tokens(&asset(
+        snapshot.join("tokenizer_config.json"),
+    ))?;
+    let settings = FrontendSettings {
+        tokenizer: tokens.clone(),
+        eos_token_ids: vec![],
+        prompt_encoder: if case["image_settings"].get("deepseek_row_major").is_some() {
+            PromptEncoder::DeepseekV41
+        } else {
+            PromptEncoder::DeepseekV4
+        },
+        image_placeholder_token_id: Some(placeholder),
+        template_encoding: Default::default(),
+        image: None,
+    };
+    let frontend = Frontend::load_with_settings(
         FrontendAssets {
-            tokenizer: asset(snapshot.join("tokenizer.json")),
-            tokens: flare_helios::frontend::test_support::tokens(&asset(
-                snapshot.join("tokenizer_config.json"),
-            ))
-            .unwrap(),
-            chat_template: asset(assets.join("chat_template.jinja")),
+            tokenizer: tokenizer_asset,
+            tokens,
+            chat_template: None,
         },
         Map::new(),
+        &settings,
     )?;
     let images: Vec<_> = case["images"]
         .as_array()
@@ -66,13 +86,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .collect();
     let prompt = RenderedPrompt {
+        image_sources: Vec::new(),
         text: case["prompt"].as_str().unwrap().into(),
         token_ids: frontend.encode(case["prompt"].as_str().unwrap(), false)?,
     };
     let input = flare_helios::model::prepare_input(
         &support::model_config(if case["contract"].is_object() {
             serde_json::from_value(case["contract"].clone())?
-        } else { support::contract("deepseek4") }),
+        } else {
+            support::contract("deepseek4")
+        }),
         &frontend,
         Some(&processor),
         &prompt,

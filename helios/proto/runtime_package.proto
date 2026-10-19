@@ -335,6 +335,13 @@ message FrontendSettings {
   ImageSettings image = 2;
   repeated uint32 eos_token_ids = 3;
   TemplateEncoding template_encoding = 4;
+  PromptEncoder prompt_encoder = 5;
+  optional uint32 image_placeholder_token_id = 6;
+}
+enum PromptEncoder {
+  PROMPT_JINJA = 0;
+  DEEPSEEK_V4 = 1;
+  DEEPSEEK_V41 = 2;
 }
 enum TemplateEncoding {
   TEMPLATE_TEXT = 0;

@@ -145,7 +145,7 @@ impl Bootstrap {
                     ))
                 })?,
             },
-            eos_token_ids: frontend_settings.eos_token_ids,
+            eos_token_ids: frontend_settings.eos_token_ids.clone(),
             sampling_defaults,
             speculative_token_capacity: usize::try_from(integer("speculative_token_capacity", Some(0))?).map_err(|_| "speculative token capacity exceeds usize")?,
             speculative_fixed_width: object
@@ -205,12 +205,10 @@ impl Bootstrap {
             .get("assets")
             .and_then(Value::as_object)
             .ok_or("assets must contain verified frontend descriptors")?;
-        if assets.len() != 2
-            || assets
-                .keys()
-                .any(|key| !matches!(key.as_str(), "tokenizer" | "chat_template"))
-        {
-            return Err("runtime assets must contain only tokenizer and chat_template".into());
+        let jinja = matches!(frontend_settings.prompt_encoder, crate::frontend::PromptEncoder::Jinja);
+        let expected = if jinja { &["tokenizer", "chat_template"][..] } else { &["tokenizer"][..] };
+        if assets.len() != expected.len() || expected.iter().any(|name| !assets.contains_key(*name)) {
+            return Err(format!("runtime assets must contain exactly {}", expected.join(" and ")).into());
         }
         let asset = |name: &str| -> Result<Asset> {
             let descriptor = assets
@@ -246,15 +244,15 @@ impl Bootstrap {
         defaults
             .entry("add_generation_prompt")
             .or_insert(Value::Bool(true));
-        let frontend = Frontend::load(
+        let frontend = Frontend::load_with_settings(
             FrontendAssets {
                 tokenizer: asset("tokenizer")?,
-                tokens: frontend_settings.tokenizer,
-                chat_template: asset("chat_template")?,
+                tokens: frontend_settings.tokenizer.clone(),
+                chat_template: jinja.then(|| asset("chat_template")).transpose()?,
             },
             defaults,
-        )?
-        .with_template_encoding(frontend_settings.template_encoding);
+            &frontend_settings,
+        )?;
         if frontend_settings
             .image
             .as_ref()
@@ -407,5 +405,140 @@ mod tests {
                 assert!(geometry.is_err());
             }
         }
+    }
+
+    #[test]
+    fn bootstrap_frontend_assets_match_the_prompt_encoder_contract() {
+        use crate::execution::ExecutionManifest;
+        use crate::frontend::PromptEncoder;
+        use crate::model::contract::GraphOperation;
+        use serde_json::json;
+        use sha2::{Digest, Sha256};
+        use std::path::PathBuf;
+
+        struct FixtureDirectory(PathBuf);
+        impl Drop for FixtureDirectory {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let directory = FixtureDirectory(std::env::temp_dir().join(format!(
+            "flare-bootstrap-assets-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        )));
+        std::fs::create_dir(&directory.0).unwrap();
+        let vocab: tokenizers::models::bpe::Vocab = (0..128)
+            .map(|id| ((id as u8 as char).to_string(), id))
+            .collect();
+        let tokenizer = tokenizers::Tokenizer::new(
+            tokenizers::models::bpe::BPE::builder()
+                .vocab_and_merges(vocab, vec![])
+                .build()
+                .unwrap(),
+        );
+        let asset = |name: &str, bytes: &[u8]| {
+            let path = directory.0.join(name);
+            std::fs::write(&path, bytes).unwrap();
+            json!({"path":path,"sha256":format!("{:x}", Sha256::digest(bytes))})
+        };
+        let tokenizer_asset = asset(
+            "tokenizer.json",
+            tokenizer.to_string(false).unwrap().as_bytes(),
+        );
+        let template_asset = asset("chat_template.jinja", b"{{ messages[0].content }}");
+        let mut model =
+            crate::frontend::test_support::model_config(crate::model::testing::metadata());
+        model.prepared_sequence_tokens = 2048;
+        model.limits = SchedulerLimits {
+            request_slots: 1,
+            max_active: 1,
+            max_sequence_tokens: 2048,
+            prefill_chunk_size: 512,
+            pages: 64,
+            snapshots: 40,
+        };
+        model.eos_token_ids = vec![0];
+        model.contract.graphs.retain(|graph| {
+            graph.kind != GraphOperation::Speculative && graph.graph.split('-').nth(1) == Some("1")
+        });
+        let mut manifest: ExecutionManifest = crate::model::testing::manifest(&model);
+        for (index, graph) in manifest.graphs.iter_mut().enumerate() {
+            graph.handle = index + 1;
+        }
+        crate::model::catalog::validate(&model, &manifest).unwrap();
+        let config = json!({
+            "identity":"11".repeat(32), "model_id":"bootstrap-assets",
+            "max_sequence_tokens":model.prepared_sequence_tokens,
+            "prefill_chunk_size":model.limits.prefill_chunk_size,
+            "pages":model.limits.pages, "snapshots":model.limits.snapshots,
+            "model_contract":model.contract, "sampling_defaults":model.sampling_defaults,
+            "frontend":{"tokenizer":{},"eos_token_ids":[0]},
+            "assets":{"tokenizer":tokenizer_asset}
+        });
+        for (selector, expected) in [
+            (1, PromptEncoder::DeepseekV4),
+            (2, PromptEncoder::DeepseekV41),
+        ] {
+            let mut native = config.clone();
+            native["frontend"]["prompt_encoder"] = selector.into();
+            let loaded = Bootstrap::load(&native.to_string(), &manifest).unwrap();
+            assert_eq!(loaded.frontend.prompt_encoder(), expected);
+            for assets in [
+                json!({}),
+                json!({"chat_template":template_asset}),
+                json!({"tokenizer":tokenizer_asset,"chat_template":template_asset}),
+                json!({"tokenizer":tokenizer_asset,"extra":template_asset}),
+            ] {
+                native["assets"] = assets;
+                let error = Bootstrap::load(&native.to_string(), &manifest)
+                    .err()
+                    .unwrap();
+                assert!(
+                    error
+                        .to_string()
+                        .contains("runtime assets must contain exactly tokenizer"),
+                    "{error}"
+                );
+            }
+        }
+        let mut legacy = config.clone();
+        let error = Bootstrap::load(&legacy.to_string(), &manifest)
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("runtime assets must contain exactly tokenizer and chat_template"),
+            "{error}"
+        );
+        legacy["assets"]["chat_template"] = template_asset.clone();
+        let loaded = Bootstrap::load(&legacy.to_string(), &manifest).unwrap();
+        assert_eq!(loaded.frontend.prompt_encoder(), PromptEncoder::Jinja);
+        for assets in [
+            json!({"chat_template":template_asset}),
+            json!({"tokenizer":tokenizer_asset,"chat_template":template_asset,"extra":tokenizer_asset}),
+        ] {
+            legacy["assets"] = assets;
+            let error = Bootstrap::load(&legacy.to_string(), &manifest)
+                .err()
+                .unwrap();
+            assert!(
+                error
+                    .to_string()
+                    .contains("runtime assets must contain exactly tokenizer and chat_template"),
+                "{error}"
+            );
+        }
+        let mut unknown = config;
+        unknown["frontend"]["prompt_encoder"] = 99.into();
+        let error = Bootstrap::load(&unknown.to_string(), &manifest)
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("invalid prepared frontend settings"),
+            "{error}"
+        );
     }
 }
