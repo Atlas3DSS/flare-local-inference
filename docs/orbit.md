@@ -1,6 +1,6 @@
-# Fleet control
+# Orbit
 
-A Flare fleet is a set of hosts, each running the `flare agent` service, that an
+A Flare orbit is a set of hosts, each running the `flare agent` service, that an
 operator controls from any machine with the Flare executable. The controlling
 machine is the controller. It pairs with agents, discovers them on the local
 network, checks the RoCE fabric between them, prepares multi-host packages, and
@@ -10,7 +10,7 @@ running a model itself.
 
 Every host in a serving group, rank zero included, runs its rank under its
 agent. The ranks keep the rendezvous, capacity agreement, and RoCEnante
-transport described in [multi-host serving](multi-host.md); fleet control
+transport described in [multi-host serving](multi-host.md); orbit
 decides who starts the processes and how hosts trust each other, not how ranks
 execute.
 
@@ -23,7 +23,7 @@ rank-zero launcher behind `flare run --hosts`.
 | Role | Runs | Identity | Authority |
 | --- | --- | --- | --- |
 | Node | `flare agent`, one per host, as a user service | Node key | Runs ranks and preparation under a grant from an authorized controller; serves cached files to nodes named in that grant |
-| Controller | `flare fleet` commands on any host | Controller key | Pairs nodes, issues grants, attaches to groups |
+| Controller | `flare orbit` commands on any host | Controller key | Pairs nodes, issues grants, attaches to groups |
 | Rank zero, peer | `flare run` processes started by agents | None beyond the host | Per-launch roles assigned by the grant |
 
 An identity is one Ed25519 key. It signs grants and controller-set records,
@@ -36,11 +36,11 @@ below compares the key a session authenticated.
 | --- | --- | --- |
 | Node key | `~/.config/flare/agent/node.key`, mode 0600 | `flare agent install`, or the agent's first start |
 | Authorized controllers | `~/.config/flare/agent/controllers.toml` | Pairing and controller-set updates |
-| Controller key | `~/.config/flare/fleet/controller.key`, mode 0600 | The first `flare fleet` command |
-| Fleet file | `~/.config/flare/fleet.toml` | `flare fleet pair`, edited by the operator |
+| Controller key | `~/.config/flare/orbit/controller.key`, mode 0600 | The first `flare orbit` command |
+| Orbit file | `~/.config/flare/orbit.toml` | `flare orbit pair`, edited by the operator |
 
 A node's name defaults to its hostname and is recorded at pairing. Renaming a
-host does not change its key or its fleet entry.
+host does not change its key or its orbit entry.
 
 ## Transport
 
@@ -83,14 +83,14 @@ pair.
 ## Pairing
 
 Pairing adds a controller's public key to a node's authorized controllers and
-the node's public key and address to the controller's fleet file. A node with
+the node's public key and address to the controller's orbit file. A node with
 no authorized controller is unpaired.
 
 | Mode | Node command | Controller command | Authentication |
 | --- | --- | --- | --- |
-| Join code | `flare agent install [--join-code CODE]` | `flare fleet pair HOST... --code CODE` | Both sides prove the code inside the session; an on-path relay cannot pass |
-| Accept first | `flare agent install --accept-first` | `flare fleet pair HOST...` | None; the first controller to connect is authorized |
-| Delegation | None | `flare fleet controllers add KEYFILE` | Signed by an authorized controller |
+| Join code | `flare agent install [--join-code CODE]` | `flare orbit pair HOST... --code CODE` | Both sides prove the code inside the session; an on-path relay cannot pass |
+| Accept first | `flare agent install --accept-first` | `flare orbit pair HOST...` | None; the first controller to connect is authorized |
+| Delegation | None | `flare orbit controllers add KEYFILE` | Signed by an authorized controller |
 
 `flare agent install` generates a one-time code of 20 random bytes, prints it
 as eight groups of four base32 characters, and keeps the SHA-256 of the code,
@@ -113,14 +113,14 @@ the same Sparks.
 
 Both pairing modes print each node's name and fingerprint. The operator
 compares them with what `flare agent install` printed at the host before
-trusting a node for anything that moves executables. `flare fleet forget NODE`
-removes a node from the fleet file; `flare agent reset` on a host removes its
+trusting a node for anything that moves executables. `flare orbit forget NODE`
+removes a node from the orbit file; `flare agent reset` on a host removes its
 authorized controllers and returns it to unpaired.
 
-## Fleet file
+## Orbit file
 
 ```toml
-# ~/.config/flare/fleet.toml
+# ~/.config/flare/orbit.toml
 [controllers]
 body = '{"revision":2,"keys":[{"name":"workstation","public_key":"a0b1…"},{"name":"laptop","public_key":"d4e5…"}]}'
 signer = "a0b1…"
@@ -144,22 +144,22 @@ nodes = ["maxwell", "hertz", "faraday", "ampere"]
 
 `controllers` is the signed controller-set record exactly as nodes store it:
 the JSON body the signer serialized, the signer's public key, and the
-signature, so a node verifies the same bytes the fleet file holds. Pairing
-writes revision 1; `flare fleet controllers` writes later revisions. The
+signature, so a node verifies the same bytes the orbit file holds. Pairing
+writes revision 1; `flare orbit controllers` writes later revisions. The
 operator adds clusters by hand.
 
 A cluster is a named, ordered list of nodes. Its order is the rank order of
-every launch and, with `--roce-ring`, the ring. `flare fleet check` proposes an
-order from the measured fabric and rewrites the list after confirmation. Fleet
-commands take `--cluster NAME`; a fleet with one cluster uses it by default.
+every launch and, with `--roce-ring`, the ring. `flare orbit check` proposes an
+order from the measured fabric and rewrites the list after confirmation. Orbit
+commands take `--cluster NAME`; an orbit with one cluster uses it by default.
 
 ## Controller set
 
 A node's authorized controllers are one record: a revision number, the list of
 controller public keys, and a signature by a key that was in the list at the
 previous revision. Pairing creates revision 1 with the pairing controller
-alone. `flare fleet controllers add` and `remove` write revision N+1 to the
-fleet file, sign it, and send it to every node. A node applies a record only
+alone. `flare orbit controllers add` and `remove` write revision N+1 to the
+orbit file, sign it, and send it to every node. A node applies a record only
 when its revision exceeds the stored one and its signature verifies against
 the stored list; HELLO carries the sender's revision, and a controller whose
 record is newer than the node's sends it at the start of every session, so an
@@ -182,13 +182,13 @@ Each agent advertises the DNS-SD service `_flare-agent._tcp.local.` through the
 | `free` | Free bytes under the agent cache |
 | `rails` | RoCE endpoints as `roce_fabric::encode` writes them: `name address/prefix` per device with an IPv4 GID, `name -` otherwise |
 
-`flare fleet discover` lists advertised agents for three seconds and prints
-name, address, fingerprint, pairing state, GPU, and rails. `flare fleet pair`
+`flare orbit discover` lists advertised agents for three seconds and prints
+name, address, fingerprint, pairing state, GPU, and rails. `flare orbit pair`
 accepts advertised names as well as hostnames and addresses. It records the
 address the advertisement arrived from, which is on the network the controller
 shares with the node, and confirms it by connecting; the RoCE rail addresses
 in the record are never used as the agent address. A network that blocks
-multicast loses only this listing; every other command works from the fleet
+multicast loses only this listing; every other command works from the orbit
 file.
 
 ## Frames
@@ -283,7 +283,7 @@ at the agent boundary, and the ranks trust the fabric network.
 
 ## Launching a group
 
-`flare fleet run PACKAGE [--cluster NAME | --nodes NODE,...] [--name NAME]
+`flare orbit run PACKAGE [--cluster NAME | --nodes NODE,...] [--name NAME]
 [serving options]` proceeds as follows, after [placement](#placement) has
 chosen the member nodes and their GPUs.
 
@@ -343,9 +343,9 @@ prints the resulting URL and does not proxy requests.
 
 The agent owns its rank process for the life of the process. A controller
 disconnecting, sleeping, or crashing does not stop a group; the agent retains
-the last 64 KiB of output per rank for a later ATTACH. `flare fleet run` stops
-the group on Ctrl-C; `flare fleet run --detach` returns after startup;
-`flare fleet attach CLUSTER` and `flare fleet stop CLUSTER` act on a running
+the last 64 KiB of output per rank for a later ATTACH. `flare orbit run` stops
+the group on Ctrl-C; `flare orbit run --detach` returns after startup;
+`flare orbit attach CLUSTER` and `flare orbit stop CLUSTER` act on a running
 group from any controller.
 
 Stopping sends STOP to rank zero and waits for its EXIT; rank zero drains
@@ -387,7 +387,7 @@ node lacks or one a running group holds, and otherwise runs the group beside
 the others, each a separate process with its own retained output. A member
 naming no GPUs takes the whole node. The agent keeps the sixteen most recent
 finished groups; STOP and ATTACH name a group when several are on the node.
-`flare fleet ls` lists every group on a cluster's nodes with its GPUs and
+`flare orbit ls` lists every group on a cluster's nodes with its GPUs and
 state, and `attach` and `stop` take a group name or identifier.
 
 A package is one of two kinds, and the package says which. A multi-host
@@ -400,7 +400,7 @@ GPUs of either kind.
 
 ## Desired state
 
-The fleet file may describe the groups the operator wants:
+The orbit file may describe the groups the operator wants:
 
 ```toml
 [[group]]
@@ -415,20 +415,20 @@ package = "maxwell:/data/flare-runtime/glm53-tp2.safetensors"
 nodes = ["maxwell", "hertz"]
 ```
 
-`flare fleet run --name ds41` takes the package from the group of that name
+`flare orbit run --name ds41` takes the package from the group of that name
 when the command names none, puts the group's `serving` words before the
 command line's serving options so the command line overrides them, puts the
 group's `rank_zero` words after the command line's bind options so the group
 decides where rank zero listens, and takes `nodes`, `gpus`, and `roce_ring`
 as constraints when the command line gives none. `nodes` lists candidate
 nodes in rank order; `gpus` lists the NVML indices every member uses on its
-node. A group without them is placed from the whole fleet.
+node. A group without them is placed from the whole orbit.
 
 ## Placement
 
-`flare fleet run` places a package on the candidate nodes: those `--nodes`
+`flare orbit run` places a package on the candidate nodes: those `--nodes`
 lists, else the cluster `--cluster` names, else the group's `nodes`, else
-every node of the fleet that answers STATUS. The planner turns the package's
+every node of the orbit that answers STATUS. The planner turns the package's
 needs, read from its signed index, and the nodes' STATUS reports into
 members with GPUs, or an explanation naming the node or GPU that cannot
 serve. It applies these rules in order:
@@ -450,6 +450,9 @@ serve. It applies these rules in order:
    assignment exists.
 5. On a node, a rank takes the lowest-index free GPU of the right revision.
 
+While the controller reads the nodes and places the group, a terminal shows
+the orbit banner, the wordmark above Flare's sun with a body circling it for
+one revolution of three seconds; the final frame stays above the placement.
 The controller prints the placement, one member per line with its node, GPU
 and whether the node already holds its rank, before transferring anything.
 `--dry-run` stops there. The planner does not set `--memory-limit` for a
@@ -465,9 +468,9 @@ document as JSON from the loopback address of its HTTP bind. METRICS returns
 the latest GPU readings with their holding groups and every group with its
 latest document.
 
-`flare fleet dashboard [--cluster NAME]` polls METRICS on every node of the
+`flare orbit dashboard [--cluster NAME]` polls METRICS on every node of the
 cluster twice a second, reconnecting to a node that stops answering, and
-draws the serving process's terminal dashboard for the fleet through the view
+draws the serving process's terminal dashboard for the orbit through the view
 Helios exports: one row per group with prefill and generation rates, active
 and queued requests, acceptance and KV tokens; the four plots of the selected
 group, derived from successive documents with the same rate history the
@@ -479,7 +482,7 @@ leaves.
 
 ## Fabric check
 
-`flare fleet check --cluster sparks [--roce-ring]` requests each node's fabric
+`flare orbit check --cluster sparks [--roce-ring]` requests each node's fabric
 endpoints through STATUS and plans routes with `roce_fabric::plan_routes` or
 `plan_ring_routes`, the functions serving uses. It reports, per pair of nodes,
 the rails a plan would use and the endpoints that share no subnet.
@@ -500,7 +503,7 @@ cluster. Without `--roce-ring`, the order stays as listed.
 
 ## Preparation
 
-`flare fleet prepare RECIPE --cluster sparks [export options]` runs
+`flare orbit prepare RECIPE --cluster sparks [export options]` runs
 `ignition export` on the cluster's first node and `ignition join` on the others
 through PREPARE. Each node's `[preparation] checkout` in its own
 `~/.config/flare/config.toml` names the repository checkout whose `.venv`
@@ -515,7 +518,7 @@ frame; the agent writes them to a private temporary file and passes it through
 token lives only for that preparation, and no shared token file exists on any
 host. Output streams to the controller with `[rank R name]` prefixes, and the
 exported package stays on rank zero's host, from where
-`flare fleet run maxwell:/data/flare-runtime/glm53-spark-tp4.safetensors`
+`flare orbit run maxwell:/data/flare-runtime/glm53-spark-tp4.safetensors`
 serves it.
 
 ## Commands
@@ -525,16 +528,16 @@ serves it.
 | `flare agent install [--join-code CODE] [--accept-first] [--listen ADDR]` | Node | Writes the node key, the systemd user unit, enables linger, starts the service, prints name, fingerprint, and the join code |
 | `flare agent reset` | Node | Removes authorized controllers; the node becomes unpaired |
 | `flare agent --listen ADDR [--no-mdns]` | Node | Runs the service (the unit's command) |
-| `flare fleet discover` | Controller | Lists advertised agents (unimplemented) |
-| `flare fleet pair HOST... [--code CODE]` | Controller | Pairs and records nodes |
-| `flare fleet controllers add KEYFILE` / `remove FINGERPRINT` | Controller | Writes and distributes the next controller-set revision |
-| `flare fleet check --cluster NAME [--roce-ring] [--write]` | Controller | Fabric plan and rail check; optional rank-order proposal (unimplemented) |
-| `flare fleet prepare RECIPE --cluster NAME ...` | Controller | Multi-host export through agents (unimplemented) |
-| `flare fleet run [PACKAGE] [--cluster NAME \| --nodes NODE,...] [--name GROUP] [--gpus N,...] [--dry-run] [--detach] ...` | Controller | Places a group on the candidate nodes' GPUs, starts it and attaches; `--dry-run` prints the placement only |
-| `flare fleet ls [--cluster NAME]` | Controller | Every group on the cluster's nodes with its GPUs and state |
-| `flare fleet dashboard [--cluster NAME]` | Controller | The serving process's live metrics dashboard for every group and GPU of the cluster |
-| `flare fleet attach [GROUP]` / `stop [GROUP]` / `status --cluster NAME` | Controller | Operates running groups, or the one named |
-| `flare fleet forget NODE` | Controller | Removes a node from the fleet file |
+| `flare orbit discover` | Controller | Lists advertised agents (unimplemented) |
+| `flare orbit pair HOST... [--code CODE]` | Controller | Pairs and records nodes |
+| `flare orbit controllers add KEYFILE` / `remove FINGERPRINT` | Controller | Writes and distributes the next controller-set revision |
+| `flare orbit check --cluster NAME [--roce-ring] [--write]` | Controller | Fabric plan and rail check; optional rank-order proposal (unimplemented) |
+| `flare orbit prepare RECIPE --cluster NAME ...` | Controller | Multi-host export through agents (unimplemented) |
+| `flare orbit run [PACKAGE] [--cluster NAME \| --nodes NODE,...] [--name GROUP] [--gpus N,...] [--dry-run] [--detach] ...` | Controller | Places a group on the candidate nodes' GPUs, starts it and attaches; `--dry-run` prints the placement only |
+| `flare orbit ls [--cluster NAME]` | Controller | Every group on the cluster's nodes with its GPUs and state |
+| `flare orbit dashboard [--cluster NAME]` | Controller | The serving process's live metrics dashboard for every group and GPU of the cluster |
+| `flare orbit attach [GROUP]` / `stop [GROUP]` / `status --cluster NAME` | Controller | Operates running groups, or the one named |
+| `flare orbit forget NODE` | Controller | Removes a node from the orbit file |
 
 `flare run --rank R --rendezvous ADDR` remains for operator-managed starts on
 hosts that already hold the executable and package. `flare run --hosts`,
@@ -544,9 +547,9 @@ hosts that already hold the executable and package. `flare run --hosts`,
 ## Security model
 
 Anyone holding an authorized controller key can run code as the agent's user
-on every node of the fleet. The controller key is therefore protected like the
+on every node of the orbit. The controller key is therefore protected like the
 signing key in [signing](signing.md): owner-only permissions, and an encrypted
-backup if the fleet must survive losing the machine.
+backup if the orbit must survive losing the machine.
 
 Packages are signed per rank. An agent digests bytes fetched from another node
 against the signed index before it will run them and keeps the result with the
@@ -559,7 +562,7 @@ controller set.
 
 Removing a controller reaches nodes when any remaining controller connects;
 until then the removed key can still launch on nodes it reaches. A node key is
-revoked by removing the node from the fleet file, which stops future launches
+revoked by removing the node from the orbit file, which stops future launches
 but not a running group. The controller stores no secrets from nodes. Nodes
 store controller public keys, their own key, and cached files. Transfers and
 output are encrypted on the controller and node network; the RoCE fabric
@@ -571,17 +574,17 @@ Prepared packages and their Protocol Buffers are unchanged: no re-export and no
 added fields, so principle 13 of [the design review](design-review.md) is
 unaffected. The rendezvous protocol and the RoCE proxy ABI are unchanged. The
 agent protocol is replaced without a compatibility window: nodes and
-controllers of one fleet run the same Flare revision, and `flare fleet`
+controllers of one orbit run the same Flare revision, and `flare orbit`
 refuses an agent whose HELLO reports another protocol version. The agent runs
 on Linux; the controller builds wherever Flare builds.
 
 ## Unimplemented parts
 
 Identity, the session transport, pairing, the controller set and its
-propagation, the fleet file, grants, executable and package placement with
+propagation, the orbit file, grants, executable and package placement with
 node-to-node fetches, GPU inventory and several groups per agent, placement
-with desired state in the fleet file, the metrics sampler and the fleet
-dashboard, `flare agent install` and `reset`, and `flare fleet pair`,
+with desired state in the orbit file, the metrics sampler and the orbit
+dashboard, `flare agent install` and `reset`, and `flare orbit pair`,
 `controllers`, `status`, `ls`, `dashboard`, `run`, `attach`, `stop`, and
 `forget` exist and are validated by unit tests and by serving a four-rank
 package on four DGX Sparks from a controller that is not a rank. The
@@ -589,11 +592,11 @@ following parts of this specification are not in the tree, and the
 [proposal](#proposal-prestaging-and-reconciliation) describes prestaging and
 reconciliation:
 
-1. **Discovery and fabric check.** mDNS advertisement, `flare fleet discover`,
+1. **Discovery and fabric check.** mDNS advertisement, `flare orbit discover`,
    fabric endpoints in STATUS, the rail check, and the ring-order proposal.
    Validation: check results agree with the rails serving selects, and a
    deliberately uncabled rail is reported before an export.
-2. **Preparation through agents.** PREPARE, `flare fleet prepare`, the
+2. **Preparation through agents.** PREPARE, `flare orbit prepare`, the
    `--checkpoint-token-file` flag, and removal of
    `[preparation] checkpoint_token_file`. Validation: a GLM TP4 export through
    agents whose rank signatures verify and which serves identically to a manual
@@ -601,21 +604,21 @@ reconciliation:
 
 ## Proposal: prestaging and reconciliation
 
-This section proposes the next form of fleet control. Nothing in it is in the
+This section proposes the next form of orbit. Nothing in it is in the
 tree.
 
 ### Prestaging
 
-`flare fleet push PACKAGE --to NODE...` places a package's ranks, or complete
+`flare orbit push PACKAGE --to NODE...` places a package's ranks, or complete
 copies, on nodes ahead of any launch and verifies them there, under a grant
-whose group runs nothing. `flare fleet packages` lists what every node holds
+whose group runs nothing. `flare orbit packages` lists what every node holds
 and whether it verified. A re-composition whose packages are already staged
 starts in the seconds a verified cache takes, not in the hours a transfer and
 verification take.
 
 ### Reconciliation
 
-`flare fleet apply` compares the fleet file's groups with what the agents
+`flare orbit apply` compares the orbit file's groups with what the agents
 report and produces a plan: groups to stop because the file no longer lists
 them or their package or options changed, groups to start, and the placement
 of each. It stops before it starts, so freed GPUs are available to the
@@ -627,9 +630,9 @@ stay available by hand.
 
 | Command | Effect |
 | --- | --- |
-| `flare fleet push PACKAGE --to NODE...` | Stages and verifies a package without starting it |
-| `flare fleet packages` | What each node's cache holds |
-| `flare fleet apply [--dry-run]` | Reconciles the fleet file's groups with the agents |
+| `flare orbit push PACKAGE --to NODE...` | Stages and verifies a package without starting it |
+| `flare orbit packages` | What each node's cache holds |
+| `flare orbit apply [--dry-run]` | Reconciles the orbit file's groups with the agents |
 
 ### Unchanged
 
@@ -638,7 +641,7 @@ authority for every launch and transfer, verification of fetched bytes in the
 agent, placement, the sampler and the dashboard, and one rank zero per group
 chosen by placement. There is no scheduler service, no lease, and no
 consensus; two controllers driving one pool see the same actual state from
-the agents and the same desired state when they share a fleet file.
+the agents and the same desired state when they share a orbit file.
 
 ### Order of work
 
@@ -650,7 +653,7 @@ the agents and the same desired state when they share a fleet file.
 The controller does not proxy HTTP; clients reach rank zero's host directly.
 A controller on a platform other than Linux aarch64 must supply the node
 executable. Agents run one group per host, and restarting an agent stops its
-ranks. Routing between controller and nodes uses whatever network the fleet
+ranks. Routing between controller and nodes uses whatever network the orbit
 file addresses name; the controller does not select or configure the RoCE
 fabric, interfaces, or firewalls. Discovery is link-local multicast and does
 not cross routed networks. Encrypted transfers run at one core's

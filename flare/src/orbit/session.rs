@@ -262,7 +262,7 @@ impl Session {
         stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
         let message1 = read_exact(&mut stream, 8 + 4 + 32)?;
         if &message1[..8] != MAGIC {
-            return Err("not a flare fleet connection".into());
+            return Err("not a flare orbit connection".into());
         }
         let version = u32::from_le_bytes(message1[8..12].try_into().unwrap());
         if version != PROTOCOL_VERSION {

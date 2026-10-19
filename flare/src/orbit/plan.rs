@@ -1,4 +1,4 @@
-//! Placement: which nodes and GPUs of the pool run a package's ranks. See docs/fleet.md,
+//! Placement: which nodes and GPUs of the pool run a package's ranks. See docs/orbit.md,
 //! "Placement".
 //!
 //! [`plan`] is a pure function of what the package needs ([`Needs`]), what every node's STATUS

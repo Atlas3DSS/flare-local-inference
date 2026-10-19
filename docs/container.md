@@ -66,7 +66,7 @@ commit. There is no path filter or pull-request trigger.
 
 The workflow first publishes a staging tag of the form
 `ghcr.io/local-inference-lab/flare:sha-COMMIT-RUN-ATTEMPT`. It checks the image
-index and runs `--version`, `run --help`, `agent --help`, and `fleet --help` for
+index and runs `--version`, `run --help`, `agent --help`, and `orbit --help` for
 both architectures, without GPUs, networking, ports, or host mounts. These CPU
 checks validate executable startup and CLI parsing; they do not validate model
 serving. Only a successful build whose commit still matches remote `main` is

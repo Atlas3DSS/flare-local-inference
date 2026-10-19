@@ -246,10 +246,10 @@ For four DGX Sparks with one GPU per host, replace `--gpus 0,4,6,8` during
 export with `--gpus 0 --ranks 4 --rendezvous 10.200.0.12:29630` and start an
 `ignition join` process on each peer. Rank zero retains the checkpoint; peers
 request their weight ranges during preparation. From a paired controller, use
-`flare fleet run maxwell:/data/flare-runtime/deepseek-v41-flash-1017-csf-tp4-c4-dspark5.safetensors --cluster sparks --gpus 0`
+`flare orbit run maxwell:/data/flare-runtime/deepseek-v41-flash-1017-csf-tp4-c4-dspark5.safetensors --cluster sparks --gpus 0`
 with a four-node `sparks` cluster. The prepared model uses RoCEnante collectives
 across hosts. See [multi-host preparation and serving](multi-host.md) for
-preparation authentication, fleet setup, and rank placement.
+preparation authentication, orbit setup, and rank placement.
 
 `--image-concurrency` defaults to the smaller of four and `--max-concurrency`.
 For example, add `--max-concurrency 64 --image-concurrency 4` during export to
@@ -593,7 +593,7 @@ A model too large for one Spark runs tensor-parallel across two or four Sparks,
 one rank per host, reducing through b12x RoCEnante over their ConnectX-7 ports:
 `ignition export --ranks N --rendezvous ADDR:PORT` on rank zero with
 `ignition join` on each peer writes one package on rank zero, and
-`flare fleet run NODE:PACKAGE --cluster NAME` serves it from any machine,
+`flare orbit run NODE:PACKAGE --cluster NAME` serves it from any machine,
 starting every rank through its host's `flare agent`. See
 [serving across DGX Sparks](multi-host.md) for agent installation, pairing,
 and failures.

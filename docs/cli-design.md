@@ -99,25 +99,25 @@ flare/target/release/flare run PACKAGE --gpus 0 --host 127.0.0.1 --port 8000
 ```
 flare run PACKAGE [flags]                 serve a package on this host
 flare download REPOSITORY [flags]         download a prepared package
-flare agent [--listen IP:PORT]            run this host's fleet agent
+flare agent [--listen IP:PORT]            run this host's orbit agent
 flare agent install [--join-code CODE | --accept-first] [--listen IP:PORT]
 flare agent reset                         forget the host's controllers
-flare fleet pair HOST... [--code CODE]    pair this controller with hosts
-flare fleet controllers add NAME KEY | remove KEY
-flare fleet status [--cluster NAME]
-flare fleet run [PACKAGE] [--cluster NAME | --nodes N,...] [--name GROUP] [--dry-run] [serving flags] [--detach]
-flare fleet attach | stop [--cluster NAME]
-flare fleet forget NODE                   remove a node from the fleet file
-flare fleet ls | dashboard [--cluster NAME]  groups on the cluster's nodes; their live metrics
+flare orbit pair HOST... [--code CODE]    pair this controller with hosts
+flare orbit controllers add NAME KEY | remove KEY
+flare orbit status [--cluster NAME]
+flare orbit run [PACKAGE] [--cluster NAME | --nodes N,...] [--name GROUP] [--dry-run] [serving flags] [--detach]
+flare orbit attach | stop [--cluster NAME]
+flare orbit forget NODE                   remove a node from the orbit file
+flare orbit ls | dashboard [--cluster NAME]  groups on the cluster's nodes; their live metrics
 flare trust revoke FINGERPRINT
 ```
 
-`flare fleet` commands take `--fleet-file PATH` and `--key-file PATH`,
-defaulting to `~/.config/flare/fleet.toml` and
-`~/.config/flare/fleet/controller.key`. `flare fleet run` takes the serving
+`flare orbit` commands take `--orbit-file PATH` and `--key-file PATH`,
+defaulting to `~/.config/flare/orbit.toml` and
+`~/.config/flare/orbit/controller.key`. `flare orbit run` takes the serving
 flags of `flare run` and applies them to every rank; `--host`, `--port`,
 `--served-model-name`, `--scheduler-policy`, and `--api-key-file` apply to rank
-zero. See [fleet control](fleet.md).
+zero. See [orbit](orbit.md).
 
 For MSVC cross-compilation, native Windows builds, and GPU compatibility
 requirements, see [Windows serving](windows.md).
@@ -921,7 +921,7 @@ cannot honor the settings reports a capacity error in the section 6 form.
 ### Experimental RoCE ring configuration
 
 `ignition export` and `ignition serve` accept `--roce-ring` with `--ranks N`;
-`flare run` and `flare fleet run` accept it with a multi-host package. Rank
+`flare run` and `flare orbit run` accept it with a multi-host package. Rank
 order defines the ring, including the cluster's node order when agents launch
 ranks. The transport accepts 2..16
 ranks, while recipe validation retains each model's supported TP sizes. This

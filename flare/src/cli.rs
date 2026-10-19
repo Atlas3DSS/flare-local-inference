@@ -28,10 +28,10 @@ pub enum Command {
     Run(Box<Run>),
     /// Download a prepared package from the hardware's Hugging Face revision.
     Download(Download),
-    /// Run this host's agent, which pairs with controllers and runs its rank of a fleet's serving group.
+    /// Run this host's agent, which pairs with controllers and runs its rank of a orbit's serving group.
     Agent(AgentArgs),
-    /// Control a fleet of agents from this machine.
-    Fleet(FleetArgs),
+    /// Control a orbit of agents from this machine.
+    Orbit(OrbitArgs),
     /// Manage remembered publisher trust.
     Trust {
         #[command(subcommand)]
@@ -107,21 +107,21 @@ pub enum AgentCommand {
 }
 
 #[derive(Debug, Args)]
-pub struct FleetArgs {
+pub struct OrbitArgs {
     #[command(subcommand)]
-    pub command: FleetCommand,
+    pub command: OrbitCommand,
 
-    /// The fleet file listing clusters and nodes [default: ~/.config/flare/fleet.toml].
+    /// The orbit file listing clusters and nodes [default: ~/.config/flare/orbit.toml].
     #[arg(long, value_name = "PATH", global = true)]
-    pub fleet_file: Option<PathBuf>,
+    pub orbit_file: Option<PathBuf>,
 
-    /// This controller's private key [default: ~/.config/flare/fleet/controller.key].
+    /// This controller's private key [default: ~/.config/flare/orbit/controller.key].
     #[arg(long, value_name = "PATH", global = true)]
     pub key_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]
-pub enum FleetCommand {
+pub enum OrbitCommand {
     /// Pair this controller with the agents on HOSTS.
     Pair {
         #[arg(required = true, value_name = "HOST")]
@@ -141,7 +141,7 @@ pub enum FleetCommand {
         cluster: Option<String>,
     },
     /// Launch a package across a cluster's nodes.
-    Run(Box<FleetRun>),
+    Run(Box<OrbitRun>),
     /// Show the live metrics dashboard for every group and GPU on the cluster's nodes.
     Dashboard {
         #[arg(long, value_name = "NAME")]
@@ -168,7 +168,7 @@ pub enum FleetCommand {
         #[arg(value_name = "GROUP")]
         group: Option<String>,
     },
-    /// Remove a node from the fleet file.
+    /// Remove a node from the orbit file.
     Forget {
         #[arg(value_name = "NODE")]
         node: String,
@@ -192,14 +192,14 @@ pub enum ControllersCommand {
 
 #[derive(Debug, Args)]
 #[command(args_override_self = true)]
-pub struct FleetRun {
+pub struct OrbitRun {
     /// A local package path or NODE:/absolute/path on a node; omitted when --name names a
-    /// [[group]] of the fleet file, which supplies it.
+    /// [[group]] of the orbit file, which supplies it.
     #[arg(value_name = "PACKAGE")]
     pub package: Option<String>,
 
     /// Cluster whose nodes serve the ranks in order; without it placement chooses from every
-    /// node of the fleet.
+    /// node of the orbit.
     #[arg(long, value_name = "NAME")]
     pub cluster: Option<String>,
 
@@ -208,7 +208,7 @@ pub struct FleetRun {
     #[arg(long, value_name = "NAME")]
     pub name: Option<String>,
 
-    /// Candidate nodes in rank order, instead of a cluster or the whole fleet.
+    /// Candidate nodes in rank order, instead of a cluster or the whole orbit.
     #[arg(long, value_name = "NODE[,NODE...]", value_delimiter = ',')]
     pub nodes: Vec<String>,
 
@@ -264,7 +264,7 @@ pub struct FleetRun {
     pub serving: ServingOptions,
 }
 
-impl FleetRun {
+impl OrbitRun {
     /// Serving options every rank loads with.
     pub fn rank_options(&self) -> Vec<String> {
         self.serving.rank_options(self.roce_ring)
