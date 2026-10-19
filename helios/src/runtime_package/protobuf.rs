@@ -15,6 +15,8 @@ impl wire::ExecutionGraph {
                     .saturating_sub(1)
                     .saturating_mul(self.token_capacity),
             )
+        } else if self.packed_token_capacity != 0 {
+            self.packed_token_capacity
         } else {
             self.batch_capacity.saturating_mul(self.token_capacity)
         }
@@ -274,6 +276,24 @@ pub(super) fn edge(value: wire::Edge) -> Result<Edge> {
 mod tests {
     use super::*;
     use prost::Message;
+
+    #[test]
+    fn packed_rows_preserve_absent_field_semantics_and_honor_explicit_bounds() {
+        // Serialized verification metadata predating the separate physical-row field.
+        let bytes = b"\x12\x0cverification\x20\x08\x28\x06";
+        let legacy = wire::ExecutionGraph::decode(bytes.as_slice()).unwrap();
+        assert_eq!(legacy.packed_token_capacity, 0);
+        assert_eq!(legacy.packed_tokens(), 48);
+        let mut encoded = bytes.to_vec();
+        encoded.extend_from_slice(b"\x68\x18");
+        let packed = wire::ExecutionGraph::decode(encoded.as_slice()).unwrap();
+        assert_eq!(packed.packed_tokens(), 24);
+        assert_eq!(packed.token_capacity, 6);
+        let mut json = serde_json::to_value(&legacy).unwrap();
+        json.as_object_mut().unwrap().remove("packed_token_capacity");
+        let restored: wire::ExecutionGraph = serde_json::from_value(json).unwrap();
+        assert_eq!(restored.packed_tokens(), 48);
+    }
 
     #[test]
     fn omitted_vision_slots_inherit_prepared_concurrency() {

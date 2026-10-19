@@ -5,7 +5,7 @@ from itertools import product
 
 import pytest
 
-from ignition.components.split_draft import causal_prefix, lagged_budget
+from ignition.components.split_draft import allocate_draft_budget, causal_prefix, lagged_budget
 
 
 def first_token_probability(selector):
@@ -56,3 +56,26 @@ def test_invalid_confidence_is_rejected(value):
         causal_prefix([value], .5)
     with pytest.raises(ValueError):
         lagged_budget([value], [1., 2.])
+
+
+def test_fixed_budget_distributes_work_to_longer_high_confidence_prefixes():
+    assert allocate_draft_budget(((.9, .9, .9), (.4, .2, .2)), 4) == (3, 1)
+    assert allocate_draft_budget(((1., 1., 1.), (1., 1., 1.)), 3) == (2, 1)
+
+
+def test_fixed_budget_admission_is_independent_of_its_own_future():
+    for budget in range(7):
+        for position in range(1, 4):
+            prefix = (.8, .5, .2)[:position]
+            decisions = {
+                allocate_draft_budget((prefix + tail, (.7, .6, .5)), budget)[0] >= position
+                for tail in product((0., .5, 1.), repeat=3-position)
+            }
+            assert len(decisions) == 1
+
+
+def test_fixed_budget_preserves_exact_first_token_probability():
+    for budget in range(5):
+        selector = lambda proposal: allocate_draft_budget(
+            ((.6, .9 if proposal == 0 else .1), (.7, .5)), budget)[0]
+        assert first_token_probability(selector) == Fraction(1, 2)

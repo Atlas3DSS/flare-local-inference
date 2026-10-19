@@ -77,20 +77,20 @@ class SpeculativeAcceptance:
     rng_increment: torch.Tensor
 
     @classmethod
-    def allocate(cls, batch, width, device):
+    def storage_layout(cls, batch, width):
         _geometry(batch, width)
-        return cls(torch.full((batch, width), -1, dtype=torch.int64, device=device),
-            torch.zeros(batch, dtype=torch.int32, device=device),
-            torch.zeros(batch, dtype=torch.int32, device=device),
-            torch.zeros(batch, dtype=torch.int32, device=device),
-            torch.zeros(batch, dtype=torch.bool, device=device),
-            torch.zeros(batch, dtype=torch.int64, device=device))
+        return dict(token_ids=((batch, width), torch.int64),
+                    proposed_count=((batch,), torch.int32), accepted_drafts=((batch,), torch.int32),
+                    offered_drafts=((batch,), torch.int32), valid=((batch,), torch.bool),
+                    rng_increment=((batch,), torch.int64))
+
+    @classmethod
+    def allocate(cls, batch, width, device):
+        return cls(**{name: torch.full(shape, -1 if name == "token_ids" else 0, dtype=dtype, device=device)
+                      for name, (shape, dtype) in cls.storage_layout(batch, width).items()})
 
     def validate(self, batch, width, device):
-        for name, shape, dtype in (("token_ids", (batch, width), torch.int64),
-                ("proposed_count", (batch,), torch.int32), ("accepted_drafts", (batch,), torch.int32),
-                ("offered_drafts", (batch,), torch.int32), ("valid", (batch,), torch.bool),
-                ("rng_increment", (batch,), torch.int64)):
+        for name, (shape, dtype) in self.storage_layout(batch, width).items():
             _tensor(getattr(self, name), shape, dtype, device, name)
 
 

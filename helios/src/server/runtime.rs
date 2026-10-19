@@ -357,7 +357,11 @@ impl ModelRuntime {
                                         GraphKind::Speculative | GraphKind::Verification
                                     )
                                 })
-                                .map(|graph| (graph.batch_capacity, graph.token_capacity))
+                                .flat_map(|graph| {
+                                    let first = if graph.packed_token_capacity == 0 { graph.token_capacity } else { 1 };
+                                    let last = graph.token_capacity.min(graph.packed_tokens() / graph.batch_capacity);
+                                    (first..=last).map(move |width| (graph.batch_capacity, width))
+                                })
                                 .collect::<std::collections::BTreeSet<_>>()
                                 .into_iter().collect::<Vec<_>>(),
                         )
@@ -514,6 +518,10 @@ impl ModelRuntime {
 
     pub fn generate_many(&self, prompts: Vec<Prompt>) -> Result<Vec<Generation>> {
         self.enqueue_many(prompts, None)
+    }
+
+    pub(super) fn generate_many_observed(&self, prompts: Vec<Prompt>, timestamps: bool) -> Result<Vec<Generation>> {
+        self.enqueue_many(prompts, Some(timestamps))
     }
 
     fn enqueue_many(
@@ -1431,13 +1439,14 @@ impl<'a> Worker<'a> {
             return Ok(false);
         }
         validate_sampling_admissions(step, &self.admissions)?;
-        let graph = crate::model::catalog::select(
+        let graph = crate::model::catalog::select_shape(
             self.config,
             executor.manifest(),
             step.kind,
             step.batch_capacity,
             step.token_capacity,
             step.prefill_capacity(),
+            step.packed_token_capacity,
             SamplingMode::General,
         )?;
         let fence = executor.next_fence()?;
@@ -1757,7 +1766,7 @@ mod tests {
             GraphKind::Resume,
             GraphKind::Speculative,
         ] {
-            let mut step = ScheduledStep {
+            let mut step = ScheduledStep { packed_token_capacity: 0,
                 kind,
                 batch_capacity: 4,
                 token_capacity: 1,
@@ -1779,7 +1788,7 @@ mod tests {
                 Error::Execution(ExecutionError::State(_))
             ));
         }
-        let mut step = ScheduledStep {
+        let mut step = ScheduledStep { packed_token_capacity: 0,
             kind: GraphKind::Decode,
             batch_capacity: 1,
             token_capacity: 1,

@@ -107,8 +107,7 @@ Compilation is enabled by default; `--no-compile` is for development.
 
 `nemotron-bolt-24gb` prepares
 `nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB` on one SM120/SM121 GPU.
-The recipe includes the C-RADIO image encoder and accepts up to four still
-images per request. Video is not prepared. LiLiCorr uses the matching
+The recipe includes the C-RADIO encoder for still images. Video is not prepared. LiLiCorr uses the matching
 `NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr` checkpoint and defaults to
 seven draft tokens with adaptive verification. Both checkpoints use the standard
 Hugging Face hub cache (`~/.cache/huggingface/hub`), or `[paths].hub_cache` when configured.
@@ -183,6 +182,10 @@ request retirement, including completion of outstanding GPU work after cancellat
 The limit counts requests containing images; it does not change images per request
 or the prepared patch capacities. Changing it requires exporting the package again.
 Packages with vision require the prepared feature-slot capacity and binding.
+Images replay one at a time into the request's feature buffer. Requests may carry
+more than four images when their combined visual tokens fit that buffer. Each
+image must fit a captured patch capacity; HTTP body and context limits also apply.
+PNG, JPEG, and static WebP data URLs are accepted.
 
 For Qwen, each feature slot holds 16,384 BF16 vectors of width 2,560: 80 MiB per
 rank. Four image slots therefore reserve 320 MiB even with 32 active request slots.
@@ -198,8 +201,8 @@ use the same prepared model graphs; the flag selects table storage only.
 ## DeepSeek V4.1 Flash
 
 The `deepseek-v4.1-flash` alias selects `deepseek-ai/DeepSeek-V4.1-Flash-1017`
-and supports TP4 text generation, reasoning, DSML tool calls, and up to four images
-per request when the checkpoint contains its vision encoder.
+and supports TP4 text generation, reasoning, DSML tool calls, and images
+when the checkpoint contains its vision encoder.
 Sampling defaults are temperature 1.0 and top-p 1.0, following the
 [model card](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017#minimal-inference).
 Add `--expert-scale-compression csf` to losslessly compress backbone and DSpark
@@ -252,7 +255,7 @@ native speculative contract; Helios contains no DSpark model implementation.
 DeepSeek V4 Flash uses `local-inference-lab/DeepSeek-V4-Flash-Vision-Exp-lossless-CSF`, including its
 vision encoder and checkpoint-integrated DSpark model. The `deepseek-v4-flash`
 alias prepares five draft tokens by default, with adaptive verification. It
-accepts up to four images per request and has no offloaded embedding tables.
+accepts images within its visual-token budget and has no offloaded embedding tables.
 Use two or four available GPUs for preparation and serving:
 
 ```sh
@@ -279,7 +282,7 @@ Packages with 128-token V4 pages are incompatible and must be re-exported.
 
 MiMo V2.6 Pro MOPD uses `XiaomiMiMo/MiMo-V2.6-Pro-MOPD` with checkpoint
 MXFP4 experts, block-FP8 dense projections, and BF16 draft and vision weights.
-The `mimo-v2.6-pro-mopd` alias prepares text, up to four images per request,
+The `mimo-v2.6-pro-mopd` alias prepares text, images,
 and seven DFlash draft tokens with adaptive verification. Audio is not prepared.
 Select eight available GPUs:
 
@@ -304,7 +307,7 @@ publishes compact image features for causal text prefill. Loading with
 ## Step-5 Preview
 
 Step-5 Preview uses `stepfun-ai/Step-5-Preview-NVFP4`. The
-`step5-preview-nvfp4` alias prepares text, up to four images per request,
+`step5-preview-nvfp4` alias prepares text, images,
 and three causal MTP draft tokens with adaptive verification. Checkpoint NVFP4
 routed experts use W4A4. Routed experts declared BF16 in checkpoint metadata
 are converted to NVFP4 during loading and use b12x W4A16 with BF16 activations;
@@ -375,7 +378,7 @@ collectives use separate reduction and normalization kernels.
 
 Kimi K3 uses the local `/data/models/Kimi-K3-MXFP4-CSF` checkpoint. The
 `kimi-k3-mxfp4-csf` alias prepares text generation, reasoning, XTML tool calls,
-and up to four images per request on sixteen GPUs. It preserves MXFP4 experts
+and images on sixteen GPUs. It preserves MXFP4 experts
 with compressed scales, BF16 projections, and FP32 KDA recurrent state.
 Its 93-layer decoder combines KDA, unrotated latent attention, attention
 residuals, and latent SiTU experts. Red Hat DSpark uses

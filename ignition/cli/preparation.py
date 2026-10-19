@@ -44,7 +44,7 @@ def derive(configuration: Configuration, model: ResolvedModel, host: Host, *, gp
            mixed_prefill: bool = False, expert_scale_compression: str | None = None,
            online_mxfp8: bool = False, language_model_only: bool = False,
            compile_workers: int | None = None, tuning_gpus: str | None = None,
-           image_concurrency: int | None = None) -> planning.Plan:
+           image_concurrency: int | None = None, mla_compute_mode: str = "auto") -> planning.Plan:
     """Select GPUs and estimate memory for one checkpoint from the configuration and command-line intent."""
     workers = compiler_workers(configuration, compile_workers)
     result = planning.plan(
@@ -53,7 +53,7 @@ def derive(configuration: Configuration, model: ResolvedModel, host: Host, *, gp
         prefill_chunk=prefill_chunk, context_parallel=context_parallel, stream_overlap=stream_overlap, roce_ring=roce_ring,
         mixed_prefill=mixed_prefill, expert_scale_compression=expert_scale_compression,
         image_concurrency=image_capacity_setting(configuration, model, image_concurrency),
-        online_mxfp8=online_mxfp8, language_model_only=language_model_only)
+        online_mxfp8=online_mxfp8, language_model_only=language_model_only, mla_compute_mode=mla_compute_mode)
     result = replace(result, compile_workers=workers, hub_cache=configuration.directory("hub_cache"))
     return tuning_devices(result, host, tuning_gpus)
 
@@ -122,12 +122,14 @@ def speculation(args, model: ResolvedModel, configuration: Configuration | None 
     """Apply the command line's speculation overrides to the recipe's settings; None disables speculation."""
     recipe, alias = model.recipe, model.checkpoint.alias
     default, limit = recipe.speculation, recipe.max_draft_tokens
+    packed = getattr(args, "packed_verification", False)
     given = [flag for flag, value in (
         ("--mtp-draft-tokens", args.mtp_draft_tokens),
         ("--speculative-token-capacity", args.speculative_token_capacity),
         ("--no-mtp-adaptive-verification", args.no_mtp_adaptive_verification or None),
         ("--mtp-proposal-source", args.mtp_proposal_source),
-        ("--history-drafts", args.history_drafts or None)) if value is not None]
+        ("--history-drafts", args.history_drafts or None),
+        ("--packed-verification", packed or None)) if value is not None]
     if default is None:
         if args.no_mtp or given:
             raise UsageError(f"{alias} has no multi-token speculation; {(given or ['--no-mtp'])[0]} does not apply")
@@ -151,7 +153,9 @@ def speculation(args, model: ResolvedModel, configuration: Configuration | None 
         capacity = configuration.model_setting(alias, "speculative_token_capacity", default.token_capacity, capacity).value
     if capacity is not None and (type(capacity) is not int or capacity < drafts + 1):
         raise UsageError("--speculative-token-capacity must cover the maximum verification width")
-    return Speculation(drafts, adaptive, source, history, capacity)
+    if packed and (not adaptive or drafts < 1 or source != "mtp" or history):
+        raise UsageError("--packed-verification requires adaptive verification of retained learned proposals")
+    return Speculation(drafts, adaptive, source, history, capacity, packed)
 
 
 def fetch(model: ResolvedModel, hub_cache, *, progress_bars: bool = True) -> str:

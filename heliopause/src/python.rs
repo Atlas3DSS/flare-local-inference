@@ -188,6 +188,8 @@ pub(crate) fn execution_manifest(value: &Bound<'_, PyAny>) -> PyResult<Execution
             handle: field!(graph, "handle", usize),
             batch_capacity: field!(graph, "batch_capacity", usize),
             token_capacity: field!(graph, "token_capacity", usize),
+            packed_token_capacity: graph.get_item("packed_token_capacity").ok()
+                .map(|value| value.extract::<usize>()).transpose()?.unwrap_or(0),
             prefill_capacity: field!(graph, "prefill_capacity", usize),
             estimated_duration_ns: field!(graph, "estimated_duration_ns", u64),
             input_bindings,

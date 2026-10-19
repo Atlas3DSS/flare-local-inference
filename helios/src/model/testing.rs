@@ -345,7 +345,7 @@ pub fn manifest(config: &ModelConfig) -> ExecutionManifest {
                 GraphOperation::Speculative => GraphKind::Speculative,
                 _ => unreachable!(),
             };
-            GraphDescriptor {
+            GraphDescriptor { packed_token_capacity: 0,
                 name: g.graph.clone(),
                 kind,
                 sampling_mode: SamplingMode::General,

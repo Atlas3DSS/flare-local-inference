@@ -151,6 +151,8 @@ pub struct GraphDescriptor {
     pub handle: usize,
     pub batch_capacity: usize,
     pub token_capacity: usize,
+    /// Total target-token rows for packed verification; zero keeps rectangular capacity.
+    pub packed_token_capacity: usize,
     /// Prompt capacity for a mixed graph; zero for every other operation.
     pub prefill_capacity: usize,
     /// Zero denotes an indeterminate duration.
@@ -160,6 +162,9 @@ pub struct GraphDescriptor {
 
 impl GraphDescriptor {
     pub fn packed_tokens(&self) -> usize {
+        if self.packed_token_capacity != 0 {
+            return self.packed_token_capacity;
+        }
         if self.kind == GraphKind::Mixed {
             self.prefill_capacity.saturating_add(
                 self.batch_capacity
@@ -335,6 +340,11 @@ impl ExecutionManifest {
         let mut names = HashSet::new();
         let mut host_spans = HashMap::<&str, (usize, usize)>::new();
         for graph in &self.graphs {
+            if graph.packed_token_capacity != 0 && (graph.kind != GraphKind::Verification
+                || graph.packed_token_capacity < graph.batch_capacity
+                || graph.packed_token_capacity > graph.batch_capacity.saturating_mul(graph.token_capacity)) {
+                return Err("packed verification rows exceed declared request-prefix bounds".into());
+            }
             if graph.kind == GraphKind::Proposal {
                 let confidence = self.buffer("proposal_confidence")?;
                 if graph.token_capacity < 2

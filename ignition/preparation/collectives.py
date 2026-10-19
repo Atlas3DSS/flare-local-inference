@@ -80,6 +80,23 @@ def create_all_gather_runtime(group, device, *, max_rows, columns, ipc=None):
         max_batch_size=max_rows, total_heads=columns // 64, head_dim=64, stream_affine=False, ipc=ipc)
 
 
+def create_result_broadcast_runtime(group, device, *, layouts, ipc=None):
+    """Allocate one local PCIe channel covering every declared result payload.
+
+    Layouts describe captured operation fields, independently of request-slot storage.
+    RoCE callers retain their existing variable-payload transport.
+    """
+    from ignition.components.collectives import packed_broadcast_layout
+
+    sizes = [packed_broadcast_layout(layout.values())[1] for layout in layouts]
+    if not sizes or min(sizes) <= 0:
+        raise ValueError("result broadcasts require nonempty payload layouts")
+    # Each rank partition contains complete groups of 64 BF16 values.
+    local_columns = (max(sizes) + 127) // 128 * 64
+    return create_all_gather_runtime(group, device, max_rows=1,
+        columns=local_columns * dist.get_world_size(group), ipc=ipc)
+
+
 def create_vocabulary_argmax_runtime(group, device, *, local_vocab_size, max_rows, ipc=None):
     """Allocate b12x exchange slabs for exact greedy tokens over vocabulary shards (TP8, TP12 or TP16)."""
     from b12x.comm.pcie.pcie_vocab_argmax import PCIeVocabParallelArgmax

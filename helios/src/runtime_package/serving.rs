@@ -47,6 +47,7 @@ impl NativeResources {
                     .position(|name| *name == g.name)
                     .ok_or_else(|| invalid("execution references an unknown graph"))?;
                 Ok(GraphDescriptor {
+                    packed_token_capacity: size(g.packed_token_capacity)?,
                     name: g.name.clone(),
                     kind: g.kind.as_str().try_into()?,
                     sampling_mode: g.sampling_mode.as_str().try_into()?,

@@ -4,7 +4,7 @@ pub(super) fn measured_costs(graphs: &[crate::execution::GraphDescriptor]) -> co
     let mut costs = cost::ActionCosts::prepared(graphs).unwrap();
     for graph in graphs {
         costs.observe(
-            &ScheduledStep {
+            &ScheduledStep { packed_token_capacity: 0,
                 kind: graph.kind,
                 batch_capacity: graph.batch_capacity,
                 token_capacity: graph.token_capacity,
@@ -154,7 +154,7 @@ pub(crate) fn duration_graphs(active: usize) -> Vec<crate::execution::GraphDescr
             GraphKind::Speculative,
         ] {
             for tokens in 1..=if kind == GraphKind::Speculative { 8 } else { 1 } {
-                graphs.push(crate::execution::GraphDescriptor {
+                graphs.push(crate::execution::GraphDescriptor { packed_token_capacity: 0,
                     name: format!("{kind:?}-{batch}-{tokens}"),
                     kind,
                     sampling_mode: crate::execution::SamplingMode::General,
@@ -173,7 +173,7 @@ pub(crate) fn duration_graphs(active: usize) -> Vec<crate::execution::GraphDescr
         (GraphKind::Vision, vec![8, 16, 256, 1024, 4096, 16384]),
     ] {
         for tokens in capacities {
-            graphs.push(crate::execution::GraphDescriptor {
+            graphs.push(crate::execution::GraphDescriptor { packed_token_capacity: 0,
                 name: format!("{kind:?}-{tokens}"),
                 kind,
                 sampling_mode: crate::execution::SamplingMode::General,
@@ -238,6 +238,25 @@ fn init(scheduler: &mut RequestScheduler, fence: u64) {
     scheduler
         .complete(Fence(fence), &completions, Default::default())
         .unwrap();
+}
+
+#[test]
+fn vision_image_count_is_bounded_by_shared_feature_storage() {
+    let mut scheduler = scheduler(1, 8, 2);
+    scheduler.capabilities.vision.features_per_request = 5 * 64;
+    let handle = scheduler.admit(spec(65, 2)).unwrap();
+    assert!(scheduler.set_vision_images(handle, &[256; 6]).is_err());
+    scheduler.set_vision_images(handle, &[256; 5]).unwrap();
+    init(&mut scheduler, 1);
+    for fence in 2..7 {
+        let step = scheduler.plan().unwrap();
+        assert_eq!((step.kind, step.token_capacity), (GraphKind::Vision, 256));
+        scheduler.commit(&step, Fence(fence)).unwrap();
+        scheduler.complete(Fence(fence), &records(handle, fence, 0, 0, -1, 1), Default::default()).unwrap();
+    }
+    assert_eq!(scheduler.plan().unwrap().kind, GraphKind::Prefill);
+    scheduler.cancel(handle).unwrap();
+    assert!(scheduler.has_available_image_slot());
 }
 
 #[test]
@@ -1914,7 +1933,7 @@ fn declared_model_capabilities_drive_state_slots_vision_buckets_and_copy_validat
         })
         .unwrap();
     assert_eq!(s.request(handle).unwrap().state_slot, StateSlotId(1));
-    assert!(s.set_vision_images(handle, &[4, 4, 4]).is_err());
+    assert!(s.set_vision_images(handle, &[16, 16, 4]).is_err());
     assert!(s.set_vision_images(handle, &[3]).is_err());
     s.set_vision_images(handle, &[4]).unwrap();
     init(&mut s, 1);

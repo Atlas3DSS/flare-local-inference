@@ -45,6 +45,7 @@ class SpeculativePreparation:
         coordinator,
         forwards,
         page_tokens=128,
+        result_runtime=None,
     ):
         self.forwards = forwards
         self.page_tokens = page_tokens
@@ -56,6 +57,8 @@ class SpeculativePreparation:
             "runtime": runtime, "vocabulary_runtime": vocabulary_runtime, "coordinator": coordinator
         }
         self.markov_runtime = markov_runtime
+        # Only sampling uses the result channel; model forwards receive the collectives above.
+        self.result_runtime = result_runtime
         self.rng = SpeculativeRngState.allocate(pool.backing.device, capacity=requests.capacity)
         self.generation = torch.zeros_like(requests.generation)
         self.offset = torch.zeros_like(requests.generation)

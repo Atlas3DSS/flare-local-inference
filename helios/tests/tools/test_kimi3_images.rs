@@ -56,6 +56,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let bytes = fs::read(i["path"].as_str().unwrap()).unwrap();
             if i["format"] == "jpeg" {
                 processor.decode_jpeg(&bytes).unwrap()
+            } else if i["format"] == "webp" {
+                processor.decode_webp(&bytes).unwrap()
             } else {
                 processor.decode_png(&bytes).unwrap()
             }

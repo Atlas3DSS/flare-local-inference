@@ -16,6 +16,35 @@ pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
 
 
 @torch.no_grad()
+def test_packed_prefixes_keep_individual_lengths_and_total_rows_independent():
+    device = torch.device("cuda", 0)
+    metadata = Metadata.allocate(8, 2, 2, device, samples=12, max_query_tokens=6)
+    lengths = torch.tensor([6, 2], dtype=torch.int32, device=device)
+    starts = torch.tensor([126, 254], dtype=torch.int64, device=device)
+    states = torch.tensor([1, 2], dtype=torch.int64, device=device)
+    pages = torch.tensor([[0, 1], [2, 3]], dtype=torch.int32, device=device)
+    tokens = torch.arange(12, dtype=torch.int64, device=device).reshape(2, 6)
+    live = torch.tensor([2], dtype=torch.int32, device=device)
+    compiled = compile_forward(lambda: metadata.set(starts, lengths, states, pages, tokens, live))
+    compiled()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        compiled()
+    graph.replay()
+    torch.cuda.synchronize()
+    assert metadata.max_query_tokens == 6
+    assert metadata.token_ids.tolist() == list(range(8))
+    assert metadata.query_start_loc.tolist() == [0, 6, 8]
+    assert metadata.positions.tolist() == [126, 127, 128, 129, 130, 131, 254, 255]
+    lengths.copy_(torch.tensor([2, 6], dtype=torch.int32, device=device))
+    graph.replay()
+    torch.cuda.synchronize()
+    assert metadata.token_ids.tolist() == [0, 1, 6, 7, 8, 9, 10, 11]
+    assert metadata.query_start_loc.tolist() == [0, 2, 8]
+    graph.reset()
+
+
+@torch.no_grad()
 def test_queued_decode_uses_pending_device_token_and_rejects_invalid_state():
     device = torch.device("cuda", 0)
     requests = DeviceRequestState.allocate(device, vocab_size=256, capacity=2)

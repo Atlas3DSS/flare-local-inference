@@ -8,15 +8,30 @@ output its consumers read.
 """
 
 import itertools
+from math import prod
 import weakref
 
 import torch
+import triton
+import triton.language as tl
 from b12x.preparation import CollectiveRequirement, PreparedCall
 
-from ignition.preparation.tuning import declare
+from ignition.preparation.tuning import declare, register_finalizer
 
 _OWNERS = weakref.WeakValueDictionary()
 _HANDLES = itertools.count()
+
+
+def packed_broadcast_layout(fields):
+    """Return byte offsets and extent for eight-byte-aligned typed fields."""
+    offsets, size = [], 0
+    for shape, dtype in fields:
+        if any(type(dimension) is not int or dimension < 0 for dimension in shape):
+            raise ValueError("broadcast field dimensions must be nonnegative integers")
+        size = (size + 7) // 8 * 8
+        offsets.append(size)
+        size += prod(shape) * dtype.itemsize
+    return tuple(offsets), size
 
 
 def _roce(runtime):
@@ -252,11 +267,63 @@ def _fake_all_gather(source, output, handle):
 
 
 
+@triton.jit
+def _broadcast_pack(sources, send, OFFSETS: tl.constexpr, SIZES: tl.constexpr,
+                    BOOLS: tl.constexpr, BLOCK: tl.constexpr):
+    index = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    for binding in tl.static_range(len(SIZES)):
+        value = tl.load(sources[binding] + index, index < SIZES[binding], other=0)
+        if BOOLS[binding]:
+            value = (value != 0).to(tl.uint8)
+        tl.store(send + OFFSETS[binding] + index, value, index < SIZES[binding])
+
+
+@triton.jit
+def _broadcast_unpack(received, destinations, OFFSETS: tl.constexpr, SIZES: tl.constexpr,
+                      BOOLS: tl.constexpr, ROW_BYTES: tl.constexpr, WORLD: tl.constexpr,
+                      BLOCK: tl.constexpr):
+    index = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    for binding in tl.static_range(len(SIZES)):
+        offset = OFFSETS[binding] + index
+        # Every received row places rank zero before the other rank partitions.
+        source = offset // ROW_BYTES * (ROW_BYTES * WORLD) + offset % ROW_BYTES
+        value = tl.load(received + source, index < SIZES[binding], other=0)
+        if BOOLS[binding]:
+            value = (value != 0).to(tl.uint8)
+        tl.store(destinations[binding] + index, value, index < SIZES[binding])
+
+
+# Typed operands preserve bool consumers and storage aliases during compilation.
+@torch.library.custom_op("flare::broadcast_pack", mutates_args=("send",))
+def _broadcast_pack_call(sources: list[torch.Tensor], send: torch.Tensor, handle: int) -> None:
+    operation = _OWNERS[handle]._pack
+    operation.compiled[operation.grid](tuple(source.view(torch.uint8).view(-1) for source in sources), send)
+
+
+@_broadcast_pack_call.register_fake
+def _fake_broadcast_pack_call(sources, send, handle):
+    pass
+
+
+@torch.library.custom_op("flare::broadcast_unpack", mutates_args=("destinations",))
+def _broadcast_unpack_call(received: torch.Tensor, destinations: list[torch.Tensor], handle: int,
+                           group: int) -> None:
+    operation = _OWNERS[handle]._unpacks[group]
+    operation.compiled[operation.grid](received,
+        tuple(destination.view(torch.uint8).view(-1) for destination in destinations))
+
+
+@_broadcast_unpack_call.register_fake
+def _fake_broadcast_unpack_call(received, destinations, handle, group):
+    pass
+
+
 class PreparedBroadcast:
     """Copy rank zero's tensor bytes through a serial all-gather channel.
 
     Integer decisions and floating-point payloads retain their exact bit patterns.
     The BF16 channel views transport bytes without floating-point arithmetic.
+    Overlapping destination views are restored in tensor order.
     """
 
     def __init__(self, tensors, *, runtime, session, coordinator, name, buffers=None):
@@ -267,11 +334,7 @@ class PreparedBroadcast:
         if not tensors or any(not tensor.is_contiguous() or tensor.device != tensors[0].device
                               for tensor in tensors):
             raise ValueError("broadcast requires contiguous tensors on one device")
-        offsets, size = [], 0
-        for tensor in tensors:
-            size = (size + 7) // 8 * 8
-            offsets.append(size)
-            size += tensor.numel() * tensor.element_size()
+        offsets, size = packed_broadcast_layout((tuple(tensor.shape), tensor.dtype) for tensor in tensors)
         columns = ((size + 15) // 16 * 8 if _roce(runtime)
                    else runtime.heads_per_rank * runtime.query_head_dim)
         rows = (size + 2 * columns - 1) // (2 * columns)
@@ -282,27 +345,56 @@ class PreparedBroadcast:
 
         self.send = allocate((rows, columns * 2))
         self.received = allocate((rows, columns * 2 * runtime.world_size))
-        self.root = allocate((rows, columns * 2))
-        self.bindings = tuple((tensor, offset, tensor.numel() * tensor.element_size())
-                              for tensor, offset in zip(tensors, offsets, strict=True))
         self.gather = PreparedAllGather(self.send.view(torch.bfloat16), self.received.view(torch.bfloat16),
             runtime=runtime, session=session, coordinator=coordinator, name=name)
+
+        self._tensors = tensors
+        self._byte_views = tuple(tensor.view(torch.uint8).view(-1) for tensor in tensors)
+        self._offsets = tuple(offsets)
+        self._sizes = tuple(tensor.numel() * tensor.element_size() for tensor in tensors)
+        self._bools = tuple(tensor.dtype == torch.bool for tensor in tensors)
+        groups, group, ranges = [], [], []
+        for index, tensor in enumerate(tensors):
+            begin, size = tensor.data_ptr(), self._sizes[index]
+            end = begin + size
+            if size and any(begin < other_end and other_begin < end for other_begin, other_end in ranges):
+                groups.append(tuple(group))
+                group, ranges = [], []
+            group.append(index)
+            if size:
+                ranges.append((begin, end))
+        groups.append(tuple(group))
+        self._unpack_groups = tuple(groups)
+        self._row_bytes = columns * 2
+        self._world = runtime.world_size
+        register_finalizer(session, self.prepare)
+        self.handle = next(_HANDLES)
+        _OWNERS[self.handle] = self
+
+    def prepare(self):
+        from ignition.preparation.triton import prepare_triton
+
+        options = dict(OFFSETS=self._offsets, SIZES=self._sizes, BOOLS=self._bools, BLOCK=256, num_warps=4)
+        grid = (triton.cdiv(max(self._sizes), 256), 1, 1)
+        self._pack = prepare_triton(_broadcast_pack, (self._byte_views, self.send), grid, **options)
+        self._unpacks = tuple(prepare_triton(_broadcast_unpack,
+            (self.received, tuple(self._byte_views[index] for index in group)),
+            (triton.cdiv(max(self._sizes[index] for index in group), 256), 1, 1),
+            OFFSETS=tuple(self._offsets[index] for index in group),
+            SIZES=tuple(self._sizes[index] for index in group),
+            BOOLS=tuple(self._bools[index] for index in group),
+            ROW_BYTES=self._row_bytes, WORLD=self._world, BLOCK=256, num_warps=4)
+            for group in self._unpack_groups)
 
     def __call__(self):
         if self.single:
             return
-        for tensor, offset, size in self.bindings:
-            value = tensor.to(torch.uint8) if tensor.dtype == torch.bool else tensor.view(torch.uint8)
-            self.send.view(-1)[offset:offset + size].copy_(value.view(-1))
+        _broadcast_pack_call(list(self._tensors), self.send, self.handle)
         self.gather(self.send.view(torch.bfloat16))
-        # Rank-zero columns are strided when the message spans multiple rows.
-        self.root.copy_(self.received[:, :self.send.shape[1]])
-        for tensor, offset, size in self.bindings:
-            value = self.root.view(-1)[offset:offset + size]
-            if tensor.dtype == torch.bool:
-                tensor.copy_(value.view(tensor.shape) != 0)
-            else:
-                tensor.view(torch.uint8).view(-1).copy_(value)
+        # Aliased destinations keep their field order across separate stream-ordered launches.
+        # Disjoint fields share one launch, including the ordinary sampling payload.
+        for index, group in enumerate(self._unpack_groups):
+            _broadcast_unpack_call(self.received, [self._tensors[field] for field in group], self.handle, index)
 
 
 class PreparedAllGather:

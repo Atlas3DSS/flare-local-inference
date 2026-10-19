@@ -5,6 +5,7 @@ Verification gathers request-owned prefixes independently of the proposal batch.
 """
 
 import math
+import heapq
 
 import torch
 import triton
@@ -68,6 +69,29 @@ def lagged_budget(confidences, costs):
         expected += survival
         utilities.append(expected / cost)
     return max(range(len(utilities)), key=utilities.__getitem__) + 1
+
+
+def allocate_draft_budget(confidences, budget):
+    """Allocate a fixed draft count across causal request prefixes.
+
+    The caller chooses the budget independently of these sampled proposals.
+    A request's next confidence enters the frontier only after its preceding
+    position has been admitted. Ties prefer the earlier position, then request.
+    """
+    if type(budget) is not int or budget < 0:
+        raise ValueError("draft budget must be a nonnegative integer")
+    rows = [tuple(row) for row in confidences]
+    if any(not math.isfinite(p) or not 0 <= p <= 1 for row in rows for p in row):
+        raise ValueError("confidence must be finite and in [0, 1]")
+    frontier = [(-row[0], 0, slot) for slot, row in enumerate(rows) if row]
+    heapq.heapify(frontier)
+    counts = [0] * len(rows)
+    for _ in range(min(budget, sum(map(len, rows)))):
+        probability, position, slot = heapq.heappop(frontier)
+        counts[slot] += 1
+        if position + 1 < len(rows[slot]):
+            heapq.heappush(frontier, (probability * rows[slot][position + 1], position + 1, slot))
+    return tuple(counts)
 
 
 class PreparedDraftConfidence:
@@ -187,6 +211,8 @@ class PreparedDraftVerification:
         valid &= (o.inputs.request_state_rows[safe, 0] == p.state_rows[safe])
         lengths = o.inputs.query_lengths[:t.batch]
         valid &= (lengths >= 1) & (lengths <= w) & (lengths <= p.depths[safe] + 1)
+        # A graph can admit long individual prefixes while bounding their sum.
+        valid &= torch.where(valid, lengths, 0).sum() <= t.target_token_capacity
         self.admitted.copy_(valid)
         self.original_slots.copy_(slots)
         for source, destination in (

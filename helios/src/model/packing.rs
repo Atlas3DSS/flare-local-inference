@@ -24,6 +24,7 @@ struct BoundGraph {
     kind: GraphKind,
     batch: usize,
     tokens: usize,
+    packed_tokens: usize,
     prefill: usize,
 }
 
@@ -143,7 +144,7 @@ impl Inputs {
                             } else if graph.kind == GraphKind::Prefill {
                                 graph.token_capacity
                             } else {
-                                graph.batch_capacity * graph.token_capacity
+                                graph.packed_tokens()
                             };
                             if elements < rows * width {
                                 return Err(
@@ -205,6 +206,7 @@ impl Inputs {
                     kind: graph.kind,
                     batch: graph.batch_capacity,
                     tokens: graph.token_capacity,
+                    packed_tokens: graph.packed_token_capacity,
                     prefill: graph.prefill_capacity,
                 })
             })
@@ -240,6 +242,7 @@ impl Inputs {
                 g.kind == step.kind
                     && g.batch == step.batch_capacity
                     && g.tokens == step.token_capacity
+                    && g.packed_tokens == step.packed_token_capacity
                     && g.prefill == step.prefill_capacity()
             })
             .map(|g| &g.semantics)
@@ -308,6 +311,7 @@ impl Inputs {
                 g.kind == frame.step.kind
                     && g.batch == frame.step.batch_capacity
                     && g.tokens == frame.step.token_capacity
+                    && g.packed_tokens == frame.step.packed_token_capacity
                     && g.prefill == frame.step.prefill_capacity()
             })
             .ok_or("submission has no resolved packing plan")?;
@@ -407,6 +411,44 @@ impl Inputs {
                             .into_iter()
                             .flat_map(f32::to_le_bytes),
                     );
+                    continue;
+                }
+                if binding.source == ValueSource::GrammarMask
+                    && input.dtype == Dtype::Int32
+                    && binding.value_offset == 0
+                    && matches!(
+                        binding.indexing,
+                        InputIndexing::RequestRow | InputIndexing::ActiveRow
+                    )
+                {
+                    // Grammar masks already contain packed i32 bit patterns.
+                    // Preserve those bytes without widening and validating every word.
+                    let count = admission
+                        .grammar_mask
+                        .as_ref()
+                        .map_or(input.width, Vec::len);
+                    if count == 0 {
+                        continue;
+                    }
+                    if destination
+                        .checked_add(count)
+                        .is_none_or(|end| end > input.elements)
+                    {
+                        return Err("packed values exceed prepared input storage".into());
+                    }
+                    if let Some(mask) = &admission.grammar_mask {
+                        self.staging.i32(
+                            &binding.buffer,
+                            destination * 4,
+                            mask.iter().copied(),
+                        );
+                    } else {
+                        self.staging.put(
+                            &binding.buffer,
+                            destination * 4,
+                            std::iter::repeat_n(0xff, count * 4),
+                        );
+                    }
                     continue;
                 }
                 self.values.clear();

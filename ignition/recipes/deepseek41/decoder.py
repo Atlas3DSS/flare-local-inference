@@ -102,7 +102,7 @@ class PreparedDecoderBoundary:
 class PreparedLayer:
     def __init__(self, index, weights, tables, scratch, metadata, pool, rotary, *, shard, mode,
                  runtime, coordinator, session, name, workspace, carry, defer_post,
-                 boundary=None, replay_start=None, window_staging=None):
+                 boundary=None, replay_start=None, window_staging=None, mla_compute_mode="auto"):
         s, text = scratch, pool.config.text
         self.scratch, self.carry = s, carry
         self.metadata = metadata
@@ -124,7 +124,7 @@ class PreparedLayer:
         self.attention = PreparedAttention(index, weights.attention, s.attention_hc.normalized, s.attention,
             metadata, pool, rotary, mode=mode, world=shard.world_size,
             session=session, name=name + ".attention", workspace=workspace, replay_start=replay_start,
-            window_staging=window_staging)
+            window_staging=window_staging, mla_compute_mode=mla_compute_mode)
         self.attention_reduce = PreparedAllReduce(s.attention.output, s.attention_output, runtime=runtime,
             coordinator=coordinator, session=session, name=name + ".attention_reduce")
         self.ffn_hc = PreparedMHC((s.attention_output, s.attention_hc.residual, s.attention_hc.post, s.attention_hc.comb),
@@ -186,7 +186,7 @@ class PreparedLayer:
 class PreparedDecoder:
     def __init__(self, weights, tables, scratch, metadata, pool, *, mode, runtime,
                  vocabulary_runtime, coordinator, session, name, workspace,
-                 window_staging=None, suffix_scratch=None, vision=None):
+                 window_staging=None, suffix_scratch=None, vision=None, mla_compute_mode="auto"):
         self.weights, self.scratch, self.metadata, self.pool = weights, scratch, metadata, pool
         self.mode = mode
         self.vision = vision if mode == "prefill" else None
@@ -216,7 +216,7 @@ class PreparedDecoder:
             self.window_commit = PreparedRingCommit(pool.reserved_backing,
                 [pool.layout.region(f"layer{index}.window").offset for index in range(len(weights.layers))],
                 metadata.state_rows, metadata.starts,
-                token_capacity=metadata.token_ids.numel() // metadata.starts.numel(),
+                token_capacity=metadata.max_query_tokens,
                 window_tokens=128, record_bytes=528, staging=window_staging)
         self.layers, carry = [], False
         for index, layer in enumerate(weights.layers):
@@ -236,10 +236,15 @@ class PreparedDecoder:
                 shard=weights.shard, mode=mode, runtime=runtime,
                 coordinator=coordinator, session=session, name=f"{name}.layer{index}", workspace=workspace,
                 carry=carry, defer_post=defer, boundary=boundary, replay_start=replay_start,
-                window_staging=None if self.window_commit is None else self.window_commit.staging[index]))
+                window_staging=None if self.window_commit is None else self.window_commit.staging[index],
+                mla_compute_mode=mla_compute_mode))
             carry = defer
-        self.head = PreparedVocabularyProjection(scratch.hidden, weights.head, scratch.local_logits, scratch.logits,
-            runtime=vocabulary_runtime, coordinator=coordinator, session=session, name=name + ".head")
+        self.compact_head = scratch.hidden.shape[0] > self.output_metadata.token_ids.numel()
+        head_rows = self.output_metadata.token_ids.numel() if self.compact_head else scratch.hidden.shape[0]
+        self.head_hidden = scratch.hidden[:head_rows]
+        self.head = PreparedVocabularyProjection(self.head_hidden, weights.head, scratch.local_logits[:head_rows],
+            scratch.logits, runtime=vocabulary_runtime, coordinator=coordinator, session=session, name=name + ".head",
+            row_indices=self.output_metadata.sample_indices if self.compact_head else None)
 
     def __call__(self):
         s, m = self.scratch, self.metadata
@@ -261,11 +266,15 @@ class PreparedDecoder:
                 self.auxiliary[:, column * 5120:(column + 1) * 5120].copy_(feedback)
             layer()
         samples = self.output_metadata.sample_indices
-        residual = self.output_scratch.residual[samples].float()
-        premix = self.output_scratch.pre_mix[samples, :, None]
+        residual = (self.output_scratch.residual if self.compact_head
+                    else self.output_scratch.residual[samples]).float()
+        premix = (self.output_scratch.pre_mix if self.compact_head
+                  else self.output_scratch.pre_mix[samples])[:, :, None]
         collapsed = (residual * premix).sum(1).bfloat16()
-        normalize(collapsed, self.weights.norm, s.hidden, self.weights.config.text["rms_norm_eps"])
-        self.head(s.hidden)
+        normalize(collapsed, self.weights.norm, self.head_hidden, self.weights.config.text["rms_norm_eps"])
+        self.head(self.head_hidden)
+        if self.compact_head:
+            s.hidden.copy_(self.head_hidden[samples])
         if self.mode != "verify":
             self.table_requests.commit(m.lengths)
         return s.hidden

@@ -175,6 +175,7 @@ class Plan:
     stream_overlap: bool = True
     mixed_prefill: bool = False
     expert_scale_compression: str | None = None
+    mla_compute_mode: str = "auto"
     roce_ring: bool = False
     compile_workers: int | None = None
     hub_cache: Path | None = None
@@ -287,12 +288,14 @@ class Plan:
             "stream_overlap": self.stream_overlap,
             "mixed_prefill": self.mixed_prefill,
             "expert_scale_compression": self.expert_scale_compression,
+            "mla_compute_mode": self.mla_compute_mode,
             "compile_workers": self.compile_workers,
             "tuning_gpus": [gpu.index for gpu in self.tuning_gpus],
             "speculative_token_capacity": self.speculative_token_capacity,
             "online_mxfp8": self.online_mxfp8, "language_model_only": self.language_model_only,
             "speculation": None if self.speculation is None else {
                 "draft_tokens": self.speculation.draft_tokens, "adaptive": self.speculation.adaptive,
+                "packed_verification": self.speculation.packed_verification,
                 "proposal_source": self.speculation.proposal_source,
                 "history_drafts": self.speculation.history_drafts},
             "context": self.context, "checkpoint_context": self.recipe.context,
@@ -315,12 +318,15 @@ def fit(recipe: Recipe, checkpoint: Checkpoint, gpus: tuple[Gpu, ...], *, concur
         context_parallel: bool = True, stream_overlap: bool = True, cache_states: int | None = None,
         mixed_prefill: bool = False, expert_scale_compression: str | None = None, roce_ring: bool = False,
         image_concurrency: int | None = None, online_mxfp8: bool = False,
-        language_model_only: bool = False) -> Plan:
+        language_model_only: bool = False, mla_compute_mode: str = "auto") -> Plan:
     """Size pages and the prefix cache to the supply; the result may not fit.
 
     Weights come from the checkpoint's stored tensors and graphs and scratch from
     the recipe's estimate.
     """
+    if mla_compute_mode not in recipe.mla_compute_modes:
+        raise UsageError(f"--mla-compute-mode {mla_compute_mode}: supported values for this recipe are "
+                         + ", ".join(recipe.mla_compute_modes))
     if expert_scale_compression is not None and expert_scale_compression not in checkpoint.scale_compressed_device_bytes:
         raise UsageError(f"--expert-scale-compression {expert_scale_compression}: {checkpoint.alias}"
                          " does not prepare this scale encoding")
@@ -331,6 +337,7 @@ def fit(recipe: Recipe, checkpoint: Checkpoint, gpus: tuple[Gpu, ...], *, concur
                 context_parallel=context_parallel and costs.page_tokens is not None,
                 stream_overlap=stream_overlap and recipe.stream_overlap, mixed_prefill=mixed_prefill,
                 expert_scale_compression=expert_scale_compression, roce_ring=roce_ring,
+                mla_compute_mode=mla_compute_mode,
                 # Language-only plans prepare no vision encoder, so no image feature slots.
                 image_concurrency=0 if language_model_only else (min(4, concurrency) if recipe.max_images else 0)
                     if image_concurrency is None else image_concurrency, online_mxfp8=online_mxfp8,
@@ -373,7 +380,7 @@ def plan(recipe: Recipe, checkpoint: Checkpoint, gpus: tuple[Gpu, ...], *, selec
          cache_states: int | None = None, mixed_prefill: bool = False,
          expert_scale_compression: str | None = None, roce_ring: bool = False,
          image_concurrency: int | None = None, online_mxfp8: bool = False,
-         language_model_only: bool = False) -> Plan:
+         language_model_only: bool = False, mla_compute_mode: str = "auto") -> Plan:
     """Select GPUs and size the plan, or raise a capacity error that lists working settings.
 
     Without `selected`, the plan uses the smallest supported tensor-parallel size
@@ -425,7 +432,8 @@ def plan(recipe: Recipe, checkpoint: Checkpoint, gpus: tuple[Gpu, ...], *, selec
                    stream_overlap=stream_overlap, cache_states=cache_states, mixed_prefill=mixed_prefill,
                    expert_scale_compression=expert_scale_compression, roce_ring=roce_ring,
                    image_concurrency=None if image_concurrency is None else min(image_concurrency, concurrency),
-                   online_mxfp8=online_mxfp8, language_model_only=language_model_only)
+                   online_mxfp8=online_mxfp8, language_model_only=language_model_only,
+                   mla_compute_mode=mla_compute_mode)
 
     def automatic(world_size, **settings):
         """Plan the first GPUs that each fit, else the GPUs with the most free memory."""

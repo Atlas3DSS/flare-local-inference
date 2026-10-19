@@ -178,6 +178,9 @@ def _preparation_arguments(running):
     speculative.add_argument("--history-drafts", action="store_true",
                           help="also draft continuations copied from the request's own history")
     advanced = running.add_argument_group("advanced options")
+    advanced.add_argument("--mla-compute-mode", choices=("auto", "bf16"), default="auto",
+                          help="constrain MLA arithmetic while retaining packed KV storage and compatible"
+                               " kernel tuning (default: auto; bf16 requires the preparation API)")
     advanced.add_argument("--compile-workers", type=int, metavar="N",
                           help="CPU compiler process budget per host, shared by local preparation ranks;"
                                " bounded by available RAM and device memory (default: automatic)")
@@ -193,6 +196,9 @@ def _preparation_arguments(running):
                                " (default: overlap)")
     advanced.add_argument("--no-compile", action="store_true",
                           help="development: capture graphs without compiling forwards")
+    advanced.add_argument("--packed-verification", action="store_true",
+                          help="share target-token rows across retained request prefixes"
+                               " (default: rectangular per-request capacities)")
     advanced.add_argument("--online-mxfp8", action="store_true",
                           help="store the recipe's eligible BF16 projections as MXFP8 while loading; faster"
                                " decode at reduced precision (Kimi K3 KDA, MLA except batched key/value, shared"

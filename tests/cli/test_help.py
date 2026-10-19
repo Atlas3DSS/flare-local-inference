@@ -11,6 +11,15 @@ from ignition.errors import UsageError
 from ignition.recipes import aliases, recipes, resolve
 
 
+@pytest.mark.parametrize("command", ["run", "export", "serve"])
+def test_mla_arithmetic_flag_defaults_and_override(command):
+    arguments = [command, "deepseek-v4.1-flash", *(["--output", "model.safetensors"] if command == "export" else [])]
+    default = _parser().parse_args(arguments)
+    explicit = _parser().parse_args([*arguments, "--mla-compute-mode", "bf16"])
+    assert default.mla_compute_mode == "auto"
+    assert explicit.mla_compute_mode == "bf16"
+
+
 @pytest.mark.parametrize("command", [[], ["run"], ["export"], ["serve"]])
 def test_help_lists_every_recipe(command, capsys):
     with pytest.raises(SystemExit) as error:

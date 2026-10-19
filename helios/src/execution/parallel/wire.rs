@@ -183,6 +183,7 @@ pub(super) fn layout(manifest: &ExecutionManifest) -> Vec<u8> {
         for value in [
             graph.batch_capacity,
             graph.token_capacity,
+            graph.packed_token_capacity,
             graph.prefill_capacity,
             graph.input_bindings.len(),
         ] {

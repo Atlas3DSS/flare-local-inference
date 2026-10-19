@@ -19,7 +19,7 @@ from ignition.components.deepseek_vision import (PreparedVision, VisionInputs, V
     PrefillVisionInputs, PreparedVisionGeneration, VisionState)
 from ignition.preparation.checkpoint import inspect_indexed_checkpoint
 from ignition.preparation.collectives import (CollectivePreparation, create_all_gather_runtime,
-    create_all_reduce_runtime, create_dma_all_reduce_runtime)
+    create_all_reduce_runtime, create_dma_all_reduce_runtime, create_result_broadcast_runtime)
 from ignition.preparation.disposable import storage_ranges
 from ignition.preparation.execution import GraphSignature
 from ignition.preparation.host_memory import virtual_device_memory, release_unused
@@ -47,6 +47,13 @@ from .weights import ModelWeights
 _CONTEXT = partial(PreparedContext, compact_prefill=True)
 
 
+def _forward_factories(mla_compute_mode, *, window_staging, suffix_scratch, vision):
+    """Bind one arithmetic contract to target, prefill, and draft attention."""
+    return (partial(PreparedDecoder, window_staging=window_staging, suffix_scratch=suffix_scratch,
+                    vision=vision, mla_compute_mode=mla_compute_mode),
+            partial(PreparedDraft, mla_compute_mode=mla_compute_mode))
+
+
 @dataclass(frozen=True)
 class PreparationConfig:
     image_concurrency: int | None = None
@@ -71,14 +78,18 @@ class PreparationConfig:
     # Run single-row decode's shared expert on an auxiliary stream; without overlap it runs serially.
     stream_overlap: bool = True
     expert_scale_compression: str | None = None
+    mla_compute_mode: str = "auto"
     # Separate proposal and verification graphs for native confidence-prefix scheduling.
     split_speculation: bool = False
+    packed_verification: bool = False
     # Additional combined graphs for exact qualification; omit when measuring service memory.
     speculation_reference_graphs: bool = False
 
     def __post_init__(self):
         from ignition.components.capacity import image_capacity
+        from ignition.components.compressed_mla import validate_mla_compute_mode
 
+        validate_mla_compute_mode(self.mla_compute_mode)
         object.__setattr__(self, "image_concurrency", image_capacity(self.max_active, self.image_concurrency))
         if self.expert_scale_compression not in (None, "csf"):
             raise ValueError("DeepSeek V4.1 expert scale compression must be None or 'csf'")
@@ -86,6 +97,9 @@ class PreparationConfig:
             raise ValueError("speculation reference graphs require split speculation")
         if self.split_speculation and (not self.dspark or self.draft_tokens < 1):
             raise ValueError("split speculation requires a learned draft model and positive draft depth")
+        if self.packed_verification and (not self.split_speculation or self.speculative_fixed_width is not None
+                                         or self.speculation_reference_graphs):
+            raise ValueError("packed verification requires an adaptive retained-proposal catalog")
         if type(self.stream_overlap) is not bool:
             raise TypeError("stream_overlap must be a boolean")
         if len(self.devices) != 4 or len(set(self.devices)) != 4 or any(d < 0 for d in self.devices):
@@ -178,11 +192,23 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         coordinator = CollectivePreparation(group)
         ipc = package_storage.peer_storage
         tokens = max(config.prefill_chunk_size, config.decode_tokens, slots * config.draft_tokens)
+        verification_samples = (slots * max(config.speculative_widths)
+                                if config.packed_verification else config.decode_tokens)
         collective = create_all_reduce_runtime(group, device, max_tokens=tokens, hidden_size=5120, ipc=ipc)
         prefill_collective = create_dma_all_reduce_runtime(group, device,
             max_tokens=config.prefill_chunk_size, hidden_size=5120, ipc=ipc)
         vocabulary_collective = create_all_gather_runtime(group, device,
-            max_rows=max(config.decode_tokens, slots * config.draft_tokens), columns=129280, ipc=ipc)
+            max_rows=max(verification_samples, slots * config.draft_tokens), columns=129280, ipc=ipc)
+        result_collective = None
+        if config.dspark:
+            from ignition.components.draft_sampling import PreparedDraftDistribution
+            from ignition.components.speculation import SpeculativeAcceptance
+
+            batch = max(config.batch_capacities)
+            layouts = [SpeculativeAcceptance.storage_layout(batch, max(config.speculative_widths))]
+            if config.draft_tokens:
+                layouts.append(PreparedDraftDistribution.broadcast_layout(batch))
+            result_collective = create_result_broadcast_runtime(group, device, layouts=layouts, ipc=ipc)
         identity = hashlib.sha256(json.dumps({"config": json.loads((metadata_path / "config.json").read_text()),
             "headers": [s.header_sha256 for s in manifest.shards], "world_size": shard.world_size,
             "contract": "deepseek41.graph-inputs.v1"}, sort_keys=True).encode()).hexdigest()
@@ -197,7 +223,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         session.register_scratch(arena)
         graph_buffers = GraphBufferPool(device, chunk_bytes=2 << 20)
         prefill_storage = Scratch.allocate(config.prefill_chunk_size, 1, shard.world_size, device)
-        decoder_storage = Scratch.allocate(config.decode_tokens, config.decode_tokens, shard.world_size, device)
+        decoder_storage = Scratch.allocate(config.decode_tokens, verification_samples, shard.world_size, device)
         suffix_storage = Scratch.allocate(128, 1, shard.world_size, device)
         window_staging = (torch.empty((len(weights.layers), slots, (128 + max(config.speculative_widths)) * 528),
                                      dtype=torch.uint8, device=device) if config.dspark else None)
@@ -209,8 +235,8 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                 token_base=129280, sentinel_names=("image_start", "image_start", "image_newline", "image_end"),
                 feature_type=1, image_slots=config.image_concurrency)
             vision_storage = {}
-        decoder_factory = partial(PreparedDecoder, window_staging=window_staging, suffix_scratch=suffix_storage,
-                                  vision=vision_state)
+        decoder_factory, draft_factory = _forward_factories(config.mla_compute_mode,
+            window_staging=window_staging, suffix_scratch=suffix_storage, vision=vision_state)
         buffers = dict(inputs.buffers(), **tables.buffers(), **commands.buffers(), **{
             name: getattr(admission, name) for name in admission.__dataclass_fields__},
             state_pool=pool.backing, memory_capacity=pool.memory_capacity,
@@ -227,8 +253,9 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                 draft_tokens=config.draft_tokens, records=records, frame=frame, sequence=sequence,
                 session=session, workspace=arena,
                 runtime=collective, vocabulary_runtime=vocabulary_collective,
-                markov_runtime=None, coordinator=coordinator,
-                forwards=DSparkForwards(decoder_factory,Scratch,_CONTEXT,PreparedDraft,PreparedMarkov))
+                markov_runtime=None, coordinator=coordinator, result_runtime=result_collective,
+                forwards=DSparkForwards(decoder_factory, Scratch, _CONTEXT,
+                    draft_factory, PreparedMarkov))
 
     del manifest
     modes = (True, False) if config.dspark else (False,)
@@ -242,10 +269,11 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
     catalog_bytes = {}
     catalog_previous = torch.cuda.memory_allocated(device)
     with phase(progress, "Construct graph catalog", total=count) as stage:
-        def add(name, forward, kind, rows, tokens, fields, *, enabled=None):
+        def add(name, forward, kind, rows, tokens, fields, *, enabled=None, packed_tokens=0):
             nonlocal catalog_previous
             forwards[name] = forward
-            signatures[name] = GraphSignature(kind, rows, tokens, tuple(fields), speculation_enabled=enabled)
+            signatures[name] = GraphSignature(kind, rows, tokens, tuple(fields), speculation_enabled=enabled,
+                                              packed_token_capacity=packed_tokens)
             allocated = torch.cuda.memory_allocated(device)
             catalog_bytes[kind] = catalog_bytes.get(kind, 0) + allocated - catalog_previous
             catalog_previous = allocated
@@ -301,11 +329,17 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                     add(name, proposal, "proposal", batch, depth + 1, forward_inputs, enabled=True)
                 for batch, width in sorted(config.speculative_shapes, key=lambda shape: shape[0] * shape[1], reverse=True):
                     name = f"verification{batch}x{width}"
-                    target = PreparedParallelDraftRound(speculation, batch, width, name,
-                        generate_proposals=False, buffers=speculation.sampling_buffers.cursor())
+                    logical_width = max(config.speculative_widths) if config.packed_verification else width
+                    packed_tokens = batch * width if config.packed_verification else 0
+                    if packed_tokens:
+                        name = f"verification{batch}x{logical_width}-tokens{packed_tokens}"
+                    target = PreparedParallelDraftRound(speculation, batch, logical_width, name,
+                        generate_proposals=False, buffers=speculation.sampling_buffers.cursor(),
+                        target_token_capacity=packed_tokens or None)
                     target.prepare()
                     verification = PreparedDraftVerification(split, target)
-                    add(name, verification, "verification", batch, width, forward_inputs, enabled=True)
+                    add(name, verification, "verification", batch, logical_width, forward_inputs, enabled=True,
+                        packed_tokens=packed_tokens)
                     if width == 1:
                         # No proposal is needed to decode while retaining draft context.
                         decode = PreparedParallelDraftRound(speculation, batch, 1, f"speculative{batch}x1",
@@ -390,6 +424,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         "catalog_operand_bytes": catalog_bytes,
         "weights_bytes": weights.allocated_bytes, "mapped_host_bytes": 0,
         "expert_scale_compression": config.expert_scale_compression,
+        "mla_compute_mode": config.mla_compute_mode,
         "offloaded_bytes": sum(source.nbytes for pair in tables.sources.values() for source in pair),
         "continuation_bytes": pool.backing.nbytes, "state_rows": state_rows,
         "preparation_state_rows": int(pool.memory_capacity[0].item()),
@@ -424,9 +459,10 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         package_data=tables if rank == 0 else None,
         resources=(weights, tables, pool, requests, inputs, admission, commands, arena, forwards,
             prefill_storage, decoder_storage, scratch, metadata, compiled, stream, graph_pool, session,
-            collective, prefill_collective, vocabulary_collective, coordinator, speculation,
+            collective, prefill_collective, vocabulary_collective, result_collective, coordinator, speculation,
             vision_state, vision_storage, vision_inputs, vision_prefill, graph_buffers),
-        close_resources=tuple(c for c in (prefill_collective, vocabulary_collective, collective) if c is not None))
+        close_resources=tuple(c for c in (result_collective, prefill_collective, vocabulary_collective, collective)
+                              if c is not None))
     if split is not None:
         model.proposal_confidence = confidence.host_view
         model.proposal_state = split

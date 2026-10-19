@@ -65,12 +65,14 @@ pub(super) struct Candidate {
     pub mask: u64,
     pub batch: usize,
     pub capacity: usize,
+    pub packed_token_capacity: usize,
     pub prefill_capacity: usize,
     pub prefill_slot: Option<usize>,
     pub work: usize,
     pub duration_ns: u64,
     pub rate: ValueRate,
     pub feedback: bool,
+    pub verification_budget: Option<usize>,
 }
 
 impl RequestScheduler {
@@ -751,7 +753,7 @@ impl RequestScheduler {
                 age_price,
             )
             .unwrap_or_else(|| (selected, ValueRate::new(duration_ns, expected, age_price)));
-        output.push(Candidate {
+        output.push(Candidate { packed_token_capacity: 0, verification_budget: None,
             kind,
             mask: selected,
             batch,
@@ -906,7 +908,7 @@ impl RequestScheduler {
                 if mask == 0 {
                     continue;
                 }
-                output.push(Candidate {
+                output.push(Candidate { packed_token_capacity: 0, verification_budget: None,
                     kind: GraphKind::Mixed,
                     mask,
                     batch,
@@ -983,7 +985,8 @@ impl RequestScheduler {
             estimated_duration_ns: candidate.duration_ns,
             selection_value_rate: candidate.rate.score,
             selection_log_scale: log_scale,
-            step: ScheduledStep {
+            verification_budget: candidate.verification_budget,
+            step: ScheduledStep { packed_token_capacity: candidate.packed_token_capacity,
                 kind: candidate.kind,
                 batch_capacity: candidate.batch,
                 token_capacity: candidate.capacity,

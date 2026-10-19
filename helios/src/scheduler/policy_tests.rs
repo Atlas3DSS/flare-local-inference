@@ -1032,7 +1032,7 @@ fn interactive_engine(active: usize, speculative: bool) -> RequestScheduler {
 }
 
 fn set_cost(s: &mut RequestScheduler, kind: GraphKind, batch: usize, capacity: usize, nanos: u64) {
-    let step = ScheduledStep {
+    let step = ScheduledStep { packed_token_capacity: 0,
         kind,
         batch_capacity: batch,
         token_capacity: capacity,
@@ -1591,7 +1591,7 @@ fn mixed_engine(
             .unwrap();
     }
     for &(batch, width, prefill, nanos) in shapes {
-        graphs.push(crate::execution::GraphDescriptor {
+        graphs.push(crate::execution::GraphDescriptor { packed_token_capacity: 0,
             name: format!("mixed-{batch}-{prefill}-{width}"),
             kind: GraphKind::Mixed,
             sampling_mode: SamplingMode::General,
@@ -1763,7 +1763,7 @@ fn mixed_cost_observations_and_expiry_are_specific_to_both_token_capacities() {
         true,
         &[(2, 1, 64, MS), (2, 8, 64, 2 * MS), (2, 8, 512, 3 * MS)],
     );
-    let make = |width, prefill| ScheduledStep {
+    let make = |width, prefill| ScheduledStep { packed_token_capacity: 0,
         kind: GraphKind::Mixed,
         batch_capacity: 2,
         token_capacity: width,

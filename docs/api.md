@@ -38,7 +38,8 @@ The additional `flare` object reports prepared and selected serving metadata:
 | `prefill_chunk_size` | Maximum tokens in a prefill chunk, not the context limit |
 | `default_max_tokens` | Default output-token budget when a request omits it; remaining context still bounds output |
 | `sampling_defaults` | Packaged seed, temperature, filters, and penalties used for omitted request fields |
-| `max_images_per_prompt` | Prepared image count limit; zero for text-only packages |
+| `max_images_per_prompt` | Upper bound from feature storage; actual image sizes and the total visual-token budget bound admission; zero for text-only packages |
+| `max_image_tokens_per_prompt` | Total visual-token budget shared by every image in a request; zero for text-only packages |
 | `input_modalities` | `text`, plus `image` when vision is prepared |
 | `output_modalities` | `text` |
 
@@ -135,7 +136,10 @@ successful response contains exactly one call. Generation uses ordinary sampling
 
 Named tool selection and strict function schemas are rejected. Hosted search,
 computer execution, file stores, audio, and remote image downloads are unsupported. Images must be
-base64 PNG/JPEG data and fit the loaded package's prepared image capacities.
+base64 PNG, JPEG, or static WebP data. Images are encoded sequentially and share
+the loaded package's visual-token budget; there is no separate four-image limit.
+Each image must fit a prepared vision graph, and the whole request must fit the
+HTTP body limit and text context. Animated images are unsupported.
 
 Anthropic histories accept inline system text and preserve text, thinking, tool
 use/results, errors, and image blocks. Message-level control metadata, including
@@ -221,6 +225,14 @@ input, output, and cache counts. Chat and Completions include final usage when
 including the legacy terminal usage when token IDs are requested without a
 separate usage chunk. Stop sequences report the exact matched string through
 Anthropic `stop_sequence`.
+
+For cumulative usage during Chat and Completions streaming, set
+`"stream_options": {"include_usage": true, "continuous_usage_stats": true}`.
+The `continuous_usage_stats` option defaults to false and requires
+`include_usage: true`. Enable it when measuring streams that may be cancelled
+before the final usage chunk arrives. Each emitted chunk carries cumulative
+native token counts; text chunks can combine multiple tokens, so counting
+chunks does not measure generated tokens. Final usage is still emitted.
 
 ## Raw completions
 

@@ -396,6 +396,12 @@ class RuntimePackage:
             raise ValueError("a signed package cannot reference staged sources")
         if not graphs or any(not name for name in graphs):
             raise ValueError("named graph templates are required")
+        if server is not None:
+            from .package_proto import serving
+            from .runtime_package_pb2 import ModelIndex
+
+            # Reject invalid serving metadata before traversing graphs or copying weights.
+            serving(ModelIndex(), server)
         cuda = _Cuda()
         cuda.call("cuCtxSynchronize")
         device = C.c_int()

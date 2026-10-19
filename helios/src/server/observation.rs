@@ -18,6 +18,7 @@ pub(crate) struct ObservationOptions {
     pub token_ids: bool,
     pub timestamps: bool,
     pub include_usage: bool,
+    pub continuous_usage: bool,
 }
 
 impl ObservationOptions {
@@ -30,10 +31,11 @@ impl ObservationOptions {
         if timestamps && !token_ids {
             return Err("return_token_timestamps requires return_token_ids=true".into());
         }
-        let include_usage = match object.get("stream_options") {
-            None | Some(Value::Null) => false,
+        let (include_usage, continuous_usage) = match object.get("stream_options") {
+            None | Some(Value::Null) => (false, false),
             Some(Value::Object(options)) => {
-                flag(options.get("include_usage"), "stream_options.include_usage")?
+                (flag(options.get("include_usage"), "stream_options.include_usage")?,
+                 flag(options.get("continuous_usage_stats"), "stream_options.continuous_usage_stats")?)
             }
             _ => return Err("stream_options must be an object or null".into()),
         };
@@ -41,6 +43,7 @@ impl ObservationOptions {
             token_ids,
             timestamps,
             include_usage,
+            continuous_usage: include_usage && continuous_usage,
         })
     }
 
@@ -98,8 +101,22 @@ mod tests {
             json!({"return_token_ids":true,"return_token_timestamps":0}),
             json!({"stream_options":false}),
             json!({"stream_options":{"include_usage":"true"}}),
+            json!({"stream_options":{"continuous_usage_stats":"true"}}),
         ] {
             assert!(ObservationOptions::parse(body.as_object().unwrap()).is_err());
+        }
+    }
+
+    #[test]
+    fn continuous_usage_requires_explicit_usage_opt_in() {
+        for (body, expected) in [
+            (json!({"stream_options":{"include_usage":true,"continuous_usage_stats":true}}), true),
+            (json!({"stream_options":{"include_usage":true}}), false),
+            (json!({"stream_options":{"continuous_usage_stats":true}}), false),
+            (json!({"stream_options":{"include_usage":false,"continuous_usage_stats":true}}), false),
+        ] {
+            let options = ObservationOptions::parse(body.as_object().unwrap()).unwrap();
+            assert_eq!(options.continuous_usage, expected);
         }
     }
 
@@ -115,6 +132,7 @@ mod tests {
             token_ids: true,
             timestamps: true,
             include_usage: false,
+            continuous_usage: false,
         };
         options.finish(&mut value, &usage, 16, (Some(10), Some(20)), true);
         assert_eq!(value["choices"], original["choices"]);

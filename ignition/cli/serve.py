@@ -115,7 +115,8 @@ def run(args) -> int:
                   context_parallel=context_parallel(args, model), stream_overlap=stream_overlap(args, model),
                   roce_ring=args.roce_ring,
                   mixed_prefill=args.mixed_prefill, expert_scale_compression=args.expert_scale_compression,
-                  online_mxfp8=args.online_mxfp8, language_model_only=args.language_model_only)
+                  online_mxfp8=args.online_mxfp8, language_model_only=args.language_model_only,
+                  mla_compute_mode=args.mla_compute_mode)
     runtime = binary()
     host = configuration.get("server.host", args.host).value
     port = configuration.get("server.port", args.port).value
@@ -219,7 +220,8 @@ def _export_hosts(args, *, export_path) -> int:
                          context_parallel=context_parallel(args, model), stream_overlap=stream_overlap(args, model),
                          roce_ring=args.roce_ring,
                          mixed_prefill=args.mixed_prefill, expert_scale_compression=args.expert_scale_compression,
-                         online_mxfp8=args.online_mxfp8, language_model_only=args.language_model_only)
+                         online_mxfp8=args.online_mxfp8, language_model_only=args.language_model_only,
+                         mla_compute_mode=args.mla_compute_mode)
     plan = replace(plan, compile_workers=compiler_workers(configuration, args.compile_workers), hub_cache=hub_cache)
     environment.apply(configuration, local, plan.recipe.b12x_environment)
     options = _server_options(configuration, model, plan)
@@ -286,7 +288,8 @@ def _prepare(args, *, export_path) -> int:
                       context_parallel=context_parallel(args, model), stream_overlap=stream_overlap(args, model),
                       roce_ring=args.roce_ring,
                       mixed_prefill=args.mixed_prefill, expert_scale_compression=args.expert_scale_compression,
-                      online_mxfp8=args.online_mxfp8, language_model_only=args.language_model_only)
+                      online_mxfp8=args.online_mxfp8, language_model_only=args.language_model_only,
+                      mla_compute_mode=args.mla_compute_mode)
         indices = planning.format_gpus(gpu.index for gpu in plan.gpus)
         # A caller's restriction changes which GPU each index names.
         restricted = "" if host.restriction is None else f" of CUDA_VISIBLE_DEVICES={host.restriction}"
@@ -399,6 +402,15 @@ def serve(args) -> int:
         raise UsageError("--graph-times applies only to --direct execution")
     if args.eager and args.graph_times is not None and not args.graph_times.is_file():
         raise UsageError(f"--graph-times {args.graph_times} does not exist; graph replay with --graph-times saves it")
+    if not args.direct:
+        requirement = ("ignition serve requires Heliopause's qualification Cargo feature; rebuild ./heliopause "
+                       "with --config-settings 'build-args=--features=qualification'")
+        try:
+            import flare_heliopause
+        except ImportError as error:
+            raise UsageError(requirement) from error
+        if not hasattr(flare_heliopause, "Server"):
+            raise UsageError(requirement)
     progress = _serving_progress(args.verbose)
     configuration = Configuration.load(args.config)
     hub_cache = configuration.directory("hub_cache")
@@ -437,7 +449,7 @@ def serve(args) -> int:
                          roce_ring=args.roce_ring,
                          cache_states=args.prefix_cache_states, mixed_prefill=args.mixed_prefill,
                          expert_scale_compression=args.expert_scale_compression, online_mxfp8=args.online_mxfp8,
-                         language_model_only=args.language_model_only)
+                         language_model_only=args.language_model_only, mla_compute_mode=args.mla_compute_mode)
     plan = replace(plan, compile_workers=compiler_workers(configuration, args.compile_workers), hub_cache=hub_cache)
     if rendezvous is None:
         plan = tuning_devices(plan, host, args.tuning_gpus)
@@ -464,6 +476,11 @@ def serve(args) -> int:
             model.snapshot(hub_cache), plan, compile_forwards=not args.no_compile,
             kernel_cache=configuration.directory("kernel_cache"), progress=progress,
             **preparation_options)
+    if plan.speculation is not None and plan.speculation.packed_verification:
+        local_model = prepared.model if hasattr(prepared, "model") else prepared
+        if not any(signature.packed_token_capacity for signature in local_model.signatures.values()):
+            prepared.close()
+            raise UsageError("this prepared recipe does not declare packed verification capacities")
     if args.direct:
         from ignition.direct.server import serve_direct
 

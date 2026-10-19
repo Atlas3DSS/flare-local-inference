@@ -365,7 +365,7 @@ fn image_limits(vision: &crate::model::VisionCapabilities) -> Result<ImageLimits
         .ok_or("vision requires a captured patch capacity")?
         .min(max_total_patches);
     Ok(ImageLimits {
-        max_images: vision.max_images,
+        max_images: vision.image_count_capacity(),
         max_patches_per_image,
         max_total_patches,
         ..ImageLimits::default()
@@ -394,7 +394,7 @@ mod tests {
             };
             vision.validate().unwrap();
             let limits = image_limits(&vision).unwrap();
-            assert_eq!(limits.max_images, 4);
+            assert_eq!(limits.max_images, features);
             assert_eq!(limits.max_total_patches, total);
             assert_eq!(limits.max_patches_per_image, graph_patches.min(total));
             let processor = ImageProcessor::load(ImageSettings::Moonvit {}, limits).unwrap();

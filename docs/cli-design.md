@@ -151,6 +151,8 @@ explicit flags take precedence.
 | `--no-mtp-adaptive-verification` | Default to fixed-width serving. Capture includes every smaller width within the speculative token capacity. | Adaptive |
 | `--mtp-proposal-source {mtp,copy}` | Where drafts come from: the checkpoint's MTP module, or `copy` for continuations of the request's own history, which loads no draft model. Qwen only. | `mtp` |
 | `--history-drafts` | Also draft continuations copied from the request's own history. Qwen only. | off |
+| `--packed-verification` | Prepare a shared target-row capacity across retained request prefixes. DeepSeek V4.1 only; requires adaptive learned proposals. | Disabled |
+| `--mla-compute-mode {auto,bf16}` | Constrain DeepSeek V4.1 MLA arithmetic while preserving packed KV storage and autotuning among compatible kernels. Selects a separate cached package. | `auto` |
 | `--no-stream-overlap` | Run every concurrent branch (shared experts, projection chains, query chains) serially on the main stream with the same kernels, to diagnose scheduling-dependent faults. Slower. Recipes that run no branches concurrently reject it. | Overlap |
 | `--compile-workers N` | CPU compiler process budget per host, divided among local preparation ranks and bounded by available RAM and device memory. Applies to b12x kernel compilation and complete-forward compilation. Overrides `[preparation] compile_workers`. | Automatic |
 | `--tuning-gpus LIST` | Local kernel-tuning GPUs. Start with the serving GPU list, then append complete replicas of that TP group on matching hardware. Serving TP size stays fixed. Command line only; cannot be combined with multi-host `--ranks`. | Serving GPUs |
@@ -164,6 +166,55 @@ N draft tokens` while verification adapts, `exactly N draft tokens` when it is
 fixed, and `branches serialized` under `--no-stream-overlap`. That flag is also
 recorded in the plan and the package cache key; it changes graph scheduling,
 not kernel selection, so its packages share tuned kernels with overlapped ones.
+
+DeepSeek V4.1 can share verification rows between requests with
+`--packed-verification`. Keep the rectangular default unless preparing a packed
+catalog intentionally. For eight requests with up to five drafts each, this
+example captures target graphs with at most 24 physical rows while retaining
+six-token per-request prefixes:
+
+```sh
+.venv/bin/ignition export deepseek-v4.1-flash --gpus 0,1,2,3 \
+  --max-concurrency 8 --mtp-draft-tokens 5 --packed-verification \
+  --speculative-token-capacity 24 --prefill-chunk-size 4096 \
+  --output /data/flare-runtime/deepseek41-tp4-c8-packed24.safetensors --verbose
+```
+
+Packed packages require adaptive execution at their captured draft depth, or
+`--mtp-draft-tokens 0` for ordinary execution. Native serving uses all captured
+packed capacities by default. Prefer `--mtp-max-verification-token-budget N` to
+retain every captured capacity at or below a ceiling; for example:
+
+```sh
+./flare/target/release/flare run \
+  /data/flare-runtime/deepseek41-tp4-c8-packed24.safetensors \
+  --gpus 0,1,2,3 --mtp-max-verification-token-budget 24 \
+  --host 127.0.0.1 --port 8001
+```
+
+For a controlled comparison, replace the maximum flag with
+`--mtp-verification-token-budget 24` to select one exact captured capacity per
+batch, bounded by that batch's full prefix extent. The exact and maximum flags
+are mutually exclusive and require a packed adaptive catalog. Each budget must
+cover the selected padded batch capacity; a maximum budget must also cover the
+captured per-request verification width. Missing required graphs fail before
+GPU initialization.
+
+For DeepSeek V4.1, `--mla-compute-mode auto` lets b12x choose arithmetic
+and is the default. Use `bf16` when BF16 MLA arithmetic is required; packed KV
+storage remains unchanged, and compatible kernels still autotune. The pinned
+FlashInfer dependency supplies the required preparation API. For example:
+
+```sh
+.venv/bin/ignition export deepseek-v4.1-flash --gpus 0,1,2,3 \
+  --max-concurrency 8 --mtp-draft-tokens 5 --packed-verification \
+  --speculative-token-capacity 24 --prefill-chunk-size 4096 \
+  --mla-compute-mode bf16 \
+  --output /data/flare-runtime/deepseek41-tp4-c8-packed24-bf16.safetensors --verbose
+```
+
+The arithmetic choice applies to target, prefill, and draft attention and is
+fixed in the exported graphs. Changing it requires another export.
 
 CPU compilation and GPU tuning have independent controls. For a TP1 package,
 `--gpus 0 --tuning-gpus 0-3 --compile-workers 24` uses four GPUs to benchmark
@@ -304,6 +355,8 @@ Help exits with status 0; usage errors go to stderr with status 2. Its options a
 | `--memory-limit LIMIT` | Per-GPU occupied size (`30G`), free-memory reserve (`-30G`), or fraction of total memory (`0.8`) | Package serving reserve |
 | `--mtp-draft-tokens N` | Reduce the maximum draft count; zero selects ordinary execution without draft generation, absorption, or draft-state maintenance | Package default |
 | `--mtp-adaptive-verification` / `--no-mtp-adaptive-verification` | Adaptive or fixed selection among captured widths | Package default |
+| `--mtp-verification-token-budget N` | Select one exact captured packed verification capacity per batch | All captured capacities |
+| `--mtp-max-verification-token-budget N` | Retain all captured packed verification capacities at or below a total-row ceiling | All captured capacities |
 | `--embedding-table-storage disk\|ram` | PLE and Engram table storage; both modes deliver compact GPU rows | `disk` |
 | `--embedding-table-cache-size SIZE` | Per-host budget for cached disk-backed PLE/Engram rows, including the index, usage counters and miss workspace; accepts sizes such as `1G` or `2GiB` | `0` (disabled) |
 

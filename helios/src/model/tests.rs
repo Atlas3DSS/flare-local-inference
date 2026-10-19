@@ -1021,7 +1021,7 @@ fn mixed_manifest(config: &mut ModelConfig, width: usize) -> crate::execution::E
             -1,
         ));
         config.contract.graphs.push(semantics);
-        manifest.graphs.push(GraphDescriptor {
+        manifest.graphs.push(GraphDescriptor { packed_token_capacity: 0,
             name,
             kind: GraphKind::Mixed,
             sampling_mode: SamplingMode::General,
@@ -1277,6 +1277,184 @@ fn retained_proposal_catalog_requires_prefix_coverage_and_proposal_free_decode()
     let mut multiple = config.clone();
     multiple.limits.max_active = 2;
     assert!(catalog::validate(&multiple, &manifest).is_err());
+    let mut packed = manifest.clone();
+    for graph in &mut packed.graphs {
+        if graph.kind == GraphKind::Verification {
+            graph.packed_token_capacity = graph.token_capacity;
+            graph.token_capacity = 8;
+        }
+    }
+    catalog::validate(&config, &packed).unwrap();
+    let index = catalog::select_shape(&config, &packed, GraphKind::Verification,
+        1, 8, 0, 3, crate::execution::SamplingMode::General).unwrap();
+    assert_eq!(packed.graphs[index].packed_tokens(), 3);
+    packed.graphs[index].packed_token_capacity = 9;
+    assert!(catalog::validate(&config, &packed).is_err());
     config.speculative_token_capacity = 0;
     assert!(catalog::validate(&config, &manifest).is_err());
+}
+
+fn grammar_packing_fixture() -> (
+    ModelConfig,
+    crate::execution::ExecutionManifest,
+    RequestScheduler,
+    Vec<Option<Admission>>,
+    crate::scheduler::ScheduledStep,
+) {
+    let mut config = config();
+    config.limits.request_slots = 8;
+    config.limits.max_active = 8;
+    config.limits.pages = 256;
+    config.contract.vocabulary = 129280;
+    config.contract.input_vocabulary = 129280;
+    let mut template = config
+        .contract
+        .graphs
+        .iter()
+        .find(|g| g.graph == "Speculative-4-6")
+        .unwrap()
+        .clone();
+    template.graph = "Speculative-8-6".into();
+    template.inputs.push(super::testing::binding(
+        "pending_input_ids",
+        ValueSource::PendingToken,
+        InputIndexing::SubmissionRow,
+        0,
+        0,
+    ));
+    config.contract.graphs.push(template.clone());
+    let mut manifest = manifest(&config);
+    let descriptor = manifest
+        .graphs
+        .iter()
+        .find(|g| g.name == template.graph)
+        .unwrap()
+        .clone();
+    for (kind, operation, name) in [
+        (GraphKind::Proposal, GraphOperation::Proposal, "proposal8x6"),
+        (
+            GraphKind::Verification,
+            GraphOperation::Verification,
+            "verification8x6",
+        ),
+    ] {
+        let mut contract = template.clone();
+        contract.graph = name.into();
+        contract.kind = operation;
+        config.contract.graphs.push(contract);
+        let mut graph = descriptor.clone();
+        graph.name = name.into();
+        graph.kind = kind;
+        manifest.graphs.push(graph);
+    }
+    let mut scheduler = RequestScheduler::new(
+        config.identity,
+        config.limits,
+        scheduler_capabilities(&config),
+    )
+    .unwrap();
+    let mut admissions = Vec::new();
+    let mut lanes = Vec::new();
+    for _ in 0..8 {
+        let handle = scheduler
+            .admit(RequestSpec {
+                system_boundary: None,
+                prompt: vec![7; 66],
+                conditioning: vec![],
+                max_new_tokens: 512,
+                grammar_constrained: false,
+                host_stops: false,
+                growable_output: false,
+            })
+            .unwrap();
+        admissions.push(Some(Admission {
+            handle,
+            sampling: SamplingParameters::default(),
+            max_new_tokens: 512,
+            prompt: vec![7; 66],
+            data: PromptData::default(),
+            grammar_mask: None,
+            ignore_eos: false,
+        }));
+        lanes.push(crate::scheduler::ScheduledLane {
+            request: handle,
+            start_position: 0,
+            tokens: 3,
+        });
+    }
+    let step = crate::scheduler::ScheduledStep {
+        kind: GraphKind::Proposal,
+        batch_capacity: 8,
+        token_capacity: 6,
+        packed_token_capacity: 0,
+        mixed: None,
+        requires_feedback: true,
+        lanes,
+    };
+    (config, manifest, scheduler, admissions, step)
+}
+
+#[test]
+fn grammar_mask_packing_preserves_bits_row_layout_and_transitions() {
+    use InputIndexing::*;
+    let (config, manifest, scheduler, mut admissions, mut step) = grammar_packing_fixture();
+    step.lanes = [6, 1, 3].map(|slot| step.lanes[slot].clone()).into();
+    let words = config.contract.vocabulary.div_ceil(32);
+    for indexing in [RequestRow, ActiveRow, SubmissionRow] {
+        let mut config = config.clone();
+        for graph in &mut config.contract.graphs {
+            for binding in &mut graph.inputs {
+                if binding.buffer == "sampling_grammar_mask" {
+                    binding.indexing = indexing;
+                }
+            }
+        }
+        for kind in [GraphKind::Proposal, GraphKind::Verification] {
+            step.kind = kind;
+            let mut inputs = Inputs::new(&config, &manifest).unwrap();
+            for round in 0..4 {
+                for (slot, admission) in admissions.iter_mut().enumerate() {
+                    admission.as_mut().unwrap().grammar_mask = match (round, slot) {
+                        (0, 1) | (1, 6) => Some(
+                            (0..words)
+                                .map(|i| [i32::MIN, i32::MAX, 0, -1][i % 4])
+                                .collect(),
+                        ),
+                        (0, 6) => Some(vec![0; words]),
+                        (1, 3) => Some(vec![1; words]),
+                        (3, 1) => Some(vec![]),
+                        _ => None,
+                    };
+                }
+                pack_inputs(&mut inputs, &config, &scheduler, &step, &admissions).unwrap();
+                let mut actual = vec![0xa5; 8 * words * 4];
+                for upload in inputs
+                    .uploads()
+                    .into_iter()
+                    .filter(|u| u.buffer == "sampling_grammar_mask")
+                {
+                    assert!(!upload.bytes.is_empty());
+                    actual[upload.offset..upload.offset + upload.bytes.len()]
+                        .copy_from_slice(upload.bytes);
+                }
+                let mut expected =
+                    vec![if indexing == SubmissionRow { 0 } else { 0xa5 }; actual.len()];
+                for (row, lane) in step.lanes.iter().enumerate() {
+                    let slot = lane.request.slot as usize;
+                    let destination = if indexing == RequestRow { slot } else { row };
+                    let mask = admissions[slot].as_ref().unwrap().grammar_mask.as_ref();
+                    // Empty masks leave the row untouched, including its padding.
+                    if mask.is_some_and(Vec::is_empty) {
+                        continue;
+                    }
+                    for word in 0..words {
+                        let value = mask.map_or(-1, |m| m[word]);
+                        let offset = (destination * words + word) * 4;
+                        expected[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+                    }
+                }
+                assert_eq!(actual, expected, "{indexing:?} {kind:?} round {round}");
+            }
+        }
+    }
 }

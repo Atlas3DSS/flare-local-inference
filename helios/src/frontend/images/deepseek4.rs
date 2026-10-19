@@ -103,9 +103,7 @@ pub(super) fn pack(
     limits: ImageLimits, images: &[RgbImage],
     resize: impl Fn(&RgbImage) -> Result<(ImageGeometry, Vec<u8>)>,
 ) -> Result<ProcessedImages> {
-    if images.is_empty() || images.len() > limits.max_images {
-        return Err("image count is empty or exceeds the configured limit".into());
-    }
+    limits.check_batch(images.len(), 0)?;
     let mut output = ProcessedImages {
         pixel_values: Vec::new(),
         geometry: Vec::new(),
@@ -116,9 +114,7 @@ pub(super) fn pack(
     };
     for image in images {
         let (g, pixels) = resize(image)?;
-        if output.position_ids.len() + g.patches > limits.max_total_patches {
-            return Err("images exceed the configured total patch limit".into());
-        }
+        limits.check_batch(images.len(), output.position_ids.len() + g.patches)?;
         let h = g.height / PATCH;
         let w = g.width / PATCH;
         for row in 0..h {

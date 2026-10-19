@@ -1,5 +1,6 @@
 """Prepared mixed-format sliding-window and indexed latent attention."""
 
+import inspect
 import torch
 from functools import partial
 from b12x.attention import compressed_sparse_mla as mla
@@ -10,6 +11,16 @@ from ignition.preparation.scratch import planned_scratch, prime_owners
 from ignition.preparation.tuning import declare, register_finalizer
 from ignition.preparation.fixtures.compressed_mla import Inputs, benchmark_call
 from ignition.preparation.fixtures.resources import candidate_inputs
+
+
+def validate_mla_compute_mode(mode):
+    """Validate an arithmetic request before loading model weights."""
+    if mode not in ("auto", "bf16"):
+        raise ValueError("MLA compute mode must be 'auto' or 'bf16'")
+    if mode != "auto" and "v41_compute_mode" not in inspect.signature(mla.Caps).parameters:
+        raise ValueError("BF16 MLA arithmetic requires FlashInfer/b12x with the"
+                         " compressed_sparse_mla.Caps.v41_compute_mode preparation API;"
+                         " select a preparation environment that provides this API")
 
 
 @torch.library.custom_op("flare::compressed_cache_write", mutates_args=("cache",))
@@ -58,13 +69,15 @@ class PreparedCompressedMLA:
     def __init__(self, query, window, indices, lengths, sink, output, *, indexed=None,
                  indexed_indices=None, indexed_lengths=None, page_table=None,
                  window_page_size=128, indexed_page_size=64, mode="decode", session, name, workspace,
-                 cache_format="deepseek_v41", decode_row_capacity=None):
+                 cache_format="deepseek_v41", decode_row_capacity=None, compute_mode="auto"):
+        validate_mla_compute_mode(compute_mode)
+        arithmetic = {} if compute_mode == "auto" else {"v41_compute_mode": compute_mode}
         width = 0 if indexed_indices is None else indexed_indices.shape[1]
         caps = mla.Caps(device=query.device, num_q_heads=query.shape[1], max_q_rows=query.shape[0],
             max_width=indices.shape[1] + width, swa_width=indices.shape[1], indexed_width=width,
             max_page_table_width=1 if page_table is None else page_table.shape[1],
             swa_page_size=window_page_size, indexed_page_size=indexed_page_size,
-            cache_format=cache_format, mode=mode, decode_row_capacity=decode_row_capacity)
+            cache_format=cache_format, mode=mode, decode_row_capacity=decode_row_capacity, **arithmetic)
         self.plan = mla.plan(caps, invocation=mla.invocation_from_tensors(q=query,
             swa_k_cache=window, indexed_k_cache=indexed, attn_sink=sink, out=output))
         self.query, self.window, self.indexed, self.output = query, window, indexed, output
