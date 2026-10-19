@@ -1,7 +1,5 @@
 """Block drafts conditioned on accepted target states, with sequential Markov logits."""
 
-import torch
-
 from ignition.components.embedding import PreparedEmbedding
 from ignition.components.vocabulary import PreparedVocabularyProjection
 
@@ -21,7 +19,7 @@ class PreparedDraft:
             session=session, name=f"{name}.layer{i}", workspace=workspace, carry=i > 0,
             defer_post=i + 1 < len(weights.draft.layers), mla_compute_mode=mla_compute_mode)
             for i, layer in enumerate(weights.draft.layers))
-        self.head_hidden = torch.zeros_like(scratch.hidden)
+        self.head_hidden = scratch.buffers.zeros(scratch.hidden.shape, scratch.hidden.dtype)
         self.head = PreparedVocabularyProjection(scratch.hidden, weights.head, scratch.local_logits, scratch.logits,
             runtime=vocabulary_runtime, coordinator=coordinator, session=session, name=name + ".head")
 

@@ -46,6 +46,7 @@ class SpeculativePreparation:
         forwards,
         page_tokens=128,
         result_runtime=None,
+        buffers=None,
     ):
         self.forwards = forwards
         self.page_tokens = page_tokens
@@ -73,6 +74,7 @@ class SpeculativePreparation:
             pool.backing.device,
             experts=draft.experts,
             top_k=draft.top_k,
+            buffers=buffers,
         )
 
 

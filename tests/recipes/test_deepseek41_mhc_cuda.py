@@ -8,6 +8,8 @@ from b12x.preparation import PreparationSession
 from b12x.testing.mhc import make_inputs, pre_reference, post_reference
 
 from ignition.components.mhc import MHCWeights, MHCScratch, PreparedMHC
+from ignition.preparation.compilation import compile_forward
+from ignition.preparation.scratch import GraphBufferPool
 
 pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
                               reason="requires an explicitly assigned CUDA device")
@@ -24,8 +26,13 @@ def test_prepared_lagged_coefficients_and_rounded_normalization(tokens, operatio
     predicted = torch.empty_like(incoming)
     previous_post = torch.ones_like(incoming)
     previous_comb = torch.eye(4, device=device).expand(tokens, -1, -1).contiguous()
+    buffers = GraphBufferPool(device, chunk_bytes=2 << 20).cursor()
+    def pooled(value):
+        return buffers.zeros(value.shape, value.dtype).copy_(value)
+    residual, branch, incoming, predicted, previous_post, previous_comb = map(
+        pooled, (residual, branch, incoming, predicted, previous_post, previous_comb))
     args = (residual,) if operation == "pre" else (branch, residual, previous_post, previous_comb)
-    scratch = MHCScratch.allocate(tokens, 5120, device)
+    scratch = MHCScratch.allocate(tokens, 5120, device, buffers=buffers)
     with PreparationSession(device=device, autotune=False, compile_workers=2) as session:
         prepared = PreparedMHC(args, MHCWeights(fn, scale, bias, norm), scratch,
             session=session, name="lagged", workspace=None, rms_eps=1e-20, norm_eps=1e-20,
@@ -53,3 +60,52 @@ def test_prepared_lagged_coefficients_and_rounded_normalization(tokens, operatio
             torch.testing.assert_close(scratch.post, expected_post, rtol=2e-5, atol=4e-5)
             torch.testing.assert_close(scratch.comb, expected_comb, rtol=2e-5, atol=4e-5)
         graph.reset()
+
+
+@pytest.mark.parametrize("operation", ["pre", "post_pre"])
+@torch.no_grad()
+def test_pooled_prefill_matches_independent_storage_exactly(operation):
+    device, tokens = torch.device("cuda:0"), 4096
+    residual, branch, fn, scale, bias = make_inputs(tokens=tokens, hidden_size=5120, seed=4102, device=device)
+    weights = MHCWeights(fn, scale, bias, torch.linspace(.5, 1.5, 5120, device=device).bfloat16())
+    previous_post = torch.ones((tokens, 4), device=device)
+    previous_comb = torch.eye(4, device=device).expand(tokens, -1, -1).contiguous()
+    sources = (residual,) if operation == "pre" else (branch, residual, previous_post, previous_comb)
+    graphs, operands, results, owners = [], [], [], []
+    with PreparationSession(device=device, autotune=False, compile_workers=2) as session:
+        for pooled in (False, True):
+            buffers = GraphBufferPool(device, chunk_bytes=2 << 20).cursor() if pooled else None
+            def allocate(shape, dtype):
+                return (torch.zeros(shape, dtype=dtype, device=device) if buffers is None
+                        else buffers.zeros(shape, dtype))
+            args = tuple(allocate(value.shape, value.dtype).copy_(value) for value in sources)
+            incoming, predicted = (allocate((tokens, 4), torch.float32) for _ in range(2))
+            scratch = MHCScratch.allocate(tokens, 5120, device, buffers=buffers)
+            prepared = PreparedMHC(args, weights, scratch, session=session, name=f"lagged{pooled}",
+                workspace=None, rms_eps=1e-20, norm_eps=1e-20, hc_eps=1e-6, sinkhorn_iters=20,
+                pre_mix=incoming, pre_out=predicted)
+            forward = compile_forward(lambda prepared=prepared, args=args: prepared(*args))
+            forward()
+            graph = torch.cuda.CUDAGraph()
+            with session.capture(), torch.cuda.graph(graph):
+                forward()
+            graphs.append(graph)
+            operands.append(incoming)
+            results.append((*scratch.bind_args().values(), predicted))
+            owners.append((buffers, args, prepared, forward))
+        for basis in (0, 3, 1):
+            for incoming, outputs in zip(operands, results, strict=True):
+                incoming.zero_()
+                incoming[:, basis] = 1
+                for output in outputs:
+                    output.fill_(float("nan"))
+            allocated = torch.cuda.memory_allocated()
+            for graph in graphs:
+                graph.replay()
+            torch.cuda.synchronize()
+            assert torch.cuda.memory_allocated() == allocated
+            for independent, pooled in zip(*results, strict=True):
+                assert torch.isfinite(pooled).all()
+                torch.testing.assert_close(pooled, independent, rtol=0, atol=0)
+        for graph in graphs:
+            graph.reset()

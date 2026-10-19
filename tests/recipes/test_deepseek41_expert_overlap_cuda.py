@@ -8,14 +8,15 @@ import torch
 
 from ignition.components.expert_overlap import ConcurrentSharedExpert
 from ignition.components.linear import UnquantizedProjection
-from ignition.components.mlp import MLPScratch, PreparedMLP
-from ignition.components.moe import PreparedRouter, PreparedRoutedExperts, RouterScratch
+from ignition.components.mlp import PreparedMLP
+from ignition.components.moe import PreparedRouter, PreparedRoutedExperts
 from ignition.components.parallel import TensorParallelShard
 from ignition.preparation.checkpoint import inspect_indexed_checkpoint
 from ignition.preparation.compilation import compile_forward
 from ignition.preparation.scratch import ScratchArena
 from ignition.preparation.tuning import RecordedPreparationSession
 from ignition.recipes.deepseek41.weights import DeepSeekWeightLoader
+from ignition.recipes.deepseek41.decoder import Scratch
 
 
 pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
@@ -41,11 +42,9 @@ def test_shared_expert_join_precedes_input_and_scratch_reuse(expert_weights, row
     device = torch.device("cuda:0")
     arena = ScratchArena(device, overlap=True)
     source = torch.randn((rows, 5120), device=device, dtype=torch.bfloat16)
-    live = torch.empty_like(source)
-    logits = torch.empty((rows, 384), device=device)
-    route = RouterScratch.allocate(rows, device, experts=384, top_k=6)
-    shared_buffers = MLPScratch.allocate(rows, 5120, 576, device)
-    routed = torch.empty_like(source)
+    storage = Scratch.allocate(rows, rows, 4, device)
+    live, logits = storage.ffn_hc.normalized, storage.router_logits
+    route, shared_buffers, routed = storage.router, storage.shared, storage.routed
     output, shared_output = torch.empty_like(source), torch.empty_like(source)
     with RecordedPreparationSession(device=device, checkpoint="ds41-expert-overlap",
             workload_schema="tp4-shard", numerical_policy="checkpoint", compile_workers=16) as session:
@@ -71,6 +70,7 @@ def test_shared_expert_join_precedes_input_and_scratch_reuse(expert_weights, row
             concurrent.finish(live, routed)
             output.copy_(routed + shared.output)
             shared_output.copy_(shared.output)
+            storage.engram.gathered.fill_(42)
             arena.tensor.fill_(255)
             live.zero_()
 
@@ -81,6 +81,7 @@ def test_shared_expert_join_precedes_input_and_scratch_reuse(expert_weights, row
             shared(live)
             output.copy_(routed + shared.output)
             shared_output.copy_(shared.output)
+            storage.engram.gathered.fill_(42)
             arena.tensor.fill_(255)
             live.zero_()
 

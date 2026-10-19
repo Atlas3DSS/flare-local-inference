@@ -143,10 +143,12 @@ class EngramScratch:
     projected: torch.Tensor
 
     @classmethod
-    def allocate(cls, tokens, device):
-        return cls(torch.zeros(tokens, dtype=torch.bool, device=device),
-                   torch.zeros((tokens, 6144), dtype=torch.bfloat16, device=device),
-                   torch.zeros((tokens, 25600), dtype=torch.bfloat16, device=device))
+    def allocate(cls, tokens, device, *, buffers=None):
+        def zeros(shape, dtype):
+            return (torch.zeros(shape, dtype=dtype, device=device) if buffers is None
+                    else buffers.zeros(shape, dtype))
+        return cls(zeros(tokens, torch.bool), zeros((tokens, 6144), torch.bfloat16),
+                   zeros((tokens, 25600), torch.bfloat16))
 
 
 class PreparedEngram:

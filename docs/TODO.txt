@@ -16,8 +16,16 @@
     allocation padding; nonoverlapping lifetimes alone do not eliminate gaps.
     See performance-work.md#cross-model-scratch-planning for scope and checks.
 
+[ ] Size DeepSeek V4 and MiMo one-shot all-reduce channels from their actual
+    callers; prefills of at least 1024 rows use separate DMA channels. Preserve
+    MiMo's full-prefill context-gather capacity when separating those bounds.
+
+[ ] Review fusion of pooled DeepSeek V4.1 indexer lengths: captured graphs split
+    clamp from amax and retain explicit copy kernels. Measure complete GPU steps
+    before changing shared storage lowering.
+
 [ ] Validate pooled vision and speculative scratch in complete exported packages
-    across Qwen, GLM, DeepSeek V4/V4.1, MiMo, Step, and Nemotron. Measure
+    across Qwen, GLM, DeepSeek V4, MiMo, Step, and Nemotron. Measure
     fixed memory and KV capacity with full catalogs and tensor parallelism;
     exercise alternating text/image graphs, proposal/verification, and rollback.
     See performance-work.md#cross-model-scratch-planning.

@@ -8,7 +8,7 @@ from b12x.preparation.types import plan_from_handle
 
 from ignition.preparation.scratch import planned_scratch, prime_owners
 from ignition.preparation.tuning import declare, register_finalizer
-from ignition.preparation.fixtures.mxfp4_indexer import benchmark_call
+from ignition.preparation.fixtures.mxfp4_indexer import acquire_inputs, benchmark_call
 
 
 @torch.library.custom_op("flare::index_quantize", mutates_args=("packed", "scales"))
@@ -75,11 +75,13 @@ class PreparedMXFP4Indexer:
 
         def prepare(state):
             scratch = planned_scratch(state.layout.scratch_specs(), workspace)
-            binding = state.bind(scratch=scratch, **self.arguments)
+            inputs = acquire_inputs(state, self.arguments, session)
+            arguments = inputs.arguments
+            binding = state.bind(scratch=scratch, **arguments)
             def run():
-                state.quantize_query(query, q_mxfp4=self.packed, q_scales=self.scales)
+                state.quantize_query(inputs.query, q_mxfp4=arguments["q_mxfp4"], q_scales=arguments["q_scales"])
                 state.run(binding)
-            return PreparedCall(run=run, owners=prime_owners(workspace, scratch, binding))
+            return PreparedCall(run=run, owners=prime_owners(workspace, inputs, scratch, binding))
 
         declare(session, (self.plan.request(name=name, prepare_call=prepare,
             benchmark_call=partial(benchmark_call, arguments=self.arguments, session=session, workspace=workspace)),))

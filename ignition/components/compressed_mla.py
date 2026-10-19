@@ -40,8 +40,15 @@ class PreparedCompressedCacheWriter:
             slot_dtype=str(slots.dtype).removeprefix("torch.")),
             device=values.device)
         self.cache, self.slots = cache, slots
-        declare(session, (self.plan.request(name=name, prepare_call=lambda state: PreparedCall(
-            run=lambda: state.run(values, cache, slots))),))
+
+        def prepare(state):
+            source = torch.zeros_like(values)
+            target = torch.empty_strided((1, cache.shape[1]), cache.stride(), dtype=cache.dtype, device=cache.device)
+            positions = torch.arange(values.shape[0], dtype=slots.dtype, device=slots.device)
+            positions.masked_fill_(positions >= page_size, -1)
+            return PreparedCall(run=lambda: state.run(source, target, positions))
+
+        declare(session, (self.plan.request(name=name, prepare_call=prepare),))
 
     def __call__(self, values):
         _write(values, self.cache, self.slots, self.plan.handle)
@@ -87,10 +94,12 @@ class PreparedCompressedMLA:
         self.workspace = workspace
 
         def prepare(state):
+            inputs = benchmark_inputs()
             scratch = planned_scratch(state.scratch_specs(), workspace)
-            binding = state.bind_for_preparation(scratch=scratch, **self.inputs)
-            return PreparedCall(run=lambda: state.run(binding, swa_k_cache=window, indexed_k_cache=indexed,
-                attn_sink=sink, sm_scale=self.scale, out=output), owners=prime_owners(workspace, scratch, binding))
+            binding = state.bind_for_preparation(scratch=scratch, **inputs.binding)
+            return PreparedCall(run=lambda: state.run(binding, swa_k_cache=inputs.window, indexed_k_cache=inputs.indexed,
+                attn_sink=inputs.sink, sm_scale=self.scale, out=inputs.out),
+                owners=prime_owners(workspace, inputs, scratch, binding))
 
         benchmark_inputs = candidate_inputs(partial(Inputs, query, window, indexed, self.inputs,
             cache_format, window_page_size, indexed_page_size))

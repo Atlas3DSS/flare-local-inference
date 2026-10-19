@@ -3,6 +3,7 @@ import pytest
 import torch
 from ignition.components.paged_batch import Metadata
 from ignition.preparation.disposable import storage_ranges
+from ignition.preparation.scratch import GraphBufferPool
 
 
 def test_scalar_capacities_preserve_every_metadata_tensor_range():
@@ -14,3 +15,13 @@ def test_scalar_capacities_preserve_every_metadata_tensor_range():
     assert (metadata.sample_indices.data_ptr(), 96) in ranges
     with pytest.raises(TypeError, match='unsupported scratch declaration'):
         storage_ranges((metadata, object()))
+
+
+def test_pool_cursors_include_unreferenced_padding_and_deduplicate_backing():
+    pool = GraphBufferPool("cpu", chunk_bytes=512)
+    cursor = pool.cursor()
+    tensor = cursor.zeros((3,), torch.float32)
+    sibling = cursor.fork()
+    sibling.zeros((1,), torch.int64)
+    assert storage_ranges((cursor, sibling, tensor)) == storage_ranges(pool)
+    assert sum(size for _, size in storage_ranges(cursor)) == 1024
