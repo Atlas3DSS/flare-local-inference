@@ -21,7 +21,7 @@ unqualified.
 ## Rank order and routes
 
 Ranks form the cycle `0,1,...,N-1,0`. The cluster's node list in the
-controller's fleet file gives the rank order: its first node is rank zero.
+controller's orbit file gives the rank order: its first node is rank zero.
 During preparation, each peer's `ignition join --rank` assigns the
 corresponding position.
 
@@ -154,7 +154,7 @@ with `--ranks` for development without package export.
 From the controller, with a cluster listing `maxwell, ampere, faraday, hertz`:
 
 ```sh
-flare fleet run maxwell:/data/flare-runtime/glm53-ring-tp4.safetensors \
+flare orbit run maxwell:/data/flare-runtime/glm53-ring-tp4.safetensors \
   --cluster ring --gpus 0 --roce-ring --host 127.0.0.1 --port 8001
 ```
 

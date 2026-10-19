@@ -8,8 +8,8 @@ peer ranks.
 Every host of a serving group runs the Flare agent, a user service that pairs
 with the operator's controller machine, caches the Flare executable and package
 data, starts the host's rank, supervises it, and streams its output. The
-operator starts and stops groups with `flare fleet` commands from any machine
-with the Flare executable; that machine is not a rank. [Fleet control](fleet.md)
+operator starts and stops groups with `flare orbit` commands from any machine
+with the Flare executable; that machine is not a rank. [Orbit](orbit.md)
 specifies the agent protocol, pairing, grants, and process ownership.
 
 Model preparation runs through `ignition export` on rank zero and `ignition join`
@@ -52,7 +52,7 @@ two rails per peer on a switch or supported point-to-point topology; the package
 does not pin the fabric used during preparation. On Spark, cabled port 0 commonly
 appears as `rocep1s0f0` and `roceP2p1s0f0`.
 
-Agent file transfers use ordinary TCP to the addresses recorded in the fleet
+Agent file transfers use ordinary TCP to the addresses recorded in the orbit
 file at pairing. Choose hostnames or addresses that route over the intended
 transfer network. The RoCE device selection for model collectives does not
 select that TCP route.
@@ -83,10 +83,10 @@ the hub cache or packages outside the cache.
 ## One-time setup: the Flare agent
 
 Every host of a group runs the agent service. The agent holds a node key and a
-list of authorized controllers; a controller holds its own key and a fleet file
+list of authorized controllers; a controller holds its own key and a orbit file
 listing the nodes it paired with and named clusters in rank order. Anyone
 holding an authorized controller key can run code as the service user on every
-node, so keep `~/.config/flare/fleet/controller.key` private.
+node, so keep `~/.config/flare/orbit/controller.key` private.
 
 ### Install the agent on each host
 
@@ -112,21 +112,21 @@ the service stops any rank it runs.
 
 ### Pair from the controller
 
-On the machine that will control the fleet, pair with each host using the code
+On the machine that will control the orbit, pair with each host using the code
 its installation printed:
 
 ```sh
-flare fleet pair maxwell hertz faraday ampere --code ABCD-EFGH-IJKL-MNOP-QRST-UVWX-YZ23-4567
+flare orbit pair maxwell hertz faraday ampere --code ABCD-EFGH-IJKL-MNOP-QRST-UVWX-YZ23-4567
 ```
 
 Pairing creates the controller key on first use, proves the join code to each
 node inside the encrypted session, records each node's name, fingerprint,
-public key, and address in `~/.config/flare/fleet.toml`, and installs the
+public key, and address in `~/.config/flare/orbit.toml`, and installs the
 controller as the node's authorized controller. Compare the fingerprints it
 prints with what each host printed at installation. Hosts installed with
 `--accept-first` pair without `--code`.
 
-Then name a cluster in the fleet file, listing nodes in rank order:
+Then name a cluster in the orbit file, listing nodes in rank order:
 
 ```toml
 [cluster.sparks]
@@ -134,12 +134,12 @@ nodes = ["maxwell", "hertz", "faraday", "ampere"]
 ```
 
 The first node is rank zero. With `--roce-ring`, the order is also the ring.
-`flare fleet status --cluster sparks` shows every node's free disk, controller
-revision, and running group. A fleet with one cluster needs no `--cluster`.
+`flare orbit status --cluster sparks` shows every node's free disk, controller
+revision, and running group. An orbit with one cluster needs no `--cluster`.
 
-To let another machine control the same fleet, run
-`flare fleet controllers add NAME PUBLIC_KEY` with the other controller's
-public key (the hex in its own fleet file); `flare fleet controllers remove KEY`
+To let another machine control the same orbit, run
+`flare orbit controllers add NAME PUBLIC_KEY` with the other controller's
+public key (the hex in its own orbit file); `flare orbit controllers remove KEY`
 revokes it. `flare agent reset` on a host forgets its controllers so it can be
 paired again.
 
@@ -175,7 +175,7 @@ scale planes retain their exact encoding and existing selection rules.
 
 Preparation uses `[preparation] checkpoint_token_file`, defaulting to
 `~/.config/flare/agent.token`, for mutual authentication and sequenced HMAC frames.
-Provision this shared preparation token separately from the fleet's node and
+Provision this shared preparation token separately from the orbit's node and
 controller keys. Install identical contents of at least 32 random bytes on every
 preparation host, with file permissions `600`. Checkpoint paths,
 contents, and byte counts are authenticated; checkpoint bytes are not encrypted.
@@ -202,7 +202,7 @@ diagnosing scheduling-dependent faults. These flags change the prepared graphs.
 From the controller, start the package on the cluster:
 
 ```sh
-flare fleet run maxwell:/data/flare-runtime/glm53-spark-tp2.safetensors \
+flare orbit run maxwell:/data/flare-runtime/glm53-spark-tp2.safetensors \
   --cluster sparks --gpus 0 --host 0.0.0.0 --port 8000
 ```
 
@@ -210,13 +210,13 @@ flare fleet run maxwell:/data/flare-runtime/glm53-spark-tp2.safetensors \
 preparation wrote it. A plain path names a package on the controller, which is
 then sent to rank zero's host. The cluster's node count must match the
 package's prepared rank count. Without `--cluster`, the controller places the
-ranks on free GPUs of the right kind anywhere in the fleet, preferring nodes
+ranks on free GPUs of the right kind anywhere in the orbit, preferring nodes
 whose caches already hold their rank; `--nodes` names candidates in rank
 order, `--name` names the group for `attach`, `stop` and `ls`, and
 `--dry-run` prints the placement without starting anything. A `[[group]]` in
-the fleet file supplies the package, serving options and constraints for a
-name, so `flare fleet run --name ds41` is a complete command; see
-[fleet control](fleet.md#desired-state).
+the orbit file supplies the package, serving options and constraints for a
+name, so `flare orbit run --name ds41` is a complete command; see
+[orbit](orbit.md#desired-state).
 
 The controller verifies the package's signed index and obtains publisher
 acceptance at its own terminal, then passes the accepted publisher profile and
@@ -258,8 +258,8 @@ files whose cache names and sizes match, avoiding another transfer.
 Every rank's output appears on the controller's terminal with a `[rank R name]`
 prefix. Ctrl-C stops the group: rank zero receives SIGTERM first and drains
 native work, then peers still running after thirty seconds are stopped.
-`--detach` returns once every rank has started; `flare fleet attach` shows a
-running group's output, `flare fleet stop` stops it, and `flare fleet
+`--detach` returns once every rank has started; `flare orbit attach` shows a
+running group's output, `flare orbit stop` stops it, and `flare orbit
 dashboard` shows the live metrics dashboard for every group and GPU on the
 cluster. A controller that
 disconnects, sleeps, or crashes does not stop the group; agents keep the last
@@ -285,11 +285,11 @@ distribution and process management to the operator.
 
 | Error or symptom | Check |
 | --- | --- |
-| `cannot reach flare agent` | The service is running on the host; the address in the fleet file, route, and firewall allow the controller and the other hosts to connect. |
-| `is not an authorized controller of this node` | The node was paired with a different controller key; pair it, or add this controller with `flare fleet controllers add` from a controller it knows. |
+| `cannot reach flare agent` | The service is running on the host; the address in the orbit file, route, and firewall allow the controller and the other hosts to connect. |
+| `is not an authorized controller of this node` | The node was paired with a different controller key; pair it, or add this controller with `flare orbit controllers add` from a controller it knows. |
 | `join code proof rejected` or `this node requires its join code` | The code matches what `flare agent install` printed and has not expired or been used. |
 | `peer speaks agent protocol N` | Every node and the controller run the same Flare build; run `flare agent install` with the matching executable. |
-| `group ... is running on this node` | Stop the running group with `flare fleet stop` before starting another. |
+| `group ... is running on this node` | Stop the running group with `flare orbit stop` before starting another. |
 | `checkpoint peer authentication failed` | All preparation hosts use the same private checkpoint token. |
 | `checkpoint source changed after admission` | Checkpoint source files remain unchanged throughout preparation. |
 | `rank zero refused rank R` | Every serving rank uses the same package export and world size. |

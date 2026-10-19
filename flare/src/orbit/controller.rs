@@ -1,5 +1,5 @@
-//! The controller side of fleet control: pairing nodes, distributing the controller set, and
-//! launching, attaching to, and stopping serving groups. See docs/fleet.md.
+//! The controller side of orbit control: pairing nodes, distributing the controller set, and
+//! launching, attaching to, and stopping serving groups. See docs/orbit.md.
 //!
 //! A launch verifies the package at the controller, where the operator accepts its publisher;
 //! checks every node's STATUS; issues a grant in the cluster's rank order; gives every node the
@@ -34,7 +34,7 @@ use super::grant::{ControllerKey, ControllerSet, Grant, Member, Package, Signed,
 use super::identity::{Key, PublicKey};
 use super::plan;
 use super::session::{FRAME_LIMIT, Session};
-use super::store::{Fleet, Node, join_key};
+use super::store::{Node, Orbit, join_key};
 use super::{
     Failure, PROTOCOL_VERSION, frame, hex, hmac_sha256, hostname, now, random, unhex, with_port,
 };
@@ -141,9 +141,9 @@ impl NodeStatus {
     }
 }
 
-/// Options of `flare fleet run`.
+/// Options of `flare orbit run`.
 pub struct RunOptions {
-    /// The operator's name for the group, and the fleet file's `[[group]]` of that name when
+    /// The operator's name for the group, and the orbit file's `[[group]]` of that name when
     /// one exists; the cluster's name or the package's stem when absent.
     pub name: Option<String>,
     /// Candidate nodes in rank order; empty leaves them to the cluster, the group, or the pool.
@@ -177,13 +177,16 @@ pub struct LaunchOptions {
     pub serving: Vec<String>,
     pub rank_zero: Vec<String>,
     pub roce_ring: bool,
+    /// Place and verify the package on the members without sending the executable or
+    /// starting ranks; the returned launch then has no rank sessions.
+    pub stage_only: bool,
 }
 
-/// A `flare fleet run` package argument.
+/// A `flare orbit run` package argument.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PackageReference {
     Local(PathBuf),
-    /// A package a fleet node holds at an absolute path.
+    /// A package a orbit node holds at an absolute path.
     Node {
         node: String,
         path: String,
@@ -258,51 +261,51 @@ pub struct RankEnd {
     pub result: Result<i32, String>,
 }
 
-/// The controlling machine's identity and fleet file.
+/// The controlling machine's identity and orbit file.
 pub struct Controller {
     key: Key,
-    fleet: Fleet,
-    fleet_path: PathBuf,
+    orbit: Orbit,
+    orbit_path: PathBuf,
     name: String,
 }
 
 impl Controller {
-    /// Load the controller key, creating it on first use, and the fleet file.
-    pub fn open(fleet_path: Option<&Path>, key_path: Option<&Path>) -> Result<Self, Failure> {
-        let key_path = key_path.map_or_else(Fleet::default_key_path, Path::to_path_buf);
-        let fleet_path = fleet_path.map_or_else(Fleet::default_path, Path::to_path_buf);
+    /// Load the controller key, creating it on first use, and the orbit file.
+    pub fn open(orbit_path: Option<&Path>, key_path: Option<&Path>) -> Result<Self, Failure> {
+        let key_path = key_path.map_or_else(Orbit::default_key_path, Path::to_path_buf);
+        let orbit_path = orbit_path.map_or_else(Orbit::default_path, Path::to_path_buf);
         let key = Key::load_or_create(&key_path)
             .map_err(|e| format!("controller key {}: {e}", key_path.display()))?;
-        let fleet = Fleet::load(&fleet_path)?;
-        Ok(Self::new(key, fleet, fleet_path))
+        let orbit = Orbit::load(&orbit_path)?;
+        Ok(Self::new(key, orbit, orbit_path))
     }
 
-    /// A controller with this key and fleet, saving the fleet to `fleet_path`.
-    pub fn new(key: Key, fleet: Fleet, fleet_path: PathBuf) -> Self {
+    /// A controller with this key and orbit, saving the orbit to `orbit_path`.
+    pub fn new(key: Key, orbit: Orbit, orbit_path: PathBuf) -> Self {
         Self {
             key,
-            fleet,
-            fleet_path,
+            orbit,
+            orbit_path,
             name: hostname(),
         }
     }
 
     fn save(&self) -> Result<(), Failure> {
-        self.fleet.save(&self.fleet_path)
+        self.orbit.save(&self.orbit_path)
     }
 
     fn revision(&self) -> Result<u64, Failure> {
-        Ok(self.fleet.controller_set()?.map_or(0, |set| set.revision))
+        Ok(self.orbit.controller_set()?.map_or(0, |set| set.revision))
     }
 
-    /// The fleet file's nodes of a cluster, in rank order.
+    /// The orbit file's nodes of a cluster, in rank order.
     pub fn cluster_nodes(&self, name: Option<&str>) -> Result<(String, Vec<Node>), Failure> {
         self.cluster(name)
     }
 
-    /// The fleet file's nodes of a cluster, in rank order.
+    /// The orbit file's nodes of a cluster, in rank order.
     fn cluster(&self, name: Option<&str>) -> Result<(String, Vec<Node>), Failure> {
-        let (name, nodes) = self.fleet.cluster(name)?;
+        let (name, nodes) = self.orbit.cluster(name)?;
         Ok((name, nodes.into_iter().cloned().collect()))
     }
 
@@ -341,12 +344,12 @@ impl Controller {
         Ok((session, hello))
     }
 
-    /// Send the fleet file's controller-set record to a paired node holding an older revision,
+    /// Send the orbit file's controller-set record to a paired node holding an older revision,
     /// and return the revision the node holds afterwards. An unpaired node becomes paired only
     /// through PAIR, so it never receives the record here.
     fn synchronize(&self, session: &mut Session, hello: &Hello) -> Result<u64, Failure> {
         let ours = self.revision()?;
-        let Some(record) = self.fleet.controllers.as_ref() else {
+        let Some(record) = self.orbit.controllers.as_ref() else {
             return Ok(hello.controllers_revision);
         };
         if hello.controllers_revision == 0 || hello.controllers_revision >= ours {
@@ -362,7 +365,7 @@ impl Controller {
 
     // ---- pairing and the controller set --------------------------------------------------------
 
-    /// Pair with the agents at `hosts` and record them in the fleet file. With `code`, both sides
+    /// Pair with the agents at `hosts` and record them in the orbit file. With `code`, both sides
     /// prove the join code inside the session; without it, each node must accept the first
     /// controller. Prints each node's name and fingerprint for comparison with what
     /// `flare agent install` printed on the host.
@@ -382,16 +385,16 @@ impl Controller {
                 }
             }
         }
-        if self.fleet.cluster.is_empty() && self.fleet.node.len() >= 2 {
+        if self.orbit.cluster.is_empty() && self.orbit.node.len() >= 2 {
             let names: Vec<String> = self
-                .fleet
+                .orbit
                 .node
                 .iter()
                 .map(|n| format!("{:?}", n.name))
                 .collect();
             println!(
                 "\nTo launch on these nodes, list them in rank order as a cluster in {}:\n\n[cluster.NAME]\nnodes = [{}]",
-                self.fleet_path.display(),
+                self.orbit_path.display(),
                 names.join(", ")
             );
         }
@@ -410,14 +413,14 @@ impl Controller {
         let (mut session, hello) = self.handshake(address)?;
         let key = session.remote();
         if let Some(known) = self
-            .fleet
+            .orbit
             .node
             .iter()
             .find(|n| n.name == hello.name && n.public_key != key.to_hex())
         {
             return Err(format!(
-                "the fleet file records another node named {} (fingerprint {}); remove it with \
-                 `flare fleet forget {}` before pairing this host",
+                "the orbit file records another node named {} (fingerprint {}); remove it with \
+                 `flare orbit forget {}` before pairing this host",
                 known.name, known.fingerprint, known.name
             )
             .into());
@@ -456,15 +459,15 @@ impl Controller {
             public_key: key.to_hex(),
             address: address.to_owned(),
         };
-        self.fleet.upsert(node.clone());
+        self.orbit.upsert(node.clone());
         self.save()?;
         Ok(node)
     }
 
-    /// The fleet file's controller-set record, created at revision 1 with this controller alone
-    /// when the fleet file has none.
+    /// The orbit file's controller-set record, created at revision 1 with this controller alone
+    /// when the orbit file has none.
     fn ensure_record(&mut self) -> Result<Signed, Failure> {
-        if let Some(record) = &self.fleet.controllers {
+        if let Some(record) = &self.orbit.controllers {
             return Ok(record.clone());
         }
         let set = ControllerSet {
@@ -475,7 +478,7 @@ impl Controller {
             }],
         };
         let record = Signed::sign(&self.key, &set)?;
-        self.fleet.controllers = Some(record.clone());
+        self.orbit.controllers = Some(record.clone());
         self.save()?;
         Ok(record)
     }
@@ -499,13 +502,13 @@ impl Controller {
         format!(
             "this controller ({}) is not in the controller set of {}",
             self.key.public().fingerprint(),
-            self.fleet_path.display()
+            self.orbit_path.display()
         )
         .into()
     }
 
     /// Authorize another controller, given its public key as hex: write the next controller-set
-    /// revision, signed by this controller, and send it to every node in the fleet file.
+    /// revision, signed by this controller, and send it to every node in the orbit file.
     pub fn controllers_add(&mut self, name: &str, public_key: &str) -> Result<(), Failure> {
         let key = PublicKey::from_hex(public_key.trim())
             .map_err(|e| format!("controller public key: {e}"))?;
@@ -551,9 +554,9 @@ impl Controller {
         change: impl FnOnce(&mut Vec<ControllerKey>) -> Result<(), Failure>,
     ) -> Result<(), Failure> {
         let set = self
-            .fleet
+            .orbit
             .controller_set()?
-            .ok_or("the fleet file has no controller set; pair a node first")?;
+            .ok_or("the orbit file has no controller set; pair a node first")?;
         if !set.contains(&self.key.public()) {
             return Err(self.not_a_member());
         }
@@ -566,7 +569,7 @@ impl Controller {
             revision: set.revision + 1,
             keys,
         };
-        self.fleet.controllers = Some(Signed::sign(&self.key, &next)?);
+        self.orbit.controllers = Some(Signed::sign(&self.key, &next)?);
         self.save()?;
         println!("controller set revision {}:", next.revision);
         for key in &next.keys {
@@ -577,10 +580,10 @@ impl Controller {
         Ok(())
     }
 
-    /// Bring every node in the fleet file to the fleet file's controller-set revision, reporting
+    /// Bring every node in the orbit file to the orbit file's controller-set revision, reporting
     /// nodes that cannot be reached; those receive it when any controller next connects.
     fn distribute(&self) {
-        let nodes = &self.fleet.node;
+        let nodes = &self.orbit.node;
         let results = parallel(nodes, |_, node| self.node_session(node));
         for (node, result) in nodes.iter().zip(results) {
             match result {
@@ -592,12 +595,12 @@ impl Controller {
         }
     }
 
-    /// Remove a node from the fleet file. Clusters that list it fail to resolve until edited.
+    /// Remove a node from the orbit file. Clusters that list it fail to resolve until edited.
     pub fn forget(&mut self, name: &str) -> Result<(), Failure> {
-        let before = self.fleet.node.len();
-        self.fleet.node.retain(|n| n.name != name);
-        if self.fleet.node.len() == before {
-            return Err(format!("the fleet file has no node named {name}").into());
+        let before = self.orbit.node.len();
+        self.orbit.node.retain(|n| n.name != name);
+        if self.orbit.node.len() == before {
+            return Err(format!("the orbit file has no node named {name}").into());
         }
         self.save()
     }
@@ -740,7 +743,7 @@ impl Controller {
 
     // ---- launching -----------------------------------------------------------------------------
 
-    /// `flare fleet run`: launch a package on a cluster, then follow its output and stop the group
+    /// `flare orbit run`: launch a package on a cluster, then follow its output and stop the group
     /// on Ctrl-C, or, with `detach`, return once every rank has started.
     pub fn run(
         &self,
@@ -748,20 +751,20 @@ impl Controller {
         cluster: Option<&str>,
         mut options: RunOptions,
     ) -> Result<(), Failure> {
-        // A [[group]] of the fleet file supplies what the command line leaves out: its package,
+        // A [[group]] of the orbit file supplies what the command line leaves out: its package,
         // its serving options before the command line's, its rank-zero options after them, and
         // its node and GPU constraints.
         let spec = options
             .name
             .as_deref()
-            .and_then(|name| self.fleet.group(name))
+            .and_then(|name| self.orbit.group(name))
             .cloned();
         let package = match (package, &spec) {
             (Some(package), _) => package.to_owned(),
             (None, Some(spec)) => spec.package.clone(),
             (None, None) => {
                 return Err(
-                    "PACKAGE is required unless --name names a [[group]] of the fleet file".into(),
+                    "PACKAGE is required unless --name names a [[group]] of the orbit file".into(),
                 );
             }
         };
@@ -773,7 +776,7 @@ impl Controller {
         } else if let Some(spec) = spec.as_ref().filter(|s| !s.nodes.is_empty()) {
             (spec.name.clone(), spec.nodes.clone())
         } else {
-            ("fleet".into(), Vec::new())
+            ("orbit".into(), Vec::new())
         };
         let name = options.name.clone().unwrap_or_else(|| {
             if cluster.is_some() {
@@ -805,26 +808,31 @@ impl Controller {
         let executable = read_executable(options.executable.as_deref())?;
         let resolved = self.resolve_package(&package, &mut options.run_args, verify_weights)?;
 
-        // The pool: the candidates in order, or every node of the fleet that answers.
+        // The banner circles while the nodes are read and the group placed; nothing else is
+        // printed until it has completed a revolution.
+        let banner = super::banner::Banner::start();
+
+        // The pool: the candidates in order, or every node of the orbit that answers.
         let pool: Vec<Node> = if candidates.is_empty() {
-            self.fleet.node.clone()
+            self.orbit.node.clone()
         } else {
             candidates
                 .iter()
                 .map(|name| {
-                    self.fleet
+                    self.orbit
                         .node(name)
                         .cloned()
-                        .ok_or_else(|| format!("the fleet file has no node named {name}").into())
+                        .ok_or_else(|| format!("the orbit file has no node named {name}").into())
                 })
                 .collect::<Result<_, Failure>>()?
         };
         if pool.is_empty() {
-            return Err("the fleet file lists no nodes; pair some first".into());
+            return Err("the orbit file lists no nodes; pair some first".into());
         }
         let results = parallel(&pool, |_, node| self.query_status(node, None));
         let mut nodes = Vec::new();
         let mut statuses = Vec::new();
+        let mut skipped = Vec::new();
         for (node, result) in pool.into_iter().zip(results) {
             match result {
                 Ok(status) => {
@@ -832,7 +840,7 @@ impl Controller {
                     statuses.push(status);
                 }
                 Err(error) if candidates.is_empty() => {
-                    eprintln!("{}: not a candidate: {error}", node.name)
+                    skipped.push(format!("{}: not a candidate: {error}", node.name))
                 }
                 Err(error) => return Err(at(&node.name, error)),
             }
@@ -857,7 +865,14 @@ impl Controller {
             nodes: candidates.clone(),
             gpus,
         };
-        let placements = plan::plan(&needs, &names, &statuses, &constraints)?;
+        let placements = plan::plan(&needs, &names, &statuses, &constraints);
+        if let Some(banner) = banner {
+            banner.finish();
+        }
+        for line in &skipped {
+            eprintln!("{line}");
+        }
+        let placements = placements?;
         eprintln!(
             "placement of {} ({}, {}):\n{}",
             name,
@@ -885,6 +900,7 @@ impl Controller {
                 serving,
                 rank_zero: rank_zero.clone(),
                 roce_ring,
+                stage_only: false,
             },
         )?;
         eprintln!(
@@ -895,11 +911,123 @@ impl Controller {
         );
         if options.detach {
             eprintln!(
-                "`flare fleet attach {name}` follows its output; `flare fleet stop {name}` stops it"
+                "`flare orbit attach {name}` follows its output; `flare orbit stop {name}` stops it"
             );
             return Ok(());
         }
         self.supervise(launch)
+    }
+
+    /// `flare orbit push`: place a package's ranks on nodes, in rank order, or its complete
+    /// copy on one node, verifying it there, without starting anything.
+    pub fn push(
+        &self,
+        package: &str,
+        to: &[String],
+        run_args: &mut crate::cli::Run,
+    ) -> Result<(), Failure> {
+        let resolved = self.resolve_package(package, run_args, false)?;
+        let world = resolved.ranks.len();
+        let nodes: Vec<Node> = to
+            .iter()
+            .map(|name| {
+                self.orbit
+                    .node(name)
+                    .cloned()
+                    .ok_or_else(|| format!("the orbit file has no node named {name}").into())
+            })
+            .collect::<Result<_, Failure>>()?;
+        let name = Path::new(package)
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "package".into());
+        let options = LaunchOptions {
+            name: format!("push-{name}"),
+            placements: vec![Vec::new(); world],
+            stage_only: true,
+            ..LaunchOptions::default()
+        };
+        if nodes.len() == world {
+            let launch = self.launch("push", &nodes, &resolved, &[], &options)?;
+            eprintln!(
+                "{} staged on {}",
+                launch.grant.name,
+                nodes
+                    .iter()
+                    .enumerate()
+                    .map(|(rank, n)| format!("{} (rank {rank})", n.name))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            return Ok(());
+        }
+        // Fewer or more nodes than ranks: each listed node gets the complete package, which
+        // serves rank zero of a multi-host package or a single-host package entirely.
+        let complete = ResolvedPackage {
+            ranks: vec![
+                resolved
+                    .files
+                    .iter()
+                    .map(|f| RankFile {
+                        name: f.name.clone(),
+                        size: f.size,
+                        ranges: vec![(0, f.size)],
+                    })
+                    .collect(),
+            ],
+            ..resolved.clone()
+        };
+        let options = LaunchOptions {
+            placements: vec![Vec::new()],
+            ..options
+        };
+        for node in &nodes {
+            if let Holder::Node { node: holder, .. } = &resolved.holder
+                && holder.public_key == node.public_key
+            {
+                eprintln!("{}: holds the package", node.name);
+                continue;
+            }
+            self.launch("push", std::slice::from_ref(node), &complete, &[], &options)?;
+            eprintln!("{}: complete package staged", node.name);
+        }
+        Ok(())
+    }
+
+    /// Print what every node of a cluster holds in its package cache.
+    pub fn packages(&self, cluster: Option<&str>) -> Result<(), Failure> {
+        let (name, nodes) = self.cluster(cluster)?;
+        let results = parallel(&nodes, |_, node| self.query_status(node, None));
+        println!("cluster {name}");
+        println!(
+            "{:<10}  {:<52}  {:>5}  {:>10}  STATE",
+            "NODE", "PACKAGE", "FILES", "ON DISK"
+        );
+        for (node, result) in nodes.iter().zip(results) {
+            match result {
+                Ok(status) if status.packages.is_empty() => {
+                    println!("{:<10}  -", node.name)
+                }
+                Ok(status) => {
+                    for package in &status.packages {
+                        println!(
+                            "{:<10}  {:<52}  {:>5}  {:>10}  {}",
+                            node.name,
+                            package.name,
+                            package.files.len(),
+                            gib(package.bytes),
+                            if package.verified {
+                                "verified"
+                            } else {
+                                "unverified"
+                            }
+                        );
+                    }
+                }
+                Err(error) => println!("{:<10}  unreachable: {error}", node.name),
+            }
+        }
+        Ok(())
     }
 
     /// Resolve and verify a package reference, obtaining publisher acceptance at this terminal,
@@ -914,10 +1042,10 @@ impl Controller {
     ) -> Result<ResolvedPackage, Failure> {
         // The controller computes every rank's ranges, so it verifies every rank's index.
         run_args.rank = None;
-        match parse_package_reference(reference, |name| self.fleet.node(name).is_some()) {
+        match parse_package_reference(reference, |name| self.orbit.node(name).is_some()) {
             PackageReference::Local(path) => {
                 let primary = path.canonicalize().map_err(|e| {
-                    format!("cannot access package {reference}: {e}; a node-held package is NODE:/ABSOLUTE/PATH with NODE a fleet node")
+                    format!("cannot access package {reference}: {e}; a node-held package is NODE:/ABSOLUTE/PATH with NODE a orbit node")
                 })?;
                 run_args.serving.verify_weights = verify_weights;
                 let (authorized, publisher) = verify(&primary, run_args)?;
@@ -932,9 +1060,9 @@ impl Controller {
             }
             PackageReference::Node { node, path } => {
                 let node = self
-                    .fleet
+                    .orbit
                     .node(&node)
-                    .ok_or_else(|| format!("the fleet file has no node named {node}"))?
+                    .ok_or_else(|| format!("the orbit file has no node named {node}"))?
                     .clone();
                 let mirror = Mirror::create()?;
                 let primary = self
@@ -1043,7 +1171,11 @@ impl Controller {
         let (mut sessions, statuses): (Vec<Session>, Vec<NodeStatus>) =
             all(opened)?.into_iter().unzip();
         let placements = &options.placements;
-        for (rank, placement) in placements.iter().enumerate() {
+        for (rank, placement) in placements
+            .iter()
+            .enumerate()
+            .filter(|_| !options.stage_only)
+        {
             for uuid in placement {
                 match statuses[rank].gpus.iter().find(|g| &g.uuid == uuid) {
                     Some(gpu) => {
@@ -1125,7 +1257,8 @@ impl Controller {
         all(parallel_mut(&mut sessions, |rank, session| {
             (|| -> Result<(), Failure> {
                 let mut needed = 0;
-                let send_binary = !have(session, "binary", &binary, executable.len() as u64)?;
+                let send_binary = !options.stage_only
+                    && !have(session, "binary", &binary, executable.len() as u64)?;
                 if send_binary {
                     needed += executable.len() as u64;
                 }
@@ -1203,6 +1336,12 @@ impl Controller {
             .map_err(|e| at(&nodes[rank].name, e))
         }))?;
 
+        if options.stage_only {
+            return Ok(Launch {
+                grant,
+                ranks: Vec::new(),
+            });
+        }
         // Transfers can outlast a grant's launch window, so RUN carries a grant issued now.
         grant.issued = now();
         grant.expires = grant.issued + GRANT_SECONDS;
@@ -1897,7 +2036,7 @@ struct Mirror(PathBuf);
 impl Mirror {
     fn create() -> Result<Self, Failure> {
         let path = std::env::temp_dir().join(format!(
-            "flare-fleet-{}-{}",
+            "flare-orbit-{}-{}",
             std::process::id(),
             hex(&random(4)?)
         ));
@@ -2115,7 +2254,7 @@ fn parallel_mut<T: Send, R: Send>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fleet::agent::tests::{harness, pair_accept_first};
+    use crate::orbit::agent::tests::{harness, pair_accept_first};
     use std::sync::Arc;
 
     /// A controller over two in-process agents paired with its key, a script as the executable,
@@ -2125,7 +2264,7 @@ mod tests {
     #[test]
     fn launching_places_the_executable_and_package_and_runs_every_rank() {
         let zero = harness(21);
-        let one = crate::fleet::agent::tests::Harness {
+        let one = crate::orbit::agent::tests::Harness {
             controller: Key::from_seed(&[21; 32]).unwrap(),
             ..harness(22)
         };
@@ -2133,32 +2272,32 @@ mod tests {
             let mut session = pair_accept_first(&zero);
             session.request(frame::STATUS, &json!({})).unwrap();
             pair_accept_first(&one);
-            crate::fleet::agent::tests::record(&zero.controller)
+            crate::orbit::agent::tests::record(&zero.controller)
         };
         let temp = tempfile::tempdir().unwrap();
-        let node = |h: &crate::fleet::agent::tests::Harness, name: &str| Node {
+        let node = |h: &crate::orbit::agent::tests::Harness, name: &str| Node {
             name: name.into(),
             fingerprint: h.agent.key.public().fingerprint(),
             public_key: h.agent.key.public().to_hex(),
             address: h.address.clone(),
         };
         let nodes = vec![node(&zero, "zero"), node(&one, "one")];
-        let mut fleet = Fleet {
+        let mut orbit = Orbit {
             controllers: Some(record),
             node: nodes.clone(),
             cluster: Default::default(),
             group: Vec::new(),
         };
-        fleet.cluster.insert(
+        orbit.cluster.insert(
             "pair".into(),
-            crate::fleet::store::Cluster {
+            crate::orbit::store::Cluster {
                 nodes: vec!["zero".into(), "one".into()],
             },
         );
         let controller = Controller::new(
             Key::from_seed(&[21; 32]).unwrap(),
-            fleet,
-            temp.path().join("fleet.toml"),
+            orbit,
+            temp.path().join("orbit.toml"),
         );
 
         let primary = temp.path().join("model.safetensors");
@@ -2214,6 +2353,7 @@ mod tests {
                     serving: vec![],
                     rank_zero: vec!["--port".into(), "8001".into()],
                     roce_ring: true,
+                    stage_only: false,
                 },
             )
             .unwrap();
@@ -2261,6 +2401,46 @@ mod tests {
         assert!(zero.agent.cache.join("bin").join(&binary).is_file());
         assert!(one.agent.cache.join("bin").join(&binary).is_file());
 
+        // Staging places and verifies the package without executables or ranks.
+        let staged = ResolvedPackage {
+            export: "export2".into(),
+            ..package.clone()
+        };
+        let launch = controller
+            .launch(
+                "push",
+                &nodes,
+                &staged,
+                &[],
+                &LaunchOptions {
+                    name: "push-model".into(),
+                    placements: vec![vec![], vec![]],
+                    stage_only: true,
+                    ..LaunchOptions::default()
+                },
+            )
+            .unwrap();
+        assert!(launch.ranks.is_empty());
+        assert_eq!(launch.grant.name, "push-model");
+        assert_eq!(
+            fs::read(zero.agent.cache.join(format!(
+                "packages/{}/model.safetensors",
+                launch.grant.complete_directory()
+            )))
+            .unwrap(),
+            bytes
+        );
+        let staged_rank = one.agent.cache.join(format!(
+            "packages/{}/model.safetensors",
+            launch.grant.cache_directory(1)
+        ));
+        assert_eq!(
+            fs::read(&staged_rank).unwrap()[40_000..48_000],
+            bytes[40_000..48_000]
+        );
+        assert!(staged_rank.with_file_name(".verified").is_file());
+        assert_eq!(one.verified.lock().unwrap().len(), 2);
+
         // A second launch is refused while a group runs; after exit it reuses the cache.
         let again = controller
             .launch(
@@ -2295,7 +2475,7 @@ mod tests {
     }
 
     #[test]
-    fn package_references_name_a_fleet_node_and_an_absolute_path() {
+    fn package_references_name_an_orbit_node_and_an_absolute_path() {
         let is_node = |name: &str| name == "maxwell";
         assert_eq!(
             parse_package_reference("maxwell:/data/glm.safetensors", is_node),

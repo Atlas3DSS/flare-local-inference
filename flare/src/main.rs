@@ -3,11 +3,11 @@
 mod cli;
 mod cluster;
 mod environment;
-#[cfg(unix)]
-mod fleet;
 mod hardware;
 mod hub;
 mod identity;
+#[cfg(unix)]
+mod orbit;
 mod trust;
 #[cfg(windows)]
 mod windows;
@@ -44,29 +44,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err("multi-host serving is not supported on Windows".into());
         }
         #[cfg(windows)]
-        cli::Command::Fleet(_) => {
-            return Err("fleet control is not supported on Windows".into());
+        cli::Command::Orbit(_) => {
+            return Err("orbit is not supported on Windows".into());
         }
         #[cfg(unix)]
         cli::Command::Agent(agent_args) => {
             return match agent_args.command {
-                None => fleet::agent::serve(
+                None => orbit::agent::serve(
                     &agent_args.listen,
-                    fleet::store::AgentDir::new(fleet::store::AgentDir::default_root()),
-                    fleet::cache::default_root(),
+                    orbit::store::AgentDir::new(orbit::store::AgentDir::default_root()),
+                    orbit::cache::default_root(),
                 ),
                 Some(cli::AgentCommand::Install {
                     join_code,
                     accept_first,
                     listen,
-                }) => fleet::agent::install(&listen, join_code.as_deref(), accept_first),
-                Some(cli::AgentCommand::Reset) => fleet::agent::reset(),
+                }) => orbit::agent::install(&listen, join_code.as_deref(), accept_first),
+                Some(cli::AgentCommand::Reset) => orbit::agent::reset(),
             }
             .map_err(|e| e.to_string().into());
         }
         #[cfg(unix)]
-        cli::Command::Fleet(fleet_args) => {
-            return fleet_command(fleet_args).map_err(|e| e.to_string().into());
+        cli::Command::Orbit(orbit_args) => {
+            return orbit_command(orbit_args).map_err(|e| e.to_string().into());
         }
         cli::Command::Trust {
             command:
@@ -192,35 +192,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     serve(owner, config, progress, cluster, roce_ring)
 }
 
-/// Run one `flare fleet` command as the controller on this machine.
+/// Run one `flare orbit` command as the controller on this machine.
 #[cfg(unix)]
-fn fleet_command(args: cli::FleetArgs) -> Result<(), fleet::Failure> {
+fn orbit_command(args: cli::OrbitArgs) -> Result<(), orbit::Failure> {
     let mut controller =
-        fleet::controller::Controller::open(args.fleet_file.as_deref(), args.key_file.as_deref())?;
+        orbit::controller::Controller::open(args.orbit_file.as_deref(), args.key_file.as_deref())?;
     match args.command {
-        cli::FleetCommand::Pair { hosts, code } => controller.pair(&hosts, code.as_deref()),
-        cli::FleetCommand::Controllers {
+        cli::OrbitCommand::Pair { hosts, code } => controller.pair(&hosts, code.as_deref()),
+        cli::OrbitCommand::Controllers {
             command: cli::ControllersCommand::Add { name, key },
         } => controller.controllers_add(&name, &key),
-        cli::FleetCommand::Controllers {
+        cli::OrbitCommand::Controllers {
             command: cli::ControllersCommand::Remove { key },
         } => controller.controllers_remove(&key),
-        cli::FleetCommand::Status { cluster } => controller.status(cluster.as_deref()),
-        cli::FleetCommand::Ls { cluster } => controller.ls(cluster.as_deref()),
-        cli::FleetCommand::Dashboard { cluster } => {
-            fleet::dashboard::run(&controller, cluster.as_deref())
+        cli::OrbitCommand::Status { cluster } => controller.status(cluster.as_deref()),
+        cli::OrbitCommand::Ls { cluster } => controller.ls(cluster.as_deref()),
+        cli::OrbitCommand::Dashboard { cluster } => {
+            orbit::dashboard::run(&controller, cluster.as_deref())
         }
-        cli::FleetCommand::Attach { cluster, group } => {
+        cli::OrbitCommand::Attach { cluster, group } => {
             controller.attach(cluster.as_deref(), group.as_deref())
         }
-        cli::FleetCommand::Stop { cluster, group } => {
+        cli::OrbitCommand::Stop { cluster, group } => {
             controller.stop(cluster.as_deref(), group.as_deref())
         }
-        cli::FleetCommand::Forget { node } => controller.forget(&node),
-        cli::FleetCommand::Run(run) => controller.run(
+        cli::OrbitCommand::Forget { node } => controller.forget(&node),
+        cli::OrbitCommand::Push(push) => {
+            controller.push(&push.package, &push.to, &mut push.run_args())
+        }
+        cli::OrbitCommand::Packages { cluster } => controller.packages(cluster.as_deref()),
+        cli::OrbitCommand::Run(run) => controller.run(
             run.package.as_deref(),
             run.cluster.as_deref(),
-            fleet::controller::RunOptions {
+            orbit::controller::RunOptions {
                 name: run.name.clone(),
                 nodes: run.nodes.clone(),
                 dry_run: run.dry_run,

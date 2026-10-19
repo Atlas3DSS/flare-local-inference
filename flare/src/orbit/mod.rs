@@ -1,14 +1,15 @@
-//! Fleet control: resident agents on every host of a tensor-parallel group, and the controller
+//! Orbit: resident agents on every host of a tensor-parallel group, and the controller
 //! commands that pair with them, move executables and packages, and run, attach to and stop
-//! groups from any machine. See docs/fleet.md.
+//! groups from any machine. See docs/orbit.md.
 //!
 //! Every connection, controller to node and node to node, is an encrypted session between two
 //! Ed25519 identities ([`identity`], [`session`]). A node runs ranks only under a launch grant
 //! signed by one of its authorized controllers ([`grant`]), keeps received files in its cache
 //! ([`cache`]), and supervises its rank for the process's life ([`agent`]). The controller side
-//! ([`controller`]) keeps the fleet file ([`store`]) and drives launches.
+//! ([`controller`]) keeps the orbit file ([`store`]) and drives launches.
 
 pub mod agent;
+pub mod banner;
 pub mod cache;
 pub mod controller;
 pub mod dashboard;
@@ -25,7 +26,7 @@ pub type Failure = Box<dyn std::error::Error + Send + Sync>;
 
 /// The agent's default port on every host.
 pub const PORT: u16 = 29900;
-/// The agent protocol every node and controller of a fleet must share.
+/// The agent protocol every node and controller of a orbit must share.
 pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Frame tags. A request receives OK with a body or ERROR with a message.

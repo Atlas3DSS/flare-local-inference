@@ -623,7 +623,7 @@ fn pair(
     request: &Value,
 ) -> Result<Vec<u8>, Failure> {
     if agent.dir.controllers()?.is_some() {
-        return Err("this node is paired; add controllers with `flare fleet controllers add` or run `flare agent reset` on it".into());
+        return Err("this node is paired; add controllers with `flare orbit controllers add` or run `flare agent reset` on it".into());
     }
     let record: Signed = serde_json::from_value(request["controllers"].clone())
         .map_err(|_| "pairing needs the controller-set record")?;
@@ -1225,7 +1225,7 @@ pub fn install(listen: &str, join_code: Option<&str>, accept_first: bool) -> Res
     fs::write(
         unit_dir.join("flare-agent.service"),
         format!(
-            "[Unit]\nDescription=Flare agent: runs this host's rank of a fleet's serving group\nAfter=network-online.target\n\n[Service]\nExecStart=%h/.local/lib/flare-agent/flare agent --listen {listen}\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n"
+            "[Unit]\nDescription=Flare agent: runs this host's rank of a orbit's serving group\nAfter=network-online.target\n\n[Service]\nExecStart=%h/.local/lib/flare-agent/flare agent --listen {listen}\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n"
         ),
     )?;
     let code = if accept_first {
@@ -1266,7 +1266,7 @@ pub fn install(listen: &str, join_code: Option<&str>, accept_first: bool) -> Res
     println!("listening on:     {listen}");
     match code {
         Some(code) => println!(
-            "join code:        {code}\n                  (valid 24 hours; from the controller: flare fleet pair {name} --code {code})"
+            "join code:        {code}\n                  (valid 24 hours; from the controller: flare orbit pair {name} --code {code})"
         ),
         None => println!("pairing:          accepts the first controller that connects"),
     }
@@ -1297,7 +1297,7 @@ pub fn reset() -> Result<(), Failure> {
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use crate::fleet::grant::{ControllerKey, ControllerSet, Member, Package, Source};
+    use crate::orbit::grant::{ControllerKey, ControllerSet, Member, Package, Source};
     use std::net::TcpListener;
 
     pub type Verified = Arc<Mutex<Vec<(PathBuf, Option<usize>)>>>;
@@ -1556,7 +1556,7 @@ pub mod tests {
         );
 
         let mut session = connect(&harness, &harness.controller);
-        let key = crate::fleet::store::join_key("abcd efgh ijkl mnop");
+        let key = crate::orbit::store::join_key("abcd efgh ijkl mnop");
         let proof = hmac_sha256(
             &key,
             &[b"controller".as_slice(), session.handshake_hash()].concat(),

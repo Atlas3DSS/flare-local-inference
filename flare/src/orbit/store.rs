@@ -1,11 +1,11 @@
-//! Files that hold fleet state: the agent's directory on a node and the controller's fleet file.
+//! Files that hold orbit state: the agent's directory on a node and the controller's orbit file.
 //!
 //! Node side, under `~/.config/flare/agent/`: `node.key` (the identity), `controllers.toml`
 //! (the signed controller-set record; absent on an unpaired node), `join-code` (the SHA-256 of
 //! an active join code and its expiry), and `accept-first` (a marker admitting the first
 //! controller without a code).
 //!
-//! Controller side: `~/.config/flare/fleet/controller.key` and `~/.config/flare/fleet.toml`,
+//! Controller side: `~/.config/flare/orbit/controller.key` and `~/.config/flare/orbit.toml`,
 //! which lists the controller set, the paired nodes, and named clusters in rank order.
 
 use std::collections::BTreeMap;
@@ -175,7 +175,7 @@ pub struct Cluster {
     pub nodes: Vec<String>,
 }
 
-/// A group the operator wants: `flare fleet run --name NAME` takes its package and options
+/// A group the operator wants: `flare orbit run --name NAME` takes its package and options
 /// from here, and the fields are constraints for placement.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -201,7 +201,7 @@ pub struct GroupSpec {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Fleet {
+pub struct Orbit {
     /// The signed controller-set record every paired node holds.
     pub controllers: Option<Signed>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -218,13 +218,13 @@ impl Node {
     }
 }
 
-impl Fleet {
+impl Orbit {
     pub fn default_path() -> PathBuf {
-        home().join(".config/flare/fleet.toml")
+        home().join(".config/flare/orbit.toml")
     }
 
     pub fn default_key_path() -> PathBuf {
-        home().join(".config/flare/fleet/controller.key")
+        home().join(".config/flare/orbit/controller.key")
     }
 
     pub fn load(path: &Path) -> Result<Self, Failure> {
@@ -276,14 +276,14 @@ impl Fleet {
         }
     }
 
-    /// The nodes of a named cluster, in rank order; with no name, the fleet's only cluster.
+    /// The nodes of a named cluster, in rank order; with no name, the orbit's only cluster.
     pub fn cluster(&self, name: Option<&str>) -> Result<(String, Vec<&Node>), Failure> {
         let (name, cluster) = match name {
             Some(name) => (
                 name.to_owned(),
                 self.cluster
                     .get(name)
-                    .ok_or_else(|| format!("no cluster named {name} in the fleet file"))?,
+                    .ok_or_else(|| format!("no cluster named {name} in the orbit file"))?,
             ),
             None if self.cluster.len() == 1 => {
                 let (name, cluster) = self.cluster.iter().next().unwrap();
@@ -291,11 +291,11 @@ impl Fleet {
             }
             None if self.cluster.is_empty() => {
                 return Err(
-                    "the fleet file defines no cluster; add [cluster.NAME] nodes = [...]".into(),
+                    "the orbit file defines no cluster; add [cluster.NAME] nodes = [...]".into(),
                 );
             }
             None => {
-                return Err("the fleet file defines several clusters; pass --cluster NAME".into());
+                return Err("the orbit file defines several clusters; pass --cluster NAME".into());
             }
         };
         let nodes = cluster
@@ -340,29 +340,29 @@ mod tests {
     }
 
     #[test]
-    fn fleet_files_round_trip_and_resolve_clusters() {
+    fn orbit_files_round_trip_and_resolve_clusters() {
         let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("fleet.toml");
-        let mut fleet = Fleet::load(&path).unwrap();
-        assert!(fleet.node.is_empty());
-        assert!(fleet.cluster(None).is_err());
+        let path = temp.path().join("orbit.toml");
+        let mut orbit = Orbit::load(&path).unwrap();
+        assert!(orbit.node.is_empty());
+        assert!(orbit.cluster(None).is_err());
         for name in ["a", "b"] {
-            fleet.upsert(Node {
+            orbit.upsert(Node {
                 name: name.into(),
                 fingerprint: format!("f{name}"),
                 public_key: name.repeat(64),
                 address: format!("{name}:29900"),
             });
         }
-        fleet.cluster.insert(
+        orbit.cluster.insert(
             "pair".into(),
             Cluster {
                 nodes: vec!["b".into(), "a".into()],
             },
         );
-        fleet.save(&path).unwrap();
-        let loaded = Fleet::load(&path).unwrap();
-        assert_eq!(loaded, fleet);
+        orbit.save(&path).unwrap();
+        let loaded = Orbit::load(&path).unwrap();
+        assert_eq!(loaded, orbit);
         let (name, nodes) = loaded.cluster(None).unwrap();
         assert_eq!(name, "pair");
         assert_eq!(
