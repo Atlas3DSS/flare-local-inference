@@ -15,6 +15,8 @@ pub use request::{PreparedRequest, prepare as prepare_request};
 mod runtime;
 mod stops;
 pub use config::Bootstrap;
+pub use dashboard::view;
+pub use metrics::Snapshot;
 pub use runtime::{Generation, GenerationEvent, ModelRuntime, Prompt};
 
 pub fn restore_terminal_for_exit() {
@@ -30,7 +32,7 @@ use crate::{
 use axum::{
     Extension, Json, Router,
     extract::{DefaultBodyLimit, Request, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode, Uri, header},
     middleware::{self, Next},
     response::{IntoResponse, Response, Sse, sse::KeepAlive},
     routing::{get, post},
@@ -55,7 +57,8 @@ pub struct ServerConfig {
     pub event_capacity: usize,
     pub frontend_workers: usize,
     pub max_body_bytes: usize,
-    /// Serving key; Messages also accepts `x-api-key`. `/health` is unauthenticated.
+    /// Serving key; Messages also accepts `x-api-key`. `/health` and `/metrics`
+    /// are unauthenticated.
     pub api_key: Option<String>,
     /// Names requests may use for the model in addition to its identifier.
     pub served_names: Vec<String>,
@@ -233,19 +236,7 @@ impl Server {
                             sampler.sample_generated();
                         }
                     });
-                    let router = Router::new()
-                        .route("/metrics", get(metrics))
-                        .merge(models::router(state.model.config(), &config.served_names))
-                        .route("/v1/chat/completions", post(http::generate).layer(middleware::from_fn_with_state(state.clone(), admit_http)))
-                        .route("/v1/completions", post(http::generate).layer(middleware::from_fn_with_state(state.clone(), admit_http)))
-                        .route("/v1/messages", post(http::generate).layer(middleware::from_fn_with_state(state.clone(), admit_http)))
-                        .route("/v1/messages/count_tokens", post(http::generate).layer(middleware::from_fn_with_state(state.clone(), admit_http)))
-                        .route("/v1/responses", post(http::generate).get(http::no_websocket).layer(middleware::from_fn_with_state(state.clone(), admit_http)));
-                    let router = router
-                        .route_layer(middleware::from_fn_with_state(state.clone(), authorize))
-                        .route("/health", get(health))
-                        .layer(DefaultBodyLimit::max(config.max_body_bytes))
-                        .with_state(state);
+                    let router = router(state, &config.served_names, config.max_body_bytes);
                     let listener = match tokio::net::TcpListener::bind(config.bind).await {
                         Ok(listener) => listener,
                         Err(error) => {
@@ -388,6 +379,23 @@ impl Drop for Server {
     }
 }
 
+/// Routes generation and model discovery behind API-key authentication; health
+/// and metrics expose no request content and stay unauthenticated.
+fn router(state: Arc<HttpState>, served_names: &[String], max_body_bytes: usize) -> Router {
+    Router::new()
+        .merge(models::router(state.model.config(), served_names))
+        .route("/v1/chat/completions", post(http::generate).layer(middleware::from_fn_with_state(state.clone(), admit_http)))
+        .route("/v1/completions", post(http::generate).layer(middleware::from_fn_with_state(state.clone(), admit_http)))
+        .route("/v1/messages", post(http::generate).layer(middleware::from_fn_with_state(state.clone(), admit_http)))
+        .route("/v1/messages/count_tokens", post(http::generate).layer(middleware::from_fn_with_state(state.clone(), admit_http)))
+        .route("/v1/responses", post(http::generate).get(http::no_websocket).layer(middleware::from_fn_with_state(state.clone(), admit_http)))
+        .route_layer(middleware::from_fn_with_state(state.clone(), authorize))
+        .route("/health", get(health))
+        .route("/metrics", get(metrics))
+        .layer(DefaultBodyLimit::max(max_body_bytes))
+        .with_state(state)
+}
+
 async fn health(State(state): State<Arc<HttpState>>) -> Response {
     if state.model.healthy() {
         Json(json!({"status":"ok"})).into_response()
@@ -398,7 +406,17 @@ async fn health(State(state): State<Arc<HttpState>>) -> Response {
         )
     }
 }
-async fn metrics(State(state): State<Arc<HttpState>>) -> Response {
+async fn metrics(State(state): State<Arc<HttpState>>, uri: Uri, headers: HeaderMap) -> Response {
+    let accept = headers.get(header::ACCEPT).and_then(|value| value.to_str().ok());
+    let format = match metrics::Format::negotiate(uri.query(), accept) {
+        Ok(format) => format,
+        Err(message) => return error(StatusCode::BAD_REQUEST, message),
+    };
+    if format == metrics::Format::Json {
+        let learned_drafter = state.model.config().has_learned_drafts();
+        let snapshot = state.model.metrics().snapshot(learned_drafter);
+        return ([(header::VARY, "accept")], Json(snapshot.json(learned_drafter))).into_response();
+    }
     let mut text = state.model.metrics().render();
     for (name, help, value) in [
         (
@@ -435,7 +453,10 @@ async fn metrics(State(state): State<Arc<HttpState>>) -> Response {
         metrics::metric(&mut text, name, "gauge", help, value as u64);
     }
     (
-        [("content-type", "text/plain; version=0.0.4; charset=utf-8")],
+        [
+            (header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8"),
+            (header::VARY, "accept"),
+        ],
         text,
     )
         .into_response()

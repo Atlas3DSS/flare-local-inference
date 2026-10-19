@@ -1642,15 +1642,12 @@ fn cancelling_a_capacity_waiter_releases_it_without_admission() {
     assert_eq!(worker.metrics.failed.load(Ordering::Relaxed), 0);
 }
 
-async fn http_generation(
-    stream: bool,
-    choices: usize,
-) -> (
-    tokio::task::JoinHandle<axum::response::Response>,
-    Vec<Incoming>,
-) {
-    use super::super::{HttpState, http};
-    use axum::{Extension, extract::State};
+/// HTTP state over an idle model runtime whose requests arrive on `sender`.
+fn http_state(
+    sender: mpsc::SyncSender<Vec<Incoming>>,
+    api_key: Option<String>,
+) -> Arc<super::super::HttpState> {
+    use super::super::HttpState;
     use tokio::sync::Semaphore;
     let mut fixture = Fixture::new();
     fixture.config.contract.vocabulary = 6;
@@ -1662,7 +1659,6 @@ async fn http_generation(
         &fixture.config.eos_token_ids,
     )
     .unwrap();
-    let (sender, receiver) = mpsc::sync_channel(4);
     let model = Arc::new(ModelRuntime {
         sender,
         stop: Arc::new(AtomicBool::new(false)),
@@ -1678,7 +1674,7 @@ async fn http_generation(
         finished: Arc::new((Mutex::new(true), Condvar::new())),
         metrics: fixture.metrics,
     });
-    let state = Arc::new(HttpState {
+    Arc::new(HttpState {
         model,
         frontend: Arc::new(fixture.frontend),
         images: None,
@@ -1689,12 +1685,25 @@ async fn http_generation(
         frontend_capacity: 1,
         ingress_capacity: 4,
         ids: Default::default(),
-        api_key: None,
+        api_key,
         context_hint: String::new(),
         capacity_hint: String::new(),
         started: std::time::Instant::now(),
         generated: Default::default(),
-    });
+    })
+}
+
+async fn http_generation(
+    stream: bool,
+    choices: usize,
+) -> (
+    tokio::task::JoinHandle<axum::response::Response>,
+    Vec<Incoming>,
+) {
+    use super::super::http;
+    use axum::{Extension, extract::State};
+    let (sender, receiver) = mpsc::sync_channel(4);
+    let state = http_state(sender, None);
     let ingress = Arc::new(state.ingress_slots.clone().acquire_owned().await.unwrap());
     let request = axum::http::Request::builder()
         .method("POST")
@@ -1796,4 +1805,73 @@ async fn http_disconnect_while_waiting_cancels_queued_generation() {
     response.abort();
     assert!(response.await.unwrap_err().is_cancelled());
     assert!(incoming[0].cancelled.load(Ordering::Acquire));
+}
+
+#[tokio::test]
+async fn metrics_route_serves_prometheus_or_json_without_the_api_key() {
+    use std::io::{Read, Write};
+    let (sender, _receiver) = mpsc::sync_channel(4);
+    let state = http_state(sender, Some("serving-key".into()));
+    state.model.metrics().progress(10, 3, 0, 0);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let router = super::super::router(state, &[], 65536);
+    let server = tokio::spawn(async move { axum::serve(listener, router).await });
+    let get = |path: &'static str, accept: Option<&'static str>| {
+        tokio::task::spawn_blocking(move || {
+            let mut stream = std::net::TcpStream::connect(address).unwrap();
+            let accept = accept.map_or_else(String::new, |accept| format!("Accept: {accept}\r\n"));
+            write!(
+                stream,
+                "GET {path} HTTP/1.1\r\nHost: localhost\r\n{accept}Connection: close\r\n\r\n"
+            )
+            .unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).unwrap();
+            let (head, body) = response.split_once("\r\n\r\n").unwrap();
+            let status: u16 = head.split(' ').nth(1).unwrap().parse().unwrap();
+            let content_type = head
+                .lines()
+                .find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("content-type: ")
+                        .map(str::to_owned)
+                })
+                .unwrap_or_default();
+            (status, content_type, body.to_owned())
+        })
+    };
+    let (status, content_type, body) = get("/metrics", None).await.unwrap();
+    assert_eq!(status, 200);
+    assert!(
+        content_type.starts_with("text/plain; version=0.0.4"),
+        "{content_type}"
+    );
+    assert!(
+        body.contains("\nflare_generated_tokens_total 3\n"),
+        "{body}"
+    );
+    assert!(body.contains("\nflare_prefill_tokens_total 10\n"));
+    for (path, accept) in [
+        ("/metrics", Some("application/json")),
+        ("/metrics?format=json", Some("text/plain")),
+    ] {
+        let (status, content_type, body) = get(path, accept).await.unwrap();
+        assert_eq!(
+            (status, content_type.as_str()),
+            (200, "application/json"),
+            "{path}"
+        );
+        let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(value["learned_drafter"], false);
+        let snapshot: super::super::Snapshot = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            (snapshot.prefill_tokens, snapshot.generated_tokens),
+            (10, 3)
+        );
+    }
+    assert_eq!(get("/metrics?format=yaml", None).await.unwrap().0, 400);
+    assert_eq!(get("/health", None).await.unwrap().0, 200);
+    assert_eq!(get("/v1/models", None).await.unwrap().0, 401);
+    server.abort();
 }

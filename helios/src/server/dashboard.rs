@@ -35,14 +35,27 @@ use super::metrics::{Metrics, Snapshot};
 const REFRESH: Duration = Duration::from_millis(500);
 const WINDOW: Duration = Duration::from_secs(2);
 const HISTORY: f64 = 120.0;
-const BACKGROUND: Color = Color::Rgb(13, 18, 28);
-const MUTED: Color = Color::Rgb(126, 146, 166);
-const TEXT: Color = Color::Rgb(221, 232, 242);
-const CYAN: Color = Color::Rgb(84, 214, 223);
-const GREEN: Color = Color::Rgb(145, 222, 139);
-const PURPLE: Color = Color::Rgb(191, 157, 245);
-const GOLD: Color = Color::Rgb(244, 196, 112);
+pub const BACKGROUND: Color = Color::Rgb(13, 18, 28);
+pub const MUTED: Color = Color::Rgb(126, 146, 166);
+pub const TEXT: Color = Color::Rgb(221, 232, 242);
+pub const CYAN: Color = Color::Rgb(84, 214, 223);
+pub const GREEN: Color = Color::Rgb(145, 222, 139);
+pub const PURPLE: Color = Color::Rgb(191, 157, 245);
+pub const GOLD: Color = Color::Rgb(244, 196, 112);
 static VISIBLE: AtomicBool = AtomicBool::new(false);
+
+/// Telemetry and rendering pieces of the serving dashboard for dashboards
+/// outside the serving process, such as one fed by `GET /metrics?format=json`.
+/// The rendering functions take `ratatui` types; `ratatui` and `crossterm` are
+/// re-exported so dependents render with the same versions.
+pub mod view {
+    pub use super::{
+        BACKGROUND, CYAN, GOLD, GREEN, History, MUTED, PURPLE, Rates, Series, TEXT, gibibytes,
+        kv_cache_lines, plot, rate,
+    };
+    pub use crate::server::metrics::Snapshot;
+    pub use {crossterm, ratatui};
+}
 
 pub(super) fn restore_for_exit() {
     if VISIBLE.load(Ordering::Relaxed) {
@@ -310,16 +323,23 @@ fn render_pane(
     }
 }
 
-#[derive(Clone, Copy, Default)]
-struct Rates {
-    prefill: f64,
-    generated: f64,
-    verify: f64,
-    acceptance: Option<f64>,
-    depth: Option<f64>,
+/// Per-second rates over the most recent sampling window of up to two seconds.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Rates {
+    /// Prompt tokens prefilled per second.
+    pub prefill: f64,
+    /// Generated tokens per second.
+    pub generated: f64,
+    /// Speculative or verification graphs completed per second.
+    pub verify: f64,
+    /// Accepted drafts per draft-offering request round; `None` without such rounds.
+    pub acceptance: Option<f64>,
+    /// Verified draft positions per verification graph; `None` without verification.
+    pub depth: Option<f64>,
 }
 
-struct History {
+/// Rates derived from successive [`Snapshot`]s, with 120 seconds of rate points.
+pub struct History {
     start: Instant,
     previous: VecDeque<(Instant, Snapshot)>,
     points: VecDeque<(f64, Rates)>,
@@ -328,7 +348,8 @@ struct History {
 }
 
 impl History {
-    fn new(start: Instant, snapshot: Snapshot) -> Self {
+    /// Starts a history whose point times count seconds from `start`.
+    pub fn new(start: Instant, snapshot: Snapshot) -> Self {
         Self {
             start,
             previous: VecDeque::from([(start, snapshot)]),
@@ -338,7 +359,8 @@ impl History {
         }
     }
 
-    fn sample(&mut self, now: Instant, snapshot: Snapshot) {
+    /// Records `snapshot` taken at `now` and appends one rate point.
+    pub fn sample(&mut self, now: Instant, snapshot: Snapshot) {
         while self.previous.len() > 1 && now.duration_since(self.previous[1].0) >= WINDOW {
             self.previous.pop_front();
         }
@@ -382,9 +404,26 @@ impl History {
         self.previous.push_back((now, snapshot));
         self.snapshot = snapshot;
     }
+
+    /// Most recently sampled snapshot.
+    pub fn snapshot(&self) -> Snapshot {
+        self.snapshot
+    }
+
+    /// Rates at the most recent sample.
+    pub fn rates(&self) -> Rates {
+        self.rates
+    }
+
+    /// Rate points from the last 120 seconds, oldest first, as seconds since
+    /// `start` and the rates at that time.
+    pub fn points(&self) -> &VecDeque<(f64, Rates)> {
+        &self.points
+    }
 }
 
-fn rate(value: f64) -> String {
+/// Formats a rate with one decimal, in thousands with a `k` suffix from 10,000.
+pub fn rate(value: f64) -> String {
     if value >= 10_000.0 {
         format!("{:.1}k", value / 1000.0)
     } else {
@@ -392,11 +431,13 @@ fn rate(value: f64) -> String {
     }
 }
 
-fn gibibytes(bytes: u64) -> String {
+/// Formats a byte count in GiB with one decimal.
+pub fn gibibytes(bytes: u64) -> String {
     format!("{:.1} GiB", bytes as f64 / (1u64 << 30) as f64)
 }
 
-fn kv_cache_lines(s: Snapshot) -> [Line<'static>; 1] {
+/// Muted summary line of cached, free, and total KV capacity in tokens.
+pub fn kv_cache_lines(s: Snapshot) -> [Line<'static>; 1] {
     [
         // Line::from(format!(
         //     " KV PAGES {} cached / {} free / {} total",
@@ -540,9 +581,12 @@ fn render_overview(frame: &mut Frame, history: &History, area: Rect) {
     );
 }
 
-type Series = (&'static str, Color, fn(Rates) -> f64);
+/// Plot series: legend name (empty for none), line color, and rate selector.
+pub type Series = (&'static str, Color, fn(Rates) -> f64);
 
-fn plot(frame: &mut Frame, area: Rect, title: &str, history: &History, series: &[Series]) {
+/// Draws `series` from the history's rate points as Braille lines over the last
+/// 120 seconds in a rounded block titled `title`, scaled to 115% of the peak.
+pub fn plot(frame: &mut Frame, area: Rect, title: &str, history: &History, series: &[Series]) {
     let now = history.points.back().map_or(0.0, |(time, _)| *time);
     let points: Vec<Vec<_>> = series
         .iter()
