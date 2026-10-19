@@ -26,14 +26,11 @@ rank-zero launcher behind `flare run --hosts`.
 | Controller | `flare fleet` commands on any host | Controller key | Pairs nodes, issues grants, attaches to groups |
 | Rank zero, peer | `flare run` processes started by agents | None beyond the host | Per-launch roles assigned by the grant |
 
-An identity is one Ed25519 key. Signatures use it directly. The transport
-handshake uses its X25519 form through the birational map that libsodium and
-age use. The fingerprint is the lowercase hex SHA-256 of the Ed25519 public
-key, the convention publisher fingerprints in [signing](signing.md) follow. An
-X25519 key does not determine its Ed25519 origin, so each side sends its
-Ed25519 public key in HELLO and the other side accepts the session only when
-that key's X25519 image equals the handshake's remote static key. Every
-identity check below compares Ed25519 keys bound to the session this way.
+An identity is one Ed25519 key. It signs grants and controller-set records,
+and it authenticates a session by signing the handshake transcript. The
+fingerprint is the lowercase hex SHA-256 of the public key, the convention
+publisher fingerprints in [signing](signing.md) follow. Every identity check
+below compares the key a session authenticated.
 
 | Key | Path | Created by |
 | --- | --- | --- |
@@ -48,18 +45,36 @@ host does not change its key or its fleet entry.
 ## Transport
 
 Agents listen on TCP port 29900. Every connection, controller to node and node
-to node, runs the Noise protocol `Noise_XX_25519_ChaChaPoly_BLAKE2s` through the
-`snow` crate. Both sides present static keys; the handshake proves possession
-of each and derives the session keys that encrypt everything after it. Noise
-is chosen over TLS because raw public keys are the only identity material: no
-certificates, names, or validity periods stand between a key and a host.
+to node, is an encrypted, mutually authenticated session built from the `ring`
+primitives Helios already links for package signatures: X25519, Ed25519,
+HKDF-SHA256, and ChaCha20-Poly1305. Flare adds no dependency for it.
 
-A frame is a tag byte, a little-endian 64-bit body length, and the body. Each
-Noise transport message carries at most 65519 plaintext bytes; the frame
-header starts a transport message and the body continues across as many
-messages as its length needs. A PUT or FETCH body of hundreds of gigabytes is
-one frame. Encryption bounds a transfer to one core's ChaCha20-Poly1305 rate,
-so transfers to different nodes run on separate connections in parallel.
+The handshake has three messages:
+
+1. The initiator sends the magic `FLAREFLT`, the protocol version, and an
+   ephemeral X25519 public key.
+2. The responder sends its ephemeral X25519 public key, then one record
+   encrypted under the responder-to-initiator key carrying its Ed25519 public
+   key and a signature over the transcript so far.
+3. The initiator sends one record under the initiator-to-responder key
+   carrying its Ed25519 public key and a signature over the transcript
+   including message 2.
+
+Both directions' keys come from HKDF-SHA256 over the X25519 shared secret,
+salted with the SHA-256 of the two ephemeral messages; each direction encrypts
+with its own ChaCha20-Poly1305 key and a counter nonce. Each side signs the
+transcript, so a party that relays the connection cannot present either
+identity, and identities travel only encrypted. The handshake hash, the
+SHA-256 of every handshake byte, is the channel binding that pairing proofs
+include.
+
+A record is a big-endian `u16` length and ciphertext of at most 65535 bytes,
+so a record carries at most 65519 plaintext bytes. A frame is a tag byte, a
+little-endian `u64` body length, and the body; its header starts a record and
+the body continues across as many records as its length needs, so a PUT or
+FETCH body of hundreds of gigabytes is one frame. Encryption bounds a transfer
+to one core's ChaCha20-Poly1305 rate, so transfers to different nodes run on
+separate connections in parallel.
 
 After the handshake the agent classifies the remote key as an authorized
 controller, a node named in an active grant, or unknown. Unknown keys may only
@@ -77,13 +92,14 @@ no authorized controller is unpaired.
 | Accept first | `flare agent install --accept-first` | `flare fleet pair HOST...` | None; the first controller to connect is authorized |
 | Delegation | None | `flare fleet controllers add KEYFILE` | Signed by an authorized controller |
 
-`flare agent install` generates a one-time code of 32 random bytes, prints it
-as eight groups of four base32 characters, and keeps its SHA-256 in
-`~/.config/flare/agent/join-code` for 24 hours or until a pairing uses it.
+`flare agent install` generates a one-time code of 20 random bytes, prints it
+as eight groups of four base32 characters, and keeps the SHA-256 of the code,
+the HMAC key both sides derive from it, in `~/.config/flare/agent/join-code`
+for 24 hours or until a pairing uses it.
 `--join-code CODE` installs a supplied code so one code covers an installation
 session across several hosts. The controller's PAIR frame carries
-HMAC-SHA256 of `"controller" || handshake hash` under the code; the node's OK
-carries HMAC-SHA256 of `"node" || handshake hash` under the code. The
+HMAC-SHA256 of `"controller" || handshake hash` under that key; the node's OK
+carries HMAC-SHA256 of `"node" || handshake hash` under it. The
 handshake hash binds both proofs to this session's static keys, so a party
 relaying the connection can neither impersonate the controller nor be recorded
 as the node. A correct proof authorizes the controller and consumes the code.
@@ -182,7 +198,7 @@ with a message; an ERROR closes the session.
 
 | Frame | Direction | Body | Effect |
 | --- | --- | --- | --- |
-| HELLO | Both, first frame | Protocol version, Ed25519 public key, controller-set revision, node facts | Binds the identity to the session; agrees on the version; carries a newer controller-set record when the sender has one |
+| HELLO | Both, first frame | Protocol version, public key, controller-set revision, node facts | Must name the key that authenticated the session; agrees on the version; a newer controller-set record follows when the sender has one |
 | PAIR | Controller to node | Code proof | Authorizes the controller as described above |
 | HAVE | Controller or node to node | Kind, name, size | Whether the cache holds the entry at that size |
 | PUT | Controller to node | Kind, name, size, optional ranges, then bytes | Stores an executable or package bytes at their offsets in a sparse file of the package's length |
@@ -236,7 +252,7 @@ not serving: a group keeps running after its grant expires. Serving options
 come from the grant, so every rank loads with the same options.
 
 The grant also authorizes node-to-node transfers. A FETCH is served only to a
-member of the grant, identified by the Ed25519 key bound to the session, for
+member of the grant, identified by the key that authenticated the session, for
 the package the grant names.
 
 The rendezvous protocol (`FLARERV3`) and the RoCE transport are unchanged and
@@ -412,12 +428,12 @@ on Linux; the controller builds wherever Flare builds.
 Each step is usable on its own and leaves the previous steps working.
 
 1. **Identity, transport, and launch from a non-member host.** Node and
-   controller keys, Noise transport, pairing by join code and accept-first,
+   controller keys, the session transport, pairing by join code and accept-first,
    the controller-set record at revision 1, the fleet file,
    `flare agent install`, HELLO, HAVE, PUT, RUN for every rank, STOP, ATTACH,
    grants, and `flare fleet run` with the controller holding the package.
-   Validation: unit tests of session identity binding, grant verification, and
-   framing without a network; a two-Spark GLM TP2 launch from a non-member
+   Validation: unit tests of the handshake, grant verification, and framing
+   without a network; a two-Spark GLM TP2 launch from a non-member
    x86 host whose output matches an operator-managed start.
 2. **Node-to-node transfer and group operation.** TRANSFER, FETCH,
    `NODE:PATH` package sources, STATUS, `flare fleet attach` and `stop`, and
