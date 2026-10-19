@@ -355,11 +355,64 @@ The agent's systemd unit keeps the default `KillMode=control-group`: stopping,
 restarting, or upgrading the agent stops the ranks it runs. Upgrade agents
 between groups. Rank failure handling is unchanged: a collective timeout or
 rank exit poisons the group's transport, every rank shuts down, and the agents
-report EXIT. An agent does not restart ranks. An agent runs any number of
-groups on disjoint GPUs, each a separate process with its own retained
-output, and keeps the sixteen most recent finished groups for STATUS and
-ATTACH; RUN naming a GPU a running group holds is refused with that group's
-identifier.
+report EXIT. An agent does not restart ranks. Several groups run under one
+agent on disjoint GPUs, as [GPUs and groups](#gpus-and-groups) describes.
+
+## GPUs and groups
+
+The unit of capacity is a GPU, not a host. A DGX Spark is a node with one
+GPU; a workstation with sixteen RTX PRO 6000 GPUs is a node with sixteen,
+running one agent. The agent reads its GPUs through NVML, loaded dynamically
+like the CUDA driver, without creating a context: index, UUID, name, hardware
+revision (`gb10`, `gb202`, `gb300` from the PCI device id or compute
+capability), memory total and free, and utilization, temperature and SM clock
+where NVML reports them. A GB10 reports host memory, since NVML has no device
+memory for it, and reports no utilization or temperature.
+
+STATUS carries three lists beside the node's identity and free cache space.
+
+| List | Entry |
+| --- | --- |
+| `gpus` | Index, UUID, name, revision, memory total and free, utilization, temperature and SM clock where present, and the running group holding the GPU, if any |
+| `groups` | Every group the agent runs or retains, oldest first: identifier, name, package, rank, GPUs, pid, state, exit status, uptime |
+| `packages` | Every cache directory: name, files with sizes, whether its stored data verified, bytes on disk |
+
+A group has a name the operator chooses with `--name`, defaulting to the
+cluster's name, stable across launches; its identifier is unique per launch.
+A grant's member names the UUIDs its rank uses, and the agent exposes exactly
+those through `CUDA_VISIBLE_DEVICES` with `--gpus 0..n`, refuses a GPU the
+node lacks or one a running group holds, and otherwise runs the group beside
+the others, each a separate process with its own retained output. A member
+naming no GPUs takes the whole node. The agent keeps the sixteen most recent
+finished groups; STOP and ATTACH name a group when several are on the node.
+`flare fleet ls` lists every group on a cluster's nodes with its GPUs and
+state, and `attach` and `stop` take a group name or identifier.
+
+A launch takes, on each node of the cluster, the first GPU no running group
+holds, or the NVML indices `--gpus` names on every node. A single-host
+tensor-parallel package of N ranks, which runs as one process over PCIe
+collectives, is not launched through the fleet; [placement](#placement) in
+the proposal below covers it.
+
+## Metrics and the dashboard
+
+A sampler thread in the agent reads the GPUs once a second and, for every
+running group whose rank zero it hosts, fetches that process's `/metrics`
+document as JSON from the loopback address of its HTTP bind. METRICS returns
+the latest GPU readings with their holding groups and every group with its
+latest document.
+
+`flare fleet dashboard [--cluster NAME]` polls METRICS on every node of the
+cluster twice a second, reconnecting to a node that stops answering, and
+draws the serving process's terminal dashboard for the fleet through the view
+Helios exports: one row per group with prefill and generation rates, active
+and queued requests, acceptance and KV tokens; the four plots of the selected
+group, derived from successive documents with the same rate history the
+serving dashboard uses; and one row per GPU with utilization, free memory,
+temperature and the group holding it. Groups and nodes appear and disappear
+as the agents report them, a node that stops answering is shown as
+unreachable until it answers again, the arrow keys select the group, and `q`
+leaves.
 
 ## Fabric check
 
@@ -463,11 +516,14 @@ on Linux; the controller builds wherever Flare builds.
 
 Identity, the session transport, pairing, the controller set and its
 propagation, the fleet file, grants, executable and package placement with
-node-to-node fetches, `flare agent install` and `reset`, and `flare fleet
-pair`, `controllers`, `status`, `run`, `attach`, `stop`, and `forget` exist and
-are validated by unit tests and by serving a four-rank package on four DGX
-Sparks from a controller that is not a rank. The following parts of this
-specification are not in the tree:
+node-to-node fetches, GPU inventory and several groups per agent, the
+metrics sampler and the fleet dashboard, `flare agent install` and `reset`,
+and `flare fleet pair`, `controllers`, `status`, `ls`, `dashboard`, `run`,
+`attach`, `stop`, and `forget` exist and are validated by unit tests and by
+serving a four-rank package on four DGX Sparks from a controller that is not
+a rank. The following parts of this specification are not in the tree, and
+the [proposal](#proposal-placement-and-desired-state) describes placement and
+desired state:
 
 1. **Discovery and fabric check.** mDNS advertisement, `flare fleet discover`,
    fabric endpoints in STATUS, the rail check, and the ring-order proposal.
@@ -479,53 +535,21 @@ specification are not in the tree:
    agents whose rank signatures verify and which serves identically to a manual
    export.
 
-## Proposal: pools, groups, and placement
+## Proposal: placement and desired state
 
 This section proposes the next form of fleet control. Nothing in it is in the
-tree. The sections above describe what exists; where this proposal differs,
-the difference is stated.
+tree.
 
 ### What changes
 
-A launch today binds to a cluster: a fixed, ordered list of nodes, one per
-rank, chosen by the operator. The proposal makes the fleet a pool of GPUs and
-has the controller place each serving group on free GPUs of the right kind.
-Several groups run at once on one fleet, on one host or across hosts, and the
-operator re-composes them by name: four single-GPU Qwen groups on four Sparks
-now, two GLM TP2 groups later, one DeepSeek TP4 group tonight, or any mix that
-fits.
-
-The unit of capacity is a GPU, not a host. A DGX Spark is a node with one GPU;
-a workstation with sixteen RTX PRO 6000 GPUs is a node with sixteen, running
-one agent and as many groups as its GPUs allow. The controller stays a
-machine that runs `flare fleet` and holds no daemon and no database: desired
-state lives in the fleet file, actual state is what the agents report.
-
-### Resource model
-
-STATUS gains three lists.
-
-| List | Entry |
-| --- | --- |
-| `gpus` | Index, UUID, name, hardware revision (`gb10`, `gb202`, `gb300`), memory total and free, utilization, temperature and SM clock where NVML reports them, and the group holding the GPU, if any |
-| `groups` | Every group the agent runs or last ran: identifier, name, package, rank, GPUs, state, exit status, uptime |
-| `packages` | Every cache directory: name, files with sizes, whether its stored data verified, bytes on disk |
-
-GPU readings come from NVML through the dynamic loading Helios already uses
-for the CUDA driver, without creating a context in the agent. A sampler thread
-in the agent reads the GPUs once a second and, for every running group whose
-rank zero it hosts, fetches that process's `/metrics` document as JSON from
-the loopback address of its HTTP bind; METRICS returns the latest of both.
-`flare fleet dashboard` polls METRICS on every node of a cluster twice a
-second and draws the serving process's terminal dashboard for the fleet: one
-row per group with prefill and generation rates, active and queued requests,
-acceptance and KV use; the plots of the selected group, derived from
-successive documents with the same rate history the serving dashboard uses;
-and one row per GPU with utilization, free memory, temperature and the group
-holding it. Groups and nodes come and go as the agents report them, and a
-node that stops answering is shown as unreachable until it answers again. An agent runs any
-number of groups on disjoint GPU sets, each a separate process with its own
-retained output; STOP and ATTACH name the group.
+A launch binds to a cluster: a fixed, ordered list of nodes, one per rank,
+chosen by the operator, each giving its first free GPU. The proposal makes
+the fleet a pool of GPUs and has the controller place each group on free GPUs
+of the right kind: four single-GPU Qwen groups on four Sparks now, two GLM
+TP2 groups later, one DeepSeek TP4 group tonight, or any mix that fits, each
+started by name without naming nodes. The controller stays a machine that
+runs `flare fleet` and holds no daemon and no database: desired state lives
+in the fleet file, actual state is what the agents report.
 
 A package is one of two kinds, and the package says which. A single-host
 tensor-parallel package of N ranks needs one node with N free GPUs of its
@@ -533,16 +557,9 @@ hardware revision and runs as one process over PCIe collectives. A multi-host
 package of N ranks needs N nodes, each giving its rank the GPUs that rank was
 prepared with, and runs over RoCEnante.
 
-### Groups
+### Desired state
 
-A group has a name the operator chooses, a package, members with their GPUs,
-serving options, and a state. The grant's member record gains `gpus`, the
-indices the member's rank uses, and the agent passes them as `--gpus`. Group
-identifiers stay unique per launch; the name is stable across launches, so
-`flare fleet stop ds41` and `flare fleet attach ds41` find the current launch
-of that name wherever placement put it.
-
-The fleet file gains desired state:
+The fleet file gains groups:
 
 ```toml
 [[group]]
@@ -562,9 +579,7 @@ group; a group without them is placed by the planner.
 
 ### Placement
 
-The controller today takes the first GPU no running group holds on each
-cluster node, or the NVML indices `--gpus` names on every node. The planner
-turns a package and the pool into members with GPUs, or an
+The planner turns a package and the pool into members with GPUs, or an
 explanation of why it cannot. It applies these rules in order:
 
 1. Only GPUs of the package's hardware revision are candidates.
@@ -596,8 +611,8 @@ what will be transferred, and from where. `--dry-run` stops there.
 copies, on nodes ahead of any launch and verifies them there, under a grant
 whose group runs nothing. `flare fleet packages` lists what every node holds
 and whether it verified. A re-composition whose packages are already staged
-starts in the seconds the Sparks showed for a verified cache, not in the hours
-a transfer and verification take.
+starts in the seconds a verified cache takes, not in the hours a transfer and
+verification take.
 
 ### Reconciliation
 
@@ -613,13 +628,10 @@ stay available by hand.
 
 | Command | Effect |
 | --- | --- |
-| `flare fleet run PACKAGE --name NAME [--nodes N,...] [--gpus ...] [serving options]` | Places and starts a group |
-| `flare fleet ls` | Every group on every node: name, package, members and GPUs, state |
-| `flare fleet stop NAME` / `attach NAME` | Operates a group by name |
+| `flare fleet run PACKAGE --name NAME [--nodes N,...] [--gpus ...]` | Places and starts a group without a cluster |
 | `flare fleet push PACKAGE --to NODE...` | Stages and verifies a package without starting it |
 | `flare fleet packages` | What each node's cache holds |
 | `flare fleet apply [--dry-run]` | Reconciles the fleet file's groups with the agents |
-| `flare fleet status` | Per node: GPUs with memory and holders, groups, cache |
 
 `--cluster` remains as a placement constraint that also fixes rank order.
 
@@ -627,17 +639,12 @@ stay available by hand.
 
 Identity, the session transport, pairing, the controller set, grants as the
 authority for every launch and transfer, verification of fetched bytes in the
-agent, and one rank zero per group chosen by placement. There is no scheduler
-service, no lease, and no consensus; two controllers driving one pool see the
-same actual state from the agents and the same desired state when they share
-a fleet file.
+agent, several groups per agent, the sampler and the dashboard, and one rank
+zero per group chosen by placement. There is no scheduler service, no lease,
+and no consensus; two controllers driving one pool see the same actual state
+from the agents and the same desired state when they share a fleet file.
 
 ### Order of work
-
-GPU enumeration, several groups per agent on disjoint GPU sets, the three
-STATUS lists, group names, `--gpus`, `ls`, and `attach` and `stop` by name are
-in the tree; the resource model and groups subsections above describe them.
-The remaining work:
 
 1. `[[group]]` in the fleet file, the planner, and `run` without a cluster.
 2. `push` and `packages`.
