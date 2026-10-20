@@ -78,6 +78,30 @@ def test_only_selected_row_bytes_cross_the_wire(tmp_path):
         assert transport._receive(server.connection) == b"prepared report"
 
 
+def test_source_disables_read_ahead_before_serving_selective_ranges(tmp_path, monkeypatch):
+    advise, read = os.posix_fadvise, os.pread
+    random_access = set()
+    reads = []
+
+    def fadvise(descriptor, offset, length, advice):
+        if advice == os.POSIX_FADV_RANDOM:
+            random_access.add(descriptor)
+        return advise(descriptor, offset, length, advice)
+
+    def pread(descriptor, length, offset):
+        assert descriptor in random_access
+        reads.append((descriptor, length, offset))
+        return read(descriptor, length, offset)
+
+    monkeypatch.setattr(os, "posix_fadvise", fadvise)
+    monkeypatch.setattr(os, "pread", pread)
+    with connected(tmp_path) as (client, server, start):
+        assert {held.descriptor for held in server.source.files.values()} == random_access
+        assert client.read("weights.safetensors", start, 8, 2, 16) == bytes((*range(8), *range(16, 24)))
+        assert reads
+        assert client.stats == server.stats
+
+
 def test_headers_and_file_sources_require_the_scoped_owner(tmp_path):
     with connected(tmp_path) as (client, _, start):
         with pytest.raises(RuntimeError, match="active source owner"):

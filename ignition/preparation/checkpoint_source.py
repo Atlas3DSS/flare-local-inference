@@ -194,6 +194,9 @@ class RootSource:
                 descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
                 held = HeldFile(path, descriptor, file_identity(descriptor))
                 self.files[name] = held
+                # Selective reads release their completed ranges; read-ahead outside those ranges
+                # would remain cached in the same DRAM needed by the integrated GPU.
+                os.posix_fadvise(descriptor, 0, 0, os.POSIX_FADV_RANDOM)
                 size = held.identity[2]
                 header = None
                 if name.endswith(".safetensors"):
