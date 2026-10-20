@@ -243,6 +243,215 @@ def test_cached_blob_corruption_is_rejected_without_replacement(tmp_path):
         store.put(64 << 30, lambda: [])
 
 
+def test_logical_reads_seek_to_overlapping_blobs_and_preserve_padding(tmp_path):
+    from ignition.preparation.package_snapshot import LogicalFile
+
+    class Parts(list):
+        reads = 0
+
+        def __getitem__(self, index):
+            self.reads += 1
+            return super().__getitem__(index)
+
+    path = tmp_path / 'payload'
+    path.write_bytes(b'abcdefgh')
+    with path.open('rb') as source:
+        parts = Parts([[8, 'payload'], [3, '']] * 5000)
+        logical = LogicalFile(parts, lambda _: (source, 0, 8))
+        parts.reads = 0
+        assert logical.read_at(9, 4999 * 11 + 3) == b'defgh' + bytes(3)
+        assert parts.reads == 2
+        assert logical.read_at(3, 5000 * 11) == b''
+        assert logical.read_at(0, 3) == b''
+        assert logical.seek(-8, 2) == 5000 * 11 - 8
+        assert logical.read() == b'defgh' + bytes(3)
+        assert logical.complete_blob(4999 * 11, 8) == (source, 0)
+        assert logical.complete_blob(4999 * 11 + 1, 7) is None
+
+
+def test_cached_snapshot_signing_hashes_unchanged_weight_inode_once(tmp_path, monkeypatch):
+    from ignition.preparation.package_snapshot import BlobStore
+    from ignition.preparation.resign import resign
+
+    signer = fixtures.development_publisher()
+    cache = tmp_path / 'cache'
+    with export_options(cache):
+        source, _ = fixtures.fixture(tmp_path, signer=signer)
+        with source.open('rb') as file:
+            layout = read_container(file)[3]
+        span = read_index(source)[0].ranks[0].resources['weights']
+        weight_name = layout['files'][span.filename][0][1]
+        original = BlobStore.verify
+
+        def verify(path, *args):
+            assert Path(path).name != weight_name, 'weight bytes were already hashed from this inode'
+            return original(path, *args)
+
+        monkeypatch.setattr(BlobStore, 'verify', staticmethod(verify))
+        destination = tmp_path / 'production.safetensors'
+        resign(source, destination, publisher=publisher(), development_profile=fixtures.development_profile(signer))
+    assert destination.is_file()
+
+
+def test_blob_link_rechecks_an_inode_changed_after_verification(tmp_path):
+    from ignition.preparation.package_snapshot import BlobStore
+
+    store = BlobStore(tmp_path / 'cache')
+    name = store.put(4, lambda: [b'data'])
+    source = store.root / name
+    store.link(name, tmp_path)
+    source.chmod(0o644)
+    with source.open('r+b') as file:
+        file.seek(4096)
+        file.write(b'nope')
+    with pytest.raises(ValueError, match='cached blob content'):
+        store.link(name, tmp_path)
+
+
+def test_snapshot_syncs_blob_directory_once_before_primary(tmp_path, monkeypatch):
+    from ignition.preparation import package_file
+
+    synced = []
+    original = package_file._sync_directory
+
+    def sync(path):
+        synced.append(Path(path))
+        original(path)
+
+    monkeypatch.setattr(package_file, '_sync_directory', sync)
+    source, _ = fixtures.fixture(tmp_path)
+    cache = tmp_path / '.flare-cache' / 'blobs'
+    assert synced.count(cache) == 1
+    assert synced.index(cache) < synced.index(tmp_path)
+    assert source.is_file()
+
+
+def test_snapshot_segment_budget_fails_before_payload_io(tmp_path, monkeypatch):
+    from ignition.preparation import package_snapshot
+
+    source, _ = fixtures.fixture(tmp_path)
+    read = package_snapshot.read_at
+    monkeypatch.setattr(package_snapshot, 'MAX_BLOBS', 1)
+    monkeypatch.setattr(package_snapshot, 'read_at', lambda *args: pytest.fail('payload read before layout validation'))
+    monkeypatch.setattr(package_snapshot.BlobStore, 'put', lambda *args, **kwargs:
+                        pytest.fail('payload write before layout validation'))
+    with pytest.raises(ValueError, match='too many payload segments'):
+        convert(source, tmp_path / 'converted' / 'model.safetensors', profiles=[profile()])
+    monkeypatch.setattr(package_snapshot, 'read_at', read)
+    (tmp_path / 'new').mkdir()
+    with pytest.raises(ValueError, match='too many payload segments'):
+        fixtures.fixture(tmp_path / 'new')
+
+
+def test_snapshot_signing_rejects_weight_corruption(tmp_path):
+    from ignition.preparation.resign import resign
+
+    signer = fixtures.development_publisher()
+    source, _ = fixtures.fixture(tmp_path, signer=signer)
+    with source.open('rb') as file:
+        layout = read_container(file)[3]
+    span = read_index(source)[0].ranks[0].resources['weights']
+    weight = tmp_path / layout['files'][span.filename][0][1]
+    weight.chmod(0o644)
+    with weight.open('r+b') as file:
+        file.seek(4096)
+        file.write(b'bad')
+    destination = tmp_path / 'production.safetensors'
+    with pytest.raises(ValueError, match='stored-data digest mismatch'):
+        resign(source, destination, publisher=publisher(), development_profile=fixtures.development_profile(signer))
+    assert not destination.exists()
+
+
+def test_cached_source_does_not_bypass_a_different_corrupt_cache_inode(tmp_path):
+    from ignition.preparation.package_snapshot import BlobStore
+
+    store = BlobStore(tmp_path / 'cache')
+    name = store.put(4, lambda: [b'data'])
+    cached = store.root / name
+    source = tmp_path / 'source'
+    source.write_bytes(cached.read_bytes())
+    cached.chmod(0o644)
+    with cached.open('r+b') as file:
+        file.seek(4096)
+        file.write(b'nope')
+    with source.open('rb') as file, pytest.raises(ValueError, match='cached blob content'):
+        store.put(4, lambda: [b'data'], source_blob=(file, 4096))
+
+
+def test_rank_packing_preserves_interleaved_ownership_and_shard_limit():
+    from ignition.preparation.package_snapshot import _resource_groups
+    from ignition.preparation import runtime_package_pb2 as proto
+
+    roles = [(kind, rank, proto.Span(offset=i * 4096, nbytes=31))
+             for i, (kind, rank) in enumerate([(2, 0), (3, 0), (2, 1), (3, 0),
+                                               (2, 0), (4, 0), (4, 0), (2, None)])]
+    groups = list(_resource_groups(roles, 12288))
+    assert [[(kind, rank) for kind, rank, _ in group] for group in groups] == [
+        [(2, 0), (3, 0)], [(2, 1)], [(3, 0), (2, 0)], [(4, 0)], [(4, 0)], [(2, None)]]
+    assert all(group[-1][2].offset + group[-1][2].nbytes - group[0][2].offset + 4096 <= 12288
+               for group in groups)
+
+
+def test_signing_large_resource_catalog_stays_within_snapshot_segment_budget(native, tmp_path):
+    """Resource-per-blob layout would require more than 65,536 segments."""
+    from ignition.preparation import runtime_package_pb2 as proto
+    from ignition.preparation.package_file import publish, align
+    from ignition.preparation.resign import resign
+
+    index = proto.ModelIndex(version=4, ranks=[proto.BundleIndex(), proto.BundleIndex()])
+    index.cluster.world, index.cluster.export_id = 2, 'large-resource-catalog'
+    data = tmp_path / 'payload'
+    data.write_bytes(b'graph')
+    payload = []
+    cursor = 0
+    for owner, rank in enumerate(index.ranks):
+        rank.allocations.add(name='weights', file='weights')
+        rank.resources['weights'].CopyFrom(proto.Span(offset=cursor, nbytes=5))
+        payload.append((cursor, data, 0, 5))
+        cursor = align(cursor + 5)
+        module = rank.modules.add(name='kernel', file='resource-0')
+        for i in range(31201):
+            name = f'resource-{i}'
+            if i % 2:
+                module.globals.add(symbol=name, file=name, nbytes=5)
+            else:
+                rank.graphs.add(name=name, resource=name)
+            rank.resources[name].CopyFrom(proto.Span(offset=cursor, nbytes=5))
+            payload.append((cursor, data, 0, 5))
+            cursor = align(cursor + 5)
+    signer = fixtures.development_publisher()
+    source = tmp_path / 'development.safetensors'
+    destination = tmp_path / 'production.safetensors'
+    limit = 8 << 20
+    with export_options(tmp_path / 'cache'):
+        publish(source, index, payload, publisher=signer, shard_size=limit)
+        resign(source, destination, publisher=publisher(), development_profile=fixtures.development_profile(signer),
+               shard_size=limit)
+    with destination.open('rb') as file:
+        header, _, _, layout = read_container(file)
+    assert header['flare.payload']['shape'] == [0]
+    assert sum(len(parts) for parts in layout['files'].values()) < 100
+    assert all((tmp_path / name).stat().st_size <= limit
+               for parts in layout['files'].values() for _, name in parts if name)
+    assert_native(native, destination)
+    for rank in (0, 1):
+        result = subprocess.run([str(native), str(destination), 'ranges', str(rank)], capture_output=True,
+                                text=True, timeout=30)
+        assert result.returncode == 0, result.stderr
+        selected = json.loads(result.stdout)
+        peer = tmp_path / f'peer-{rank}'
+        peer.mkdir()
+        for name in selected:
+            os.link(destination.with_name(name) if name else destination,
+                    peer / (name or destination.name))
+        result = fixtures.read(native, peer / destination.name, weights=True, rank=rank)
+        assert result.returncode == 0, result.stderr
+        assert fixtures.read(native, peer / destination.name, weights=True, rank=1 - rank).returncode != 0
+    converted = tmp_path / 'converted' / 'model.safetensors'
+    convert(destination, converted, profiles=[profile()], cache=tmp_path / 'cache', shard_size=limit)
+    assert_native(native, converted)
+
+
 def test_resource_larger_than_hard_limit_does_not_publish(tmp_path):
     with pytest.raises(ValueError, match='resource exceeds'):
         fixtures.shard_fixture(tmp_path, sizes=(17000,), shard_size=12288)

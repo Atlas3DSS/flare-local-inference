@@ -8,6 +8,9 @@ immutable sibling payload blobs named by their SHA-256 hashes. The primary's
 `flare.metadata` contains the signed Protobuf envelope; `flare.layout` maps its
 logical resources to the blobs. `flare.payload` is empty. Weights, embedding
 tables, graphs, kernels, and frontend assets all reside in payload blobs.
+Each weight resource has its own blob identity. Adjacent executable and supporting
+resources owned by one rank share blobs; ranks remain separate for selective
+distribution. Export, conversion, and signing use the same grouping rule.
 
 The payload-file limit is 64 GiB, including the header. `--shard-size SIZE`
 overrides `[publishing] shard_size` with a smaller positive limit. Resources

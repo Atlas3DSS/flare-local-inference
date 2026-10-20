@@ -243,6 +243,6 @@ def _repack(destination, index, base, contents, package_id, public, resources, s
     with phase(progress, 'Re-encrypt executable resources'):
         protection = Protection(index, payload, publisher, temporary, source_verifiers=verifiers,
                                 shard_size=shard_size, basename=destination.stem)
-    with phase(progress, 'Verify stored data and sign package'):
+    with phase(progress, 'Verify stored data and sign package') as stage:
         from .package_snapshot import publish_snapshot
-        publish_snapshot(destination, index, protection, shard_size=shard_size)
+        publish_snapshot(destination, index, protection, shard_size=shard_size, progress=stage)

@@ -5,6 +5,7 @@ signatures and executable encryption continue to authenticate the logical bytes,
 so conversion does not require a private key or change the model's identity.
 """
 
+from bisect import bisect_left, bisect_right
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -118,13 +119,23 @@ class LogicalFile:
     """Read signed logical bytes from pinned blob handles and zero padding."""
     def __init__(self, parts, physical):
         self.parts, self.physical, self.position = parts, physical, 0
+        self.starts = []
+        self.length = 0
+        for length, _ in parts:
+            self.starts.append(self.length)
+            self.length += length
 
     def read_at(self, size, offset):
         if size < 0 or offset < 0:
             raise ValueError('invalid logical read')
-        result, cursor = bytearray(), 0
+        result = bytearray()
         end = offset + size
-        for length, name in self.parts:
+        first = max(0, bisect_right(self.starts, offset) - 1)
+        for i in range(first, len(self.parts)):
+            cursor = self.starts[i]
+            if cursor >= end:
+                break
+            length, name = self.parts[i]
             stop = cursor + length
             if cursor < end and offset < stop:
                 first, last = max(offset, cursor), min(end, stop)
@@ -138,16 +149,25 @@ class LogicalFile:
                     result.extend(data)
                 else:
                     result.extend(bytes(last - first))
-            cursor = stop
-            if cursor >= end:
-                break
         return bytes(result)
+
+    def complete_blob(self, offset, size):
+        """Return the pinned physical file when a range covers one entire blob."""
+        i = bisect_left(self.starts, offset)
+        if i < len(self.parts) and self.starts[i] == offset:
+            length, name = self.parts[i]
+            if name and length == size:
+                source, base, actual = self.physical(name)
+                if actual != size:
+                    raise ValueError('snapshot blob length mismatch')
+                return source, base
+        return None
 
     def seek(self, offset, whence=0):
         if whence == 1:
             offset += self.position
         elif whence == 2:
-            offset += sum(n for n, _ in self.parts)
+            offset += self.length
         elif whence != 0:
             raise ValueError('invalid seek')
         if offset < 0:
@@ -157,7 +177,7 @@ class LogicalFile:
 
     def read(self, size=-1):
         if size < 0:
-            size = sum(n for n, _ in self.parts) - self.position
+            size = self.length - self.position
         data = self.read_at(max(0, size), self.position)
         self.position += len(data)
         return data
@@ -168,12 +188,25 @@ class BlobStore:
         self.root = Path(root) / 'blobs'
         self.root.mkdir(parents=True, exist_ok=True)
         self.written = self.reused = 0
+        self.verified = {}
 
-    def put(self, size, blocks, *, required=False):
+    @staticmethod
+    def _identity(info):
+        return tuple(getattr(info, field) for field in
+                     ('st_dev', 'st_ino', 'st_size', 'st_mtime_ns', 'st_ctime_ns'))
+
+    def put(self, size, blocks, *, required=False, source_blob=None):
         """Hash before writing so an existing blob incurs no payload writes."""
         if not 0 < size <= DEFAULT_SHARD_SIZE - ALIGNMENT:
             raise ValueError('package resource exceeds the 64G payload shard limit')
         header = container_header(size)
+        verified_source = None
+        if source_blob is not None:
+            source, base = source_blob
+            before = os.fstat(source.fileno())
+            if (base == len(header) and before.st_size == base + size
+                    and os.pread(source.fileno(), base, 0) == header):
+                verified_source = source, before
         digest = hashlib.sha256(header)
         count = 0
         for block in blocks():
@@ -184,7 +217,17 @@ class BlobStore:
         name = digest.hexdigest() + '.safetensors'
         target = self.root / name
         if target.exists():
-            self.verify(target, digest.digest(), len(header) + size)
+            # The source pass already hashed this entire inode. Reuse that work only
+            # when the cache names the same unchanged file, including its header.
+            same_source = False
+            if verified_source is not None:
+                source, before = verified_source
+                after = os.fstat(source.fileno())
+                cached = target.stat(follow_symlinks=False)
+                same_source = self._identity(before) == self._identity(after) == self._identity(cached)
+            if not same_source:
+                cached = self.verify(target, digest.digest(), len(header) + size)
+            self.verified[name] = self._identity(cached)
             self.reused += size
             return name
         if required:
@@ -214,13 +257,19 @@ class BlobStore:
             try:
                 os.link(temporary, target)
             except FileExistsError:
-                self.verify(target, digest.digest(), len(header) + size)
-            from .package_file import _sync_directory
-            _sync_directory(self.root)
+                info = self.verify(target, digest.digest(), len(header) + size)
+            else:
+                info = target.stat(follow_symlinks=False)
+            self.verified[name] = self._identity(info)
             self.written += size
         finally:
             Path(temporary).unlink(missing_ok=True)
         return name
+
+    def sync(self):
+        """Make all payload names durable before committing a primary file."""
+        from .package_file import _sync_directory
+        _sync_directory(self.root)
 
     @staticmethod
     def verify(path, expected, size):
@@ -230,8 +279,11 @@ class BlobStore:
             if not stat.S_ISREG(info.st_mode) or info.st_size != size:
                 raise ValueError('invalid cached blob')
             digest = hashlib.file_digest(source, 'sha256').digest()
+            if BlobStore._identity(info) != BlobStore._identity(os.fstat(source.fileno())):
+                raise ValueError('cached blob changed during verification')
         if digest != expected:
             raise ValueError('cached blob content does not match its hash')
+        return info
 
     def link(self, name, directory):
         target = Path(directory) / name
@@ -239,7 +291,9 @@ class BlobStore:
             os.link(self.root / name, target)
         except FileExistsError:
             source = self.root / name
-            self.verify(target, bytes.fromhex(name[:-12]), source.stat().st_size)
+            cached, linked = source.stat(follow_symlinks=False), target.stat(follow_symlinks=False)
+            if self.verified.get(name) != self._identity(cached) or self._identity(cached) != self._identity(linked):
+                self.verify(target, bytes.fromhex(name[:-12]), cached.st_size)
         except OSError as error:
             if error.errno != 18:
                 raise
@@ -274,10 +328,40 @@ def write_primary(path, envelope, layout):
         Path(temporary).unlink(missing_ok=True)
 
 
-def publish_snapshot(path, index, protection, *, shard_size=DEFAULT_SHARD_SIZE):
+def _resource_groups(roles, shard_size):
+    """Pack adjacent code and support within one rank; retain independent weights."""
+    group = []
+    for role in roles:
+        kind, owner, span = role
+        if span.nbytes > shard_size - ALIGNMENT:
+            raise ValueError('package resource exceeds the payload shard limit')
+        if (group and (kind == 4 or group[-1][0] == 4 or owner != group[-1][1]
+                       or span.filename != group[0][2].filename
+                       or span.offset + span.nbytes - group[0][2].offset > shard_size - ALIGNMENT)):
+            yield group
+            group = []
+        group.append(role)
+    if group:
+        yield group
+
+
+def _plan_groups(index, shard_size):
+    from .protection import resource_roles
+    groups = list(_resource_groups(sorted(resource_roles(index), key=lambda role:
+                                         (role[2].filename, role[2].offset)), shard_size))
+    cursors, count = {}, 0
+    for group in groups:
+        first, last = group[0][2], group[-1][2]
+        count += 1 + (first.offset > cursors.get(first.filename, 0))
+        cursors[first.filename] = last.offset + last.nbytes
+    if count > MAX_BLOBS:
+        raise ValueError('snapshot has too many payload segments')
+    return groups
+
+
+def publish_snapshot(path, index, protection, *, shard_size=DEFAULT_SHARD_SIZE, progress=None):
     """Publish directly from staged resource ranges without a complete package copy."""
     from .package_file import _open_source, _absorb_zeros
-    from .protection import resource_roles
     if not ALIGNMENT < shard_size <= DEFAULT_SHARD_SIZE:
         raise ValueError('payload shard limit must exceed 4096 bytes and be at most 64G')
     path = Path(path)
@@ -285,34 +369,41 @@ def publish_snapshot(path, index, protection, *, shard_size=DEFAULT_SHARD_SIZE):
     if path.exists():
         raise FileExistsError(path)
     options = _OPTIONS.get() or ExportOptions(path.parent / '.flare-cache')
+    groups = _plan_groups(index, shard_size)
     store = BlobStore(options.cache)
     layout = {'version': 1, 'files': {}}
+    processed = reported = 0
     for filename, entries in protection.payloads.items():
+        entries = sorted(entries, key=lambda entry: entry[0])
+        starts = [entry[0] for entry in entries]
         parts, cursor = [], 0
-        roles = [(kind, owner, span) for kind, owner, span in resource_roles(index)
-                     if span.filename == filename]
-        roles.sort(key=lambda item: item[2].offset)
         positions = {owner: {p.offset: p.offset for p in ranges if p.filename == filename}
                      for owner, ranges in protection.ranges.items()}
-        for kind, owner, span in roles:
+        for group in (group for group in groups if group[0][2].filename == filename):
+            kind, owner, span = group[0]
+            size = group[-1][2].offset + group[-1][2].nbytes - span.offset
             if span.offset > cursor:
                 parts.append([span.offset - cursor, ''])
-            selected = [entry for entry in entries if span.offset <= entry[0] < span.offset + span.nbytes]
-            if span.nbytes > shard_size - ALIGNMENT:
-                raise ValueError('package resource exceeds the payload shard limit')
+            selected = entries[bisect_left(starts, span.offset):
+                               bisect_left(starts, span.offset + size)]
             observed = False
             part = next((p for p in protection.ranges.get(owner, []) if p.filename == filename
                          and p.offset <= span.offset < p.offset + p.nbytes), None) if kind == 4 else None
             if part is not None:
                 _absorb_zeros(protection.hashes[owner], span.offset - positions[owner][part.offset])
             def blocks():
-                nonlocal observed
+                nonlocal observed, processed, reported
                 first = not observed
                 observed = True
-                for _, source, offset, size in selected:
+                position = span.offset
+                for destination, source, offset, length in selected:
+                    while position < destination:
+                        count = min(BLOCK, destination - position)
+                        yield bytes(count)
+                        position += count
                     with _open_source(source) as contents:
-                        for pos in range(0, size, BLOCK):
-                            count = min(BLOCK, size - pos)
+                        for pos in range(0, length, BLOCK):
+                            count = min(BLOCK, length - pos)
                             block = read_at(contents, count, offset + pos)
                             if len(block) != count:
                                 raise ValueError('truncated export source')
@@ -321,18 +412,36 @@ def publish_snapshot(path, index, protection, *, shard_size=DEFAULT_SHARD_SIZE):
                                 verifier = protection.source_verifiers.get(owner)
                                 if verifier is not None:
                                     verifier.consume(contents, offset + pos, block)
+                            if first:
+                                processed += count
+                                if progress is not None and processed - reported >= 256 << 20:
+                                    progress.update(f'{processed / (1 << 30):.1f} GiB read; '
+                                                    f'{store.reused / (1 << 30):.1f} GiB reused')
+                                    reported = processed
                             yield block
-            name = store.put(span.nbytes, blocks, required=options.no_weights and kind == 4)
+                    position += length
+            source_blob = None
+            if len(selected) == 1:
+                _, source, offset, length = selected[0]
+                if isinstance(source, LogicalFile):
+                    source_blob = source.complete_blob(offset, length)
+            name = store.put(size, blocks, required=options.no_weights and kind == 4,
+                             source_blob=source_blob)
             store.link(name, path.parent)
-            parts.append([span.nbytes, name])
-            cursor = span.offset + span.nbytes
+            if progress is not None:
+                progress.update(f'{processed / (1 << 30):.1f} GiB read; '
+                                f'{store.reused / (1 << 30):.1f} GiB reused')
+            parts.append([size, name])
+            cursor = span.offset + size
             if part is not None:
                 positions[owner][part.offset] = cursor
         layout['files'][filename] = parts
         for owner, ranges in protection.ranges.items():
             for part in (p for p in ranges if p.filename == filename):
                 _absorb_zeros(protection.hashes[owner], part.offset + part.nbytes - positions[owner][part.offset])
-    write_primary(path, protection.envelope(final=True), layout)
+    envelope = protection.envelope(final=True)
+    store.sync()
+    write_primary(path, envelope, layout)
     return store
 
 
@@ -356,6 +465,7 @@ def convert(source, destination, *, profiles, cache=None, shard_size=DEFAULT_SHA
         if profile is None:
             raise ValueError('package publisher is unknown; supply its public profile with --publisher-keys')
         index, _, _, _, resources, stored, _ = _authenticate(primary, profile, development_only=False)
+        groups = _plan_groups(index, shard_size)
         length = header['flare.payload']['shape'][0]
         with PackageFiles(source, primary, base, length) as files:
             for data in stored.values():
@@ -371,35 +481,42 @@ def convert(source, destination, *, profiles, cache=None, shard_size=DEFAULT_SHA
                     raise ValueError('stored-data digest mismatch')
             layout = {'version': 1, 'files': {'': []}}
             cursors = {}
-            for kind, owner, span in sorted(resource_roles(index), key=lambda r: (r[2].filename, r[2].offset)):
-                contents, start, size = files.get(span.filename)
-                if span.offset + span.nbytes > size or span.nbytes > shard_size - ALIGNMENT:
-                    raise ValueError('package resource exceeds its payload or the shard limit')
-                if kind != 4:
-                    resource = resources[kind, owner, span.offset]
-                    for i, expected in enumerate(resource.sha256):
-                        pos = i * (CHUNK + 16) if kind == 2 else 0
-                        count = min(CHUNK + 16, span.nbytes - pos) if kind == 2 else span.nbytes
-                        digest = hashlib.sha256()
-                        for offset in range(0, count, BLOCK):
-                            digest.update(read_at(contents, min(BLOCK, count - offset), start + span.offset + pos + offset))
-                        if digest.digest() != expected:
-                            raise ValueError('publisher resource content verification failed')
-                parts = layout['files'].setdefault(span.filename, [])
-                cursor = cursors.get(span.filename, 0)
-                if cursor < span.offset:
-                    gap = span.offset - cursor
-                    for offset in range(0, gap, BLOCK):
-                        if any(read_at(contents, min(BLOCK, gap - offset), start + cursor + offset)):
-                            raise ValueError('package padding is not zero')
-                    parts.append([gap, ''])
+            for group in groups:
+                _, _, first = group[0]
+                contents, start, length = files.get(first.filename)
+                size = group[-1][2].offset + group[-1][2].nbytes - first.offset
+                if first.offset + size > length:
+                    raise ValueError('package resource exceeds its payload')
+                cursor = cursors.get(first.filename, 0)
+                for kind, owner, span in group:
+                    if cursor < span.offset:
+                        gap = span.offset - cursor
+                        for offset in range(0, gap, BLOCK):
+                            if any(read_at(contents, min(BLOCK, gap - offset), start + cursor + offset)):
+                                raise ValueError('package padding is not zero')
+                    if kind != 4:
+                        resource = resources[kind, owner, span.offset]
+                        for i, expected in enumerate(resource.sha256):
+                            pos = i * (CHUNK + 16) if kind == 2 else 0
+                            count = min(CHUNK + 16, span.nbytes - pos) if kind == 2 else span.nbytes
+                            digest = hashlib.sha256()
+                            for offset in range(0, count, BLOCK):
+                                digest.update(read_at(contents, min(BLOCK, count - offset), start + span.offset + pos + offset))
+                            if digest.digest() != expected:
+                                raise ValueError('publisher resource content verification failed')
+                    cursor = span.offset + span.nbytes
+                parts = layout['files'].setdefault(first.filename, [])
+                previous = cursors.get(first.filename, 0)
+                if previous < first.offset:
+                    parts.append([first.offset - previous, ''])
                 def blocks():
-                    for offset in range(0, span.nbytes, BLOCK):
-                        yield read_at(contents, min(BLOCK, span.nbytes - offset), start + span.offset + offset)
-                name = store.put(span.nbytes, blocks)
+                    for offset in range(0, size, BLOCK):
+                        yield read_at(contents, min(BLOCK, size - offset), start + first.offset + offset)
+                source_blob = contents.complete_blob(first.offset, size) if isinstance(contents, LogicalFile) else None
+                name = store.put(size, blocks, source_blob=source_blob)
                 store.link(name, destination.parent)
-                parts.append([span.nbytes, name])
-                cursors[span.filename] = span.offset + span.nbytes
+                parts.append([size, name])
+                cursors[first.filename] = first.offset + size
             for name, cursor in cursors.items():
                 if cursor != files.get(name)[2]:
                     raise ValueError('unreferenced source payload bytes')
@@ -437,5 +554,15 @@ def convert(source, destination, *, profiles, cache=None, shard_size=DEFAULT_SHA
                                 min(BLOCK, count - offset), span.offset + pos + offset))
                         if digest.digest() != expected:
                             raise ValueError('relocated publisher resource verification failed')
+                # Packed code blobs also carry unsigned alignment gaps. Preserve
+                # their zero-padding invariant if the source changed during copy.
+                for group in groups:
+                    for previous, following in zip(group, group[1:]):
+                        left, right = previous[2], following[2]
+                        start = left.offset + left.nbytes
+                        for offset in range(start, right.offset, BLOCK):
+                            if any(logical[left.filename].read_at(min(BLOCK, right.offset - offset), offset)):
+                                raise ValueError('relocated package padding is not zero')
+            store.sync()
             write_primary(destination, encoded, layout)
     return store

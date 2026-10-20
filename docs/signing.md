@@ -116,13 +116,22 @@ while resolving payloads, before the metadata-only primary is published.
 `--shard-size SIZE` overrides `[publishing] shard_size` (default `64G`), a hard
 payload-file limit of at most 64 GiB. Re-signing accepts monolithic, numbered-shard,
 and snapshot sources and emits a snapshot with content-addressed payload blobs.
-The signed logical resources remain whole. Stored-data blobs already in the
-package cache are hardlinked; executable blobs change with the signing identity.
+The signed logical resources remain whole. Adjacent executable and supporting
+resources for one rank share bounded payload blobs; different ranks retain
+separate blobs for selective distribution. Weight resources keep independent
+blob identities so graph changes do not duplicate weights. Stored-data blobs
+already in the package cache are hardlinked; executable blobs change with the
+signing identity. An unchanged snapshot weight already linked into the cache
+is hashed once for source verification and blob identity, without redundant
+cache or destination-link reads.
 Invalid packages fail without publishing a primary, and existing destinations
 are never overwritten.
 
 No checkpoint reload, compilation, graph capture, or GPU access is required.
-The operation reads all source payloads to verify them and needs disk space for
+The operation reads all source payloads to verify them and reports GiB read and
+reused during stored-data verification. Large packages still require a complete
+weight read. Promoting a monolithic or numbered-shard package also writes weight
+blobs that are absent from the cache. Signing needs disk space for
 uncached blobs plus temporary executable resources. Temporary plaintext executable
 files reside in a private directory beside the destination and are removed when
 the command exits normally or raises an error. A forced kill can leave that
