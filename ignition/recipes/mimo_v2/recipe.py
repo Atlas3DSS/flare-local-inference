@@ -29,6 +29,7 @@ def usage(prepared):
 
 RECIPE = Recipe(
     name="mimo_v2",
+    served_model_name="MiMo-V2.6-Pro-MOPD",
     # Recommended sampling: https://huggingface.co/XiaomiMiMo/MiMo-V2.6-Pro-MOPD#4-deployment.
     sampling_defaults=SamplingDefaults(temperature=1., top_p=.95, top_k=-1),
     prepare=prepare,

@@ -153,6 +153,8 @@ class Recipe:
     `prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress)` loads,
     tunes, and captures the plan's serving catalog and returns the prepared model.
     `usage(prepared)` reports each rank's device memory in rank order.
+    `served_model_name` is the canonical model name advertised by the API,
+    independent of checkpoint selection aliases and storage formats.
 
     `ranks` holds each tensor-parallel size's costs as the recipe serves by
     default. A recipe that declares `speculation` drafts with those settings
@@ -175,6 +177,7 @@ class Recipe:
     """
 
     name: str
+    served_model_name: str
     checkpoints: tuple[Checkpoint, ...]
     context: int
     page_tokens: int

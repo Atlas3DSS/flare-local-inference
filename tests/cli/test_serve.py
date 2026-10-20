@@ -13,7 +13,7 @@ import pytest
 from ignition import planning
 from ignition.cli import environment, main as cli_main, runtime, serve
 from ignition.cli.config import Configuration
-from ignition.recipes import ResolvedModel, resolve
+from ignition.recipes import ResolvedModel, recipes, resolve
 from ignition.recipes.declaration import RankUsage
 
 GIB = 1 << 30
@@ -180,6 +180,35 @@ def test_runtime_memory_flags_are_forwarded_without_preparing_another_package(ho
         assert host["options"]["reserve_bytes"] == 0
 
 
+@pytest.mark.parametrize(("alias", "served_name"), [
+    ("qwen3.8-flash", "Qwen3.8-Flash-Next"),
+    ("qwen3.8-27b", "Qwen3.8-27B"),
+    ("glm-5.3-flash", "GLM-5.3-Flash"),
+    ("deepseek-v4.1-flash", "DeepSeek-V4.1-Flash"),
+    ("deepseek-v4-flash", "DeepSeek-V4-Flash-Vision-Exp"),
+    ("mimo-v2.6-pro-mopd", "MiMo-V2.6-Pro-MOPD"),
+    ("kimi-k3-mxfp4-csf", "Kimi-K3"),
+    ("kimi-k3", "Kimi-K3"),
+    ("kimi-k3-dspark", "Kimi-K3"),
+    ("step5-preview-nvfp4", "Step-5-Preview"),
+    ("nemotron-bolt-24gb", "NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB"),
+])
+@pytest.mark.parametrize("local", [False, True], ids=["checkpoint", "local-directory"])
+def test_server_options_advertise_canonical_names_independently_of_checkpoint_source(
+        tmp_path, alias, served_name, local):
+    recipe, checkpoint = next((recipe, checkpoint) for recipe in recipes()
+                              for checkpoint in recipe.checkpoints if checkpoint.alias == alias)
+    directory = tmp_path / "custom-checkpoint" if local else None
+    model = ResolvedModel(recipe, checkpoint, directory)
+    plan = types.SimpleNamespace(recipe=recipe, checkpoint=checkpoint, reserve_bytes=0,
+                                 concurrency=recipe.concurrency, max_images=recipe.max_images)
+    config = tmp_path / "config.toml"
+    config.write_text("")
+    options = serve._server_options(Configuration.load(config), model, plan)
+    assert options["served_names"] == [served_name]
+    assert options["model_id"] == ("custom-checkpoint" if local else checkpoint.repository)
+
+
 def test_served_model_name_is_forwarded_without_changing_the_package_alias(host):
     assert run("qwen3.8-flash") == 0
     original = host["exec"][2]
@@ -189,7 +218,7 @@ def test_served_model_name_is_forwarded_without_changing_the_package_alias(host)
         arguments = host["exec"]
         assert arguments[arguments.index("--served-model-name") + 1] == alias
         assert arguments[2] == original and host["exports"] == 1
-        assert host["options"]["served_names"] == ["qwen3.8-flash"]
+        assert host["options"]["served_names"] == ["Qwen3.8-Flash-Next"]
 
 
 @pytest.mark.parametrize("extension", [None, types.SimpleNamespace()])
@@ -392,7 +421,7 @@ def test_export_does_not_launch_a_server_and_preserves_the_serving_plan(host, tm
     assert host["plan"].mixed_prefill == mixed
     assert host["plan"].stream_overlap == overlap
     assert host["options"]["queue_capacity"] == 16
-    assert host["options"]["served_names"] == ["qwen3.8-flash"]
+    assert host["options"]["served_names"] == ["Qwen3.8-Flash-Next"]
     assert host["options"]["reserve_bytes"] == reserve
     assert "headroom_bytes" not in host["options"]
     assert host["prepared"].closed

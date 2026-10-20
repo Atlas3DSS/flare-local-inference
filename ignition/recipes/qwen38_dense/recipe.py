@@ -25,7 +25,7 @@ def usage(prepared):
 
 
 RECIPE = Recipe(
-    name="qwen38_dense", prepare=prepare, usage=usage,
+    name="qwen38_dense", served_model_name="Qwen3.8-27B", prepare=prepare, usage=usage,
     # Thinking defaults; bounds span thinking/instruct presets: https://huggingface.co/Qwen/Qwen3.8-27B#best-practices.
     sampling_defaults=SamplingDefaults(temperature=1., top_p=.95, top_k=20, min_p=0.,
         presence_penalty=0., repetition_penalty=1., frequency_penalty=0.,

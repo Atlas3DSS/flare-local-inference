@@ -430,6 +430,12 @@ RAM table storage already retains both planes. The metric
 `flare_engram_resident_scale_bytes` reports the scale allocation separately from
 the row cache.
 
+Ignition exports each recipe's canonical model name as its default serving
+alias, such as `DeepSeek-V4.1-Flash`. Checkpoint selectors such as
+`deepseek-v4.1-flash` select preparation inputs and configuration sections;
+they do not set the advertised API name. Existing packages retain their
+embedded aliases.
+
 `--served-model-name` changes the name advertised by `/v1/models` and accepted
 for requests. It replaces the package aliases; the canonical model ID remains
 accepted and appears as the model card's `root`. The override does not modify

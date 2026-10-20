@@ -23,7 +23,8 @@ def recipe(name, device_gib, ranks, *, speculation=None, mapped_gib=0, draft_gib
                             stored_bytes=(device_gib + mapped_gib) * GIB, device_bytes=device_gib * GIB,
                             mapped_host_bytes=mapped_gib * GIB, draft_bytes=draft_gib * GIB)
     speculating = speculation is not None
-    return Recipe(name=name, checkpoints=(checkpoint,), context=262144, page_tokens=64, concurrency=4,
+    return Recipe(name=name, served_model_name=name, checkpoints=(checkpoint,),
+                  context=262144, page_tokens=64, concurrency=4,
                   sampling_defaults=SamplingDefaults(temperature=1., top_p=1., top_k=-1),
                   max_concurrency=64, max_draft_tokens=7 if speculating else 0, prefill_chunk=4096, prepare=None,
                   usage=None, mapped_host_name="lookup table", speculation=speculation, history_copy=speculating,

@@ -45,7 +45,7 @@ def usage(prepared):
 
 
 RECIPE = Recipe(
-    name="kimi3", prepare=prepare, usage=usage,
+    name="kimi3", served_model_name="Kimi-K3", prepare=prepare, usage=usage,
     # Agentic defaults; top-p spans single-step/agentic presets: https://huggingface.co/moonshotai/Kimi-K3#3-evaluation-results.
     sampling_defaults=SamplingDefaults(temperature=1., top_p=1., top_k=-1,
         ranges={"top_p": SamplingRange(.95, 1.)}),

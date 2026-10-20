@@ -61,7 +61,7 @@ def usage(prepared):
 
 
 RECIPE = Recipe(
-    name="glm53", prepare=prepare, usage=usage,
+    name="glm53", served_model_name="GLM-5.3-Flash", prepare=prepare, usage=usage,
     # Bounds span HLE, BabyVision, and coding presets: https://huggingface.co/zai-org/GLM-5.3-Flash#footnotes.
     sampling_defaults=SamplingDefaults(temperature=1., top_p=.95, top_k=-1,
         ranges={"temperature": SamplingRange(.95, 1.), "top_p": SamplingRange(.95, 1.)}),
