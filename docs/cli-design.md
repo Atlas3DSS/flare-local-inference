@@ -104,14 +104,16 @@ flare download REPOSITORY [flags]         download a prepared package
 flare inspect PACKAGE [--memory-map] [--graphs] [--frontend] [--all] [--json | --plain]
 flare agent [--listen IP:PORT]            run this host's orbit agent
 flare agent install [--join-code CODE | --accept-first] [--listen IP:PORT]
-flare agent reset                         forget the host's controllers
+flare agent reset                        forget authorized controllers and pairing codes
 flare orbit pair HOST... [--code CODE]    pair this controller with hosts
 flare orbit controllers add NAME KEY | remove KEY
 flare orbit status [--cluster NAME]
-flare orbit run [PACKAGE] [--cluster NAME | --nodes N,...] [--name GROUP] [--dry-run] [serving flags] [--detach]
-flare orbit attach | stop [--cluster NAME]
+flare orbit run [PACKAGE] [--cluster NAME | --nodes NODE,...] [--name GROUP] [--persistent] [--executable PATH] [--dry-run] [serving flags] [--detach]
+flare orbit attach [GROUP] [--cluster NAME]
+flare orbit stop [GROUP] [--cluster NAME]
+flare orbit rm GROUP                     remove a stopped definition or retained launch
 flare orbit forget NODE                   remove a node from the orbit file
-flare orbit push PACKAGE --to NODE,...    stage and verify a package on nodes
+flare orbit push PACKAGE --to NODE,...    stage package data without starting ranks
 flare orbit packages [--cluster NAME]     what each node's cache holds
 flare orbit ls | dashboard [--cluster NAME]  groups on the cluster's nodes; their live metrics
 flare trust revoke FINGERPRINT
@@ -122,7 +124,17 @@ defaulting to `~/.config/flare/orbit.toml` and
 `~/.config/flare/orbit/controller.key`. `flare orbit run` takes the serving
 flags of `flare run` and applies them to every rank; `--host`, `--port`,
 `--served-model-name`, `--scheduler-policy`, and `--api-key-file` apply to rank
-zero. See [orbit](orbit.md).
+zero. `--api-key-file` names a file rank zero must be able to read; Orbit does
+not upload it. Package inputs are controller-local files or
+`NODE:/absolute/path` on a paired node. Download Hugging Face packages with
+`flare download` first, then supply the returned path.
+
+Ranks use each node's installed agent executable by default. An explicit
+`--executable PATH`, or a saved group's override, uploads the chosen build.
+`--persistent --name GROUP` saves a launch for manual reuse;
+`--detach` returns when processes start, before HTTP readiness is guaranteed.
+See [Orbit](orbit.md) and the [multi-host guide](multi-host.md). Orbit commands
+are implemented in Unix builds; Windows builds reject them.
 
 For MSVC cross-compilation, native Windows builds, and GPU compatibility
 requirements, see [Windows serving](windows.md).

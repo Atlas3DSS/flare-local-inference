@@ -30,9 +30,9 @@ pub enum Command {
     Download(Download),
     /// Summarize a package's metadata, with optional memory, graph, and frontend details.
     Inspect(Inspect),
-    /// Run this host's agent, which pairs with controllers and runs its rank of a orbit's serving group.
+    /// Run this host's agent, which pairs with controllers and supervises serving ranks.
     Agent(AgentArgs),
-    /// Control a orbit of agents from this machine.
+    /// Control an orbit of agents from this machine.
     Orbit(OrbitArgs),
     /// Manage remembered publisher trust.
     Trust {
@@ -140,7 +140,7 @@ pub struct AgentArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum AgentCommand {
-    /// Install the agent as a service on this host and pair its first controller.
+    /// Install and restart this host's agent service, and prepare controller pairing.
     Install {
         /// One-time code a controller presents to pair.
         #[arg(long, value_name = "CODE")]
@@ -152,7 +152,7 @@ pub enum AgentCommand {
         #[arg(long, value_name = "IP:PORT", default_value = "0.0.0.0:29900")]
         listen: String,
     },
-    /// Remove this host's pairings and cached files.
+    /// Remove this host's authorized controllers and pairing codes; keep its key and cache.
     Reset,
 }
 
@@ -185,7 +185,7 @@ pub enum OrbitCommand {
         #[command(subcommand)]
         command: ControllersCommand,
     },
-    /// Show each node's state and its running group.
+    /// Show each node's capacity, groups, and package cache.
     Status {
         #[arg(long, value_name = "NAME")]
         cluster: Option<String>,
@@ -202,7 +202,7 @@ pub enum OrbitCommand {
         #[arg(long, value_name = "NAME")]
         cluster: Option<String>,
     },
-    /// Follow running groups' output.
+    /// Follow retained and live rank output; Ctrl-C detaches without stopping ranks.
     Attach {
         #[arg(long, value_name = "NAME")]
         cluster: Option<String>,
@@ -228,7 +228,7 @@ pub enum OrbitCommand {
         #[arg(value_name = "NODE")]
         node: String,
     },
-    /// Place a package on nodes and verify it there without starting it.
+    /// Stage package data on nodes without starting ranks.
     Push(Box<OrbitPush>),
     /// List what every node's package cache holds.
     Packages {
@@ -315,11 +315,11 @@ pub struct OrbitRun {
     #[arg(long, value_name = "NODE[,NODE...]", value_delimiter = ',')]
     pub nodes: Vec<String>,
 
-    /// Print the placement and what would be transferred, then exit.
+    /// Verify package metadata and print placement without starting ranks or saving a group.
     #[arg(long)]
     pub dry_run: bool,
 
-    /// Return once the group is serving instead of following its output.
+    /// Return once rank processes start; the HTTP server may still be loading the model.
     #[arg(long)]
     pub detach: bool,
 

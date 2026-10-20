@@ -35,11 +35,15 @@ See [APT's authentication specification](https://manpages.debian.org/bookworm/ap
 Installation and upgrades do not create or restart services. To install an
 agent, run `/usr/bin/flare agent install` as the user who owns its models. The
 command prints a pairing code and enables a systemd user service; see
-[Orbit](orbit.md). The installer copies the executable into the user's home
-directory. After a Debian package upgrade, rerun that command during a maintenance
-window to update and restart the agent. Existing controller identities and caches
-remain in place. Check `command -v flare` when a locally installed executable
-might take precedence over `/usr/bin/flare`.
+[agent setup](multi-host.md#one-time-setup-the-flare-agent). The installer copies
+the executable to `~/.local/lib/flare-agent/flare`. Orbit uses that copy for both
+the agent and default serving; `orbit run --executable PATH` selects an uploaded
+override. After a Debian package upgrade, stop the groups that agent serves and
+rerun `/usr/bin/flare agent install` to update the copy and restart the service.
+Pass `--listen IP:PORT` again if the listener was customized. Existing identities
+and caches remain. Restart saved groups explicitly; agent startup does not
+restore them. Check `command -v flare` when another installed executable might
+take precedence over `/usr/bin/flare`.
 
 ## Build
 
