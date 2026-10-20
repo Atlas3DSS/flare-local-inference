@@ -407,7 +407,8 @@ fn rank_loop(
 
 fn same_layout(a: &ExecutionManifest, b: &ExecutionManifest) -> bool {
     match (&a.engram, &b.engram) {
-        (Some(a), Some(b)) if !Arc::ptr_eq(&a.shared, &b.shared) || a.rank == b.rank => {
+        // Partitioned tables have independent delivery groups, each numbered from zero.
+        (Some(a), Some(b)) if Arc::ptr_eq(&a.shared, &b.shared) && a.rank == b.rank => {
             return false;
         }
         (Some(_), None) | (None, Some(_)) => return false,
@@ -517,5 +518,69 @@ mod tests {
         assert!(same_layout(&root, &peer));
         peer.cache.as_mut().unwrap().planes[0].unit_bytes += 1;
         assert!(!same_layout(&root, &peer));
+    }
+
+    #[test]
+    fn rank_layout_accepts_shared_and_partitioned_engram_delivery() {
+        use crate::engram::{Binding, Index, Plane, Shared, Table};
+
+        for partitioned in [false, true] {
+            let groups: Vec<_> = (0..if partitioned { 4 } else { 1 })
+                .map(|rank| {
+                    Shared::layout_fixture(
+                        Index {
+                            tables: vec![Table {
+                                planes: [256, 8].map(|row_bytes| Plane {
+                                    file: rank,
+                                    offset: rank as u64 * 4096,
+                                    nbytes: (100 + rank) * row_bytes,
+                                    row_bytes,
+                                }),
+                                heads: 24,
+                                weights: "weights".into(),
+                                scales: "scales".into(),
+                                hashes: "hashes".into(),
+                                event: "ready".into(),
+                                request: Some("requests".into()),
+                            }],
+                        },
+                        if partitioned { 1 } else { 4 },
+                    )
+                })
+                .collect();
+            let ranks: Vec<_> = (0..4)
+                .map(|rank| {
+                    let mut manifest = super::super::tests::manifest();
+                    manifest.context += rank;
+                    manifest.device = rank as i32;
+                    for buffer in &mut manifest.buffers {
+                        buffer.address += rank * 0x100000;
+                    }
+                    for graph in &mut manifest.graphs {
+                        graph.handle += rank * 0x100000;
+                    }
+                    manifest.engram = Some(Binding {
+                        shared: groups[if partitioned { rank } else { 0 }].clone(),
+                        rank: if partitioned { 0 } else { rank },
+                        events: vec![rank + 1],
+                    });
+                    manifest.validate().unwrap();
+                    manifest
+                })
+                .collect();
+            for peer in &ranks[1..] {
+                assert!(same_layout(&ranks[0], peer));
+            }
+            // A delivery group cannot count the same member twice.
+            let mut duplicate = ranks[1].clone();
+            duplicate.engram = ranks[0].engram.clone();
+            assert!(!same_layout(&ranks[0], &duplicate));
+            let mut missing = ranks[1].clone();
+            missing.engram = None;
+            assert!(!same_layout(&ranks[0], &missing));
+            let mut mismatch = ranks[1].clone();
+            mismatch.graphs[0].input_bindings[0].host_offset += 8;
+            assert!(!same_layout(&ranks[0], &mismatch));
+        }
     }
 }

@@ -243,6 +243,14 @@ pub(crate) struct Shared {
     stats: Arc<Stats>,
 }
 impl Shared {
+    #[cfg(test)]
+    pub(crate) fn layout_fixture(index: Index, ranks: usize) -> Arc<Self> {
+        Arc::new(Self {
+            index: Arc::new(index), layers: Vec::new(), ranks, max_tokens: 4096,
+            stats: Arc::new(Stats::default()),
+        })
+    }
+
     pub fn new(
         index: Index,
         files: &[Arc<std::fs::File>],
