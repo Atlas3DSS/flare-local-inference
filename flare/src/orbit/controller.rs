@@ -1966,8 +1966,8 @@ fn put(
 fn package_streams(roce_ring: bool, selected: Option<u8>) -> Result<u8, Failure> {
     match (roce_ring, selected) {
         (true, None) => Ok(8),
-        (true, Some(streams @ 1..=8)) => Ok(streams),
-        (true, Some(_)) => Err("transfer streams must be in 1..=8".into()),
+        (true, Some(streams @ 1..=64)) => Ok(streams),
+        (true, Some(_)) => Err("transfer streams must be in 1..=64".into()),
         (false, None) => Ok(1),
         (false, Some(_)) => {
             Err("--transfer-streams requires --roce-ring or a saved ring group".into())

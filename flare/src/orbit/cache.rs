@@ -246,8 +246,8 @@ pub fn store_parallel<R: Read>(
     use std::os::unix::fs::FileExt;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    if !(1..=8).contains(&streams) {
-        return Err("transfer streams must be in 1..=8".into());
+    if !(1..=64).contains(&streams) {
+        return Err("transfer streams must be in 1..=64".into());
     }
     store_entry(cache, "package", name, size, ranges, |partial| {
         let output = fs::OpenOptions::new()
@@ -591,7 +591,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let bytes = (0..9_000_019).map(|i| (i % 251) as u8).collect::<Vec<_>>();
         let ranges = [(7, 101), (3_000_000, 5_999_999)];
-        for streams in [1, 4, 8] {
+        for streams in [1, 4, 8, 16, 32, 64] {
             let ready = Barrier::new(streams);
             let path = store_parallel(
                 temp.path(),
@@ -633,7 +633,7 @@ mod tests {
             ]
         );
         assert!(split_ranges(&[], 8).is_empty());
-        for streams in [0, 9] {
+        for streams in [0, 65] {
             assert!(
                 store_parallel(
                     temp.path(),

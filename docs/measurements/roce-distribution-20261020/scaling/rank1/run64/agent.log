@@ -1,0 +1,10 @@
+2026-10-20T11:15:56-07:00 spark-1afa flare-stream-scaling-test-bin[1822993]: running 1 test
+2026-10-20T11:15:56-07:00 spark-1afa flare-stream-scaling-test-bin[1822993]: flare agent spark-1afa (44211a818b28d247f0055866a25894f2db72c05eab03cbb08cbc1a7fac70ce88) listening on 0.0.0.0:29910; cache /home/nvidia/erakhmatulin/flare-stream-scaling-20261020/run64/cache; controller set revision 1
+2026-10-20T11:16:06-07:00 spark-1afa flare-stream-scaling-test-bin[1822993]: deepseek-v41-flash-1017-csf-ring-tp4-c4-dspark5.safetensors: fabric TCP spark-1ae8 -> spark-1afa (64 streams)
+2026-10-20T11:16:07-07:00 spark-1afa flare-stream-scaling-test-bin[1822993]: deepseek-v41-flash-1017-csf-ring-tp4-c4-dspark5.safetensors: received 352367147 bytes in 0.27s (1240.2 MiB/s)
+2026-10-20T11:16:07-07:00 spark-1afa flare-stream-scaling-test-bin[1822993]: deepseek-v41-flash-1017-csf-ring-tp4-c4-dspark5-data-03-of-08.safetensors: fabric TCP spark-1ae8 -> spark-1afa (64 streams)
+2026-10-20T11:16:35-07:00 spark-1afa flare-stream-scaling-test-bin[1822993]: deepseek-v41-flash-1017-csf-ring-tp4-c4-dspark5-data-03-of-08.safetensors: received 68545087376 bytes in 28.28s (2311.2 MiB/s)
+2026-10-20T11:16:35-07:00 spark-1afa flare-stream-scaling-test-bin[1822993]: deepseek-v41-flash-1017-csf-ring-tp4-c4-dspark5-data-04-of-08.safetensors: fabric TCP spark-1ae8 -> spark-1afa (64 streams)
+2026-10-20T11:16:56-07:00 spark-1afa flare-stream-scaling-test-bin[1822993]: test orbit::agent::tests::serve_ring_transfer_fixture has been running for over 60 seconds
+2026-10-20T11:16:58-07:00 spark-1afa flare-stream-scaling-test-bin[1822993]: deepseek-v41-flash-1017-csf-ring-tp4-c4-dspark5-data-04-of-08.safetensors: received 58378800400 bytes in 23.00s (2420.3 MiB/s)
+2026-10-20T11:19:45-07:00 spark-1afa flare-stream-scaling-test-bin[1822993]: 3b3e74467321456d92b39330e49158cb-1491781628-rank1: stored data verified

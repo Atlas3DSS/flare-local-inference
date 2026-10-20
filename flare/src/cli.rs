@@ -257,7 +257,7 @@ pub struct OrbitPush {
     pub roce_ring: bool,
 
     /// Parallel TCP streams per destination file over the ring fabric [default: 8].
-    #[arg(long, value_name = "N", requires = "roce_ring", value_parser = clap::value_parser!(u8).range(1..=8))]
+    #[arg(long, value_name = "N", requires = "roce_ring", value_parser = clap::value_parser!(u8).range(1..=64))]
     pub transfer_streams: Option<u8>,
 
     #[command(flatten)]
@@ -341,7 +341,7 @@ pub struct OrbitRun {
     pub roce_ring: bool,
 
     /// Parallel TCP streams per destination file over the ring fabric [default: saved group or 8].
-    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u8).range(1..=8), help_heading = "Multi-host options")]
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u8).range(1..=64), help_heading = "Multi-host options")]
     pub transfer_streams: Option<u8>,
 
     /// IP address for rank zero's HTTP server [default: saved group or 127.0.0.1].
@@ -1023,7 +1023,7 @@ mod tests {
 
     #[test]
     fn transfer_stream_counts_are_bounded_and_stay_out_of_rank_arguments() {
-        for count in ["1", "4", "8"] {
+        for count in ["1", "4", "8", "16", "32", "64"] {
             let parsed = Cli::try_parse_from([
                 "flare",
                 "orbit",
@@ -1050,7 +1050,7 @@ mod tests {
             );
         }
         for command in ["run", "push"] {
-            for count in ["0", "9", "256"] {
+            for count in ["0", "65", "256"] {
                 let mut args = vec![
                     "flare",
                     "orbit",

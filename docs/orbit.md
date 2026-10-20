@@ -565,10 +565,13 @@ agents forward encrypted sessions one record at a time, without storing another
 rank's shard. TCP backpressure bounds buffering, and each hop verifies its peer
 identity and the signed local and remote interface addresses. Connections bind
 their local fabric IP; failed links report errors without retrying through the
-management network. `--transfer-streams N` selects 1..8 parallel TCP streams per
+management network. `--transfer-streams N` selects 1..64 parallel TCP streams per
 destination file (default 8), divided between the available rails. Each stream
 pulls a disjoint, approximately equal share of the requested bytes; sparse holes
-remain holes. Files are processed one at a time. A saved group's
+remain holes. Files are processed one at a time. The count applies to each
+destination, so a source or relay serving several ranks handles their combined
+connections. Higher counts increase CPU and I/O concurrency; benchmark the
+actual package and ring before increasing the default. A saved group's
 `transfer_streams` value is reused by `orbit run`, and an explicit CLI value
 overrides it. This setting requires ring distribution and does not affect
 collectives. A transfer connection fails after 120 seconds without read or write

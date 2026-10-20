@@ -868,8 +868,8 @@ fn transfer(agent: &Agent, pinned: &mut Pinned, request: &Value) -> Result<Vec<u
         None => 1,
         Some(value) => value
             .as_u64()
-            .filter(|n| (1..=8).contains(n))
-            .ok_or("transfer streams must be in 1..=8")? as usize,
+            .filter(|n| (1..=64).contains(n))
+            .ok_or("transfer streams must be in 1..=64")? as usize,
     };
     if streams > 1 && ring_source.is_none() {
         return Err("parallel package transfers require ring fabric interfaces".into());
@@ -2758,11 +2758,11 @@ pub mod tests {
                 "grant": Signed::sign(&hosts[0].controller, grant).unwrap(), "publisher": publisher(),
                 "source": {"public_key": nodes[0].public_key, "address": "127.0.0.1:1"},
                 "directory": format!("ring-{}-rank{rank}", bytes.len()),
-                "streams": if rank % 2 == 0 { 8 } else { 4 },
+                "streams": ([0, 4, 8, 16, 32, 64][rank]),
                 "files": [{"name": "model.safetensors", "size": bytes.len(), "ranges": ranges}],
             })
         };
-        for count in [json!(0), json!(9), json!("8")] {
+        for count in [json!(0), json!(65), json!("8")] {
             let mut invalid = request(&grant, 1);
             invalid["streams"] = count;
             let error = connect(&hosts[1], &hosts[1].controller)
@@ -2771,7 +2771,7 @@ pub mod tests {
             assert!(
                 error
                     .to_string()
-                    .contains("transfer streams must be in 1..=8")
+                    .contains("transfer streams must be in 1..=64")
             );
         }
         // The source's management address is deliberately unusable. Rank 2 must go through 1.

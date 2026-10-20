@@ -1110,7 +1110,7 @@ captured collective operation contracts. `flare orbit run --roce-ring` also
 distributes package bytes over TCP through the ring's fabric interfaces.
 `flare orbit push --roce-ring --to NODE,...` uses the same distribution path
 without starting ranks; it requires exactly one target per package rank, in
-ring order. Both Orbit commands accept `--transfer-streams N` (1..8, default 8)
+ring order. Both Orbit commands accept `--transfer-streams N` (1..64, default 8)
 to fetch each destination file through parallel TCP connections across the
 available rails. Named groups save this as `transfer_streams`; an explicit
 value overrides the saved setting. Controller traffic remains on the paired

@@ -355,6 +355,56 @@ verification remains a separate substantial cost. All temporary agents were
 stopped and their test caches and copied credentials removed; installed agents
 and the original verified caches were preserved.
 
+### Scaling beyond eight streams
+
+The stream limit was extended to 64 and the same signed fixture was tested at
+16, 32, and 64 streams, followed by another eight-stream run. Each run used new
+empty destination caches and finished verification before the next began.
+Previous test caches stayed on disk until all four runs finished; OS caches
+were not flushed. All peers received and verified the same 118.5 GiB in three
+files. The [scaling measurements](measurements/roce-distribution-20261020/scaling/)
+include one-second interface, process, memory, CPU, and NVMe samples for the
+first 90 seconds, alongside the complete transfer logs and route snapshots.
+
+| Streams per file | Rank 1 payload | Rank 2 payload | Rank 3 payload | Full push | Best 10-second source TX |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 8 (repeat) | 37.59 s | 40.64 s | 67.56 s | 141.63 s | 90.00 Gb/s |
+| 16 | 46.15 s | 37.81 s | 65.51 s | 134.41 s | 83.51 Gb/s |
+| 32 | 51.07 s | 45.18 s | 61.05 s | 212.32 s | 71.20 Gb/s |
+| 64 | 51.55 s | 46.15 s | 46.12 s | 219.23 s | 70.23 Gb/s |
+
+Payload durations use the same sum of per-file receive times as above. Source
+TX is the largest ten-second delta in the one-second counters, summed across
+all four fabric interfaces; it is not a per-link or per-destination rate. In
+the eight-stream peak window, the two 0–1 rails together carried 58.6 Gb/s and
+the two 0–3 rails carried 31.4 Gb/s. Neither direction reached its TCP ceiling.
+Sockets and route snapshots confirmed the fabric paths at every stream count;
+management RX plus TX remained below 1 MB per node per run.
+
+More streams did not produce a consistent throughput improvement. In the first
+20 sampled seconds, aggregate source TX was 77.7, 73.5, 69.5, and 66.8 Gb/s for
+8, 16, 32, and 64 streams respectively. Source NVMe reads were 8.6, 8.2, 7.7,
+and 7.4 GiB/s, with about 10–11 process CPU cores and 16–21% system I/O wait.
+At the eight-stream peak, reads reached 10.0 GiB/s and process CPU use was
+11.5 cores. Source thread counts rose from 29 at eight streams to 197 at 64.
+These samples show substantial host-side costs and a plateau before network
+saturation; they do not isolate one limiting resource.
+
+Per-peer and verification times varied considerably. The two eight-stream
+runs had similar payload times on ranks 1 and 2, but rank 3 changed from 37.14
+to 67.56 seconds. Their full pushes took 179.62 and 141.63 seconds respectively.
+Thus these runs do not establish a globally optimal count or a stable staging
+latency. Eight remains the default because the higher counts did not improve
+aggregate source throughput; `--transfer-streams N` now permits 1 through 64
+for measurements on other packages and rings.
+
+The expanded tests cover concurrent sparse writes and authenticated relay
+transfers through 64 streams. All 120 non-ignored CLI/unit/inspection tests
+passed, and every live run completed signed-package verification. No inference
+benchmark was run. Temporary agents, caches, and copied credentials were
+removed after measurement; installed agents and original rank caches remain
+in place.
+
 ## Protocol model and runtime checks
 
 The [RoCEnante protocol models in FlashInfer](https://github.com/local-inference-lab/flashinfer/tree/f4ca6f08b7f697da521c212b5b02187a4d82e352/tests/experimental/b12x/comm/formal)
