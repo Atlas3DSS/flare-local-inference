@@ -1,0 +1,38 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 15  of event 'armv8_pmuv3_0/cycles/P'
+# Event count (approx.): 180628227
+#
+# Overhead  Command          Shared Object                 Symbol                         IPC   [IPC Coverage]
+# ........  ...............  ............................  .............................  ....................
+#
+    40.02%  orbit::agent::t  [kernel.kallsyms]             [k] ext4_mpage_readpages       -      -
+    16.98%  orbit::agent::t  flare-ring-test-bin-20261020  [.] 0x0000000000409f2c         -      -
+    14.55%  orbit::agent::t  flare-ring-test-bin-20261020  [.] 0x000000000040a2c0         -      -
+    14.35%  orbit::agent::t  flare-ring-test-bin-20261020  [.] 0x0000000000409fc8         -      -
+    13.32%  orbit::agent::t  flare-ring-test-bin-20261020  [.] 0x0000000000409f50         -      -
+
+
+# Samples: 1K of event 'armv8_pmuv3_1/cycles/P'
+# Event count (approx.): 47626785445
+#
+# Overhead  Command          Shared Object                 Symbol                                              IPC   [IPC Coverage]
+# ........  ...............  ............................  ..................................................  ....................
+#
+    30.83%  orbit::agent::t  flare-ring-test-bin-20261020  [.] 0x000000000040a188                              -      -
+     5.94%  orbit::agent::t  [kernel.kallsyms]             [k] __arch_copy_to_user                             -      -
+     3.74%  orbit::agent::t  flare-ring-test-bin-20261020  [.] 0x000000000040a30c                              -      -
+     2.85%  orbit::agent::t  [kernel.kallsyms]             [k] __arch_copy_from_user                           -      -
+     1.87%  orbit::agent::t  [kernel.kallsyms]             [k] _raw_spin_unlock_irqrestore                     -      -
+     1.52%  orbit::agent::t  flare-ring-test-bin-20261020  [.] 0x0000000000409ff0                              -      -
+     1.35%  orbit::agent::t  [kernel.kallsyms]             [k] handle_softirqs                                 -      -
+     1.33%  orbit::agent::t  flare-ring-test-bin-20261020  [.] 0x000000000040a118                              -      -
+     1.13%  orbit::agent::t  flare-ring-test-bin-20261020  [.] 0x0000000000409fa0                              -      -
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

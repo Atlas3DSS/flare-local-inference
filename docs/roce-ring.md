@@ -264,10 +264,53 @@ The measured 489–529 MiB/s is about 4.1–4.4 Gb/s per peer, well below the
 100 Gb/s interface ceiling. The experiment validates TCP distribution and
 package verification; it does not measure the hardware ceilings above.
 Files alternate rails sequentially; a file is not striped across parallel
-connections. A matching cold management-transfer baseline, throughput bottleneck
-profiling, and a new inference run were not performed. Socket tests cover six
+connections. This initial run did not include a matching cold management-transfer
+baseline, throughput profiling, or a new inference run. Socket tests cover six
 agents, multiple relay hops in both directions, sparse range contents, cache
 reuse, signed-interface and peer-identity rejection, and interrupted streams.
+
+### TCP interface recheck
+
+A second cold distribution on the same four hosts checked live TCP endpoints,
+`ip route get ... from ...`, and the network-device entries under
+`/sys/class/infiniband`. Each peer again verified 118.5 GiB; the command took
+420.49 seconds including verification. The [recheck measurements](measurements/roce-distribution-20261020/recheck/)
+retain socket traces, interface counters, iperf results, and CPU/storage samples.
+Bulk sockets used both selected rails on each path:
+
+| Payload hop | First rail | Second rail |
+| --- | --- | --- |
+| Rank 0 → rank 1 | `10.10.4.1 → 10.10.4.2` | `10.10.5.1 → 10.10.5.2` |
+| Rank 1 → rank 2 | `10.10.6.1 → 10.10.6.2` | `10.10.7.1 → 10.10.7.2` |
+| Rank 0 → rank 3 | `10.10.0.2 → 10.10.0.1` | `10.10.1.2 → 10.10.1.1` |
+
+These addresses belong to the RoCE-connected Ethernet interfaces. The live
+management sockets carried only small control messages. In particular, rank 1
+had two receiving sockets from rank 0 and a sending socket to rank 2, confirming
+that it relayed rank 2's shard while receiving its own. Management RX plus TX
+stayed below 1 MB on every host during the counter window spanning distribution.
+
+Before the repeated distribution, direct TCP tests bound both endpoints to the
+same rank 0–1 fabric addresses. iperf3 3.16 used ten measured seconds after a
+two-second warmup, the existing 1500-byte MTU, and no routing or socket-buffer
+configuration changes:
+
+| Fabric subnet | Streams | Zero-copy sender | Received Gb/s |
+| --- | ---: | --- | ---: |
+| `10.10.4.0/24` | 1 | No | 24.89 |
+| `10.10.5.0/24` | 1 | No | 18.31 |
+| `10.10.4.0/24` | 4 | No | 89.14 |
+| `10.10.4.0/24` | 1 | Yes | 22.82 |
+| `10.10.5.0/24` | 4 | Yes | 78.41 |
+
+These memory-to-memory tests confirm capacity above the package-transfer rate;
+they do not include encryption, file I/O, or package verification. Ten-second
+CPU samples during distribution show substantial work in ChaCha20-Poly1305 and
+kernel copies. Source storage samples show 1,495–1,666 MiB/s of aggregate
+reads and I/O wait; transfer threads were not continuously CPU-saturated. The
+samples establish costs to investigate, not a single proven throughput limit.
+The interface selection is correct; separating storage waits from encrypted
+streaming costs remains necessary before choosing an optimization.
 
 ## Protocol model and runtime checks
 

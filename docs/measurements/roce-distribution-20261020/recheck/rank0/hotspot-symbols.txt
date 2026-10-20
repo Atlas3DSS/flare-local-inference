@@ -1,0 +1,5 @@
+Matched 64 instruction bytes at each of four sampled addresses; common object text base: 0x409900
+0x40a188 ring_core_0_17_14__chacha20_poly1305_seal + 0x748
+0x409f2c ring_core_0_17_14__chacha20_poly1305_seal + 0x4ec
+0x40ad40 ring_core_0_17_14__chacha20_poly1305_open + 0x180
+0x40b044 ring_core_0_17_14__chacha20_poly1305_open + 0x484
