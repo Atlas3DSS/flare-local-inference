@@ -133,12 +133,13 @@ def _fake_join_query_chain(query, absorbed, gathered, workspace, stream):
 
 
 class QueryChain:
-    """Project, absorb and, under context parallelism, gather decode queries on an auxiliary stream.
+    """Project and absorb decode queries on an auxiliary stream, optionally gathering on a separate channel.
 
     The chain reads only the normalized low-rank query and writes the query, absorbed query and gathered
     heads, which the main stream's latent writes and record selection never touch. Its projection uses
-    a disjoint arena suffix, the absorption BMM none, and the head exchange its own channel. The main stream
-    joins before attention reads the chain's outputs.
+    a disjoint arena suffix, the absorption BMM none, and an optional head exchange its own channel.
+    The main stream joins before attention reads the chain's outputs. RoCE gathers share the main
+    transport region and run after that join.
     """
 
     def __init__(self, projection: QuantizedProjection, absorb: BatchedQuantizedProjection, source, query,
@@ -209,8 +210,7 @@ class PreparedGlmMLA:
                 or weights["kv_b_proj"].out_features != heads * 512):
             raise ValueError("GLM MLA cache or head partition geometry mismatch")
         self.module, self.scratch, self.state, self.metadata = module, scratch, state, metadata
-        # Decode projects, absorbs and gathers queries on an auxiliary stream while records are selected.
-        # Without stream overlap, the main stream projects, absorbs and gathers them before attention.
+        # Decode overlaps query work with record selection; shared RoCE gathers follow the stream join.
         self.query_chain = None
         for key in ("q_a_layernorm", "kv_a_layernorm"):
             module.get_submodule(key).weight = torch.nn.Parameter(weights[f"{key}.weight"], requires_grad=False)
@@ -333,8 +333,11 @@ class PreparedGlmMLA:
             self.slices.append((start, end, absorb, gather, attention, combine, expand))
         if len(self.slices) == 1 and workspace.overlap:
             start, end, absorb, gather = self.slices[0][:4]
+            # RoCEnante shares its transport region with the indexer's main-stream
+            # collectives. Keep that gather ordered there after joining query work.
             self.query_chain = QueryChain(self.projections["q_b_proj"], absorb, scratch.query_residual,
-                scratch.query, scratch.absorbed_query[:end - start], gather, scratch.gathered[:end - start],
+                scratch.query, scratch.absorbed_query[:end - start], None if context.remote else gather,
+                scratch.gathered[:end - start],
                 session=session, workspace=workspace, parallel_plans=self.indexer.scratch_plans)
 
     def attend_gathered_context(self):
@@ -407,6 +410,8 @@ class PreparedGlmMLA:
                 count = end - start
                 if chain is not None:
                     chain.finish()
+                    if chain.gather is None:
+                        gather(s.absorbed_query[:count].view(count, -1))
                 else:
                     absorb(s.query[start:end].transpose(0, 1))
                     gather(s.absorbed_query[:count].view(count, -1))
