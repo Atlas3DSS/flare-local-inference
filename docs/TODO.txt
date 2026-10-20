@@ -1,3 +1,7 @@
+[ ] Exercise per-message checkpoint restore and prefill graph selection through
+    Qwen, GLM, DeepSeek, MiMo, Step, and Nemotron services. See
+    core-design.md#exact-endpoint-capture and scheduling-runtime-design.md.
+
 [ ] Orbit: mDNS discovery, the fabric check with a ring-order proposal,
     preparation through agents (PREPARE, `flare orbit prepare`), and
     reconciliation (`flare orbit apply`). See orbit.md#unimplemented-parts.

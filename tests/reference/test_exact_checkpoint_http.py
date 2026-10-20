@@ -1,6 +1,7 @@
 """HTTP qualification expectations for exact prompt and instruction checkpoints."""
 from pathlib import Path
 import json
+import os
 
 import pytest
 
@@ -14,7 +15,7 @@ from qualify.server import (
 def tokenizer():
     from transformers import AutoTokenizer
     fixture = json.loads((Path(__file__).resolve().parents[1] / "frontend/qwen38.json").read_text())
-    snapshot = (Path.home() / ".cache/huggingface/hub" /
+    snapshot = Path(os.environ["FLARE_TEST_SNAPSHOT"]) if "FLARE_TEST_SNAPSHOT" in os.environ else (Path.home() / ".cache/huggingface/hub" /
         ("models--" + fixture["model_id"].replace("/", "--")) / "snapshots" / fixture["revision"])
     if not snapshot.is_dir():
         pytest.skip("requires the pinned checkpoint tokenizer assets")
@@ -58,9 +59,9 @@ def test_exact_prompt_replay_skips_prefill_and_edits_do_not_reuse_rounded_tail()
     assert prefill_launches(160, 160, 4096) == 0
     assert prefill_launches(160, 0, 4096) == 1
     assert prefill_launches(160, 0, 64) == 3
-    assert prefill_launches(160, 11, 64, 11) == 3
-    assert prefill_launches(160, 0, 64, 11) == 4
-    assert prefill_launches(160, 0, 4096, 11) == 2
+    assert prefill_launches(160, 11, 64, [11]) == 3
+    assert prefill_launches(160, 0, 64, [11]) == 4
+    assert prefill_launches(160, 0, 4096, [11]) == 2
     with pytest.raises(ValueError):
         prefill_launches(160, 161, 4096)
 
@@ -75,7 +76,7 @@ def test_request_option_and_tool_history_normalization_remains_nonmutating():
     assert json.dumps(request) == before
 
 
-def geometry_inputs(snapshots=8, draft=False):
+def geometry_inputs(snapshots=12, draft=False):
     memory = {"pages": 8192, "cached_token_capacity": 8192 * 64,
         "page_bytes": 100, "kv_bytes": 819200, "snapshot_capacity": snapshots}
     if draft:
@@ -86,10 +87,10 @@ def geometry_inputs(snapshots=8, draft=False):
     return memory, metrics
 
 
-def test_kv_pressure_reserves_prompt_and_terminal_snapshots():
+def test_kv_pressure_reserves_message_prompt_and_terminal_snapshots():
     memory, metrics = geometry_inputs()
     geometry = kv_pressure_geometry(memory, metrics, 262144)
-    assert geometry["holding_requests"] == 2 and geometry["snapshots_per_request"] == 2
+    assert geometry["holding_requests"] == 2 and geometry["snapshots_per_request"] == 3
     assert geometry["pages_per_request"] == 4096 and geometry["unreserved_pages"] == 0
     with pytest.raises(ValueError, match="snapshot capacity"):
         kv_pressure_geometry(*geometry_inputs(snapshots=5), 262144)

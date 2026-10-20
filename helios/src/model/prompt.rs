@@ -64,6 +64,7 @@ pub fn prepare_input(
             }
             PreparedInput {
                 tokens: rendered.token_ids.clone(),
+                token_expansions: vec![],
                 data: PromptData {
                     positions: if config.contract.frontend.position_dimensions == 3 {
                         (0..rendered.token_ids.len())
@@ -83,45 +84,28 @@ pub fn prepare_input(
     Ok(prepared)
 }
 
-pub fn system_boundary(
-    config: &ModelConfig,
+pub fn message_boundaries(
     frontend: &Frontend,
     tokens: &[u32],
     messages: &[Value],
     options: &Map<String, Value>,
-) -> Option<usize> {
-    let rule = config.contract.frontend.prefix_boundary.as_ref()?;
-    let count = messages
-        .iter()
-        .take_while(|message| {
-            message
-                .get("role")
-                .and_then(Value::as_str)
-                .is_some_and(|role| rule.roles.iter().any(|r| r == role))
-        })
-        .count();
-    if count < rule.minimum_messages {
-        return None;
-    }
-    let mut messages = messages[..count].to_vec();
-    if let Some(role) = &rule.append_role {
-        messages.push(serde_json::json!({"role": role, "content": ""}));
-    }
+) -> Vec<usize> {
     let mut options = options.clone();
     options.insert("add_generation_prompt".into(), false.into());
-    options.insert(
-        "continue_final_message".into(),
-        rule.continue_final_message.into(),
-    );
-    let prefix = frontend.render_boundary(&messages, &options).ok()?;
-    let length = prefix.token_ids.len();
-    (length > 0
-        && length < tokens.len()
-        && tokens.starts_with(&prefix.token_ids)
-        && prefix.text.starts_with(&rule.required_start)
-        && prefix.text.ends_with(&rule.required_end)
-        && prefix.text.contains(&rule.required_marker))
-    .then_some(length)
+    options.insert("continue_final_message".into(), false.into());
+    let mut boundaries = Vec::with_capacity(messages.len());
+    for count in 0..=messages.len() {
+        let Ok(prefix) = frontend.render_boundary(&messages[..count], &options) else {
+            continue;
+        };
+        let length = prefix.token_ids.len();
+        if length > 0 && length < tokens.len() && tokens.starts_with(&prefix.token_ids) {
+            boundaries.push(length);
+        }
+    }
+    boundaries.sort_unstable();
+    boundaries.dedup();
+    boundaries
 }
 
 pub fn prepare_output(

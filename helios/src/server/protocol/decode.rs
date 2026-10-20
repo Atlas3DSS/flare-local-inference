@@ -903,7 +903,7 @@ mod native_prompt_tests {
                 assert_eq!(prepared.prompt.tokens, expected);
                 assert_eq!(prepared.prompt.max_new_tokens, 0);
                 assert!(prepared.output.is_none());
-                assert!(prepared.prompt.system_boundary.is_none());
+                assert!(prepared.prompt.message_boundaries.is_empty());
                 assert!(prepared.prompt.grammar.is_none());
             }
         }

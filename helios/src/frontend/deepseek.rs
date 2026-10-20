@@ -375,8 +375,23 @@ pub(super) fn render(
     messages: &[Json],
     options: &Map<String, Json>,
 ) -> Result<RenderedPrompt> {
+    render_prompt(frontend, messages, options, true)
+}
+
+fn render_prompt(
+    frontend: &Frontend,
+    messages: &[Json],
+    options: &Map<String, Json>,
+    generation_prompt: bool,
+) -> Result<RenderedPrompt> {
     let conversation = conversation(frontend, messages, options)?;
-    let rendered = official(frontend.prompt_encoder, &conversation);
+    let mut rendered = official(frontend.prompt_encoder, &conversation);
+    if !generation_prompt {
+        let end = rendered.prompt
+            .rfind(deepseek_recipe_encoding::v4::ASSISTANT_SP_TOKEN)
+            .ok_or_else(|| invalid("canonical prompt lacks its assistant generation header"))?;
+        rendered.prompt.truncate(end);
+    }
     let image_sources = rendered
         .image_sources
         .into_iter()
@@ -425,67 +440,19 @@ impl Frontend {
         Ok(ids[0])
     }
 
-    /// Render a reusable prefix without constructing an alternative conversation format.
+    /// Render a message prefix without its generation header.
+    /// Callers must verify that its tokens are an exact prefix of the complete prompt.
     pub fn render_boundary(
         &self,
         messages: &[Json],
         options: &Map<String, Json>,
     ) -> Result<RenderedPrompt> {
         if self.prompt_encoder == PromptEncoder::Jinja {
-            return self.render_chat(messages, options);
-        }
-        if messages.iter().any(|message| message["role"] != "system") {
-            return Err(invalid(
-                "canonical system boundary requires only system messages",
-            ));
-        }
-        let user = self.encode("<｜User｜>", false)?;
-        let assistant = self.encode("<｜Assistant｜>", false)?;
-        if user.len() != 1 || assistant.len() != 1 || user == assistant {
-            return Err(invalid(
-                "canonical boundary requires distinct atomic role tokens",
-            ));
+            return self.render_jinja(messages, options, true);
         }
         let mut options = options.clone();
         options.insert("add_generation_prompt".into(), true.into());
         options.insert("continue_final_message".into(), false.into());
-        let first = self.render_chat(messages, &options)?;
-        let mut second_messages = messages.to_vec();
-        second_messages.push(serde_json::json!({"role":"user", "content":""}));
-        let second = self.render_chat(&second_messages, &options)?;
-        let count = first
-            .token_ids
-            .iter()
-            .zip(&second.token_ids)
-            .take_while(|(a, b)| a == b)
-            .count();
-        if count == 0 || count == first.token_ids.len() || count == second.token_ids.len() {
-            return Err(invalid(
-                "canonical boundary probes do not identify a nonempty prefix",
-            ));
-        }
-        if first.token_ids[count] != assistant[0] || second.token_ids[count] != user[0] {
-            return Err(invalid(
-                "canonical probes diverge outside the role boundary",
-            ));
-        }
-        let encoding = self
-            .tokenizer
-            .encode(first.text.as_str(), false)
-            .map_err(|e| invalid(e.to_string()))?;
-        let end = encoding.get_offsets()[count].0;
-        let text = first
-            .text
-            .get(..end)
-            .ok_or_else(|| invalid("canonical prefix has invalid tokenizer offsets"))?
-            .to_owned();
-        if self.encode(&text, false)? != first.token_ids[..count] {
-            return Err(invalid("canonical prefix is not independently tokenizable"));
-        }
-        Ok(RenderedPrompt {
-            text,
-            token_ids: first.token_ids[..count].to_vec(),
-            image_sources: vec![],
-        })
+        render_prompt(self, messages, &options, false)
     }
 }

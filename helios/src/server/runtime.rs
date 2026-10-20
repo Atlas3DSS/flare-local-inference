@@ -22,8 +22,8 @@ use crate::{
 
 pub struct Prompt {
     pub tokens: Vec<u32>,
-    /// Exact token count of a verified instruction prefix, including its user header.
-    pub system_boundary: Option<usize>,
+    /// Sorted token counts of exact rendered message prefixes.
+    pub message_boundaries: Vec<usize>,
     pub data: crate::model::PromptData,
     pub images: Option<crate::frontend::images::ProcessedImages>,
     pub conditioning: Vec<ConditioningEvent>,
@@ -956,7 +956,7 @@ impl<'a> Worker<'a> {
             let growable =
                 incoming.prompt.images.is_none() && incoming.prompt.conditioning.is_empty();
             let spec = RequestSpec {
-                system_boundary: incoming.prompt.system_boundary,
+                message_boundaries: incoming.prompt.message_boundaries.clone(),
                 prompt: incoming.prompt.tokens.clone(),
                 conditioning: incoming.prompt.conditioning.clone(),
                 max_new_tokens: incoming.prompt.max_new_tokens,
@@ -2028,7 +2028,7 @@ mod tests {
             .measured_graph_durations(&crate::scheduler::tests::duration_graphs(4))
             .unwrap();
         let spec = |token, grammar_constrained| RequestSpec {
-            system_boundary: None,
+            message_boundaries: vec![],
             prompt: vec![token],
             conditioning: vec![],
             max_new_tokens: 20,
@@ -2099,7 +2099,7 @@ mod tests {
             publications: Default::default(),
             prompt: Prompt {
                 tokens: vec![7],
-                system_boundary: None,
+                message_boundaries: vec![],
                 data: PromptData {
                     positions: vec![[0; 3]],
                     vision_token_indices: vec![-1],
@@ -2246,7 +2246,7 @@ mod tests {
 
     fn retirement_spec(grammar_constrained: bool) -> RequestSpec {
         RequestSpec {
-            system_boundary: None,
+            message_boundaries: vec![],
             prompt: vec![0],
             conditioning: vec![],
             max_new_tokens: 10,
@@ -2752,7 +2752,7 @@ mod tests {
         )
         .unwrap();
         let spec = || RequestSpec {
-            system_boundary: None,
+            message_boundaries: vec![],
             prompt: vec![7],
             conditioning: vec![],
             max_new_tokens: 10,

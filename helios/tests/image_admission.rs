@@ -126,6 +126,12 @@ fn jpeg_and_oriented_png_use_actual_checkpoint_request_preparation() {
             .unwrap();
         assert_eq!(prepared.prompt.tokens, expanded.token_ids);
         assert_eq!(prepared.prompt.conditioning.len(), 1);
+        let complete_message = frontend.render_chat(messages.as_array().unwrap(),
+            json!({"add_generation_prompt":false}).as_object().unwrap()).unwrap();
+        let complete_message = processor.expand_prompt(&frontend, &complete_message.text,
+            &processed).unwrap();
+        assert!(prepared.prompt.tokens.starts_with(&complete_message.token_ids));
+        assert!(prepared.prompt.message_boundaries.contains(&complete_message.token_ids.len()));
         let limited = ImageProcessor::load(
             support::image(&asset("preprocessor_config.json"), &asset("config.json")).unwrap(),
             ImageLimits {

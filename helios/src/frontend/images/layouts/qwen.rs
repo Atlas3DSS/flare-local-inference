@@ -94,8 +94,14 @@ pub(crate) fn prepare_input(
             Some(processed),
         )
     };
+    let token_expansions = rendered.token_ids.iter().enumerate()
+        .filter(|(_, token)| placeholders.contains(token))
+        .zip(images.iter().flat_map(|images| &images.geometry))
+        .map(|((index, _), geometry)| (index, geometry.tokens - 1))
+        .collect();
     Ok(PreparedInput {
         tokens,
+        token_expansions,
         data: PromptData {
             positions,
             vision_token_indices,

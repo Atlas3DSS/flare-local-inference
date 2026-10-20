@@ -48,7 +48,7 @@ fn admission_histogram_seed_and_partial_page_uploads_preserve_native_semantics()
         .unwrap();
     let handle = scheduler
         .admit(RequestSpec {
-            system_boundary: None,
+            message_boundaries: vec![],
             prompt: vec![7; 65],
             conditioning: vec![],
             max_new_tokens: 4,
@@ -189,7 +189,7 @@ fn large_prefill_uploads_preserve_token_position_and_image_indices_without_tail_
     let prompt: Vec<u32> = (0..4113).collect();
     let handle = scheduler
         .admit(RequestSpec {
-            system_boundary: None,
+            message_boundaries: vec![],
             prompt: prompt.clone(),
             conditioning: vec![],
             max_new_tokens: 4,
@@ -493,7 +493,7 @@ fn packing_follows_value_bindings_after_buffers_and_model_are_renamed() {
         .unwrap();
     let handle = scheduler
         .admit(RequestSpec {
-            system_boundary: None,
+            message_boundaries: vec![],
             prompt: vec![7; 65],
             conditioning: vec![],
             max_new_tokens: 4,
@@ -628,7 +628,7 @@ fn copy_staging_uses_physical_slots_stochastic_defaults_and_bonus_mask() {
         .map(|slot| {
             scheduler
                 .admit(RequestSpec {
-                    system_boundary: None,
+                    message_boundaries: vec![],
                     prompt: vec![7; 65],
                     conditioning: vec![],
                     max_new_tokens: 16,
@@ -852,7 +852,7 @@ fn mixed_native_uploads_pack_prompt_after_the_decode_extent_and_sample_only_elig
             let h = scheduler
                 .admit(RequestSpec {
                     prompt: prompt.clone(),
-                    system_boundary: None,
+                    message_boundaries: vec![],
                     conditioning: vec![],
                     max_new_tokens: 16,
                     grammar_constrained: false,
@@ -1056,7 +1056,7 @@ fn state_transfer_and_resume_upload_fixture() {
         let prompt = vec![7; 64];
         let handle = scheduler
             .admit(RequestSpec {
-                system_boundary: None,
+                message_boundaries: vec![],
                 prompt: prompt.clone(),
                 conditioning: vec![],
                 max_new_tokens: 2,
@@ -1392,7 +1392,7 @@ fn grammar_packing_fixture() -> (
     for _ in 0..8 {
         let handle = scheduler
             .admit(RequestSpec {
-                system_boundary: None,
+                message_boundaries: vec![],
                 prompt: vec![7; 66],
                 conditioning: vec![],
                 max_new_tokens: 512,

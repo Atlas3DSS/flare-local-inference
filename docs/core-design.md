@@ -426,7 +426,7 @@ For Qwen at concurrency four:
 | Context limit | 262,144 tokens |
 | Main KV / GDN recurrence | BF16 / FP32 |
 | PLE delivery | Compact GPU rows supplied by Helios from disk or RAM |
-| Checkpoint endpoints | Rendered instruction, final prompt, and terminal consumed prefix |
+| Checkpoint endpoints | Rendered message endpoints, final prompt, and terminal consumed prefix |
 | MTP draft limit | Five drafts plus the pending input |
 | Speculative scheduling | One round in flight |
 | Vision | Prepared image capacities; video validation remains separate |
@@ -1053,7 +1053,7 @@ channel closing without a terminal event reports an error.
 
 The native model thread uses a private `Worker` for admission, completion,
 publication, retirement, planning, and submission. Every completion is validated
-before scheduler mutation. Exact instruction and prompt checkpoints become
+before scheduler mutation. Exact message and prompt checkpoints become
 visible atomically in scheduler completion; stopped requests retire before another
 completion is processed. Submission reserves scheduler ownership before model
 input packing and graph enqueue. The executor remains outside the worker's
@@ -1128,7 +1128,7 @@ Prepare these operations:
 - **Prefill:** metadata preparation, embedding, model forward, cache writes,
   state updates, and optional final-token sampling. Prompt penalty counts are
   initialized once at admission. The scheduler clips a chunk at a required
-  instruction or prompt endpoint. GDN writes its final live recurrent state at
+  message or prompt endpoint. GDN writes its final live recurrent state at
   that exact length; internal aligned checkpoint export is disabled.
 - **Decode:** gather pending token from device request state, forward, sample,
   update request state including the penalty histogram and PLE n-gram history,
@@ -1269,10 +1269,10 @@ trimming must not mutate cached model history.
 
 ## 4. Prefix checkpoints and complete model state
 
-### Immutable instruction, prompt, and terminal cache
+### Immutable message, prompt, and terminal cache
 
 The cache retains immutable, content-addressed checkpoints at the rendered
-instruction boundary, final prompt boundary, and terminal consumed boundary.
+endpoints of complete messages, final prompt boundary, and terminal consumed boundary.
 Equal endpoints share one checkpoint. Parent-linked complete-page chains,
 ancestor pinning, and eviction preserve ownership across active branches.
 
@@ -1345,17 +1345,21 @@ Only consumed history can define a checkpoint.
 
 ### Exact endpoint capture
 
-The model-owned Qwen boundary helper renders leading system/developer instructions
-with an empty user continuation, then requires the resulting token IDs to be an
-exact prefix of the admitted prompt. Tools and reasoning defaults can synthesize
-instructions without an explicit system-role message. Shared template framing is
-part of the endpoint; a user header alone is not an instruction checkpoint. The
-boundary is not rounded to a token group or KV page.
+The shared frontend renders each message prefix without a generation header or
+assistant continuation. It accepts every nonempty rendered token sequence that
+is a strict prefix of the complete prompt, irrespective of message roles. A
+prefix may contain a template-generated preamble or end after any system,
+developer, user, assistant, or tool message. Templates can reject an incomplete
+conversation after emitting a complete prefix; only emitted tokens matching the
+validated full prompt are eligible. Context-dependent rendering that changes
+previous tokens cannot create a checkpoint for that prefix. Equal endpoints are
+deduplicated. Image placeholder expansion shifts endpoints to their positions in
+the prepared token stream; no endpoint may split an atomic image span.
 
-Admission reserves destinations for all distinct required instruction, prompt,
-and terminal roles before model work. Completed cache hits satisfy already-covered
-roles. Resource pressure triggers normal cache eviction or admission rejection;
-it cannot silently omit a required checkpoint.
+Endpoints are not rounded to token groups or KV pages. The scheduler obtains a
+snapshot destination when it reaches an endpoint, using normal cache eviction.
+If all snapshot slots are pinned, inference continues without publishing that
+checkpoint. The number of messages does not enlarge the prepared snapshot pool.
 
 At each required prefill endpoint, the scheduler drains submitted work, snapshots
 the exact live state, and publishes only after the copy fence completes. The
@@ -1367,8 +1371,8 @@ internal GDN checkpoint exports, or boundary-label fields participate in this pa
 
 The scheduler and prefix cache use the model's declared physical token capacity
 per page. Qwen uses 64 tokens, GLM uses 256, and DeepSeek uses 128. Prefix identity uses fixed 64-token
-hash blocks independently of physical storage. CPU lifecycle tests cover both
-page geometries, exact system/prompt/terminal checkpoints, and branching restores
+hash blocks independently of physical storage. CPU lifecycle tests cover multiple
+page geometries, exact message/prompt/terminal checkpoints, and branching restores
 with private partial pages.
 
 Complete target pages are immutable and shared. When `S % page_tokens != 0`, snapshot

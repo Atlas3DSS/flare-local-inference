@@ -40,7 +40,7 @@ fn scheduler_with_pages(snapshots: u32, mtp: bool, page_tokens: usize) -> Reques
 }
 fn spec(system: Option<usize>, prompt: usize, output: u32) -> RequestSpec {
     RequestSpec {
-        system_boundary: system,
+        message_boundaries: system.into_iter().collect(),
         prompt: (0..prompt as u32).collect(),
         conditioning: vec![],
         max_new_tokens: output,
@@ -177,7 +177,7 @@ fn exact_system_prompt_terminal_endpoints_and_partial_restore_pages() {
                 assert_eq!(s.request(h).unwrap().generated_tokens, 0);
                 assert_eq!(
                     s.request(h).unwrap().snapshot_destination(),
-                    s.request(h).unwrap().system_snapshot.unwrap()
+                    s.request(h).unwrap().message_snapshot.unwrap()
                 );
                 run_step(&mut s);
                 let r = s.request(h).unwrap();
@@ -311,7 +311,7 @@ fn duplicate_boundary_publication_does_not_remap_live_partial_pages() {
     assert_eq!(s.request(b).unwrap().prefix_tokens, 0);
     assert!(s.request(a).unwrap().prefix_tokens >= 10);
     assert_eq!(s.cache.lookup(&history(10)).unwrap().consumed_tokens, 10);
-    assert!(s.request(b).unwrap().system_snapshot.is_none());
+    assert!(s.request(b).unwrap().message_snapshot.is_none());
     assert_eq!(s.free_snapshot_count(), 3);
 }
 
@@ -456,4 +456,95 @@ fn empty_atomic_spans_preserve_text_chunking() {
         }
     }
     assert_eq!(chunks, [512, 512, 76]);
+}
+
+#[test]
+fn message_and_prompt_checkpoints_evict_complete_page_chains_under_pressure() {
+    for capacity in [2usize, 3, 16, 17] {
+        let mut s = scheduler(capacity as u32, false);
+        let turns = capacity + 3;
+        let mut lengths = Vec::new();
+        for turn in 0..turns {
+            let length = 160 + 64 * turn;
+            let mut request = spec(Some(length - 10), length, 1);
+            request.prompt[0] = (turn + 1) as u32;
+            let handle = s.admit(request).unwrap();
+            while s.request(handle).unwrap().phase != RequestPhase::Finishing {
+                run_step(&mut s);
+            }
+            s.finish(handle).unwrap();
+            lengths.push(length);
+        }
+        let pairs = capacity / 2;
+        let mut pages: usize = lengths[lengths.len() - pairs..].iter().map(|n| n / 64).sum();
+        if capacity % 2 != 0 {
+            pages += (lengths[lengths.len() - pairs - 1] - 10) / 64;
+        }
+        assert_eq!(s.stats().cached_checkpoints, capacity);
+        assert_eq!(s.stats().cached_pages, pages);
+        assert_eq!(s.stats().snapshot_publications, (2 * turns) as u64);
+    }
+}
+
+#[test]
+fn every_message_endpoint_can_restore_after_a_changed_following_turn() {
+    let endpoints = vec![1, 7, 63, 64, 65, 129, 300, 514, 700];
+    for page_tokens in [64, 128, 256, 2048] {
+        for mtp in [false, true] {
+            let mut s = scheduler_with_pages(16, mtp, page_tokens);
+            let mut request = spec(None, 901, 3);
+            request.message_boundaries = endpoints.clone();
+            let handle = s.admit(request).unwrap();
+            for &end in &endpoints {
+                stop_at_capture(&mut s, handle, end as u64);
+                assert_eq!(s.request(handle).unwrap().generated_tokens, 0);
+                run_step(&mut s);
+                assert_eq!(s.request(handle).unwrap().prefix_tokens, end as u64);
+            }
+            finish(&mut s, handle);
+            assert_eq!(s.stats().message_checkpoints, endpoints.len() as u64);
+            for &end in &endpoints {
+                let mut branch = spec(None, end + 10, 1);
+                branch.prompt[end..].fill(1000);
+                branch.message_boundaries = endpoints.iter().copied().filter(|&n| n <= end).collect();
+                let branch = s.admit(branch).unwrap();
+                assert_eq!(s.request(branch).unwrap().reused_prompt_tokens(), end as u64);
+                assert_eq!(run_step(&mut s).kind, GraphKind::Restore);
+                let step = s.plan().unwrap();
+                assert_eq!(step.kind, GraphKind::Prefill);
+                assert_eq!(step.lanes[0].start_position, end as u64);
+                assert_eq!(step.lanes[0].tokens, 10);
+                s.cancel(branch).unwrap();
+            }
+        }
+    }
+}
+
+#[test]
+fn many_message_boundaries_make_progress_with_bounded_snapshot_storage() {
+    let mut s = scheduler(2, false);
+    let mut request = spec(None, 100, 3);
+    request.message_boundaries = (1..100).collect();
+    let handle = s.admit(request).unwrap();
+    for _ in 0..250 {
+        if s.request(handle).unwrap().phase == RequestPhase::Finishing {
+            break;
+        }
+        run_step(&mut s);
+    }
+    assert_eq!(s.request(handle).unwrap().phase, RequestPhase::Finishing);
+    assert_eq!(s.request(handle).unwrap().generated_tokens, 3);
+    s.finish(handle).unwrap();
+    assert!(s.stats().cached_checkpoints <= 2);
+}
+
+#[test]
+fn message_boundaries_must_be_ordered_unique_and_within_the_prompt() {
+    for endpoints in [vec![0], vec![2, 1], vec![1, 1], vec![101]] {
+        let mut s = scheduler(4, false);
+        let mut request = spec(None, 100, 3);
+        request.message_boundaries = endpoints;
+        assert!(s.admit(request).is_err());
+        assert_eq!(s.free_page_count(), 256);
+    }
 }

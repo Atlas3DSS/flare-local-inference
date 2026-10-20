@@ -18,7 +18,7 @@ pub use contract::PreparedContract;
 pub use inputs::{InputStep, pack_inputs};
 pub use packing::Inputs;
 #[cfg(feature = "server")]
-pub use prompt::{prepare_input, prepare_output, system_boundary};
+pub use prompt::{prepare_input, prepare_output, message_boundaries};
 
 #[cfg_attr(
     any(feature = "frontend", feature = "runtime-package"),
@@ -206,6 +206,8 @@ pub struct PromptData {
 #[cfg(feature = "server")]
 pub struct PreparedInput {
     pub tokens: Vec<u32>,
+    /// Original placeholder token index and the additional tokens in its prepared expansion.
+    pub token_expansions: Vec<(usize, usize)>,
     pub data: PromptData,
     pub conditioning: Vec<crate::cache::ConditioningEvent>,
     pub images: Option<crate::frontend::images::ProcessedImages>,

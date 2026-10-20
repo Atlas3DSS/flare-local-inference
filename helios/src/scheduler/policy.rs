@@ -198,8 +198,10 @@ impl RequestScheduler {
     pub(super) fn prefill_work(&self, request: &LiveRequest, capacity: usize) -> usize {
         let start = request.consumed_tokens as usize;
         let mut end = request
-            .system_boundary
-            .filter(|n| *n > start)
+            .message_boundaries
+            .iter()
+            .copied()
+            .find(|n| *n > start)
             .unwrap_or(request.prompt_tokens)
             .min(start.saturating_add(capacity));
         if let Some(span) = request
@@ -735,10 +737,9 @@ impl RequestScheduler {
                     || (kind == GraphKind::Prefill
                         && (r.consumed_tokens + self.prefill_work(r, capacity) as u64
                             == r.prompt_tokens as u64
-                            || r.system_boundary
-                                == Some(
-                                    r.consumed_tokens as usize + self.prefill_work(r, capacity),
-                                )))
+                            || r.message_boundaries.binary_search(
+                                &(r.consumed_tokens as usize + self.prefill_work(r, capacity)),
+                            ).is_ok()))
             });
         if feedback && !self.submissions.is_empty() {
             return;

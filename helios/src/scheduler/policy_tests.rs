@@ -45,7 +45,7 @@ fn engine(active: usize, speculative: bool) -> RequestScheduler {
 fn add(s: &mut RequestScheduler, id: u32, prompt: usize, output: u32) -> RequestHandle {
     s.admit(RequestSpec {
         prompt: vec![id; prompt],
-        system_boundary: None,
+        message_boundaries: vec![],
         conditioning: vec![],
         max_new_tokens: output,
         grammar_constrained: false,
@@ -1523,7 +1523,7 @@ fn prerequisite_cohort_accounts_for_ready_batch_mates() {
     let prefill = s
         .admit(RequestSpec {
             prompt: vec![16; 32768],
-            system_boundary: Some(512),
+            message_boundaries: vec![512],
             conditioning: vec![],
             max_new_tokens: 128,
             grammar_constrained: false,
@@ -2036,7 +2036,7 @@ fn mixed_cancellation_keeps_other_rows_live_and_retires_pages_only_after_complet
     assert!(
         s.admit(RequestSpec {
             prompt: vec![3; 64],
-            system_boundary: None,
+            message_boundaries: vec![],
             conditioning: vec![],
             max_new_tokens: 128,
             grammar_constrained: false,

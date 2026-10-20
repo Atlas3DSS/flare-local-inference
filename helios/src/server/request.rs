@@ -233,17 +233,25 @@ pub(super) fn prepare_inference(
         }
         None => None,
     };
+    let mut message_boundaries = if raw.is_some() {
+        Vec::new()
+    } else {
+        crate::model::message_boundaries(frontend, &rendered.token_ids, &normalized, &options)
+    };
     let crate::model::PreparedInput {
         tokens,
+        token_expansions,
         data,
         conditioning,
         images,
     } = crate::model::prepare_input(config, frontend, processor, &rendered, images)?;
-    let system_boundary = if raw.is_some() {
-        None
-    } else {
-        crate::model::system_boundary(config, frontend, &tokens, &normalized, &options)
-    };
+    for boundary in &mut message_boundaries {
+        let original = *boundary;
+        *boundary += token_expansions.iter()
+            .take_while(|(index, _)| *index < original)
+            .map(|(_, additional)| additional)
+            .sum::<usize>();
+    }
     let mut sampling = sampling_parameters(object, &config.sampling_defaults)?;
     sampling.seed = sampling.seed.wrapping_add(index as u64);
     let stop_sequences = opts.token_stops.clone();
@@ -285,7 +293,7 @@ pub(super) fn prepare_inference(
     Ok(PreparedInference {
         prompt: Prompt {
             tokens,
-            system_boundary,
+            message_boundaries,
             data,
             images,
             conditioning,

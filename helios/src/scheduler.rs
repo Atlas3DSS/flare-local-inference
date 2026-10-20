@@ -99,7 +99,7 @@ pub struct SchedulerStats {
     pub reused_tokens: u64,
     pub snapshot_publications: u64,
     pub snapshot_evictions: u64,
-    pub system_checkpoints: u64,
+    pub message_checkpoints: u64,
     pub prompt_checkpoints: u64,
     pub active_requests: usize,
     pub free_slots: usize,
@@ -121,7 +121,7 @@ pub struct SchedulerStats {
 #[derive(Clone)]
 pub struct RequestSpec {
     pub prompt: Vec<u32>,
-    pub system_boundary: Option<usize>,
+    pub message_boundaries: Vec<usize>,
     pub conditioning: Vec<ConditioningEvent>,
     pub max_new_tokens: u32,
     pub grammar_constrained: bool,
@@ -148,7 +148,7 @@ pub enum RequestPhase {
 
 #[derive(Clone, Copy, Debug)]
 enum BoundaryKind {
-    System,
+    Message,
     Prompt,
 }
 #[derive(Clone, Copy, Debug)]
@@ -180,8 +180,8 @@ pub struct LiveRequest {
     prefix: Option<CheckpointId>,
     prefix_tokens: u64,
     admission_reused_tokens: u64,
-    system_boundary: Option<usize>,
-    system_snapshot: Option<SnapshotId>,
+    message_boundaries: Vec<usize>,
+    message_snapshot: Option<SnapshotId>,
     prompt_snapshot: Option<SnapshotId>,
     boundary_capture: Option<BoundaryCapture>,
     prefix_snapshot: Option<SnapshotId>,
@@ -1025,9 +1025,9 @@ impl RequestScheduler {
     /// cache without reserving anything.
     pub fn plan_admission(&mut self, spec: &RequestSpec) -> Result<AdmissionPlan> {
         if spec.prompt.is_empty()
-            || spec
-                .system_boundary
-                .is_some_and(|n| n == 0 || n > spec.prompt.len())
+            || spec.message_boundaries.first() == Some(&0)
+            || spec.message_boundaries.last().is_some_and(|n| *n > spec.prompt.len())
+            || spec.message_boundaries.windows(2).any(|pair| pair[0] >= pair[1])
             || spec.max_new_tokens == 0
             || spec
                 .prompt
@@ -1238,8 +1238,8 @@ impl RequestScheduler {
             prefix,
             prefix_tokens: consumed,
             admission_reused_tokens: consumed,
-            system_boundary: spec.system_boundary,
-            system_snapshot: None,
+            message_boundaries: spec.message_boundaries,
+            message_snapshot: None,
             prompt_snapshot: None,
             boundary_capture: None,
             prefix_snapshot,
@@ -1435,8 +1435,8 @@ impl RequestScheduler {
                     || (s.start < request.consumed_tokens as usize
                         && (request.consumed_tokens as usize) < s.end)
                     || request
-                        .system_boundary
-                        .is_some_and(|n| s.start < n && n < s.end)
+                        .message_boundaries
+                        .iter().any(|&n| s.start < n && n < s.end)
             })
         {
             return Err("invalid atomic prefill spans or prefix boundary".into());
@@ -1813,17 +1813,17 @@ impl RequestScheduler {
             };
             if kind == GraphKind::Prefill && request.error_code.is_none() {
                 let endpoint = request.consumed_tokens;
-                let capture = if request.system_boundary == Some(endpoint as usize)
+                let capture = if request.message_boundaries.binary_search(&(endpoint as usize)).is_ok()
                     && endpoint > request.prefix_tokens
                 {
-                    Some(BoundaryKind::System)
+                    Some(BoundaryKind::Message)
                 } else {
                     None
                 }
                 .or_else(|| {
                     (endpoint == request.prompt_tokens as u64
                         && endpoint > request.prefix_tokens
-                        && request.system_boundary != Some(request.prompt_tokens)
+                        && request.message_boundaries.last() != Some(&request.prompt_tokens)
                         && request.max_new_tokens > 1)
                         .then_some(BoundaryKind::Prompt)
                 });
@@ -1864,7 +1864,7 @@ impl RequestScheduler {
             if let Some(snapshot) = snapshot {
                 if let Some(kind) = kind {
                     match kind {
-                        BoundaryKind::System => request.system_snapshot = Some(snapshot),
+                        BoundaryKind::Message => request.message_snapshot = Some(snapshot),
                         BoundaryKind::Prompt => request.prompt_snapshot = Some(snapshot),
                     }
                     request.boundary_capture = Some(BoundaryCapture {
@@ -1924,12 +1924,12 @@ impl RequestScheduler {
             self.release_snapshot(capture.snapshot);
         }
         match capture.kind {
-            BoundaryKind::System => self.stats.system_checkpoints += 1,
+            BoundaryKind::Message => self.stats.message_checkpoints += 1,
             BoundaryKind::Prompt => self.stats.prompt_checkpoints += 1,
         }
         let request = self.request_mut(handle)?;
         match capture.kind {
-            BoundaryKind::System => request.system_snapshot = None,
+            BoundaryKind::Message => request.message_snapshot = None,
             BoundaryKind::Prompt => request.prompt_snapshot = None,
         }
         request.boundary_capture = None;
@@ -2053,7 +2053,7 @@ impl RequestScheduler {
         self.retired.push(RetiredRequest {
             image_slot: request.image_slot,
             pages: request.private_pages,
-            snapshots: [snapshot, request.system_snapshot, request.prompt_snapshot],
+            snapshots: [snapshot, request.message_snapshot, request.prompt_snapshot],
             slot: handle.slot as usize,
             through: request.last_use,
         });

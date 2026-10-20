@@ -183,7 +183,7 @@ impl Fixture {
                 publications: Default::default(),
                 prompt: Prompt {
                     tokens,
-                    system_boundary: None,
+                    message_boundaries: vec![],
                     data,
                     images: None,
                     conditioning: vec![],
@@ -621,7 +621,7 @@ fn exact_system_and_prompt_checkpoints_publish_only_after_snapshot_completion() 
     let fixture = Fixture::new();
     let (sender, receiver) = mpsc::channel();
     let (mut incoming, mut generation) = fixture.incoming(vec![0; 13], 2);
-    incoming.prompt.system_boundary = Some(10);
+    incoming.prompt.message_boundaries = vec![10];
     sender.send(vec![incoming]).unwrap();
     let mut worker = fixture.worker(receiver);
     assert_eq!(worker.admit().unwrap(), ControlFlow::Continue(true));
@@ -632,7 +632,7 @@ fn exact_system_and_prompt_checkpoints_publish_only_after_snapshot_completion() 
         worker.scheduler.request(handle).unwrap().consumed_tokens,
         10
     );
-    assert_eq!(worker.scheduler.stats().system_checkpoints, 0);
+    assert_eq!(worker.scheduler.stats().message_checkpoints, 0);
     assert!(!worker.publish().unwrap());
     let snapshot = planned(&mut worker, GraphKind::Snapshot, 3);
     let uploads = crate::model::Inputs::uploads(worker.inputs.as_ref().unwrap());
@@ -641,11 +641,11 @@ fn exact_system_and_prompt_checkpoints_publish_only_after_snapshot_completion() 
         .find(|u| u.buffer == "state_expected_consumed")
         .unwrap();
     assert_eq!(&expected.bytes[..8], &10i64.to_le_bytes());
-    assert_eq!(worker.scheduler.stats().system_checkpoints, 0);
+    assert_eq!(worker.scheduler.stats().message_checkpoints, 0);
     worker
         .complete(GraphKind::Snapshot, completion(&worker, &snapshot, 3, None))
         .unwrap();
-    assert_eq!(worker.scheduler.stats().system_checkpoints, 1);
+    assert_eq!(worker.scheduler.stats().message_checkpoints, 1);
     assert_eq!(
         worker
             .scheduler
@@ -1496,7 +1496,7 @@ fn exercise_text_preemption(
                 prompt: vec![3; page_tokens * 5],
                 max_new_tokens: 1,
                 growable_output: false,
-                system_boundary: None,
+                message_boundaries: vec![],
                 conditioning: vec![],
                 grammar_constrained: false,
                 host_stops: false,

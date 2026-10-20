@@ -162,10 +162,12 @@ model histories. Shared cache allocation sizes the physical backing independentl
 of model identity. Native code implements no attention state-update computation.
 
 Frontend enums independently select tool/reasoning parsers and image preparation
-and layouts. Marker strings, prefix-boundary rules, feature tokens, and atomic
+and layouts. Marker strings, feature tokens, and atomic
 image spans are data. Enum zero and unknown identifiers are rejected; enum
 numbers are stable and removed values must be reserved. Frontend identifiers
 cannot select scheduler, cache, text-graph packing, or completion policy.
+The serialized `prefix_boundary` field remains readable for package compatibility;
+message checkpoints derive from exact rendered prefixes without role filters.
 
 The index stores complete recipe-declared sampling parameters in
 `DefaultSamplingParameters` and structural frontend settings in

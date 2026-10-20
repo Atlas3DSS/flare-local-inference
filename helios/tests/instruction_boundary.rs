@@ -91,7 +91,9 @@ impl Fixture {
         }
     }
 
-    fn prepare(&self, messages: Value, options: Value) -> PreparedRequest {
+    fn prepare(&self, messages: Value, mut options: Value) -> PreparedRequest {
+        let generation = !options.get("continue_final_message").is_some_and(|v| v != false);
+        options.as_object_mut().unwrap().entry("add_generation_prompt").or_insert(generation.into());
         let expected = self
             .frontend
             .render_chat(messages.as_array().unwrap(), options.as_object().unwrap())
@@ -112,10 +114,7 @@ impl Fixture {
     }
 
     fn prefix(&self, prepared: &PreparedRequest) -> Vec<u32> {
-        let boundary = prepared
-            .prompt
-            .system_boundary
-            .expect("instruction boundary");
+        let boundary = *prepared.prompt.message_boundaries.first().expect("message boundary");
         assert!(boundary > 0 && boundary < prepared.prompt.tokens.len());
         prepared.prompt.tokens[..boundary].to_vec()
     }
@@ -212,15 +211,15 @@ fn exact_short_instruction_boundary_survives_changed_user_content() {
     let decoded = fixture.frontend.decode(&prefix, false).unwrap();
     assert!(decoded.starts_with("<|im_start|>system\nBe concise.<|im_end|>\n"));
     assert!(!decoded.contains("two plus two"));
-    assert!(decoded.contains("<|im_start|>user"));
-    let expected = fixture.frontend.render_chat(
-        json!([{"role":"system","content":"Be concise."},{"role":"user","content":""}]).as_array().unwrap(),
-        json!({"enable_thinking":false,"add_generation_prompt":false,"continue_final_message":true}).as_object().unwrap(),
+    assert!(!decoded.contains("<|im_start|>user"));
+    let expected = fixture.frontend.render_boundary(
+        json!([{"role":"system","content":"Be concise."}]).as_array().unwrap(),
+        json!({"enable_thinking":false,"add_generation_prompt":false,"continue_final_message":false}).as_object().unwrap(),
     ).unwrap();
     assert_eq!(prefix, expected.token_ids);
     let mut malformed = a;
     for boundary in [0, malformed.prompt.tokens.len(), usize::MAX] {
-        malformed.prompt.system_boundary = Some(boundary);
+        malformed.prompt.message_boundaries = vec![boundary];
         assert!(
             flare_helios::model::admission::validate_prompt(&fixture.config, &malformed.prompt)
                 .is_err()
@@ -242,8 +241,14 @@ fn tool_instructions_are_rendered_without_explicit_system_and_disable_with_none(
         options("weather"),
     );
     let c = fixture.prepare(messages.clone(), options("other_weather"));
-    assert_eq!(fixture.prefix(&a), fixture.prefix(&b));
+    assert_ne!(fixture.prefix(&a), fixture.prefix(&b));
     assert_ne!(fixture.prefix(&a), fixture.prefix(&c));
+    for prepared in [&a, &b, &c] {
+        assert_eq!(prepared.prompt.message_boundaries.len(), 1);
+        let prefix = fixture.frontend.decode(&fixture.prefix(prepared), false).unwrap();
+        assert!(prefix.contains("Weather in"));
+        assert!(prefix.ends_with("<|im_end|>\n"));
+    }
     assert!(
         fixture
             .frontend
@@ -260,7 +265,7 @@ fn tool_instructions_are_rendered_without_explicit_system_and_disable_with_none(
         request,
     )
     .unwrap();
-    assert_eq!(disabled.prompt.system_boundary, None);
+    assert!(disabled.prompt.message_boundaries.is_empty());
     assert!(!disabled.rendered_prompt.contains("# Tools"));
 }
 
@@ -278,13 +283,7 @@ fn reasoning_defaults_and_explicit_overrides_follow_actual_system_rendering() {
             .unwrap()
             .clone(),
     );
-    assert_eq!(
-        disabled
-            .prepare(messages.clone(), json!({}))
-            .prompt
-            .system_boundary,
-        None
-    );
+    assert!(!disabled.prepare(messages.clone(), json!({})).prompt.message_boundaries.is_empty());
     let overridden = disabled.prepare(
         messages.clone(),
         json!({"enable_thinking":true,"reasoning_effort":"low"}),
@@ -296,33 +295,20 @@ fn reasoning_defaults_and_explicit_overrides_follow_actual_system_rendering() {
             .unwrap()
             .contains("Reasoning effort is set to low.")
     );
-    assert_eq!(
-        default
-            .prepare(
-                messages,
-                json!({"enable_thinking":true,"reasoning_effort":"medium"})
-            )
-            .prompt
-            .system_boundary,
-        None
-    );
+    assert!(!default.prepare(messages,
+        json!({"enable_thinking":true,"reasoning_effort":"medium"})).prompt.message_boundaries.is_empty());
 }
 
 #[test]
 #[ignore = "requires FLARE_TEST_SNAPSHOT pointing to the pinned Qwen checkpoint"]
-fn user_header_and_empty_system_do_not_create_checkpoints() {
+fn complete_user_and_empty_system_messages_have_checkpoints() {
     let fixture = Fixture::load(Map::new());
     for messages in [
         json!([{"role":"user","content":"Hello"}]),
         json!([{"role":"system","content":" "},{"role":"user","content":"Hello"}]),
     ] {
-        assert_eq!(
-            fixture
-                .prepare(messages, json!({"enable_thinking":false}))
-                .prompt
-                .system_boundary,
-            None
-        );
+        assert!(!fixture.prepare(messages, json!({"enable_thinking":false}))
+            .prompt.message_boundaries.is_empty());
     }
 }
 
@@ -333,32 +319,30 @@ fn token_prefix_mismatch_or_complete_prompt_match_suppresses_boundary() {
     let messages = json!([{"role":"system","content":"Be concise."},{"role":"user","content":"Explain the sky."}]);
     let options = json!({"enable_thinking":false});
     let a = fixture.prepare(messages.clone(), options.clone());
-    let boundary = a.prompt.system_boundary.unwrap();
+    let boundary = *a.prompt.message_boundaries.first().unwrap();
     let mut mismatch = a.prompt.tokens.clone();
     mismatch[boundary - 1] += 1;
     for tokens in [&mismatch[..], &a.prompt.tokens[..boundary], &[]] {
         assert_eq!(
-            flare_helios::model::system_boundary(
-                &fixture.config,
+            flare_helios::model::message_boundaries(
                 &fixture.frontend,
                 tokens,
                 messages.as_array().unwrap(),
                 options.as_object().unwrap()
             ),
-            None
+            Vec::<usize>::new()
         );
     }
     let malformed =
         json!([{"role":"system","content":{"not":"valid"}},{"role":"user","content":"Hello"}]);
     assert_eq!(
-        flare_helios::model::system_boundary(
-            &fixture.config,
+        flare_helios::model::message_boundaries(
             &fixture.frontend,
             &a.prompt.tokens,
             malformed.as_array().unwrap(),
             options.as_object().unwrap()
         ),
-        None
+        Vec::<usize>::new()
     );
 }
 

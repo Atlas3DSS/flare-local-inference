@@ -513,6 +513,15 @@ impl Frontend {
                 "Cannot apply chat template to an empty conversation. Provide at least one message.",
             ))));
         }
+        self.render_jinja(messages, options, false)
+    }
+
+    fn render_jinja(
+        &self,
+        messages: &[Json],
+        options: &Map<String, Json>,
+        boundary: bool,
+    ) -> Result<RenderedPrompt> {
         let mut context = self.defaults.clone();
         context.extend(options.clone());
         let continuation = match context.remove("continue_final_message") {
@@ -581,7 +590,8 @@ impl Frontend {
             .map(|field| self.mark_continuation(&mut messages, &field))
             .transpose()?;
         context.insert("messages".into(), Json::Array(messages));
-        let rendered = self
+        let mut rendered = Vec::new();
+        let template = self
             .environment
             .get_template("chat")
             .map_err(|error| {
@@ -589,17 +599,19 @@ impl Frontend {
                     error.to_string(),
                     error,
                 )))
-            })?
-            .render(context)
-            .map_err(|error| {
+            })?;
+        let result = template.render_captured_to(context, &mut rendered);
+        // A complete request may require later turns that a prefix does not contain.
+        if !boundary || rendered.is_empty() {
+            result.map_err(|error| {
                 Error::frontend(FrontendError::Template(Failure::caused_by(
-                    error
-                        .detail()
-                        .unwrap_or("chat template rendering failed")
-                        .to_owned(),
+                    error.detail().unwrap_or("chat template rendering failed").to_owned(),
                     error,
                 )))
             })?;
+        }
+        let rendered = String::from_utf8(rendered)
+            .map_err(|error| deepseek::invalid(error.to_string()))?;
         let mut segments: Vec<TokenSegment> = if self.ordinary_tokenizer.is_some() {
             serde_json::from_str(&rendered).map_err(|error| {
                 Error::frontend(FrontendError::Template(Failure::caused_by(

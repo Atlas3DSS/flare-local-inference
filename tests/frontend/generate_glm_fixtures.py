@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 from transformers import AutoTokenizer
+from transformers.utils.chat_template_utils import _compile_jinja_template
 
 
 def generate(snapshot):
@@ -22,15 +23,29 @@ def generate(snapshot):
         effective = {"add_generation_prompt": not continuation, **options}
         rendered = tokenizer.apply_chat_template(messages, tokenize=False, **effective)
         ids = tokenizer.apply_chat_template(messages, tokenize=True, return_dict=False, **effective)
-        prefix_messages = []
-        for message in messages:
-            if message["role"] != "system":
-                break
-            prefix_messages.append(message)
-        prefix_messages.append({"role": "user", "content": ""})
-        prefix_options = {**effective, "add_generation_prompt": False, "continue_final_message": True}
-        prefix = tokenizer.apply_chat_template(prefix_messages, tokenize=True, return_dict=False, **prefix_options)
-        assert 0 < len(prefix) < len(ids) and ids[:len(prefix)] == prefix, name
+        prefix_options = {**effective, "add_generation_prompt": False, "continue_final_message": False}
+        boundary_messages = copy.deepcopy(messages)
+        for index, message in enumerate(boundary_messages):
+            if message["role"] != "assistant" or not message.get("tool_calls"):
+                continue
+            ranks = {call["id"]: rank for rank, call in enumerate(message["tool_calls"])}
+            end = index + 1
+            while end < len(boundary_messages) and boundary_messages[end]["role"] == "tool":
+                end += 1
+            boundary_messages[index + 1:end] = sorted(boundary_messages[index + 1:end],
+                key=lambda result: ranks[result["tool_call_id"]])
+        boundaries = []
+        for count in range(len(boundary_messages) + 1):
+            if count:
+                prefix = tokenizer.apply_chat_template(boundary_messages[:count], tokenize=True,
+                    return_dict=False, **prefix_options)
+            else:
+                text = _compile_jinja_template(tokenizer.get_chat_template()).render(
+                    messages=[], **tokenizer.special_tokens_map, **prefix_options)
+                prefix = tokenizer.encode(text, add_special_tokens=False)
+            if 0 < len(prefix) < len(ids) and ids[:len(prefix)] == prefix:
+                boundaries.append(len(prefix))
+        boundaries = sorted(set(boundaries))
         body = {"model": "glm53", "messages": copy.deepcopy(messages), "chat_template_kwargs": options}
         if wire_strings:
             for message in body["messages"]:
@@ -39,7 +54,7 @@ def generate(snapshot):
         suffix = rendered.rsplit("<|assistant|>", 1)[-1]
         reasoning = suffix.rfind("<think>") > suffix.rfind("</think>")
         cases.append({"name": name, "body": body, "rendered": rendered, "token_ids": ids,
-                      "prefix": prefix, "reasoning": reasoning})
+                      "message_boundaries": boundaries, "reasoning": reasoning})
 
     add("default_reasoning", [user])
     add("system", [system, user])

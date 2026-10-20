@@ -147,6 +147,28 @@ impl Fixture {
 }
 
 #[test]
+fn native_encoders_checkpoint_each_message_prefix() {
+    for encoder in [PromptEncoder::DeepseekV4, PromptEncoder::DeepseekV41] {
+        let fixture = Fixture::new(encoder);
+        let messages = json!([
+            {"role":"system","content":"Policy"},
+            {"role":"assistant","content":"Opening reply"},
+            {"role":"user","content":"Question"},
+            {"role":"assistant","reasoning_content":"Thought", "content":"Answer"},
+            {"role":"user","content":"Follow-up"}
+        ]);
+        let prepared = fixture.prepare(json!({"messages":messages})).unwrap();
+        for count in 1..=messages.as_array().unwrap().len() {
+            let prefix = fixture.frontend.render_boundary(
+                &messages.as_array().unwrap()[..count], &Map::new()).unwrap();
+            assert!(prepared.prompt.tokens.starts_with(&prefix.token_ids));
+            assert!(prepared.prompt.message_boundaries.contains(&prefix.token_ids.len()),
+                "{encoder:?}, message {count}");
+        }
+    }
+}
+
+#[test]
 fn typed_native_settings_do_not_require_jinja_and_legacy_settings_do() {
     for encoder in [PromptEncoder::DeepseekV4, PromptEncoder::DeepseekV41] {
         let fixture = Fixture::new(encoder);
@@ -154,7 +176,7 @@ fn typed_native_settings_do_not_require_jinja_and_legacy_settings_do() {
         let request = fixture.prepare(json!({})).unwrap();
         assert_eq!(request.output.content.start, OutputStart::Reasoning);
         assert!(request.rendered_prompt.ends_with("<｜Assistant｜><think>"));
-        let boundary = request.prompt.system_boundary.unwrap();
+        let boundary = *request.prompt.message_boundaries.first().unwrap();
         assert!(boundary > 0 && boundary < request.prompt.tokens.len());
     }
     let asset = tokenizer_asset();
@@ -345,4 +367,10 @@ fn base64_images_follow_the_rendered_placeholder_order() {
     assert_eq!(actual.pixel_values, expected.pixel_values);
     assert_eq!(actual.geometry.len(), 2);
     assert_eq!(request.rendered_prompt, rendered.text);
+    let complete_message = f.frontend.render_boundary(messages.as_array().unwrap(), &Map::new()).unwrap();
+    let complete_message = flare_helios::model::prepare_input(&f.config, &f.frontend,
+        Some(&processor), &complete_message,
+        vec![processor.decode_png(&green).unwrap(), processor.decode_png(&red).unwrap()]).unwrap();
+    assert!(request.prompt.tokens.starts_with(&complete_message.tokens));
+    assert!(request.prompt.message_boundaries.contains(&complete_message.tokens.len()));
 }
