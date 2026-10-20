@@ -75,6 +75,18 @@ pub(super) struct Candidate {
     pub verification_budget: Option<usize>,
 }
 
+impl Candidate {
+    pub(super) fn cost_key(self) -> cost::Key {
+        cost::Key {
+            kind: self.kind,
+            batch: self.batch,
+            tokens: self.capacity,
+            prefill: self.prefill_capacity,
+            packed: self.packed_token_capacity,
+        }
+    }
+}
+
 impl RequestScheduler {
     pub fn configure_policy(&mut self, policy: PolicyConfig) -> Result<()> {
         if self.submitted != Fence(0) || self.slots.iter().any(|s| s.request.is_some()) {
@@ -736,7 +748,9 @@ impl RequestScheduler {
             .filter(|(s, _)| selected & (1 << s) != 0)
             .map(|(_, v)| v)
             .sum();
-        let feedback = duration_ns == 0
+        let feedback = !self.costs.is_fresh(cost::Key {
+            kind, batch, tokens: capacity, prefill: 0, packed: 0,
+        })
             || !matches!(kind, GraphKind::Decode | GraphKind::Prefill)
             || bits(selected).any(|slot| {
                 let r = self.slots[slot].request.as_ref().unwrap();
@@ -954,7 +968,7 @@ impl RequestScheduler {
         let (values, age_price, log_scale) = self.lane_values(window);
         let mut candidates = self.candidates.borrow_mut();
         self.candidates(&mut candidates, &values, age_price);
-        let candidate = *candidates.iter().max_by(|a, b| {
+        let compare = |a: &Candidate, b: &Candidate| {
             let last = |c: &Candidate| {
                 bits(c.mask)
                     .map(|s| self.slots[s].request.as_ref().unwrap().last_use.0 as u128)
@@ -968,11 +982,49 @@ impl RequestScheduler {
                 .then(b.capacity.cmp(&a.capacity))
                 .then(b.prefill_capacity.cmp(&a.prefill_capacity))
                 .then(b.mask.cmp(&a.mask))
-        })?;
-        Some(self.materialize(candidate, log_scale))
+        };
+        let ordinary = *candidates.iter().max_by(|a, b| compare(a, b))?;
+        if let Some(episode) = self.refresh_episode() {
+            let mut continuations = Vec::new();
+            self.refresh_verification_candidates(
+                &mut continuations, &values, age_price, episode.owned_mask(),
+                (episode.target.kind == GraphKind::Verification).then_some(episode.target),
+            );
+            let candidate = *continuations.iter().max_by(|a, b| compare(a, b))?;
+            return Some(self.materialize(candidate, log_scale,
+                PlanOrigin::RefreshContinuation(episode.id)));
+        }
+        if ordinary.rate.duration_ns == 0 {
+            return Some(self.materialize(ordinary, log_scale, PlanOrigin::Discovery));
+        }
+        if self.refresh_ready() && self.submissions.is_empty() {
+            let mut targets: Vec<_> = self.costs.stale_keys().filter(|key| *key != ordinary.cost_key())
+                .map(|key| (self.costs.refresh_order(key), key)).collect();
+            targets.sort_by_key(|(order, _)| *order);
+            let mut best: Option<(u64, cost::Key, Candidate)> = None;
+            let mut choices = Vec::new();
+            let mut budget_cache = split::RefreshBudgetCache::default();
+            for (order, target) in targets {
+                if best.is_some_and(|(best_order, _, _)| best_order < order) { break; }
+                choices.clear();
+                choices.extend(candidates.iter().copied().filter(|candidate| candidate.cost_key() == target));
+                if self.split.is_some() {
+                    self.split_refresh_candidates(&mut choices, target, &values, age_price, Some(&mut budget_cache));
+                }
+                if let Some(candidate) = choices.iter().copied().max_by(compare) {
+                    if best.is_none_or(|(_, _, previous)| compare(&candidate, &previous).is_gt()) {
+                        best = Some((order, target, candidate));
+                    }
+                }
+            }
+            if let Some((_, target, candidate)) = best {
+                return Some(self.materialize(candidate, log_scale, PlanOrigin::RefreshStart(target)));
+            }
+        }
+        Some(self.materialize(ordinary, log_scale, PlanOrigin::Ordinary))
     }
 
-    fn materialize(&self, candidate: Candidate, log_scale: f64) -> ScheduledPlan {
+    fn materialize(&self, candidate: Candidate, log_scale: f64, origin: PlanOrigin) -> ScheduledPlan {
         let mut lanes = Vec::with_capacity(candidate.mask.count_ones() as usize);
         let mut epochs = Vec::with_capacity(lanes.capacity());
         for slot in bits(candidate.mask) {
@@ -1002,6 +1054,8 @@ impl RequestScheduler {
             });
         }
         ScheduledPlan {
+            origin,
+            selected_cost: self.selected_cost(candidate.cost_key()),
             owner: self.plan_owner.clone(),
             epochs,
             estimated_duration_ns: candidate.duration_ns,
@@ -1070,7 +1124,8 @@ impl RequestScheduler {
                     .then(b.batch.cmp(&a.batch))
             })
             .expect("requested lifecycle operation must be feasible");
-        self.materialize(candidate, scale)
+        let origin = if candidate.rate.duration_ns == 0 { PlanOrigin::Discovery } else { PlanOrigin::Ordinary };
+        self.materialize(candidate, scale, origin)
     }
 }
 

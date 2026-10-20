@@ -307,17 +307,31 @@ Acceptance learning and accepted-draft metrics exclude proposals beyond the
 lane's logical token limit even when the completion reports physical padding.
 
 `estimated_duration_ns` returns one estimate per captured graph, initially zero
-(indeterminate). A valid completion sets its cost directly; further GPU replay
-intervals update it with an EMA of weight 1/8. After 30 seconds without a valid
-observation, the cost becomes indeterminate and the next observation resets it.
-Indeterminate candidates compete by useful work and can beat measured candidates;
-they require an empty queue and completion before another submission. Tensor-parallel
-observations use the maximum rank interval; host queue and completion-delivery delays do not enter the EMA.
+(unmeasured). A valid completion sets its cost directly; further fresh observations
+update it with an EMA of weight 1/8. After 30 seconds without a valid observation,
+the cost becomes stale but remains available for selection. The next valid
+observation replaces the stale estimate. Tensor-parallel observations use the
+maximum positive rank interval. Isolated executions also measure host handoff;
+queued executions exclude queue wait from the timing updates. Unmeasured
+candidates compete by useful work and can beat measured candidates. Both
+unmeasured and stale physical dispatches require an empty queue and completion
+before another submission.
+
+Ordinary valid execution earns refresh credit at `0.002 / 0.998` times its
+measured duration, capped at 5 ms. Full credit permits a stale alternative to
+displace the ordinary winner, ordered by the later of its last valid observation
+and last attempted dispatch.
+Refresh pays for every physical capture, including an enabling proposal and its
+verification captures. Required verification can continue through debt; another
+refresh waits for full credit. Idle discards positive credit and preserves debt.
+This bounds aggregate refresh expense, not individual stalls; see
+[funded timing refresh](../docs/scheduling-runtime-design.md#funded-timing-refresh).
+
 Speculative width selection combines this cost with request-local expected
 acceptance. Each request accrues equal entitlement while GPU work is outstanding;
 completion earns useful-progress credit at frozen reference rates. Unknown
 reference rates initialize from runtime observations and credit accumulated
-progress once. Prediction expiry does not alter those accounting units.
+progress once. Timing freshness does not alter those accounting units.
 The latency filter includes queued work and prerequisite stages, preserving
 separate clocks for prompt progress and published output.
 

@@ -830,6 +830,7 @@ impl<'a> Worker<'a> {
                     std::hint::spin_loop();
                     thread::yield_now();
                 } else {
+                    self.scheduler.idle()?;
                     match self
                         .receiver
                         .recv_timeout(std::time::Duration::from_millis(2))
@@ -1069,6 +1070,7 @@ impl<'a> Worker<'a> {
         self.scheduler
             .advance_to(super::observation::monotonic_ns())?;
         let measured_step = self.scheduler.submitted_step(completion.fence)?.clone();
+        let selection = self.scheduler.submitted_timing(completion.fence)?;
         if measured_step.kind != kind {
             return Err("completion graph kind differs from submitted step".into());
         }
@@ -1144,9 +1146,12 @@ impl<'a> Worker<'a> {
         }
         self.metrics.scheduler_trace.completed(
             super::observation::monotonic_ns(),
+            completion.fence,
             completion.graph_index,
             &measured_step,
             completion.timing,
+            selection,
+            self.scheduler.refresh_credit_ns(),
         );
         if kind == GraphKind::Proposal {
             self.metrics.proposal_completed(measured_step.batch_capacity, measured_step.token_capacity,
@@ -1538,7 +1543,7 @@ impl<'a> Worker<'a> {
     fn submit(&mut self, executor: &mut RankExecutor, step: &ScheduledPlan) -> Result<bool> {
         self.scheduler
             .advance_to(super::observation::monotonic_ns())?;
-        if !executor.can_submit(step.requires_feedback)
+        if !executor.can_submit(self.scheduler.plan_requires_feedback(step))
             || !self
                 .scheduler
                 .submission_window_available(step.estimated_duration_ns())
@@ -1558,6 +1563,7 @@ impl<'a> Worker<'a> {
         )?;
         let fence = executor.next_fence()?;
         self.reserve_and_pack(step, fence)?;
+        let feedback = self.scheduler.submitted_step(fence)?.requires_feedback;
         if step
             .lanes
             .iter()
@@ -1593,7 +1599,7 @@ impl<'a> Worker<'a> {
         if executor.submit(
             graph,
             &uploads,
-            step.requires_feedback,
+            feedback,
         )? != Some(fence)
         {
             return Err("executor refused a reserved scheduler submission".into());
@@ -1601,7 +1607,7 @@ impl<'a> Worker<'a> {
         observe_submission(self.metrics, &self.scheduler, step, executor.outstanding())?;
         self.metrics
             .scheduler_trace
-            .submitted(super::observation::monotonic_ns(), graph, step);
+            .submitted(super::observation::monotonic_ns(), graph, step, feedback);
         Ok(true)
     }
 

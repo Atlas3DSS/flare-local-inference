@@ -63,3 +63,9 @@
 
 [ ] Port Python runtime-package export's positional I/O to Windows;
     tests/preparation/test_runtime_package.py has two existing os.pread failures.
+
+[ ] Qualify retained graph costs and funded remeasurement in live Helios:
+    idle/resume, concurrent decode latency, cost-change recovery, and split
+    proposal/verification transitions. Use per-fence scheduler traces and request
+    latency measurements; measure GPU replay, queueing, and host planning separately.
+    See scheduling-runtime-design.md#funded-timing-refresh.
