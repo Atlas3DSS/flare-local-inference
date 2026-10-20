@@ -100,6 +100,7 @@ flare/target/release/flare run PACKAGE --gpus 0 --host 127.0.0.1 --port 8000
 
 ```
 flare run PACKAGE [flags]                 serve a package on this host
+flare info PACKAGE [--memory-map] [--graphs] [--all] [--json]  inspect package metadata
 flare download REPOSITORY [flags]         download a prepared package
 flare inspect PACKAGE [--json | --plain]  a package's signed metadata
 flare agent [--listen IP:PORT]            run this host's orbit agent
@@ -921,6 +922,33 @@ and 100 columns. A redirected stream, `TERM=dumb`, or `--plain` prints the same
 characters without escape sequences at 80 columns. `--json` prints the
 metadata as one JSON document for other programs, with enumerations by name
 and byte counts exact.
+
+### 5.5 `flare info`
+
+Read a local package's primary-file metadata without initializing CUDA, opening
+companion files, reading weight or executable payloads, contacting the network,
+or requesting publisher acceptance. Output identifies metadata as unverified:
+inspection does not authenticate publisher signatures or grant execution trust.
+
+The default view shows model identity, served names, prepared context and execution
+capacities, sampling defaults, publisher and license metadata, and per-rank resource
+totals. Unrecorded optional values are shown as `not recorded`; explicit zeroes
+remain zeroes. Packages contain serving metadata rather than the checkpoint's raw
+model configuration.
+
+`--memory-map` adds recorded allocations, payload locations relative to their
+file's payload base, virtual address reservations, runtime cache sizing formulas,
+and execution buffer views with shapes and strides. Fixed allocation bytes,
+runtime-sized virtual extents, mapped host storage, and peer views are reported
+separately. Address reservations and runtime cache maxima do not measure physical
+GPU memory consumption; serving chooses cache backing at load time.
+
+`--graphs` lists captured graph capacities, sampling modes, and node and edge counts
+for every rank. `--all` includes both detailed views and the full serving contract,
+frontend settings, assets, auxiliary table layouts, and cluster metadata.
+`--json` prints all inspection metadata as a JSON object regardless of detail flags;
+byte sizes and addresses are integers. Inspection supports model index versions 4
+and 5 without requiring re-export.
 
 ## 6. Capacity errors
 

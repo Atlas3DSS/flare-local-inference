@@ -14,6 +14,8 @@ mod format;
 #[cfg(any(windows, test))]
 mod host;
 mod limits;
+mod metadata;
+pub use metadata::package_metadata;
 mod memory;
 mod model;
 mod payload;

@@ -26,6 +26,8 @@ pub struct Cli {
 pub enum Command {
     /// Serve a local package or download a prepared package from Hugging Face.
     Run(Box<Run>),
+    /// Inspect a local package's model metadata without loading it onto GPUs.
+    Info(Info),
     /// Download a prepared package from the hardware's Hugging Face revision.
     Download(Download),
     /// Show a package's signed metadata: model, limits, caches, sampling defaults, frontend, ranks and graphs.
@@ -39,6 +41,29 @@ pub enum Command {
         #[command(subcommand)]
         command: TrustCommand,
     },
+}
+
+#[derive(Debug, Args)]
+pub struct Info {
+    /// Local prepared .safetensors package.
+    #[arg(value_name = "PACKAGE")]
+    pub package: PathBuf,
+
+    /// Show recorded allocations, address reservations, and execution buffer views.
+    #[arg(long)]
+    pub memory_map: bool,
+
+    /// Show captured graph capacities and node counts for every rank.
+    #[arg(long)]
+    pub graphs: bool,
+
+    /// Show memory, graphs, and the complete serving and frontend contracts.
+    #[arg(long)]
+    pub all: bool,
+
+    /// Print all inspection metadata as JSON.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Args, Default, Clone)]
