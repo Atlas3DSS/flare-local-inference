@@ -1,5 +1,7 @@
 **
 !Dockerfile
+!LICENSE
+!NOTICE
 !flare/
 flare/**
 !flare/Cargo.toml

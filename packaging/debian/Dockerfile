@@ -13,7 +13,7 @@ ENV PATH=/usr/local/cargo/bin:$PATH
 WORKDIR /src
 COPY flare/ flare/
 COPY helios/ helios/
-COPY LICENSE LICENSE
+COPY LICENSE NOTICE ./
 COPY packaging/debian/ packaging/debian/
 ARG PACKAGE_VERSION
 ARG SOURCE_COMMIT
