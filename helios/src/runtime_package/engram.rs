@@ -180,12 +180,8 @@ pub(super) fn decode(
                 return Err(invalid("Engram payload geometry mismatch"));
             }
             Ok(Plane {
-                file: archive.file_index(&span.filename)?,
-                offset: archive
-                    .source(&span)?
-                    .start
-                    .checked_add(span.offset)
-                    .ok_or_else(|| invalid("Engram file offset overflow"))?,
+                file: archive.source_index(&span)?,
+                offset: archive.source(&span)?.1,
                 nbytes: usize::try_from(span.nbytes)
                     .map_err(|_| invalid("Engram plane exceeds host range"))?,
                 row_bytes,

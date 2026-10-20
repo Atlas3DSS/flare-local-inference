@@ -13,9 +13,8 @@ def export_package(prepared, images, storage, path, *, options, publisher, progr
                    staging=None, shard_size=DEFAULT_SHARD_SIZE):
     """Export every rank, close preparation resources, and assemble the model file.
 
-    Ranks stage their storage and resources as files under `staging` (default: beside `path`),
-    which the model file copies directly; staging on another disk keeps that copy from reading
-    and writing one device.
+    Ranks reuse immutable allocation blobs and stage execution resources under `staging`
+    (default: beside `path`). Publication links payload blobs beside the metadata primary.
     """
     if publisher is None:
         raise ValueError("final model publication requires a signing publisher")
@@ -27,11 +26,13 @@ def export_package(prepared, images, storage, path, *, options, publisher, progr
     staging = path.parent if staging is None else Path(staging)
     staging.mkdir(parents=True, exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix=f'.{path.name}-', dir=staging))
+    from .package_snapshot import _OPTIONS, ExportOptions
+    token = _OPTIONS.set(_OPTIONS.get() or ExportOptions(path.parent / '.flare-cache'))
     try:
         roots = [f'rank-{rank}.json' for rank in range(storage.world)]
         if storage.world > 1:
             for rank, control in enumerate(prepared.controls, 1):
-                control.send(('export', stage / roots[rank], options))
+                control.send(('export', stage / roots[rank], options, _OPTIONS.get()))
             dist.barrier()
             storage.peer_storage.reset()
             torch.cuda.synchronize()
@@ -56,39 +57,6 @@ def export_package(prepared, images, storage, path, *, options, publisher, progr
         combine(path, [stage / root for root in roots], peers, publisher=publisher, shard_size=shard_size)
         print_inventory(inventories, console=console or getattr(progress, "console", None))
     finally:
+        _OPTIONS.reset(token)
         if stage.exists():
             shutil.rmtree(stage)
-
-
-def export_cluster_package(prepared, images, storage, path, *, peer_files, options, export_id, world,
-                           publisher, peer_inventories, progress=None, shard_size=DEFAULT_SHARD_SIZE):
-    """Assemble private rank exports and sign one package holding every rank.
-
-    `peer_files` yields a readable stream of each peer's exported rank file, ranks 1 onward, in
-    order; each is appended to a staging file as it arrives. Publication copies stored data and
-    encrypts executables into the final package before removing staging. The
-    package names its cluster and export id; `flare run --hosts` serves each rank on its own host.
-    """
-    from .package_file import extend_cluster, publish, read_index
-    from .protection import resource_roles
-
-    if publisher is None:
-        raise ValueError("final model publication requires a signing publisher")
-
-    path = Path(path)
-    if path.exists():
-        raise FileExistsError(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    partial = path.with_name(f".{path.name}.partial")
-    partial.unlink(missing_ok=True)
-
-    try:
-        package = export_model(prepared, images, storage, partial, options=options, progress=progress)
-        extend_cluster(partial, peer_files, (world, export_id))
-        index, start = read_index(partial)
-        payload = sorted((span.offset, partial, start + span.offset, span.nbytes)
-                         for _, _, span in resource_roles(index))
-        publish(path, index, payload, publisher=publisher, shard_size=shard_size)
-        print_inventory([package.memory_inventory, *peer_inventories], console=getattr(progress, "console", None))
-    finally:
-        partial.unlink(missing_ok=True)

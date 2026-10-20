@@ -3,8 +3,9 @@
 //! Executables live in `bin/` under their SHA-256 names and run only from there. Package files
 //! live in `packages/<directory>/<filename>`: one directory per package and rank, holding each
 //! file at its logical length with only the transferred byte ranges written, so a rank's copy is
-//! a sparse file. Entries are pinned by the sessions transferring them and by the groups running
-//! them; receiving an entry evicts the unpinned entries of its kind.
+//! a sparse file. Content-addressed payloads arrive whole and are hardlinked from `blobs/`,
+//! so package directories share their immutable bytes. Entries are pinned by transferring
+//! sessions and running groups; package eviction preserves the reusable blob store.
 
 use std::collections::HashMap;
 use std::fs::{self, File};
@@ -128,9 +129,32 @@ pub fn evict(directory: &Path, pins: &Pins) -> Result<Vec<PathBuf>, Failure> {
 /// The entry's path when the cache holds it at `size` bytes.
 pub fn have(cache: &Path, kind: &str, name: &str, size: u64) -> Result<Option<PathBuf>, Failure> {
     let path = entry(cache, kind_directory(kind)?, name)?;
-    Ok(fs::metadata(&path)
-        .is_ok_and(|m| m.len() == size)
+    if kind == "package" && !path.exists() {
+        if let Some(blob) = blob_name(name) {
+            let stored = cache.join("blobs").join(blob);
+            if fs::symlink_metadata(&stored).is_ok_and(|m| m.is_file() && m.len() == size) {
+                fs::create_dir_all(path.parent().unwrap())?;
+                match fs::hard_link(stored, &path) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(e) => return Err(e.into()),
+                }
+            }
+        }
+    }
+    Ok(fs::symlink_metadata(&path)
+        .is_ok_and(|m| m.is_file() && m.len() == size)
         .then_some(path))
+}
+
+fn blob_name(name: &str) -> Option<&str> {
+    let file = name.rsplit('/').next()?;
+    let hash = file.strip_suffix(".safetensors")?;
+    (hash.len() == 64
+        && hash
+            .bytes()
+            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)))
+    .then_some(file)
 }
 
 /// Validate byte ranges: increasing, disjoint, non-empty, within `size`.
@@ -179,6 +203,10 @@ pub fn store(
     source: &mut dyn Read,
 ) -> Result<PathBuf, Failure> {
     let path = entry(cache, kind_directory(kind)?, name)?;
+    validate_ranges(size, ranges)?;
+    if kind == "package" && blob_name(name).is_some() && ranges != [(0, size)] {
+        return Err("content-addressed payloads must be transferred whole".into());
+    }
     if kind == "binary" && ranges != [(0, size)] {
         return Err("only packages arrive as byte ranges".into());
     }
@@ -191,6 +219,33 @@ pub fn store(
     if result.is_err() {
         let _ = fs::remove_file(&partial);
         return result.map(|_| path);
+    }
+    if let Some(blob) = (kind == "package").then(|| blob_name(name)).flatten() {
+        let directory = cache.join("blobs");
+        fs::create_dir_all(&directory)?;
+        let stored = directory.join(blob);
+        match fs::hard_link(&partial, &stored) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                use std::os::unix::fs::OpenOptionsExt;
+                let mut source = fs::OpenOptions::new()
+                    .read(true)
+                    .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                    .open(&stored)?;
+                let metadata = source.metadata()?;
+                if !metadata.is_file() || metadata.len() != size {
+                    return Err("invalid cached payload blob".into());
+                }
+                let mut digest = Sha256::new();
+                std::io::copy(&mut source, &mut digest)?;
+                if format!("{}.safetensors", super::hex(&digest.finalize())) != blob {
+                    return Err("cached payload digest mismatch".into());
+                }
+            }
+            Err(e) => return Err(e.into()),
+        }
+        fs::remove_file(&partial)?;
+        fs::hard_link(stored, &partial)?;
     }
     fs::rename(&partial, &path)?;
     Ok(path)
@@ -217,7 +272,7 @@ fn store_partial(
             if count == 0 {
                 return Err(format!("{name}: transfer ended {remaining} bytes early").into());
             }
-            if kind == "binary" {
+            if kind == "binary" || blob_name(name).is_some() {
                 digest.update(&block[..count]);
             }
             output.write_all(&block[..count])?;
@@ -231,6 +286,12 @@ fn store_partial(
             return Err(format!("{name}: received bytes hash to {found}").into());
         }
         fs::set_permissions(partial, fs::Permissions::from_mode(0o700))?;
+    } else if let Some(blob) = blob_name(name) {
+        let found = format!("{}.safetensors", super::hex(&digest.finalize()));
+        if found != blob {
+            return Err(format!("{name}: payload digest mismatch").into());
+        }
+        fs::set_permissions(partial, fs::Permissions::from_mode(0o444))?;
     }
     Ok(())
 }
@@ -396,5 +457,60 @@ mod tests {
         drop(pinned);
         let removed = evict(&cache.join("packages"), &pins).unwrap();
         assert_eq!(removed, vec![cache.join("packages/e-8-rank1")]);
+    }
+
+    #[test]
+    fn snapshots_share_verified_blobs_and_eviction_preserves_them() {
+        use std::os::unix::fs::MetadataExt;
+        let temp = tempfile::tempdir().unwrap();
+        let cache = temp.path();
+        let bytes = b"immutable model payload";
+        let blob = format!("{}.safetensors", super::super::hex(&Sha256::digest(bytes)));
+        let first_name = format!("first/{blob}");
+        let second_name = format!("second/{blob}");
+        let size = bytes.len() as u64;
+        let first = store(
+            cache,
+            "package",
+            &first_name,
+            size,
+            &[(0, size)],
+            &mut &bytes[..],
+        )
+        .unwrap();
+        let second = have(cache, "package", &second_name, size).unwrap().unwrap();
+        assert_eq!(
+            fs::metadata(&first).unwrap().ino(),
+            fs::metadata(&second).unwrap().ino()
+        );
+        assert_eq!(fs::metadata(&first).unwrap().mode() & 0o222, 0);
+        evict(&cache.join("packages"), &Pins::default()).unwrap();
+        assert!(!first.exists() && !second.exists());
+        assert!(cache.join("blobs").join(&blob).exists());
+        assert!(have(cache, "package", &first_name, size).unwrap().is_some());
+        assert!(
+            store(
+                cache,
+                "package",
+                &second_name,
+                size,
+                &[(0, 4)],
+                &mut &bytes[..4]
+            )
+            .is_err()
+        );
+        let bad = vec![b'x'; bytes.len()];
+        assert!(
+            store(
+                cache,
+                "package",
+                &second_name,
+                size,
+                &[(0, size)],
+                &mut &bad[..]
+            )
+            .is_err()
+        );
+        assert!(!second.exists());
     }
 }

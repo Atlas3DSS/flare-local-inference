@@ -56,7 +56,8 @@ then use `.venv/bin/ignition` or `.venv/bin/python -m ignition`.
 
 ```
 ignition run     [MODEL] [flags]     cache a runtime package and launch Flare
-ignition export  [MODEL] --output FILE [flags]  prepare a native model package
+ignition export  [MODEL] [--output FILE] [flags]  prepare a native model package
+ignition convert FILE [--output FILE] [flags]   convert a package to shared blobs
 ```
 
 Every command has exactly one name. `MODEL` is a recipe alias, a Hugging Face
@@ -78,8 +79,9 @@ Flare banner on a terminal and reports model loading through Helios.
 
 `export` imports the `flare_heliopause` CPython extension in Ignition's process.
 Ignition performs weight loading, tuning, compilation, warmup, and capture. It writes compiled CUDA modules,
-allocation contents, graph descriptions, and frontend assets to a `.safetensors`
-primary and optional sibling data files. Every destination must be unused. It
+allocation contents, graph descriptions, and frontend assets to content-addressed
+payload blobs with a metadata-only `.safetensors` primary. Every destination must
+be unused. It
 then exits without opening a listener. `run` caches the resulting package in
 `paths.package_cache` and replaces its Python process with the Rust `flare` executable. Cache keys
 include checkpoint identity, preparation settings, dependency versions, and
@@ -142,7 +144,7 @@ storage according to those selections and available GPU memory.
 ### 3.1 Ignition command-line flags
 
 `run` accepts the following flags. `export` accepts the same preparation flags,
-requires `--output FILE`, and excludes `--host` and `--port`.
+accepts `--output FILE` and defaults to a local snapshot; it excludes `--host` and `--port`.
 
 | Flag | Meaning | Default |
 |---|---|---|
@@ -156,7 +158,9 @@ requires `--output FILE`, and excludes `--host` and `--port`.
 | `--kv-cache-limit concurrency\|context\|memory` | `run` only: pass the shared KV-pool ceiling to Flare without changing preparation | `memory` |
 | `--memory-limit LIMIT` | `run` only: pass an occupied size (`30G`), free reserve (`-30G`), or total-memory fraction (`0.8`) to Flare | Package serving reserve |
 | `--config PATH` | Configuration file | `~/.config/flare/config.toml` |
-| `--shard-size SIZE` | Soft file-size target for export/run; `0` keeps one file | `[publishing] shard_size`, else `64G` |
+| `--shard-size SIZE` | Hard payload-file limit for export/run/sign/convert, at most 64 GiB | `[publishing] shard_size`, else `64G` |
+| `--no-weights` | Export only when exact stored-data blobs are cached | Off |
+| `--repo-id NAMESPACE/REPOSITORY` | Export repository namespace for the default local snapshot path | Recipe `export_repository` |
 | `--official-source URL` | Published repository URL under the configured publisher namespace | `[publishing] official_source` |
 | `--publisher-keys PATH` | Additional publisher profiles passed to Flare; repeatable, `run` only | Embedded keys plus the local development profile when applicable |
 | `--trust-store PATH` | Remembered execution trust passed to Flare; `run` only | `~/.config/flare/trust.toml` |
@@ -489,14 +493,13 @@ revision. GPU selection follows `CUDA_VISIBLE_DEVICES` for both commands.
 An explicit `--revision` overrides `@revision` and hardware detection. It accepts
 a branch, tag, or commit, and permits downloading on a machine without NVIDIA
 hardware. Online resolution obtains the revision's commit and downloads from
-that exact commit. Flare excludes `*-data-NN-of-NN.safetensors` companions when
-selecting the primary; multiple primaries require `--filename`. Referenced
-companions download from the primary's directory at that same commit. Offline
-resolution requires every referenced file. Multi-file packages use regular
-hardlinks in the Hub cache's `flare-packages` directory so the loader can reject
-symlink companions; filesystems without hardlink support report an error. Hardware selection does not infer tensor-parallel size or graph capacities
-from filenames. The selected package must match the serving GPU count, topology,
-and capacities; the native loader validates its contract.
+that exact commit. Flare excludes SHA-256 blob filenames and
+`*-data-NN-of-NN.safetensors` companions when selecting the primary; multiple
+primaries require `--filename`. Referenced companions resolve from the primary's
+directory at that same commit. Offline resolution requires every referenced file.
+Hardware selection does not infer tensor-parallel size or graph capacities from
+filenames. The selected package must match the serving GPU count, topology, and
+capacities; the native loader validates its contract.
 
 `flare download` prints only the cached package path on stdout; resolution and
 terminal download progress go to stderr. It does not load or execute the package,
@@ -516,13 +519,91 @@ Both commands accept these download options:
 | `--offline` | Resolve only from cached refs and snapshots and skip the publisher identity check; make no network requests. Accepted with a local package path | Off |
 
 The native client uses Hugging Face's `refs`, `snapshots`, and `blobs` cache
-layout. Existing cached files can be reused without copying their weights.
+layout. It loads regular snapshot files directly. Multi-file snapshots containing
+symlinks, including those created by Python's Hub client, use regular hardlinks in
+the cache's `flare-packages` directory. These links share the cached file's bytes
+and allow the loader to reject symlink companions. Filesystems without hardlink
+support report an error instead of copying payloads.
+
+When a file is absent from a snapshot, Flare checks its Hub ETag and size against
+the repository's blob cache. An existing blob is hardlinked into the snapshot
+without downloading its body. Identical files therefore share disk storage across
+revisions of the same repository. Concurrent Flare downloads serialize the blob
+lookup and transfer to preserve that sharing. Reuse operates on complete files;
+downloads use resumable HTTP transfers through `hf-hub`, without Xet chunk
+reconstruction. A cached blob with an unexpected size or file type reports an
+error. Package signature verification still occurs when serving.
+
 Offline automatic filename selection considers the files present in that cached
 snapshot; use `--filename` to select one explicitly. Cache paths, endpoint, and
 authentication are configured explicitly; native commands do not interpret
 `HF_HOME`, `HF_HUB_CACHE`, `HF_TOKEN`, or `HF_ENDPOINT`.
-Downloads use resumable HTTP transfers through `hf-hub`; Xet chunk reconstruction
-is not used.
+
+### Package snapshots
+
+`ignition export MODEL` writes a unique local snapshot without requiring
+`--output`. A recipe's `export_repository` supplies its Hugging Face target;
+`--repo-id NAMESPACE/REPOSITORY` overrides it. Recipes without a target use their
+local recipe name as the cache namespace. For Qwen Flash:
+
+```sh
+ignition export qwen3.8-flash
+ignition export qwen3.8-flash --no-weights
+```
+
+With the default package cache, the layout is:
+
+```text
+~/.cache/flare/packages/
+  blobs/<sha256>.safetensors
+  models--local-inference-lab--Qwen3.8-Flash-Next-FLARE/
+    snapshots/<snapshot-id>/
+      model.safetensors
+      <sha256>.safetensors
+```
+
+Each payload filename hashes the complete file. Snapshot payloads are read-only
+hardlinks to `blobs/`, so identical bytes occupy disk space once. Every primary
+contains only the signed model envelope and the storage layout. All model payloads,
+including graphs and kernels, follow in separate files no larger than 64 GiB.
+`--output FILE` selects another primary location on the cache's filesystem;
+a different filesystem requires a package cache on that filesystem. Configure
+`paths.package_cache` accordingly.
+
+`--no-weights` requires every stored allocation and embedding plane to match an
+existing cached blob. A missing or changed payload fails export before publishing
+the primary. This includes initialized persistent buffers as well as weights.
+The flag avoids temporary allocation files and duplicate weight writes. It still
+loads and prepares the checkpoint and reads captured storage to establish exact
+content identity. Changed graph captures and encrypted executable resources may
+produce additional blobs. Regular exports also reuse matching cached blobs.
+
+Multi-host preparation keeps a blob cache on each host. Peers send manifests;
+rank zero requests only files absent from its own cache. Orbit distributes only
+the payload blobs needed by each serving rank and reuses blobs across snapshots.
+
+Convert an existing package without a GPU or private signing key:
+
+```sh
+ignition convert /models/existing.safetensors \
+  --publisher-keys /keys/publisher.json
+```
+
+Conversion accepts monolithic, numbered-shard, and snapshot packages, verifies
+signed resources and stored data, and preserves the exact signed envelope. Supply
+the public publisher profile for a production package; the local development
+profile is loaded automatically. `--output FILE` selects a destination. Conversion
+leaves its source intact and needs space for payload bytes absent from the cache.
+It reads the complete package to verify its contents. Identical conversions reuse
+blobs without rewriting them. A resource larger than the selected limit is
+rejected because native resources must remain contiguous.
+
+The printed snapshot directory is self-contained. Upload that directory to the
+recipe's repository using the Hugging Face upload client; hardlinks appear as
+ordinary files. Export and conversion do not upload or change publisher trust.
+Keep every referenced payload beside its primary when copying a snapshot. Removing
+a snapshot removes its hardlinks; cached blobs remain available for other exports.
+There is no automatic blob garbage collection.
 
 ### Signing and local development
 
@@ -543,13 +624,11 @@ accepted. Runtime publisher profiles contain only the verification key.
 identity field requires all three identity fields. `[publishing] shard_size` may
 be configured independently and does not select a production identity.
 
-`shard_size = "64G"` is the default soft target; export/run/sign accept
-`--shard-size SIZE` to override it, and `0` requests one file. An indivisible
-resource may exceed the target. `example.safetensors` keeps metadata, encrypted
-resources, and supporting assets; companions are named
-`example-data-01-of-02.safetensors` through `example-data-02-of-02.safetensors`.
-At most 99 companions are supported, and no resource crosses a file boundary.
-Move or upload the complete set together.
+`shard_size = "64G"` is the hard payload-file limit; export/run/sign/convert
+accept `--shard-size SIZE` up to 64 GiB, including each file's header. Zero and
+limits at or below 4096 bytes are invalid. A resource larger than the limit fails
+export. The primary contains metadata only; all resources reside in immutable
+content-addressed blobs. See [package snapshots](#package-snapshots).
 
 `ignition keygen` creates an encrypted production key and public profile.
 `ignition key-password` changes the key's passphrase while preserving its identity.
@@ -773,9 +852,10 @@ Native startup and runtime failures exit 1.
 ### 5.2 `ignition export`
 
 Resolve the model and preparation settings as for `run`, then prepare and write
-a runtime package to `--output FILE`, appending `.safetensors` if needed.
-The destination must not exist. Export
-closes the prepared model and exits without starting a listener.
+a runtime package in a unique local snapshot under the recipe's export repository.
+`--output FILE` selects another destination, appending `.safetensors` if needed;
+the destination must not exist. `--no-weights` requires exact cached stored-data
+blobs. Export closes the prepared model and exits without starting a listener.
 
 ### 5.3 `flare run`
 

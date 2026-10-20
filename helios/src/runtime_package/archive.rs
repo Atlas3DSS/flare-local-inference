@@ -30,6 +30,123 @@ struct Header {
     payload: ByteTensor,
     #[serde(rename = "flare.metadata")]
     index: ByteTensor,
+    #[serde(rename = "flare.layout", default)]
+    layout: Option<ByteTensor>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Layout {
+    version: u32,
+    files: BTreeMap<String, Vec<(u64, String)>>,
+}
+
+impl Layout {
+    fn validate(&self) -> Result<()> {
+        if self.version != 1 || !self.files.contains_key("") || self.files.len() > 100 {
+            return Err(invalid("invalid snapshot layout"));
+        }
+        let mut count = 0;
+        let mut lengths = BTreeMap::new();
+        for (name, parts) in &self.files {
+            if !name.is_empty() {
+                validate_filename(name)?;
+            }
+            let mut total = 0u64;
+            for (size, blob) in parts {
+                count += 1;
+                if *size == 0
+                    || *size > (64u64 << 30) - 4096
+                    || count > 65536
+                    || (!blob.is_empty()
+                        && (blob.len() != 76
+                            || !blob.ends_with(".safetensors")
+                            || !blob.as_bytes()[..64]
+                                .iter()
+                                .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(c))))
+                {
+                    return Err(invalid("invalid snapshot blob"));
+                }
+                total = total
+                    .checked_add(*size)
+                    .ok_or_else(|| invalid("snapshot length overflow"))?;
+                if !blob.is_empty()
+                    && lengths
+                        .insert(blob, size)
+                        .is_some_and(|previous| previous != size)
+                {
+                    return Err(invalid("conflicting snapshot blob lengths"));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn segments(&self, span: &wire::Span) -> Result<Vec<(Option<String>, u64, u64)>> {
+        let parts = self
+            .files
+            .get(&span.filename)
+            .ok_or_else(|| invalid("missing logical package file"))?;
+        let end = span
+            .offset
+            .checked_add(span.nbytes)
+            .ok_or_else(|| invalid("resource overflow"))?;
+        let mut cursor = 0u64;
+        let mut result = Vec::new();
+        for (size, name) in parts {
+            let stop = cursor + size;
+            if cursor < end && span.offset < stop {
+                let start = cursor.max(span.offset);
+                result.push((
+                    (!name.is_empty()).then_some(name.clone()),
+                    start - cursor,
+                    end.min(stop) - start,
+                ));
+            }
+            cursor = stop;
+        }
+        if end > cursor {
+            return Err(invalid("resource exceeds logical payload"));
+        }
+        Ok(result)
+    }
+
+    fn read(file: &File) -> Result<Option<Self>> {
+        let mut prefix = [0; 8];
+        file.read_exact_at(&mut prefix, 0)
+            .map_err(|e| e.to_string())?;
+        let size = u64::from_le_bytes(prefix);
+        if size == 0 || size > MAX_HEADER as u64 {
+            return Err(invalid("invalid package header"));
+        }
+        let mut bytes = vec![0; size as usize];
+        file.read_exact_at(&mut bytes, 8)
+            .map_err(|e| e.to_string())?;
+        let header: Header = serde_json::from_slice(&bytes).map_err(|e| invalid(e.to_string()))?;
+        if header.format.format != "flare-snapshot" {
+            if header.layout.is_some() {
+                return Err(invalid("unexpected snapshot layout"));
+            }
+            return Ok(None);
+        }
+        let tensor = header
+            .layout
+            .ok_or_else(|| invalid("snapshot lacks storage layout"))?;
+        let count = tensor.size()?;
+        if header.payload.size()? != 0
+            || tensor.data_offsets[0] != header.index.data_offsets[1]
+            || count == 0
+            || count > MAX_INDEX as u64
+        {
+            return Err(invalid("invalid snapshot layout tensor"));
+        }
+        let mut bytes = vec![0; count as usize];
+        file.read_exact_at(&mut bytes, size + 8 + tensor.data_offsets[0])
+            .map_err(|e| e.to_string())?;
+        let layout: Self = serde_json::from_slice(&bytes).map_err(|e| invalid(e.to_string()))?;
+        layout.validate()?;
+        Ok(Some(layout))
+    }
 }
 
 #[derive(Deserialize)]
@@ -164,7 +281,17 @@ impl PayloadFile {
 /// Inspect bounded metadata for sibling files before authentication, without opening any sibling.
 /// Callers may fetch these names from the primary's pinned source; signatures still require verification.
 pub fn package_companions(path: &Path) -> Result<Vec<String>> {
-    let (_, _, _, bytes) = Archive::envelope(path)?;
+    let (file, _, _, bytes) = Archive::envelope(path)?;
+    if let Some(layout) = Layout::read(&file)? {
+        return Ok(layout
+            .files
+            .values()
+            .flatten()
+            .filter_map(|(_, name)| (!name.is_empty()).then_some(name.clone()))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect());
+    }
     let envelope =
         wire::ProtectedIndex::decode(bytes.as_slice()).map_err(|e| invalid(e.to_string()))?;
     if envelope.version != 4
@@ -232,6 +359,7 @@ pub(super) struct Archive {
     pub payload: u64,
     pub file: Arc<File>,
     pub files: BTreeMap<String, PayloadFile>,
+    layout: Option<Layout>,
     _directory: File,
     pub(super) protection: Protection,
 }
@@ -266,7 +394,7 @@ impl Archive {
         }
         let header: Header = serde_json::from_slice(&header)
             .map_err(|e| invalid(format!("invalid safetensors header: {e}")))?;
-        if header.format.format != "flare" {
+        if !matches!(header.format.format.as_str(), "flare" | "flare-snapshot") {
             return Err(invalid("not a Flare safetensors package"));
         }
         let payload = header.payload.size()?;
@@ -280,7 +408,11 @@ impl Archive {
             ));
         }
         let length = file.metadata().map_err(|e| e.to_string())?.len();
-        if length.checked_sub(start) != Some(header.index.data_offsets[1]) {
+        let end = header
+            .layout
+            .as_ref()
+            .map_or(header.index.data_offsets[1], |l| l.data_offsets[1]);
+        if length.checked_sub(start) != Some(end) {
             return Err(invalid(
                 "safetensors data length differs from model package",
             ));
@@ -288,7 +420,9 @@ impl Archive {
         let mut bytes = vec![0; size as usize];
         file.read_exact_at(&mut bytes, start + payload)
             .map_err(|e| e.to_string())?;
-        Ok((file, start, payload, bytes))
+        let logical_payload =
+            Layout::read(&file)?.map_or(payload, |l| l.files[""].iter().map(|p| p.0).sum());
+        Ok((file, start, logical_payload, bytes))
     }
     pub fn open(
         path: &Path,
@@ -330,6 +464,7 @@ impl Archive {
         let primary = path.to_owned();
         let (file, start, payload, bytes) = Self::envelope(&primary)?;
         let (protection, index) = Protection::verify(&bytes, publishers, payload, rank)?;
+        let layout = Layout::read(&file)?;
         let file = Arc::new(file);
         let mut files = BTreeMap::new();
         files.insert(
@@ -337,22 +472,42 @@ impl Archive {
             PayloadFile {
                 file: file.clone(),
                 start,
-                length: payload,
+                length: if layout.is_some() { 0 } else { payload },
                 direct: Mutex::new(None),
             },
         );
-        for part in protection.data_parts() {
-            if files.contains_key(&part.filename) {
-                continue;
+        let mut names = std::collections::BTreeSet::new();
+        let spans: Vec<_> = protection
+            .data_parts()
+            .into_iter()
+            .chain(index.ranks.iter().flat_map(|r| r.resources.values()))
+            .chain(index.assets.iter().filter_map(|a| a.payload.as_ref()))
+            .chain(
+                super::engram::spans(&index, rank)?
+                    .into_iter()
+                    .map(|(_, s)| s),
+            )
+            .collect();
+        for span in &spans {
+            if let Some(layout) = &layout {
+                for (name, _, _) in layout.segments(span)? {
+                    if let Some(name) = name {
+                        names.insert(name);
+                    }
+                }
+            } else if !span.filename.is_empty() {
+                names.insert(span.filename.clone());
             }
-            validate_filename(&part.filename)?;
-            if files.len() > 99 {
-                return Err(invalid("package references more than 99 data files"));
+        }
+        for name in names {
+            validate_filename(&name)?;
+            if files.len() > if layout.is_some() { 65536 } else { 99 } {
+                return Err(invalid("package references too many data files"));
             }
             #[cfg(unix)]
             let companion = {
                 use std::os::fd::{AsRawFd, FromRawFd};
-                let name = std::ffi::CString::new(part.filename.as_str()).unwrap();
+                let name = std::ffi::CString::new(name.as_str()).unwrap();
                 // SAFETY: directory and name remain live; the returned descriptor has one owner.
                 let fd = unsafe {
                     libc::openat(
@@ -363,8 +518,8 @@ impl Archive {
                 };
                 if fd < 0 {
                     return Err(invalid(format!(
-                        "open companion {}: {}",
-                        part.filename,
+                        "open companion {:?}: {}",
+                        name,
                         std::io::Error::last_os_error()
                     )));
                 }
@@ -380,7 +535,7 @@ impl Archive {
                     .read(true)
                     .share_mode(FILE_SHARE_READ)
                     .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-                    .open(parent.join(&part.filename))
+                    .open(parent.join(&name))
                     .map_err(|e| e.to_string())?;
                 if file
                     .metadata()
@@ -393,7 +548,20 @@ impl Archive {
                 }
                 file
             };
-            files.insert(part.filename.clone(), PayloadFile::companion(companion)?);
+            let companion = PayloadFile::companion(companion)?;
+            if let Some(layout) = &layout {
+                let size = layout
+                    .files
+                    .values()
+                    .flatten()
+                    .find(|(_, blob)| blob == &name)
+                    .map(|(size, _)| *size)
+                    .ok_or_else(|| invalid("unlisted snapshot blob"))?;
+                if companion.length != size || companion.start != 4096 {
+                    return Err(invalid("snapshot blob length or alignment mismatch"));
+                }
+            }
+            files.insert(name, companion);
         }
         let result = Self {
             #[cfg(unix)]
@@ -407,11 +575,12 @@ impl Archive {
             payload,
             file,
             files,
+            layout,
             _directory: directory,
             protection,
         };
         for part in result.protection.data_parts() {
-            result.source(part)?;
+            result.segments(part)?;
         }
         let spans = index
             .ranks
@@ -437,25 +606,96 @@ impl Archive {
         if rank.is_none()
             && ends
                 .iter()
-                .any(|(name, end)| result.files[*name].length != *end)
+                .any(|(name, end)| result.logical_length(name) != Some(*end))
         {
             return Err(invalid("unreferenced package payload bytes"));
         }
         Ok((result, index))
     }
-    pub fn source(&self, span: &wire::Span) -> Result<&PayloadFile> {
-        let file = self
-            .files
-            .get(&span.filename)
-            .ok_or_else(|| invalid("resource names an unsigned companion"))?;
-        if span
-            .offset
-            .checked_add(span.nbytes)
-            .is_none_or(|end| end > file.length)
-        {
-            return Err(invalid("resource exceeds package payload"));
+    fn logical_length(&self, name: &str) -> Option<u64> {
+        match &self.layout {
+            Some(layout) => layout
+                .files
+                .get(name)
+                .map(|parts| parts.iter().map(|p| p.0).sum()),
+            None => self.files.get(name).map(|f| f.length),
         }
-        Ok(file)
+    }
+    fn segments(&self, span: &wire::Span) -> Result<Vec<(Option<String>, u64, u64)>> {
+        let parts = if let Some(layout) = &self.layout {
+            layout.segments(span)?
+        } else {
+            vec![(Some(span.filename.clone()), span.offset, span.nbytes)]
+        };
+        for (name, offset, size) in &parts {
+            if let Some(name) = name {
+                let file = self
+                    .files
+                    .get(name)
+                    .ok_or_else(|| invalid("missing package blob"))?;
+                if offset
+                    .checked_add(*size)
+                    .is_none_or(|end| end > file.length)
+                {
+                    return Err(invalid("resource exceeds package payload"));
+                }
+            }
+        }
+        Ok(parts)
+    }
+    pub fn source(&self, span: &wire::Span) -> Result<(&PayloadFile, u64)> {
+        let parts = self.segments(span)?;
+        if parts.len() != 1 || parts[0].0.is_none() {
+            return Err(invalid("resource must occupy one contiguous payload blob"));
+        }
+        let (name, offset, _) = &parts[0];
+        let file = &self.files[name.as_ref().unwrap()];
+        Ok((file, file.start + offset))
+    }
+    #[cfg(windows)]
+    pub fn source_name(&self, span: &wire::Span) -> Result<String> {
+        let parts = self.segments(span)?;
+        if parts.len() != 1 {
+            return Err(invalid("resource crosses payload blobs"));
+        }
+        parts[0]
+            .0
+            .clone()
+            .ok_or_else(|| invalid("resource names padding"))
+    }
+    pub fn source_index(&self, span: &wire::Span) -> Result<usize> {
+        let parts = self.segments(span)?;
+        if parts.len() != 1 || parts[0].0.is_none() {
+            return Err(invalid("resource must occupy one contiguous payload blob"));
+        }
+        self.file_index(parts[0].0.as_ref().unwrap())
+    }
+    pub fn read_logical(&self, span: &wire::Span, offset: u64, output: &mut [u8]) -> Result<()> {
+        if offset
+            .checked_add(output.len() as u64)
+            .is_none_or(|n| n > span.nbytes)
+        {
+            return Err(invalid("logical read exceeds resource"));
+        }
+        let slice = wire::Span {
+            filename: span.filename.clone(),
+            offset: span.offset + offset,
+            nbytes: output.len() as u64,
+        };
+        let mut cursor = 0;
+        for (name, offset, size) in self.segments(&slice)? {
+            let target = &mut output[cursor..cursor + size as usize];
+            if let Some(name) = name {
+                let file = &self.files[&name];
+                file.file
+                    .read_exact_at(target, file.start + offset)
+                    .map_err(|e| e.to_string())?;
+            } else {
+                target.fill(0);
+            }
+            cursor += size as usize;
+        }
+        Ok(())
     }
     pub fn file_index(&self, filename: &str) -> Result<usize> {
         self.files
@@ -476,13 +716,17 @@ impl Archive {
         let length = self.file.metadata().map_err(|e| e.to_string())?.len();
         selected.insert(
             String::new(),
-            vec![
-                (0, self.start),
-                (
-                    self.start + self.payload,
-                    length - self.start - self.payload,
-                ),
-            ],
+            if self.layout.is_some() {
+                vec![(0, length)]
+            } else {
+                vec![
+                    (0, self.start),
+                    (
+                        self.start + self.payload,
+                        length - self.start - self.payload,
+                    ),
+                ]
+            },
         );
         for span in bundle
             .resources
@@ -495,11 +739,19 @@ impl Archive {
             )
             .chain(&stored)
         {
-            let file = self.source(span)?;
-            selected
-                .entry(span.filename.clone())
-                .or_insert_with(|| vec![(0, file.start)])
-                .push((file.start + span.offset, span.nbytes));
+            for (name, offset, size) in self.segments(span)? {
+                if let Some(name) = name {
+                    let file = &self.files[&name];
+                    let ranges = selected.entry(name).or_default();
+                    if self.layout.is_some() {
+                        // A content-addressed blob is transferred whole, so it can be reused.
+                        ranges.push((0, file.start + file.length));
+                    } else {
+                        ranges.push((0, file.start));
+                        ranges.push((file.start + offset, size));
+                    }
+                }
+            }
         }
         Ok(selected
             .into_iter()
@@ -562,8 +814,9 @@ impl Archive {
         }
     }
     fn reader(&self, package: &Package, key: &str) -> Result<ResourceReader> {
-        self.protection
-            .reader(self.file.clone(), self.start, self.span(package, key)?)
+        let span = self.span(package, key)?;
+        let (source, offset) = self.source(span)?;
+        self.protection.reader(source.file.clone(), offset, span)
     }
     pub fn read(&self, package: &Package, key: &str) -> Result<Vec<u8>> {
         let mut reader = self.reader(package, key)?;

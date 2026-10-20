@@ -427,7 +427,7 @@ def test_graph_export_preserves_construction_order_across_branches():
     ("fixed_package_fixture.py", "test_fixed_runtime_package", "native fixed-address replay passed", False),
     ("fixed_package_fixture.py", "test_fixed_runtime_package", "native fixed-address replay passed", True),
 ])
-@pytest.mark.parametrize("shard_size", [0, 128 << 10])
+@pytest.mark.parametrize("shard_size", [64 << 30, 64 << 20])
 def test_package_replays_without_python(tmp_path, fixture, binary, expected, exec_handover, shard_size):
     assert os.environ.get("CUDA_VISIBLE_DEVICES"), "assign CUDA_VISIBLE_DEVICES before running GPU tests"
     root = Path(__file__).resolve().parents[2]
@@ -449,7 +449,8 @@ def test_package_replays_without_python(tmp_path, fixture, binary, expected, exe
     from safetensors import safe_open
 
     with safe_open(package_path, framework="numpy") as tensors:
-        assert tensors.keys() == ["flare.metadata", "flare.payload"]
+        assert tensors.keys() == ["flare.layout", "flare.metadata", "flare.payload"]
+        assert tensors.get_tensor("flare.payload").size == 0
         from ignition.preparation import runtime_package_pb2 as proto
         protected = proto.ProtectedIndex.FromString(tensors.get_tensor("flare.metadata").tobytes())
         shared = proto.PublisherMetadata.FromString(protected.groups[0].body).index
@@ -466,9 +467,11 @@ def test_package_replays_without_python(tmp_path, fixture, binary, expected, exe
         assert all(document.resources[key].filename for key in storage)
     def contents(key):
         span = document.resources[key]
-        with package_path.open("rb") as source:
-            source.seek(start + span.offset)
-            stored = source.read(span.nbytes)
+        from ignition.preparation.package_file import PackageFiles
+        from ignition.preparation.package_snapshot import read_at
+        with package_path.open("rb") as source, PackageFiles(package_path, source, start, 0) as files:
+            file, base, _ = files.get(span.filename)
+            stored = read_at(file, span.nbytes, base + span.offset)
         resource = next((item for item in signed.executables.resources if item.offset == span.offset), None)
         if resource is None:
             return stored

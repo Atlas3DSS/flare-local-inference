@@ -89,12 +89,15 @@ def _peer(parent, snapshot, config, rank, rendezvous, connection, control, prepa
             if recorder is None:
                 raise RuntimeError("export requires module images recorded during preparation")
 
-            _, path, options = command
+            from contextlib import nullcontext
+            from .package_snapshot import export_options
+            _, path, options, cache = command
             dist.barrier()
             storage.peer_storage.reset()
             torch.cuda.synchronize()
             dist.barrier()
-            package = export_model(model, recorder, storage, path, options=options, sources=True)
+            with export_options(cache.cache, no_weights=cache.no_weights) if cache else nullcontext():
+                package = export_model(model, recorder, storage, path, options=options, sources=True)
             control.send({"peer_memory": list(storage.peer_storage.owned.items()),
                           "memory_inventory": package.memory_inventory})
             command = control.recv()

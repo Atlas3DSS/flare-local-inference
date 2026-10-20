@@ -56,7 +56,7 @@ def test_publication_contains_one_bundle_per_rank(monkeypatch, tmp_path, world):
     assert len(descriptor.peer_memory) == (2 if world == 2 else 0)
     for owner, peer in enumerate(descriptor.peer_memory):
         assert peer.owner == owner and list(peer.readers) == list(range(world))
-    assert list(tmp_path.iterdir()) == [output]
+    assert {p.name for p in tmp_path.iterdir()} == {output.name, '.flare-cache'}
 
 
 def test_failed_rank_export_leaves_no_published_model(monkeypatch, tmp_path):

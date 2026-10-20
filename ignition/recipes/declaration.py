@@ -143,6 +143,8 @@ class Recipe:
     encoder, rejecting images and leaving the encoder's memory to KV pages.
     `mla_compute_modes` declares the attention arithmetic constraints a plan may select,
     independently of KV storage encoding and kernel tuning.
+    `export_repository` names the Hugging Face destination and the default local snapshot
+    namespace. Export writes locally; it does not upload or select a signing identity.
     `b12x_environment` holds the b12x settings the recipe prepares with. b12x reads them
     only from its environment, so Ignition sets them for the preparing process.
     """
@@ -172,6 +174,7 @@ class Recipe:
     language_model_only: bool = False
     b12x_environment: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
     mla_compute_modes: tuple[str, ...] = ("auto",)
+    export_repository: str = ""
 
     def mixed_shapes(self, concurrency, chunk, speculation):
         from ignition.components.capacity import mixed_shapes
@@ -184,6 +187,10 @@ class Recipe:
                                         speculation.token_capacity if enabled else None))
 
     def __post_init__(self):
+        if self.export_repository:
+            import re
+            if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*', self.export_repository) or '..' in self.export_repository:
+                raise ValueError('export_repository must be a Hugging Face namespace/repository')
         if any(not name.startswith("B12X_") or not isinstance(value, str)
                for name, value in self.b12x_environment.items()):
             raise ValueError("b12x settings name B12X_ variables with string values")

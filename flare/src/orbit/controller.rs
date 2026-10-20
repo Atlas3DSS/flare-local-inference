@@ -1839,11 +1839,21 @@ fn mirror_file(
         let header: Value = serde_json::from_slice(&header)
             .map_err(|e| format!("{remote}: invalid safetensors header: {e}"))?;
         let offsets = &header["flare.metadata"]["data_offsets"];
-        let (Some(begin), Some(end)) = (offsets[0].as_u64(), offsets[1].as_u64()) else {
+        let (Some(begin), Some(mut end)) = (offsets[0].as_u64(), offsets[1].as_u64()) else {
             return Err(format!("{remote} is not a Flare package").into());
         };
+        if header["__metadata__"]["format"] == "flare-snapshot" {
+            let layout = &header["flare.layout"]["data_offsets"];
+            if layout[0].as_u64() != Some(end) {
+                return Err("snapshot layout must follow its signed metadata".into());
+            }
+            end = layout[1].as_u64().ok_or("snapshot lacks layout metadata")?;
+        }
         let start = 8 + header_size;
-        if end <= begin || start.checked_add(end).is_none_or(|e| e > size) {
+        if end <= begin
+            || end - begin > 256 << 20
+            || start.checked_add(end).is_none_or(|e| e > size)
+        {
             return Err(format!("{remote} has an invalid model index range").into());
         }
         get(

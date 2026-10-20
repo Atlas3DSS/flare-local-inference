@@ -19,6 +19,18 @@ from ignition.preparation.protection import CHUNK, License, Publisher, signature
 ROOT = Path(__file__).resolve().parents[2]
 
 
+@pytest.fixture(autouse=True)
+def legacy_container_fixtures(monkeypatch):
+    """Retain coverage of published version 4/5 container bytes and signatures."""
+    from helios.tests.signing import publish_legacy
+    from ignition.preparation import package_file, package_snapshot, resign as promotion
+    monkeypatch.setattr(package_file, 'publish', publish_legacy)
+    monkeypatch.setattr(__import__(__name__, fromlist=['publish']), 'publish', publish_legacy)
+    monkeypatch.setattr(package_snapshot, 'publish_snapshot',
+                        lambda path, index, protection, **kwargs:
+                        promotion._publish(path, index, protection.payload, protection))
+
+
 @pytest.fixture(scope='module')
 def native():
     subprocess.run(['cargo', 'build', '--manifest-path', str(ROOT / 'helios/Cargo.toml'),
@@ -115,7 +127,7 @@ def test_multichunk_export_is_read_and_authenticated_by_rust(native, tmp_path):
 
 
 def cluster_package(tmp_path, monkeypatch):
-    from ignition.preparation import model_package
+    from helios.tests import signing as model_package
     from types import SimpleNamespace
 
     def export(rank, path):

@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 
-PROTOCOL = 3
+PROTOCOL = 4
 # Peers wait here while rank zero compiles the complete serving catalog.
 _PREPARATION_TIMEOUT = timedelta(hours=2)
 _HANDSHAKE_SECONDS = 30
@@ -80,6 +80,90 @@ def send_object(sock, value):
 def receive_object(sock):
     """Unpickle a message from rank zero, which every peer was told to trust."""
     return pickle.loads(_receive(sock, _PICKLE))
+
+
+def send_export_sources(control, path, inventory):
+    """Send a rank manifest, then the content files requested by the coordinator."""
+    from contextlib import ExitStack
+    import hashlib
+
+    document = json.loads(Path(path).read_text())
+    with ExitStack() as stack:
+        files, metadata = {}, {}
+        for _, name, _, _ in document['payload']:
+            if name in files:
+                continue
+            source = stack.enter_context(Path(name).open('rb'))
+            size = os.fstat(source.fileno()).st_size
+            digest = hashlib.file_digest(source, 'sha256').hexdigest()
+            source.seek(0)
+            files[name] = source
+            metadata[name] = {'size': size, 'sha256': digest,
+                              'blob': Path(name).name == digest + '.safetensors'}
+        send_object(control, {'sources': {'document': document, 'files': metadata}, 'memory_inventory': inventory})
+        requested = receive_object(control)
+        if not isinstance(requested, list) or len(requested) != len(set(requested)) or any(n not in files for n in requested):
+            raise ValueError('invalid requested rank export sources')
+        for name in requested:
+            control.sendfile(files[name], count=metadata[name]['size'])
+
+
+def receive_export_sources(control, description, destination, settings):
+    """Reuse verified local blobs and receive only absent files into private storage."""
+    import tempfile
+    from .package_snapshot import BlobStore
+    from .package_file import read_sources
+
+    document, metadata = description['document'], description['files']
+    store = BlobStore(settings.cache)
+    targets, requested = {}, []
+    for name, info in metadata.items():
+        digest, size = info['sha256'], info['size']
+        if type(info['blob']) is not bool:
+            raise ValueError('invalid rank payload storage kind')
+        if not isinstance(digest, str) or len(digest) != 64 or any(c not in '0123456789abcdef' for c in digest):
+            raise ValueError('invalid rank payload digest')
+        if type(size) is not int or not 0 < size <= 64 << 30:
+            raise ValueError('rank payload exceeds its size limit')
+        target = (store.root / (digest + '.safetensors') if info['blob'] else
+                  destination.parent / (digest + '.source'))
+        targets[name] = target
+        if target.exists():
+            store.verify(target, bytes.fromhex(digest), size)
+        else:
+            if info['blob'] and settings.no_weights:
+                raise ValueError('--no-weights requires the peer stored-data blob in the coordinator cache')
+            requested.append(name)
+    send_object(control, requested)
+    for name in requested:
+        info, target = metadata[name], targets[name]
+        descriptor, temporary = tempfile.mkstemp(prefix='.rank-blob-', dir=target.parent)
+        partial = Path(temporary)
+        try:
+            digest = hashlib.sha256()
+            with os.fdopen(descriptor, 'wb') as output:
+                remaining = info['size']
+                while remaining:
+                    block = _receive_exact(control, min(_COPY_BLOCK, remaining))
+                    output.write(block)
+                    digest.update(block)
+                    remaining -= len(block)
+                output.flush()
+                os.fsync(output.fileno())
+                if info['blob']:
+                    os.fchmod(output.fileno(), 0o444)
+            if digest.hexdigest() != info['sha256']:
+                raise ValueError('rank payload digest mismatch')
+            try:
+                os.link(partial, target)
+            except FileExistsError:
+                store.verify(target, bytes.fromhex(info['sha256']), info['size'])
+        finally:
+            partial.unlink(missing_ok=True)
+    for item in document['payload']:
+        item[1] = str(targets[item[1]])
+    destination.write_text(json.dumps(document, separators=(',', ':')))
+    read_sources(destination)
 
 
 def source_identity():
@@ -370,25 +454,6 @@ class HostRendezvous:
             raise RuntimeError(f"tensor-parallel peers did not exit cleanly: {failures}")
 
 
-class _Received:
-    """Exactly `nbytes` of a socket, read like a file; reads past them return nothing."""
-
-    def __init__(self, sock, nbytes):
-        self.sock, self.remaining = sock, nbytes
-
-    def read(self, size):
-        size = min(size, self.remaining)
-        parts = []
-        while size:
-            part = self.sock.recv(min(size, 16 << 20))
-            if not part:
-                raise ConnectionError("peer closed its connection during an export transfer")
-            parts.append(part)
-            size -= len(part)
-            self.remaining -= len(part)
-        return b"".join(parts)
-
-
 class HostRankGroup:
     """Root model and its remote peers through native coordinated shutdown."""
 
@@ -409,33 +474,37 @@ class HostRankGroup:
         return self.model.manifest()
 
     def export(self, path, *, options, export_id, images, storage, publisher, progress=None, shard_size=64 << 30):
-        """Write one package holding every rank at `path` here; `flare run --hosts` serves it.
-
-        Each peer exports its rank on its own host and sends the file over its control connection,
-        which this rank appends to the package as it arrives.
-        """
-        from .model_package import export_cluster_package
+        """Combine rank manifests, receiving only content absent from the coordinator cache."""
+        import tempfile
+        from .package_snapshot import _OPTIONS, ExportOptions, export_options
+        from .package_file import combine
+        from .runtime_package import export_model
+        from .memory_inventory import print_inventory
 
         if self._started or self._closed:
             raise RuntimeError("prepared rank group has already been consumed or closed")
+        if publisher is None:
+            raise ValueError('final model publication requires a signing publisher')
+        settings = _OPTIONS.get() or ExportOptions(Path(path).parent / '.flare-cache')
         for control in self.controls:
             send_object(control, ("export", options))
-
-        inventories = []
-        def peer_files():
-            for rank, control in enumerate(self.controls, 1):
-                reply = receive_object(control)
-                if "exported" not in reply:
-                    raise RuntimeError(f"rank {rank} export failed: {reply}")
-                inventories.append(reply["memory_inventory"])
-                stream = _Received(control, reply["exported"])
-                yield stream
-                if stream.remaining:
-                    raise RuntimeError(f"rank {rank} sent {stream.remaining} bytes more than its export used")
-
-        export_cluster_package(self.model, images, storage, path, peer_files=peer_files(), options=options,
-                               export_id=export_id, world=self.rendezvous.world, publisher=publisher,
-                               peer_inventories=inventories, progress=progress, shard_size=shard_size)
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix='.rank-sources-', dir=Path(path).parent) as temporary:
+            stage = Path(temporary)
+            roots = [stage / f'rank-{rank}.json' for rank in range(self.rendezvous.world)]
+            with export_options(settings.cache, no_weights=settings.no_weights):
+                package = export_model(self.model, images, storage, roots[0], options=options,
+                                       progress=progress, sources=True)
+                inventories = [package.memory_inventory]
+                for rank, control in enumerate(self.controls, 1):
+                    reply = receive_object(control)
+                    if 'sources' not in reply:
+                        raise RuntimeError(f'rank {rank} export failed: {reply}')
+                    inventories.append(reply['memory_inventory'])
+                    receive_export_sources(control, reply['sources'], roots[rank], settings)
+                combine(path, roots, [], publisher=publisher, shard_size=shard_size,
+                        cluster=(self.rendezvous.world, export_id))
+            print_inventory(inventories, console=getattr(progress, 'console', None))
 
     def start_server(self, *, bind="127.0.0.1:8000", template_defaults=None, options=None):
         if self._started or self._closed:
@@ -521,6 +590,7 @@ def knock(address, rank, world, *, identity, topology, timeout=600.0, report=Non
 
 
 def serve_peer(control, executor, rank, world, *, hub_cache, progress=None, export_staging=None,
+               package_cache=None,
                checkpoint_token_file="~/.config/flare/agent.token", identity=None):
     """Prepare one peer from owned checkpoint metadata and requested source ranges, report
     memory, and serve until coordinated drain.
@@ -589,15 +659,15 @@ def serve_peer(control, executor, rank, world, *, hub_cache, progress=None, expo
                 Path(export_staging).mkdir(parents=True, exist_ok=True)
             directory = Path(tempfile.mkdtemp(prefix="flare-rank-", dir=export_staging))
             try:
-                path = directory / f"rank-{rank}.safetensors"
+                from .package_snapshot import export_options
+                path = directory / f"rank-{rank}.json"
                 if progress is not None:
                     progress(f"exporting rank {rank}")
-                package = export_model(model, recorder, storage, path, options=options, bundle_only=True)
-                # Rank zero appends this file to its package as it arrives.
-                send_object(control, {"exported": path.stat().st_size,
-                                      "memory_inventory": package.memory_inventory})
-                with path.open("rb") as package_stream:
-                    control.sendfile(package_stream)
+                # The peer retains its own prepared blobs; rank zero requests only missing files.
+                with export_options(package_cache or Path.home() / '.cache/flare/packages'):
+                    package = export_model(model, recorder, storage, path, options=options,
+                                           bundle_only=True, sources=True)
+                send_export_sources(control, path, package.memory_inventory)
             finally:
                 shutil.rmtree(directory, ignore_errors=True)
             command = receive_object(control)

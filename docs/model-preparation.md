@@ -3,15 +3,25 @@
 ## Runtime packages
 
 Run commands from the repository root. Ignition prepares a source checkpoint
-into a **runtime package**: a primary `.safetensors` file with two `U8` tensors,
-plus sibling data files when the package exceeds the 64 GiB soft target.
-`flare.payload` holds primary resources; `flare.metadata` holds the bounded
-Protobuf index at the end. `--shard-size SIZE` overrides `[publishing] shard_size`;
-`0` keeps the package monolithic. Companions use the primary basename, such as
-`example-data-01-of-02.safetensors`, and hold whole allocation payloads or
-embedding planes. Encrypted and individually authenticated resources stay primary.
-The protobuf describes independently addressed resources. Tensor-parallel
-packages contain one resource bundle per rank.
+into a **runtime package**: a metadata-only primary `.safetensors` file and
+immutable sibling payload blobs named by their SHA-256 hashes. The primary's
+`flare.metadata` contains the signed Protobuf envelope; `flare.layout` maps its
+logical resources to the blobs. `flare.payload` is empty. Weights, embedding
+tables, graphs, kernels, and frontend assets all reside in payload blobs.
+
+The payload-file limit is 64 GiB, including the header. `--shard-size SIZE`
+overrides `[publishing] shard_size` with a smaller positive limit. Resources
+remain contiguous; export rejects a resource that exceeds the limit. Existing
+monolithic and numbered-shard packages remain loadable.
+
+Exports hardlink unchanged blobs from `paths.package_cache`. `ignition export
+--no-weights` requires exact cached stored-data payloads and creates only missing
+execution-resource blobs and metadata. Preparation and weight reads still occur.
+Recipes can declare `export_repository`; without `--output`, exports use a unique
+snapshot directory under that repository's local cache namespace. See
+[package snapshots](cli-design.md#package-snapshots) for conversion and upload.
+
+Tensor-parallel packages contain one resource bundle per rank.
 Final packages use a format-4 signed envelope and encrypted cubins and graph
 records. Ignition creates a per-user development signing key when `[publishing]`
 is absent. `ignition run` passes the exact export key and publisher to Flare for

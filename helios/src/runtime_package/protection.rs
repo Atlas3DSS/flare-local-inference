@@ -693,14 +693,10 @@ impl Protection {
         for range in &self.data {
             let mut hash = digest::Context::new(&digest::SHA256);
             for part in &range.parts {
-                let source = archive.source(part)?;
                 let mut pos = 0;
                 while pos < part.nbytes {
                     let count = (part.nbytes - pos).min(block.len() as u64) as usize;
-                    source
-                        .file
-                        .read_exact_at(&mut block[..count], source.start + part.offset + pos)
-                        .map_err(|e| e.to_string())?;
+                    archive.read_logical(part, pos, &mut block[..count])?;
                     hash.update(&block[..count]);
                     pos += count as u64;
                 }
@@ -779,10 +775,7 @@ impl ResourceReader {
         self.file
             .read_exact_at(
                 &mut self.buffer,
-                self.start
-                    + self.entry.offset
-                    + plain_offset
-                    + if encrypted { self.chunk as u64 * 16 } else { 0 },
+                self.start + plain_offset + if encrypted { self.chunk as u64 * 16 } else { 0 },
             )
             .map_err(|e| e.to_string())?;
         if sha256(&self.buffer) != self.entry.sha256[self.chunk] {

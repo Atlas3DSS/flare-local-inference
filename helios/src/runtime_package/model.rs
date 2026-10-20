@@ -306,7 +306,24 @@ impl NativeModel {
             let span = asset
                 .payload
                 .ok_or_else(|| invalid("frontend asset lacks a payload"))?;
-            let value = serde_json::json!({ "path": root, "offset": archive.start + span.offset,
+            let (source, offset) = archive.source(&span)?;
+            #[cfg(unix)]
+            let asset_path = {
+                use std::os::fd::AsRawFd;
+                std::path::PathBuf::from(format!("/proc/self/fd/{}", source.file.as_raw_fd()))
+            };
+            #[cfg(windows)]
+            let asset_path = {
+                let name = archive.source_name(&span)?;
+                if name.is_empty() {
+                    root.to_owned()
+                } else {
+                    root.parent()
+                        .unwrap_or(std::path::Path::new("."))
+                        .join(name)
+                }
+            };
+            let value = serde_json::json!({ "path": asset_path, "offset": offset,
                 "nbytes": span.nbytes, "sha256": asset.sha256 });
             if assets.insert(asset.name, value).is_some() {
                 return Err(invalid("duplicate frontend asset"));
@@ -490,14 +507,20 @@ impl NativeModel {
         // Windows direct reads can stall while any buffered handle remains open.
         // Keep every shard's write/delete exclusion through unbuffered guards;
         // the buffered startup readers close when loading returns.
-        let package_files = archive.files.values().map(|payload| {
-            #[cfg(windows)]
-            let file = std::sync::Arc::new(crate::os::direct_read_guard(&payload.file)
-                .map_err(|error| invalid(format!("retain read-only package: {error}")))?);
-            #[cfg(unix)]
-            let file = payload.file.clone();
-            Ok(file)
-        }).collect::<Result<Vec<_>>>()?;
+        let package_files = archive
+            .files
+            .values()
+            .map(|payload| {
+                #[cfg(windows)]
+                let file = std::sync::Arc::new(
+                    crate::os::direct_read_guard(&payload.file)
+                        .map_err(|error| invalid(format!("retain read-only package: {error}")))?,
+                );
+                #[cfg(unix)]
+                let file = payload.file.clone();
+                Ok(file)
+            })
+            .collect::<Result<Vec<_>>>()?;
         let mut model = Self {
             _package_files: package_files,
             ranks: Vec::new(),

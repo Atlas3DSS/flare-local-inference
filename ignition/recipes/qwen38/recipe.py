@@ -57,6 +57,7 @@ def usage(prepared):
 
 RECIPE = Recipe(
     name="qwen38", prepare=prepare, usage=usage,
+    export_repository="local-inference-lab/Qwen3.8-Flash-Next-FLARE",
     # Default thinking mode: https://huggingface.co/Qwen/Qwen3.8-Flash-Next#best-practices.
     sampling_defaults=SamplingDefaults(temperature=1., top_p=.95, top_k=20),
     checkpoints=(Checkpoint(

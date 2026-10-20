@@ -85,15 +85,29 @@ class PackageFiles:
     """Retain regular companion files opened relative to one pinned directory."""
 
     def __init__(self, path, primary, base, length):
+        from .package_snapshot import read_container, LogicalFile
+        self.layout = read_container(primary)[3]
         self.directory = os.open(Path(path).absolute().parent, os.O_RDONLY | os.O_DIRECTORY)
         self.files = {'': (primary, base, length)}
+        self.logical = {}
+        if self.layout is not None:
+            for name, parts in self.layout['files'].items():
+                self.logical[name] = (LogicalFile(parts, self._physical), 0, sum(n for n, _ in parts))
 
     def get(self, filename):
+        if self.layout is not None:
+            try:
+                return self.logical[filename]
+            except KeyError:
+                raise ValueError('logical package file is missing') from None
+        return self._physical(filename)
+
+    def _physical(self, filename):
         if filename in self.files:
             return self.files[filename]
         validate_filename(filename)
-        if len(self.files) > 99:
-            raise ValueError('package references more than 99 data files')
+        if len(self.files) > (65536 if self.layout is not None else 99):
+            raise ValueError('package references too many data files')
         fd = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=self.directory)
         source = os.fdopen(fd, 'rb')
         try:
@@ -180,7 +194,18 @@ def _validate_spans(index, length):
 
 def read_index(path):
     """Inspect staging or signed metadata without authenticating it or reading payloads."""
+    from .package_snapshot import read_container
     with _open_source(path) as source:
+        header, start, encoded, layout = read_container(source)
+        if layout is not None:
+            envelope = proto.ProtectedIndex.FromString(encoded)
+            if envelope.version != 4 or len(envelope.groups) != 3 or not envelope.ranks:
+                raise ValueError('invalid protected package envelope')
+            result = proto.PublisherMetadata.FromString(envelope.groups[0].body).index
+            for group in envelope.ranks:
+                result.ranks.add().CopyFrom(proto.RankProtection.FromString(group.body).bundle)
+            _validate_spans(result, sum(n for n, _ in layout['files']['']))
+            return result, start
         source.seek(0)
         prefix = source.read(8)
         if len(prefix) != 8:
@@ -227,13 +252,16 @@ def publish(path, index, payload, *, publisher=None, shard_size=DEFAULT_SHARD_SI
     """Publish private rank staging or a publisher-protected final package."""
     if publisher is None:
         return _publish(path, index, payload)
+    if not ALIGNMENT < shard_size <= DEFAULT_SHARD_SIZE:
+        raise ValueError('payload shard limit must exceed 4096 bytes and be at most 64G')
     from .protection import Protection
     with tempfile.TemporaryDirectory(prefix="flare-protection-") as stage:
         protected_index = type(index)()
         protected_index.CopyFrom(index)
         protection = Protection(protected_index, list(payload), publisher, stage,
                                 shard_size=shard_size, basename=Path(path).stem)
-        return _publish(path, protected_index, protection.payload, protection)
+        from .package_snapshot import publish_snapshot
+        return publish_snapshot(path, protected_index, protection, shard_size=shard_size)
 
 
 def _publish(path, index, payload, protection=None):
@@ -428,7 +456,7 @@ def read_sources(path):
     return index, locate
 
 
-def combine(path, ranks, peer_memory, *, publisher=None, shard_size=DEFAULT_SHARD_SIZE):
+def combine(path, ranks, peer_memory, *, publisher=None, shard_size=DEFAULT_SHARD_SIZE, cluster=None):
     """Place every rank's tensor storage before execution resources and the index.
 
     `ranks` names each rank's export recorded by `write_sources`; ranges copy directly from the
@@ -468,6 +496,10 @@ def combine(path, ranks, peer_memory, *, publisher=None, shard_size=DEFAULT_SHAR
         for source, offset, nbytes in pieces:
             payload.append((cursor, source, offset, nbytes))
             cursor += nbytes
+    if cluster is not None:
+        if len(result.ranks) != cluster[0]:
+            raise ValueError('a multi-host package holds every rank of its cluster')
+        result.cluster.world, result.cluster.export_id = cluster
     publish(path, result, payload, publisher=publisher, shard_size=shard_size)
 
 

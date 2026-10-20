@@ -104,6 +104,18 @@ fn disk_cached_and_resident_tables_feed_native_b12x_graphs() {
             let name = archive.files.keys().nth(file).unwrap();
             let source = root.join(if name.is_empty() { "package" } else { name });
             std::fs::copy(source, &failed_source).unwrap();
+            // Corrupt the private copy; snapshot payloads themselves remain read-only.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&failed_source, std::fs::Permissions::from_mode(0o600)).unwrap();
+            }
+            #[cfg(windows)]
+            {
+                let mut permissions = std::fs::metadata(&failed_source).unwrap().permissions();
+                permissions.set_readonly(false);
+                std::fs::set_permissions(&failed_source, permissions).unwrap();
+            }
             sources[file] =
                 std::sync::Arc::new(crate::os::direct_file(&failed_source, false).unwrap());
         }
