@@ -278,7 +278,7 @@ def prepare(snapshot, config, *, progress=None, package_storage):
         kv_bytes=pages * page_bytes(weights.config), completion_output_bytes=completion.nbytes, operator_scratch_bytes=arena.nbytes, graphs=len(graphs),
         prefill_capacities=prefill_sizes, free_device_bytes=free, total_device_bytes=total,
         headroom_bytes=config.headroom_bytes, tuning=tuning, compiled_decoder=config.compile_decoder)
-    return PreparedModel(device=config.device, graphs=graphs, buffers=buffers, signatures=signatures,
+    return PreparedModel(rebuild_weights={"weights": weights}, device=config.device, graphs=graphs, buffers=buffers, signatures=signatures,
         max_active=config.max_active, session=session, server_config=server_config, memory_report=memory,
         export_zero_ranges=(*storage_ranges([arena.tensor, metadata, vision_state.arena,
             *[chunk for p in (graph_buffers, layer_buffers) for chunks in p.chunks.values() for chunk in chunks]]), *completion.zero_ranges()),

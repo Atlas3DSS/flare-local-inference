@@ -26,8 +26,10 @@ def serving(index, server):
     })
     ParseDict(sampling, index.sampling_defaults)
     ParseDict(server["frontend"], index.frontend)
+    if 'rebuild_manifest' in server:
+        index.rebuild.ParseFromString(server['rebuild_manifest'])
     ParseDict({"speculative_proposal_source": "mtp", **{key: value for key, value in server.items()
-               if key not in ("assets", "sampling_defaults", "frontend")}}, index.contract)
+               if key not in ("assets", "sampling_defaults", "frontend", "rebuild_manifest")}}, index.contract)
 
 
 def _relocations(values):

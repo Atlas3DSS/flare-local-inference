@@ -130,7 +130,8 @@ def _prepare(root, images, shard_size):
                              kernels=[Kernel(function, "dense", tuple(arguments)),
                                       Kernel(int(fill.func), "fill", fill_arguments)],
                              owners=(gemm, tensors))
-    package.write(root / "package", graphs, publisher=publisher(), shard_size=shard_size)
+    package.write(root / "package", graphs, publisher=publisher(), shard_size=shard_size,
+                  rebuild_weights={"weight": tensors["weight"]})
     tensors["input"].copy_((tensors["input"].float() * 0.25 + 0.5).to(torch.float8_e4m3fn))
     (root / "modified-input.bin").write_bytes(tensors["input"].view(torch.uint8).cpu().numpy().tobytes())
     for rows in (32, 64):

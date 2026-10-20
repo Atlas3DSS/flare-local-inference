@@ -18,7 +18,7 @@ class PreparedModel(PreparedExecution):
     """
 
     def __init__(self, *, server_config, memory_report, session, close_resources=(), package_data=None,
-                 forwards=None, embedding_catalog=None, **kwargs):
+                 forwards=None, embedding_catalog=None, rebuild_weights=None, **kwargs):
         super().__init__(**kwargs)
         if forwards is not None and set(forwards) != set(self.graphs):
             raise ValueError("retained forwards must cover exactly the captured graphs")
@@ -26,6 +26,7 @@ class PreparedModel(PreparedExecution):
         self.memory_report = memory_report
         self.session = session
         self.package_data = package_data
+        self.rebuild_weights = rebuild_weights
         self.forwards = None if forwards is None else MappingProxyType(dict(forwards))
         self.embedding_catalog = embedding_catalog
         self.embedding_tables = self._embedding_binding = None
@@ -127,6 +128,7 @@ class PreparedModel(PreparedExecution):
         self.session.close()
         for resource in self._close_resources:
             resource.close()
+        self.rebuild_weights = None
         self._resources = ()
         self._buffers = MappingProxyType({})
         self._graphs = MappingProxyType({})

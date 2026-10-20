@@ -577,7 +577,7 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
         prefill_collective, vocabulary_collective, coordinator, speculation, context)
     from .export import disposable_ranges
 
-    return PreparedModel(device=config.devices[rank], graphs=graphs, buffers=buffers, signatures=signatures,
+    return PreparedModel(rebuild_weights={"weights": weights}, device=config.devices[rank], graphs=graphs, buffers=buffers, signatures=signatures,
         max_active=config.max_active, resources=resources, session=session,
         forwards={name: compiled.get(name, forward) for name, forward in forwards.items()},
         export_zero_ranges=(*disposable_ranges((decoder_storage, prefill_storage), arena, forwards), *completion.zero_ranges()),

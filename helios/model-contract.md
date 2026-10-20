@@ -45,6 +45,11 @@ concurrency, speculative widths, and serving defaults. Load-time selection may
 reduce captured concurrency and speculative width. Physical cache capacities
 are chosen after graph loading and replace preparation's working-set counts.
 
+The optional package rebuild manifest and per-rank weight catalogs describe
+preparation inputs and stored tensor views. They do not select serving behavior.
+Missing fields, or catalog versions unknown to a serving runtime, leave the
+serving contract and replay path unchanged.
+
 `ModelContract` contains:
 
 | Field | Meaning |

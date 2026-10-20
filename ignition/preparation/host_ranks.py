@@ -33,6 +33,8 @@ from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 
+from .source_identity import source_identity
+
 PROTOCOL = 4
 # Peers wait here while rank zero compiles the complete serving catalog.
 _PREPARATION_TIMEOUT = timedelta(hours=2)
@@ -173,25 +175,6 @@ def receive_export_sources(control, description, destination, settings):
         item[1] = str(targets[item[1]])
     destination.write_text(json.dumps(document, separators=(',', ':')))
     read_sources(destination)
-
-
-def source_identity():
-    """Digest of the Python and native sources every rank must run identically."""
-    from importlib import util
-
-    # Locate FlashInfer without importing it: CUDA device selection must precede PyTorch's import.
-    flashinfer = util.find_spec("flashinfer")
-    if flashinfer is None:
-        raise RuntimeError("the preparation environment requires FlashInfer")
-    root = Path(__file__).resolve().parents[2]
-    digest = hashlib.sha256()
-    for source in (root / "ignition", root / "helios" / "src", root / "heliopause" / "src",
-                   Path(flashinfer.origin).resolve().parent):
-        for path in sorted(source.rglob("*")):
-            if path.is_file() and path.suffix in (".py", ".rs", ".c", ".cu", ".cuh", ".h"):
-                digest.update(str(path.relative_to(source)).encode())
-                digest.update(path.read_bytes())
-    return digest.hexdigest()
 
 
 def _rdma_devices():

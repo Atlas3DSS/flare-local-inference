@@ -429,7 +429,7 @@ class RuntimePackage:
                     raise ValueError(f"tensor-map binding does not match {relocation.target}")
 
     def write(self, path, graphs, *, execution=None, server=None, progress=None, package_data=None, publisher=None,
-              sources=False, shard_size=64 << 30):
+              sources=False, shard_size=64 << 30, rebuild_weights=None, zero_ranges=()):
         """Synchronize and publish an indexed model file without overwriting.
 
         With `sources`, `path` records the index and the staged files holding each range instead
@@ -581,6 +581,12 @@ class RuntimePackage:
                         "context": {"flags": flags.value, "cache": cache.value, "limits": limits},
                         "events": list(self.events)}
             index = ModelIndex(version=4, ranks=[bundle(document)])
+            if rebuild_weights is not None:
+                from .rebuild_manifest import describe_weights, validate_weights
+
+                index.ranks[0].rebuild_weights.CopyFrom(describe_weights(
+                    rebuild_weights, self.allocations, zero_ranges=zero_ranges))
+                validate_weights(index.ranks[0])
             for transport in self.transports:
                 _roce_transport(index.ranks[0].roce, transport)
             asset_files = {}
@@ -966,7 +972,8 @@ def export_model(prepared, images, storage, path, *, options, progress=None, pub
     server = None if bundle_only else {**prepared.server_config, **options}
     package.write(path, prepared.graphs, execution=execution, server=server, progress=progress,
                   package_data=None if bundle_only else prepared.package_data, publisher=publisher,
-                  sources=sources, shard_size=shard_size)
+                  sources=sources, shard_size=shard_size,
+                  rebuild_weights=getattr(prepared, 'rebuild_weights', None), zero_ranges=zero_ranges)
     from .memory_inventory import collect_inventory, print_inventory
 
     package.memory_inventory = collect_inventory(prepared, storage, package, external=outside)

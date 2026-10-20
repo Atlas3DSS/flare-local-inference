@@ -573,7 +573,7 @@ def _prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, t
         from ignition.preparation.disposable import storage_ranges
 
         export_zero_ranges = (*export_zero_ranges, *storage_ranges(graph_buffers.chunks))
-        return PreparedModel(device=device.index, max_active=config.max_active, graphs=graphs, buffers=buffers, signatures=signatures,
+        return PreparedModel(rebuild_weights={"weights": weights, "mtp": mtp_weights}, device=device.index, max_active=config.max_active, graphs=graphs, buffers=buffers, signatures=signatures,
             export_zero_ranges=(*export_zero_ranges, *completion.zero_ranges(), *((t.data_ptr(), t.nbytes) for t in table.buffers().values())),
             export_events=table.events(), package_data=table if rank == 0 else None,
             resources=resources, server_config=server_config, memory_report=memory, session=session, close_resources=(table, *((vocabulary_collective, collective) if collective is not None else ())))
