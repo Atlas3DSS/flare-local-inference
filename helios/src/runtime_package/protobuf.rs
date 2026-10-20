@@ -318,6 +318,28 @@ mod tests {
     use prost::Message;
 
     #[test]
+    fn rebuild_catalogs_do_not_change_native_bundle_loading() {
+        // SM120 architecture and an empty CUDA context, serialized without a catalog.
+        let bytes = [10, 2, 12, 0, 66, 0];
+        let legacy = wire::BundleIndex::decode(bytes.as_slice()).unwrap();
+        assert!(legacy.rebuild_weights.is_none());
+        let expected = decode(legacy.clone()).unwrap();
+        for version in [0, 1, 99] {
+            let mut described = legacy.clone();
+            described.rebuild_weights = Some(wire::RebuildWeights {
+                version,
+                unavailable: vec!["weights".into()],
+                ..Default::default()
+            });
+            let actual = decode(described).unwrap();
+            assert_eq!(actual.architecture, expected.architecture);
+            assert_eq!(actual.context.flags, expected.context.flags);
+            assert_eq!(actual.allocations.len(), expected.allocations.len());
+            assert_eq!(actual.graphs.len(), expected.graphs.len());
+        }
+    }
+
+    #[test]
     fn packed_rows_preserve_absent_field_semantics_and_honor_explicit_bounds() {
         // Serialized verification metadata predating the separate physical-row field.
         let bytes = b"\x12\x0cverification\x20\x08\x28\x06";

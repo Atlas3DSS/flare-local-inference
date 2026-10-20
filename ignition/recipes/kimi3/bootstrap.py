@@ -428,7 +428,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         memory.update(speculative_shapes=config.speculative_shapes)
     draft_disposable = [] if speculation is None else [speculation.draft_scratch.scratch_tensors(), speculation.context_buffers,
         speculation.kda_records.corrections, speculation.kda_records.keys_and_gates]
-    return PreparedModel(device=config.devices[rank], graphs=graphs, buffers=buffers, signatures=signatures,
+    return PreparedModel(rebuild_weights={"weights": weights}, device=config.devices[rank], graphs=graphs, buffers=buffers, signatures=signatures,
         max_active=config.max_active, session=session, server_config=server_config, memory_report=memory,
         export_zero_ranges=(*storage_ranges([prefill_storage, decode_storage, graph_buffers.chunks,
             None if speculation is None else speculation.sampling_buffers.chunks, arena.tensor, metadata,

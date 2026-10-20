@@ -475,6 +475,8 @@ def combine(path, ranks, peer_memory, *, publisher=None, shard_size=DEFAULT_SHAR
             (storage if name in stored else execution).append((span, source(span)))
         if rank == 0:
             result.contract.CopyFrom(index.contract)
+            if index.HasField('rebuild'):
+                result.rebuild.CopyFrom(index.rebuild)
             if index.HasField("sampling_defaults"):
                 result.sampling_defaults.CopyFrom(index.sampling_defaults)
             if index.HasField("frontend"):

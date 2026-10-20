@@ -66,6 +66,63 @@ message ModelIndex {
   // loads the one it serves.
   Cluster cluster = 9;
   ServingContract contract = 10;
+  // Preparation-only metadata. Absence means no rebuild description was recorded;
+  // serving uses contract and rank bundles regardless of this field's version.
+  RebuildManifest rebuild = 11;
+}
+
+// Identifies the preparation inputs without embedding source code or checkpoint config files.
+// A compatible Ignition importer is required to prepare graphs from stored weight views.
+message RebuildManifest {
+  uint32 version = 1;
+  string recipe = 2;
+  string source_identity = 3;
+  string checkpoint_repository = 4;
+  string checkpoint_revision = 5;
+  uint32 tensor_parallel = 6;
+  uint64 max_concurrency = 7;
+  uint64 prefill_chunk = 8;
+  uint64 image_concurrency = 9;
+  bool context_parallel = 10;
+  bool stream_overlap = 11;
+  bool mixed_prefill = 12;
+  optional string expert_scale_compression = 13;
+  string mla_compute_mode = 14;
+  bool roce_ring = 15;
+  bool online_mxfp8 = 16;
+  bool language_model_only = 17;
+  RebuildSpeculation speculation = 18;
+  bool compiled_forwards = 19;
+  uint64 reserve_bytes = 20;
+  // Local checkpoint overrides have no asserted upstream revision.
+  bool local_checkpoint = 21;
+}
+message RebuildSpeculation {
+  uint32 draft_tokens = 1;
+  bool adaptive = 2;
+  string proposal_source = 3;
+  bool history_drafts = 4;
+  uint64 token_capacity = 5;
+  bool packed_verification = 6;
+}
+// Views of retained prepared weight storage, with no additional payload copies.
+// Names are paths in the recipe's weight objects, not original checkpoint keys.
+message RebuildWeights {
+  uint32 version = 1;
+  repeated RebuildTensor tensors = 2;
+  // Weight-object tensors omitted from stored fixed allocations cannot be reused.
+  repeated string unavailable = 3;
+}
+message RebuildTensor {
+  string name = 1;
+  string dtype = 2;
+  uint32 element_bytes = 3;
+  repeated uint64 shape = 4;
+  repeated uint64 stride = 5;
+  // Python type owning the view describes its prepared packing contract; inert text,
+  // never an import target. Interpretation requires matching preparation code.
+  string layout_type = 6;
+  Reference storage = 7;
 }
 
 // Prepared semantics shared by every rank. Physical bindings remain in each rank's bundle.
@@ -469,6 +526,8 @@ message BundleIndex {
   map<string, Span> resources = 9;
   repeated string events = 10;
   RoceTransport roce = 11;
+  // Absent in packages without a prepared-weight catalog. Ignored during replay.
+  RebuildWeights rebuild_weights = 12;
 }
 // A RoCEnante (b12x.comm.roce) transport whose kernels the rank's graphs launch. Its pinned region
 // and device counters are allocations restored at their recorded addresses and zeroed; the native

@@ -277,6 +277,9 @@ def _export_hosts(args, *, export_path) -> int:
                     retain_graphs=True, package_storage=storage, ranks=rendezvous)
         with prepared:
             with phase(progress, "Export native packages") as stage:
+                from ignition.preparation.rebuild_manifest import from_plan
+
+                options['rebuild_manifest'] = from_plan(model, plan, compiled_forwards=not args.no_compile)
                 prepared.export(export_path, options=options, export_id=uuid.uuid4().hex, images=recorder,
                                 storage=storage, publisher=_publisher(configuration, args, model, hub_cache),
                                 shard_size=configuration.shard_size(getattr(args, "shard_size", None)),
@@ -387,6 +390,9 @@ def _prepare(args, *, export_path) -> int:
             with phase(progress, "Export native package") as stage:
                 try:
                     options.pop("api_key")
+                    from ignition.preparation.rebuild_manifest import from_plan
+
+                    options['rebuild_manifest'] = from_plan(model, plan, compiled_forwards=not args.no_compile)
                     export_package(prepared, recorder, storage, export_path, options=options, publisher=publisher,
                                  progress=progress if args.verbose else None, console=progress.console,
                                  staging=configuration.directory("export_staging"),

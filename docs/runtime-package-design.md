@@ -438,6 +438,39 @@ which lets a loader place storage elsewhere and rewrite the fields, tensor
 maps through `cuTensorMapReplaceAddress`; the model export does not declare
 them and relies on identical addresses instead.
 
+### Preparation rebuild metadata
+
+Exports through `ignition export` and `ignition run` record an optional
+`ModelIndex.rebuild` manifest in the signed metadata of the primary shard.
+It identifies the recipe, preparation source identity, qualified checkpoint
+repository and revision, tensor-parallel size, concurrency, chunk size,
+speculation, and selected preparation settings. A local checkpoint override
+is marked explicitly and carries no asserted upstream revision.
+
+Each recipe also supplies its named weight owners. After reachability pruning,
+the exporter records retained tensor views in `BundleIndex.rebuild_weights`:
+owner paths, packing-owner types, dtypes, shapes, element strides, and
+allocation-relative byte offsets. The containing bundle identifies the rank.
+Allocation resource spans and the package layout locate those bytes in the
+payload shards; repacking and re-signing preserve the references. Aliased views
+share storage. Catalog creation reads tensor metadata and creates no weight copy.
+Meta tensors, discarded storage, and disposable scratch are listed as
+unavailable rather than treated as recoverable weights.
+
+These catalogs describe prepared storage, whose names and packing can differ
+from the original checkpoint. They do not serialize Python objects or execute
+imports. A package-based graph rebuild still requires a compatible recipe
+importer that validates the catalog and supplies any unavailable inputs;
+Ignition does not yet provide that importer or a package rebuild command.
+`--no-weights` continues to prepare from the source checkpoint and reuse cached
+payloads. Offloaded embedding planes retain their existing typed table metadata.
+
+Flare exposes the manifest and per-rank tensor counts through `flare inspect`;
+`--all` includes the tensor catalogs. Absent manifests are reported as null.
+Helios ignores rebuild metadata during loading and replay, including unfamiliar
+catalog versions. Previously exported packages need no conversion to serve.
+Changing signed rebuild metadata requires signing the package again.
+
 ### Publisher authentication and executable access
 
 Every final package carries three ordered Ed25519 signature groups for what

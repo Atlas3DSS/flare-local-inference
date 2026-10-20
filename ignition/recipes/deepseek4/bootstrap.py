@@ -541,7 +541,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
     for forward in forwards.values():
         if hasattr(forward, "completion") and hasattr(forward.completion, "scratch_tensors"):
             disposable.append(forward.completion.scratch_tensors)
-    return PreparedModel(
+    return PreparedModel(rebuild_weights={"weights": weights},
         device=config.devices[rank],
         graphs=graphs,
         buffers=buffers,

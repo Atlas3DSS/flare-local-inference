@@ -85,6 +85,9 @@ pub(super) fn describe_index(
         .as_ref()
         .ok_or_else(|| invalid("model package lacks sampling defaults"))?;
     let mut value = json!({
+        // Preparation metadata is optional and never supplies serving policy. Packages
+        // without it, including version 4 exports, retain their complete serving contract.
+        "rebuild": index.rebuild,
         "model": {
             "model_id": contract.model_id,
             "identity": contract.identity,
@@ -360,6 +363,12 @@ fn rank_json(rank: usize, bundle: &wire::BundleIndex, options: InspectionOptions
     if !options.graphs && !options.all {
         value.as_object_mut().unwrap().remove("execution_graphs");
     }
+    value["rebuild_weights"] = match &bundle.rebuild_weights {
+        None => Value::Null,
+        Some(catalog) if options.all => json!(catalog),
+        Some(catalog) => json!({"version": catalog.version, "tensors": catalog.tensors.len(),
+            "unavailable": catalog.unavailable.len()}),
+    };
     if options.memory_map || options.all {
         value["memory_map"] = json!({
             "allocations": bundle.allocations.iter().map(|a| allocation_json(a, bundle)).collect::<Result<Vec<_>>>()?,
@@ -419,6 +428,33 @@ fn allocation_json(a: &wire::Allocation, bundle: &wire::BundleIndex) -> Result<V
 #[cfg(test)]
 mod tests {
     use super::*;
+    use prost::Message;
+
+    #[test]
+    fn serialized_packages_without_rebuild_metadata_keep_serving_descriptions() {
+        // Version 4, one empty rank, empty sampling/frontend messages, and a typed
+        // serving contract with an empty model contract; no rebuild fields on wire.
+        let bytes = [8, 4, 18, 0, 58, 0, 66, 0, 82, 2, 26, 0];
+        let mut index = wire::ModelIndex::decode(bytes.as_slice()).unwrap();
+        let before = describe_index(&index, InspectionOptions::default(), None).unwrap();
+        assert!(before["rebuild"].is_null());
+        assert!(before["ranks"][0]["rebuild_weights"].is_null());
+        // Serving metadata remains usable even if preparation requires an importer
+        // for a catalog version this runtime does not interpret.
+        index.rebuild = Some(wire::RebuildManifest {
+            version: 99,
+            ..Default::default()
+        });
+        index.ranks[0].rebuild_weights = Some(wire::RebuildWeights {
+            version: 99,
+            ..Default::default()
+        });
+        let after = describe_index(&index, InspectionOptions::default(), None).unwrap();
+        assert_eq!(before["model"], after["model"]);
+        assert_eq!(before["cache"], after["cache"]);
+        assert_eq!(after["rebuild"]["version"], 99);
+        assert_eq!(after["ranks"][0]["rebuild_weights"]["version"], 99);
+    }
 
     #[test]
     fn summary_and_detail_sections_preserve_optional_values_and_selected_ranks() {
@@ -568,6 +604,7 @@ mod tests {
             resources: Default::default(),
             events: vec![],
             roce: None,
+            rebuild_weights: None,
         };
         let value = rank_json(
             2,

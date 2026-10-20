@@ -446,6 +446,12 @@ def test_package_replays_without_python(tmp_path, fixture, binary, expected, exe
     from ignition.preparation.package_file import read_index
 
     index, start = read_index(package_path)
+    if fixture == 'runtime_package_fixture.py':
+        from ignition.preparation.rebuild_manifest import validate_weights
+        validate_weights(index.ranks[0])
+        assert index.ranks[0].rebuild_weights.tensors[0].name == 'weight'
+    else:
+        assert not index.ranks[0].HasField('rebuild_weights')
     from safetensors import safe_open
 
     with safe_open(package_path, framework="numpy") as tensors:

@@ -163,6 +163,18 @@ def test_run_exports_then_replaces_python_with_flare_and_reuses_the_package(host
     assert not host["plan"].mixed_prefill and host["plan"].mixed_shapes == ()
     assert host["exec"][3:5] == ["--gpus", "0"]
     assert host["prepared"].closed and host["prepared"].started is None
+    from ignition.preparation.runtime_package_pb2 import RebuildManifest
+    rebuild = RebuildManifest.FromString(host['options']['rebuild_manifest'])
+    assert rebuild.version == 1 and rebuild.recipe == host['plan'].recipe.name
+    assert rebuild.checkpoint_revision == host['plan'].checkpoint.revision
+    assert rebuild.tensor_parallel == 1 and len(rebuild.source_identity) == 64
+    assert rebuild.prefill_chunk == host['plan'].prefill_chunk
+    assert rebuild.speculation.draft_tokens == host['plan'].speculation.draft_tokens
+    assert not rebuild.compiled_forwards and not rebuild.local_checkpoint
+    from ignition.preparation.rebuild_manifest import from_plan
+    local = ResolvedModel(host['plan'].recipe, host['plan'].checkpoint, Path('/local/checkpoint'))
+    local_manifest = RebuildManifest.FromString(from_plan(local, host['plan'], compiled_forwards=True))
+    assert local_manifest.local_checkpoint and not local_manifest.checkpoint_revision
     assert run("qwen3.8-flash", "--no-compile") == 0
     assert host["exports"] == 1
 

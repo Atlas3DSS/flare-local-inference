@@ -339,7 +339,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
             disposable.append(forward.context.scratch_tensors())
         if hasattr(forward, "encoder"):
             disposable.extend((forward.errors, forward.encoder.scratch_tensors()))
-    return PreparedModel(device=config.devices[rank], graphs=graphs, buffers=buffers, signatures=signatures,
+    return PreparedModel(rebuild_weights={"weights": weights}, device=config.devices[rank], graphs=graphs, buffers=buffers, signatures=signatures,
         max_active=config.max_active, session=session, server_config=server_config, memory_report=memory,
         export_zero_ranges=(*storage_ranges(disposable), *completion.zero_ranges()),
         resources=(weights, pool, requests, inputs, admission, commands, arena, forwards, prefill_storage,
