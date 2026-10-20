@@ -253,6 +253,32 @@ def test_native_flashinfer_one_hot_all_prefix_lengths_and_clipping(width):
         assert torch.equal(state.histogram.cpu(), before)
 
 
+def penalized_scores(state, slots, logits, candidates, prefix_offset):
+    """Reference penalized, tempered scores from the committed history and preceding drafts.
+
+    Counts gather every valid candidate before each column's prefix boundary on
+    top of the slot's committed histogram. Grammar masking is part of the
+    prepared scores; the comparison runs with grammar disabled.
+    """
+    batch, width, vocab = logits.shape
+    result = torch.empty((batch, width, vocab), dtype=torch.float32)
+    for row in range(batch):
+        slot = slots[row].item()
+        history = state.histogram[slot].cpu().clone()
+        temperature, _, _, penalty, presence, frequency = state.parameters[slot].tolist()
+        for column in range(width):
+            counts = history.clone()
+            for token in candidates[row, :column + prefix_offset].tolist():
+                if 0 <= token < vocab:
+                    counts[token] += 1
+            values = logits[row, column].cpu()
+            adjusted = torch.where(values > 0, values / penalty, values * penalty)
+            values = torch.where(counts > 0, adjusted, values)
+            values = values - (counts > 0) * presence - counts * frequency
+            result[row, column] = values / (temperature if temperature > 0 else 1)
+    return result.to(logits.device)
+
+
 @pytest.mark.parametrize("batch,width,prefix_offset", [(1, 1, 0), (1, 1, 1), (2, 1, 5), (1, 4, 0), (2, 4, 0)])
 @torch.no_grad()
 def test_compiled_distributions_match_eager_with_changed_parameters(batch, width, prefix_offset):
@@ -275,15 +301,20 @@ def test_compiled_distributions_match_eager_with_changed_parameters(batch, width
             state.parameters[:, 2] = min_p
             state.parameters[:, 3] = 1.2
             state.parameters[:, 4] = .15
+            state.parameters[:, 5] = .05
             expected = op().clone()
             expected_valid = op.valid.clone()
-            expected_counts = op.counts.clone()
+            op.prepare_scores()
+            reference = penalized_scores(state, slots, logits, candidates, prefix_offset)
+            torch.testing.assert_close(op.scores[expected_valid], reference[expected_valid], rtol=2e-5, atol=1e-5)
             op.probabilities.fill_(float("nan"))
-            op.counts.fill_(-99)
+            op.scores.fill_(float("nan"))
             replay()
             torch.testing.assert_close(op.probabilities, expected, rtol=2e-5, atol=1e-7)
             assert torch.equal(op.valid, expected_valid)
-            assert torch.equal(op.counts, expected_counts)
+            if top_k == 0:
+                # Only an unmasked top-k leaves the replayed scores reportable.
+                torch.testing.assert_close(op.scores[expected_valid], reference[expected_valid], rtol=2e-5, atol=1e-5)
         state.grammar_enabled.fill_(1)
         state.grammar_mask.zero_()
         replay()
