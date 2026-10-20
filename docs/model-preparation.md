@@ -89,18 +89,22 @@ GLM TP4 have been exercised end to end; Qwen TP4 still requires model validation
 
 ## Preparation resources
 
-`--compile-workers N` sets the CPU compiler process budget per host. Memory
-limits can reduce it; local preparation ranks share the budget. Set
-`[preparation] compile_workers = N` for a persistent default. Omitting the
-setting retains automatic sizing, including shared-memory limits on DGX Spark.
+`--compile-workers N` sets a positive CPU compiler process budget per host for
+b12x kernel compilation and complete-forward compilation. Available RAM and
+device memory can reduce it; local preparation ranks share the budget. Set
+`[preparation] compile_workers = N` for a persistent default; the CLI flag
+overrides that setting. Omitting both retains automatic sizing, including
+shared-memory limits on DGX Spark.
 
 `--tuning-gpus LIST` adds local GPU replicas for benchmarking b12x candidates.
 The list begins with `--gpus` and continues in complete TP groups: for example,
 `--gpus 0 --tuning-gpus 0-3 --compile-workers 24` prepares a TP1 package with
-four tuning GPUs. Each replica needs memory for its model and preparation
-storage. Helpers release their resources after tuning; serving ranks then
-compile and capture their forwards. Kernel compilation runs in CPU workers,
-independently of the number of tuning GPUs.
+four tuning GPUs. Corresponding GPUs in each replica must match in model and
+architecture and have enough free memory for the model and preparation storage.
+Helpers exit and release their resources after tuning; serving TP size and capture
+devices stay fixed. Serving ranks then compile and capture their forwards.
+Both GPU lists use `CUDA_VISIBLE_DEVICES` ordinals. Kernel compilation runs in
+CPU workers, independently of the number of tuning GPUs.
 
 Multi-host `--ranks` preparation retains its existing sharding and transport;
 `--tuning-gpus` is local-only and cannot be combined with it. An explicit
