@@ -323,7 +323,7 @@ pub struct OrbitRun {
     #[arg(long)]
     pub detach: bool,
 
-    /// Flare executable to send to nodes that run a different build [default: this executable].
+    /// Upload this Flare executable [default: saved override or each node's installed Flare].
     #[arg(long, value_name = "PATH")]
     pub executable: Option<PathBuf>,
 

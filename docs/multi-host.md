@@ -6,8 +6,8 @@ Rank zero coordinates the ranks and serves the HTTP API. The other hosts run
 peer ranks.
 
 Every host of a serving group runs the Flare agent, a user service that pairs
-with the operator's controller machine, caches the Flare executable and package
-data, starts the host's rank, supervises it, and streams its output. The
+with the operator's controller machine, caches package data and executable overrides,
+starts the host's rank, supervises it, and streams its output. The
 operator starts and stops groups with `flare orbit` commands from any machine
 with the Flare executable; that machine is not a rank. [Orbit](orbit.md)
 specifies the agent protocol, pairing, grants, and process ownership.
@@ -67,14 +67,14 @@ the weights, graphs, and other resources that Flare loads for serving.
 | Source checkpoint | Retained in its hub cache or local checkpoint directory | Receives metadata and headers, then requests the byte ranges its weight loader needs |
 | Temporary export | Stages all ranks before publication | Stages its own rank under `[paths] export_staging`, then sends it to rank zero |
 | Signed serving package | Retains the complete package, including companion files | The agent caches its rank's resources and required shared data, fetched from rank zero's host and digested once on arrival |
-| Serving executable | The agent caches and runs the executable sent by the controller | The agent caches and runs the executable sent by the controller |
+| Serving executable | Uses the installed agent's Flare by default; caches and runs an explicit controller override | Uses the installed agent's Flare by default; caches and runs an explicit controller override |
 
 On rank zero, allow roughly twice the final package size for staging and
 publication, in addition to checkpoint storage. On a preparation peer, allow
 roughly twice its own exported rank size while that export is assembled.
 Temporary exports are removed after use.
 
-The agent stores packages under `~/.cache/flare/packages` and executables under
+The agent stores packages under `~/.cache/flare/packages` and executable overrides under
 `~/.cache/flare/bin`, in the account running the service. After a successful
 transfer, the agent removes entries of the same kind that no running group and
 no open connection uses. This cleanup does not remove source checkpoints from
@@ -108,7 +108,11 @@ agent's log.
 
 To update an agent, stop the group it serves, run `flare agent install` again
 with the new executable, and pair again only if the node was reset. Restarting
-the service stops any rank it runs.
+the service stops any rank it runs. The installed agent executable is also the
+default serving executable. A controller on another CPU architecture uses
+each node's installed Flare without transferring its own binary. To run a
+specific build, pass `--executable PATH` to `flare orbit run`; PATH names a file
+on the controller that must run on every selected node.
 
 ### Pair from the controller
 
@@ -228,9 +232,10 @@ rank; `--verify-weights` makes every rank digest its stored data at load.
 
 Startup then proceeds as follows:
 
-1. The controller connects to every node's agent, checks that no group is
-   running and that disk suffices, and sends the Flare executable to nodes that
-   lack it.
+1. The controller connects to every node's agent, checks that the selected GPUs
+   are free and disk suffices, and selects the node's installed Flare. An
+   explicit executable override is uploaded to nodes that do not already
+   cache it.
 2. Rank zero's node holds the complete package. Each peer fetches the signed
    index, its own rank's resources, and the shared tables it needs from rank
    zero's host, in parallel, over the hosts' own network.

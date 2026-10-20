@@ -198,7 +198,7 @@ with a message; an ERROR closes the session.
 
 | Frame | Direction | Body | Effect |
 | --- | --- | --- | --- |
-| HELLO | Both, first frame | Protocol version, public key, controller-set revision, node facts | Must name the key that authenticated the session; agrees on the version; a newer controller-set record follows when the sender has one |
+| HELLO | Both, first frame | Protocol version, public key, controller-set revision, node facts, installed executable path | Must name the key that authenticated the session; agrees on the version; a newer controller-set record follows when the sender has one |
 | PAIR | Controller to node | Code proof | Authorizes the controller as described above |
 | HAVE | Controller or node to node | Kind, name, size | Whether the cache holds the entry at that size |
 | PUT | Controller to node | Kind, name, size, optional ranges, then bytes | Stores an executable or package bytes at their offsets in a sparse file of the package's length |
@@ -207,7 +207,7 @@ with a message; an ERROR closes the session.
 | FETCH | Node to node | Grant, file name, ranges | Streams the file's bytes to a node the grant names, from the package the node holds or its cache |
 | GET | Controller to node | Absolute path, offset, length | Streams up to 256 MiB of a node-local file, used to mirror a package's header and index |
 | STAT | Controller to node | Absolute path | The package file's size and its companions' names and sizes |
-| RUN | Controller to node | Grant, rank, executable name, publisher profile | Starts this host's rank on the GPUs the grant's member names, beside other groups on other GPUs, then streams LOG and EXIT |
+| RUN | Controller to node | Grant, rank, optional cached executable name, publisher profile | Starts this host's rank on the GPUs the grant's member names, beside other groups on other GPUs, then streams LOG and EXIT; an absent or null executable name selects the agent's installed Flare |
 | ATTACH | Controller to node | Group identifier, required when several groups are on the node | Streams the rank's retained output, then live output |
 | STOP | Controller to node | Group identifier, required when several groups are on the node | Sends SIGTERM to the rank |
 | REMOVE | Controller to node | Exact group identifier | Removes completed run history; refuses a running rank and preserves cached packages |
@@ -295,8 +295,11 @@ sequenceDiagram
     participant P as Peer node
     C->>Z: HELLO, STATUS toward peer address
     C->>P: HELLO, STATUS
-    C->>Z: PUT executable, package (if the controller holds it)
-    C->>P: PUT executable
+    opt Explicit executable override
+        C->>Z: PUT executable (if not cached)
+        C->>P: PUT executable (if not cached)
+    end
+    C->>Z: PUT package (if the controller holds it)
     C->>P: TRANSFER grant, source = rank zero, rank ranges
     P->>Z: FETCH grant, ranges
     Z-->>P: bytes
@@ -323,9 +326,15 @@ sequenceDiagram
    zero's host uses to reach its peers; the controller places it in the grant
    as the rendezvous address.
 3. The controller issues the grant with the cluster's rank order.
-4. The controller ensures every node holds the executable, sending its own
-   `flare` binary to nodes that lack it. The executable must be a Linux aarch64
-   build; a controller on another platform supplies one with `--executable PATH`.
+4. Each node uses the executable running its installed agent for serving.
+   The controller prints the path advertised in HELLO and sends no executable
+   by default, regardless of the controller's architecture. `--executable PATH`
+   selects a controller-local build to upload and run on every node; a saved
+   group's executable override has the same effect. The override must be
+   compatible with every selected node. Agents cache it by content and reuse
+   it on subsequent launches. If a node does not advertise an installed
+   executable, the controller refuses the default launch before transferring
+   package data and asks for an agent update or an explicit override.
 5. The controller ensures the package. If the controller holds it, rank zero
    receives the complete package and the shared data. If a node holds it, that
    node is the source. Each peer receives TRANSFER naming the source and its
@@ -644,10 +653,17 @@ between ranks is not.
 Prepared packages and their Protocol Buffers are unchanged: no re-export and no
 added fields, so principle 13 of [the design review](design-review.md) is
 unaffected. The rendezvous protocol and the RoCE proxy ABI are unchanged. The
-agent protocol is replaced without a compatibility window: nodes and
-controllers of one orbit run the same Flare revision, and `flare orbit`
-refuses an agent whose HELLO reports another protocol version. The agent runs
-on Linux; the controller builds wherever Flare builds.
+controller and agents must agree on the agent protocol version; `flare orbit`
+refuses an agent whose HELLO reports another version. Keep serving builds
+compatible across the nodes. The agent runs on Linux; the controller builds
+wherever Flare builds and does not need the nodes' CPU architecture.
+
+HELLO's optional `executable` path advertises support for using the installed
+agent binary in RUN. Agents without that field require `--executable PATH`
+until updated. RUN still accepts a cached binary name from controllers that
+upload executables. Updating the installed agent with `flare agent install`
+also updates the default serving executable; restarting the agent stops its
+running ranks.
 
 ## Unimplemented parts
 
@@ -709,10 +725,8 @@ the agents and the same desired state when they share a orbit file.
 ## Limitations
 
 The controller does not proxy HTTP; clients reach rank zero's host directly.
-A controller on a platform other than Linux aarch64 must supply the node
-executable. Agents run one group per host, and restarting an agent stops its
-ranks. Routing between controller and nodes uses whatever network the orbit
-file addresses name; the controller does not select or configure the RoCE
+Restarting an agent stops its ranks. Routing between controller and nodes uses
+whatever network the orbit file addresses name; the controller does not select or configure the RoCE
 fabric, interfaces, or firewalls. Discovery is link-local multicast and does
 not cross routed networks. Encrypted transfers run at one core's
 ChaCha20-Poly1305 rate per connection.

@@ -2,9 +2,9 @@
 //! launching, attaching to, and stopping serving groups. See docs/orbit.md.
 //!
 //! A launch verifies the package at the controller, where the operator accepts its publisher;
-//! checks every node's STATUS; issues a grant in the cluster's rank order; gives every node the
-//! executable; places the package, either complete on rank zero from the controller or at the
-//! node that holds it, from where every other node fetches its ranks' byte ranges with TRANSFER;
+//! checks every node's STATUS; issues a grant in the cluster's rank order; transfers an explicit
+//! executable override; places the package, either complete on rank zero from the controller or
+//! at the node that holds it, from where every other node fetches its ranks' byte ranges with TRANSFER;
 //! and sends RUN to rank zero and then to the peers. Each rank's output is printed with a
 //! `[rank R name]` prefix.
 //!
@@ -159,7 +159,7 @@ pub struct RunOptions {
     /// Options for rank zero alone: the HTTP bind and request handling.
     pub rank_zero: Vec<String>,
     pub roce_ring: bool,
-    /// The flare executable the nodes run; the running executable when absent.
+    /// An executable to upload; absent means each node uses its installed agent executable.
     pub executable: Option<PathBuf>,
     /// Return once every rank has started instead of following the group.
     pub detach: bool,
@@ -338,6 +338,7 @@ impl Controller {
             public_key: self.key.public().to_hex(),
             controllers_revision: self.revision()?,
             free_bytes: 0,
+            executable: None,
         };
         let hello = exchange_hello(&mut session, &mine)?;
         if hello.kind != "node" {
@@ -973,7 +974,7 @@ impl Controller {
             &label,
             &members,
             &resolved,
-            &executable,
+            executable.as_deref(),
             &LaunchOptions {
                 name: name.clone(),
                 placements: placements.iter().map(|p| p.gpus.clone()).collect(),
@@ -1028,7 +1029,7 @@ impl Controller {
             ..LaunchOptions::default()
         };
         if nodes.len() == world {
-            let launch = self.launch("push", &nodes, &resolved, &[], &options)?;
+            let launch = self.launch("push", &nodes, &resolved, None, &options)?;
             eprintln!(
                 "{} staged on {}",
                 launch.grant.name,
@@ -1068,7 +1069,13 @@ impl Controller {
                 eprintln!("{}: holds the package", node.name);
                 continue;
             }
-            self.launch("push", std::slice::from_ref(node), &complete, &[], &options)?;
+            self.launch(
+                "push",
+                std::slice::from_ref(node),
+                &complete,
+                None,
+                &options,
+            )?;
             eprintln!("{}: complete package staged", node.name);
         }
         Ok(())
@@ -1217,7 +1224,7 @@ impl Controller {
         cluster: &str,
         nodes: &[Node],
         package: &ResolvedPackage,
-        executable: &[u8],
+        executable: Option<&[u8]>,
         options: &LaunchOptions,
     ) -> Result<Launch, Failure> {
         let world = package.ranks.len();
@@ -1242,7 +1249,15 @@ impl Controller {
         let toward = nodes.get(1).unwrap_or(&nodes[0]).address.clone();
         let opened = parallel(nodes, |rank, node| {
             (|| -> Result<(Session, NodeStatus), Failure> {
-                let (mut session, _) = self.node_session(node)?;
+                let (mut session, hello) = self.node_session(node)?;
+                if executable.is_none() && !options.stage_only {
+                    let installed = hello.installed_executable()?;
+                    eprintln!(
+                        "{}: using installed flare {}",
+                        node.name,
+                        installed.display()
+                    );
+                }
                 let status = status_on(&mut session, (rank == 0).then_some(toward.as_str()))?;
                 Ok((session, status))
             })()
@@ -1330,18 +1345,23 @@ impl Controller {
             );
         }
 
-        // Every node gets the executable; with the package at the controller, rank zero gets
-        // every file of it complete.
-        let binary = cache::binary_name(executable);
+        // Only an explicit override transfers an executable. With the package at the
+        // controller, rank zero gets every file of it complete.
+        let binary = executable.map(|bytes| (cache::binary_name(bytes), bytes));
         let complete = grant.complete_directory();
         all(parallel_mut(&mut sessions, |rank, session| {
             (|| -> Result<(), Failure> {
                 let mut needed = 0;
-                let send_binary = !options.stage_only
-                    && !have(session, "binary", &binary, executable.len() as u64)?;
-                if send_binary {
-                    needed += executable.len() as u64;
-                }
+                let send_binary = match &binary {
+                    Some((name, bytes))
+                        if !options.stage_only
+                            && !have(session, "binary", name, bytes.len() as u64)? =>
+                    {
+                        needed += bytes.len() as u64;
+                        Some((name, *bytes))
+                    }
+                    _ => None,
+                };
                 let mut sends = Vec::new();
                 if let (0, Holder::Controller { primary }) = (rank, &package.holder) {
                     for file in &package.files {
@@ -1353,15 +1373,9 @@ impl Controller {
                     }
                 }
                 check_space(&statuses[rank], needed)?;
-                if send_binary {
-                    put(
-                        session,
-                        "binary",
-                        &binary,
-                        executable.len() as u64,
-                        &mut &executable[..],
-                    )?;
-                    eprintln!("{}: received flare executable {binary}", nodes[rank].name);
+                if let Some((name, bytes)) = send_binary {
+                    put(session, "binary", name, bytes.len() as u64, &mut &bytes[..])?;
+                    eprintln!("{}: received flare executable {name}", nodes[rank].name);
                 }
                 for (path, name, size) in sends {
                     let mut source = File::open(&path)
@@ -1431,7 +1445,7 @@ impl Controller {
             let request = json!({
                 "grant": signed,
                 "rank": rank,
-                "binary": binary,
+                "binary": binary.as_ref().map(|(name, _)| name),
                 "publisher": publisher,
             });
             if let Err(error) = sessions[rank].request(frame::RUN, &request) {
@@ -2183,19 +2197,12 @@ impl Drop for Mirror {
     }
 }
 
-/// The executable nodes run: `path`, or this executable on a Linux aarch64 controller.
-fn read_executable(path: Option<&Path>) -> Result<Vec<u8>, Failure> {
-    let path = match path {
-        Some(path) => path.to_owned(),
-        None if cfg!(all(target_os = "linux", target_arch = "aarch64")) => std::env::current_exe()?,
-        None => {
-            return Err(
-                "nodes run a Linux aarch64 flare and this controller is another build; supply one with --executable PATH"
-                    .into(),
-            );
-        }
-    };
-    fs::read(&path).map_err(|e| format!("cannot read executable {}: {e}", path.display()).into())
+/// Read only an explicit override; the controller's own binary is never sent implicitly.
+fn read_executable(path: Option<&Path>) -> Result<Option<Vec<u8>>, Failure> {
+    path.map(|path| {
+        fs::read(path).map_err(|e| format!("cannot read executable {}: {e}", path.display()).into())
+    })
+    .transpose()
 }
 
 // ---- formatting --------------------------------------------------------------------------------
@@ -2411,12 +2418,36 @@ mod tests {
     use crate::orbit::agent::tests::{harness, pair_accept_first};
     use std::sync::Arc;
 
-    /// A controller over two in-process agents paired with its key, a script as the executable,
+    #[test]
+    fn reading_an_executable_requires_an_explicit_path_on_every_controller_platform() {
+        assert!(read_executable(None).unwrap().is_none());
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("flare");
+        assert!(read_executable(Some(&path)).is_err());
+        fs::write(&path, b"chosen executable").unwrap();
+        assert_eq!(
+            read_executable(Some(&path)).unwrap().unwrap(),
+            b"chosen executable"
+        );
+    }
+
+    #[test]
+    fn launching_uses_each_nodes_installed_executable_without_uploading_a_binary() {
+        check_launch(None);
+    }
+
+    #[test]
+    fn launching_uploads_and_runs_an_explicit_executable_override() {
+        check_launch(Some(
+            b"#!/bin/sh\necho \"$0\"\necho \"$@\"\nod -An -tx1 -j 40000 -N 4 \"$2\"\nexit 0\n",
+        ));
+    }
+
+    /// A controller over two in-process agents paired with its key, scripts as the executables,
     /// and a two-rank package whose "primary" is a plain file: rank 0 reads all of it, rank 1
     /// two ranges. Launching exercises PUT, TRANSFER, FETCH, RUN and output following end to
     /// end; only the rank processes are fakes.
-    #[test]
-    fn launching_places_the_executable_and_package_and_runs_every_rank() {
+    fn check_launch(executable: Option<&[u8]>) {
         let zero = harness(21);
         let one = crate::orbit::agent::tests::Harness {
             controller: Key::from_seed(&[21; 32]).unwrap(),
@@ -2457,7 +2488,6 @@ mod tests {
         let primary = temp.path().join("model.safetensors");
         let bytes: Vec<u8> = (0..50_000u32).map(|i| (i % 241) as u8).collect();
         fs::write(&primary, &bytes).unwrap();
-        let script = "#!/bin/sh\necho \"$@\"\nod -An -tx1 -j 40000 -N 4 \"$2\"\nexit 0\n";
         let package = ResolvedPackage {
             export: "export".into(),
             files: vec![PackageEntry {
@@ -2497,7 +2527,7 @@ mod tests {
                 "pair",
                 &nodes,
                 &package,
-                script.as_bytes(),
+                executable,
                 &LaunchOptions {
                     name: "pair".into(),
                     placements: vec![
@@ -2551,9 +2581,38 @@ mod tests {
         assert_eq!(copy[..4096], bytes[..4096]);
         assert_eq!(copy[40_000..48_000], bytes[40_000..48_000]);
         assert!(copy[4096..40_000].iter().all(|&b| b == 0));
-        let binary = cache::binary_name(script.as_bytes());
-        assert!(zero.agent.cache.join("bin").join(&binary).is_file());
-        assert!(one.agent.cache.join("bin").join(&binary).is_file());
+        for harness in [&zero, &one] {
+            let selected = match executable {
+                Some(bytes) => {
+                    let binary = harness
+                        .agent
+                        .cache
+                        .join("bin")
+                        .join(cache::binary_name(bytes));
+                    assert_eq!(fs::read(&binary).unwrap(), bytes);
+                    binary
+                }
+                None => {
+                    assert_eq!(
+                        fs::read_dir(harness.agent.cache.join("bin"))
+                            .unwrap()
+                            .count(),
+                        0
+                    );
+                    harness.temp.path().join("installed-flare")
+                }
+            };
+            let mut session = crate::orbit::agent::tests::connect(harness, &harness.controller);
+            session
+                .request(frame::ATTACH, &json!({"group": launch.grant.group}))
+                .unwrap();
+            let (lines, exit) = crate::orbit::agent::tests::collect(&mut session);
+            assert_eq!(exit, 0);
+            assert!(
+                lines.contains(&selected.to_string_lossy().into_owned()),
+                "{lines:?}"
+            );
+        }
 
         controller.orbit.save_group(GroupSpec {
             name: "pair".into(),
@@ -2592,7 +2651,7 @@ mod tests {
                 "push",
                 &nodes,
                 &staged,
-                &[],
+                None,
                 &LaunchOptions {
                     name: "push-model".into(),
                     placements: vec![vec![], vec![]],
@@ -2628,7 +2687,7 @@ mod tests {
                 "pair",
                 &nodes,
                 &package,
-                script.as_bytes(),
+                executable,
                 &LaunchOptions {
                     name: "pair".into(),
                     placements: vec![vec![], vec![]],

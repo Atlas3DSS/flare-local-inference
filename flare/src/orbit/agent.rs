@@ -45,6 +45,18 @@ pub struct Hello {
     pub controllers_revision: u64,
     #[serde(default)]
     pub free_bytes: u64,
+    /// The node's installed Flare, used when RUN omits a cached binary name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executable: Option<PathBuf>,
+}
+
+impl Hello {
+    pub fn installed_executable(&self) -> Result<&Path, Failure> {
+        self.executable.as_deref().ok_or_else(|| {
+            "agent does not advertise an installed Flare executable; update it with `flare agent install`, or supply a node-compatible build with --executable PATH"
+                .into()
+        })
+    }
 }
 
 /// Exchange HELLO frames: the initiator sends first. The peer's HELLO must name the key that
@@ -291,6 +303,8 @@ pub struct Agent {
     pub key: Key,
     pub cache: PathBuf,
     pub name: String,
+    /// The executable running this agent, also used for serving unless RUN overrides it.
+    executable: PathBuf,
     pins: Pins,
     /// Groups started by this agent, oldest first; finished ones are retained up to a limit.
     groups: Mutex<Vec<Arc<Group>>>,
@@ -330,6 +344,7 @@ impl Agent {
             key,
             cache,
             name: super::hostname(),
+            executable: std::env::current_exe()?,
             pins: Pins::default(),
             groups: Mutex::new(Vec::new()),
             verifier,
@@ -406,6 +421,7 @@ impl Agent {
             public_key: self.key.public().to_hex(),
             controllers_revision: self.dir.controllers()?.map_or(0, |(_, set)| set.revision),
             free_bytes: free_bytes(&self.cache),
+            executable: Some(self.executable.clone()),
         })
     }
 
@@ -972,16 +988,21 @@ fn run(agent: &Arc<Agent>, request: &Value) -> Result<Arc<Group>, Failure> {
     if !grant.current(now()) {
         return Err("the grant has expired".into());
     }
-    let binary_name = field(request, "binary")?;
-    let binary = cache::entry(&agent.cache, "bin", binary_name)?;
-    if !binary.is_file() {
-        return Err(format!("executable {binary_name} is not cached").into());
-    }
+    let mut pins = Pinned::new(&agent.pins);
+    let binary = if request["binary"].is_null() {
+        agent.executable.clone()
+    } else {
+        let binary_name = field(request, "binary")?;
+        let binary = cache::entry(&agent.cache, "bin", binary_name)?;
+        if !binary.is_file() {
+            return Err(format!("executable {binary_name} is not cached").into());
+        }
+        pins.pin(binary.clone());
+        binary
+    };
     let publisher: Publisher = serde_json::from_value(request["publisher"].clone())?;
     publisher.validate().map_err(|e| e.to_string())?;
     let primary = grant.primary();
-    let mut pins = Pinned::new(&agent.pins);
-    pins.pin(binary.clone());
     let package = match &grant.package.source {
         Some(source) if source.public_key == mine.to_hex() => PathBuf::from(&source.path),
         _ => {
@@ -1410,24 +1431,26 @@ pub mod tests {
         let address = listener.local_addr().unwrap().to_string();
         let verified = Arc::new(Mutex::new(Vec::new()));
         let record = verified.clone();
-        let agent = Arc::new(
-            Agent::with_fakes(
-                dir,
-                temp.path().join("cache"),
-                Box::new(move |primary, rank, publisher| {
-                    if !primary.is_file() {
-                        return Err(format!("{} is not a file", primary.display()).into());
-                    }
-                    if publisher.namespace == "reject" {
-                        return Err("stored-data content verification failed".into());
-                    }
-                    record.lock().unwrap().push((primary.to_owned(), rank));
-                    Ok(())
-                }),
-                Box::new(|| Ok(fake_gpus())),
-            )
-            .unwrap(),
-        );
+        let mut agent = Agent::with_fakes(
+            dir,
+            temp.path().join("cache"),
+            Box::new(move |primary, rank, publisher| {
+                if !primary.is_file() {
+                    return Err(format!("{} is not a file", primary.display()).into());
+                }
+                if publisher.namespace == "reject" {
+                    return Err("stored-data content verification failed".into());
+                }
+                record.lock().unwrap().push((primary.to_owned(), rank));
+                Ok(())
+            }),
+            Box::new(|| Ok(fake_gpus())),
+        )
+        .unwrap();
+        agent.executable = temp.path().join("installed-flare");
+        fs::write(&agent.executable, "#!/bin/sh\necho \"$0\"\necho \"$@\"\n").unwrap();
+        fs::set_permissions(&agent.executable, fs::Permissions::from_mode(0o755)).unwrap();
+        let agent = Arc::new(agent);
         {
             let agent = agent.clone();
             thread::spawn(move || serve_on(listener, agent));
@@ -1472,6 +1495,7 @@ pub mod tests {
             public_key: key.public().to_hex(),
             controllers_revision: 0,
             free_bytes: 0,
+            executable: None,
         }
     }
 
@@ -1570,7 +1594,7 @@ pub mod tests {
         json!({"grant": grant, "rank": rank, "binary": binary, "publisher": publisher()})
     }
 
-    fn collect(session: &mut Session) -> (Vec<String>, i32) {
+    pub fn collect(session: &mut Session) -> (Vec<String>, i32) {
         let mut lines = Vec::new();
         loop {
             match session.read_frame().unwrap() {
@@ -1581,6 +1605,69 @@ pub mod tests {
                 }
                 (tag, body) => panic!("unexpected frame {tag}: {}", String::from_utf8_lossy(&body)),
             }
+        }
+    }
+
+    #[test]
+    fn hello_advertises_the_installed_executable_and_detects_agents_without_it() {
+        let harness = harness(44);
+        let hello = harness.agent.hello().unwrap();
+        assert_eq!(
+            hello.installed_executable().unwrap(),
+            harness.agent.executable
+        );
+        let mut value = serde_json::to_value(&hello).unwrap();
+        value.as_object_mut().unwrap().remove("executable");
+        let without_executable: Hello = serde_json::from_value(value).unwrap();
+        let error = without_executable
+            .installed_executable()
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("flare agent install"), "{error}");
+        assert!(error.contains("--executable PATH"), "{error}");
+    }
+
+    #[test]
+    fn run_defaults_to_the_installed_executable_only_when_no_override_is_named() {
+        for binary in [None, Some(Value::Null)] {
+            let harness = harness(45);
+            let mut session = pair_accept_first(&harness);
+            put(
+                &mut session,
+                "package",
+                "export-13/model.safetensors",
+                b"package bytes",
+                None,
+            );
+            let grant = grant_for(&harness, 0, None);
+            let mut request = run_request(&grant, 0, "missing-executable");
+            let error = session
+                .request(frame::RUN, &request)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("executable missing-executable is not cached"),
+                "{error}"
+            );
+            let mut session = connect(&harness, &harness.controller);
+            request["binary"] = json!(123);
+            assert!(session.request(frame::RUN, &request).is_err());
+            let mut session = connect(&harness, &harness.controller);
+            if let Some(binary) = binary {
+                request["binary"] = binary;
+            } else {
+                request.as_object_mut().unwrap().remove("binary");
+            }
+            session.request(frame::RUN, &request).unwrap();
+            let (lines, exit) = collect(&mut session);
+            assert_eq!(exit, 0);
+            assert!(lines.contains(&harness.agent.executable.to_string_lossy().into_owned()));
+            assert_eq!(
+                fs::read_dir(harness.agent.cache.join("bin"))
+                    .unwrap()
+                    .count(),
+                0
+            );
         }
     }
 
