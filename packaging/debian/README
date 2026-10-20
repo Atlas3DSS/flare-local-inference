@@ -1,0 +1,18 @@
+Flare for Ubuntu 24.04
+
+The flare-inference package installs /usr/bin/flare. Run `flare --help` for
+commands, `flare run --help` for serving, and `flare orbit --help` for cluster
+management. Model packages are downloaded separately. Serving requires a
+compatible NVIDIA driver; the DGX OS driver provides the CUDA driver library.
+
+To register a host agent, run `flare agent install` as the user who will run
+models. It prints a pairing code and installs a systemd user service. Installing
+or upgrading this Debian package does not start or restart any service.
+
+The agent installer keeps its own executable under ~/.local/lib/flare-agent.
+After upgrading this package, run `/usr/bin/flare agent install` during a
+maintenance window to update and restart that user's agent. Existing controller
+identities and model caches are retained. Run `command -v flare` to check whether
+another executable in ~/.local/bin or /usr/local/bin takes precedence.
+
+Ignition, model weights, the CUDA toolkit, and Python are not included.

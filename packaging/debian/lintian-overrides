@@ -1,0 +1,5 @@
+# The Rust turbojpeg crate statically builds libjpeg-turbo with its pinned
+# upstream sources. This is the same image decoder used by native Flare.
+flare-inference: embedded-library libjpeg [usr/bin/flare]
+# This package is published in the Local Inference Lab repository, not Debian.
+flare-inference: initial-upload-closes-no-bugs

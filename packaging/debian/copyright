@@ -1,0 +1,12 @@
+Flare
+https://github.com/local-inference-lab/flare
+
+Copyright 2026 Flare contributors
+
+Licensed under the Apache License, Version 2.0.
+On Debian systems, the complete license is available at
+/usr/share/common-licenses/Apache-2.0.
+
+Dependency copyright notices and license texts are included in the
+third-party-licenses directory beside this file. Package manifests there
+identify each dependency's source and declared license.

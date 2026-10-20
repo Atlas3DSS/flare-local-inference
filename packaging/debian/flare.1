@@ -1,0 +1,34 @@
+.TH FLARE 1 "Flare" "Local Inference Lab" "User Commands"
+.SH NAME
+flare \- serve prepared model packages on NVIDIA GPUs
+.SH SYNOPSIS
+.B flare
+.RI [ COMMAND ] " [OPTIONS]"
+.SH DESCRIPTION
+Flare runs prepared CUDA graphs and provides an inference API.
+The executable also includes a host agent and Orbit cluster management.
+A compatible NVIDIA driver and a model package matching the GPU architecture
+and tensor-parallel size are required for serving.
+.SH COMMANDS
+.TP
+.B run
+Load and serve a prepared model package.
+.TP
+.B agent
+Run or install a host agent.
+.TP
+.B orbit
+Pair hosts and manage multi-host serving groups.
+.SH OPTIONS
+.TP
+.B \-\-help
+Display command help. Each subcommand also accepts this option.
+.TP
+.B \-\-version
+Display the executable version. Use dpkg-query for the Debian package version.
+.SH FILES
+.I /usr/share/doc/flare-inference/README.Debian
+describes agent installation and upgrades.
+.SH SEE ALSO
+.BR dpkg-query (1),
+.BR systemctl (1)
