@@ -1042,6 +1042,7 @@ impl Controller {
             name: format!("push-{name}"),
             placements: vec![Vec::new(); world],
             stage_only: true,
+            roce_ring: run_args.roce_ring,
             ..LaunchOptions::default()
         };
         if nodes.len() == world {
@@ -1057,6 +1058,11 @@ impl Controller {
                     .join(", ")
             );
             return Ok(());
+        }
+        if run_args.roce_ring {
+            return Err(
+                "--roce-ring push requires one target node per package rank, in ring order".into(),
+            );
         }
         // Fewer or more nodes than ranks: each listed node gets the complete package, which
         // serves rank zero of a multi-host package or a single-host package entirely.
@@ -1377,6 +1383,16 @@ impl Controller {
         };
 
         let issued = now();
+        let transfer_ring = if options.roce_ring {
+            let records = all(parallel_mut(&mut sessions, |rank, session| {
+                session
+                    .request(frame::FABRIC, &json!({}))
+                    .map_err(|e| at(&nodes[rank].name, e))
+            }))?;
+            super::fabric::plan(nodes, &records)?
+        } else {
+            Vec::new()
+        };
         let mut grant = Grant {
             group: group_id(&options.name, issued, &random(2)?),
             name: options.name.clone(),
@@ -1407,6 +1423,7 @@ impl Controller {
             serving: options.serving.clone(),
             rank_zero: options.rank_zero.clone(),
             roce_ring: options.roce_ring,
+            transfer_ring,
             single_host: !package.needs.multi_host,
             issued,
             expires: issued + GRANT_SECONDS,
@@ -1474,10 +1491,37 @@ impl Controller {
 
         // Every node other than the source fetches from it: rank zero the complete package,
         // peers their ranks' ranges.
-        let source = match &package.holder {
+        let mut source = match &package.holder {
             Holder::Controller { .. } => nodes[0].clone(),
             Holder::Node { node, .. } => node.clone(),
         };
+        // An outside source has no ring links. Stage it once on rank zero before its peers fetch.
+        if options.roce_ring
+            && !nodes
+                .iter()
+                .any(|node| node.public_key == source.public_key)
+        {
+            let files = package
+                .files
+                .iter()
+                .map(|f| RankFile {
+                    name: f.name.clone(),
+                    size: f.size,
+                    ranges: vec![(0, f.size)],
+                })
+                .collect::<Vec<_>>();
+            transfer(
+                &mut sessions[0],
+                &nodes[0],
+                &statuses[0],
+                &transfer_grant,
+                &package.publisher,
+                &source,
+                &complete,
+                &files,
+            )?;
+            source = nodes[0].clone();
+        }
         all(parallel_mut(&mut sessions, |rank, session| {
             if nodes[rank].public_key == source.public_key {
                 return Ok(());
@@ -2839,6 +2883,51 @@ mod tests {
         );
         assert!(staged_rank.with_file_name(".verified").is_file());
         assert_eq!(one.verified.lock().unwrap().len(), 2);
+
+        // A source outside the ring stages once on rank zero, which serves the peer over fabric.
+        let outside = crate::orbit::agent::tests::Harness {
+            controller: Key::from_seed(&[21; 32]).unwrap(),
+            ..harness(23)
+        };
+        pair_accept_first(&outside);
+        let external = ResolvedPackage {
+            export: "external".into(),
+            holder: Holder::Node {
+                node: node(&outside, "outside"),
+                path: primary.to_string_lossy().into_owned(),
+            },
+            ..package.clone()
+        };
+        let staged = controller
+            .launch(
+                "push",
+                &nodes,
+                &external,
+                None,
+                &LaunchOptions {
+                    name: "external".into(),
+                    placements: vec![vec![], vec![]],
+                    stage_only: true,
+                    roce_ring: true,
+                    ..LaunchOptions::default()
+                },
+            )
+            .unwrap();
+        let complete = zero.agent.cache.join(format!(
+            "packages/{}/model.safetensors",
+            staged.grant.complete_directory()
+        ));
+        assert_eq!(fs::read(&complete).unwrap(), bytes);
+        assert!(complete.with_file_name(".verified").is_file());
+        let partial = one.agent.cache.join(format!(
+            "packages/{}/model.safetensors",
+            staged.grant.cache_directory(1)
+        ));
+        assert_eq!(
+            fs::read(&partial).unwrap()[40_000..48_000],
+            bytes[40_000..48_000]
+        );
+        assert!(partial.with_file_name(".verified").is_file());
 
         // A second launch is refused while a group runs; after exit it reuses the cache.
         let again = controller

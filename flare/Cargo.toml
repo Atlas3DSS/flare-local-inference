@@ -23,6 +23,7 @@ ureq = "3"
 libloading = "0.8.9"
 # Fleet control signs grants and encrypts agent sessions with the ring Helios already links.
 ring = "0.17.14"
+socket2 = "0.6"
 
 [dev-dependencies]
 tempfile = "3"

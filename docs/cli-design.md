@@ -1106,7 +1106,13 @@ ranks. The transport accepts 2..16
 ranks, while recipe validation retains each model's supported TP sizes. This
 option is recorded in the preparation plan, sent to preparation peers, and
 forwarded to serving peers. It changes native transport routing, not the
-captured collective operation contracts. See [RoCE ring transport](roce-ring.md)
+captured collective operation contracts. `flare orbit run --roce-ring` also
+distributes package bytes over TCP through the ring's fabric interfaces.
+`flare orbit push --roce-ring --to NODE,...` uses the same distribution path
+without starting ranks; it requires exactly one target per package rank, in
+ring order. Controller traffic remains on the paired addresses. See
+[Orbit fabric transfers](orbit.md#package-transfers-through-ring-interfaces) and
+[RoCE ring transport](roce-ring.md)
 for routing, buffer ownership, setup, the transport test harness, and qualification
 limits.
 

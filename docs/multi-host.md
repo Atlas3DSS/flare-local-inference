@@ -39,11 +39,13 @@ needs only Flare, the driver, and the package.
 | Ignition preparation rendezvous | Preparation rank zero | The selected port; examples use TCP 29630 |
 | Ignition preparation coordination | Preparation hosts | Additional dynamically allocated TCPStore and Gloo ports |
 
-Agent transfers use encrypted TCP to the addresses recorded at pairing.
-Model collectives use RDMA over separately discovered RoCE devices. Pair using
-hostnames or addresses that route over the intended transfer network; selecting
-RoCE rails does not change the agent's TCP route. Flare does not configure
-interfaces, addresses, switches, or firewalls.
+Agent control uses encrypted TCP to the addresses recorded at pairing.
+With `orbit run --roce-ring` or `orbit push --roce-ring`, package transfers use
+TCP on the discovered RoCE interfaces, with agents relaying non-neighbor data
+through the ring. Each agent must listen on its fabric addresses as well as its
+management address. Other package transfers use the paired addresses. Model
+collectives use RDMA. Flare does not configure interfaces, addresses, host routes,
+switches, or firewalls. See [fabric TCP transfers](orbit.md#package-transfers-through-ring-interfaces).
 
 The serving ranks select up to two rails per peer from active devices. The
 package does not pin the physical fabric used during preparation. For direct

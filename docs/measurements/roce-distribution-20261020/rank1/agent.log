@@ -1,0 +1,11 @@
+Oct 20 09:39:45 spark-1afa systemd[1033949]: Started flare-ring-transfer-test-20261020.service - /home/nvidia/erakhmatulin/flare-ring-test-bin-20261020 --ignored --exact orbit::agent::tests::serve_ring_transfer_fixture --nocapture.
+Oct 20 09:39:45 spark-1afa flare-ring-test-bin-20261020[1776190]: running 1 test
+Oct 20 09:39:45 spark-1afa flare-ring-test-bin-20261020[1776190]: flare agent spark-1afa (44211a818b28d247f0055866a25894f2db72c05eab03cbb08cbc1a7fac70ce88) listening on 0.0.0.0:29910; cache /home/nvidia/erakhmatulin/flare-ring-transfer-test-20261020/cache; controller set revision 1
+Oct 20 09:40:35 spark-1afa flare-ring-test-bin-20261020[1776190]: deepseek-v41-flash-1017-csf-ring-tp4-c4-dspark5.safetensors: fabric TCP spark-1ae8 -> spark-1afa
+Oct 20 09:40:36 spark-1afa flare-ring-test-bin-20261020[1776190]: deepseek-v41-flash-1017-csf-ring-tp4-c4-dspark5.safetensors: received 352367147 bytes in 0.78s (429.5 MiB/s)
+Oct 20 09:40:36 spark-1afa flare-ring-test-bin-20261020[1776190]: deepseek-v41-flash-1017-csf-ring-tp4-c4-dspark5-data-03-of-08.safetensors: fabric TCP spark-1ae8 -> spark-1afa
+Oct 20 09:40:45 spark-1afa flare-ring-test-bin-20261020[1776190]: test orbit::agent::tests::serve_ring_transfer_fixture has been running for over 60 seconds
+Oct 20 09:42:41 spark-1afa flare-ring-test-bin-20261020[1776190]: deepseek-v41-flash-1017-csf-ring-tp4-c4-dspark5-data-03-of-08.safetensors: received 68545087376 bytes in 125.25s (521.9 MiB/s)
+Oct 20 09:42:41 spark-1afa flare-ring-test-bin-20261020[1776190]: deepseek-v41-flash-1017-csf-ring-tp4-c4-dspark5-data-04-of-08.safetensors: fabric TCP spark-1ae8 -> spark-1afa
+Oct 20 09:44:30 spark-1afa flare-ring-test-bin-20261020[1776190]: deepseek-v41-flash-1017-csf-ring-tp4-c4-dspark5-data-04-of-08.safetensors: received 58378800400 bytes in 108.98s (510.9 MiB/s)
+Oct 20 09:47:11 spark-1afa flare-ring-test-bin-20261020[1776190]: 3b3e74467321456d92b39330e49158cb-1491781628-rank1: stored data verified

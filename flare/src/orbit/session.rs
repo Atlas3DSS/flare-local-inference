@@ -21,7 +21,7 @@
 //! needs, so a frame of many gigabytes streams without buffering.
 
 use std::io::{self, Read, Write};
-use std::net::TcpStream;
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream};
 use std::time::Duration;
 
 use ring::aead::{self, Aad, LessSafeKey, Nonce, UnboundKey};
@@ -113,6 +113,8 @@ pub struct Session {
     pending: Vec<u8>,
     /// Body bytes of the current frame not yet consumed.
     remaining: u64,
+    /// A failed streaming write must close the connection, never append another frame.
+    incomplete_write: bool,
 }
 
 fn io_error(context: &str, error: io::Error) -> Failure {
@@ -196,6 +198,36 @@ fn verify_proof(record: &[u8], transcript: &[u8; 32], label: &[u8]) -> Result<Pu
 }
 
 impl Session {
+    /// Connect only through the selected fabric address; never retry on management Ethernet.
+    pub fn connect_from(local: Ipv4Addr, remote: SocketAddrV4, key: &Key) -> Result<Self, Failure> {
+        let socket = socket2::Socket::new(
+            socket2::Domain::IPV4,
+            socket2::Type::STREAM,
+            Some(socket2::Protocol::TCP),
+        )?;
+        socket.bind(&SocketAddr::V4(SocketAddrV4::new(local, 0)).into())?;
+        socket
+            .connect_timeout(&SocketAddr::V4(remote).into(), Duration::from_secs(10))
+            .map_err(|e| format!("cannot reach fabric agent {remote} from {local}: {e}"))?;
+        let stream: TcpStream = socket.into();
+        stream.set_write_timeout(Some(Duration::from_secs(120)))?;
+        let mut session = Self::initiate(stream, key)?;
+        session.transfer_timeout()?;
+        Ok(session)
+    }
+
+    pub fn transfer_timeout(&mut self) -> Result<(), Failure> {
+        self.stream
+            .set_read_timeout(Some(Duration::from_secs(120)))?;
+        self.stream
+            .set_write_timeout(Some(Duration::from_secs(120)))?;
+        Ok(())
+    }
+
+    pub fn addresses(&self) -> Result<(SocketAddr, SocketAddr), Failure> {
+        Ok((self.stream.local_addr()?, self.stream.peer_addr()?))
+    }
+
     /// Open a session to `address` as the initiator.
     pub fn connect(address: &str, key: &Key) -> Result<Self, Failure> {
         let stream = TcpStream::connect_timeout(
@@ -253,6 +285,7 @@ impl Session {
             role: Role::Initiator,
             pending: Vec::new(),
             remaining: 0,
+            incomplete_write: false,
         })
     }
 
@@ -304,6 +337,7 @@ impl Session {
             role: Role::Responder,
             pending: Vec::new(),
             remaining: 0,
+            incomplete_write: false,
         })
     }
 
@@ -372,6 +406,7 @@ impl Session {
                     .map_err(|e| io_error("frame source read failed", e))?;
                 remaining -= want as u64;
             }
+            self.incomplete_write = true;
             self.write_plain(&buffer[..offset + want])?;
             offset = 0;
             if remaining == 0 {
@@ -379,6 +414,7 @@ impl Session {
             }
         }
         self.stream.flush()?;
+        self.incomplete_write = false;
         Ok(())
     }
 
@@ -453,6 +489,10 @@ impl Session {
     }
 
     pub fn error(&mut self, message: &str) -> Result<(), Failure> {
+        if self.incomplete_write {
+            self.stream.shutdown(std::net::Shutdown::Both)?;
+            return Ok(());
+        }
         self.write_frame(frame::ERROR, message.as_bytes())
     }
 }
@@ -503,6 +543,25 @@ mod tests {
         });
         let client = Session::connect(&address, &Key::from_seed(&[2; 32]).unwrap()).unwrap();
         (client, server.join().unwrap())
+    }
+
+    #[test]
+    fn a_failed_relay_stream_closes_instead_of_inserting_an_error_into_payload() {
+        let (mut client, mut server) = pair();
+        let length = (RECORD_PLAINTEXT * 3) as u64;
+        let writer = thread::spawn(move || {
+            let bytes = vec![42u8; RECORD_PLAINTEXT * 2];
+            let error = server
+                .write_frame_from(frame::OK, length, &mut bytes.as_slice())
+                .unwrap_err();
+            server.error(&error.to_string()).unwrap();
+        });
+        assert_eq!(client.read_header().unwrap(), (frame::OK, length));
+        let mut received = Vec::new();
+        assert!(client.body().read_to_end(&mut received).is_err());
+        assert!(!received.is_empty());
+        assert!(received.iter().all(|b| *b == 42));
+        writer.join().unwrap();
     }
 
     #[test]

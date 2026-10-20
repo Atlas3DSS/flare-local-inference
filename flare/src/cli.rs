@@ -252,6 +252,10 @@ pub struct OrbitPush {
     )]
     pub to: Vec<String>,
 
+    /// Stream package data through fabric interfaces in the target nodes' ring order.
+    #[arg(long)]
+    pub roce_ring: bool,
+
     #[command(flatten)]
     pub serving: ServingOptions,
 }
@@ -264,7 +268,7 @@ impl OrbitPush {
             host: "127.0.0.1".parse().unwrap(),
             port: 8000,
             served_model_name: None,
-            roce_ring: false,
+            roce_ring: self.roce_ring,
             rendezvous: None,
             rank: None,
             api_key_file: None,
@@ -981,6 +985,29 @@ mod tests {
                 transport: Some(Transport::Direct),
             }
         );
+    }
+
+    #[test]
+    fn ring_prestaging_keeps_target_order_and_selects_fabric_distribution() {
+        let parsed = Cli::try_parse_from([
+            "flare",
+            "orbit",
+            "push",
+            "model.safetensors",
+            "--to",
+            "zero,one,two,three",
+            "--roce-ring",
+        ])
+        .unwrap();
+        let Command::Orbit(OrbitArgs {
+            command: OrbitCommand::Push(push),
+            ..
+        }) = parsed.command
+        else {
+            panic!("expected prestaging command");
+        };
+        assert_eq!(push.to, ["zero", "one", "two", "three"]);
+        assert!(push.run_args().roce_ring);
     }
 
     #[test]

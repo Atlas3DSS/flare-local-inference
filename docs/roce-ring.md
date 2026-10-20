@@ -12,6 +12,11 @@ in the prepared GPU programs. Routing, registered relay buffers, and RDMA
 progress belong to the native transport. Serving has no Python callback,
 runtime compilation, or steady-state GPU allocation.
 
+Orbit also uses this rank order and fabric discovery for encrypted TCP package
+distribution when `--roce-ring` is selected. Agents stream shards through their
+neighbors before serving starts; this is separate from the RDMA proxy and its
+captured regions. See [fabric TCP transfers](orbit.md#package-transfers-through-ring-interfaces).
+
 The ring can run over a switch or hosts cabled directly to their neighbors.
 Forwarding runs on host CPUs; ConnectX hardware hairpin forwarding is not
 implemented. Four-Spark native transport and GPU graph replay checks pass on a
@@ -231,6 +236,32 @@ physical ring cabling, full-model serving, and ring throughput remain
 unqualified. CPU relays, extra RDMA hops, and per-packet acknowledgments require
 complete graph and serving measurements before making performance claims.
 Switched-fabric results do not establish physical-ring performance.
+
+### TCP package distribution
+
+On 2026-10-20, four directly cabled DGX Sparks transferred the existing signed
+`deepseek-v41-flash-1017-csf-ring-tp4-c4-dspark5` package using
+`orbit push --roce-ring`. Each peer received and verified 118.5 GiB in three
+files; rank 2's payload passed through rank 1, and rank 3 used the closing link
+from rank 0. The large files sustained 489–529 MiB/s per peer. Bulk transfer
+finished in about four minutes; the complete command, including stored-data
+verification, took 412.59 seconds. A warm push reused all three verified peer
+caches and completed in 0.19 seconds.
+
+The [raw measurements](measurements/roce-distribution-20261020/) include command
+timings, agent logs, interface addresses and speeds, and byte counters spanning
+the bulk transfer. Fabric counters show rank 1 receiving two shards and forwarding
+one; management traffic remained below 1.1 MB per host in that window. These
+hosts report 200 Gb/s fabric ports and 1 Gb/s management links. The experiment
+used isolated agents on port 29910 and fresh caches; existing agents, caches,
+host routes, and SSH configuration were preserved.
+
+This validates TCP distribution and package verification, not 200 Gb/s throughput.
+Files alternate rails sequentially; a file is not striped across parallel
+connections. A matching cold management-transfer baseline, throughput bottleneck
+profiling, and a new inference run were not performed. Socket tests cover six
+agents, multiple relay hops in both directions, sparse range contents, cache
+reuse, signed-interface and peer-identity rejection, and interrupted streams.
 
 ## Protocol model and runtime checks
 

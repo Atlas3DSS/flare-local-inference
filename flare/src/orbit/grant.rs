@@ -95,6 +95,9 @@ pub struct Grant {
     /// Options for rank zero alone: the HTTP bind and request handling.
     pub rank_zero: Vec<String>,
     pub roce_ring: bool,
+    /// Fabric TCP links from member i to member (i + 1) % world, one entry per rail.
+    #[serde(default)]
+    pub transfer_ring: Vec<Vec<super::fabric::Link>>,
     /// True for a single-host tensor-parallel package: one member runs every rank in one process
     /// over its GPUs, with no rendezvous.
     #[serde(default)]
@@ -219,6 +222,7 @@ mod tests {
             serving: vec![],
             rank_zero: vec![],
             roce_ring: false,
+            transfer_ring: Vec::new(),
             single_host: false,
             issued: 100,
             expires: 700,
