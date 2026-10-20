@@ -336,18 +336,25 @@ def test_peer_export_keeps_the_remote_owner_for_cleanup(tmp_path, monkeypatch, f
     class Control:
         def getsockname(self):
             return "127.0.0.1", 0
-        def sendfile(self, stream):
+        def sendfile(self, stream, *, count):
             events.append("package-sent")
             if failed_send:
                 raise ConnectionError("synthetic interrupted export")
+            return len(stream.read(count))
         def close(self):
             pass
     model = SimpleNamespace(memory_report={}, manifest=lambda: None, close=lambda: events.append("model-closed"))
     assignment = {"config": None, "prepare": lambda *args, **kwargs: model,
                   "store": ("127.0.0.1", 1234), "packaged": False}
-    commands = iter((("checkpoint-source", None), assignment, ("export", {}), "close"))
+    source = tmp_path / "weights.bin"
+    source.write_bytes(b"synthetic weights")
+    commands = iter((("checkpoint-source", None), assignment, ("export", {}), [str(source)], "close"))
     def export(*args, **kwargs):
-        args[3].write_bytes(b"synthetic package")
+        from ignition.preparation.package_file import write_sources
+        from ignition.preparation.runtime_package_pb2 import ModelIndex, BundleIndex, Span
+        size = source.stat().st_size
+        index = ModelIndex(version=4, ranks=[BundleIndex(resources={'weights': Span(nbytes=size)})])
+        write_sources(args[3], index, [(0, source, 0, size)])
         return SimpleNamespace(memory_inventory={})
     monkeypatch.setattr(transport, "RemoteSource", remote)
     monkeypatch.setattr(transport, "token", lambda path: b"test" * 8)

@@ -84,28 +84,37 @@ def receive_object(sock):
 
 def send_export_sources(control, path, inventory):
     """Send a rank manifest, then the content files requested by the coordinator."""
-    from contextlib import ExitStack
-    import hashlib
+    def identity(source):
+        info = os.fstat(source.fileno())
+        return tuple(getattr(info, key) for key in
+                     ('st_dev', 'st_ino', 'st_size', 'st_mtime_ns', 'st_ctime_ns'))
 
     document = json.loads(Path(path).read_text())
-    with ExitStack() as stack:
-        files, metadata = {}, {}
-        for _, name, _, _ in document['payload']:
-            if name in files:
-                continue
-            source = stack.enter_context(Path(name).open('rb'))
-            size = os.fstat(source.fileno()).st_size
+    identities, metadata = {}, {}
+    # Graph catalogs can contain thousands of source files. Retain their identities,
+    # rather than file handles, while the coordinator selects the missing content.
+    for _, name, _, _ in document['payload']:
+        if name in metadata:
+            continue
+        with Path(name).open('rb') as source:
+            before = identity(source)
             digest = hashlib.file_digest(source, 'sha256').hexdigest()
-            source.seek(0)
-            files[name] = source
-            metadata[name] = {'size': size, 'sha256': digest,
-                              'blob': Path(name).name == digest + '.safetensors'}
-        send_object(control, {'sources': {'document': document, 'files': metadata}, 'memory_inventory': inventory})
-        requested = receive_object(control)
-        if not isinstance(requested, list) or len(requested) != len(set(requested)) or any(n not in files for n in requested):
-            raise ValueError('invalid requested rank export sources')
-        for name in requested:
-            control.sendfile(files[name], count=metadata[name]['size'])
+            if identity(source) != before:
+                raise ValueError(f'rank payload changed during hashing: {name}')
+        identities[name] = before
+        metadata[name] = {'size': before[2], 'sha256': digest,
+                          'blob': Path(name).name == digest + '.safetensors'}
+    send_object(control, {'sources': {'document': document, 'files': metadata}, 'memory_inventory': inventory})
+    requested = receive_object(control)
+    if not isinstance(requested, list) or len(requested) != len(set(requested)) or any(n not in metadata for n in requested):
+        raise ValueError('invalid requested rank export sources')
+    for name in requested:
+        with Path(name).open('rb') as source:
+            if identity(source) != identities[name]:
+                raise ValueError(f'rank payload changed before transfer: {name}')
+            sent = control.sendfile(source, count=metadata[name]['size'])
+            if sent != metadata[name]['size'] or identity(source) != identities[name]:
+                raise ValueError(f'rank payload changed during transfer: {name}')
 
 
 def receive_export_sources(control, description, destination, settings):
