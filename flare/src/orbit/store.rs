@@ -197,6 +197,14 @@ pub struct GroupSpec {
     pub gpus: Vec<u32>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub roce_ring: bool,
+    /// Controller-local executable override; absent sends the controller's running binary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executable: Option<PathBuf>,
+    /// Controller-local publisher profiles used to verify the package before each launch.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub publisher_keys: Vec<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trust_store: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -261,6 +269,14 @@ impl Orbit {
 
     pub fn group(&self, name: &str) -> Option<&GroupSpec> {
         self.group.iter().find(|g| g.name == name)
+    }
+
+    pub fn save_group(&mut self, spec: GroupSpec) {
+        if let Some(existing) = self.group.iter_mut().find(|group| group.name == spec.name) {
+            *existing = spec;
+        } else {
+            self.group.push(spec);
+        }
     }
 
     /// Record or update a node; a node is identified by its key.
@@ -370,5 +386,46 @@ mod tests {
             ["b", "a"]
         );
         assert!(loaded.cluster(Some("other")).is_err());
+    }
+
+    #[test]
+    fn persistent_group_definitions_survive_reload_and_update_by_name() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("orbit.toml");
+        let mut orbit = Orbit::default();
+        let mut group = GroupSpec {
+            name: "service".into(),
+            package: "node:/models/model.safetensors".into(),
+            serving: vec!["--mtp-draft-tokens".into(), "5".into()],
+            rank_zero: vec![
+                "--host".into(),
+                "0.0.0.0".into(),
+                "--port".into(),
+                "8001".into(),
+            ],
+            nodes: vec!["node".into()],
+            gpus: vec![0],
+            roce_ring: true,
+            executable: Some("/bin/flare-pinned".into()),
+            publisher_keys: vec!["/keys/publisher.json".into()],
+            trust_store: Some("/keys/trust.toml".into()),
+        };
+        orbit.save_group(group.clone());
+        orbit.save(&path).unwrap();
+        let mut reloaded = Orbit::load(&path).unwrap();
+        assert_eq!(reloaded.group("service"), Some(&group));
+        group.serving = vec!["--mtp-draft-tokens".into(), "0".into()];
+        reloaded.save_group(group.clone());
+        reloaded.save(&path).unwrap();
+        let reloaded = Orbit::load(&path).unwrap();
+        assert_eq!(reloaded.group.len(), 1);
+        assert_eq!(reloaded.group("service"), Some(&group));
+        assert_eq!(
+            fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let manual: GroupSpec =
+            toml::from_str("name = 'manual'\npackage = '/model.safetensors'").unwrap();
+        assert!(manual.executable.is_none());
     }
 }

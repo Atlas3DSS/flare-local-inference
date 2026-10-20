@@ -18,7 +18,7 @@ use std::{
     time::Duration,
 };
 
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches};
 use flare_helios::{
     runtime_package::NativeModel,
     server::{Bootstrap, Server},
@@ -32,7 +32,9 @@ extern "C" fn stop(_: libc::c_int) {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args = match cli::Cli::parse().command {
+    let matches = cli::Cli::command().get_matches();
+    let parsed = cli::Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
+    let args = match parsed.command {
         cli::Command::Run(args) => *args,
         cli::Command::Download(args) => {
             environment::configure(&args.gpus)?;
@@ -68,7 +70,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         #[cfg(unix)]
         cli::Command::Orbit(orbit_args) => {
-            return orbit_command(orbit_args).map_err(|e| e.to_string().into());
+            return orbit_command(orbit_args, matches.subcommand_matches("orbit").unwrap())
+                .map_err(|e| e.to_string().into());
         }
         cli::Command::Trust {
             command:
@@ -196,7 +199,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Run one `flare orbit` command as the controller on this machine.
 #[cfg(unix)]
-fn orbit_command(args: cli::OrbitArgs) -> Result<(), orbit::Failure> {
+fn orbit_command(args: cli::OrbitArgs, matches: &clap::ArgMatches) -> Result<(), orbit::Failure> {
     let mut controller =
         orbit::controller::Controller::open(args.orbit_file.as_deref(), args.key_file.as_deref())?;
     match args.command {
@@ -218,6 +221,7 @@ fn orbit_command(args: cli::OrbitArgs) -> Result<(), orbit::Failure> {
         cli::OrbitCommand::Stop { cluster, group } => {
             controller.stop(cluster.as_deref(), group.as_deref())
         }
+        cli::OrbitCommand::Rm { group } => controller.remove(&group),
         cli::OrbitCommand::Forget { node } => controller.forget(&node),
         cli::OrbitCommand::Push(push) => {
             controller.push(&push.package, &push.to, &mut push.run_args())
@@ -228,15 +232,20 @@ fn orbit_command(args: cli::OrbitArgs) -> Result<(), orbit::Failure> {
             run.cluster.as_deref(),
             orbit::controller::RunOptions {
                 name: run.name.clone(),
+                persistent: run.persistent,
                 nodes: run.nodes.clone(),
                 dry_run: run.dry_run,
-                // GPU 0 is the serving default; any other list names the GPUs on every node.
-                gpus: if run.serving.gpus == [0] {
+                gpus: if matches
+                    .subcommand_matches("run")
+                    .unwrap()
+                    .value_source("gpus")
+                    != Some(clap::parser::ValueSource::CommandLine)
+                {
                     Vec::new()
                 } else {
                     run.serving.gpus.iter().map(|&g| g as u32).collect()
                 },
-                serving: run.rank_options(),
+                serving: run.rank_options(matches.subcommand_matches("run").unwrap()),
                 rank_zero: run.rank_zero_options(),
                 roce_ring: run.roce_ring,
                 executable: run.executable.clone(),

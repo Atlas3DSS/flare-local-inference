@@ -210,6 +210,7 @@ with a message; an ERROR closes the session.
 | RUN | Controller to node | Grant, rank, executable name, publisher profile | Starts this host's rank on the GPUs the grant's member names, beside other groups on other GPUs, then streams LOG and EXIT |
 | ATTACH | Controller to node | Group identifier, required when several groups are on the node | Streams the rank's retained output, then live output |
 | STOP | Controller to node | Group identifier, required when several groups are on the node | Sends SIGTERM to the rank |
+| REMOVE | Controller to node | Exact group identifier | Removes completed run history; refuses a running rank and preserves cached packages |
 | STATUS | Controller to node | Optional `toward` address | Name, keys, controller-set revision, free cache space, every GPU with its UUID, revision, memory and holding group, every group the agent runs or retains with its name, rank, GPUs, state and uptime, every package cache directory with its files and verification state, and the local address routing selects toward `toward` |
 | METRICS | Controller to node | None | The GPUs as the agent's sampler last read them, with utilization, temperature, clock and holding group, and every group with the metrics document its rank-zero process last served |
 | PREPARE | Controller to node | Preparation command, checkpoint token, rank | Runs `ignition export` or `ignition join` from the node's configured checkout (see [unimplemented parts](#unimplemented-parts)) |
@@ -349,7 +350,7 @@ The agent owns its rank process for the life of the process. A controller
 disconnecting, sleeping, or crashing does not stop a group; the agent retains
 the last 64 KiB of output per rank for a later ATTACH. `flare orbit run` stops
 the group on Ctrl-C; `flare orbit run --detach` returns after startup;
-`flare orbit attach CLUSTER` and `flare orbit stop CLUSTER` act on a running
+`flare orbit attach GROUP` and `flare orbit stop GROUP` act on a running
 group from any controller.
 
 Stopping sends STOP to rank zero and waits for its EXIT; rank zero drains
@@ -394,10 +395,17 @@ A grant's member names the UUIDs its rank uses, and the agent exposes exactly
 those through `CUDA_VISIBLE_DEVICES` with `--gpus 0..n`, refuses a GPU the
 node lacks or one a running group holds, and otherwise runs the group beside
 the others, each a separate process with its own retained output. A member
-naming no GPUs takes the whole node. The agent keeps the sixteen most recent
-finished groups; STOP and ATTACH name a group when several are on the node.
-`flare orbit ls` lists every group on a cluster's nodes with its GPUs and
-state, and `attach` and `stop` take a group name or identifier.
+naming no GPUs takes the whole node. Run history is separate from a saved group
+definition. The agent retains successful runs for five minutes after exit,
+capped at sixteen successful runs in launch order. Nonzero exits and running
+ranks are exempt from both limits. The sampling loop and group queries prune
+expired history even when no further groups start. Pruning removes retained logs
+and metrics without deleting saved definitions or model packages, or interrupting
+an already attached log stream. Run history is held in memory and is lost when
+the agent restarts, including failed-run logs. STOP and ATTACH name a group when
+several are on the node. `flare orbit ls` lists saved definitions and every
+retained run on a cluster's nodes; `attach` and `stop` take a name or launch
+identifier.
 
 A package is one of two kinds, and the package says which. A multi-host
 package of N ranks needs N nodes, each giving its rank one GPU, and runs over
@@ -407,9 +415,45 @@ names one member with those GPUs and `single_host`, and the agent starts it
 without a rank or rendezvous. [Placement](#placement) chooses the nodes and
 GPUs of either kind.
 
-## Desired state
+## Persistent and ephemeral groups
 
-The orbit file may describe the groups the operator wants:
+An ordinary `flare orbit run PACKAGE` creates an ephemeral group. After a
+successful exit, its run history expires. A failed run remains available for
+`attach` until explicitly removed or the agent restarts.
+
+Use `--persistent --name NAME` to save a launch configuration in the controller's
+orbit file. The saved definition remains after stop, history expiry, and reboot:
+
+```sh
+flare orbit run maxwell:/data/flare-runtime/deepseek-tp4.safetensors \
+  --cluster sparks --name ds41 --persistent --detach \
+  --host 0.0.0.0 --port 8000 --mtp-draft-tokens 5
+flare orbit stop ds41
+flare orbit run --name ds41 --detach
+```
+
+Persistence saves the package reference, serving settings, candidate nodes in
+rank order, GPU constraints, publisher profiles, trust-store path, and any
+executable override. Local package, executable, and verification paths are saved
+as absolute paths. The definition is written after placement validation and
+before starting ranks, so a startup failure can be retried. `--dry-run` saves
+nothing. A later run uses the saved configuration; overrides affect that launch
+only unless `--persistent` is passed again. An existing running group with the
+same saved name on the candidate nodes prevents another launch.
+
+`flare orbit ls` keeps saved groups visible when stopped. An unreachable node
+makes an inactive saved group's state unknown. Saved definitions belong to the
+controller's orbit file; other controllers need that file to reuse them.
+Persistence does not start services automatically after reboot. Start a stopped
+group with `flare orbit run --name NAME`.
+
+`flare orbit rm NAME` removes a saved definition and all retained runs with that
+name. `flare orbit rm RUN_ID` removes only that launch's history, keeping its
+saved definition. Removal requires all paired nodes to be reachable and refuses
+a selected running rank. It leaves cached model packages in place. Agents must
+support the REMOVE request to clear their history.
+
+Persistent groups can also be declared directly in the orbit file:
 
 ```toml
 [[group]]
@@ -426,9 +470,9 @@ nodes = ["maxwell", "hertz"]
 
 `flare orbit run --name ds41` takes the package from the group of that name
 when the command names none, puts the group's `serving` words before the
-command line's serving options so the command line overrides them, puts the
-group's `rank_zero` words after the command line's bind options so the group
-decides where rank zero listens, and takes `nodes`, `gpus`, and `roce_ring`
+command line's serving options so the command line overrides them, and puts the
+group's `rank_zero` words before explicit command-line HTTP options. It takes
+`nodes`, `gpus`, `roce_ring`, and `executable`
 as constraints when the command line gives none. `nodes` lists candidate
 nodes in rank order; `gpus` lists the NVML indices every member uses on its
 node. A group without them is placed from the whole orbit.
@@ -557,10 +601,11 @@ serves it.
 | `flare orbit controllers add KEYFILE` / `remove FINGERPRINT` | Controller | Writes and distributes the next controller-set revision |
 | `flare orbit check --cluster NAME [--roce-ring] [--write]` | Controller | Fabric plan and rail check; optional rank-order proposal (unimplemented) |
 | `flare orbit prepare RECIPE --cluster NAME ...` | Controller | Multi-host export through agents (unimplemented) |
-| `flare orbit run [PACKAGE] [--cluster NAME \| --nodes NODE,...] [--name GROUP] [--gpus N,...] [--dry-run] [--detach] ...` | Controller | Places a group on the candidate nodes' GPUs, starts it and attaches; `--dry-run` prints the placement only |
-| `flare orbit ls [--cluster NAME]` | Controller | Every group on the cluster's nodes with its GPUs and state |
+| `flare orbit run [PACKAGE] [--cluster NAME \| --nodes NODE,...] [--name GROUP] [--persistent] [--gpus N,...] [--dry-run] [--detach] ...` | Controller | Places a group on the candidate nodes' GPUs, starts it and attaches; `--persistent` saves its named definition; `--dry-run` prints the placement only |
+| `flare orbit ls [--cluster NAME]` | Controller | Saved groups and retained runs on the cluster's nodes with their GPUs and state |
 | `flare orbit dashboard [--cluster NAME]` | Controller | The serving process's live metrics dashboard for every group and GPU of the cluster |
 | `flare orbit attach [GROUP]` / `stop [GROUP]` / `status --cluster NAME` | Controller | Operates running groups, or the one named |
+| `flare orbit rm GROUP` | Controller | Removes a stopped group's definition and history, or only the history when given a launch identifier |
 | `flare orbit forget NODE` | Controller | Removes a node from the orbit file |
 | `flare orbit push PACKAGE --to NODE,...` | Controller | Places and verifies a package on nodes without starting it |
 | `flare orbit packages [--cluster NAME]` | Controller | Every node's cache directories with their verification state |

@@ -216,7 +216,7 @@ order, `--name` names the group for `attach`, `stop` and `ls`, and
 `--dry-run` prints the placement without starting anything. A `[[group]]` in
 the orbit file supplies the package, serving options and constraints for a
 name, so `flare orbit run --name ds41` is a complete command; see
-[orbit](orbit.md#desired-state).
+[orbit](orbit.md#persistent-and-ephemeral-groups).
 
 The controller verifies the package's signed index and obtains publisher
 acceptance at its own terminal, then passes the accepted publisher profile and

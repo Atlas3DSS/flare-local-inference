@@ -190,14 +190,14 @@ pub enum OrbitCommand {
         #[arg(long, value_name = "NAME")]
         cluster: Option<String>,
     },
-    /// Launch a package across a cluster's nodes.
+    /// Launch a package across nodes or start a saved group.
     Run(Box<OrbitRun>),
     /// Show the live metrics dashboard for every group and GPU on the cluster's nodes.
     Dashboard {
         #[arg(long, value_name = "NAME")]
         cluster: Option<String>,
     },
-    /// List every group on the cluster's nodes.
+    /// List saved groups and retained runs on the cluster's nodes.
     Ls {
         #[arg(long, value_name = "NAME")]
         cluster: Option<String>,
@@ -217,6 +217,11 @@ pub enum OrbitCommand {
         /// Only the group with this name or identifier.
         #[arg(value_name = "GROUP")]
         group: Option<String>,
+    },
+    /// Remove a stopped group's saved definition and retained run history.
+    Rm {
+        /// Group name or exact launch identifier; a launch identifier keeps its saved definition.
+        group: String,
     },
     /// Remove a node from the orbit file.
     Forget {
@@ -302,6 +307,10 @@ pub struct OrbitRun {
     #[arg(long, value_name = "NAME")]
     pub name: Option<String>,
 
+    /// Save this named group's launch configuration for reuse after stopping or rebooting.
+    #[arg(long, requires = "name")]
+    pub persistent: bool,
+
     /// Candidate nodes in rank order, instead of a cluster or the whole orbit.
     #[arg(long, value_name = "NODE[,NODE...]", value_delimiter = ',')]
     pub nodes: Vec<String>,
@@ -323,32 +332,22 @@ pub struct OrbitRun {
     #[arg(long, help_heading = "Multi-host options")]
     pub roce_ring: bool,
 
-    /// IP address for the HTTP server on rank zero.
-    #[arg(
-        long,
-        value_name = "ADDR",
-        default_value = "127.0.0.1",
-        help_heading = "Serving options"
-    )]
-    pub host: IpAddr,
+    /// IP address for rank zero's HTTP server [default: saved group or 127.0.0.1].
+    #[arg(long, value_name = "ADDR", help_heading = "Serving options")]
+    pub host: Option<IpAddr>,
 
-    /// Port for the HTTP server on rank zero.
-    #[arg(
-        long,
-        value_name = "N",
-        default_value = "8000",
-        help_heading = "Serving options"
-    )]
-    pub port: u16,
+    /// Port for rank zero's HTTP server [default: saved group or 8000].
+    #[arg(long, value_name = "N", help_heading = "Serving options")]
+    pub port: Option<u16>,
 
     /// Replace the package's serving alias; the canonical model ID remains accepted.
     #[arg(long, value_name = "ALIAS", value_parser = served_model_name, help_heading = "Serving options")]
     pub served_model_name: Option<String>,
 
-    /// Favor token throughput or balance it with output cadence; both retain token-service fairness.
-    #[arg(long, value_name = "MODE", default_value = "balanced",
+    /// Favor throughput or output cadence [default: saved group or balanced].
+    #[arg(long, value_name = "MODE",
         value_parser = ["balanced", "throughput"], help_heading = "Serving options")]
-    pub scheduler_policy: String,
+    pub scheduler_policy: Option<String>,
 
     /// File on rank zero's node containing the serving API key; omit to disable authentication.
     #[arg(long, value_name = "PATH", help_heading = "Serving options")]
@@ -360,22 +359,39 @@ pub struct OrbitRun {
 
 impl OrbitRun {
     /// Serving options every rank loads with.
-    pub fn rank_options(&self) -> Vec<String> {
-        self.serving.rank_options(self.roce_ring)
+    pub fn rank_options(&self, matches: &clap::ArgMatches) -> Vec<String> {
+        let mut options = self.serving.rank_options(self.roce_ring);
+        // Explicit defaults must override saved values, while omitted defaults must not.
+        if self.serving.kv_cache_limit == KvCacheLimit::Memory
+            && matches.value_source("kv_cache_limit")
+                == Some(clap::parser::ValueSource::CommandLine)
+        {
+            options.extend(["--kv-cache-limit".into(), "memory".into()]);
+        }
+        if self.serving.embedding_table_cache_size == 0
+            && matches.value_source("embedding_table_cache_size")
+                == Some(clap::parser::ValueSource::CommandLine)
+        {
+            options.extend(["--embedding-table-cache-size".into(), "0".into()]);
+        }
+        options
     }
 
     /// Options only rank zero's HTTP server takes.
     pub fn rank_zero_options(&self) -> Vec<String> {
-        let mut options = vec![
-            "--host".into(),
-            self.host.to_string(),
-            "--port".into(),
-            self.port.to_string(),
-        ];
+        let mut options = Vec::new();
+        if let Some(host) = self.host {
+            options.extend(["--host".into(), host.to_string()]);
+        }
+        if let Some(port) = self.port {
+            options.extend(["--port".into(), port.to_string()]);
+        }
         if let Some(name) = &self.served_model_name {
             options.extend(["--served-model-name".into(), name.clone()]);
         }
-        options.extend(["--scheduler-policy".into(), self.scheduler_policy.clone()]);
+        if let Some(policy) = &self.scheduler_policy {
+            options.extend(["--scheduler-policy".into(), policy.clone()]);
+        }
         if let Some(path) = &self.api_key_file {
             options.extend(["--api-key-file".into(), path.display().to_string()]);
         }
@@ -386,14 +402,17 @@ impl OrbitRun {
     pub fn run_args(&self) -> Run {
         Run {
             package: PathBuf::from(self.package.as_deref().unwrap_or_default()),
-            host: self.host,
-            port: self.port,
+            host: self.host.unwrap_or_else(|| "127.0.0.1".parse().unwrap()),
+            port: self.port.unwrap_or(8000),
             served_model_name: self.served_model_name.clone(),
             roce_ring: self.roce_ring,
             rendezvous: None,
             rank: None,
             api_key_file: self.api_key_file.clone(),
-            scheduler_policy: self.scheduler_policy.clone(),
+            scheduler_policy: self
+                .scheduler_policy
+                .clone()
+                .unwrap_or_else(|| "balanced".into()),
             serving: self.serving.clone(),
         }
     }
@@ -737,6 +756,89 @@ impl ServingOptions {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn persistent_orbit_options_preserve_saved_values_and_allow_explicit_defaults() {
+        use clap::{CommandFactory, FromArgMatches};
+        assert!(Cli::try_parse_from(["flare", "orbit", "run", "model", "--persistent"]).is_err());
+        for explicit in [false, true] {
+            let mut arguments = vec!["flare", "orbit", "run", "--name", "service", "--persistent"];
+            if explicit {
+                arguments.extend([
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    "8000",
+                    "--scheduler-policy",
+                    "balanced",
+                    "--kv-cache-limit",
+                    "memory",
+                    "--embedding-table-cache-size",
+                    "0",
+                    "--gpus",
+                    "0",
+                ]);
+            }
+            let matches = Cli::command().try_get_matches_from(arguments).unwrap();
+            let Command::Orbit(orbit) = Cli::from_arg_matches(&matches).unwrap().command else {
+                panic!()
+            };
+            let OrbitCommand::Run(orbit) = orbit.command else {
+                panic!()
+            };
+            assert!(orbit.persistent);
+            let run_matches = matches
+                .subcommand_matches("orbit")
+                .unwrap()
+                .subcommand_matches("run")
+                .unwrap();
+            let mut saved = vec![
+                "flare".to_string(),
+                "run".into(),
+                "model".into(),
+                "--host".into(),
+                "0.0.0.0".into(),
+                "--port".into(),
+                "8001".into(),
+                "--scheduler-policy".into(),
+                "throughput".into(),
+                "--kv-cache-limit".into(),
+                "context".into(),
+                "--embedding-table-cache-size".into(),
+                "1G".into(),
+            ];
+            saved.extend(orbit.rank_options(run_matches));
+            saved.extend(orbit.rank_zero_options());
+            let Command::Run(effective) = Cli::try_parse_from(saved).unwrap().command else {
+                panic!()
+            };
+            assert_eq!(effective.port, if explicit { 8000 } else { 8001 });
+            assert_eq!(
+                effective.host.to_string(),
+                if explicit { "127.0.0.1" } else { "0.0.0.0" }
+            );
+            assert_eq!(
+                effective.scheduler_policy,
+                if explicit { "balanced" } else { "throughput" }
+            );
+            assert_eq!(
+                effective.serving.kv_cache_limit,
+                if explicit {
+                    KvCacheLimit::Memory
+                } else {
+                    KvCacheLimit::Context
+                }
+            );
+            assert_eq!(
+                effective.serving.embedding_table_cache_size,
+                if explicit { 0 } else { 1 << 30 }
+            );
+            assert_eq!(
+                run_matches.value_source("gpus") == Some(clap::parser::ValueSource::CommandLine),
+                explicit
+            );
+        }
+    }
 
     fn run(arguments: &[&str]) -> Run {
         let Command::Run(args) = Cli::try_parse_from(arguments).unwrap().command else {

@@ -141,7 +141,7 @@ enum Event {
 struct Log {
     lines: VecDeque<String>,
     bytes: usize,
-    exit: Option<i32>,
+    exit: Option<(i32, Instant)>,
     subscribers: Vec<mpsc::Sender<Event>>,
     /// Cache pins held while the rank runs.
     pins: Option<Pinned>,
@@ -181,7 +181,7 @@ impl Group {
 
     fn finish(&self, code: i32) {
         let mut log = self.log.lock().unwrap();
-        log.exit = Some(code);
+        log.exit = Some((code, Instant::now()));
         log.subscribers
             .retain(|s| s.send(Event::Exit(code)).is_ok());
         log.subscribers.clear();
@@ -193,7 +193,16 @@ impl Group {
     }
 
     pub fn exit(&self) -> Option<i32> {
-        self.log.lock().unwrap().exit
+        self.log.lock().unwrap().exit.map(|(code, _)| code)
+    }
+
+    fn retained_at(&self, now: Instant) -> bool {
+        let log = self.log.lock().unwrap();
+        match log.exit {
+            None => true,
+            Some((0, finished)) => now.saturating_duration_since(finished) < SUCCESS_RETENTION,
+            Some(_) => true,
+        }
     }
 
     /// Read the rank's metrics endpoint and keep the document.
@@ -224,7 +233,11 @@ impl Group {
         if log.exit.is_none() {
             log.subscribers.push(sender);
         }
-        (log.lines.iter().cloned().collect(), log.exit, receiver)
+        (
+            log.lines.iter().cloned().collect(),
+            log.exit.map(|(code, _)| code),
+            receiver,
+        )
     }
 }
 
@@ -237,8 +250,27 @@ pub type Verifier =
 
 /// The marker a package cache directory holds once its stored data verified.
 const VERIFIED: &str = ".verified";
-/// Finished groups the agent keeps for STATUS and ATTACH.
+/// Successful runs retained for STATUS and ATTACH; failures require explicit removal.
 const RETAINED_GROUPS: usize = 16;
+const SUCCESS_RETENTION: Duration = Duration::from_secs(5 * 60);
+
+/// Bound successful history by time since exit and count. Preserve running and failed ranks.
+fn prune_groups(groups: &mut Vec<Arc<Group>>, now: Instant) {
+    groups.retain(|group| group.retained_at(now));
+    let mut excess = groups
+        .iter()
+        .filter(|group| group.exit() == Some(0))
+        .count()
+        .saturating_sub(RETAINED_GROUPS);
+    groups.retain(|group| {
+        if excess > 0 && group.exit() == Some(0) {
+            excess -= 1;
+            false
+        } else {
+            true
+        }
+    });
+}
 
 /// Enumerates the host's GPUs.
 pub type Gpus = Box<dyn Fn() -> Result<Vec<Gpu>, Failure> + Send + Sync>;
@@ -398,7 +430,10 @@ impl Agent {
     }
 
     fn groups(&self) -> Vec<Arc<Group>> {
-        self.groups.lock().unwrap().clone()
+        let mut groups = self.groups.lock().unwrap();
+        // The sampler calls this even when no controller is connected or launching work.
+        prune_groups(&mut groups, Instant::now());
+        groups.clone()
     }
 
     /// The group a request names, or the only group when it names none.
@@ -580,6 +615,10 @@ fn session(agent: &Arc<Agent>, stream: TcpStream) -> Result<(), Failure> {
             frame::STOP => {
                 let request = json_body(&mut session, length)?;
                 stop(agent, &request)
+            }
+            frame::REMOVE => {
+                let request = json_body(&mut session, length)?;
+                remove(agent, &request)
             }
             frame::STATUS => {
                 let request = json_body(&mut session, length)?;
@@ -1061,19 +1100,7 @@ fn run(agent: &Arc<Agent>, request: &Value) -> Result<Arc<Group>, Failure> {
         }),
     });
     groups.push(group.clone());
-    // Keep every running group and the most recent finished ones.
-    let finished = groups.iter().filter(|g| !g.running()).count();
-    if finished > RETAINED_GROUPS {
-        let mut drop = finished - RETAINED_GROUPS;
-        groups.retain(|g| {
-            if drop > 0 && !g.running() {
-                drop -= 1;
-                false
-            } else {
-                true
-            }
-        });
-    }
+    prune_groups(&mut groups, Instant::now());
     drop(groups);
     eprintln!(
         "group {} ({}) rank {rank}: started pid {} on {}",
@@ -1156,6 +1183,20 @@ fn stop(agent: &Agent, request: &Value) -> Result<Vec<u8>, Failure> {
         eprintln!("group {} rank {}: stop requested", group.id, group.rank);
     }
     Ok(json!({"stopped": running}).to_string().into_bytes())
+}
+
+/// Forget completed runs selected by exact launch identifier; never stop a live process.
+fn remove(agent: &Agent, request: &Value) -> Result<Vec<u8>, Failure> {
+    let id = field(request, "group")?;
+    let mut groups = agent.groups.lock().unwrap();
+    if groups.iter().any(|group| group.id == id && group.running()) {
+        return Err(format!("group {id} is running; stop it before removing it").into());
+    }
+    let before = groups.len();
+    groups.retain(|group| group.id != id);
+    Ok(json!({"removed": before - groups.len()})
+        .to_string()
+        .into_bytes())
 }
 
 fn status(agent: &Agent, request: &Value) -> Result<Vec<u8>, Failure> {
@@ -2000,6 +2041,173 @@ pub mod tests {
                 .iter()
                 .all(|g| g["group"].is_null())
         );
+    }
+
+    fn history_group(id: &str, started: Instant) -> Arc<Group> {
+        Arc::new(Group {
+            id: id.into(),
+            name: "history-test".into(),
+            rank: 0,
+            package: "model.safetensors".into(),
+            gpus: Vec::new(),
+            pid: 0,
+            metrics_url: None,
+            started,
+            log: Mutex::new(Log {
+                lines: VecDeque::new(),
+                bytes: 0,
+                exit: None,
+                subscribers: Vec::new(),
+                pins: None,
+            }),
+            metrics: Mutex::new(None),
+        })
+    }
+
+    #[test]
+    fn history_retention_starts_at_exit_and_preserves_running_groups() {
+        let started = Instant::now();
+        let finished = started + SUCCESS_RETENTION * 2;
+        let success = history_group("success", started);
+        success.push("completed".into());
+        success.log.lock().unwrap().exit = Some((0, finished));
+        let failure = history_group("failure", started);
+        failure.log.lock().unwrap().exit = Some((1, finished));
+        let running = history_group("running", started);
+        let mut groups = vec![success.clone(), failure, running];
+
+        prune_groups(
+            &mut groups,
+            finished + SUCCESS_RETENTION - Duration::from_nanos(1),
+        );
+        assert_eq!(groups.len(), 3);
+        prune_groups(&mut groups, finished + SUCCESS_RETENTION);
+        assert_eq!(
+            groups.iter().map(|g| g.id.as_str()).collect::<Vec<_>>(),
+            ["failure", "running"]
+        );
+        // An attached session owns its group independently of the agent's history.
+        let (lines, exit, _) = success.subscribe();
+        assert_eq!(lines, ["completed"]);
+        assert_eq!(exit, Some(0));
+        prune_groups(&mut groups, finished + Duration::from_secs(365 * 86400));
+        assert_eq!(
+            groups.iter().map(|g| g.id.as_str()).collect::<Vec<_>>(),
+            ["failure", "running"]
+        );
+    }
+
+    #[test]
+    fn completed_groups_are_count_bounded_without_another_launch() {
+        let now = Instant::now();
+        let mut groups = (0..RETAINED_GROUPS + 3)
+            .map(|i| history_group(&format!("group-{i}"), now))
+            .collect::<Vec<_>>();
+        // No count limit applies while all the groups are running.
+        prune_groups(&mut groups, now + SUCCESS_RETENTION);
+        assert_eq!(groups.len(), RETAINED_GROUPS + 3);
+        // The first launch remains active while every later launch finishes.
+        for group in groups.iter().skip(1) {
+            group.finish(0);
+        }
+        prune_groups(&mut groups, Instant::now());
+        assert_eq!(groups.len(), RETAINED_GROUPS + 1);
+        assert_eq!(groups[0].id, "group-0");
+        assert!(groups[0].running());
+        assert_eq!(groups[1].id, "group-3");
+        for i in 0..RETAINED_GROUPS + 3 {
+            let failure = history_group(&format!("failure-{i}"), now);
+            failure.finish(1);
+            groups.push(failure);
+        }
+        prune_groups(&mut groups, Instant::now());
+        assert_eq!(
+            groups
+                .iter()
+                .filter(|group| group.exit() == Some(1))
+                .count(),
+            RETAINED_GROUPS + 3
+        );
+        assert_eq!(
+            groups
+                .iter()
+                .filter(|group| group.exit() == Some(0))
+                .count(),
+            RETAINED_GROUPS
+        );
+    }
+
+    #[test]
+    fn removing_history_requires_a_controller_and_preserves_live_groups() {
+        let harness = harness(28);
+        let now = Instant::now();
+        let failed = history_group("failed", now);
+        failed.push("failure detail".into());
+        failed.finish(7);
+        harness
+            .agent
+            .groups
+            .lock()
+            .unwrap()
+            .extend([failed.clone(), history_group("live", now)]);
+        // An unpaired controller cannot remove history.
+        let mut stranger = connect(&harness, &harness.controller);
+        assert!(
+            stranger
+                .request(frame::REMOVE, &json!({"group": "failed"}))
+                .is_err()
+        );
+        let mut session = pair_accept_first(&harness);
+        assert!(
+            session
+                .request(frame::REMOVE, &json!({"group": "live"}))
+                .is_err()
+        );
+        assert_eq!(harness.agent.groups().len(), 2);
+        let mut session = connect(&harness, &harness.controller);
+        let removed: Value = serde_json::from_slice(
+            &session
+                .request(frame::REMOVE, &json!({"group": "failed"}))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(removed["removed"], 1);
+        assert_eq!(harness.agent.groups()[0].id, "live");
+        assert_eq!(failed.subscribe().0, ["failure detail"]);
+        // Retrying after another controller removed the same record is harmless.
+        let removed: Value = serde_json::from_slice(
+            &session
+                .request(frame::REMOVE, &json!({"group": "failed"}))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(removed["removed"], 0);
+    }
+
+    #[test]
+    fn sampler_and_queries_remove_expired_history() {
+        let harness = harness(27);
+        let now = Instant::now();
+        let expired = history_group("expired", now - SUCCESS_RETENTION * 2);
+        expired.log.lock().unwrap().exit = Some((0, now - SUCCESS_RETENTION));
+        harness.agent.groups.lock().unwrap().push(expired.clone());
+        harness.agent.sample();
+        assert!(harness.agent.groups.lock().unwrap().is_empty());
+
+        harness.agent.groups.lock().unwrap().push(expired.clone());
+        assert!(
+            harness.agent.metrics()["groups"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        harness.agent.groups.lock().unwrap().push(expired.clone());
+        let state: Value =
+            serde_json::from_slice(&status(&harness.agent, &json!({})).unwrap()).unwrap();
+        assert!(state["groups"].as_array().unwrap().is_empty());
+        assert!(state["group"].is_null());
+        harness.agent.groups.lock().unwrap().push(expired);
+        assert!(harness.agent.find_group(Some("expired")).is_err());
     }
 
     #[test]

@@ -49,6 +49,7 @@ pub mod frame {
     pub const STAT: u8 = 16;
     pub const CONTROLLERS: u8 = 17;
     pub const METRICS: u8 = 18;
+    pub const REMOVE: u8 = 19;
 }
 
 pub fn hex(bytes: &[u8]) -> String {

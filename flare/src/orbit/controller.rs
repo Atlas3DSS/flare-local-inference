@@ -34,7 +34,7 @@ use super::grant::{ControllerKey, ControllerSet, Grant, Member, Package, Signed,
 use super::identity::{Key, PublicKey};
 use super::plan;
 use super::session::{FRAME_LIMIT, Session};
-use super::store::{Node, Orbit, join_key};
+use super::store::{GroupSpec, Node, Orbit, join_key};
 use super::{
     Failure, PROTOCOL_VERSION, frame, hex, hmac_sha256, hostname, now, random, unhex, with_port,
 };
@@ -146,6 +146,8 @@ pub struct RunOptions {
     /// The operator's name for the group, and the orbit file's `[[group]]` of that name when
     /// one exists; the cluster's name or the package's stem when absent.
     pub name: Option<String>,
+    /// Save the effective launch configuration as a persistent named group.
+    pub persistent: bool,
     /// Candidate nodes in rank order; empty leaves them to the cluster, the group, or the pool.
     pub nodes: Vec<String>,
     /// NVML indices of the GPUs each member uses on its node; empty lets placement pick.
@@ -691,6 +693,13 @@ impl Controller {
         let (name, nodes) = self.cluster(cluster)?;
         let results = parallel(&nodes, |_, node| self.query_status(node, None));
         println!("cluster {name}");
+        for spec in &self.orbit.group {
+            if !spec.nodes.is_empty() && !nodes.iter().any(|node| spec.nodes.contains(&node.name)) {
+                continue;
+            }
+            let state = saved_group_state(spec, &results);
+            println!("persistent {}: {state}; {}", spec.name, spec.package);
+        }
         println!(
             "{:<16}  {:<36}  {:<10}  {:>4}  {:<24}  STATE",
             "NAME", "GROUP", "NODE", "RANK", "GPUS"
@@ -746,13 +755,13 @@ impl Controller {
     /// `flare orbit run`: launch a package on a cluster, then follow its output and stop the group
     /// on Ctrl-C, or, with `detach`, return once every rank has started.
     pub fn run(
-        &self,
+        &mut self,
         package: Option<&str>,
         cluster: Option<&str>,
         mut options: RunOptions,
     ) -> Result<(), Failure> {
         // A [[group]] of the orbit file supplies what the command line leaves out: its package,
-        // its serving options before the command line's, its rank-zero options after them, and
+        // its serving and rank-zero options before the command line's, and
         // its node and GPU constraints.
         let spec = options
             .name
@@ -790,14 +799,14 @@ impl Controller {
         });
         let mut serving = spec.as_ref().map_or_else(Vec::new, |s| s.serving.clone());
         serving.extend(options.serving.iter().cloned());
-        let verify_weights = options.verify_weights || options.run_args.serving.verify_weights;
+        let verify_weights = options.verify_weights
+            || options.run_args.serving.verify_weights
+            || serving.iter().any(|arg| arg == "--verify-weights");
         if verify_weights && !serving.iter().any(|a| a == "--verify-weights") {
             serving.push("--verify-weights".into());
         }
-        let mut rank_zero = options.rank_zero.clone();
-        if let Some(spec) = &spec {
-            rank_zero.extend(spec.rank_zero.iter().cloned());
-        }
+        let mut rank_zero = spec.as_ref().map_or_else(Vec::new, |s| s.rank_zero.clone());
+        rank_zero.extend(options.rank_zero.iter().cloned());
         let roce_ring = options.roce_ring || spec.as_ref().is_some_and(|s| s.roce_ring);
         let gpus = if options.gpus.is_empty() {
             spec.as_ref().map_or_else(Vec::new, |s| s.gpus.clone())
@@ -805,6 +814,25 @@ impl Controller {
             options.gpus.clone()
         };
 
+        if options.persistent
+            && options
+                .name
+                .as_deref()
+                .is_none_or(|name| name.trim().is_empty())
+        {
+            return Err("--persistent requires a nonempty --name".into());
+        }
+        if options.executable.is_none() {
+            options.executable = spec.as_ref().and_then(|s| s.executable.clone());
+        }
+        if let Some(spec) = &spec {
+            if options.run_args.serving.publisher_keys.is_empty() {
+                options.run_args.serving.publisher_keys = spec.publisher_keys.clone();
+            }
+            if options.run_args.serving.trust_store.is_none() {
+                options.run_args.serving.trust_store = spec.trust_store.clone();
+            }
+        }
         let executable = read_executable(options.executable.as_deref())?;
         let resolved = self.resolve_package(&package, &mut options.run_args, verify_weights)?;
 
@@ -845,6 +873,16 @@ impl Controller {
                 Err(error) => return Err(at(&node.name, error)),
             }
         }
+        if (options.persistent || spec.is_some())
+            && statuses
+                .iter()
+                .any(|status| status.running().any(|group| group.name == name))
+        {
+            return Err(format!(
+                "persistent group {name} is already running; stop it before starting it again"
+            )
+            .into());
+        }
         let names: Vec<String> = nodes.iter().map(|n| n.name.clone()).collect();
         let length = resolved.files[0].size;
         let needs = plan::Needs {
@@ -863,7 +901,7 @@ impl Controller {
         };
         let constraints = plan::Constraints {
             nodes: candidates.clone(),
-            gpus,
+            gpus: gpus.clone(),
         };
         let placements = plan::plan(&needs, &names, &statuses, &constraints);
         if let Some(banner) = banner {
@@ -887,6 +925,48 @@ impl Controller {
         if options.dry_run {
             eprintln!("dry run: nothing started");
             return Ok(());
+        }
+        if options.persistent {
+            let package = match &resolved.holder {
+                Holder::Controller { primary } => primary.to_string_lossy().into_owned(),
+                Holder::Node { node, path } => format!("{}:{path}", node.name),
+            };
+            let saved = GroupSpec {
+                name: name.clone(),
+                package,
+                serving: serving.clone(),
+                rank_zero: rank_zero.clone(),
+                nodes: candidates.clone(),
+                gpus,
+                roce_ring,
+                executable: options
+                    .executable
+                    .as_deref()
+                    .map(Path::canonicalize)
+                    .transpose()?,
+                publisher_keys: options
+                    .run_args
+                    .serving
+                    .publisher_keys
+                    .iter()
+                    .map(|path| path.canonicalize())
+                    .collect::<Result<_, _>>()?,
+                trust_store: options
+                    .run_args
+                    .serving
+                    .trust_store
+                    .as_deref()
+                    .map(absolute_path)
+                    .transpose()?,
+            };
+            // Persist validated intent before RUN so a failed launch remains restartable.
+            let mut orbit = Orbit::load(&self.orbit_path)?;
+            orbit.save_group(saved);
+            orbit.save(&self.orbit_path)?;
+            self.orbit = orbit;
+            eprintln!(
+                "saved persistent group {name}; start it again with `flare orbit run --name {name}`"
+            );
         }
         let members: Vec<Node> = placements.iter().map(|p| nodes[p.node].clone()).collect();
         let launch = self.launch(
@@ -1463,6 +1543,48 @@ impl Controller {
     }
 
     // ---- attaching and stopping ----------------------------------------------------------------
+
+    /// Remove a named definition and its stopped runs, or one exact run without its definition.
+    pub fn remove(&mut self, name: &str) -> Result<(), Failure> {
+        // Inspect every paired node before deleting anything. An unreachable node may still run
+        // this name, so partial visibility cannot authorize forgetting its saved definition.
+        let statuses = all(parallel(&self.orbit.node, |_, node| {
+            self.node_status(node, None)
+        }))?;
+        let mut runs = Vec::new();
+        for (node, status) in self.orbit.node.iter().zip(&statuses) {
+            for group in status
+                .groups
+                .iter()
+                .filter(|group| group.id == name || group.name == name)
+            {
+                if group.running {
+                    return Err(format!(
+                        "group {} is running on {}; stop it before removing it",
+                        group.id, node.name
+                    )
+                    .into());
+                }
+                runs.push((node.clone(), group.id.clone()));
+            }
+        }
+        if runs.is_empty() && self.orbit.group(name).is_none() {
+            return Err(format!("no saved group or retained run named {name}").into());
+        }
+        for (node, id) in &runs {
+            let (mut session, _) = self.node_session(node)?;
+            session.request(frame::REMOVE, &json!({"group": id}))?;
+        }
+        let mut orbit = Orbit::load(&self.orbit_path)?;
+        let before = orbit.group.len();
+        orbit.group.retain(|group| group.name != name);
+        if before != orbit.group.len() {
+            orbit.save(&self.orbit_path)?;
+        }
+        self.orbit = orbit;
+        eprintln!("removed {name}; model packages remain cached");
+        Ok(())
+    }
 
     /// Follow the groups on a cluster's nodes, or the group named `group`: retained output,
     /// then live output until every rank exits. Ctrl-C detaches and leaves the groups running.
@@ -2192,6 +2314,28 @@ fn gib(bytes: u64) -> String {
 
 // ---- helpers -----------------------------------------------------------------------------------
 
+fn absolute_path(path: &Path) -> Result<PathBuf, Failure> {
+    Ok(if path.is_absolute() {
+        path.to_owned()
+    } else {
+        std::env::current_dir()?.join(path)
+    })
+}
+
+fn saved_group_state(spec: &GroupSpec, statuses: &[Result<NodeStatus, Failure>]) -> &'static str {
+    if statuses
+        .iter()
+        .filter_map(|status| status.as_ref().ok())
+        .any(|status| status.running().any(|group| group.name == spec.name))
+    {
+        "running"
+    } else if statuses.iter().any(Result::is_err) {
+        "unknown (node unreachable)"
+    } else {
+        "stopped"
+    }
+}
+
 /// Prefix an error with the node it concerns.
 fn at(node: &str, error: Failure) -> Failure {
     format!("{node}: {error}").into()
@@ -2304,7 +2448,7 @@ mod tests {
                 nodes: vec!["zero".into(), "one".into()],
             },
         );
-        let controller = Controller::new(
+        let mut controller = Controller::new(
             Key::from_seed(&[21; 32]).unwrap(),
             orbit,
             temp.path().join("orbit.toml"),
@@ -2410,6 +2554,33 @@ mod tests {
         let binary = cache::binary_name(script.as_bytes());
         assert!(zero.agent.cache.join("bin").join(&binary).is_file());
         assert!(one.agent.cache.join("bin").join(&binary).is_file());
+
+        controller.orbit.save_group(GroupSpec {
+            name: "pair".into(),
+            package: primary.to_string_lossy().into_owned(),
+            ..GroupSpec::default()
+        });
+        controller.save().unwrap();
+        controller.remove(&launch.grant.group).unwrap();
+        assert!(controller.orbit.group("pair").is_some());
+        for node in &nodes {
+            assert!(
+                controller
+                    .node_status(node, None)
+                    .unwrap()
+                    .groups
+                    .is_empty()
+            );
+        }
+        controller.remove("pair").unwrap();
+        assert!(
+            Orbit::load(&controller.orbit_path)
+                .unwrap()
+                .group
+                .is_empty()
+        );
+        assert!(complete.is_file());
+        assert!(partial.is_file());
 
         // Staging places and verifies the package without executables or ranks.
         let staged = ResolvedPackage {
