@@ -113,6 +113,7 @@ impl Bootstrap {
         let prepared_sequence_tokens = usize::try_from(integer("max_sequence_tokens", None)?)
             .map_err(|_| "prepared context extent overflow")?;
         let mut model = ModelConfig {
+            max_top_logprobs: manifest.max_top_logprobs()?,
             prepared_sequence_tokens,
             contract,
             model_id: text("model_id")?.into(),
@@ -254,6 +255,7 @@ impl Bootstrap {
             defaults,
             &frontend_settings,
         )?;
+        if model.max_top_logprobs != 0 { frontend.prepare_token_bytes()?; }
         if frontend_settings
             .image
             .as_ref()

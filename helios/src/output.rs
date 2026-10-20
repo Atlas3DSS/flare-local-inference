@@ -26,8 +26,10 @@ pub enum Input<'a> {
 
 /// Ordered presentation input after worker-owned string-stop filtering.
 /// Token IDs accompany only fully visible spans; clipped spans carry text.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Piece {
+    #[cfg(feature = "server")]
+    Logprob(crate::server::token_spans::ReturnedLogprob),
     Token(u32),
     Text(String),
 }
@@ -41,8 +43,12 @@ pub enum Termination {
     ExecutionError,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Event {
+    #[cfg(feature = "server")]
+    TokenLogprobs(Vec<crate::server::token_spans::ReturnedLogprob>),
+    #[cfg(feature = "server")]
+    ContentLogprobs(Vec<crate::server::token_spans::ReturnedLogprob>),
     Content(String),
     Reasoning(String),
     ToolBegin {
@@ -79,6 +85,14 @@ pub trait ToolCallParser {
 
 /// Concrete associated types keep model selection outside the token loop.
 pub trait ModelOutput {
+    /// One span per Content event from the latest push/finish, in event order.
+    /// Ranges use absolute byte offsets in concatenated Input::Text strings;
+    /// token inputs add no bytes. None marks synthetic content without source bytes.
+    fn content_spans(&self) -> Vec<Option<std::ops::Range<usize>>>;
+    /// Monotonic byte watermark in the same coordinates: future content cannot
+    /// refer to earlier bytes. Attribution entries starting below this watermark
+    /// may be discarded after processing the latest events and their spans.
+    fn consumed_bytes(&self) -> usize;
     type Config;
     fn new(config: Self::Config) -> Self;
     #[cfg(feature = "server")]

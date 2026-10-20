@@ -130,6 +130,7 @@ fn completed(status: i64) -> FrameCompletion {
         vector: None,
     };
     FrameCompletion {
+        logprobs: None,
         proposal_confidence: None,
         fence: Fence(3),
         graph_index: 2,

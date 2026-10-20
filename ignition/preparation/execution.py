@@ -60,7 +60,8 @@ class GraphSignature:
         object.__setattr__(self, "inputs", tuple(self.inputs))
         if len(set(self.inputs)) != len(self.inputs):
             raise ValueError("graph input names must be unique")
-        if any(name in self.inputs for name in ("frame_index", "submission_sequence", "completion_records")):
+        if any(name in self.inputs for name in ("frame_index", "submission_sequence", "completion_records",
+                                               "completion_logprobs", "logprob_requested")):
             raise ValueError("reserved execution buffers are bound automatically")
 
 
@@ -89,6 +90,8 @@ class PreparedExecution(PreparedGraphBundle):
         for signature in signatures.values():
             if not set(signature.inputs) <= self.buffers.keys():
                 raise ValueError("graph signature references an unregistered input buffer")
+        from ignition.components.completion import validate_completion_buffers
+        validate_completion_buffers(self.buffers, request_capacity(max_active))
         self.signatures = MappingProxyType(dict(signatures))
         durations = dict.fromkeys(self.graphs, 0) if estimated_durations_ns is None else dict(estimated_durations_ns)
         if durations.keys() != self.graphs.keys() or any(
@@ -104,7 +107,10 @@ class PreparedExecution(PreparedGraphBundle):
         descriptors = []
         offsets = {}
         cursor = 0
-        input_names = {"frame_index", "submission_sequence"}
+        reserved = ("frame_index", "submission_sequence")
+        if "logprob_requested" in self.buffers:
+            reserved += ("logprob_requested",)
+        input_names = set(reserved)
         for signature in self.signatures.values():
             input_names.update(signature.inputs)
         for (name, tensor), (address, nbytes) in zip(self.buffers.items(), spans, strict=True):
@@ -121,7 +127,7 @@ class PreparedExecution(PreparedGraphBundle):
             signature = self.signatures[name]
             if not all_variants and signature.speculation_enabled not in (None, speculative):
                 continue
-            inputs = ("frame_index", "submission_sequence", *signature.inputs)
+            inputs = (*reserved, *signature.inputs)
             graphs.append({"name": name, "kind": signature.kind, "handle": handle,
                 "sampling_mode": signature.sampling_mode,
                 "batch_capacity": signature.batch_capacity, "token_capacity": signature.token_capacity,

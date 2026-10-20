@@ -7,6 +7,8 @@ import os
 import pytest
 import torch
 
+from tests.components.completion_support import completion_outputs
+
 from ignition.preparation.scratch import GraphBufferPool
 from ignition.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission
 from ignition.recipes.qwen38.vision_state import (
@@ -74,7 +76,7 @@ def test_native_vision_handoff_append_epoch_validation_and_completion(compiled):
     buffers = pool.cursor()
     pixels = buffers.zeros((256, 1536), torch.bfloat16)
     operation = PreparedVisionHandoff(
-        inputs, features, requests, output, records, frame, sequence, pixels=pixels, buffers=buffers
+        inputs, features, requests, output, completion_outputs(records), frame, sequence, pixels=pixels, buffers=buffers
     )
     operation.prepare()
     def forward():

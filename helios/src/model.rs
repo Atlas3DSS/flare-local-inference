@@ -82,6 +82,7 @@ impl VisionCapabilities {
 
 #[derive(Clone, Debug)]
 pub struct ModelConfig {
+    pub max_top_logprobs: usize,
     /// Context extent of captured page tables and workspaces; serving may use a smaller limit.
     pub prepared_sequence_tokens: usize,
     pub contract: PreparedContract,

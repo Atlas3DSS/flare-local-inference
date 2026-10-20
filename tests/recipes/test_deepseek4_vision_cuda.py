@@ -8,6 +8,8 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+
+from tests.components.completion_support import completion_outputs
 from b12x.preparation import PreparationSession
 
 from ignition.components.paged_batch import BatchInputs
@@ -112,7 +114,7 @@ def test_compiled_vision_publishes_only_valid_current_generation(compiler):
     requests.status[2] = 1
     with PreparationSession(device=device, autotune=False, compile_workers=2) as session:
         encoder = PreparedVision(weights, scratch, inputs, session=session, workspace=arena, name="vision", buffers=buffers)
-        operation = PreparedVisionGeneration(encoder, state, records, frame, sequence, buffers=buffers)
+        operation = PreparedVisionGeneration(encoder, state, completion_outputs(records), frame, sequence, buffers=buffers)
         if compiler == "aot":
             from ignition.preparation.aot import aot_forward
 

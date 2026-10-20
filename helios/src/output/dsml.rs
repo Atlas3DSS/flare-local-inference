@@ -21,6 +21,8 @@ struct Call {
 }
 
 pub struct DsmlOutput<const SPACED: bool> {
+    consumed: usize,
+    spans: Vec<Option<std::ops::Range<usize>>>,
     machine: Option<StateMachine>,
     pending: String,
     last_action: OutputAction,
@@ -45,6 +47,7 @@ impl<const SPACED: bool> DsmlOutput<SPACED> {
             match segment.action {
                 OutputAction::Raw => {
                     if !source.is_empty() {
+                        self.spans.push(Some(self.consumed + consumed..self.consumed + end));
                         events.push(Event::Content(source.to_owned()));
                         self.verbatim = self.structured && !source.trim().is_empty();
                     }
@@ -129,9 +132,13 @@ impl<const SPACED: bool> DsmlOutput<SPACED> {
                     self.calls += 1;
                 }
                 OutputAction::Label(label) if !repeated => {
+                    self.spans.push(None);
                     events.push(Event::Content(label.into()))
                 }
-                OutputAction::ToSpace => events.push(Event::Content(" ".into())),
+                OutputAction::ToSpace => {
+                    self.spans.push(Some(self.consumed + consumed..self.consumed + end));
+                    events.push(Event::Content(" ".into()));
+                },
                 _ => {}
             }
             if self.call.as_ref().is_some_and(|call| {
@@ -145,7 +152,10 @@ impl<const SPACED: bool> DsmlOutput<SPACED> {
             }
         }
         self.pending.drain(..consumed);
+        self.consumed += consumed;
         if self.verbatim && !self.pending.is_empty() {
+            self.spans.push(Some(self.consumed..self.consumed + self.pending.len()));
+            self.consumed += self.pending.len();
             events.push(Event::Content(std::mem::take(&mut self.pending)));
         }
         if self.pending.len() > BUFFER_LIMIT {
@@ -166,6 +176,8 @@ impl<const SPACED: bool> ModelOutput for DsmlOutput<SPACED> {
 
     fn new(config: OutputConfig) -> Self {
         Self {
+            consumed: 0,
+            spans: vec![],
             machine: Some(StateMachine::new(ParsingOptions {
                 parse_tool_calls: !config.tools.is_empty(),
                 tool_call_initial_stage: config.start == OutputStart::ToolBody,
@@ -200,7 +212,14 @@ impl<const SPACED: bool> ModelOutput for DsmlOutput<SPACED> {
         })
     }
 
+    fn content_spans(&self) -> Vec<Option<std::ops::Range<usize>>> {
+        self.spans.clone()
+    }
+    fn consumed_bytes(&self) -> usize {
+        self.consumed
+    }
     fn push(&mut self, input: Input<'_>) -> Result<Vec<Event>> {
+        self.spans.clear();
         if self.machine.is_none() {
             return Err("output presentation is finished".into());
         }
@@ -217,6 +236,8 @@ impl<const SPACED: bool> ModelOutput for DsmlOutput<SPACED> {
         }
         if !rest.is_empty() {
             if self.verbatim {
+                self.spans.push(Some(self.consumed..self.consumed + rest.len()));
+                self.consumed += rest.len();
                 events.push(Event::Content(rest.to_owned()));
             } else {
                 self.feed(rest, &mut events)?;
@@ -226,6 +247,7 @@ impl<const SPACED: bool> ModelOutput for DsmlOutput<SPACED> {
     }
 
     fn finish(&mut self, cause: Termination) -> Result<Vec<Event>> {
+        self.spans.clear();
         let machine = self
             .machine
             .take()

@@ -76,6 +76,7 @@ pub fn contract(name: &str) -> crate::model::PreparedContract {
 
 pub fn model_config(contract: crate::model::PreparedContract) -> crate::model::ModelConfig {
     crate::model::ModelConfig {
+        max_top_logprobs: 0,
         prepared_sequence_tokens: 1048576,
         contract,
         model_id: "frontend-fixture".into(),

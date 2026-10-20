@@ -24,6 +24,8 @@ enum Channel {
 }
 
 pub struct XtmlOutput {
+    received: usize,
+    spans: Vec<Option<std::ops::Range<usize>>>,
     channel: Channel,
     buffer: String,
     tools: Vec<Value>,
@@ -36,6 +38,8 @@ pub struct XtmlOutput {
 impl XtmlOutput {
     pub fn new(config: OutputConfig, control_tokens: Vec<(u32, String)>) -> Self {
         Self {
+            received: 0,
+            spans: vec![],
             channel: if config.start == crate::output::tagged::OutputStart::Reasoning {
                 Channel::Reasoning
             } else {
@@ -50,7 +54,14 @@ impl XtmlOutput {
         }
     }
 
+    pub fn content_spans(&self) -> Vec<Option<std::ops::Range<usize>>> {
+        self.spans.clone()
+    }
+    pub fn consumed_bytes(&self) -> usize {
+        self.received - if matches!(self.channel, Channel::Response) { unescape(&self.buffer).len() } else { 0 }
+    }
     pub fn push(&mut self, input: Input<'_>) -> Result<Vec<Event>> {
+        self.spans.clear();
         let text = match input {
             Input::Token(token) => {
                 if let Some((_, marker)) = self.control_tokens.iter().find(|(id, _)| *id == token) {
@@ -82,6 +93,7 @@ impl XtmlOutput {
     }
 
     fn push_encoded(&mut self, text: &str) -> Result<Vec<Event>> {
+        self.received += unescape(text).len();
         self.buffer.push_str(text);
         let mut events = Vec::new();
         loop {
@@ -96,8 +108,10 @@ impl XtmlOutput {
                     let boundary = self.buffer.find(close);
                     let visible = boundary
                         .unwrap_or_else(|| self.buffer.len() - partial(&self.buffer, close));
+                    let start = self.consumed_bytes();
                     let text: String = self.buffer.drain(..visible).collect();
                     if !text.is_empty() {
+                        if !reasoning { self.spans.push(Some(start..start + unescape(&text).len())); }
                         events.push(if reasoning {
                             Event::Reasoning(unescape(&text))
                         } else {
@@ -185,6 +199,7 @@ impl XtmlOutput {
     }
 
     pub fn finish(&mut self, cause: Termination) -> Result<Vec<Event>> {
+        self.spans.clear();
         if matches!(cause, Termination::Cancelled | Termination::ExecutionError) {
             self.buffer.clear();
             self.pending_text.clear();
@@ -200,9 +215,11 @@ impl XtmlOutput {
             self.buffer.clear();
             return Ok(Vec::new());
         }
+        self.received += self.pending_text.len();
         self.buffer
             .push_str(&escape(&std::mem::take(&mut self.pending_text)));
         self.pending_controls.clear();
+        let start = self.consumed_bytes();
         let text = unescape(&std::mem::take(&mut self.buffer));
         if text.is_empty() || matches!(self.channel, Channel::Closed) {
             Ok(Vec::new())
@@ -210,7 +227,7 @@ impl XtmlOutput {
             Ok(vec![if matches!(self.channel, Channel::Reasoning) {
                 Event::Reasoning(text)
             } else {
-                Event::Content(text)
+                { self.spans.push(Some(start..start + text.len())); Event::Content(text) }
             }])
         }
     }

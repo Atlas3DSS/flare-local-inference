@@ -69,7 +69,7 @@ def test_model_discovery_and_lookup(clients):
         assert card["flare"]["input_modalities"][0] == "text"
         assert card["flare"]["sampling_defaults"]["temperature"] > 0
         assert card["permission"][0]["allow_sampling"] is True
-        assert card["permission"][0]["allow_logprobs"] is False
+        assert card["permission"][0]["allow_logprobs"] is (card["flare"]["max_top_logprobs"] > 0)
         assert o.models.retrieve(card["id"]).model_dump() == card
         assert o.models.retrieve(card["root"]).model_dump() == card
         encoded = http.get("/v1/models/" + quote(card["id"], safe=""))
@@ -639,3 +639,153 @@ def test_image_input(clients):
         assert 0 < usage.prompt_tokens_details.multimodal_tokens["image"] <= usage.prompt_tokens
         assert usage.prompt_tokens == message_input_tokens(result.usage)
         assert usage.total_tokens == usage.prompt_tokens + usage.completion_tokens
+
+
+def _logprob_package(http):
+    card = http.get('/v1/models').json()['data'][0]
+    if not card['permission'][0]['allow_logprobs']:
+        response = http.post('/v1/chat/completions', json={'messages': USER, 'max_tokens': 1, 'logprobs': True})
+        assert response.status_code == 400
+        assert 'not available in this model package' in response.text
+        pytest.skip('package predates generation logprobs')
+    assert card['flare']['max_top_logprobs'] == 20
+
+
+def _check_logprob_entry(entry, top):
+    assert entry['token'].startswith('token_id:')
+    assert isinstance(entry['logprob'], (int, float)) and entry['logprob'] <= 0
+    assert all(isinstance(b, int) and 0 <= b < 256 for b in entry['bytes'])
+    alternatives = entry['top_logprobs']
+    assert len(alternatives) == top
+    keys = [(-a['logprob'], int(a['token'].split(':')[1])) for a in alternatives]
+    assert keys == sorted(keys)
+
+
+@pytest.mark.parametrize('streaming', [False, True])
+def test_generation_logprobs_single_token_continuation(clients, streaming):
+    _, _, http = clients
+    _logprob_package(http)
+    body = {'messages': [{'role': 'user', 'content': 'Choose A or B. Reply with only the letter.'},
+                         {'role': 'assistant', 'content': 'Choice:'}],
+            'max_tokens': 1, 'continue_final_message': True, 'add_generation_prompt': False,
+            'logprobs': True, 'top_logprobs': 20, 'return_tokens_as_token_ids': True,
+            'stream': streaming}
+    if streaming:
+        entries = []
+        with http.stream('POST', '/v1/chat/completions', json=body) as response:
+            assert response.status_code == 200, response.read()
+            for line in response.iter_lines():
+                if line.startswith('data: ') and line != 'data: [DONE]':
+                    data = json.loads(line[6:])
+                    for choice in data.get('choices', []):
+                        entries.extend((choice.get('logprobs') or {}).get('content', []))
+    else:
+        response = http.post('/v1/chat/completions', json=body)
+        assert response.status_code == 200, response.text
+        entries = response.json()['choices'][0]['logprobs']['content']
+    assert len(entries) == 1
+    _check_logprob_entry(entries[0], 20)
+
+
+@pytest.mark.parametrize('streaming', [False, True])
+def test_completion_logprob_arrays_and_offsets(clients, streaming):
+    _, _, http = clients
+    _logprob_package(http)
+    body = {'prompt': 'Once upon a time', 'max_tokens': 4, 'ignore_eos': True,
+            'logprobs': 3, 'return_tokens_as_token_ids': True, 'stream': streaming}
+    parts = []
+    if streaming:
+        with http.stream('POST', '/v1/completions', json=body) as response:
+            assert response.status_code == 200, response.read()
+            for line in response.iter_lines():
+                if line.startswith('data: ') and line != 'data: [DONE]':
+                    for choice in json.loads(line[6:]).get('choices', []):
+                        if choice.get('logprobs') is not None:
+                            parts.append(choice['logprobs'])
+    else:
+        response = http.post('/v1/completions', json=body)
+        assert response.status_code == 200, response.text
+        parts.append(response.json()['choices'][0]['logprobs'])
+    tokens = [token for part in parts for token in part['tokens']]
+    offsets = [offset for part in parts for offset in part['text_offset']]
+    assert len(tokens) == len(offsets) == 4
+    assert offsets[0] == 0 and offsets == sorted(offsets)
+    for part in parts:
+        assert len(part['tokens']) == len(part['token_logprobs']) == len(part['top_logprobs']) == len(part['text_offset'])
+        assert all(token.startswith('token_id:') for token in part['tokens'])
+        assert all(len(top) == 3 for top in part['top_logprobs'])
+
+
+@pytest.mark.parametrize('streaming', [False, True])
+def test_responses_logprobs_belong_to_output_text(clients, streaming):
+    _, _, http = clients
+    _logprob_package(http)
+    body = {'input': USER, 'max_output_tokens': 16, 'include': ['message.output_text.logprobs'],
+            'top_logprobs': 3, 'return_tokens_as_token_ids': True, 'stream': streaming, **EXTRA}
+    deltas = []
+    if streaming:
+        final = None
+        with http.stream('POST', '/v1/responses', json=body) as response:
+            assert response.status_code == 200, response.read()
+            for line in response.iter_lines():
+                if not line.startswith('data: '):
+                    continue
+                event = json.loads(line[6:])
+                if event['type'] == 'response.output_text.delta':
+                    deltas.extend(event['logprobs'])
+                if event['type'] == 'response.completed' or event['type'] == 'response.incomplete':
+                    final = event['response']
+        assert final is not None
+    else:
+        response = http.post('/v1/responses', json=body)
+        assert response.status_code == 200, response.text
+        final = response.json()
+    entries = []
+    for item in final['output']:
+        for part in item.get('content', []):
+            if part['type'] == 'output_text':
+                entries.extend(part['logprobs'])
+            else:
+                assert 'logprobs' not in part
+    for entry in entries:
+        _check_logprob_entry(entry, 3)
+    if streaming:
+        assert entries == deltas
+
+
+def test_logprob_validation_preserves_other_request_semantics(clients):
+    _, _, http = clients
+    for route, body in [
+        ('/v1/chat/completions', {'messages': USER, 'top_logprobs': 1}),
+        ('/v1/chat/completions', {'messages': USER, 'logprobs': True, 'top_logprobs': 21}),
+        ('/v1/completions', {'prompt': 'x', 'logprobs': 0, 'echo': True}),
+        ('/v1/responses', {'input': USER, 'top_logprobs': 1}),
+        ('/v1/messages', {'messages': USER, 'max_tokens': 1, 'top_logprobs': 0}),
+    ]:
+        response = http.post(route, json=body, headers={'anthropic-version': '2023-06-01'})
+        assert response.status_code == 400, response.text
+
+
+def test_concurrent_speculative_logprobs_keep_request_lengths_and_flags_separate(clients):
+    _, _, http = clients
+    _logprob_package(http)
+    for round in range(2):
+        def generate(index):
+            length = (1, 7, 23, 9)[index]
+            requested = (index + round) % 2 == 0
+            body = {'prompt': 'Count the integers starting at one:', 'max_tokens': length,
+                    'ignore_eos': True, 'top_k': 1, 'temperature': 1, 'seed': 42}
+            if requested:
+                body.update(logprobs=5, return_tokens_as_token_ids=True)
+            response = http.post('/v1/completions', json=body)
+            assert response.status_code == 200, response.text
+            choice = response.json()['choices'][0]
+            if requested:
+                values = choice['logprobs']
+                assert len(values['tokens']) == len(values['token_logprobs']) == length
+                assert len(values['top_logprobs']) == len(values['text_offset']) == length
+                assert all(len(top) == 5 for top in values['top_logprobs'])
+            else:
+                assert choice['logprobs'] is None
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            list(executor.map(generate, range(4)))

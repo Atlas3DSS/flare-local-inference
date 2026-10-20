@@ -9,6 +9,7 @@ use crate::{
 
 pub(super) fn config() -> ModelConfig {
     ModelConfig {
+        max_top_logprobs: 0,
         prepared_sequence_tokens: 2048,
         contract: super::testing::metadata(),
         identity: [1; 32],

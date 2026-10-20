@@ -6,6 +6,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from tests.components.completion_support import completion_outputs
+
 from ignition.components.sampling import AdmissionBuffers
 from ignition.preparation.graphs import PreparedGraphBundle
 from ignition.recipes.qwen38.attention import QSAState
@@ -35,7 +37,7 @@ def test_noncontiguous_bindings_snapshot_normalization_and_runtime_bounds():
     sequence = torch.zeros(1, dtype=torch.int64, device=device)
     operations, graphs = [], {}
     for mode in ("init", "snapshot", "restore"):
-        operation = PreparedMaintenance(mode, requests, pool, commands, records, frame, sequence,
+        operation = PreparedMaintenance(mode, requests, pool, commands, completion_outputs(records), frame, sequence,
             admission_buffers=admission, forward_inputs=inputs, capacity=2,
             qsa_states=tuple(cache[layer] for layer in range(3, 48, 4)), speculation=speculation)
         operation.prepare()

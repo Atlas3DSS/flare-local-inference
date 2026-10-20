@@ -725,12 +725,12 @@ def test_prepare_model_constructs_real_catalog_on_meta(
     for decoder, args in decoders:
         assert len(decoder.layers) == 48
         assert args["workspaces"] is session.arena
-        assert args["completion_records"].shape == (
+        assert args["completion_records"].records.shape == (
             2,
             config.request_capacity,
             8 if proposal == "ordinary" else 24,
         )
-        assert args["completion_records"].dtype == torch.int64
+        assert args["completion_records"].records.dtype == torch.int64
         pool = args["state"].pool
         if not decoder.verification:
             assert (args["state"]._residual is not None) == args["state"].maintain_draft_state

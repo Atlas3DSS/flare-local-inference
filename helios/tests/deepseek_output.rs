@@ -22,6 +22,7 @@ struct Parsed {
 impl Parsed {
     fn event(&mut self, event: Event) {
         match event {
+            Event::TokenLogprobs(_) | Event::ContentLogprobs(_) => panic!("unexpected logprobs from syntax parser"),
             Event::Content(text) => self.content.push_str(&text),
             Event::Reasoning(text) => self.reasoning.push_str(&text),
             Event::ToolBegin { index, name, .. } => {

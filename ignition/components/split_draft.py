@@ -158,7 +158,7 @@ class PreparedDraftProposal:
         self.allowed = torch.zeros_like(source.active)
         self.depth = torch.full_like(source.before, source.width - 1)
         self.completion = PreparedCompletion(o.requests, o.inputs.row_slot_ids[:b],
-            o.inputs.row_generations[:b], o.inputs.live_rows, o.records, o.frame, o.sequence)
+            o.inputs.row_generations[:b], o.inputs.live_rows, o.completion, o.frame, o.sequence)
         self.completion.prepare()
 
     def __call__(self):
@@ -180,7 +180,7 @@ class PreparedDraftProposal:
         self.completion()
         torch.library.wrap_triton(_reject_stale)[(s.batch,)](
             self.allowed, slots, o.inputs.row_generations, o.inputs.live_rows, o.requests.generation,
-            o.requests.consumed_tokens, o.requests.generated_tokens, o.records, o.frame, o.sequence,
+            o.requests.consumed_tokens, o.requests.generated_tokens, o.completion.records, o.frame, o.sequence,
             o.requests.consumed_tokens.stride(0), o.requests.capacity)
 
 
@@ -231,7 +231,7 @@ class PreparedDraftVerification:
         r = o.requests
         torch.library.wrap_triton(_reject_stale)[(t.batch,)](
             self.admitted, slots, o.inputs.row_generations, o.inputs.live_rows, r.generation,
-            r.consumed_tokens, r.generated_tokens, o.records, o.frame, o.sequence,
+            r.consumed_tokens, r.generated_tokens, o.completion.records, o.frame, o.sequence,
             r.consumed_tokens.stride(0), r.capacity)
 
 

@@ -5,6 +5,8 @@ mod deepseek;
 pub mod images;
 mod json;
 
+mod vocabulary;
+
 use std::fs;
 use std::path::PathBuf;
 
@@ -193,6 +195,7 @@ pub struct Frontend {
     template_source: String,
     bos_token_id: Option<u32>,
     effort_levels: std::sync::OnceLock<Vec<String>>,
+    vocabulary_bytes: std::sync::OnceLock<Result<vocabulary::VocabularyBytes>>,
     inline_system_messages: std::sync::OnceLock<bool>,
     defaults: Map<String, Json>,
 }
@@ -459,6 +462,7 @@ impl Frontend {
             prompt_encoder,
             image_placeholder_token_id,
             bos_token_id,
+            vocabulary_bytes: Default::default(),
             effort_levels: Default::default(),
             inline_system_messages: Default::default(),
             tokenizer,
@@ -690,6 +694,17 @@ impl Frontend {
         Ok(original)
     }
 
+    #[cfg(feature = "server")]
+    pub(crate) fn prepare_token_bytes(&self) -> Result<()> {
+        self.vocabulary_bytes.get_or_init(|| vocabulary::VocabularyBytes::new(&self.tokenizer))
+            .as_ref().map(|_| ()).map_err(Clone::clone)
+    }
+
+    pub fn token_bytes(&self, token: u32) -> Result<&[u8]> {
+        self.vocabulary_bytes.get_or_init(|| vocabulary::VocabularyBytes::new(&self.tokenizer))
+            .as_ref().map_err(Clone::clone)?.get(token)
+    }
+
     pub fn incremental_decoder(&self, skip_special_tokens: bool) -> IncrementalDecoder<'_> {
         IncrementalDecoder {
             tokenizer: &self.tokenizer,
@@ -735,6 +750,11 @@ impl IncrementalDecoder<'_> {
                 error,
             )))
         })
+    }
+
+    pub(crate) fn pending_text(&self) -> Result<String> {
+        let text = self.tokenizer.decode(&self.ids, self.skip_special_tokens).map_err(|e| e.to_string())?;
+        Ok(text.strip_prefix(&self.prefix).ok_or("decoder changed its emitted prefix")?.to_owned())
     }
 
     pub fn finish(&mut self) -> Result<String> {
@@ -795,6 +815,7 @@ mod tests {
             environment,
             template_source: source,
             bos_token_id: None,
+            vocabulary_bytes: Default::default(),
             effort_levels: Default::default(),
             inline_system_messages: Default::default(),
             defaults: Map::new(),
@@ -905,6 +926,7 @@ mod tests {
                 environment,
                 template_source: source,
                 bos_token_id: None,
+                vocabulary_bytes: Default::default(),
                 effort_levels: Default::default(),
                 inline_system_messages: Default::default(),
                 defaults: Map::new(),
@@ -968,6 +990,7 @@ mod tests {
             prompt_encoder: PromptEncoder::Jinja,
             image_placeholder_token_id: None,
             bos_token_id: None,
+            vocabulary_bytes: Default::default(),
             effort_levels: Default::default(),
             inline_system_messages: Default::default(),
             ordinary_tokenizer: None,

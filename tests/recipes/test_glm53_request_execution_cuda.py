@@ -10,6 +10,8 @@ import time
 import pytest
 import torch
 
+from tests.components.completion_support import completion_outputs
+
 from ignition.components.parallel import TensorParallelShard
 from ignition.components.sampling import (
     AdmissionBuffers,
@@ -39,7 +41,7 @@ def test_native_glm_admission_prefill_decode_and_rank_completion(rank, fields):
     records = torch.zeros((2, 4, fields), dtype=torch.int64, device="cuda")
     frame = torch.zeros(1, dtype=torch.int32, device="cuda")
     sequence = torch.zeros(1, dtype=torch.int64, device="cuda")
-    init = PreparedAdmission(requests, admission, records, frame, sequence, capacity=1)
+    init = PreparedAdmission(requests, admission, completion_outputs(records), frame, sequence, capacity=1)
     init.prepare()
     operations, graphs, signatures, owners = {"init": init}, {}, {}, [init]
     signatures["init"] = GraphSignature("init", 1, 1, tuple(admission.__dataclass_fields__))

@@ -8,6 +8,8 @@ from pathlib import Path
 import pytest
 import torch
 
+from tests.components.completion_support import completion_outputs
+
 from ignition.components.paged_batch import BatchInputs
 from ignition.components.parallel import TensorParallelShard
 from ignition.components.sampling import DeviceRequestState
@@ -74,7 +76,7 @@ def test_pooled_encoder_publication_matches_unpooled_after_poisoning(weights, ca
             state = VisionState(batch, PrefillVisionInputs.allocate(capacity, device), requests,
                 image_token=config["image_token_id"], features=FEATURES, hidden=HIDDEN)
             state.feature_slot.fill_(0)
-            operation = PreparedVisionGeneration(encoder, state, records, frame, sequence, buffers=buffers)
+            operation = PreparedVisionGeneration(encoder, state, completion_outputs(records), frame, sequence, buffers=buffers)
             states.append(state)
             owners.append(operation)
         arena.finalize()

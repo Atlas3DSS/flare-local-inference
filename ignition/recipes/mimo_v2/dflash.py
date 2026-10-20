@@ -210,14 +210,14 @@ class DraftForwards:
 
 
 class SpeculativePreparation:
-    def __init__(self, weights, canonical, pool, requests, inputs, scratch, *, records, frame, sequence,
+    def __init__(self, weights, canonical, pool, requests, inputs, scratch, *, completion, frame, sequence,
                  session, workspace, runtime, vocabulary_runtime, context_runtime, coordinator):
         from .pool import PAGE_TOKENS
 
         self.page_tokens = PAGE_TOKENS
         self.weights, self.tables, self.pool = weights, canonical, pool
         self.requests, self.inputs, self.scratch = requests, inputs, scratch
-        self.records, self.frame, self.sequence = records, frame, sequence
+        self.completion, self.frame, self.sequence = completion, frame, sequence
         self.session, self.workspace = session, workspace
         self.collectives = dict(runtime=runtime, vocabulary_runtime=vocabulary_runtime, coordinator=coordinator)
         self.markov_runtime = None

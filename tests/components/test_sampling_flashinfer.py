@@ -7,6 +7,8 @@ from contextlib import ExitStack, contextmanager
 import pytest
 import torch
 
+from tests.components.completion_support import completion_outputs
+
 from ignition.components.sampling import (
     DUPLICATE_SLOT,
     ERROR,
@@ -44,7 +46,7 @@ class CapturedSampler:
         for slot in range(4):
             self.admit(slot)
         self.sampler = PreparedSampling(self.logits, self.state, self.slots, self.epochs,
-            self.live, self.records, self.frame, self.sequence, sample_enabled=self.enabled, workspace=workspace)
+            self.live, completion_outputs(self.records), self.frame, self.sequence, sample_enabled=self.enabled, workspace=workspace)
         self.sampler.prepare()
         self.call = self.sampler
         if compile_forward == 'aot':

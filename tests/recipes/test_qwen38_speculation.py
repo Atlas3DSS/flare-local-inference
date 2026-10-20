@@ -3,6 +3,8 @@ from __future__ import annotations
 import pytest
 import torch
 
+from tests.components.completion_support import RecordOnlyLogprobs, completion_outputs
+
 from ignition.components.sampling import ERROR, FINISHED, RUNNING
 from ignition.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission
 from ignition.components.speculation import (
@@ -42,8 +44,9 @@ def example(*, batch=1, width=4, consumed=2, budget=20, eos=(), slot=2):
     acceptance.valid.fill_(True)
     records = torch.full((2, 4, 24), -99, dtype=torch.int64)
     frame, sequence = torch.tensor([1], dtype=torch.int32), torch.tensor([37], dtype=torch.int64)
+    logits = torch.zeros((*inputs.shape, state.vocab_size), device=inputs.device)
     commit = PreparedSpeculativeCommit(state, acceptance, inputs, slots, epochs, live,
-        records, frame, sequence)
+        completion_outputs(records), frame, sequence, logits=logits)
     return state, acceptance, commit, records
 
 
@@ -205,3 +208,10 @@ def test_draft_penalties_ignore_unoffered_candidates(prefix_offset):
         candidates[:, prefix_offset - 1] = 99
         op.prepare_scores()
         assert not op.valid.item()
+
+
+@pytest.fixture(autouse=True)
+def records_only_cpu_commit(monkeypatch):
+    # These state-machine tests run without CUDA; reduction and graph ordering
+    # have independent CUDA coverage.
+    monkeypatch.setattr("ignition.components.speculation.PreparedLogprobs", RecordOnlyLogprobs)

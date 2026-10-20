@@ -9,6 +9,8 @@ from pathlib import Path
 
 import torch
 
+from ignition.components.completion import CompletionOutputs
+
 from ignition.components.capacity import speculative_token_capacity, batch_capacities, prefill_capacities, request_capacity
 from ignition.components.parallel import TensorParallelShard
 from ignition.components.sampling import AdmissionBuffers, DeviceRequestState
@@ -234,7 +236,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         admission = AdmissionBuffers.allocate(device, vocab_size=129280, capacity=slots)
         commands = StateCommands.allocate(device, capacity=slots)
         frame = torch.zeros(1, dtype=torch.int32, device=device)
-        records = torch.zeros((2, slots, 24 if config.dspark else 8), dtype=torch.int64, device=device)
+        completion = CompletionOutputs.allocate((2, slots, 24 if config.dspark else 8), device=device)
         coordinator = CollectivePreparation(group)
         verification_samples = (slots * max(config.speculative_widths)
                                 if config.packed_verification else config.decode_tokens)
@@ -282,7 +284,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
             name: getattr(admission, name) for name in admission.__dataclass_fields__},
             state_pool=pool.backing, memory_capacity=pool.memory_capacity,
             sampling_grammar_mask=requests.grammar_mask, frame_index=frame,
-            submission_sequence=sequence, completion_records=records)
+            submission_sequence=sequence, **completion.buffers())
         if vision_state is not None:
             buffers.update(vision_inputs.buffers(), **vision_prefill.buffers())
         forwards, signatures, metadata, scratch = {}, {}, {}, {}
@@ -291,7 +293,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
             from ignition.components.dspark import DSparkForwards, SpeculativePreparation
 
             speculation = SpeculativePreparation(weights, tables, pool, requests, inputs, decoder_storage,
-                draft_tokens=config.draft_tokens, records=records, frame=frame, sequence=sequence,
+                draft_tokens=config.draft_tokens, completion=completion, frame=frame, sequence=sequence,
                 session=session, workspace=arena,
                 runtime=collective, vocabulary_runtime=vocabulary_collective,
                 markov_runtime=None, coordinator=coordinator, result_runtime=result_collective,
@@ -342,7 +344,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                         input_vocabulary=INPUT_VOCABULARY if vision_state is not None else None,
                         validate_prefill=vision_state.validate_prefill if vision_state is not None and mode == "prefill" else None,
                         buffers=cursor)
-                    forward = PreparedGeneration(decoder, batch, records, frame, sequence, runtime=collective,
+                    forward = PreparedGeneration(decoder, batch, completion, frame, sequence, runtime=collective,
                         coordinator=coordinator, session=session, name=name + ".generation", workspace=arena,
                         context_factory=_CONTEXT, buffers=cursor)
                     fields = (*forward_inputs, "vision_token_indices", "vision_feature_slot") if mode == "prefill" and vision_state is not None else forward_inputs
@@ -409,7 +411,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                 vision_storage[capacity] = VisionScratch.allocate(capacity, device, hidden=5120, buffers=cursor)
                 encoder = PreparedVision(weights.vision, vision_storage[capacity], vision_inputs,
                     session=session, workspace=arena, name=name, buffers=cursor)
-                add(name, PreparedVisionGeneration(encoder, vision_state, records, frame, sequence, buffers=cursor),
+                add(name, PreparedVisionGeneration(encoder, vision_state, completion, frame, sequence, buffers=cursor),
                     "vision", 1, capacity, (*vision_inputs.buffers(), "vision_feature_slot"))
         row_inputs = ("request_state_rows", "row_slot_ids", "row_generations", "live_rows")
         for enabled in modes:
@@ -417,13 +419,13 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
             mode_weights = weights if enabled else replace(weights, draft=None)
             for capacity in config.batch_capacities:
                 name = f"resume{capacity}" + suffix
-                forward = PreparedResume(mode_weights, requests, pool, inputs, records, frame, sequence,
+                forward = PreparedResume(mode_weights, requests, pool, inputs, completion, frame, sequence,
                     rows=capacity, runtime=collective, vocabulary_runtime=vocabulary_collective,
                     coordinator=coordinator, session=session, name=name, buffers=graph_buffers.cursor())
                 add(name, forward, "resume", capacity, 1, (*row_inputs, "sampling_grammar_mask"), enabled=enabled)
                 for mode in ("init", "restore", "snapshot"):
                     name = f"{mode}{capacity}" + suffix
-                    forward = PreparedMaintenance(mode, requests, pool, commands, inputs, records, frame, sequence,
+                    forward = PreparedMaintenance(mode, requests, pool, commands, inputs, completion, frame, sequence,
                         runtime=collective, coordinator=coordinator, session=session, name=name,
                         capacity=capacity, admission_buffers=admission, draft_state=enabled)
                     fields = row_inputs if mode == "snapshot" else ("request_state_rows", *admission.__dataclass_fields__)
@@ -474,7 +476,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         "preparation_state_rows": int(pool.memory_capacity[0].item()),
         "preparation_state_bytes": int(pool.memory_capacity[0].item()) * layout.row_bytes,
         "pages": pages, "page_bytes": bytes_per_page, "page_tokens": PAGE_TOKENS,
-        "kv_bytes": pages * bytes_per_page, "operator_scratch_bytes": arena.nbytes,
+        "kv_bytes": pages * bytes_per_page, "completion_output_bytes": completion.nbytes, "operator_scratch_bytes": arena.nbytes,
         "graphs": len(graphs), "prefill_capacities": config.prefill_capacities,
         "indexer_query_rows": INDEXER_QUERY_ROWS,
         "free_device_bytes": free, "total_device_bytes": total, "headroom_bytes": config.headroom_bytes,
@@ -498,7 +500,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
             disposable.append(forward.completion.scratch_tensors)
     model = PreparedModel(device=config.devices[rank], graphs=graphs, buffers=buffers, signatures=signatures,
         max_active=config.max_active, session=session, server_config=server_config, memory_report=memory,
-        export_zero_ranges=storage_ranges(disposable), export_events=tables.events(),
+        export_zero_ranges=(*storage_ranges(disposable), *completion.zero_ranges()), export_events=tables.events(),
         embedding_catalog=tables.resident_catalog(),
         package_data=tables if rank == 0 else None,
         resources=(weights, tables, pool, requests, inputs, admission, commands, arena, forwards,

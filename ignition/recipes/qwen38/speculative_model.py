@@ -254,8 +254,9 @@ class PreparedSpeculativeRound:
                                     name=self.name, buffers=self.broadcast_buffers)
         commit = PreparedSpeculativeCommit(o.requests, verify.output,
             self.state.token_ids.view(b, w), slots, epochs, o.inputs.live_rows,
-            o.completion, o.frame, o.sequence, rng=o.rng, copy_offered_mask=self.copy_mask,
+            o.completion, o.frame, o.sequence, logits=self.decoder.scratch.logits.view(b, w, -1), rng=o.rng, copy_offered_mask=self.copy_mask,
             draft_context_lag=None if self.copy_only else 1, token_limits=self.token_limits)
+        commit.prepare()
         self.state.prepare_commit(commit.emitted_count, commit.consumed_before,
                                   self.target_residual, self.decoder.scratch.sample_hidden)
         model_commit = tuple(self.state._commit)

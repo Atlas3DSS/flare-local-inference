@@ -5,6 +5,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from tests.components.completion_support import RecordOnlyLogprobs, completion_outputs
+
 from ignition.components.sampling import DeviceRequestState, RequestAdmission
 from ignition.components.speculation import PreparedSpeculativeCommit, SpeculativeAcceptance
 from ignition.recipes.glm53.batch import BatchInputs
@@ -29,7 +31,7 @@ def test_shared_commit_without_previous_token_embeddings():
     records = torch.zeros((2, 2, 24), dtype=torch.int64)
     commit = PreparedSpeculativeCommit(state, acceptance, torch.tensor([[3, 4, 5, 6, 7, 8]]),
         torch.tensor([1], dtype=torch.int32), torch.tensor([7]), torch.tensor([1], dtype=torch.int32),
-        records, torch.tensor([0], dtype=torch.int32), torch.tensor([1]))
+        completion_outputs(records), torch.tensor([0], dtype=torch.int32), torch.tensor([1]), logits=torch.zeros((1, 6, state.vocab_size)))
     commit()
     assert state.consumed_tokens.tolist() == [0, 5]
     assert state.pending_token[1] == 17
@@ -88,3 +90,10 @@ def test_draft_rows_exclude_exhausted_requests_and_restore_output_order():
     assert metadata.num_tokens.item() == 0
     assert metadata.indexed.positions.tolist() == [-1, -1, -1]
     assert metadata.indexed.token_slots.tolist() == [-1, -1, -1]
+
+
+@pytest.fixture(autouse=True)
+def records_only_cpu_commit(monkeypatch):
+    # These state-machine tests run without CUDA; reduction and graph ordering
+    # have independent CUDA coverage.
+    monkeypatch.setattr("ignition.components.speculation.PreparedLogprobs", RecordOnlyLogprobs)

@@ -539,11 +539,54 @@ fn raw_prompts(value: &Value) -> Result<Vec<RawPrompt>> {
         })
         .collect()
 }
+fn generation_logprobs(protocol: Protocol, body: &Value) -> Result<Option<LogprobOptions>> {
+    let integer = |key: &str| -> Result<usize> {
+        match body.get(key).filter(|v| !v.is_null()) {
+            None => Ok(0),
+            Some(v) => v.as_u64().filter(|n| *n <= crate::execution::MAX_TOP_LOGPROBS as u64).map(|n| n as usize)
+                .ok_or_else(|| format!("{key} must be an integer from 0 through {}", crate::execution::MAX_TOP_LOGPROBS).into()),
+        }
+    };
+    let token_ids = flag(body, "return_tokens_as_token_ids", false)?;
+    let (enabled, top) = match protocol {
+        Protocol::Chat => {
+            let enabled = flag(body, "logprobs", false)?;
+            let top = integer("top_logprobs")?;
+            if top > 0 && !enabled { return Err("top_logprobs requires logprobs: true".into()); }
+            (enabled, top)
+        }
+        Protocol::Completions => {
+            if present(body, "top_logprobs") { return Err("completions use integer logprobs".into()); }
+            let enabled = present(body, "logprobs");
+            let top = integer("logprobs")?;
+            if enabled && flag(body, "echo", false)? {
+                return Err("echo with logprobs requires prompt logprobs, which are not supported".into());
+            }
+            (enabled, top)
+        }
+        Protocol::Responses => {
+            if present(body, "logprobs") { return Err("responses use include and top_logprobs".into()); }
+            let enabled = body.get("include").and_then(Value::as_array).is_some_and(|items|
+                items.iter().any(|v| v == "message.output_text.logprobs"));
+            let top = integer("top_logprobs")?;
+            if top > 0 && !enabled { return Err("top_logprobs requires include: [\"message.output_text.logprobs\"]".into()); }
+            (enabled, top)
+        }
+        Protocol::Messages => {
+            if ["logprobs", "top_logprobs", "return_tokens_as_token_ids"].iter().any(|key| present(body, key)) {
+                return Err(unsupported("/v1/messages does not support logprob fields"));
+            }
+            (false, 0)
+        }
+    };
+    Ok(enabled.then_some(LogprobOptions { top, token_ids }))
+}
+
 pub(crate) fn decode(protocol: Protocol, body: Value, count: bool) -> Result<Decoded> {
     body.as_object().ok_or("request must be a JSON object")?;
     reject(
         &body,
-        &["logprobs", "top_logprobs", "logit_bias", "guided_json"],
+        &["logit_bias", "guided_json"],
     )?;
     if protocol == Protocol::Responses {
         reject(
@@ -568,6 +611,7 @@ pub(crate) fn decode(protocol: Protocol, body: Value, count: bool) -> Result<Dec
     if protocol == Protocol::Completions {
         reject(&body, &["suffix"])?;
     }
+    let logprobs = generation_logprobs(protocol, &body)?;
     let choices = body
         .get("n")
         .filter(|v| !v.is_null())
@@ -666,6 +710,7 @@ pub(crate) fn decode(protocol: Protocol, body: Value, count: bool) -> Result<Dec
         Protocol::Responses => Input::Conversation(responses_messages(&body)?),
         Protocol::Completions => Input::Raw(raw_prompts(&body["prompt"])?),
     };
+    options.logprobs = logprobs;
     let request = Request {
         input,
         options,

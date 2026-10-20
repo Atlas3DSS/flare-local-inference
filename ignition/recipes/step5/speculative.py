@@ -23,7 +23,7 @@ class PreparedRound:
         self.batch, self.width, self.buffers = b, w, buffers
         self.collectives, self.session, self.name = o.collectives, o.session, name
         self.inputs, self.requests, self.pool = o.inputs, o.requests, o.pool
-        self.records, self.frame, self.sequence = o.records, o.frame, o.sequence
+        self.completion, self.frame, self.sequence = o.completion, o.frame, o.sequence
         self.rng, self.draft_offset, self.draft_generation = o.rng, o.offset, o.generation
         self.hidden = o.weights.config.hidden
         device, blocks = o.pool.backing.device, o.inputs.page_tables.shape[1]
@@ -77,8 +77,9 @@ class PreparedRound:
         prepare_sampling_broadcasts(proposals, verify, collectives=self.collectives, session=self.session,
                                     name=self.name, buffers=self.buffers)
         commit = PreparedSpeculativeCommit(self.requests, verify.output, self.candidates,
-            self.inputs.row_slot_ids[:b], self.inputs.row_generations[:b], self.inputs.live_rows, self.records, self.frame,
-            self.sequence, rng=self.rng, token_limits=self.inputs.query_lengths[:b], draft_context_lag=0, buffers=self.buffers)
+            self.inputs.row_slot_ids[:b], self.inputs.row_generations[:b], self.inputs.live_rows, self.completion, self.frame,
+            self.sequence, logits=self.decoder.scratch.logits.view(b, w, -1), rng=self.rng, token_limits=self.inputs.query_lengths[:b], draft_context_lag=0, buffers=self.buffers)
+        commit.prepare()
         self.operations = target, proposals, verify, commit
 
     def __call__(self):

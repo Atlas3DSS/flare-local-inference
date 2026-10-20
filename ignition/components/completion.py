@@ -1,0 +1,92 @@
+"""Persistent two-frame generation outputs and their request flags."""
+
+from dataclasses import dataclass
+
+import torch
+
+from ignition.preparation.disposable import storage_ranges
+from ignition.preparation.scratch import GraphBufferPool
+
+MAX_TOP_LOGPROBS = 20
+MAX_OUTPUT_TOKENS = 8
+COMPLETION_FRAMES = 2
+RECORD_FIELDS = 8
+VECTOR_RECORD_FIELDS = 24
+TOKEN_FIELD = 4
+EMITTED_COUNT_FIELD = 8
+VECTOR_TOKENS_FIELD = 16
+# Each token/logprob pair occupies two int32 words, starting with the chosen token.
+LOGPROB_PAIR_FIELDS = 2
+LOGPROB_FIELDS = LOGPROB_PAIR_FIELDS * (1 + MAX_TOP_LOGPROBS)
+# Small chunks bound unused tails for reductions and mixed-role outputs; the
+# general graph pool default would reserve far more than these buffers need.
+_POOL_CHUNK_BYTES = 256 << 10
+
+
+@dataclass(frozen=True)
+class CompletionOutputs:
+    """Own persistent outputs shared by the serial graph catalog.
+
+    ``records`` is int64 [2, slots, 8 or 24] for ABI2 or ABI3. The runtime
+    alternates frames so readback can retain one while the next graph writes.
+    ``logprobs`` is int32 [2, slots, 8, 42]: the chosen token followed by up to
+    twenty alternatives, each packed as [token ID, FP32 logprob bits]. Per-slot
+    int32 ``requested`` flags gate reductions; only committed positions are valid.
+    ``scratch`` shares reduction storage across serial variants. ``private_storage``
+    keeps mixed-role outputs disjoint until their active-frame merge.
+    """
+    records: torch.Tensor
+    logprobs: torch.Tensor
+    requested: torch.Tensor
+    scratch: GraphBufferPool
+    private_storage: GraphBufferPool
+
+    @classmethod
+    def allocate(cls, shape, *, device):
+        frames, slots, fields = shape
+        if frames != COMPLETION_FRAMES or fields not in (RECORD_FIELDS, VECTOR_RECORD_FIELDS):
+            raise ValueError("completion records require two ABI2 or ABI3 frames")
+        return cls(torch.zeros(shape, dtype=torch.int64, device=device),
+            torch.zeros((frames, slots, MAX_OUTPUT_TOKENS, LOGPROB_FIELDS), dtype=torch.int32, device=device),
+            torch.zeros(slots, dtype=torch.int32, device=device), GraphBufferPool(device, chunk_bytes=_POOL_CHUNK_BYTES),
+            GraphBufferPool(device, chunk_bytes=_POOL_CHUNK_BYTES))
+
+    def buffers(self):
+        return dict(completion_records=self.records, completion_logprobs=self.logprobs,
+                    logprob_requested=self.requested)
+
+    @property
+    def nbytes(self):
+        return sum(t.nbytes for t in self.buffers().values()) + self.scratch.nbytes + self.private_storage.nbytes
+
+    def zero_ranges(self):
+        return storage_ranges([self.buffers(), self.scratch.chunks, self.private_storage.chunks])
+
+    def private(self, buffers):
+        """Mixed roles share flags but retain disjoint outputs until their merge."""
+        return CompletionOutputs(buffers.zeros(self.records.shape, torch.int64),
+            buffers.zeros(self.logprobs.shape, torch.int32), self.requested, self.scratch, self.private_storage)
+
+    def merge(self, prompt, decode, prompt_slot, frame):
+        slots = torch.arange(self.records.shape[1], device=self.records.device)
+        role = slots == prompt_slot
+        index = frame.long()
+        for output, a, b in ((self.records, prompt.records, decode.records),
+                             (self.logprobs, prompt.logprobs, decode.logprobs)):
+            mask = role.view(1, -1, *([1] * (output.ndim - 2)))
+            output.index_copy_(0, index, torch.where(mask, a.index_select(0, index), b.index_select(0, index)))
+
+
+def validate_completion_buffers(buffers, capacity):
+    names = ("completion_logprobs", "logprob_requested")
+    present = [name in buffers for name in names]
+    if not any(present):
+        return
+    if not all(present):
+        raise ValueError(f"generation logprobs missing buffer {names[present.index(False)]}")
+    for name, shape in ((names[0], (COMPLETION_FRAMES, capacity, MAX_OUTPUT_TOKENS, LOGPROB_FIELDS)),
+                        (names[1], (capacity,))):
+        tensor = buffers[name]
+        if tuple(tensor.shape) != shape or str(tensor.dtype) != "torch.int32":
+            raise ValueError(f"{name}: expected shape {shape}, dtype torch.int32; "
+                             f"got shape {tuple(tensor.shape)}, dtype {tensor.dtype}")

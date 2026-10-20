@@ -533,7 +533,6 @@ fn unsupported_controls_are_rejected_before_generation() {
     }
     for field in [
         json!({"suffix":"tail"}),
-        json!({"logprobs":0}),
         json!({"best_of":2}),
     ] {
         let mut body = json!({"prompt":"x"});
@@ -1110,4 +1109,31 @@ fn empty_text_messages_preserve_conversation_roles() {
             json!({"role":"assistant","content":""})
         ]
     );
+}
+
+#[test]
+fn generation_logprob_controls_have_endpoint_specific_types_and_limits() {
+    for (protocol, base, accepted, rejected) in [
+        (Protocol::Chat, json!({"messages":[{"role":"user","content":"x"}]}),
+            vec![json!({"logprobs":true,"top_logprobs":20}), json!({"top_logprobs":0})],
+            vec![json!({"top_logprobs":1}), json!({"logprobs":1}), json!({"logprobs":true,"top_logprobs":21})]),
+        (Protocol::Completions, json!({"prompt":"x"}), vec![json!({"logprobs":0}), json!({"logprobs":20})],
+            vec![json!({"logprobs":true}), json!({"logprobs":1,"echo":true}), json!({"logprobs":-1})]),
+        (Protocol::Responses, json!({"input":"x"}),
+            vec![json!({"top_logprobs":20,"include":["message.output_text.logprobs"]}), json!({"include":["unrelated"]})],
+            vec![json!({"top_logprobs":1}), json!({"logprobs":true})]),
+        (Protocol::Messages, json!({"messages":[{"role":"user","content":"x"}],"max_tokens":1}), vec![],
+            vec![json!({"logprobs":false}), json!({"top_logprobs":0}), json!({"return_tokens_as_token_ids":true})]),
+    ] {
+        for (fields, valid) in accepted.into_iter().map(|v| (v,true)).chain(rejected.into_iter().map(|v| (v,false))) {
+            let mut body = base.clone();
+            body.as_object_mut().unwrap().extend(fields.as_object().unwrap().clone());
+            assert_eq!(decode(protocol, body.clone(), false).is_ok(), valid, "{protocol:?}: {body}");
+        }
+    }
+    let body = json!({"messages":[{"role":"assistant","content":"Cletus:"}], "max_tokens":1,
+        "continue_final_message":true,"add_generation_prompt":false,"logprobs":true,"top_logprobs":20});
+    let request = decode(Protocol::Chat, body, false).unwrap().request;
+    assert_eq!(request.options.logprobs.unwrap().top,20);
+    assert!(request.options.sampling.temperature.is_none());
 }

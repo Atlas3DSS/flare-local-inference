@@ -65,6 +65,7 @@ impl Fixture {
         std::fs::remove_dir_all(directory).unwrap();
         Self {
             config: ModelConfig {
+                max_top_logprobs: 0,
                 prepared_sequence_tokens: 128,
                 contract: crate::model::testing::metadata(),
                 identity: [23; 32],
@@ -190,6 +191,7 @@ impl Fixture {
                     max_new_tokens: limit,
                     stop_sequences: vec![],
                     stop_strings: vec![],
+                    logprobs: false,
                     ignore_eos: false,
                     grammar: None,
                 },
@@ -312,6 +314,7 @@ fn completion(
         };
     }
     FrameCompletion {
+        logprobs: None,
         proposal_confidence: None,
         fence: Fence(sequence),
         graph_index: 0,
@@ -852,6 +855,7 @@ fn speculative_dashboard_counts_live_rounds_and_batched_forward_passes() {
                 .complete(
                     GraphKind::Speculative,
                     FrameCompletion {
+                        logprobs: None,
                         proposal_confidence: None,
                         records: invalid,
                         ..frame

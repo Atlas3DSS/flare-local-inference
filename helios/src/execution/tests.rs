@@ -785,3 +785,96 @@ fn mixed_manifest_requires_independent_prompt_capacity_and_a_role_input() {
     m.graphs[0].kind = GraphKind::Speculative;
     assert!(m.validate().is_err());
 }
+
+pub(super) fn with_logprobs(k: usize) -> ExecutionManifest {
+    let mut value = manifest();
+    let fields = LOGPROB_PAIR_FIELDS * (1 + k);
+    value.buffers.push(BufferDescriptor {
+        name: "completion_logprobs".into(), address: 0x10000,
+        nbytes: 2 * 4 * MAX_OUTPUT_TOKENS * fields * size_of::<i32>(),
+        dtype: Dtype::Int32, shape: vec![2, 4, MAX_OUTPUT_TOKENS, fields],
+        strides: vec![4 * MAX_OUTPUT_TOKENS * fields, MAX_OUTPUT_TOKENS * fields, fields, 1],
+    });
+    value.buffers.push(BufferDescriptor {
+        name: "logprob_requested".into(), address: 0x20000,
+        nbytes: 16, dtype: Dtype::Int32, shape: vec![4], strides: vec![1],
+    });
+    value.graphs[0].input_bindings.push(InputBinding {
+        buffer_name: "logprob_requested".into(),
+        host_offset: value.input_frame_bytes, nbytes: 16,
+    });
+    value.input_frame_bytes += 16;
+    value
+}
+
+#[test]
+fn old_execution_manifests_serve_without_logprob_outputs_and_partial_declarations_fail() {
+    let old = manifest();
+    old.validate().unwrap();
+    assert_eq!(old.max_top_logprobs().unwrap(), 0);
+    for k in [1, MAX_TOP_LOGPROBS] {
+        let current = with_logprobs(k);
+        current.validate().unwrap();
+        assert_eq!(current.max_top_logprobs().unwrap(), k);
+        for name in ["completion_logprobs", "logprob_requested"] {
+            let mut partial = current.clone();
+            partial.buffers.retain(|b| b.name != name);
+            let error = partial.max_top_logprobs().unwrap_err();
+            assert!(matches!(&error, Error::Execution(ExecutionError::Manifest(_))));
+            assert!(error.to_string().contains(name));
+            assert!(partial.validate().is_err());
+        }
+    }
+    for k in [0, MAX_TOP_LOGPROBS + 1] {
+        assert!(with_logprobs(k).validate().is_err());
+    }
+    let mut missing = with_logprobs(MAX_TOP_LOGPROBS);
+    missing.graphs[0].input_bindings.pop();
+    assert!(missing.validate().is_err());
+    for field in 0..4 {
+        let mut malformed = with_logprobs(MAX_TOP_LOGPROBS);
+        let output = malformed.buffers.iter_mut()
+            .find(|b| b.name == "completion_logprobs").unwrap();
+        output.shape[field] += 1;
+        let error = malformed.max_top_logprobs().unwrap_err();
+        assert!(matches!(&error, Error::Execution(ExecutionError::Manifest(_))));
+        let message = error.to_string();
+        assert!(message.contains("completion_logprobs"));
+        assert!(message.contains("expected Int32 shape") && message.contains("got Int32 shape"));
+        assert!(malformed.validate().is_err());
+    }
+}
+
+#[test]
+fn logprob_readback_uses_only_emitted_positions_and_validates_chosen_ids() {
+    let mut records = [CompletionRecord::default(); 4];
+    records[2] = CompletionRecord {
+        generation: 9, submission_sequence: 7, consumed_tokens: 3,
+        generated_tokens: 2, token_id: 8, status: 1,
+        vector: Some(TokenVector {
+            emitted_count: 2, offered_drafts: 1, accepted_drafts: 1, verification_width: 2,
+            tokens: [7, 8, -1, -1, -1, -1, -1, -1], ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let fields = LOGPROB_FIELDS;
+    let mut words = vec![-1i32; 4 * MAX_OUTPUT_TOKENS * fields];
+    for (position, token) in [7, 8].into_iter().enumerate() {
+        let start = (2 * MAX_OUTPUT_TOKENS + position) * fields;
+        let row = &mut words[start..start + fields];
+        row[0] = token;
+        row[1] = (-3f32).to_bits() as i32;
+        row[2] = 5;
+        row[3] = (-2f32).to_bits() as i32;
+    }
+    let bytes: Vec<u8> = words.iter().flat_map(|v| v.to_ne_bytes()).collect();
+    let decoded = transport::decode_logprobs(&bytes, &records, MAX_TOP_LOGPROBS, 1 << 2).unwrap();
+    assert!(decoded[0].iter().all(Option::is_none));
+    assert_eq!(decoded[2][0].unwrap().token, 7);
+    assert_eq!(decoded[2][1].unwrap().logprob, -3.);
+    assert_eq!(decoded[2][0].unwrap().top_count, 1);
+    assert!(decoded[2][2..].iter().all(Option::is_none));
+    records[2].vector.as_mut().unwrap().tokens[0] = 4;
+    let decoded = transport::decode_logprobs(&bytes, &records, MAX_TOP_LOGPROBS, 1 << 2).unwrap();
+    assert!(decoded[2][0].is_none());
+}

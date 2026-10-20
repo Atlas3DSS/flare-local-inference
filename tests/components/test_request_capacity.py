@@ -5,6 +5,8 @@ import os
 import pytest
 import torch
 
+from tests.components.completion_support import completion_outputs
+
 from ignition.components.capacity import batch_capacities, request_capacity
 from ignition.components.sampling import AdmissionBuffers, DeviceRequestState, PreparedAdmission, PreparedSampling, RequestAdmission
 from ignition.components.token_state import PreparedTokenState
@@ -44,12 +46,12 @@ def test_native_replay_reorders_every_slot_without_allocation(capacity):
     for row in range(capacity):
         admission.stage(row, capacity - row - 1, RequestAdmission(1, row, top_k=0, top_p=1), [3])
     admission.admission_count.fill_(capacity)
-    initialize = PreparedAdmission(state, admission, records, frame, sequence, capacity=capacity)
+    initialize = PreparedAdmission(state, admission, completion_outputs(records), frame, sequence, capacity=capacity)
     initialize.prepare()
     logits = torch.full((capacity, 32), -torch.inf, device="cuda")
     expected = slots.long() % 32
     logits.scatter_(1, expected[:, None], 0)
-    sampler = PreparedSampling(logits, state, slots, epochs, live, records, frame, sequence)
+    sampler = PreparedSampling(logits, state, slots, epochs, live, completion_outputs(records), frame, sequence)
     sampler.prepare()
     tokens = torch.empty(capacity, dtype=torch.int64, device="cuda")
     spans = torch.arange(capacity + 1, dtype=torch.int32, device="cuda")

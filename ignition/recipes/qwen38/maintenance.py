@@ -135,7 +135,7 @@ class PreparedMaintenance:
     """
 
     def __init__(self, mode: str, requests: DeviceRequestState, pool: HybridStatePool,
-                 metadata: StateTransferMetadata, completion_records, frame_index, submission_sequence,
+                 metadata: StateTransferMetadata, completion, frame_index, submission_sequence,
                  *, admission_buffers: AdmissionBuffers | None = None, forward_inputs=None,
                  qsa_states=(), capacity: int = 4, speculation=None):
         if mode not in ("init", "restore", "snapshot") or capacity not in BATCH_CAPACITIES or capacity > requests.capacity:
@@ -150,7 +150,8 @@ class PreparedMaintenance:
                 ("operation", torch.int32), ("qsa_slots", torch.int64), ("accepted_tokens", torch.int32),
                 ("expected_consumed", torch.int64), ("num_ops", torch.int32), ("errors", torch.int32)):
             _check_tensor(getattr(metadata, name), (1,) if name == "num_ops" else (self.slots,), dtype, device, name)
-        record_fields = _completion_fields(completion_records, device, self.slots)
+        records = completion.records
+        record_fields = _completion_fields(records, device, self.slots)
         for tensor, shape, dtype, name in ((frame_index, (1,), torch.int32, "frame_index"), (submission_sequence, (1,), torch.int64, "submission_sequence")):
             _check_tensor(tensor, shape, dtype, device, name)
         self.mode, self.requests, self.pool, self.metadata = mode, requests, pool, metadata
@@ -166,7 +167,7 @@ class PreparedMaintenance:
         else:
             if admission_buffers is None:
                 raise ValueError("init and restore maintenance require admission staging buffers")
-            self.admission = PreparedAdmission(requests, admission_buffers, completion_records, frame_index,
+            self.admission = PreparedAdmission(requests, admission_buffers, completion, frame_index,
                                               submission_sequence, capacity=capacity)
             slots, epochs, count = (admission_buffers.admission_slots, admission_buffers.admission_generations,
                                     admission_buffers.admission_count)
@@ -186,7 +187,7 @@ class PreparedMaintenance:
             r.consumed_tokens.stride(0), self.slots)
         self._merge_args = (count, self.stage_errors, f.errors, self.admission_errors, m.errors, capacity, mode != "snapshot", self.slots)
         self._complete_args = (slots, epochs, count, m.errors, r.generation, r.consumed_tokens, r.generated_tokens,
-            r.status, r.error_code, completion_records, frame_index, submission_sequence, capacity, r.consumed_tokens.stride(0), record_fields, self.slots)
+            r.status, r.error_code, records, frame_index, submission_sequence, capacity, r.consumed_tokens.stride(0), record_fields, self.slots)
         from ignition.components.state import PreparedRequestHistory
 
         self.history = PreparedRequestHistory(pool, requests, self.filtered, snapshot=mode == "snapshot")

@@ -5,6 +5,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from tests.components.completion_support import RecordOnlyLogprobs, completion_outputs
+
 from ignition.components.sampling import ERROR, RUNNING
 from ignition.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission
 from ignition.components.speculation import (
@@ -198,7 +200,7 @@ def test_copy_round_constructs_no_draft_module_and_commits_only_verified_prefix(
     records = torch.full((2, 4, 24), -99, dtype=torch.int64)
     owner = module.SpeculativePreparation(weights=None, mtp_weights=None, pool=pool, requests=state,
         inputs=inputs, scratch=SimpleNamespace(rows=lambda *_: scratch), workspaces=None,
-        rotary=None, cache={}, table=None, session=None, completion=records,
+        rotary=None, cache={}, table=None, session=None, completion=completion_outputs(records),
         frame=torch.tensor([0], dtype=torch.int32), sequence=torch.tensor([19]),
         context=64, prefill_capacity=64, max_cache_pages=1, proposal_source="copy")
     assert owner.prefill(scratch, "test") is scratch and owner.resume(scratch) is scratch
@@ -226,3 +228,8 @@ def test_copy_round_constructs_no_draft_module_and_commits_only_verified_prefix(
     assert state.consumed_tokens[3] == 5
     assert records[0, 3, 5:9].tolist() == [ERROR, INVALID_SPECULATION, 0, 0]
     assert torch.cuda.is_initialized() == cuda_initialized
+
+
+@pytest.fixture(autouse=True)
+def records_only_cpu_commit(monkeypatch):
+    monkeypatch.setattr("ignition.components.speculation.PreparedLogprobs", RecordOnlyLogprobs)

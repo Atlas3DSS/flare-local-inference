@@ -42,6 +42,7 @@ fn checkpoint_template_tokenization_requests_and_instruction_prefix_match_transf
     )
     .unwrap();
     let config = ModelConfig {
+        max_top_logprobs: 0,
         prepared_sequence_tokens: 1048576,
         contract: support::contract("glm53"),
         identity: [9; 32],

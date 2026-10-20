@@ -73,7 +73,8 @@ def _finish(
 
 
 class PreparedFeaturePublication:
-    def __init__(self, state, inputs, records, frame, sequence):
+    def __init__(self, state, inputs, completion, frame, sequence):
+        records = completion.records
         self.state, self.inputs = state, inputs
         self.records, self.frame, self.sequence = records, frame, sequence
         self.record_fields = _completion_fields(records, records.device, state.requests.capacity)

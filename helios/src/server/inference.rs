@@ -106,9 +106,16 @@ pub enum Effort {
     Max,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LogprobOptions {
+    pub top: usize,
+    pub token_ids: bool,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Options {
     pub sampling: Sampling,
+    pub logprobs: Option<LogprobOptions>,
     pub effort: Option<Effort>,
     pub output_limit: Option<u64>,
     pub stops: Vec<String>,

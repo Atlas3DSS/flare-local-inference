@@ -5,6 +5,8 @@ import os
 import pytest
 import torch
 
+from tests.components.completion_support import completion_outputs
+
 from ignition.components.split_draft import _reject_stale
 from ignition.preparation.compilation import compile_forward
 from ignition.preparation.graphs import PreparedGraphBundle
@@ -134,7 +136,7 @@ def test_retained_proposals_regroup_prefixes_and_reject_stale_ownership(target_c
         row_generations=tensor([14, 11, 13, 12]), live_rows=tensor([4], torch.int32),
         request_state_rows=tensor([[1], [2], [3], [4]]), query_lengths=tensor([3, 1, 2, 3], torch.int32))
     owner = SimpleNamespace(requests=requests, inputs=inputs, sequence=tensor([6]),
-        frame=tensor([0], torch.int32), records=torch.zeros((2, 4, 24), dtype=torch.int64, device="cuda"))
+        frame=tensor([0], torch.int32), completion=completion_outputs(torch.zeros((2, 4, 24), dtype=torch.int64, device="cuda")))
     retained = PreparedProposalStorage(owner, 7)
     retained.ready.fill_(True)
     retained.generations.copy_(requests.generation)
@@ -177,7 +179,7 @@ def test_retained_proposals_regroup_prefixes_and_reject_stale_ownership(target_c
     torch.cuda.synchronize()
     assert observed.tolist() == [-1] * 4
     assert inputs.row_slot_ids.tolist() == [3, 0, 2, 1]
-    assert owner.records[0, :, 6].tolist() == [256] * 4
+    assert owner.completion.records[0, :, 6].tolist() == [256] * 4
 
     # Different invalidation causes coexist in one batch without consuming the bank.
     retained.ready.fill_(True)

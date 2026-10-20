@@ -57,6 +57,10 @@ pub(crate) struct PromptUsage {
     pub image_tokens: usize,
 }
 pub(crate) struct Encoder {
+    logprob_format: Option<(crate::server::inference::LogprobOptions, std::sync::Arc<crate::frontend::Frontend>)>,
+    logprob_entries: Vec<Vec<crate::server::logprobs::Formatted>>,
+    part_logprobs: Vec<Vec<Value>>,
+    streaming: bool,
     pub protocol: Protocol,
     pub id: String,
     pub model: String,
@@ -95,6 +99,10 @@ impl Encoder {
         let choices = prompts.len() * choices_per_prompt;
         Self {
             protocol,
+            logprob_format: None,
+            logprob_entries: vec![vec![]; choices],
+            part_logprobs: vec![],
+            streaming: false,
             chats: (0..choices)
                 .map(|i| Accumulator::new(format!("{id}_{i}")))
                 .collect(),
@@ -123,6 +131,10 @@ impl Encoder {
         grammars: std::collections::HashMap<String, crate::grammar::TextGrammar>,
     ) {
         self.tool_grammars = grammars;
+    }
+    pub fn set_logprobs(&mut self, options: Option<crate::server::inference::LogprobOptions>, frontend: std::sync::Arc<crate::frontend::Frontend>, streaming: bool) {
+        self.logprob_format = options.map(|options| (options, frontend));
+        self.streaming = streaming;
     }
     pub fn set_continuous_usage(&mut self, enabled: bool) {
         self.continuous_usage = self.include_usage && enabled;
@@ -188,7 +200,11 @@ impl Encoder {
         let id = self.item_id(index);
         match &self.outputs[0].blocks[index] {
             Block::Text(text) => {
-                json!({"id":id,"type":"message","role":"assistant","status":status,"content":if complete{json!([{"type":"output_text","text":text,"annotations":[]}])}else{json!([])}})
+                let mut part = json!({"type":"output_text","text":text,"annotations":[]});
+                if self.logprob_format.is_some() {
+                    part["logprobs"] = json!(self.part_logprobs.get(index).cloned().unwrap_or_default());
+                }
+                json!({"id":id,"type":"message","role":"assistant","status":status,"content":if complete{json!([part])}else{json!([])}})
             }
             Block::Reasoning(text) => {
                 json!({"id":id,"type":"reasoning","status":status,"summary":[],"content":if complete{json!([{"type":"reasoning_text","text":text}])}else{json!([])}})
@@ -278,11 +294,12 @@ impl Encoder {
                     } else {
                         "reasoning_text"
                     };
-                    let part = if kind == "output_text" {
+                    let mut part = if kind == "output_text" {
                         json!({"type":kind,"text":"","annotations":[]})
                     } else {
                         json!({"type":kind,"text":""})
                     };
+                    if kind == "output_text" && self.logprob_format.is_some() { part["logprobs"] = json!([]); }
                     frames.push(self.named("response.content_part.added",json!({"item_id":self.item_id(i),"output_index":i,"content_index":0,"part":part})));
                 }
             }
@@ -327,7 +344,11 @@ impl Encoder {
                         } else {
                             "response.reasoning_text.done"
                         };
-                        frames.push(self.named(name,json!({"item_id":self.item_id(i),"output_index":i,"content_index":0,"text":text})));
+                        let mut data = json!({"item_id":self.item_id(i),"output_index":i,"content_index":0,"text":text});
+                        if name == "response.output_text.done" && self.logprob_format.is_some() {
+                            data["logprobs"] = item["content"][0]["logprobs"].clone();
+                        }
+                        frames.push(self.named(name, data));
                         frames.push(self.named("response.content_part.done",json!({"item_id":self.item_id(i),"output_index":i,"content_index":0,"part":item["content"][0]})));
                     }
                     Block::Tool { .. } => {
@@ -353,7 +374,35 @@ impl Encoder {
     }
     pub fn apply(&mut self, index: usize, events: Vec<Event>) -> Result<Vec<Frame>> {
         let mut frames = vec![];
+        let mut content_logprobs = Vec::new();
         for event in events {
+            match &event {
+                Event::TokenLogprobs(entries) => {
+                    if self.protocol != Protocol::Responses {
+                        let (options, frontend) = self.logprob_format.as_ref().ok_or("unexpected logprob entries")?;
+                        let entries = entries.iter().map(|e| crate::server::logprobs::format(e, *options, frontend))
+                            .collect::<Result<Vec<_>>>()?;
+                        if !self.streaming { self.logprob_entries[index].extend(entries.iter().cloned()); }
+                        if self.streaming && !entries.is_empty() {
+                            let mut frame = self.chunk(index, if self.protocol == Protocol::Completions { json!("") } else { json!({}) }, Value::Null);
+                            frame.data["choices"][0]["logprobs"] = if self.protocol == Protocol::Completions {
+                                crate::server::logprobs::legacy(&entries)
+                            } else { crate::server::logprobs::chat(&entries) };
+                            frames.push(frame);
+                        }
+                    }
+                    continue;
+                }
+                Event::ContentLogprobs(entries) => {
+                    if self.protocol == Protocol::Responses {
+                        let (options, frontend) = self.logprob_format.as_ref().ok_or("unexpected content logprobs")?;
+                        content_logprobs = entries.iter().map(|e| crate::server::logprobs::format(e, *options, frontend).map(|e| e.entry))
+                            .collect::<Result<_>>()?;
+                    }
+                    continue;
+                }
+                _ => {}
+            }
             if let Event::ToolBegin { name, .. } = &event {
                 if !self.parallel_tool_calls && self.outputs[index].has_tools() {
                     return Err("parallel tool calls are disabled, but the model produced more than one tool call".into());
@@ -374,6 +423,22 @@ impl Encoder {
                 }
             }
             for change in self.outputs[index].apply(event, &self.id)? {
+                if let Change::Delta(part, _) = &change {
+                    if self.protocol == Protocol::Responses && self.logprob_format.is_some()
+                        && matches!(self.outputs[index].blocks[*part], Block::Text(_)) {
+                        self.part_logprobs.resize_with(self.outputs[index].blocks.len(), Vec::new);
+                        self.part_logprobs[*part].extend(content_logprobs.iter().cloned());
+                        let mut deltas = self.change(change)?;
+                        for frame in &mut deltas {
+                            if frame.data["type"] == "response.output_text.delta" {
+                                frame.data["logprobs"] = json!(content_logprobs);
+                            }
+                        }
+                        content_logprobs.clear();
+                        frames.extend(deltas);
+                        continue;
+                    }
+                }
                 frames.extend(self.change(change)?);
             }
         }
@@ -490,10 +555,14 @@ impl Encoder {
     pub fn response(&self) -> Value {
         match self.protocol {
             Protocol::Chat => {
-                json!({"id":self.id,"object":"chat.completion","created":self.created,"model":self.model,"choices":[{"index":0,"message":self.chats[0].message(),"finish_reason":self.reasons[0]}],"usage":self.usage_value()})
+                let mut response = json!({"id":self.id,"object":"chat.completion","created":self.created,"model":self.model,"choices":[{"index":0,"message":self.chats[0].message(),"finish_reason":self.reasons[0]}],"usage":self.usage_value()});
+                if self.logprob_format.is_some() {
+                    response["choices"][0]["logprobs"] = crate::server::logprobs::chat(&self.logprob_entries[0]);
+                }
+                response
             }
             Protocol::Completions => {
-                json!({"id":self.id,"object":"text_completion","created":self.created,"model":self.model,"choices":self.outputs.iter().enumerate().map(|(i,o)|json!({"index":i,"text":o.text(),"logprobs":null,"finish_reason":self.reasons[i]})).collect::<Vec<_>>(),"usage":self.usage_value()})
+                json!({"id":self.id,"object":"text_completion","created":self.created,"model":self.model,"choices":self.outputs.iter().enumerate().map(|(i,o)|json!({"index":i,"text":o.text(),"logprobs":if self.logprob_format.is_some() { crate::server::logprobs::legacy(&self.logprob_entries[i]) } else { Value::Null },"finish_reason":self.reasons[i]})).collect::<Vec<_>>(),"usage":self.usage_value()})
             }
             Protocol::Messages => {
                 json!({"id":self.id,"type":"message","role":"assistant","model":self.model,"content":(0..self.outputs[0].blocks.len()).map(|i|self.anthropic_block(i,true)).collect::<Vec<_>>(),"stop_reason":self.reasons[0].map(|r|if r=="length"{"max_tokens"}else if r=="tool_calls"{"tool_use"}else if self.stop.is_some(){"stop_sequence"}else{"end_turn"}),"stop_sequence":self.stop,"usage":self.usage_value()})

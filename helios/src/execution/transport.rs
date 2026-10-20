@@ -143,12 +143,21 @@ impl<const N: usize> From<[CompletionRecord; N]> for CompletionRecords {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TokenLogprobs {
+    pub token: u32,
+    pub logprob: f32,
+    pub top: [(u32, f32); super::MAX_TOP_LOGPROBS],
+    pub top_count: usize,
+}
+
 #[derive(Debug)]
 pub struct FrameCompletion {
     pub fence: Fence,
     pub graph_index: usize,
     pub timing: ExecutionTiming,
     pub records: CompletionRecords,
+    pub logprobs: Option<Vec<[Option<TokenLogprobs>; MAX_OUTPUT_TOKENS]>>,
     /// Confidence by proposal batch row; rows and columns outside the graph shape are zero.
     pub proposal_confidence: Option<[[f32; MAX_OUTPUT_TOKENS - 1]; REQUEST_LANES]>,
 }
@@ -166,6 +175,7 @@ pub struct ExecutionTiming {
 
 #[derive(Clone, Copy)]
 struct Pending {
+    logprobs: u64,
     fence: Fence,
     graph_index: usize,
     grammar: bool,
@@ -176,19 +186,20 @@ struct Pending {
 struct Frame {
     input: PinnedHost,
     output: PinnedHost,
-    confidence: Option<ConfidenceStorage>,
+    confidence: Option<Readback>,
+    logprobs: Option<Readback>,
     produced: Event,
     started: Event,
     transferred: Event,
     pending: Option<Pending>,
 }
 
-enum ConfidenceStorage {
+enum Readback {
     MappedHost { address: usize, nbytes: usize },
     DeviceCopy(PinnedHost),
 }
 
-impl ConfidenceStorage {
+impl Readback {
     fn new(stream: &Stream, address: usize, nbytes: usize) -> Result<Self> {
         Ok(match stream.mapped_host_address(address, nbytes)? {
             Some(address) => Self::MappedHost { address, nbytes },
@@ -285,6 +296,7 @@ struct Resources {
 /// Thread-bound executor over one borrowed prepared model and its CUDA context.
 pub struct GraphExecutor {
     manifest: ExecutionManifest,
+    pub(super) copy_logprobs: bool,
     resources: Option<Resources>,
     resolved_uploads: Vec<ResolvedUpload>,
     next_sequence: u64,
@@ -311,17 +323,28 @@ impl GraphExecutor {
             .saturating_mul(manifest.request_capacity());
         let model = Stream::open(manifest.context, manifest.device)?;
         let copy = Stream::open(manifest.context, manifest.device)?;
-        let frame = || -> Result<Frame> {
+        let mut frame_index = 0;
+        let mut frame = || -> Result<Frame> {
+            let index = frame_index;
+            frame_index += 1;
             Ok(Frame {
                 input: model.host_buffer(manifest.input_frame_bytes)?,
                 output: model.host_buffer(manifest.completion_bytes())?,
+                logprobs: if manifest.max_top_logprobs()? != 0 {
+                    let b = manifest.buffer("completion_logprobs")?;
+                    Some(Readback::new(
+                        &model, b.address + index * b.nbytes / 2, b.nbytes / 2,
+                    )?)
+                } else {
+                    None
+                },
                 confidence: manifest
                     .graphs
                     .iter()
                     .any(|g| g.kind == GraphKind::Proposal)
                     .then(|| {
                         let buffer = manifest.buffer("proposal_confidence")?;
-                        ConfidenceStorage::new(&model, buffer.address, buffer.nbytes)
+                        Readback::new(&model, buffer.address, buffer.nbytes)
                     })
                     .transpose()?,
                 produced: model.event_with_timing(true)?,
@@ -338,6 +361,7 @@ impl GraphExecutor {
             .transpose()?;
         Ok(Self {
             manifest,
+            copy_logprobs: true,
             resources: Some(Resources {
                 model,
                 copy,
@@ -503,7 +527,18 @@ impl GraphExecutor {
         let frame = &mut resources.frames[index];
         let dispatched = Instant::now();
         resolved.stage(frame.input.bytes_mut(), index as i32, fence.0 as i64);
+        let mut logprobs = 0u64;
+        if self.copy_logprobs && graph.kind.samples() {
+            for upload in uploads.iter().filter(|u| u.buffer == "logprob_requested") {
+                for (i, bytes) in upload.bytes.chunks_exact(size_of::<i32>()).enumerate() {
+                    if i32::from_ne_bytes(bytes.try_into().unwrap()) != 0 {
+                        logprobs |= 1 << (upload.offset / size_of::<i32>() + i);
+                    }
+                }
+            }
+        }
         frame.pending = Some(Pending {
+            logprobs,
             fence,
             graph_index,
             grammar: grammar_constrained,
@@ -542,6 +577,12 @@ impl GraphExecutor {
                     address,
                     self.manifest.completion_bytes(),
                 )?;
+                if logprobs != 0 {
+                    let b = self.manifest.buffer("completion_logprobs")?;
+                    frame.logprobs.as_ref().unwrap().enqueue_copy(
+                        &resources.copy, b.address + index * b.nbytes / 2, b.nbytes / 2,
+                    )?;
+                }
                 if graph.kind == GraphKind::Proposal {
                     let confidence = self.manifest.buffer("proposal_confidence")?;
                     frame.confidence.as_ref().unwrap().enqueue_copy(
@@ -614,6 +655,20 @@ impl GraphExecutor {
                 return Err(error);
             }
         };
+        let logprobs = if pending.logprobs != 0 {
+            // SAFETY: This frame's transfer event covers its sidecar; the source
+            // and pinned destination remain owned until decoding completes.
+            let bytes = unsafe { frame.logprobs.as_ref().unwrap().bytes() };
+            match decode_logprobs(bytes, &records, self.manifest.max_top_logprobs()?, pending.logprobs) {
+                Ok(values) => Some(values),
+                Err(error) => {
+                    self.poison = Some(error.clone());
+                    return Err(error);
+                }
+            }
+        } else {
+            None
+        };
         let elapsed_ns = match frame.produced.elapsed_ns(&frame.started) {
             Ok(value) => value,
             Err(error) => {
@@ -651,6 +706,7 @@ impl GraphExecutor {
                 queued: pending.queued,
             },
             records,
+            logprobs,
             proposal_confidence: if self.manifest.graphs[pending.graph_index].kind
                 == GraphKind::Proposal
             {
@@ -920,6 +976,75 @@ pub(super) fn decode_records(
     Ok(records)
 }
 
+pub(super) fn decode_logprobs(
+    bytes: &[u8],
+    records: &[CompletionRecord],
+    k: usize,
+    requested: u64,
+) -> Result<Vec<[Option<TokenLogprobs>; MAX_OUTPUT_TOKENS]>> {
+    let fields = super::LOGPROB_PAIR_FIELDS * (1 + k);
+    if !(1..=super::MAX_TOP_LOGPROBS).contains(&k)
+        || bytes.len() != records.len() * MAX_OUTPUT_TOKENS * fields * size_of::<i32>()
+    {
+        return Err(Error::execution(
+            ExecutionError::Completion,
+            "generation logprob frame extent mismatch",
+        ));
+    }
+    let mut result = vec![[None; MAX_OUTPUT_TOKENS]; records.len()];
+    for (slot, record) in records.iter().enumerate()
+        .filter(|(slot, r)| r.status != 0 && requested & (1 << slot) != 0)
+    {
+        let count = record.vector.map_or(
+            usize::from(record.token_id >= 0), |v| v.emitted_count as usize,
+        );
+        for position in 0..count {
+            let start = (slot * MAX_OUTPUT_TOKENS + position) * fields * size_of::<i32>();
+            let int = |at: usize| {
+                let offset = start + at * size_of::<i32>();
+                i32::from_ne_bytes(bytes[offset..offset + size_of::<i32>()].try_into().unwrap())
+            };
+            let float = |at| f32::from_bits(int(at) as u32);
+            let expected = record.vector.map_or(record.token_id, |v| v.tokens[position]);
+            if int(0) < 0 || i64::from(int(0)) != expected || float(1).is_nan() {
+                continue;
+            }
+            let mut value = TokenLogprobs {
+                token: int(0) as u32,
+                logprob: float(1),
+                top: [(0, 0.); super::MAX_TOP_LOGPROBS],
+                top_count: 0,
+            };
+            for i in 0..k {
+                let id = int(super::LOGPROB_PAIR_FIELDS * (1 + i));
+                if id < 0 {
+                    break;
+                }
+                let lp = float(super::LOGPROB_PAIR_FIELDS * (1 + i) + 1);
+                if lp.is_nan() {
+                    return Err(Error::execution(
+                        ExecutionError::Completion,
+                        "invalid generation logprob alternative",
+                    ));
+                }
+                if i > 0 {
+                    let (previous, p) = value.top[i - 1];
+                    if lp > p || (lp == p && id as u32 <= previous) {
+                        return Err(Error::execution(
+                            ExecutionError::Completion,
+                            "generation logprob alternatives are not ordered",
+                        ));
+                    }
+                }
+                value.top[i] = (id as u32, lp);
+                value.top_count += 1;
+            }
+            result[slot][position] = Some(value);
+        }
+    }
+    Ok(result)
+}
+
 #[cfg(test)]
 mod input_copy_tests {
     use super::*;
@@ -1020,9 +1145,9 @@ mod confidence_tests {
             let mapped_address = model.mapped_address(&mapped).unwrap();
             let mut input = model.host_buffer(BYTES).unwrap();
             for address in [mapped_address, device_output as usize] {
-                let confidence = ConfidenceStorage::new(&model, address, BYTES).unwrap();
+                let confidence = Readback::new(&model, address, BYTES).unwrap();
                 assert_eq!(
-                    matches!(confidence, ConfidenceStorage::MappedHost { .. }),
+                    matches!(confidence, Readback::MappedHost { .. }),
                     address == mapped_address
                 );
                 let mut graph = std::ptr::null_mut();

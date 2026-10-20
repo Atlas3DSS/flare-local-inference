@@ -76,6 +76,14 @@ pub(super) fn prepare_inference(
 ) -> Result<PreparedInference> {
     use super::inference::{Constraint, Input, RawPrompt, ToolChoice};
     let opts = &request.options;
+    if let Some(logprobs) = opts.logprobs {
+        if config.max_top_logprobs == 0 {
+            return Err("logprobs are not available in this model package".into());
+        }
+        if logprobs.top > config.max_top_logprobs {
+            return Err(format!("top_logprobs exceeds this package's maximum of {}", config.max_top_logprobs).into());
+        }
+    }
     let mut object = serde_json::to_value(&opts.sampling)
         .unwrap()
         .as_object()
@@ -287,6 +295,7 @@ pub(super) fn prepare_inference(
             stop_strings,
             grammar,
             ignore_eos,
+            logprobs: opts.logprobs.is_some(),
         },
         output,
         rendered_prompt: rendered.text,

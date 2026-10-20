@@ -60,7 +60,7 @@ impl ModelCatalog {
                 "created": created,
                 "allow_create_engine": false,
                 "allow_sampling": true,
-                "allow_logprobs": false,
+                "allow_logprobs": model.max_top_logprobs != 0,
                 "allow_search_indices": false,
                 "allow_view": true,
                 "allow_fine_tuning": false,
@@ -70,6 +70,7 @@ impl ModelCatalog {
             }],
             "flare": {
                 "vocab_size": model.contract.vocabulary,
+                "max_top_logprobs": model.max_top_logprobs,
                 "max_concurrency": model.limits.max_active,
                 "prefill_chunk_size": model.limits.prefill_chunk_size,
                 "default_max_tokens": model.max_new_tokens,
@@ -138,6 +139,7 @@ mod tests {
 
     fn config() -> ModelConfig {
         ModelConfig {
+            max_top_logprobs: 0,
             prepared_sequence_tokens: 16384,
             contract: crate::model::PreparedContract {
                 vocabulary: 1024,
@@ -196,6 +198,11 @@ mod tests {
         assert!(text["created"].as_u64().unwrap() > 0);
         assert_eq!(text["permission"][0]["created"], text["created"]);
 
+        assert_eq!(text["flare"]["max_top_logprobs"], 0);
+        model.max_top_logprobs = crate::execution::MAX_TOP_LOGPROBS;
+        let logprobs = ModelCatalog::new(&model, &[]).card;
+        assert_eq!(logprobs["permission"][0]["allow_logprobs"], true);
+        assert_eq!(logprobs["flare"]["max_top_logprobs"], crate::execution::MAX_TOP_LOGPROBS);
         model.limits.max_sequence_tokens = 4096;
         model.contract.vision = VisionCapabilities {
             feature_slots: 4,

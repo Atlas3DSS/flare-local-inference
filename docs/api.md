@@ -26,14 +26,16 @@ is the effective serving context limit in tokens, including prompt and output.
 `root` is the loaded model's identifier, `parent` is null, and `owned_by` remains
 `local`. `created` is the serving instance's discovery initialization time in
 Unix seconds; cards and permission IDs stay stable until the server restarts.
-Permissions advertise sampling and viewing, with unsupported log probabilities,
-fine-tuning, engine creation, and search indices disabled.
+Permissions advertise sampling and viewing. `allow_logprobs` reflects the loaded
+package’s generation logprob outputs; fine-tuning, engine creation, and search
+indices remain disabled.
 
 The additional `flare` object reports prepared and selected serving metadata:
 
 | Field | Meaning |
 | --- | --- |
 | `vocab_size` | Prepared output vocabulary size |
+| `max_top_logprobs` | Packaged alternative-token capacity; 20 for new packages, zero for older packages |
 | `max_concurrency` | Selected maximum active requests |
 | `prefill_chunk_size` | Maximum tokens in a prefill chunk, not the context limit |
 | `default_max_tokens` | Default output-token budget when a request omits it; remaining context still bounds output |
@@ -48,6 +50,62 @@ The additional `flare` object reports prepared and selected serving metadata:
 
 Generation requests always use the loaded model, regardless of the request's
 `model` string. Returned generation objects identify the loaded model.
+
+## Generation log probabilities
+
+Logprobs describe the raw next-token distribution over the complete vocabulary:
+`logit(token) - logsumexp(logits)`, with FP32 accumulation, before temperature,
+penalties, grammar masks, and top-k, top-p, or min-p filtering. Speculative output
+uses the target model's distribution at each committed position. The chosen token
+is always included, even when outside the alternatives. Alternatives are ordered
+by decreasing logprob, with increasing token ID for ties.
+
+Every newly exported package provides up to 20 alternatives. Older packages serve
+unchanged, advertise `allow_logprobs: false` and `flare.max_top_logprobs: 0`, and
+reject logprob requests with HTTP 400: `logprobs are not available in this model
+package`. Re-export to enable the feature.
+
+For Chat Completions, set `logprobs: true` and optionally `top_logprobs: 0..20`.
+A positive `top_logprobs` requires `logprobs: true`; zero alone is accepted and
+requests no logprobs. Buffered responses and streaming choices carry:
+
+```json
+{"logprobs":{"content":[{"token":"OK","logprob":-0.25,"bytes":[79,75],
+  "top_logprobs":[{"token":"OK","logprob":-0.25,"bytes":[79,75]}]}]}}
+```
+
+There is one entry per returned generated token, including reasoning, tool-call,
+and control tokens. Stream chunks may carry entries with an empty text delta,
+particularly when the tokenizer buffers incomplete UTF-8. Concatenate entries in
+stream order. A token's text can span multiple deltas, including a final parser
+flush; each text delta does not require a new logprob entry.
+A terminating EOS or token-ID stop has no entry. An EOS under
+`ignore_eos` keeps its entry. A token partially clipped by a string stop keeps its
+entry and full bytes; tokens entirely beyond the stop have no entries. `bytes`
+contains the token's exact bytes, including partial UTF-8; `token` uses UTF-8
+replacement characters where needed for JSON.
+
+Legacy Completions accepts integer `logprobs: 0..20`. Each choice's `logprobs` has
+parallel `tokens`, `token_logprobs`, `top_logprobs`, and `text_offset` arrays.
+`top_logprobs` contains one token-to-logprob object per generated token.
+`text_offset` counts Unicode characters from the start of the completion, including
+positions inside a decoder span released for several tokens. `echo` with logprobs
+returns HTTP 400; prompt logprobs are not implemented.
+
+Responses accepts `include: ["message.output_text.logprobs"]` with optional
+`top_logprobs: 0..20`. Entries use the Chat token shape and appear in each
+`output_text` part's `logprobs`, and in `response.output_text.delta` events.
+Only tokens whose first text byte belongs to output text receive entries there;
+reasoning, tool calls, and delimiters do not. A token spanning a delimiter and
+answer belongs to the delimiter, even if its suffix contributes answer text.
+Other `include` values retain their existing behavior.
+
+On these three endpoints, `return_tokens_as_token_ids: true` changes chosen and
+alternative token strings to `token_id:<id>`; bytes remain exact. `/v1/messages`
+explicitly rejects logprob fields. Temperature zero remains rejected. Single-token
+continuations work with `max_tokens: 1`, `continue_final_message: true`,
+`add_generation_prompt: false`, `logprobs: true`, and `top_logprobs: 20`, omitting
+temperature to use the model's prepared default.
 
 ## Transport and admission
 

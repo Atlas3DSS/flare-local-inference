@@ -1,4 +1,5 @@
 """Captured MoonViT projections and attention against the checkpoint forward."""
+
 import json
 from copy import deepcopy
 import os
@@ -8,6 +9,8 @@ import sys
 
 import pytest
 import torch
+
+from tests.components.completion_support import completion_outputs
 
 pytestmark = pytest.mark.skipif(os.getenv('FLARE_RUN_CUDA_TESTS') != '1', reason='requires an assigned GPU')
 CHECKPOINT = Path('/data/models/Kimi-K3-MXFP4-CSF')
@@ -121,7 +124,7 @@ def test_checkpoint_vision(monkeypatch, tmp_path, n, h, w):
         sequence = torch.ones(1, dtype=torch.int64, device=device)
         # TP ranks bind publication scratch at identical offsets after encoder buffers.
         publication_buffers = deepcopy(buffers, {id(pool): pool})
-        publication = PreparedVisionGeneration(encoder, state, records, frame, sequence, feature_range=(448,896), buffers=buffers)
+        publication = PreparedVisionGeneration(encoder, state, completion_outputs(records), frame, sequence, feature_range=(448,896), buffers=buffers)
         inputs.vision_pixel_values[:n].copy_(source.flatten(1))
         for target, value in ((inputs.vision_position_ids, encoder.positions),
                               (inputs.vision_interpolation_indices, encoder.interpolation_indices),
@@ -166,7 +169,7 @@ def test_checkpoint_vision(monkeypatch, tmp_path, n, h, w):
             assert state.count.tolist() == [0,n//2]
             torch.testing.assert_close(state.arena[1,n//4:n//2], actual[:,448:896], atol=0, rtol=0)
         graph.reset()
-        publication = PreparedVisionGeneration(encoder, state, records, frame, sequence, feature_range=(6720,7168), buffers=publication_buffers)
+        publication = PreparedVisionGeneration(encoder, state, completion_outputs(records), frame, sequence, feature_range=(6720,7168), buffers=publication_buffers)
         with artifact.open('rb') as file:
             restored = torch.compiler.load_compiled_function(file)
         inputs.vision_feature_offset.zero_()
