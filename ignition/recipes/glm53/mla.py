@@ -133,12 +133,13 @@ def _fake_join_query_chain(query, absorbed, gathered, workspace, stream):
 
 
 class QueryChain:
-    """Project, absorb and, under context parallelism, gather decode queries on an auxiliary stream.
+    """Project and absorb decode queries while the main stream selects records.
 
     The chain reads only the normalized low-rank query and writes the query, absorbed query and gathered
     heads, which the main stream's latent writes and record selection never touch. Its projection uses
-    a disjoint arena suffix, the absorption BMM none, and the head exchange its own channel. The main stream
-    joins before attention reads the chain's outputs.
+    a disjoint arena suffix and the absorption BMM none. PCIe head exchange uses a separate channel on
+    the auxiliary stream. RoCE gathers run after the join on the main stream because the runtime shares
+    one ordered transport channel with the model's other collectives.
     """
 
     def __init__(self, projection: QuantizedProjection, absorb: BatchedQuantizedProjection, source, query,
@@ -149,6 +150,7 @@ class QueryChain:
         if values.dtype not in (torch.float8_e4m3fn, torch.uint8) or gain is not None or fp4 or projection.bias is not None:
             raise ValueError("the query chain requires an unbiased MXFP8 or MXFP4 query projection")
         self.projection, self.absorb, self.gather = projection, absorb, gather
+        self.gather_on_main = gather is not None and not gather.single and gather.roce
         self.values, self.scales = values, scales.view(torch.uint8)
         self.source, self.query, self.absorbed = source, query, absorbed
         self.gathered = gathered if gathered is not None else absorbed
@@ -172,7 +174,7 @@ class QueryChain:
                              None, self.projection.plan.handle, "any")
         rows = self.absorbed.shape[0]
         self.absorb(self.query[:rows].transpose(0, 1))
-        if self.gather is not None:
+        if self.gather is not None and not self.gather_on_main:
             self.gather.run_eager(self.absorbed.view(rows, -1))
 
     def start(self):
@@ -181,6 +183,8 @@ class QueryChain:
 
     def finish(self):
         _join_query_chain(self.query, self.absorbed, self.gathered, self.workspace, self.stream_handle)
+        if self.gather_on_main:
+            self.gather(self.absorbed.view(self.absorbed.shape[0], -1))
 
 
 class PreparedGlmMLA:
@@ -209,8 +213,7 @@ class PreparedGlmMLA:
                 or weights["kv_b_proj"].out_features != heads * 512):
             raise ValueError("GLM MLA cache or head partition geometry mismatch")
         self.module, self.scratch, self.state, self.metadata = module, scratch, state, metadata
-        # Decode projects, absorbs and gathers queries on an auxiliary stream while records are selected.
-        # Without stream overlap, the main stream projects, absorbs and gathers them before attention.
+        # Decode projects and absorbs queries while records are selected; shared RoCE gathers follow the join.
         self.query_chain = None
         for key in ("q_a_layernorm", "kv_a_layernorm"):
             module.get_submodule(key).weight = torch.nn.Parameter(weights[f"{key}.weight"], requires_grad=False)
