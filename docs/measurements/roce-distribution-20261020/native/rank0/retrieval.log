@@ -1,0 +1,11 @@
+ 0 correct   completion_tokens=129 'The vault access code is **2U2GYCZF**, and it appears immediately after Record **198**.'
+ 1 correct   completion_tokens=175 'e is **2U2GYCZF**, and the record immediately preceding the line containing it is **Record 198**.\n\nAnswer: 2U2GYCZF, 198'
+ 2 correct   completion_tokens=98 '2U2GYCZF, 198'
+3 correct of 3 (answer 2U2GYCZF, 198) in 22.1s
+speculative rounds by batch x width: 1x2:138 1x4:35 1x5:1 1x6:1; 0 of 175 in graphs above 16 query rows
+ 0 correct   completion_tokens=173 'ted between Record 198 and Record 199, so Record 198 is the record written immediately before the line stating the code.'
+ 1 correct   completion_tokens=248 'e records. The record written immediately before that line was **Record 198** ("are it or is with or by that at from.").'
+ 2 correct   completion_tokens=174 'appears between Record 198 and Record 199, so the record written immediately before it is Record 198.\n\n**2U2GYCZF, 198**'
+ 3 correct   completion_tokens=142 'ode is **2U2GYCZF**, and the record written immediately before the line stating it is Record **198**.\n\n**2U2GYCZF, 198**'
+4 correct of 4 (answer 2U2GYCZF, 198) in 14.6s
+speculative rounds by batch x width: 1x2:38 2x2:1 4x1:172; 0 of 211 in graphs above 16 query rows

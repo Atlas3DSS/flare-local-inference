@@ -217,13 +217,11 @@ pub fn relay(
         // The source receives the agent-verified rank and stream before its end-to-end handshake.
         source.write_all(&(request.destination as u32).to_le_bytes())?;
         source.write_all(&(request.stream as u32).to_le_bytes())?;
-        let write = source.try_clone()?;
-        let close = source.try_clone()?;
         session.ok(&[])?;
         let (read, send, network) = session.checkpoint_parts()?;
-        bridge(read, send, source, write, || {
+        bridge(read, send, &source, &source, || {
             let _ = network.shutdown(Shutdown::Both);
-            let _ = close.shutdown(Shutdown::Both);
+            let _ = source.shutdown(Shutdown::Both);
         })
     } else {
         let result = upstream(key, hello, &grant, &request, rank);
@@ -270,11 +268,9 @@ pub fn connect(path: &Path, rank: usize, stream: usize, descriptor: i32) -> Resu
     let session = upstream(&key, &hello, &grant, &request, rank)?;
     // SAFETY: Ignition passes an owned socketpair descriptor via pass_fds; this process owns its copy.
     let local = unsafe { UnixStream::from_raw_fd(descriptor) };
-    let write = local.try_clone()?;
-    let close = local.try_clone()?;
     let (read, send, network) = session.checkpoint_parts()?;
-    bridge(local, write, read, send, || {
-        let _ = close.shutdown(Shutdown::Both);
+    bridge(&local, &local, read, send, || {
+        let _ = local.shutdown(Shutdown::Both);
         let _ = network.shutdown(Shutdown::Both);
     })
 }
@@ -363,6 +359,10 @@ mod tests {
                             stream.write_all(source_bytes).unwrap();
                             stream.read_exact(&mut request).unwrap();
                             assert_eq!(&request, b"finish!");
+                            // Export reverses bulk traffic through the same authenticated hops.
+                            let mut exported = vec![0; source_bytes.len()];
+                            stream.read_exact(&mut exported).unwrap();
+                            assert_eq!(&exported, source_bytes);
                             stream.write_all(b"drained").unwrap();
                         });
                     }
@@ -391,6 +391,7 @@ mod tests {
                         read.read_exact(&mut received).unwrap();
                         assert_eq!(&received, bytes);
                         write.write_all(b"finish!").unwrap();
+                        write.write_all(bytes).unwrap();
                         let mut reply = [0; 7];
                         read.read_exact(&mut reply).unwrap();
                         assert_eq!(&reply, b"drained");

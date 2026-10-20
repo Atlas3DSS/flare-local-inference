@@ -1,0 +1,73 @@
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "GLM-5.3-Flash",
+      "object": "model",
+      "created": 1792530880,
+      "owned_by": "local",
+      "root": "nvidia/GLM-5.3-Flash-FP4-Local",
+      "parent": null,
+      "max_model_len": 1048576,
+      "permission": [
+        {
+          "id": "modelperm-1792530880-0",
+          "object": "model_permission",
+          "created": 1792530880,
+          "allow_create_engine": false,
+          "allow_sampling": true,
+          "allow_logprobs": true,
+          "allow_search_indices": false,
+          "allow_view": true,
+          "allow_fine_tuning": false,
+          "organization": "*",
+          "group": null,
+          "is_blocking": false
+        }
+      ],
+      "flare": {
+        "vocab_size": 154880,
+        "max_top_logprobs": 20,
+        "max_concurrency": 4,
+        "prefill_chunk_size": 4096,
+        "default_max_tokens": 1048576,
+        "sampling_defaults": {
+          "seed": 0,
+          "temperature": 1.0,
+          "top_p": 0.949999988079071,
+          "min_p": 0.0,
+          "repetition_penalty": 1.0,
+          "presence_penalty": 0.0,
+          "frequency_penalty": 0.0,
+          "top_k": -1
+        },
+        "sampling_ranges": {
+          "temperature": {
+            "min": 0.949999988079071,
+            "max": 1.0
+          },
+          "top_k": null,
+          "top_p": {
+            "min": 0.949999988079071,
+            "max": 1.0
+          },
+          "min_p": null,
+          "repetition_penalty": null,
+          "presence_penalty": null,
+          "frequency_penalty": null
+        },
+        "max_images_per_prompt": 0,
+        "max_image_tokens_per_prompt": 0,
+        "max_image_tokens_per_image": 0,
+        "max_image_pixels": 0,
+        "max_image_bytes": 0,
+        "input_modalities": [
+          "text"
+        ],
+        "output_modalities": [
+          "text"
+        ]
+      }
+    }
+  ]
+}

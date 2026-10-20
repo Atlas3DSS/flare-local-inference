@@ -258,6 +258,7 @@ class SourceServer:
         try:
             channel, _ = authenticate(self.connection, self.key, rank=self.rank, identity=self.identity,
                                       catalog=self.source.catalog)
+            self.channel = channel
             channel.send("catalog", _json(self.source.catalog), transport=self.transport)
             while True:
                 message, payload = channel.receive()
@@ -442,7 +443,7 @@ class RemoteSource:
             if self.channels is not None:
                 self.channels.put((channel, stats))
 
-    def finish(self):
+    def finish(self, *, keep_transport=False):
         total = {field: sum(stats[field] for _, stats in [*self.channel_stats, (self.channel, self.control_stats)])
                  for field in self.stats}
         if total != self.stats:
@@ -453,6 +454,10 @@ class RemoteSource:
             if message["stats"] != stats:
                 raise ValueError("checkpoint completion accounting differs")
         self.finished = True
+        if not keep_transport:
+            self.close_transport()
+
+    def close_transport(self):
         while self.ring_connections:
             self.ring_connections.pop().close(check=True)
 

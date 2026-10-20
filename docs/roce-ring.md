@@ -13,7 +13,7 @@ progress belong to the native transport. Serving has no Python callback,
 runtime compilation, or steady-state GPU allocation.
 
 Orbit also uses this rank order and fabric discovery for encrypted TCP checkpoint
-reads during preparation and package distribution before serving when
+reads, prepared exports, and package distribution before serving when
 `--roce-ring` is selected. Agents stream bytes through their neighbors; this is
 separate from the RDMA proxy and its captured regions. See
 [checkpoint range reads](multi-host.md) and
@@ -22,8 +22,8 @@ separate from the RDMA proxy and its captured regions. See
 The ring can run over a switch or hosts cabled directly to their neighbors.
 Forwarding runs on host CPUs; ConnectX hardware hairpin forwarding is not
 implemented. Four-Spark native transport and GPU graph replay checks pass on a
-switched fabric. Physical ring cabling and full-model ring serving remain
-unqualified.
+switched fabric. The four-Spark physical ring also completed GLM-5.3 Flash
+preparation, export, package distribution, and native inference as measured below.
 
 ## Rank order and routes
 
@@ -167,8 +167,9 @@ files. Each peer fetches only its routed checkpoint ranges through 1..64 streams
 rank 1. Range requests retain their authenticated catalog, exact bounds, and
 completion accounting. Buffering is bounded by the stream count; one reusable
 4 MiB memory-backed buffer feeds the native weight loader without writing received
-weights to peer NVMe. Metadata and coordination stay on the management
-rendezvous, as does final export assembly. Agents on every hop and the Flare
+weights to peer NVMe. Export payloads return over the same authenticated fabric
+channels; rank zero assembles and signs the package locally. Metadata and
+coordination stay on the management rendezvous. Agents on every hop and the Flare
 executable used by Ignition must include checkpoint transport support.
 
 ### Serve through the agents
@@ -246,11 +247,12 @@ mesh and ring modes.
 Removing the GPU wait for `pipe_done` from a copied source produces a data
 integrity failure in the four-rank ring stress graph when message sizes change.
 The shared GPU suites also exercise stopped-proxy timeouts and invalid
-variable-length counts. Permanent relay failure under arbitrary schedules,
-physical ring cabling, full-model serving, and ring throughput remain
-unqualified. CPU relays, extra RDMA hops, and per-packet acknowledgments require
-complete graph and serving measurements before making performance claims.
-Switched-fabric results do not establish physical-ring performance.
+variable-length counts. Permanent relay failure under arbitrary schedules
+and arbitrary physical-ring model workloads remain unqualified. CPU relays,
+extra RDMA hops, and per-packet acknowledgments require complete graph and serving
+measurements before making performance claims. The GLM results below exercise
+one full-model physical-ring workload; switched-fabric results alone do not
+establish physical-ring performance.
 
 ### TCP package distribution
 
@@ -301,16 +303,23 @@ analysis script. These are ordinary page-cache conditions, not cold-cache tests.
 | Management rendezvous, one stream | Incomplete | Incomplete | Incomplete |
 | Fabric TCP, eight streams, disk buffer | 310.5 s | 375.6 s | 326.4 s |
 | Fabric TCP, eight streams, memory buffer and parallel calibration reads | 199.1 s | 204.0 s | 200.2 s |
+| Fabric TCP, sixteen streams, memory buffer | 178.4 s | 177.3 s | 171.6 s |
+| Fabric TCP, thirty-two streams, memory buffer | 168.9 s | 169.5 s | 164.0 s |
 
 Times are each peer's process elapsed time at the recipe's `after weights`
 marker, including admission and loading. The management run was stopped after
 505–511 seconds with only 13.9–14.9 GiB received per peer; it supplies no completed
 baseline time. The fabric runs loaded every rank. The disk-buffer run stopped
-before graph preparation finished. The memory-buffer run later failed capturing
-GLM's `decode4` graph because an auxiliary-stream query gather violated
-RoCEnante's single capture-stream requirement; it did not export or serve a model.
+before graph preparation finished. The eight-stream memory-buffer run later
+failed capturing GLM's `decode4` graph because an auxiliary-stream query gather
+violated RoCEnante's single capture-stream requirement; it did not export or serve a model.
+Ordering that gather after the main-stream join allowed all 57 serving graphs
+to capture on every rank. The sixteen-stream run then exposed a separate export
+descriptor-limit failure. Bounded file ownership and fabric export streams
+allowed the thirty-two-stream run to publish the signed package and all four
+preparation processes to exit successfully. Rank zero took 20:30.98 overall.
 
-During the memory-buffer loading window, source fabric TX was 155.25 GiB.
+During the eight-stream memory-buffer loading window, source fabric TX was 155.25 GiB.
 Rank 1 received 103.62 GiB and transmitted 52.02 GiB; ranks 2 and 3 received
 51.77 and 51.75 GiB. Live TCP sockets used the same two rails per hop listed
 below. Management RX was about 69.4 MiB per peer for checkpoint metadata and
@@ -326,8 +335,94 @@ Package-copy throughput below does not describe checkpoint-loading throughput.
 Focused tests cover exact GPU copies with one, four and eight streams, bounded
 parallel calibration/weight reads, authenticated completion accounting,
 multi-hop encrypted streams, invalid routes, replay/tampering and interrupted
-connections. Final export assembly still transfers missing prepared payloads
-over the preparation rendezvous.
+connections. Increasing concurrency also changes storage/cache behavior: root
+NVMe reads during the sampled loading windows were 356.2, 347.9, and 321.9 GiB
+at eight, sixteen, and thirty-two streams. These runs do not isolate stream count
+from every cache and storage effect.
+
+A separate loading-only series uses `load_glm_weights.py` with identical text
+and MTP weights, A16 expert loading, the real agent transport, and ordinary
+page-cache conditions. It excludes tuning, capture, and export. Unlike the full
+preparation runs, this script does not load into export `PackageStorage`, so
+compare stream counts within this series rather than treating its times as
+interchangeable with the table above. It runs eight, thirty-two, sixty-four,
+then eight streams again, without dropping host caches.
+
+| Streams per peer | Rank 0 load | Rank 1 load | Rank 2 load | Rank 3 load | Peak source-agent descriptors |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 8 | 153.23 s | 209.46 s | 213.59 s | 209.52 s | 113 |
+| 32 | 169.85 s | 158.98 s | 161.71 s | 159.01 s | 401 |
+| 64 | 170.65 s | 154.84 s | 160.89 s | 159.55 s | 785 |
+| 8, repeated | 149.80 s | 193.91 s | 197.76 s | 193.85 s | 113 |
+
+All sixteen processes completed successfully. Each peer received exactly
+53,002,660,524 payload bytes (49.36 GiB) and authenticated completion accounting
+matched. Root fabric TX was 155.25–155.26 GiB per run, with about 69.4 MiB of
+management RX per peer for metadata. At 64 streams, rank 1's relay agent peaked
+at 401 descriptors; both source and relay stayed below the unchanged soft limit
+of 1,024. The native bridge borrows its local socket through the scoped worker
+join instead of cloning two additional descriptors per stream.
+
+The repeated eight-stream load was faster than the first, so these are not
+cache-controlled speedup ratios. Both eight-stream runs were slower on the
+peers than thirty-two streams, while sixty-four offered little further benefit.
+Root NVMe reads were 339.4, 349.9, 354.3, and 341.6 GiB across the four runs;
+the first peer runs also recorded about 1.6 GiB of NVMe reads, versus near-zero
+reads in subsequent runs. Loading and strided source reads
+remain material costs, and increasing streams alone did not saturate the ports.
+
+### Export payloads through the ring
+
+The thirty-two-stream run reused the authenticated checkpoint channels for
+prepared payloads in the reverse direction. Rank zero received all three peers
+concurrently, verifying each file before publishing it into its cache:
+
+| Peer | Missing payload received | Receive time | Payload throughput |
+| --- | ---: | ---: | ---: |
+| Rank 1 | 44.02 GiB | 93.66 s | 4.04 Gbit/s |
+| Rank 2, through rank 1 | 44.02 GiB | 93.72 s | 4.04 Gbit/s |
+| Rank 3 | 44.02 GiB | 95.19 s | 3.97 Gbit/s |
+
+The retained export counter snapshots show 138.25 GiB arriving at rank zero's
+fabric interfaces, including framing and network overhead, versus 9.24 MiB on
+management for manifests/control. Rank 1 received 46.20 GiB and sent 92.23 GiB
+on the fabric, forwarding rank 2's payload alongside its own. Sockets remained
+on the signed `10.10.*` rails. One-second interface samples bracketed about
+99.7 seconds of active root reception, averaging 11.91 Gbit/s and peaking at
+37.31 Gbit/s; these include transport overhead. The complete export phase took
+770.0 seconds; producing payloads and locally hashing/assembling the final signed
+package dominated the remaining time. This is not a 100 Gbit/s transfer result.
+
+Real-socket tests cover one, four and eight export streams, verified cache reuse,
+checkpoint-to-export handoff, source replacement/mutation, invalid ranges,
+digests and completion accounting, truncated or unauthenticated frames, and
+1,200 files under a 128-descriptor limit. A native multi-hop test sends bulk
+bytes in both directions with deliberately unreachable management addresses.
+
+### Native serving of the distributed GLM package
+
+The exported GLM package then passed a native four-rank launch with
+`orbit run --roce-ring --transfer-streams 8 --verify-weights`. Each peer received
+and verified 45.2 GiB in its fresh rank cache. The detached launch returned in
+127.71 seconds; HTTP became healthy another 377.80 seconds later. Rank zero's
+full-package stored-data verification took about 235 seconds, while peers
+verified their rank data in about 21 seconds before waiting for rank zero.
+The [native measurements](measurements/roce-distribution-20261020/native/)
+retain launch logs, interface/resource samples, requests, SSE events, and metrics.
+
+One warmup and six measured requests each consumed exactly 512 prompt tokens
+and generated 256 tokens with T=1, top-p=.95, seed 42, and low reasoning effort.
+The two sequential requests delivered 52.96 and 55.07 output tokens/s after
+first token, with first-token latency 598 and 415 ms. Four concurrent requests
+completed in 13.73 seconds (74.56 output tokens/s including prefill), with
+21.29–21.88 output tokens/s per request after first token. These are absolute
+measurements of this package, without a matching mesh or management baseline.
+
+All three cold and four concurrent cached retrieval checks returned the correct
+code and record number for the standard 8,000-size fixture. Observed speculative
+shapes included 1×2/4/5/6, 2×2, and 4×1; no graph above 16 query rows ran in this
+workload. All four ranks drained and exited with status zero. Original agents
+on port 29900 remained active; this validation used isolated agents on 29910.
 
 ### TCP interface recheck
 

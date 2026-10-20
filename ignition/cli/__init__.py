@@ -77,17 +77,17 @@ def _parser() -> argparse.ArgumentParser:
     for spanning in (serving, exporting):
         hosts = spanning.add_argument_group("multi-host tensor parallelism")
         hosts.add_argument("--roce-ring", action="store_true",
-                           help="ring collectives and checkpoint TCP through paired agents on the RoCE interfaces")
+                           help="ring collectives and checkpoint/export TCP through paired agents on the RoCE interfaces")
         hosts.add_argument("--orbit-file", type=Path, metavar="PATH",
                            help="checkpoint ring's Orbit cluster file (default: ~/.config/flare/orbit.toml)")
         hosts.add_argument("--key-file", type=Path, metavar="PATH",
                            help="checkpoint ring's controller key (default: ~/.config/flare/orbit/controller.key)")
         hosts.add_argument("--cluster", metavar="NAME", help="checkpoint ring's Orbit cluster in rank order")
         hosts.add_argument("--transfer-streams", type=int, choices=range(1, 65), metavar="N",
-                           help="checkpoint TCP streams per peer through the ring, 1..64 (default: 8)")
+                           help="checkpoint and export TCP streams per peer through the ring, 1..64 (default: 8)")
         hosts.add_argument("--ranks", type=int, default=1, choices=range(1, 17), metavar="N",
                            help="tensor-parallel ranks, one per host; this process is rank zero (default: 1);"
-                                " an export writes each host's own rank file at --output on that host")
+                                " an export assembles all ranks at --output on rank zero")
         hosts.add_argument("--rendezvous", metavar="ADDR:PORT",
                            help="IPv4 address and port on which rank zero admits its peers")
     serving.add_argument("--prefix-cache-states", type=int, metavar="N",

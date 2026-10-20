@@ -222,8 +222,14 @@ Checkpoint loading uses eight TCP streams per peer by default. Select 1 through
 the opposite host receives its requested ranges through a shortest ring path,
 with clockwise ties. Each hop binds and checks the signed fabric IPs. A failed
 fabric channel ends preparation instead of retrying through management.
-Admission metadata, coordination, and export assembly continue using the
-rendezvous connection. This changes neither host routes nor collective transport.
+Admission metadata and coordination continue using the rendezvous connection.
+Export retains the authenticated fabric channels after checkpoint reads drain:
+peers send missing prepared payload files back through the same ring hops and
+rails. Rank zero receives from all peers concurrently, with one file per stream
+and bounded 4 MiB frames. Each received file is hashed and published atomically;
+failure aborts sibling streams before their temporary files are removed. Export
+manifests and cache requests stay on the rendezvous connection. This changes
+neither host routes nor collective transport.
 
 Prefetch retains at most one 4 MiB payload per stream plus bounded transport
 buffers. b12x destination copies remain ordered, with exact packed rows,
@@ -232,6 +238,8 @@ memory-backed transfer descriptor, without writing checkpoint weights to disk.
 The preparation report records the checkpoint
 transport, stream count, payload bytes, and the interval from the first payload
 read to the last; this interval includes intervening loading work.
+Export reports missing payload bytes, stream count, receive duration, and
+throughput separately for each peer. Cache hits skip bulk payload transfer.
 
 Each rank loads its weights and prepares its graphs. Forward compilation is
 shared across ranks, and compiled artifacts go to the ranks that need them.

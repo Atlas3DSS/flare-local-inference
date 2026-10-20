@@ -400,13 +400,16 @@ def test_peer_export_keeps_the_remote_owner_for_cleanup(tmp_path, monkeypatch, f
     events = []
     class Owner:
         stats = dict(payload_bytes=0, metadata_bytes=0, requests=0)
+        channel_stats = []
         def report(self):
             return dict(self.stats)
         @contextlib.contextmanager
         def activate(self):
             yield tmp_path
-        def finish(self):
+        def finish(self, *, keep_transport=False):
             events.append("drained")
+        def close_transport(self):
+            pass
         def close(self):
             events.append("owner-closed")
     owner = Owner()
@@ -421,6 +424,7 @@ def test_peer_export_keeps_the_remote_owner_for_cleanup(tmp_path, monkeypatch, f
             events.append("package-sent")
             if failed_send:
                 raise ConnectionError("synthetic interrupted export")
+            return count
         def close(self):
             pass
     model = SimpleNamespace(memory_report={}, manifest=lambda: None, close=lambda: events.append("model-closed"))

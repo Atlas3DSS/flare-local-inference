@@ -592,10 +592,11 @@ from that copy.
 
 Controller connections, metadata lookup, and serving rendezvous continue to use
 the configured management addresses. These transfers use TCP, not RDMA, and
-require no host routing changes or IP forwarding. Ignition checkpoint reads and
-export assembly use their existing preparation connections. Package formats and
-captured collective ABIs are unaffected. Encryption at each hop, disk throughput,
-and shared links can limit bulk throughput below interface line rate.
+require no host routing changes or IP forwarding. With `ignition export --roce-ring`,
+checkpoint reads and prepared export payloads also use agent fabric connections;
+preparation control and export manifests remain on the rendezvous connection.
+Package formats and captured collective ABIs are unaffected. Encryption at each
+hop, disk throughput, and shared links can limit bulk throughput below interface line rate.
 
 ## Frames
 

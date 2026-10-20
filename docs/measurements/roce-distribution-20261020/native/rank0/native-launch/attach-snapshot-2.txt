@@ -1,0 +1,56 @@
+[rank 0 spark-1ae8] [ PENDING  ] Verify package.  0.0s
+[rank 0 spark-1ae8] [    OK    ] Verify package.  signatures  0.0s
+[rank 0 spark-1ae8] [ PENDING  ] Verify stored data.  0.0s
+[rank 2 spark-1b6f] [ PENDING  ] Verify package.  0.0s
+[rank 0 spark-1ae8] [    OK    ] Verify stored data.  stored-data contents  235.7s
+[rank 0 spark-1ae8] [ PENDING  ] Wait for tensor-parallel hosts.  0.0s
+[rank 3 localhost] [ PENDING  ] Verify package.  0.0s
+[rank 3 localhost] [    OK    ] Verify package.  signatures  0.0s
+[rank 1 spark-1afa] [ PENDING  ] Verify package.  0.0s
+[rank 1 spark-1afa] [    OK    ] Verify package.  signatures  0.0s
+[rank 1 spark-1afa] [ PENDING  ] Verify stored data.  0.0s
+[rank 3 localhost] [ PENDING  ] Verify stored data.  0.0s
+[rank 3 localhost] [    OK    ] Verify stored data.  stored-data contents  21.4s
+[rank 3 localhost] [ PENDING  ] Join rank zero.  0.0s
+[rank 3 localhost] [    OK    ] Join rank zero.  rank 3 of 4 at 10.137.203.173:29800  214.8s
+[rank 3 localhost] [ PENDING  ] Prepare model.  0.0s
+[rank 3 localhost] [    OK    ] Prepare model.  1 rank  0.0s
+[rank 3 localhost] [ PENDING  ] Initialize GPU.  0.0s
+[rank 3 localhost] [    OK    ] Initialize GPU.  GPU 0 · SM121  0.3s
+[rank 0 spark-1ae8] Rank 2 joined
+[rank 0 spark-1ae8] Rank 1 joined
+[rank 0 spark-1ae8] Rank 3 joined
+[rank 0 spark-1ae8] [    OK    ] Wait for tensor-parallel hosts.  3 peer ranks at 0.0.0.0:29800  0.5s
+[rank 3 localhost] [ PENDING  ] Allocate model memory.  0.0s
+[rank 1 spark-1afa] [    OK    ] Verify stored data.  stored-data contents  21.0s
+[rank 1 spark-1afa] [ PENDING  ] Join rank zero.  0.0s
+[rank 1 spark-1afa] [    OK    ] Join rank zero.  rank 1 of 4 at 10.137.203.173:29800  215.3s
+[rank 1 spark-1afa] [ PENDING  ] Prepare model.  0.0s
+[rank 1 spark-1afa] [    OK    ] Prepare model.  1 rank  0.0s
+[rank 1 spark-1afa] [ PENDING  ] Initialize GPU.  0.0s
+[rank 1 spark-1afa] [    OK    ] Initialize GPU.  GPU 0 · SM121  0.3s
+[rank 1 spark-1afa] [ PENDING  ] Allocate model memory.  0.0s
+[rank 0 spark-1ae8] [ PENDING  ] Prepare model.  0.0s
+[rank 0 spark-1ae8] [    OK    ] Prepare model.  1 rank  0.0s
+[rank 0 spark-1ae8] [ PENDING  ] Initialize GPU.  0.0s
+[rank 0 spark-1ae8] [    OK    ] Initialize GPU.  GPU 0 · SM121  0.3s
+[rank 0 spark-1ae8] [ PENDING  ] Allocate model memory.  0.0s
+[rank 2 spark-1b6f] [    OK    ] Verify package.  signatures  0.0s
+[rank 2 spark-1b6f] [ PENDING  ] Verify stored data.  0.0s
+[rank 2 spark-1b6f] [    OK    ] Verify stored data.  stored-data contents  21.4s
+[rank 2 spark-1b6f] [ PENDING  ] Join rank zero.  0.0s
+[rank 2 spark-1b6f] [    OK    ] Join rank zero.  rank 2 of 4 at 10.137.203.173:29800  214.8s
+[rank 2 spark-1b6f] [ PENDING  ] Prepare model.  0.0s
+[rank 2 spark-1b6f] [    OK    ] Prepare model.  1 rank  0.0s
+[rank 2 spark-1b6f] [ PENDING  ] Initialize GPU.  0.0s
+[rank 2 spark-1b6f] [    OK    ] Initialize GPU.  GPU 0 · SM121  0.3s
+[rank 2 spark-1b6f] [ PENDING  ] Allocate model memory.  0.0s
+[rank 0 spark-1ae8] [    OK    ] Allocate model memory.  47.3 GiB GPU · 0.4 GiB host  2.3s
+[rank 0 spark-1ae8] [ PENDING  ] Load weights.  0.0s
+[rank 3 localhost] [    OK    ] Allocate model memory.  47.3 GiB GPU · 0.4 GiB host  2.4s
+[rank 3 localhost] [ PENDING  ] Load weights.  0.0s
+[rank 2 spark-1b6f] [    OK    ] Allocate model memory.  47.3 GiB GPU · 0.4 GiB host  2.6s
+[rank 2 spark-1b6f] [ PENDING  ] Load weights.  0.0s
+[rank 1 spark-1afa] [    OK    ] Allocate model memory.  47.3 GiB GPU · 0.4 GiB host  2.9s
+[rank 1 spark-1afa] [ PENDING  ] Load weights.  0.0s
+detached from cluster ring; its group keeps running

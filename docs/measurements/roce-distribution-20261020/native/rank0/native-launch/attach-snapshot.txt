@@ -1,0 +1,19 @@
+[rank 0 spark-1ae8] [ PENDING  ] Verify package.  0.0s
+[rank 0 spark-1ae8] [    OK    ] Verify package.  signatures  0.0s
+[rank 1 spark-1afa] [ PENDING  ] Verify package.  0.0s
+[rank 1 spark-1afa] [    OK    ] Verify package.  signatures  0.0s
+[rank 1 spark-1afa] [ PENDING  ] Verify stored data.  0.0s
+[rank 1 spark-1afa] [    OK    ] Verify stored data.  stored-data contents  21.0s
+[rank 0 spark-1ae8] [ PENDING  ] Verify stored data.  0.0s
+[rank 1 spark-1afa] [ PENDING  ] Join rank zero.  0.0s
+[rank 3 localhost] [ PENDING  ] Verify package.  0.0s
+[rank 3 localhost] [    OK    ] Verify package.  signatures  0.0s
+[rank 3 localhost] [ PENDING  ] Verify stored data.  0.0s
+[rank 3 localhost] [    OK    ] Verify stored data.  stored-data contents  21.4s
+[rank 3 localhost] [ PENDING  ] Join rank zero.  0.0s
+[rank 2 spark-1b6f] [ PENDING  ] Verify package.  0.0s
+[rank 2 spark-1b6f] [    OK    ] Verify package.  signatures  0.0s
+[rank 2 spark-1b6f] [ PENDING  ] Verify stored data.  0.0s
+[rank 2 spark-1b6f] [    OK    ] Verify stored data.  stored-data contents  21.4s
+[rank 2 spark-1b6f] [ PENDING  ] Join rank zero.  0.0s
+detached from cluster ring; its group keeps running

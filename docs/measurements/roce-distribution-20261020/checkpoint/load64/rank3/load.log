@@ -1,0 +1,1 @@
+{"rank": 3, "streams": 64, "load_seconds": 159.54777395399287, "allocated_bytes": 46042233344, "checkpoint_source": {"payload_bytes": 53002660524, "metadata_bytes": 70096210, "requests": 186978, "transport": "agent-ring-tcp", "streams": 64, "payload_seconds": 156.18159671092872, "payload_gbps": 2.7149247614416874}}
