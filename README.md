@@ -11,17 +11,21 @@ as DGX Spark go further, while keeping generation responsive.
 
 The design rests on a few principles:
 
-- **Python prepares; Rust serves.** Ignition uses PyTorch, Transformers, and
-  FlashInfer/b12x to load models, tune kernels, compile forwards, and capture
-  CUDA graphs into a runtime package. Helios, the Rust runtime, serves that
-  package without Python. Compilation and graph capture finish before serving.
+- **Embrace the standard PyTorch ecosystem at build time; serve from Rust.**
+  Ignition uses PyTorch, Transformers, and FlashInfer/b12x to load models,
+  tune kernels, compile forwards, and capture CUDA graphs into a runtime package.
+  Helios, the Rust runtime, serves that package without Python. Compilation and
+  graph capture finish before serving.
+
 - **Build on the model ecosystem.** Reuse canonical model implementations
   wherever their dataflow fits, and specialize the parts that need different
   layouts or execution. Model development keeps the tools and libraries that
   make the Python ecosystem productive.
+
 - **Make memory and state explicit.** Plan buffers and execution capacities
   ahead of time. Treat conversation state—including recurrent state alongside
   KV caches—as a whole, so reuse, branching, and resuming preserve it correctly.
+
 - **Keep the runtime small and shared.** Model recipes own model computation;
   the runtime owns scheduling, cache storage, and request handling. A focused
   hardware and kernel stack keeps those boundaries manageable.
