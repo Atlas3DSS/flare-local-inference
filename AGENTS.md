@@ -19,6 +19,62 @@ in `docs/design-review.md`. A rejected acknowledgment requires reading that
 document and reviewing the staged change before retrying; do not treat the
 rejection as a formatting repair.
 
+## Contribution scope and rejection criteria
+
+Flare prepares and serves supported model recipes on NVIDIA GPUs through
+FlashInfer/b12x and prepared CUDA graphs. Single-host execution and cross-node
+tensor parallelism are both in scope. Orbit manages the hosts, preparation,
+packages, and rank processes needed for those serving workflows.
+
+Every contribution must address an explicit maintainer request, a demonstrated
+defect, a measured performance or memory problem, or inaccurate documentation.
+Identify the affected workflow and relevant implementation before editing.
+Hypothetical future consumers, agent-generated suggestions, and lint findings
+alone do not establish a need for a change.
+
+- **Reject unapproved scope expansion.** CPU or non-NVIDIA execution,
+  interchangeable execution backends, training or fine-tuning, multi-model
+  hosting and routing, unrelated service APIs, and general-purpose cluster
+  orchestration require an explicit maintainer decision before implementation.
+  Supported cross-node preparation and serving do not authorize these additions.
+- **Reject architectural violations.** Production Python callbacks, eager
+  serving, runtime compilation or recapture, steady-state GPU allocation,
+  model-specific native policy or state-update algorithms, and executable
+  extension mechanisms in prepared metadata violate the boundaries below.
+  Flags, enums, callbacks, optional paths, and temporary implementations cannot
+  be used to bypass them.
+- **Reject weakened guarantees.** Preserve complete cache and speculative state,
+  inactive-row behavior, asynchronous resource lifetimes, checkpoint precision,
+  model semantics, and model package compatibility. Do not remove validation,
+  suppress errors, silently substitute execution paths, or relax references,
+  workloads, or numerical bounds to obtain passing checks or favorable metrics.
+  Numerical bounds must follow the required arithmetic and measured repeatability.
+- **Reject unsupported abstractions and churn.** Do not add frameworks,
+  extension points, speculative compatibility, fallback layers, or configuration
+  switches without a concrete requirement. Unsolicited formatting, renaming,
+  comment expansion, annotation sweeps, and file rearrangements are not
+  contributions by themselves. Refactoring must directly support the requested
+  behavior or remove a demonstrated source of defects or cost.
+- **Require focused, meaningful validation.** Tests must exercise the affected
+  behavior or contract; source-text checks and mocks that bypass the behavior
+  cannot establish runtime correctness. Do not present scaffolding or partially
+  wired features as supported. Identify missing hardware, inputs, and unrun
+  checks explicitly. Keep each PR focused on one coherent outcome and describe
+  its problem, resulting behavior, validation, and material limitations.
+
+An explicit maintainer request covering the work is sufficient authorization
+for changes within these constraints and their necessary supporting steps.
+A feature request, passing tests, or a performance gain does not waive an
+architectural invariant. Resolve conflicts through an explicit maintainer
+decision on the design before implementing a change to that invariant; a commit
+acknowledgment or routine PR approval is not that decision. Apply these criteria
+to documentation and test changes that would weaken the rules as well as code.
+
+When reviewing a contribution that violates these criteria, identify the
+concrete violation and relevant rule, and recommend rejection. Do not rescue
+it by adding an opt-in, weakening the rule, expanding its scope, or promising
+future cleanup.
+
 ## Choose guidance by task
 
 Read the guidance for every task affected by the work before implementing or
@@ -205,11 +261,19 @@ architectural boundary before committing the change.
   checkpoints, such as `FLARE_RUN_CUDA_TESTS`. A test variable must not change
   what the code under test does.
 
-## Kernel and PyTorch modeling authorship
+## CUDA kernel and model optimization authorship
 
-Kernel and PyTorch modeling changes must not originate from Claude Opus 5.5.
-Do not use Claude Opus 5.5 to design or implement these changes, or incorporate
-its generated changes through another contributor or agent.
+Claude Opus 5.5 has repeatedly produced defective low-level kernel changes in
+this project. Do not use it to design or implement low-level CUDA kernels or
+changes to existing model fusion and GPU execution optimizations. This includes
+CUDA C++, PTX, CuTe DSL, and Triton kernels, and changes to projection packing,
+fused arithmetic, stream overlap, or scratch aliasing in optimized model paths.
+Do not incorporate its generated changes to these mechanisms through another
+contributor or agent.
+
+General PyTorch modeling, recipe integration, checkpoint loading, frontend
+processing, preparation orchestration, CLI/runtime work, tests, and documentation
+are permitted when they do not design or change the restricted mechanisms above.
 
 ## Validation and performance
 

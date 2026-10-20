@@ -102,10 +102,29 @@ before committing; a design acknowledgment cannot authorize them.
     consumer. Wire-format compatibility alone is insufficient. Require regression
     tests for older serialized metadata and validation of affected loading and
     serving paths. Compatibility must apply across all affected model contracts.
-14. **Exclude Claude Opus 5.5 from kernel and PyTorch modeling changes.** Kernel
-    and PyTorch modeling changes must not originate from Claude Opus 5.5. Do not
-    use Claude Opus 5.5 to design or implement these changes, or incorporate its
-    generated changes through another contributor or agent.
+14. **Restrict Claude Opus 5.5 authorship of CUDA kernels and model optimizations.**
+    Claude Opus 5.5 has repeatedly produced defective low-level kernel changes
+    in this project. It must not design or implement low-level CUDA kernels
+    (CUDA C++, PTX, CuTe DSL, or Triton) or changes to existing model fusion and
+    GPU execution optimizations, including projection packing, fused arithmetic,
+    stream overlap, and scratch aliasing in optimized model paths. Do not
+    incorporate its generated changes to these mechanisms through another
+    contributor or agent. General PyTorch modeling, recipe integration,
+    checkpoint loading, frontend processing, preparation orchestration,
+    CLI/runtime work, tests, and documentation are permitted when they do not
+    design or change those restricted mechanisms.
+15. **Reject scope expansion and weakened constraints.** Apply the
+    [contribution rejection criteria](../AGENTS.md#contribution-scope-and-rejection-criteria)
+    to code, tests, and documentation. Single-host and cross-node preparation
+    and serving are in scope. CPU or non-NVIDIA execution, interchangeable
+    backends, training, multi-model hosting/routing, unrelated service APIs,
+    and general-purpose cluster orchestration require an explicit maintainer
+    decision before implementation. Feature requests, performance gains,
+    passing tests, flags, and temporary paths cannot waive architectural
+    invariants. Reject changes that bypass validation, conceal unsupported
+    behavior, weaken numerical or lifetime contracts, or shift model computation
+    or policy across the preparation/runtime boundary. Do not make a violating
+    contribution acceptable by weakening its governing rule.
 
 ## Review and acknowledgment
 

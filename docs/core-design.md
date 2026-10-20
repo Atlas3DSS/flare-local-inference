@@ -89,7 +89,8 @@ vLLM's device, backend, model, and distributed-execution breadth creates a
 large compatibility matrix. Changes to cache layouts, compilation, offload,
 and scheduling must coexist across those combinations. Flare limits that
 obligation to selected model recipes, FlashInfer/b12x, NVIDIA SM120/SM121,
-and one host. It can use one prepared-execution contract throughout the
+and supported single-host and cross-node tensor-parallel configurations.
+It can use one prepared-execution contract throughout the
 runtime because backend portability and general vLLM feature parity are
 outside its scope.
 
@@ -223,12 +224,12 @@ available byte and unit of bandwidth, with predictable response times.
 
 [vLLM's broad model, hardware, and distributed-serving support](https://docs.vllm.ai/en/latest/design/arch_overview/)
 is valuable and expensive to reproduce. Flare chooses NVIDIA SM120/SM121,
-FlashInfer/b12x, selected model recipes, one host, and interactive local
-workloads. It does not aim for vLLM's feature matrix. Cross-node execution,
-interchangeable backends, and general fleet orchestration would enlarge the
-compatibility and validation burden without advancing that target. The fork's
-RoCE integration, for example, remains useful to deployments outside Flare's
-single-host scope; owning a component does not require adopting every use of it.
+FlashInfer/b12x, selected model recipes, and interactive workloads on one host
+or supported cross-node tensor-parallel groups. [Multi-host serving](multi-host.md)
+uses prepared RoCEnante collectives; [Orbit](orbit.md) manages the hosts,
+preparation, packages, and rank processes needed for those deployments.
+Interchangeable backends and general-purpose cluster orchestration remain
+outside that serving scope. Flare does not aim for vLLM's feature matrix.
 
 Within this scope, the priorities are concrete. A tool result should append
 to an existing conversation without recomputing its history. Branches should
@@ -350,10 +351,12 @@ same boundary; violations must be resolved before committing.
   request values override defaults. Runtime metadata contains typed sampling,
   EOS, tokenizer, and image settings, with no raw configuration-file assets.
 
-Local serving includes cancellation, streaming, tool-call presentation,
-structured output, prefix reuse, and speculative decoding. Cross-node
-parallelism, disaggregated prefill, adapters, pooling models, and device
-portability are outside this design.
+Serving includes cancellation, streaming, tool-call presentation, structured
+output, prefix reuse, and speculative decoding on one host or supported
+cross-node tensor-parallel groups. Rank coordination and transport preserve
+the same prepared-graph execution and shared runtime policy boundaries.
+Disaggregated prefill, adapters, pooling models, and device portability are
+outside this design.
 
 ## 1. Target and execution contract
 

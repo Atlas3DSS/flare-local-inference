@@ -1101,7 +1101,9 @@ limits.
 ## 10. Non-goals
 
 Topology files, model families, launch override blocks, per-host environment
-maps, container and multi-node discovery, multiple models in one process,
+maps, container orchestration, multiple models in one process,
 and serving an architecture no recipe supports.
-Multi-node tensor parallelism across DGX Spark hosts, if it arrives, is a
-separate command with its own discovery, not a layer inside `run`.
+Cross-node tensor parallelism across supported hosts is in scope. The
+`flare orbit` commands and `flare agent` own host discovery, pairing, package
+distribution, and rank process management. `flare run` executes its assigned
+rank. See [Orbit](orbit.md) and [multi-host serving](multi-host.md).
