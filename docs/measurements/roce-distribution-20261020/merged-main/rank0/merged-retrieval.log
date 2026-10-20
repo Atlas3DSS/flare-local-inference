@@ -1,0 +1,11 @@
+ 0 correct   completion_tokens=170 'F. Remember it." The record immediately preceding that line is **Record 198** ("are it or is with or by that at from.").'
+ 1 correct   completion_tokens=197 ' line is written immediately after **Record 198**, making it the record number immediately preceding the code statement.'
+ 2 correct   completion_tokens=131 't appears between Record 198 and Record 199, so Record 198 is the record written immediately before the line stating it.'
+3 correct of 3 (answer 2U2GYCZF, 198) in 23.5s
+speculative rounds by batch x width: 1x2:23 1x3:162 1x4:1 1x6:1; 0 of 187 in graphs above 16 query rows
+ 0 correct   completion_tokens=190 't.") appears immediately after Record 198 and before Record 199, so Record 198 is the record written directly before it.'
+ 1 correct   completion_tokens=191 ' Record 199. The record written immediately before that line is **Record 198** ("are it or is with or by that at from").'
+ 2 correct   completion_tokens=172 'cord 198 ("are it or is with or by that at from.") and Record 199, so the record immediately preceding it is Record 198.'
+ 3 correct   completion_tokens=130 'The vault access code is **2U2GYCZF**, and the record written immediately before that line is **Record 198**.'
+4 correct of 4 (answer 2U2GYCZF, 198) in 13.8s
+speculative rounds by batch x width: 1x3:1 2x1:1 2x2:1 2x3:7 4x1:167; 0 of 177 in graphs above 16 query rows

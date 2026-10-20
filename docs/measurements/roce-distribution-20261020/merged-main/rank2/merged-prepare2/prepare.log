@@ -1,0 +1,319 @@
+     0.8s rank 2: joined rank zero at 10.137.203.173:29630 as rank 2 of 4
+     8.7s rank 2: Inspect checkpoint started
+     9.8s rank 2: Inspect checkpoint complete in 1.15s
+   172.6s rank 2: after weights: free=18572 MiB, allocated=45934 MiB, reserved=47394 MiB, rss=2847 MiB
+   172.6s rank 2: Allocate model state and collectives started
+   184.8s rank 2: Allocate model state and collectives complete in 12.20s
+   184.8s rank 2: after model state (continuation 238 MiB, 5 rows): free=16522 MiB, allocated=47562 MiB, reserved=48776 MiB, rss=3235 MiB
+   184.8s rank 2: Construct graph catalog started
+   187.5s rank 2: Construct graph catalog complete in 2.75s
+   187.5s rank 2: after graph catalog (operator scratch 0 MiB): free=16105 MiB, allocated=47967 MiB, reserved=48776 MiB, rss=3650 MiB
+   187.5s rank 2: Prepare and tune kernels started
+   270.3s rank 2: Prepare and tune kernels complete in 82.72s
+   270.3s rank 2: selected kernels: {'fixed': 14415, 'cached': 16622}
+   270.3s rank 2: after tuning: free=14945 MiB, allocated=48330 MiB, reserved=48752 MiB, weights=45934 MiB, continuation=238 MiB, operator scratch=312 MiB
+   270.3s rank 2: Measure graph memory started
+   272.8s rank 2: capturing prefill4096: 14812 MiB free, 48394 MiB allocated, 48816 MiB reserved, 60982 MiB outside PyTorch
+   273.0s rank 2: captured prefill4096 in 2.75s
+   274.4s rank 2: capturing prefill3584: 14662 MiB free, 48394 MiB allocated, 48900 MiB reserved, 61048 MiB outside PyTorch
+   274.7s rank 2: captured prefill3584 in 1.64s
+   275.9s rank 2: capturing prefill3072: 14616 MiB free, 48394 MiB allocated, 48900 MiB reserved, 61095 MiB outside PyTorch
+   276.1s rank 2: captured prefill3072 in 1.44s
+   277.1s rank 2: capturing prefill2560: 14569 MiB free, 48394 MiB allocated, 48900 MiB reserved, 61142 MiB outside PyTorch
+   277.3s rank 2: captured prefill2560 in 1.21s
+   278.1s rank 2: capturing prefill2048: 14528 MiB free, 48394 MiB allocated, 48900 MiB reserved, 61183 MiB outside PyTorch
+   278.3s rank 2: captured prefill2048 in 1.01s
+   278.9s rank 2: capturing prefill1536: 14483 MiB free, 48394 MiB allocated, 48900 MiB reserved, 61228 MiB outside PyTorch
+   279.1s rank 2: captured prefill1536 in 0.79s
+   279.5s rank 2: capturing prefill1024: 14443 MiB free, 48394 MiB allocated, 48900 MiB reserved, 61267 MiB outside PyTorch
+   279.7s rank 2: captured prefill1024 in 0.56s
+   279.9s rank 2: capturing prefill512: 14410 MiB free, 48394 MiB allocated, 48900 MiB reserved, 61301 MiB outside PyTorch
+   280.0s rank 2: captured prefill512 in 0.36s
+   280.2s rank 2: capturing prefill256: 14372 MiB free, 48394 MiB allocated, 48900 MiB reserved, 61338 MiB outside PyTorch
+   280.3s rank 2: captured prefill256 in 0.28s
+   280.5s rank 2: capturing prefill128: 14331 MiB free, 48394 MiB allocated, 48900 MiB reserved, 61380 MiB outside PyTorch
+   280.6s rank 2: captured prefill128 in 0.28s
+   282.2s rank 2: capturing prefill4096-no-mtp: 14279 MiB free, 48394 MiB allocated, 48900 MiB reserved, 61432 MiB outside PyTorch
+   282.4s rank 2: captured prefill4096-no-mtp in 1.85s
+   283.8s rank 2: capturing prefill3584-no-mtp: 14232 MiB free, 48394 MiB allocated, 48900 MiB reserved, 61478 MiB outside PyTorch
+   284.1s rank 2: captured prefill3584-no-mtp in 1.62s
+   285.3s rank 2: capturing prefill3072-no-mtp: 14184 MiB free, 48394 MiB allocated, 48900 MiB reserved, 61527 MiB outside PyTorch
+   285.5s rank 2: captured prefill3072-no-mtp in 1.41s
+   286.5s rank 2: capturing prefill2560-no-mtp: 14139 MiB free, 48394 MiB allocated, 48900 MiB reserved, 61572 MiB outside PyTorch
+   286.6s rank 2: captured prefill2560-no-mtp in 1.18s
+   287.4s rank 2: capturing prefill2048-no-mtp: 14099 MiB free, 48394 MiB allocated, 48900 MiB reserved, 61612 MiB outside PyTorch
+   287.6s rank 2: captured prefill2048-no-mtp in 0.97s
+   288.2s rank 2: capturing prefill1536-no-mtp: 14053 MiB free, 48394 MiB allocated, 48900 MiB reserved, 61658 MiB outside PyTorch
+   288.4s rank 2: captured prefill1536-no-mtp in 0.76s
+   288.8s rank 2: capturing prefill1024-no-mtp: 14014 MiB free, 48394 MiB allocated, 48900 MiB reserved, 61696 MiB outside PyTorch
+   288.9s rank 2: captured prefill1024-no-mtp in 0.54s
+   289.1s rank 2: capturing prefill512-no-mtp: 13978 MiB free, 48394 MiB allocated, 48900 MiB reserved, 61732 MiB outside PyTorch
+   289.2s rank 2: captured prefill512-no-mtp in 0.33s
+   289.4s rank 2: capturing prefill256-no-mtp: 13946 MiB free, 48394 MiB allocated, 48900 MiB reserved, 61765 MiB outside PyTorch
+   289.5s rank 2: captured prefill256-no-mtp in 0.26s
+   289.6s rank 2: capturing prefill128-no-mtp: 13905 MiB free, 48394 MiB allocated, 48900 MiB reserved, 61806 MiB outside PyTorch
+   289.8s rank 2: captured prefill128-no-mtp in 0.26s
+   289.9s rank 2: capturing decode4: 13855 MiB free, 48394 MiB allocated, 48900 MiB reserved, 61856 MiB outside PyTorch
+   290.0s rank 2: captured decode4 in 0.23s
+   290.1s rank 2: capturing decode2: 13834 MiB free, 48394 MiB allocated, 48900 MiB reserved, 61877 MiB outside PyTorch
+   290.2s rank 2: captured decode2 in 0.20s
+   290.3s rank 2: capturing decode1: 13807 MiB free, 48394 MiB allocated, 48900 MiB reserved, 61903 MiB outside PyTorch
+   290.4s rank 2: captured decode1 in 0.21s
+   290.6s rank 2: capturing speculative1x6: 13768 MiB free, 48394 MiB allocated, 48900 MiB reserved, 61943 MiB outside PyTorch
+   290.7s rank 2: captured speculative1x6 in 0.30s
+   290.9s rank 2: capturing speculative2x3: 13716 MiB free, 48394 MiB allocated, 48900 MiB reserved, 61994 MiB outside PyTorch
+   291.0s rank 2: captured speculative2x3 in 0.28s
+   291.1s rank 2: capturing speculative1x5: 13675 MiB free, 48394 MiB allocated, 48900 MiB reserved, 62036 MiB outside PyTorch
+   291.2s rank 2: captured speculative1x5 in 0.26s
+   291.4s rank 2: capturing speculative1x4: 13627 MiB free, 48394 MiB allocated, 48900 MiB reserved, 62084 MiB outside PyTorch
+   291.5s rank 2: captured speculative1x4 in 0.25s
+   291.6s rank 2: capturing speculative2x2: 13576 MiB free, 48394 MiB allocated, 48900 MiB reserved, 62135 MiB outside PyTorch
+   291.7s rank 2: captured speculative2x2 in 0.24s
+   291.9s rank 2: capturing speculative4x1: 13553 MiB free, 48394 MiB allocated, 48900 MiB reserved, 62158 MiB outside PyTorch
+   292.0s rank 2: captured speculative4x1 in 0.23s
+   292.1s rank 2: capturing speculative1x3: 13519 MiB free, 48394 MiB allocated, 48900 MiB reserved, 62192 MiB outside PyTorch
+   292.2s rank 2: captured speculative1x3 in 0.25s
+   292.3s rank 2: capturing speculative1x2: 13482 MiB free, 48394 MiB allocated, 48900 MiB reserved, 62229 MiB outside PyTorch
+   292.5s rank 2: captured speculative1x2 in 0.24s
+   292.6s rank 2: capturing speculative2x1: 13453 MiB free, 48394 MiB allocated, 48900 MiB reserved, 62257 MiB outside PyTorch
+   292.7s rank 2: captured speculative2x1 in 0.23s
+   292.8s rank 2: capturing speculative1x1: 13419 MiB free, 48394 MiB allocated, 48900 MiB reserved, 62291 MiB outside PyTorch
+   292.9s rank 2: captured speculative1x1 in 0.21s
+   292.9s rank 2: capturing resume4: 13394 MiB free, 48394 MiB allocated, 48900 MiB reserved, 62317 MiB outside PyTorch
+   292.9s rank 2: captured resume4 in 0.02s
+   292.9s rank 2: capturing init4: 13394 MiB free, 48394 MiB allocated, 48900 MiB reserved, 62317 MiB outside PyTorch
+   292.9s rank 2: captured init4 in 0.01s
+   292.9s rank 2: capturing restore4: 13394 MiB free, 48394 MiB allocated, 48900 MiB reserved, 62317 MiB outside PyTorch
+   292.9s rank 2: captured restore4 in 0.01s
+   292.9s rank 2: capturing snapshot4: 13394 MiB free, 48394 MiB allocated, 48900 MiB reserved, 62317 MiB outside PyTorch
+   292.9s rank 2: captured snapshot4 in 0.01s
+   293.0s rank 2: capturing resume2: 13394 MiB free, 48394 MiB allocated, 48900 MiB reserved, 62317 MiB outside PyTorch
+   293.0s rank 2: captured resume2 in 0.02s
+   293.0s rank 2: capturing init2: 13393 MiB free, 48394 MiB allocated, 48900 MiB reserved, 62318 MiB outside PyTorch
+   293.0s rank 2: captured init2 in 0.01s
+   293.0s rank 2: capturing restore2: 13393 MiB free, 48394 MiB allocated, 48900 MiB reserved, 62318 MiB outside PyTorch
+   293.0s rank 2: captured restore2 in 0.01s
+   293.0s rank 2: capturing snapshot2: 13393 MiB free, 48394 MiB allocated, 48900 MiB reserved, 62318 MiB outside PyTorch
+   293.0s rank 2: captured snapshot2 in 0.01s
+   293.0s rank 2: capturing resume1: 13393 MiB free, 48394 MiB allocated, 48900 MiB reserved, 62318 MiB outside PyTorch
+   293.0s rank 2: captured resume1 in 0.01s
+   293.0s rank 2: capturing init1: 13391 MiB free, 48394 MiB allocated, 48900 MiB reserved, 62320 MiB outside PyTorch
+   293.0s rank 2: captured init1 in 0.01s
+   293.0s rank 2: capturing restore1: 13391 MiB free, 48394 MiB allocated, 48900 MiB reserved, 62320 MiB outside PyTorch
+   293.0s rank 2: captured restore1 in 0.01s
+   293.0s rank 2: capturing snapshot1: 13391 MiB free, 48394 MiB allocated, 48900 MiB reserved, 62320 MiB outside PyTorch
+   293.0s rank 2: captured snapshot1 in 0.01s
+   293.1s rank 2: capturing resume4-no-mtp: 13390 MiB free, 48394 MiB allocated, 48900 MiB reserved, 62321 MiB outside PyTorch
+   293.1s rank 2: captured resume4-no-mtp in 0.01s
+   293.1s rank 2: capturing init4-no-mtp: 13390 MiB free, 48394 MiB allocated, 48900 MiB reserved, 62321 MiB outside PyTorch
+   293.1s rank 2: captured init4-no-mtp in 0.01s
+   293.1s rank 2: capturing restore4-no-mtp: 13388 MiB free, 48394 MiB allocated, 48900 MiB reserved, 62323 MiB outside PyTorch
+   293.1s rank 2: captured restore4-no-mtp in 0.01s
+   293.1s rank 2: capturing snapshot4-no-mtp: 13388 MiB free, 48394 MiB allocated, 48900 MiB reserved, 62323 MiB outside PyTorch
+   293.1s rank 2: captured snapshot4-no-mtp in 0.01s
+   293.1s rank 2: capturing resume2-no-mtp: 13387 MiB free, 48394 MiB allocated, 48900 MiB reserved, 62323 MiB outside PyTorch
+   293.1s rank 2: captured resume2-no-mtp in 0.01s
+   293.1s rank 2: capturing init2-no-mtp: 13387 MiB free, 48394 MiB allocated, 48900 MiB reserved, 62323 MiB outside PyTorch
+   293.1s rank 2: captured init2-no-mtp in 0.01s
+   293.1s rank 2: capturing restore2-no-mtp: 13387 MiB free, 48394 MiB allocated, 48900 MiB reserved, 62323 MiB outside PyTorch
+   293.1s rank 2: captured restore2-no-mtp in 0.01s
+   293.1s rank 2: capturing snapshot2-no-mtp: 13387 MiB free, 48394 MiB allocated, 48900 MiB reserved, 62323 MiB outside PyTorch
+   293.1s rank 2: captured snapshot2-no-mtp in 0.01s
+   293.1s rank 2: capturing resume1-no-mtp: 13387 MiB free, 48394 MiB allocated, 48900 MiB reserved, 62323 MiB outside PyTorch
+   293.2s rank 2: captured resume1-no-mtp in 0.01s
+   293.2s rank 2: capturing init1-no-mtp: 13387 MiB free, 48394 MiB allocated, 48900 MiB reserved, 62323 MiB outside PyTorch
+   293.2s rank 2: captured init1-no-mtp in 0.01s
+   293.2s rank 2: capturing restore1-no-mtp: 13387 MiB free, 48394 MiB allocated, 48900 MiB reserved, 62323 MiB outside PyTorch
+   293.2s rank 2: captured restore1-no-mtp in 0.01s
+   293.2s rank 2: capturing snapshot1-no-mtp: 13387 MiB free, 48394 MiB allocated, 48900 MiB reserved, 62323 MiB outside PyTorch
+   293.2s rank 2: captured snapshot1-no-mtp in 0.01s
+   293.2s rank 2: Measure graph memory complete in 22.92s
+   293.2s rank 2: after graph measurement (the package backs 8 preparation KV pages): free=13386 MiB, allocated=48394 MiB, reserved=48900 MiB, rss=5522 MiB
+   294.1s rank 2: Compile model forwards started
+   360.1s rank 2: Compile model forwards complete in 66.04s
+   382.2s rank 2: Allocate KV cache started
+   382.2s rank 2: Allocate KV cache: 0.01 GiB per GPU · 8,192 tokens
+   382.2s rank 2: Allocate KV cache complete in 0.07s
+   382.2s rank 2: after KV allocation: free=12617 MiB, allocated=48362 MiB, reserved=48900 MiB, rss=5525 MiB
+   382.2s rank 2: Load compiled forwards started
+   416.0s rank 2: Load compiled forwards complete in 33.82s
+   419.6s rank 2: Warm compiled forwards started
+   438.0s rank 2: Warm compiled forwards complete in 18.39s
+   438.0s rank 2: Prepare serving graphs started
+   438.0s rank 2: capturing prefill4096: 10615 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65095 MiB outside PyTorch
+   438.3s rank 2: instantiating prefill4096: 10615 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65095 MiB outside PyTorch
+   438.3s rank 2: captured prefill4096 in 0.26s
+   438.3s rank 2: capturing prefill3584: 10600 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65111 MiB outside PyTorch
+   438.5s rank 2: instantiating prefill3584: 10600 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65111 MiB outside PyTorch
+   438.5s rank 2: captured prefill3584 in 0.25s
+   438.5s rank 2: capturing prefill3072: 10593 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65118 MiB outside PyTorch
+   438.8s rank 2: instantiating prefill3072: 10592 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65119 MiB outside PyTorch
+   438.8s rank 2: captured prefill3072 in 0.24s
+   438.8s rank 2: capturing prefill2560: 10585 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65126 MiB outside PyTorch
+   439.0s rank 2: instantiating prefill2560: 10577 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65134 MiB outside PyTorch
+   439.0s rank 2: captured prefill2560 in 0.23s
+   439.0s rank 2: capturing prefill2048: 10573 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65138 MiB outside PyTorch
+   439.2s rank 2: instantiating prefill2048: 10569 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65142 MiB outside PyTorch
+   439.2s rank 2: captured prefill2048 in 0.21s
+   439.2s rank 2: capturing prefill1536: 10566 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65145 MiB outside PyTorch
+   439.4s rank 2: instantiating prefill1536: 10562 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65149 MiB outside PyTorch
+   439.4s rank 2: captured prefill1536 in 0.20s
+   439.4s rank 2: capturing prefill1024: 10554 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65157 MiB outside PyTorch
+   439.6s rank 2: instantiating prefill1024: 10554 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65157 MiB outside PyTorch
+   439.6s rank 2: captured prefill1024 in 0.18s
+   439.6s rank 2: capturing prefill512: 10546 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65164 MiB outside PyTorch
+   439.8s rank 2: instantiating prefill512: 10546 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65164 MiB outside PyTorch
+   439.8s rank 2: captured prefill512 in 0.17s
+   439.8s rank 2: capturing prefill256: 10539 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65172 MiB outside PyTorch
+   439.9s rank 2: instantiating prefill256: 10539 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65172 MiB outside PyTorch
+   439.9s rank 2: captured prefill256 in 0.18s
+   439.9s rank 2: capturing prefill128: 10531 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65180 MiB outside PyTorch
+   440.1s rank 2: instantiating prefill128: 10531 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65180 MiB outside PyTorch
+   440.1s rank 2: captured prefill128 in 0.17s
+   440.1s rank 2: capturing prefill4096-no-mtp: 10523 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65187 MiB outside PyTorch
+   440.4s rank 2: instantiating prefill4096-no-mtp: 10523 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65187 MiB outside PyTorch
+   440.4s rank 2: captured prefill4096-no-mtp in 0.26s
+   440.4s rank 2: capturing prefill3584-no-mtp: 10508 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65203 MiB outside PyTorch
+   440.6s rank 2: instantiating prefill3584-no-mtp: 10508 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65203 MiB outside PyTorch
+   440.6s rank 2: captured prefill3584-no-mtp in 0.25s
+   440.6s rank 2: capturing prefill3072-no-mtp: 10500 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65210 MiB outside PyTorch
+   440.9s rank 2: instantiating prefill3072-no-mtp: 10500 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65211 MiB outside PyTorch
+   440.9s rank 2: captured prefill3072-no-mtp in 0.24s
+   440.9s rank 2: capturing prefill2560-no-mtp: 10485 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65226 MiB outside PyTorch
+   441.1s rank 2: instantiating prefill2560-no-mtp: 10485 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65226 MiB outside PyTorch
+   441.1s rank 2: captured prefill2560-no-mtp in 0.23s
+   441.1s rank 2: capturing prefill2048-no-mtp: 10481 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65230 MiB outside PyTorch
+   441.3s rank 2: instantiating prefill2048-no-mtp: 10477 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65234 MiB outside PyTorch
+   441.3s rank 2: captured prefill2048-no-mtp in 0.21s
+   441.3s rank 2: capturing prefill1536-no-mtp: 10470 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65241 MiB outside PyTorch
+   441.5s rank 2: instantiating prefill1536-no-mtp: 10470 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65241 MiB outside PyTorch
+   441.5s rank 2: captured prefill1536-no-mtp in 0.19s
+   441.5s rank 2: capturing prefill1024-no-mtp: 10462 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65249 MiB outside PyTorch
+   441.7s rank 2: instantiating prefill1024-no-mtp: 10462 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65249 MiB outside PyTorch
+   441.7s rank 2: captured prefill1024-no-mtp in 0.17s
+   441.7s rank 2: capturing prefill512-no-mtp: 10454 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65256 MiB outside PyTorch
+   441.8s rank 2: instantiating prefill512-no-mtp: 10454 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65256 MiB outside PyTorch
+   441.8s rank 2: captured prefill512-no-mtp in 0.16s
+   441.8s rank 2: capturing prefill256-no-mtp: 10447 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65264 MiB outside PyTorch
+   442.0s rank 2: instantiating prefill256-no-mtp: 10447 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65264 MiB outside PyTorch
+   442.0s rank 2: captured prefill256-no-mtp in 0.17s
+   442.0s rank 2: capturing prefill128-no-mtp: 10439 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65272 MiB outside PyTorch
+   442.2s rank 2: instantiating prefill128-no-mtp: 10439 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65272 MiB outside PyTorch
+   442.2s rank 2: captured prefill128-no-mtp in 0.17s
+   442.2s rank 2: capturing decode4: 10431 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65279 MiB outside PyTorch
+   442.3s rank 2: instantiating decode4: 10431 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65279 MiB outside PyTorch
+   442.3s rank 2: captured decode4 in 0.13s
+   442.3s rank 2: capturing decode2: 10428 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65283 MiB outside PyTorch
+   442.4s rank 2: instantiating decode2: 10424 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65287 MiB outside PyTorch
+   442.4s rank 2: captured decode2 in 0.13s
+   442.4s rank 2: capturing decode1: 10424 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65287 MiB outside PyTorch
+   442.6s rank 2: instantiating decode1: 10422 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65288 MiB outside PyTorch
+   442.6s rank 2: captured decode1 in 0.13s
+   442.6s rank 2: capturing speculative1x6: 10418 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65292 MiB outside PyTorch
+   442.7s rank 2: instantiating speculative1x6: 10414 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65296 MiB outside PyTorch
+   442.7s rank 2: captured speculative1x6 in 0.16s
+   442.7s rank 2: capturing speculative2x3: 10411 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65300 MiB outside PyTorch
+   442.9s rank 2: instantiating speculative2x3: 10407 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65304 MiB outside PyTorch
+   442.9s rank 2: captured speculative2x3 in 0.15s
+   442.9s rank 2: capturing speculative1x5: 10405 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65306 MiB outside PyTorch
+   443.0s rank 2: instantiating speculative1x5: 10399 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65312 MiB outside PyTorch
+   443.0s rank 2: captured speculative1x5 in 0.16s
+   443.0s rank 2: capturing speculative1x4: 10383 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65328 MiB outside PyTorch
+   443.2s rank 2: instantiating speculative1x4: 10375 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65335 MiB outside PyTorch
+   443.2s rank 2: captured speculative1x4 in 0.15s
+   443.2s rank 2: capturing speculative2x2: 10368 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65343 MiB outside PyTorch
+   443.3s rank 2: instantiating speculative2x2: 10360 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65351 MiB outside PyTorch
+   443.3s rank 2: captured speculative2x2 in 0.14s
+   443.3s rank 2: capturing speculative4x1: 10352 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65358 MiB outside PyTorch
+   443.4s rank 2: instantiating speculative4x1: 10345 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65366 MiB outside PyTorch
+   443.5s rank 2: captured speculative4x1 in 0.14s
+   443.5s rank 2: capturing speculative1x3: 10341 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65370 MiB outside PyTorch
+   443.6s rank 2: instantiating speculative1x3: 10337 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65374 MiB outside PyTorch
+   443.6s rank 2: captured speculative1x3 in 0.15s
+   443.6s rank 2: capturing speculative1x2: 10321 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65390 MiB outside PyTorch
+   443.7s rank 2: instantiating speculative1x2: 10321 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65390 MiB outside PyTorch
+   443.7s rank 2: captured speculative1x2 in 0.14s
+   443.8s rank 2: capturing speculative2x1: 10306 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65405 MiB outside PyTorch
+   443.9s rank 2: instantiating speculative2x1: 10306 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65405 MiB outside PyTorch
+   443.9s rank 2: captured speculative2x1 in 0.14s
+   443.9s rank 2: capturing speculative1x1: 10291 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65420 MiB outside PyTorch
+   444.0s rank 2: instantiating speculative1x1: 10291 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65420 MiB outside PyTorch
+   444.0s rank 2: captured speculative1x1 in 0.13s
+   444.0s rank 2: capturing resume4: 10283 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65428 MiB outside PyTorch
+   444.0s rank 2: instantiating resume4: 10283 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65428 MiB outside PyTorch
+   444.0s rank 2: captured resume4 in 0.02s
+   444.4s rank 2: capturing init4: 10283 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65428 MiB outside PyTorch
+   444.4s rank 2: instantiating init4: 10283 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65428 MiB outside PyTorch
+   444.4s rank 2: captured init4 in 0.38s
+   444.4s rank 2: capturing restore4: 10283 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65428 MiB outside PyTorch
+   444.4s rank 2: instantiating restore4: 10283 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65428 MiB outside PyTorch
+   444.4s rank 2: captured restore4 in 0.03s
+   444.5s rank 2: capturing snapshot4: 10283 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65428 MiB outside PyTorch
+   444.5s rank 2: instantiating snapshot4: 10283 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65428 MiB outside PyTorch
+   444.5s rank 2: captured snapshot4 in 0.01s
+   444.5s rank 2: capturing resume2: 10283 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65428 MiB outside PyTorch
+   444.5s rank 2: instantiating resume2: 10283 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65428 MiB outside PyTorch
+   444.5s rank 2: captured resume2 in 0.01s
+   444.5s rank 2: capturing init2: 10275 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65436 MiB outside PyTorch
+   444.5s rank 2: instantiating init2: 10275 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65436 MiB outside PyTorch
+   444.5s rank 2: captured init2 in 0.01s
+   444.5s rank 2: capturing restore2: 10275 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65436 MiB outside PyTorch
+   444.5s rank 2: instantiating restore2: 10275 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65436 MiB outside PyTorch
+   444.5s rank 2: captured restore2 in 0.01s
+   444.5s rank 2: capturing snapshot2: 10275 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65436 MiB outside PyTorch
+   444.5s rank 2: instantiating snapshot2: 10275 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65436 MiB outside PyTorch
+   444.5s rank 2: captured snapshot2 in 0.01s
+   444.5s rank 2: capturing resume1: 10275 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65436 MiB outside PyTorch
+   444.5s rank 2: instantiating resume1: 10275 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65436 MiB outside PyTorch
+   444.5s rank 2: captured resume1 in 0.01s
+   444.5s rank 2: capturing init1: 10275 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65436 MiB outside PyTorch
+   444.5s rank 2: instantiating init1: 10275 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65436 MiB outside PyTorch
+   444.5s rank 2: captured init1 in 0.01s
+   444.5s rank 2: capturing restore1: 10275 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65436 MiB outside PyTorch
+   444.5s rank 2: instantiating restore1: 10275 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65436 MiB outside PyTorch
+   444.5s rank 2: captured restore1 in 0.01s
+   444.6s rank 2: capturing snapshot1: 10275 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65436 MiB outside PyTorch
+   444.6s rank 2: instantiating snapshot1: 10275 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65436 MiB outside PyTorch
+   444.6s rank 2: captured snapshot1 in 0.01s
+   444.6s rank 2: capturing resume4-no-mtp: 10275 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65436 MiB outside PyTorch
+   444.6s rank 2: instantiating resume4-no-mtp: 10275 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65436 MiB outside PyTorch
+   444.6s rank 2: captured resume4-no-mtp in 0.01s
+   444.6s rank 2: capturing init4-no-mtp: 10275 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65436 MiB outside PyTorch
+   444.6s rank 2: instantiating init4-no-mtp: 10275 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65436 MiB outside PyTorch
+   444.6s rank 2: captured init4-no-mtp in 0.01s
+   444.6s rank 2: capturing restore4-no-mtp: 10275 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65436 MiB outside PyTorch
+   444.6s rank 2: instantiating restore4-no-mtp: 10275 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65436 MiB outside PyTorch
+   444.6s rank 2: captured restore4-no-mtp in 0.01s
+   444.6s rank 2: capturing snapshot4-no-mtp: 10275 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65436 MiB outside PyTorch
+   444.6s rank 2: instantiating snapshot4-no-mtp: 10275 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65436 MiB outside PyTorch
+   444.6s rank 2: captured snapshot4-no-mtp in 0.01s
+   444.6s rank 2: capturing resume2-no-mtp: 10275 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65436 MiB outside PyTorch
+   444.6s rank 2: instantiating resume2-no-mtp: 10275 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65436 MiB outside PyTorch
+   444.6s rank 2: captured resume2-no-mtp in 0.01s
+   444.6s rank 2: capturing init2-no-mtp: 10275 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65436 MiB outside PyTorch
+   444.6s rank 2: instantiating init2-no-mtp: 10275 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65436 MiB outside PyTorch
+   444.6s rank 2: captured init2-no-mtp in 0.01s
+   444.6s rank 2: capturing restore2-no-mtp: 10275 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65436 MiB outside PyTorch
+   444.6s rank 2: instantiating restore2-no-mtp: 10275 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65436 MiB outside PyTorch
+   444.6s rank 2: captured restore2-no-mtp in 0.01s
+   444.7s rank 2: capturing snapshot2-no-mtp: 10275 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65436 MiB outside PyTorch
+   444.7s rank 2: instantiating snapshot2-no-mtp: 10275 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65436 MiB outside PyTorch
+   444.7s rank 2: captured snapshot2-no-mtp in 0.01s
+   444.7s rank 2: capturing resume1-no-mtp: 10275 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65436 MiB outside PyTorch
+   444.7s rank 2: instantiating resume1-no-mtp: 10275 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65436 MiB outside PyTorch
+   444.7s rank 2: captured resume1-no-mtp in 0.01s
+   444.7s rank 2: capturing init1-no-mtp: 10275 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65436 MiB outside PyTorch
+   444.7s rank 2: instantiating init1-no-mtp: 10275 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65436 MiB outside PyTorch
+   444.7s rank 2: captured init1-no-mtp in 0.02s
+   444.7s rank 2: capturing restore1-no-mtp: 10275 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65436 MiB outside PyTorch
+   444.7s rank 2: instantiating restore1-no-mtp: 10275 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65436 MiB outside PyTorch
+   444.7s rank 2: captured restore1-no-mtp in 0.01s
+   444.7s rank 2: capturing snapshot1-no-mtp: 10276 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65435 MiB outside PyTorch
+   444.7s rank 2: instantiating snapshot1-no-mtp: 10276 MiB free, 48394 MiB allocated, 48900 MiB reserved, 65435 MiB outside PyTorch
+   444.7s rank 2: captured snapshot1-no-mtp in 0.01s
+   444.7s rank 2: Prepare serving graphs complete in 6.70s
+   444.7s rank 2: after capture (process peak RSS 7852 MiB): free=10275 MiB, allocated=48394 MiB, reserved=48900 MiB, rss=7853 MiB
+   444.7s rank 2: memory breakdown (MiB): weights=45934, continuation=238, kv=13, operator_scratch=312, decoder_scratch=1592, other_allocated=303, cached_unallocated=505, collective_pinned_host=381, compiled_forward_reservation=0, headroom=5120, peak_rss=7852, available=62442, cuda_free=10275
+   444.8s rank 2: received 49.36 GiB of checkpoint ranges via agent-ring-tcp (32 streams, 161.56s, 2.62 Gbit/s)
+   445.8s rank 2: exporting rank 2
+flare: rank zero disconnected before shutdown

@@ -1,0 +1,1033 @@
+FFFFFF                                                                   [100%]
+=================================== FAILURES ===================================
+_ test_package_replays_without_python[68719476736-runtime_package_fixture.py-test_runtime_package-192 graph launches-False] _
+
+tmp_path = PosixPath('/tmp/pytest-of-nvidia/pytest-0/test_package_replays_without_p0')
+fixture = 'runtime_package_fixture.py', binary = 'test_runtime_package'
+expected = '192 graph launches', exec_handover = False, shard_size = 68719476736
+
+    @pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1", reason="requires explicit CUDA test opt-in")
+    @pytest.mark.parametrize("fixture,binary,expected,exec_handover", [
+        ("runtime_package_fixture.py", "test_runtime_package", "192 graph launches", False),
+        ("fixed_package_fixture.py", "test_fixed_runtime_package", "native fixed-address replay passed", False),
+        ("fixed_package_fixture.py", "test_fixed_runtime_package", "native fixed-address replay passed", True),
+    ])
+    @pytest.mark.parametrize("shard_size", [64 << 30, 64 << 20])
+    def test_package_replays_without_python(tmp_path, fixture, binary, expected, exec_handover, shard_size):
+        assert os.environ.get("CUDA_VISIBLE_DEVICES"), "assign CUDA_VISIBLE_DEVICES before running GPU tests"
+        root = Path(__file__).resolve().parents[2]
+        subprocess.run([
+            "cargo", "build", "--manifest-path", str(root / "helios/Cargo.toml"),
+            "--no-default-features", "--features", "runtime-package,test-tools", "--bin", binary,
+        ], check=True, cwd=root, timeout=180)
+        executable = str(root / "helios/target/debug" / binary)
+        arguments = [sys.executable, str(root / "helios/tests" / fixture), str(tmp_path)]
+        if exec_handover:
+            arguments.append(executable)
+        arguments += ["--shard-size", str(shard_size)]
+        result = subprocess.run(arguments, cwd=root, text=True, capture_output=True, timeout=180)
+>       assert result.returncode == 0, result.stdout + result.stderr
+E       AssertionError: Traceback (most recent call last):
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/helios/tests/runtime_package_fixture.py", line 157, in <module>
+E             prepare(args.directory, args.shard_size)
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/helios/tests/runtime_package_fixture.py", line 16, in prepare
+E             _prepare(root, images, shard_size)
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/helios/tests/runtime_package_fixture.py", line 42, in _prepare
+E             gemm = _get_compiled_dense_gemm(**settings)
+E                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/flashinfer/experimental/b12x/_lib/program_cache.py", line 140, in __call__
+E             value = self._function(*args, **kwargs)
+E                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/flashinfer/experimental/b12x/_lib/dense_gemm/compile.py", line 1807, in _get_compiled_dense_gemm
+E             compiled_kernel = b12x_compile(
+E                               ^^^^^^^^^^^^^
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/flashinfer/experimental/b12x/_lib/compiler.py", line 2589, in compile
+E             with _disk_cache_key_lock(cache_key):
+E           File "/usr/lib/python3.12/contextlib.py", line 137, in __enter__
+E             return next(self.gen)
+E                    ^^^^^^^^^^^^^^
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/flashinfer/experimental/b12x/_lib/compiler.py", line 2351, in _disk_cache_key_lock
+E             with FileLock(lock_path):
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/filelock/_api.py", line 978, in __enter__
+E             self.acquire()
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/filelock/_api.py", line 1087, in acquire
+E             self._poll_until_acquired(
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/filelock/_api.py", line 1251, in _poll_until_acquired
+E             self._acquire_with_fork_tracking()
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/filelock/_api.py", line 1309, in _acquire_with_fork_tracking
+E             self._acquire()
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/filelock/_unix.py", line 70, in _acquire
+E             missing_flock = self._acquire_native()
+E                             ^^^^^^^^^^^^^^^^^^^^^^
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/filelock/_unix.py", line 85, in _acquire_native
+E             fd = os.open(self.lock_file, open_flags, open_mode)
+E                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E         PermissionError: [Errno 13] Permission denied: '/home/nvidia/.cache/b12x/compile/4a/4a1ff8ab7c62dcf3aaaed023bf5d56380beafca19b9c957f1e74c464a7e184ed.lock'
+E         
+E       assert 1 == 0
+E        +  where 1 = CompletedProcess(args=['/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/bin/python', '/home/nvidia/era...nied: \'/home/nvidia/.cache/b12x/compile/4a/4a1ff8ab7c62dcf3aaaed023bf5d56380beafca19b9c957f1e74c464a7e184ed.lock\'\n').returncode
+
+tests/preparation/test_runtime_package.py:444: AssertionError
+----------------------------- Captured stderr call -----------------------------
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.26
+   Compiling anyhow v1.0.104
+   Compiling either v1.19.0
+   Compiling hashbrown v0.17.1
+   Compiling equivalent v1.0.2
+   Compiling version_check v0.9.5
+   Compiling rustix v1.1.5
+   Compiling bytes v1.12.1
+   Compiling libc v0.2.189
+   Compiling shlex v2.0.1
+   Compiling regex-syntax v0.8.11
+   Compiling find-msvc-tools v0.1.14
+   Compiling typenum v1.20.1
+   Compiling foldhash v0.1.5
+   Compiling bitflags v2.13.2
+   Compiling linux-raw-sys v0.12.1
+   Compiling prettyplease v0.2.37
+   Compiling cfg-if v1.0.5
+   Compiling serde_core v1.0.229
+   Compiling fixedbitset v0.5.7
+   Compiling once_cell v1.21.4
+   Compiling cc v1.6.0
+   Compiling itertools v0.13.0
+   Compiling hashbrown v0.15.5
+   Compiling generic-array v0.14.7
+   Compiling fastrand v2.5.0
+   Compiling heck v0.5.0
+   Compiling multimap v0.10.1
+   Compiling log v0.4.34
+   Compiling zmij v1.0.23
+   Compiling io-uring v0.7.15
+   Compiling serde v1.0.229
+   Compiling subtle v2.6.1
+   Compiling thiserror v2.0.21
+   Compiling serde_json v1.0.151
+   Compiling indexmap v2.14.2
+   Compiling untrusted v0.9.0
+   Compiling itoa v1.0.18
+   Compiling memchr v2.8.3
+   Compiling libloading v0.8.9
+   Compiling twox-hash v2.1.5
+   Compiling petgraph v0.8.3
+   Compiling block-buffer v0.10.4
+   Compiling crypto-common v0.1.7
+   Compiling syn v2.0.119
+   Compiling syn v3.0.6
+   Compiling regex-automata v0.4.18
+   Compiling digest v0.10.7
+   Compiling ring v0.17.14
+   Compiling blake2 v0.10.6
+   Compiling getrandom v0.2.17
+   Compiling tempfile v3.27.0
+   Compiling regex v1.13.1
+   Compiling thiserror-impl v2.0.21
+   Compiling serde_derive v1.0.229
+   Compiling prost-derive v0.14.4
+   Compiling prost v0.14.4
+   Compiling prost-types v0.14.4
+   Compiling prost-build v0.14.4
+   Compiling flare-helios v0.1.0 (/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/helios)
+warning: constant `ATTRIBUTE_INTEGRATED` is never used
+  --> src/cuda.rs:92:7
+   |
+92 | const ATTRIBUTE_INTEGRATED: c_int = 18;
+   |       ^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `device_integrated` is never used
+   --> src/cuda.rs:271:15
+    |
+271 | pub(crate) fn device_integrated(context: usize) -> Result<bool> {
+    |               ^^^^^^^^^^^^^^^^^
+
+warning: field `nbytes` is never read
+   --> src/cuda.rs:291:5
+    |
+287 | pub(crate) struct HostRegistration {
+    |                   ---------------- field in this struct
+...
+291 |     nbytes: usize,
+    |     ^^^^^^
+
+warning: methods `address` and `nbytes` are never used
+   --> src/cuda.rs:295:19
+    |
+294 | impl HostRegistration {
+    | --------------------- methods in this implementation
+295 |     pub(crate) fn address(&self) -> usize {
+    |                   ^^^^^^^
+...
+298 |     pub(crate) fn nbytes(&self) -> usize {
+    |                   ^^^^^^
+
+warning: method `render` is never used
+  --> src/engram.rs:45:19
+   |
+44 | impl Stats {
+   | ---------- method in this implementation
+45 |     pub(crate) fn render(&self, text: &mut String) {
+   |                   ^^^^^^
+
+warning: method `stats` is never used
+   --> src/engram.rs:391:19
+    |
+252 | impl Shared {
+    | ----------- method in this implementation
+...
+391 |     pub(crate) fn stats(&self) -> Arc<Stats> {
+    |                   ^^^^^
+
+warning: function `open_file` is never used
+  --> src/engram/reader.rs:76:15
+   |
+76 | pub(super) fn open_file(path: &Path) -> Result<File> {
+   |               ^^^^^^^^^
+
+warning: methods `manifest` and `can_submit` are never used
+   --> src/execution/threaded.rs:172:12
+    |
+ 91 | impl ThreadedExecutor {
+    | --------------------- methods in this implementation
+...
+172 |     pub fn manifest(&self) -> &ExecutionManifest {
+    |            ^^^^^^^^
+...
+178 |     pub fn can_submit(&self, grammar: bool) -> bool {
+    |            ^^^^^^^^^^
+
+warning: methods `conditioned_inputs_ready` and `set_conditioned_features` are never used
+    --> src/scheduler.rs:1566:19
+     |
+ 546 | impl RequestScheduler {
+     | --------------------- methods in this implementation
+...
+1566 |     pub(crate) fn conditioned_inputs_ready(
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1578 |     pub(crate) fn set_conditioned_features(
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `flare-helios` (lib) generated 9 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 11.07s
+_ test_package_replays_without_python[68719476736-fixed_package_fixture.py-test_fixed_runtime_package-native fixed-address replay passed-False] _
+
+tmp_path = PosixPath('/tmp/pytest-of-nvidia/pytest-0/test_package_replays_without_p1')
+fixture = 'fixed_package_fixture.py', binary = 'test_fixed_runtime_package'
+expected = 'native fixed-address replay passed', exec_handover = False
+shard_size = 68719476736
+
+    @pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1", reason="requires explicit CUDA test opt-in")
+    @pytest.mark.parametrize("fixture,binary,expected,exec_handover", [
+        ("runtime_package_fixture.py", "test_runtime_package", "192 graph launches", False),
+        ("fixed_package_fixture.py", "test_fixed_runtime_package", "native fixed-address replay passed", False),
+        ("fixed_package_fixture.py", "test_fixed_runtime_package", "native fixed-address replay passed", True),
+    ])
+    @pytest.mark.parametrize("shard_size", [64 << 30, 64 << 20])
+    def test_package_replays_without_python(tmp_path, fixture, binary, expected, exec_handover, shard_size):
+        assert os.environ.get("CUDA_VISIBLE_DEVICES"), "assign CUDA_VISIBLE_DEVICES before running GPU tests"
+        root = Path(__file__).resolve().parents[2]
+        subprocess.run([
+            "cargo", "build", "--manifest-path", str(root / "helios/Cargo.toml"),
+            "--no-default-features", "--features", "runtime-package,test-tools", "--bin", binary,
+        ], check=True, cwd=root, timeout=180)
+        executable = str(root / "helios/target/debug" / binary)
+        arguments = [sys.executable, str(root / "helios/tests" / fixture), str(tmp_path)]
+        if exec_handover:
+            arguments.append(executable)
+        arguments += ["--shard-size", str(shard_size)]
+        result = subprocess.run(arguments, cwd=root, text=True, capture_output=True, timeout=180)
+>       assert result.returncode == 0, result.stdout + result.stderr
+E       AssertionError: Traceback (most recent call last):
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/helios/tests/fixed_package_fixture.py", line 183, in <module>
+E             prepare(args.directory, args.shard_size)
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/helios/tests/fixed_package_fixture.py", line 130, in prepare
+E             run()
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/helios/tests/fixed_package_fixture.py", line 112, in run
+E             numeric_argument[(1,)](output, unused_address)
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/triton/runtime/jit.py", line 374, in <lambda>
+E             return lambda *args, **kwargs: self.run(grid=grid, warmup=False, *args, **kwargs)
+E                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/triton/runtime/jit.py", line 731, in run
+E             device = driver.active.get_current_device()
+E                      ^^^^^^^^^^^^^
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/triton/runtime/driver.py", line 39, in active
+E             self._active = self.default
+E                            ^^^^^^^^^^^^
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/triton/runtime/driver.py", line 33, in default
+E             self._default = _create_driver()
+E                             ^^^^^^^^^^^^^^^^
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/triton/runtime/driver.py", line 21, in _create_driver
+E             return active_drivers[0]()
+E                    ^^^^^^^^^^^^^^^^^^^
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/triton/backends/nvidia/driver.py", line 342, in __init__
+E             self.utils = CudaUtils()  # TODO: make static
+E                          ^^^^^^^^^^^
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/triton/backends/nvidia/driver.py", line 101, in __init__
+E             mod = compile_module_from_file(
+E                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/triton/runtime/build.py", line 196, in compile_module_from_file
+E             return _compile_so_from_file(src_path, name, library_dirs, include_dirs, libraries, ccflags, load_module=True)
+E                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/triton/runtime/build.py", line 165, in _compile_so_from_file
+E             return _compile_so(src=src, src_path=src_path, name=name, library_dirs=library_dirs, include_dirs=include_dirs,
+E                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/triton/runtime/build.py", line 136, in _compile_so
+E             cache = _get_cache_manager(src, config=config)
+E                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/triton/runtime/build.py", line 129, in _get_cache_manager
+E             return get_cache_manager(key)
+E                    ^^^^^^^^^^^^^^^^^^^^^^
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/triton/runtime/cache.py", line 260, in get_cache_manager
+E             return cls(_base32(key))
+E                    ^^^^^^^^^^^^^^^^^
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/triton/runtime/cache.py", line 55, in __init__
+E             os.makedirs(self.cache_dir, exist_ok=True)
+E           File "<frozen os>", line 225, in makedirs
+E         PermissionError: [Errno 13] Permission denied: '/home/nvidia/.triton/cache/LZG2QK2N2ARBCOJF3J2L2MICC3UFHJRT2PFCYTMUORIGD7ZM7KMA'
+E         
+E       assert 1 == 0
+E        +  where 1 = CompletedProcess(args=['/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/bin/python', '/home/nvidia/era...: [Errno 13] Permission denied: \'/home/nvidia/.triton/cache/LZG2QK2N2ARBCOJF3J2L2MICC3UFHJRT2PFCYTMUORIGD7ZM7KMA\'\n').returncode
+
+tests/preparation/test_runtime_package.py:444: AssertionError
+----------------------------- Captured stderr call -----------------------------
+warning: constant `ATTRIBUTE_INTEGRATED` is never used
+  --> src/cuda.rs:92:7
+   |
+92 | const ATTRIBUTE_INTEGRATED: c_int = 18;
+   |       ^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `device_integrated` is never used
+   --> src/cuda.rs:271:15
+    |
+271 | pub(crate) fn device_integrated(context: usize) -> Result<bool> {
+    |               ^^^^^^^^^^^^^^^^^
+
+warning: field `nbytes` is never read
+   --> src/cuda.rs:291:5
+    |
+287 | pub(crate) struct HostRegistration {
+    |                   ---------------- field in this struct
+...
+291 |     nbytes: usize,
+    |     ^^^^^^
+
+warning: methods `address` and `nbytes` are never used
+   --> src/cuda.rs:295:19
+    |
+294 | impl HostRegistration {
+    | --------------------- methods in this implementation
+295 |     pub(crate) fn address(&self) -> usize {
+    |                   ^^^^^^^
+...
+298 |     pub(crate) fn nbytes(&self) -> usize {
+    |                   ^^^^^^
+
+warning: method `render` is never used
+  --> src/engram.rs:45:19
+   |
+44 | impl Stats {
+   | ---------- method in this implementation
+45 |     pub(crate) fn render(&self, text: &mut String) {
+   |                   ^^^^^^
+
+warning: method `stats` is never used
+   --> src/engram.rs:391:19
+    |
+252 | impl Shared {
+    | ----------- method in this implementation
+...
+391 |     pub(crate) fn stats(&self) -> Arc<Stats> {
+    |                   ^^^^^
+
+warning: function `open_file` is never used
+  --> src/engram/reader.rs:76:15
+   |
+76 | pub(super) fn open_file(path: &Path) -> Result<File> {
+   |               ^^^^^^^^^
+
+warning: methods `manifest` and `can_submit` are never used
+   --> src/execution/threaded.rs:172:12
+    |
+ 91 | impl ThreadedExecutor {
+    | --------------------- methods in this implementation
+...
+172 |     pub fn manifest(&self) -> &ExecutionManifest {
+    |            ^^^^^^^^
+...
+178 |     pub fn can_submit(&self, grammar: bool) -> bool {
+    |            ^^^^^^^^^^
+
+warning: methods `conditioned_inputs_ready` and `set_conditioned_features` are never used
+    --> src/scheduler.rs:1566:19
+     |
+ 546 | impl RequestScheduler {
+     | --------------------- methods in this implementation
+...
+1566 |     pub(crate) fn conditioned_inputs_ready(
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1578 |     pub(crate) fn set_conditioned_features(
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `flare-helios` (lib) generated 9 warnings
+   Compiling flare-helios v0.1.0 (/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/helios)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.94s
+_ test_package_replays_without_python[68719476736-fixed_package_fixture.py-test_fixed_runtime_package-native fixed-address replay passed-True] _
+
+tmp_path = PosixPath('/tmp/pytest-of-nvidia/pytest-0/test_package_replays_without_p2')
+fixture = 'fixed_package_fixture.py', binary = 'test_fixed_runtime_package'
+expected = 'native fixed-address replay passed', exec_handover = True
+shard_size = 68719476736
+
+    @pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1", reason="requires explicit CUDA test opt-in")
+    @pytest.mark.parametrize("fixture,binary,expected,exec_handover", [
+        ("runtime_package_fixture.py", "test_runtime_package", "192 graph launches", False),
+        ("fixed_package_fixture.py", "test_fixed_runtime_package", "native fixed-address replay passed", False),
+        ("fixed_package_fixture.py", "test_fixed_runtime_package", "native fixed-address replay passed", True),
+    ])
+    @pytest.mark.parametrize("shard_size", [64 << 30, 64 << 20])
+    def test_package_replays_without_python(tmp_path, fixture, binary, expected, exec_handover, shard_size):
+        assert os.environ.get("CUDA_VISIBLE_DEVICES"), "assign CUDA_VISIBLE_DEVICES before running GPU tests"
+        root = Path(__file__).resolve().parents[2]
+        subprocess.run([
+            "cargo", "build", "--manifest-path", str(root / "helios/Cargo.toml"),
+            "--no-default-features", "--features", "runtime-package,test-tools", "--bin", binary,
+        ], check=True, cwd=root, timeout=180)
+        executable = str(root / "helios/target/debug" / binary)
+        arguments = [sys.executable, str(root / "helios/tests" / fixture), str(tmp_path)]
+        if exec_handover:
+            arguments.append(executable)
+        arguments += ["--shard-size", str(shard_size)]
+        result = subprocess.run(arguments, cwd=root, text=True, capture_output=True, timeout=180)
+>       assert result.returncode == 0, result.stdout + result.stderr
+E       AssertionError: Traceback (most recent call last):
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/helios/tests/fixed_package_fixture.py", line 183, in <module>
+E             prepare(args.directory, args.shard_size)
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/helios/tests/fixed_package_fixture.py", line 130, in prepare
+E             run()
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/helios/tests/fixed_package_fixture.py", line 112, in run
+E             numeric_argument[(1,)](output, unused_address)
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/triton/runtime/jit.py", line 374, in <lambda>
+E             return lambda *args, **kwargs: self.run(grid=grid, warmup=False, *args, **kwargs)
+E                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/triton/runtime/jit.py", line 731, in run
+E             device = driver.active.get_current_device()
+E                      ^^^^^^^^^^^^^
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/triton/runtime/driver.py", line 39, in active
+E             self._active = self.default
+E                            ^^^^^^^^^^^^
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/triton/runtime/driver.py", line 33, in default
+E             self._default = _create_driver()
+E                             ^^^^^^^^^^^^^^^^
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/triton/runtime/driver.py", line 21, in _create_driver
+E             return active_drivers[0]()
+E                    ^^^^^^^^^^^^^^^^^^^
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/triton/backends/nvidia/driver.py", line 342, in __init__
+E             self.utils = CudaUtils()  # TODO: make static
+E                          ^^^^^^^^^^^
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/triton/backends/nvidia/driver.py", line 101, in __init__
+E             mod = compile_module_from_file(
+E                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/triton/runtime/build.py", line 196, in compile_module_from_file
+E             return _compile_so_from_file(src_path, name, library_dirs, include_dirs, libraries, ccflags, load_module=True)
+E                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/triton/runtime/build.py", line 165, in _compile_so_from_file
+E             return _compile_so(src=src, src_path=src_path, name=name, library_dirs=library_dirs, include_dirs=include_dirs,
+E                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/triton/runtime/build.py", line 136, in _compile_so
+E             cache = _get_cache_manager(src, config=config)
+E                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/triton/runtime/build.py", line 129, in _get_cache_manager
+E             return get_cache_manager(key)
+E                    ^^^^^^^^^^^^^^^^^^^^^^
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/triton/runtime/cache.py", line 260, in get_cache_manager
+E             return cls(_base32(key))
+E                    ^^^^^^^^^^^^^^^^^
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/triton/runtime/cache.py", line 55, in __init__
+E             os.makedirs(self.cache_dir, exist_ok=True)
+E           File "<frozen os>", line 225, in makedirs
+E         PermissionError: [Errno 13] Permission denied: '/home/nvidia/.triton/cache/LZG2QK2N2ARBCOJF3J2L2MICC3UFHJRT2PFCYTMUORIGD7ZM7KMA'
+E         
+E       assert 1 == 0
+E        +  where 1 = CompletedProcess(args=['/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/bin/python', '/home/nvidia/era...: [Errno 13] Permission denied: \'/home/nvidia/.triton/cache/LZG2QK2N2ARBCOJF3J2L2MICC3UFHJRT2PFCYTMUORIGD7ZM7KMA\'\n').returncode
+
+tests/preparation/test_runtime_package.py:444: AssertionError
+----------------------------- Captured stderr call -----------------------------
+warning: constant `ATTRIBUTE_INTEGRATED` is never used
+  --> src/cuda.rs:92:7
+   |
+92 | const ATTRIBUTE_INTEGRATED: c_int = 18;
+   |       ^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `device_integrated` is never used
+   --> src/cuda.rs:271:15
+    |
+271 | pub(crate) fn device_integrated(context: usize) -> Result<bool> {
+    |               ^^^^^^^^^^^^^^^^^
+
+warning: field `nbytes` is never read
+   --> src/cuda.rs:291:5
+    |
+287 | pub(crate) struct HostRegistration {
+    |                   ---------------- field in this struct
+...
+291 |     nbytes: usize,
+    |     ^^^^^^
+
+warning: methods `address` and `nbytes` are never used
+   --> src/cuda.rs:295:19
+    |
+294 | impl HostRegistration {
+    | --------------------- methods in this implementation
+295 |     pub(crate) fn address(&self) -> usize {
+    |                   ^^^^^^^
+...
+298 |     pub(crate) fn nbytes(&self) -> usize {
+    |                   ^^^^^^
+
+warning: method `render` is never used
+  --> src/engram.rs:45:19
+   |
+44 | impl Stats {
+   | ---------- method in this implementation
+45 |     pub(crate) fn render(&self, text: &mut String) {
+   |                   ^^^^^^
+
+warning: method `stats` is never used
+   --> src/engram.rs:391:19
+    |
+252 | impl Shared {
+    | ----------- method in this implementation
+...
+391 |     pub(crate) fn stats(&self) -> Arc<Stats> {
+    |                   ^^^^^
+
+warning: function `open_file` is never used
+  --> src/engram/reader.rs:76:15
+   |
+76 | pub(super) fn open_file(path: &Path) -> Result<File> {
+   |               ^^^^^^^^^
+
+warning: methods `manifest` and `can_submit` are never used
+   --> src/execution/threaded.rs:172:12
+    |
+ 91 | impl ThreadedExecutor {
+    | --------------------- methods in this implementation
+...
+172 |     pub fn manifest(&self) -> &ExecutionManifest {
+    |            ^^^^^^^^
+...
+178 |     pub fn can_submit(&self, grammar: bool) -> bool {
+    |            ^^^^^^^^^^
+
+warning: methods `conditioned_inputs_ready` and `set_conditioned_features` are never used
+    --> src/scheduler.rs:1566:19
+     |
+ 546 | impl RequestScheduler {
+     | --------------------- methods in this implementation
+...
+1566 |     pub(crate) fn conditioned_inputs_ready(
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1578 |     pub(crate) fn set_conditioned_features(
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `flare-helios` (lib) generated 9 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.04s
+_ test_package_replays_without_python[67108864-runtime_package_fixture.py-test_runtime_package-192 graph launches-False] _
+
+tmp_path = PosixPath('/tmp/pytest-of-nvidia/pytest-0/test_package_replays_without_p3')
+fixture = 'runtime_package_fixture.py', binary = 'test_runtime_package'
+expected = '192 graph launches', exec_handover = False, shard_size = 67108864
+
+    @pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1", reason="requires explicit CUDA test opt-in")
+    @pytest.mark.parametrize("fixture,binary,expected,exec_handover", [
+        ("runtime_package_fixture.py", "test_runtime_package", "192 graph launches", False),
+        ("fixed_package_fixture.py", "test_fixed_runtime_package", "native fixed-address replay passed", False),
+        ("fixed_package_fixture.py", "test_fixed_runtime_package", "native fixed-address replay passed", True),
+    ])
+    @pytest.mark.parametrize("shard_size", [64 << 30, 64 << 20])
+    def test_package_replays_without_python(tmp_path, fixture, binary, expected, exec_handover, shard_size):
+        assert os.environ.get("CUDA_VISIBLE_DEVICES"), "assign CUDA_VISIBLE_DEVICES before running GPU tests"
+        root = Path(__file__).resolve().parents[2]
+        subprocess.run([
+            "cargo", "build", "--manifest-path", str(root / "helios/Cargo.toml"),
+            "--no-default-features", "--features", "runtime-package,test-tools", "--bin", binary,
+        ], check=True, cwd=root, timeout=180)
+        executable = str(root / "helios/target/debug" / binary)
+        arguments = [sys.executable, str(root / "helios/tests" / fixture), str(tmp_path)]
+        if exec_handover:
+            arguments.append(executable)
+        arguments += ["--shard-size", str(shard_size)]
+        result = subprocess.run(arguments, cwd=root, text=True, capture_output=True, timeout=180)
+>       assert result.returncode == 0, result.stdout + result.stderr
+E       AssertionError: Traceback (most recent call last):
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/helios/tests/runtime_package_fixture.py", line 157, in <module>
+E             prepare(args.directory, args.shard_size)
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/helios/tests/runtime_package_fixture.py", line 16, in prepare
+E             _prepare(root, images, shard_size)
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/helios/tests/runtime_package_fixture.py", line 42, in _prepare
+E             gemm = _get_compiled_dense_gemm(**settings)
+E                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/flashinfer/experimental/b12x/_lib/program_cache.py", line 140, in __call__
+E             value = self._function(*args, **kwargs)
+E                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/flashinfer/experimental/b12x/_lib/dense_gemm/compile.py", line 1807, in _get_compiled_dense_gemm
+E             compiled_kernel = b12x_compile(
+E                               ^^^^^^^^^^^^^
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/flashinfer/experimental/b12x/_lib/compiler.py", line 2589, in compile
+E             with _disk_cache_key_lock(cache_key):
+E           File "/usr/lib/python3.12/contextlib.py", line 137, in __enter__
+E             return next(self.gen)
+E                    ^^^^^^^^^^^^^^
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/flashinfer/experimental/b12x/_lib/compiler.py", line 2351, in _disk_cache_key_lock
+E             with FileLock(lock_path):
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/filelock/_api.py", line 978, in __enter__
+E             self.acquire()
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/filelock/_api.py", line 1087, in acquire
+E             self._poll_until_acquired(
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/filelock/_api.py", line 1251, in _poll_until_acquired
+E             self._acquire_with_fork_tracking()
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/filelock/_api.py", line 1309, in _acquire_with_fork_tracking
+E             self._acquire()
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/filelock/_unix.py", line 70, in _acquire
+E             missing_flock = self._acquire_native()
+E                             ^^^^^^^^^^^^^^^^^^^^^^
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/filelock/_unix.py", line 85, in _acquire_native
+E             fd = os.open(self.lock_file, open_flags, open_mode)
+E                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E         PermissionError: [Errno 13] Permission denied: '/home/nvidia/.cache/b12x/compile/4a/4a1ff8ab7c62dcf3aaaed023bf5d56380beafca19b9c957f1e74c464a7e184ed.lock'
+E         
+E       assert 1 == 0
+E        +  where 1 = CompletedProcess(args=['/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/bin/python', '/home/nvidia/era...nied: \'/home/nvidia/.cache/b12x/compile/4a/4a1ff8ab7c62dcf3aaaed023bf5d56380beafca19b9c957f1e74c464a7e184ed.lock\'\n').returncode
+
+tests/preparation/test_runtime_package.py:444: AssertionError
+----------------------------- Captured stderr call -----------------------------
+warning: constant `ATTRIBUTE_INTEGRATED` is never used
+  --> src/cuda.rs:92:7
+   |
+92 | const ATTRIBUTE_INTEGRATED: c_int = 18;
+   |       ^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `device_integrated` is never used
+   --> src/cuda.rs:271:15
+    |
+271 | pub(crate) fn device_integrated(context: usize) -> Result<bool> {
+    |               ^^^^^^^^^^^^^^^^^
+
+warning: field `nbytes` is never read
+   --> src/cuda.rs:291:5
+    |
+287 | pub(crate) struct HostRegistration {
+    |                   ---------------- field in this struct
+...
+291 |     nbytes: usize,
+    |     ^^^^^^
+
+warning: methods `address` and `nbytes` are never used
+   --> src/cuda.rs:295:19
+    |
+294 | impl HostRegistration {
+    | --------------------- methods in this implementation
+295 |     pub(crate) fn address(&self) -> usize {
+    |                   ^^^^^^^
+...
+298 |     pub(crate) fn nbytes(&self) -> usize {
+    |                   ^^^^^^
+
+warning: method `render` is never used
+  --> src/engram.rs:45:19
+   |
+44 | impl Stats {
+   | ---------- method in this implementation
+45 |     pub(crate) fn render(&self, text: &mut String) {
+   |                   ^^^^^^
+
+warning: method `stats` is never used
+   --> src/engram.rs:391:19
+    |
+252 | impl Shared {
+    | ----------- method in this implementation
+...
+391 |     pub(crate) fn stats(&self) -> Arc<Stats> {
+    |                   ^^^^^
+
+warning: function `open_file` is never used
+  --> src/engram/reader.rs:76:15
+   |
+76 | pub(super) fn open_file(path: &Path) -> Result<File> {
+   |               ^^^^^^^^^
+
+warning: methods `manifest` and `can_submit` are never used
+   --> src/execution/threaded.rs:172:12
+    |
+ 91 | impl ThreadedExecutor {
+    | --------------------- methods in this implementation
+...
+172 |     pub fn manifest(&self) -> &ExecutionManifest {
+    |            ^^^^^^^^
+...
+178 |     pub fn can_submit(&self, grammar: bool) -> bool {
+    |            ^^^^^^^^^^
+
+warning: methods `conditioned_inputs_ready` and `set_conditioned_features` are never used
+    --> src/scheduler.rs:1566:19
+     |
+ 546 | impl RequestScheduler {
+     | --------------------- methods in this implementation
+...
+1566 |     pub(crate) fn conditioned_inputs_ready(
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1578 |     pub(crate) fn set_conditioned_features(
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `flare-helios` (lib) generated 9 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.03s
+_ test_package_replays_without_python[67108864-fixed_package_fixture.py-test_fixed_runtime_package-native fixed-address replay passed-False] _
+
+tmp_path = PosixPath('/tmp/pytest-of-nvidia/pytest-0/test_package_replays_without_p4')
+fixture = 'fixed_package_fixture.py', binary = 'test_fixed_runtime_package'
+expected = 'native fixed-address replay passed', exec_handover = False
+shard_size = 67108864
+
+    @pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1", reason="requires explicit CUDA test opt-in")
+    @pytest.mark.parametrize("fixture,binary,expected,exec_handover", [
+        ("runtime_package_fixture.py", "test_runtime_package", "192 graph launches", False),
+        ("fixed_package_fixture.py", "test_fixed_runtime_package", "native fixed-address replay passed", False),
+        ("fixed_package_fixture.py", "test_fixed_runtime_package", "native fixed-address replay passed", True),
+    ])
+    @pytest.mark.parametrize("shard_size", [64 << 30, 64 << 20])
+    def test_package_replays_without_python(tmp_path, fixture, binary, expected, exec_handover, shard_size):
+        assert os.environ.get("CUDA_VISIBLE_DEVICES"), "assign CUDA_VISIBLE_DEVICES before running GPU tests"
+        root = Path(__file__).resolve().parents[2]
+        subprocess.run([
+            "cargo", "build", "--manifest-path", str(root / "helios/Cargo.toml"),
+            "--no-default-features", "--features", "runtime-package,test-tools", "--bin", binary,
+        ], check=True, cwd=root, timeout=180)
+        executable = str(root / "helios/target/debug" / binary)
+        arguments = [sys.executable, str(root / "helios/tests" / fixture), str(tmp_path)]
+        if exec_handover:
+            arguments.append(executable)
+        arguments += ["--shard-size", str(shard_size)]
+        result = subprocess.run(arguments, cwd=root, text=True, capture_output=True, timeout=180)
+>       assert result.returncode == 0, result.stdout + result.stderr
+E       AssertionError: Traceback (most recent call last):
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/helios/tests/fixed_package_fixture.py", line 183, in <module>
+E             prepare(args.directory, args.shard_size)
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/helios/tests/fixed_package_fixture.py", line 130, in prepare
+E             run()
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/helios/tests/fixed_package_fixture.py", line 112, in run
+E             numeric_argument[(1,)](output, unused_address)
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/triton/runtime/jit.py", line 374, in <lambda>
+E             return lambda *args, **kwargs: self.run(grid=grid, warmup=False, *args, **kwargs)
+E                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/triton/runtime/jit.py", line 731, in run
+E             device = driver.active.get_current_device()
+E                      ^^^^^^^^^^^^^
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/triton/runtime/driver.py", line 39, in active
+E             self._active = self.default
+E                            ^^^^^^^^^^^^
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/triton/runtime/driver.py", line 33, in default
+E             self._default = _create_driver()
+E                             ^^^^^^^^^^^^^^^^
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/triton/runtime/driver.py", line 21, in _create_driver
+E             return active_drivers[0]()
+E                    ^^^^^^^^^^^^^^^^^^^
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/triton/backends/nvidia/driver.py", line 342, in __init__
+E             self.utils = CudaUtils()  # TODO: make static
+E                          ^^^^^^^^^^^
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/triton/backends/nvidia/driver.py", line 101, in __init__
+E             mod = compile_module_from_file(
+E                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/triton/runtime/build.py", line 196, in compile_module_from_file
+E             return _compile_so_from_file(src_path, name, library_dirs, include_dirs, libraries, ccflags, load_module=True)
+E                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/triton/runtime/build.py", line 165, in _compile_so_from_file
+E             return _compile_so(src=src, src_path=src_path, name=name, library_dirs=library_dirs, include_dirs=include_dirs,
+E                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/triton/runtime/build.py", line 136, in _compile_so
+E             cache = _get_cache_manager(src, config=config)
+E                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/triton/runtime/build.py", line 129, in _get_cache_manager
+E             return get_cache_manager(key)
+E                    ^^^^^^^^^^^^^^^^^^^^^^
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/triton/runtime/cache.py", line 260, in get_cache_manager
+E             return cls(_base32(key))
+E                    ^^^^^^^^^^^^^^^^^
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/triton/runtime/cache.py", line 55, in __init__
+E             os.makedirs(self.cache_dir, exist_ok=True)
+E           File "<frozen os>", line 225, in makedirs
+E         PermissionError: [Errno 13] Permission denied: '/home/nvidia/.triton/cache/LZG2QK2N2ARBCOJF3J2L2MICC3UFHJRT2PFCYTMUORIGD7ZM7KMA'
+E         
+E       assert 1 == 0
+E        +  where 1 = CompletedProcess(args=['/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/bin/python', '/home/nvidia/era...: [Errno 13] Permission denied: \'/home/nvidia/.triton/cache/LZG2QK2N2ARBCOJF3J2L2MICC3UFHJRT2PFCYTMUORIGD7ZM7KMA\'\n').returncode
+
+tests/preparation/test_runtime_package.py:444: AssertionError
+----------------------------- Captured stderr call -----------------------------
+warning: constant `ATTRIBUTE_INTEGRATED` is never used
+  --> src/cuda.rs:92:7
+   |
+92 | const ATTRIBUTE_INTEGRATED: c_int = 18;
+   |       ^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `device_integrated` is never used
+   --> src/cuda.rs:271:15
+    |
+271 | pub(crate) fn device_integrated(context: usize) -> Result<bool> {
+    |               ^^^^^^^^^^^^^^^^^
+
+warning: field `nbytes` is never read
+   --> src/cuda.rs:291:5
+    |
+287 | pub(crate) struct HostRegistration {
+    |                   ---------------- field in this struct
+...
+291 |     nbytes: usize,
+    |     ^^^^^^
+
+warning: methods `address` and `nbytes` are never used
+   --> src/cuda.rs:295:19
+    |
+294 | impl HostRegistration {
+    | --------------------- methods in this implementation
+295 |     pub(crate) fn address(&self) -> usize {
+    |                   ^^^^^^^
+...
+298 |     pub(crate) fn nbytes(&self) -> usize {
+    |                   ^^^^^^
+
+warning: method `render` is never used
+  --> src/engram.rs:45:19
+   |
+44 | impl Stats {
+   | ---------- method in this implementation
+45 |     pub(crate) fn render(&self, text: &mut String) {
+   |                   ^^^^^^
+
+warning: method `stats` is never used
+   --> src/engram.rs:391:19
+    |
+252 | impl Shared {
+    | ----------- method in this implementation
+...
+391 |     pub(crate) fn stats(&self) -> Arc<Stats> {
+    |                   ^^^^^
+
+warning: function `open_file` is never used
+  --> src/engram/reader.rs:76:15
+   |
+76 | pub(super) fn open_file(path: &Path) -> Result<File> {
+   |               ^^^^^^^^^
+
+warning: methods `manifest` and `can_submit` are never used
+   --> src/execution/threaded.rs:172:12
+    |
+ 91 | impl ThreadedExecutor {
+    | --------------------- methods in this implementation
+...
+172 |     pub fn manifest(&self) -> &ExecutionManifest {
+    |            ^^^^^^^^
+...
+178 |     pub fn can_submit(&self, grammar: bool) -> bool {
+    |            ^^^^^^^^^^
+
+warning: methods `conditioned_inputs_ready` and `set_conditioned_features` are never used
+    --> src/scheduler.rs:1566:19
+     |
+ 546 | impl RequestScheduler {
+     | --------------------- methods in this implementation
+...
+1566 |     pub(crate) fn conditioned_inputs_ready(
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1578 |     pub(crate) fn set_conditioned_features(
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `flare-helios` (lib) generated 9 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.03s
+_ test_package_replays_without_python[67108864-fixed_package_fixture.py-test_fixed_runtime_package-native fixed-address replay passed-True] _
+
+tmp_path = PosixPath('/tmp/pytest-of-nvidia/pytest-0/test_package_replays_without_p5')
+fixture = 'fixed_package_fixture.py', binary = 'test_fixed_runtime_package'
+expected = 'native fixed-address replay passed', exec_handover = True
+shard_size = 67108864
+
+    @pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1", reason="requires explicit CUDA test opt-in")
+    @pytest.mark.parametrize("fixture,binary,expected,exec_handover", [
+        ("runtime_package_fixture.py", "test_runtime_package", "192 graph launches", False),
+        ("fixed_package_fixture.py", "test_fixed_runtime_package", "native fixed-address replay passed", False),
+        ("fixed_package_fixture.py", "test_fixed_runtime_package", "native fixed-address replay passed", True),
+    ])
+    @pytest.mark.parametrize("shard_size", [64 << 30, 64 << 20])
+    def test_package_replays_without_python(tmp_path, fixture, binary, expected, exec_handover, shard_size):
+        assert os.environ.get("CUDA_VISIBLE_DEVICES"), "assign CUDA_VISIBLE_DEVICES before running GPU tests"
+        root = Path(__file__).resolve().parents[2]
+        subprocess.run([
+            "cargo", "build", "--manifest-path", str(root / "helios/Cargo.toml"),
+            "--no-default-features", "--features", "runtime-package,test-tools", "--bin", binary,
+        ], check=True, cwd=root, timeout=180)
+        executable = str(root / "helios/target/debug" / binary)
+        arguments = [sys.executable, str(root / "helios/tests" / fixture), str(tmp_path)]
+        if exec_handover:
+            arguments.append(executable)
+        arguments += ["--shard-size", str(shard_size)]
+        result = subprocess.run(arguments, cwd=root, text=True, capture_output=True, timeout=180)
+>       assert result.returncode == 0, result.stdout + result.stderr
+E       AssertionError: Traceback (most recent call last):
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/helios/tests/fixed_package_fixture.py", line 183, in <module>
+E             prepare(args.directory, args.shard_size)
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/helios/tests/fixed_package_fixture.py", line 130, in prepare
+E             run()
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/helios/tests/fixed_package_fixture.py", line 112, in run
+E             numeric_argument[(1,)](output, unused_address)
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/triton/runtime/jit.py", line 374, in <lambda>
+E             return lambda *args, **kwargs: self.run(grid=grid, warmup=False, *args, **kwargs)
+E                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/triton/runtime/jit.py", line 731, in run
+E             device = driver.active.get_current_device()
+E                      ^^^^^^^^^^^^^
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/triton/runtime/driver.py", line 39, in active
+E             self._active = self.default
+E                            ^^^^^^^^^^^^
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/triton/runtime/driver.py", line 33, in default
+E             self._default = _create_driver()
+E                             ^^^^^^^^^^^^^^^^
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/triton/runtime/driver.py", line 21, in _create_driver
+E             return active_drivers[0]()
+E                    ^^^^^^^^^^^^^^^^^^^
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/triton/backends/nvidia/driver.py", line 342, in __init__
+E             self.utils = CudaUtils()  # TODO: make static
+E                          ^^^^^^^^^^^
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/triton/backends/nvidia/driver.py", line 101, in __init__
+E             mod = compile_module_from_file(
+E                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/triton/runtime/build.py", line 196, in compile_module_from_file
+E             return _compile_so_from_file(src_path, name, library_dirs, include_dirs, libraries, ccflags, load_module=True)
+E                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/triton/runtime/build.py", line 165, in _compile_so_from_file
+E             return _compile_so(src=src, src_path=src_path, name=name, library_dirs=library_dirs, include_dirs=include_dirs,
+E                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/triton/runtime/build.py", line 136, in _compile_so
+E             cache = _get_cache_manager(src, config=config)
+E                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/triton/runtime/build.py", line 129, in _get_cache_manager
+E             return get_cache_manager(key)
+E                    ^^^^^^^^^^^^^^^^^^^^^^
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/triton/runtime/cache.py", line 260, in get_cache_manager
+E             return cls(_base32(key))
+E                    ^^^^^^^^^^^^^^^^^
+E           File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/triton/runtime/cache.py", line 55, in __init__
+E             os.makedirs(self.cache_dir, exist_ok=True)
+E           File "<frozen os>", line 225, in makedirs
+E         PermissionError: [Errno 13] Permission denied: '/home/nvidia/.triton/cache/LZG2QK2N2ARBCOJF3J2L2MICC3UFHJRT2PFCYTMUORIGD7ZM7KMA'
+E         
+E       assert 1 == 0
+E        +  where 1 = CompletedProcess(args=['/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/bin/python', '/home/nvidia/era...: [Errno 13] Permission denied: \'/home/nvidia/.triton/cache/LZG2QK2N2ARBCOJF3J2L2MICC3UFHJRT2PFCYTMUORIGD7ZM7KMA\'\n').returncode
+
+tests/preparation/test_runtime_package.py:444: AssertionError
+----------------------------- Captured stderr call -----------------------------
+warning: constant `ATTRIBUTE_INTEGRATED` is never used
+  --> src/cuda.rs:92:7
+   |
+92 | const ATTRIBUTE_INTEGRATED: c_int = 18;
+   |       ^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `device_integrated` is never used
+   --> src/cuda.rs:271:15
+    |
+271 | pub(crate) fn device_integrated(context: usize) -> Result<bool> {
+    |               ^^^^^^^^^^^^^^^^^
+
+warning: field `nbytes` is never read
+   --> src/cuda.rs:291:5
+    |
+287 | pub(crate) struct HostRegistration {
+    |                   ---------------- field in this struct
+...
+291 |     nbytes: usize,
+    |     ^^^^^^
+
+warning: methods `address` and `nbytes` are never used
+   --> src/cuda.rs:295:19
+    |
+294 | impl HostRegistration {
+    | --------------------- methods in this implementation
+295 |     pub(crate) fn address(&self) -> usize {
+    |                   ^^^^^^^
+...
+298 |     pub(crate) fn nbytes(&self) -> usize {
+    |                   ^^^^^^
+
+warning: method `render` is never used
+  --> src/engram.rs:45:19
+   |
+44 | impl Stats {
+   | ---------- method in this implementation
+45 |     pub(crate) fn render(&self, text: &mut String) {
+   |                   ^^^^^^
+
+warning: method `stats` is never used
+   --> src/engram.rs:391:19
+    |
+252 | impl Shared {
+    | ----------- method in this implementation
+...
+391 |     pub(crate) fn stats(&self) -> Arc<Stats> {
+    |                   ^^^^^
+
+warning: function `open_file` is never used
+  --> src/engram/reader.rs:76:15
+   |
+76 | pub(super) fn open_file(path: &Path) -> Result<File> {
+   |               ^^^^^^^^^
+
+warning: methods `manifest` and `can_submit` are never used
+   --> src/execution/threaded.rs:172:12
+    |
+ 91 | impl ThreadedExecutor {
+    | --------------------- methods in this implementation
+...
+172 |     pub fn manifest(&self) -> &ExecutionManifest {
+    |            ^^^^^^^^
+...
+178 |     pub fn can_submit(&self, grammar: bool) -> bool {
+    |            ^^^^^^^^^^
+
+warning: methods `conditioned_inputs_ready` and `set_conditioned_features` are never used
+    --> src/scheduler.rs:1566:19
+     |
+ 546 | impl RequestScheduler {
+     | --------------------- methods in this implementation
+...
+1566 |     pub(crate) fn conditioned_inputs_ready(
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1578 |     pub(crate) fn set_conditioned_features(
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `flare-helios` (lib) generated 9 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.04s
+=========================== short test summary info ============================
+FAILED tests/preparation/test_runtime_package.py::test_package_replays_without_python[68719476736-runtime_package_fixture.py-test_runtime_package-192 graph launches-False]
+FAILED tests/preparation/test_runtime_package.py::test_package_replays_without_python[68719476736-fixed_package_fixture.py-test_fixed_runtime_package-native fixed-address replay passed-False]
+FAILED tests/preparation/test_runtime_package.py::test_package_replays_without_python[68719476736-fixed_package_fixture.py-test_fixed_runtime_package-native fixed-address replay passed-True]
+FAILED tests/preparation/test_runtime_package.py::test_package_replays_without_python[67108864-runtime_package_fixture.py-test_runtime_package-192 graph launches-False]
+FAILED tests/preparation/test_runtime_package.py::test_package_replays_without_python[67108864-fixed_package_fixture.py-test_fixed_runtime_package-native fixed-address replay passed-False]
+FAILED tests/preparation/test_runtime_package.py::test_package_replays_without_python[67108864-fixed_package_fixture.py-test_fixed_runtime_package-native fixed-address replay passed-True]
+6 failed, 34 deselected in 24.65s

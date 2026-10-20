@@ -424,6 +424,128 @@ shapes included 1×2/4/5/6, 2×2, and 4×1; no graph above 16 query rows ran in 
 workload. All four ranks drained and exited with status zero. Original agents
 on port 29900 remained active; this validation used isolated agents on 29910.
 
+### Retest after merging main
+
+Merge `670d6ca` incorporates main `7f54759`, including bounded export handles,
+disabled checkpoint read-ahead, and the equivalent GLM main-stream query gather.
+The [post-merge measurements](measurements/roce-distribution-20261020/merged-main/)
+use the same four hosts, checkpoint, dependencies, loading script, and stream-count
+order as the loading-only series above, without dropping host caches.
+
+| Streams per peer | Rank 0 load | Rank 1 load | Rank 2 load | Rank 3 load | Peak source-agent descriptors |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 8 | 124.52 s | 204.17 s | 214.22 s | 204.17 s | 113 |
+| 32 | 170.81 s | 161.31 s | 164.44 s | 161.51 s | 401 |
+| 64 | 171.52 s | 159.82 s | 162.21 s | 159.65 s | 785 |
+| 8, repeated | 123.96 s | 204.13 s | 212.73 s | 204.52 s | 113 |
+
+All sixteen processes exited successfully with exactly 53,002,660,524 payload
+bytes per peer. Root fabric TX remained 155.25–155.26 GiB; management RX stayed
+at about 69.4 MiB per peer for metadata. Rank 1 received 103.62–103.64 GiB and
+forwarded about 52 GiB, confirming the two-hop path. Peer NVMe reads remained
+near zero. Root NVMe reads were 338.4, 351.9, 351.9, and 350.4 GiB, so this
+series does not show reduced disk traffic from disabling read-ahead. Thirty-two
+streams still shorten peer loading versus eight; sixty-four provide little
+additional benefit. These ordinary-cache runs do not isolate individual
+upstream changes or establish network saturation.
+
+The merged build passed 298 Python transfer/export/CLI/package-protection tests,
+122 Flare Rust tests, and 763 Helios runtime tests. Exact native GPU-copy tests
+passed at one, four, and eight streams. Main's two-Spark query-chain regression
+passed compiled and uncompiled graphs at 1, 16, and 96 rows, with exact serial
+references, alternating capacities, and unchanged replay allocation counters.
+The initial temporary test launcher incorrectly reran GPU discovery in spawned
+compiler workers; adding its missing main guard fixed that harness failure.
+Image-model end-to-end validation and 17 ignored Helios tests were not run.
+
+The first two warm re-exports passed warmup and all 57 final graph captures
+per rank, then failed during concurrent peer export. The diagnostic rerun
+identified a publication race: removing a temporary hard link changed the
+published inode's ctime while another worker verified the same content.
+Publication and temporary-link cleanup now share a short lock with the
+receiver's existence check; transfers and hashing remain concurrent. Integrity
+checks are unchanged. Export workers also report the originating exception
+before aborting sockets, so the rank-lifetime watcher cannot hide it behind a
+secondary disconnect. Regression tests reproduce both concurrent misses and
+reuse during publication on the old code; all 29 focused transfer and rank
+lifecycle tests pass with the fix.
+
+With fix `1003b81`, all four preparation processes exited successfully. Rank
+zero took 21:16.93 overall, including 172.2 seconds loading weights and 821.6
+seconds exporting. Peers reached their post-weight marker at 168.0–169.2
+seconds after launch and each received 49.36 GiB through 32 fabric streams.
+All 57 final serving graphs captured on every rank. This re-export used
+`--no-weights`: verified cached stored data was reused, while ranks 1, 2, and 3
+returned about 0.06, 0.28, and 0.06 GiB of missing export data over
+the ring. Receipt took 0.08, 1.59, and 0.09 seconds respectively; these small
+warm-cache transfers are not comparable to the earlier cold 44.02 GiB exports.
+Local hashing and assembly dominated the remaining export time.
+
+The same build then completed native serving with full stored-data verification.
+Each peer fetched about 0.3 GiB of changed package data and reused its existing
+weight blobs. Orbit returned in 59.66 seconds and HTTP was ready at 309.77
+seconds. The matching 512-prompt/256-output corpus delivered 53.16 and 61.51
+output tokens/s after first token for the sequential requests, with first-token
+latencies of 598 and 419 ms. Four concurrent requests completed in 13.80 seconds
+(74.18 output tokens/s including prefill), close to the prior run's 13.73
+seconds. All three cold and four concurrent cached retrieval checks passed.
+All native ranks drained and exited with status zero. These measurements
+precede the subsequent merge of main `44bdae3`.
+
+Merge `0a91856` then incorporates main `44bdae3`, which records signed preparation
+inputs and prepared-weight views. Flare, Heliopause, and the isolated test agents
+were rebuilt on all four hosts. The merged sources passed 339 Python tests,
+122 Flare tests, and 765 Helios tests (17 ignored). All six native package replay
+cases passed, covering catalogs present and absent, two shard sizes, and native
+process handover. The first replay launch failed because default b12x and Triton
+caches were root-owned; applying the established isolated cache configuration
+resolved those test-launch errors.
+
+With maintainer authorization, ownership of `~/.cache` and `~/.triton/cache`
+was restored to `nvidia:nvidia` on all four hosts. This overlapped the first full
+trial's checkpoint admission and loading: ownership changes update inode ctime,
+which the immutable checkpoint snapshot validates, and the trial disconnected.
+That interrupted run is retained separately from the subsequent measurements.
+
+The [latest-main trial](measurements/roce-distribution-20261020/latest-main/)
+uses the same TP4/C4, prefill-4096, MTP5, 32-stream preparation configuration
+with verified stored-weight reuse. Rank zero loaded in 171.9 seconds; peers
+reached their post-weight marker at 168.2, 168.6, and 169.2 seconds. Each peer
+received 49.36 GiB in 157.64, 158.67, and 157.62 seconds respectively. Live TCP
+sockets used the `10.10.x.x` links, with 16 streams on each rail per destination
+and rank 1 forwarding rank 2's traffic. All four ranks completed warmup and
+57 final graph captures. Peer exports returned 0.28, 0.06, and 0.06 GiB of changed
+data through the same agent ring transport in 1.76, 0.09, and 0.12 seconds;
+cached weight payloads were reused.
+
+All preparation ranks exited successfully. Rank zero took 21:26.06 overall,
+including 829.2 seconds exporting, versus 21:16.93 and 821.6 seconds in the
+preceding trial. It read 883.6 GiB from NVMe across the full run. Full preparation
+includes compilation and rendezvous traffic: its management TX was about
+1,010 MiB, while fabric TX was 155.26 GiB. These full-run counters must not be
+confused with the loading-only metadata totals above. Authenticated inspection
+accepted both the new signed package and the preceding package without rebuild
+metadata. Every new rank catalog validated 2,787 tensor views and explicitly
+reported 1,086 unavailable views.
+
+Native serving verified the stored payloads, started the Orbit group in 62.22
+seconds, and became HTTP-ready at 328.40 seconds (previously 59.66 and 309.77).
+The matching 512-prompt/256-output corpus measured 60.39 and 62.09 output
+tokens/s after first token, with first-token latencies of 597 and 416 ms. Four
+concurrent requests completed in 13.86 seconds, versus 13.80 previously. These
+single-run measurements do not establish a throughput improvement.
+
+The first retrieval trial used the reproducer's default clock-based nonce:
+all three cold requests were correct, while two of four cached requests gave
+the correct code with adjacent record 199 instead of 198. The reproducer
+distinguishes these model-level misses from corrupted codes; no corrupt answer
+or request error occurred. Replaying the exact saved requests from the preceding
+successful run, including its nonces and seeds, passed all three cold and all
+four cached checks. The harness asserted equality of every replayed request;
+both sets of results are retained. No tested graph exceeded 16 query rows.
+All four serving ranks drained and exited with status zero; GPUs were idle
+afterward and the original agents remained active.
+
 ### TCP interface recheck
 
 A second cold distribution on the same four hosts checked live TCP endpoints,

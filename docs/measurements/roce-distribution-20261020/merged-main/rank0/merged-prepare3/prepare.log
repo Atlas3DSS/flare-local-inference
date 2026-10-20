@@ -1,0 +1,2079 @@
+[━━━━━━━━━━] Wait for tensor-parallel hosts.  0.0s
+[    OK    ] Wait for tensor-parallel hosts.  rank 3 joined from localhos…  2.4s
+{"plan": {"alias": "glm-5.3-flash", "repository": "nvidia/GLM-5.3-Flash-FP4-Local", "revision": "5b865baa418c3ebd339c310df11b5e4faa2daa18", "architecture": "Glm5NextForConditionalGeneration", "gpus": [{"index": 0, "name": "NVIDIA GB10", "uuid": "GPU-b52278a1-1c97-1f29-5342-17d9ff536c1d", "free_bytes": 126231937024, "total_bytes": 130663657472}, {"index": 1, "name": "NVIDIA GB10", "uuid": "GPU-bd6edb22-6fcd-ad9c-1f21-571289e665e8", "free_bytes": 126255951872, "total_bytes": 130663886848}, {"index": 2, "name": "NVIDIA GB10", "uuid": "GPU-8545a214-81bb-d357-046c-29d1f1966eb4", "free_bytes": 126639779840, "total_bytes": 130663886848}, {"index": 3, "name": "NVIDIA GB10", "uuid": "GPU-e381c187-68c4-6e9c-780a-317d8251bc6f", "free_bytes": 126571331584, "total_bytes": 130663886848}], "tensor_parallel": 4, "max_concurrency": 4, "image_concurrency": 0, "prefill_chunk": 4096, "roce_ring": true, "context_parallel": true, "stream_overlap": true, "mixed_prefill": false, "expert_scale_compression": null, "mla_compute_mode": "auto", "compile_workers": 4, "tuning_gpus": [], "speculative_token_capacity": 6, "online_mxfp8": false, "language_model_only": false, "speculation": {"draft_tokens": 5, "adaptive": true, "packed_verification": false, "proposal_source": "mtp", "history_drafts": false}, "context": 1048576, "checkpoint_context": 1048576, "weights_bytes": 44446226533, "mapped_host_bytes": 0, "graph_bytes": 5100273664, "mixed_shapes": [], "live_bytes": 208175360, "prefix_cache_states": 32, "prefix_cache_target": 32, "snapshot_virtual_bytes": 1332322304, "snapshots": 32, "pages": 41260, "demand_pages": 4096, "page_tokens": 1024, "page_bytes": 71107153920, "tokens": 42250240, "guaranteed_tokens": 1048576, "free_bytes": 126231937024, "headroom_bytes": 1073741824, "reserve_bytes": 4294967296, "supply_bytes": 120863227904}}
+[━━━━━━━━━━] Admit checkpoint range readers.  0.0s
+  checkpoint ranges: agent ring TCP, 32 streams per peer
+[    OK    ] Admit checkpoint range readers.  checkpoint ranges: agent ri…  2.2s
+[━━━━━━━━━━] Connect tensor-parallel ranks.  0.0s
+[    OK    ] Connect tensor-parallel ranks.  1.6s
+[━━━━━━━━━━] Inspect checkpoint.  0.0s
+[    OK    ] Inspect checkpoint.  1.3s
+[━━━━━━━━━━] Load weights.  0.0s
+b12x routing checkpoint shards: 0/36 shards routed, 0.00 GB selected on rank 0, 0:00
+b12x routing checkpoint shards: 23/36 shards routed, 0.00 GB selected on rank 0, 0:10
+b12x routing checkpoint shards: 35/36 shards routed, 0.00 GB selected on rank 0, 0:30
+b12x routing checkpoint shards: 36/36 shards routed, 0.00 GB selected on rank 0, 0:30
+b12x reading and scattering weights: 36/36 shards routed, 0.00 GB selected on rank 0, 0:30
+b12x reading and scattering weights: 36/36 shards routed, 5.49 GB selected on rank 0, 0:44
+b12x reading and scattering weights: 36/36 shards routed, 9.06 GB selected on rank 0, 0:56
+b12x reading and scattering weights: 36/36 shards routed, 11.49 GB selected on rank 0, 1:07
+b12x reading and scattering weights: 36/36 shards routed, 15.00 GB selected on rank 0, 1:19
+b12x reading and scattering weights: 36/36 shards routed, 18.57 GB selected on rank 0, 1:32
+b12x reading and scattering weights: 36/36 shards routed, 20.95 GB selected on rank 0, 1:43
+b12x reading and scattering weights: 36/36 shards routed, 24.51 GB selected on rank 0, 1:55
+b12x reading and scattering weights: 36/36 shards routed, 26.90 GB selected on rank 0, 2:06
+b12x reading and scattering weights: 36/36 shards routed, 29.27 GB selected on rank 0, 2:18
+b12x reading and scattering weights: 36/36 shards routed, 31.65 GB selected on rank 0, 2:29
+b12x reading and scattering weights: 36/36 shards routed, 35.21 GB selected on rank 0, 2:40
+b12x reading and scattering weights: 36/36 shards routed, 50.67 GB selected on rank 0, 2:50
+b12x weights loaded: 53.00 GB selected on rank 0 · 94.04 GB physical reads; 172.23 s total loading; ROUTE 30.76s · SETUP 0.00s · PLAN 0.00s · READ 141.47s · SYNC 0.00s
+[    OK    ] Load weights.  172.2s
+  after weights: free=10302 MiB, allocated=45934 MiB, reserved=47394 MiB, 
+rss=3630 MiB
+[━━━━━━━━━━] Allocate model state and collectives.  0.0s
+[    OK    ] Allocate model state and collectives.  0.3s
+  after model state (continuation 238 MiB, 5 rows): free=8198 MiB, 
+allocated=47562 MiB, reserved=48776 MiB, rss=4019 MiB
+[          ] Construct graph catalog.  0/57  0.0s
+[    OK    ] Construct graph catalog.  57/57  3.3s
+  after graph catalog (operator scratch 0 MiB): free=7799 MiB, allocated=47999 
+MiB, reserved=48776 MiB, rss=4372 MiB
+[━━━━━━━━━━] Prepare and tune kernels.  0.0s
+b12x waiting for ranks: 0/455 ready, 0 measured, 0 cached, 0 compilations, 0:00
+b12x planning gemm.blockscaled_precision: 0/33 ready, candidates 0/33 prepared, 0 measured, 0 cached, 0 compilations, 0:00
+b12x planning sequence.kda_prefill: 0/33 ready, candidates 0/352 prepared, 0 measured, 4 cached, 0 compilations, 0:01
+b12x planning norm.mhc: 0/33 ready, candidates 0/121 prepared, 0 measured, 5 cached, 0 compilations, 0:01
+b12x planning moe.decode: 0/33 ready, candidates 0/1 prepared, 0 measured, 15 cached, 0 compilations, 0:02
+b12x priming gemm.blockscaled_precision: 4/33 ready, candidates 0/33 prepared, 0 measured, 15 cached, 0 compilations, 0:02
+b12x selecting norm.hyperconnection: 11/33 ready, candidates 0/1 prepared, 0 measured, 15 cached, 0 compilations, 0:02
+b12x selecting attention.dsa_indexer: 18/33 ready, candidates 0/1 prepared, 0 measured, 15 cached, 0 compilations, 0:02
+b12x selecting attention.sparse_mla: 20/33 ready, candidates 0/1 prepared, 0 measured, 15 cached, 0 compilations, 0:03
+b12x priming gemm.bf16_gemv: 24/33 ready, candidates 0/10 prepared, 0 measured, 15 cached, 0 compilations, 0:03
+b12x selecting moe.decode: 29/33 ready, candidates 0/1 prepared, 0 measured, 15 cached, 0 compilations, 0:04
+b12x priming moe.decode: 29/33 ready, candidates 0/1 prepared, 0 measured, 15 cached, 0 compilations, 0:04
+b12x waiting for ranks comm.roce: 30/33 ready, candidates 0/1 prepared, 0 measured, 15 cached, 0 compilations, 0:04
+b12x ready comm.roce: 33/33 ready, candidates 0/1 prepared, 0 measured, 15 cached, 0 compilations, 0:05
+b12x priming gemm.bmm: 0/28 ready, candidates 0/1 prepared, 0 measured, 1 cached, 0 compilations, 0:05
+b12x priming attention.dsa_indexer: 22/28 ready, candidates 0/1 prepared, 0 measured, 1 cached, 0 compilations, 0:05
+b12x ready comm.roce: 28/28 ready, candidates 0/1 prepared, 0 measured, 1 cached, 0 compilations, 0:06
+b12x planning gemm.bf16_gemv: 0/60 ready, candidates 0/11 prepared, 0 measured, 1 cached, 0 compilations, 0:06
+b12x priming norm.mhc: 30/60 ready, candidates 0/1 prepared, 0 measured, 18 cached, 0 compilations, 0:06
+b12x ready comm.roce: 60/60 ready, candidates 0/1 prepared, 0 measured, 18 cached, 0 compilations, 0:08
+b12x priming attention.sparse_mla: 3/30 ready, candidates 0/1 prepared, 0 measured, 1 cached, 0 compilations, 0:08
+b12x ready comm.roce: 30/30 ready, candidates 0/1 prepared, 0 measured, 1 cached, 0 compilations, 0:09
+b12x ready comm.roce: 62/62 ready, candidates 0/1 prepared, 0 measured, 17 cached, 0 compilations, 0:11
+b12x priming sequence.short_conv: 5/30 ready, candidates 0/1 prepared, 0 measured, 1 cached, 0 compilations, 0:11
+b12x ready comm.roce: 30/30 ready, candidates 0/1 prepared, 0 measured, 1 cached, 0 compilations, 0:12
+b12x ready comm.roce: 34/34 ready, candidates 0/1 prepared, 0 measured, 2 cached, 0 compilations, 0:13
+b12x priming sequence.embedding: 5/37 ready, candidates 0/1 prepared, 0 measured, 15 cached, 0 compilations, 0:13
+b12x ready comm.roce: 37/37 ready, candidates 0/1 prepared, 0 measured, 15 cached, 0 compilations, 0:15
+b12x priming sequence.kda_prefill: 19/30 ready, candidates 0/288 prepared, 0 measured, 1 cached, 0 compilations, 0:15
+b12x ready comm.roce: 30/30 ready, candidates 0/1 prepared, 0 measured, 1 cached, 0 compilations, 0:16
+b12x ready comm.roce: 47/47 ready, candidates 0/1 prepared, 0 measured, 16 cached, 0 compilations, 0:18
+b12x ready comm.roce: 30/30 ready, candidates 0/1 prepared, 0 measured, 1 cached, 0 compilations, 0:19
+b12x ready comm.roce: 46/46 ready, candidates 0/1 prepared, 0 measured, 16 cached, 0 compilations, 0:21
+b12x ready comm.roce: 44/44 ready, candidates 0/1 prepared, 0 measured, 10 cached, 0 compilations, 0:23
+b12x ready comm.roce: 28/28 ready, candidates 0/1 prepared, 0 measured, 8 cached, 0 compilations, 0:24
+b12x ready comm.roce: 61/61 ready, candidates 0/1 prepared, 0 measured, 17 cached, 0 compilations, 0:26
+b12x ready comm.roce: 28/28 ready, candidates 0/1 prepared, 0 measured, 1 cached, 0 compilations, 0:27
+b12x selecting norm.mhc: 25/62 ready, candidates 0/1 prepared, 0 measured, 17 cached, 0 compilations, 0:27
+b12x ready comm.roce: 62/62 ready, candidates 0/1 prepared, 0 measured, 17 cached, 0 compilations, 0:31
+b12x selecting attention.dsa_indexer.glm_pool: 46/62 ready, candidates 0/1 prepared, 0 measured, 17 cached, 0 compilations, 0:31
+b12x ready comm.roce: 62/62 ready, candidates 0/1 prepared, 0 measured, 17 cached, 0 compilations, 0:34
+b12x ready comm.roce: 28/28 ready, candidates 0/1 prepared, 0 measured, 1 cached, 0 compilations, 0:35
+b12x ready comm.roce: 62/62 ready, candidates 0/1 prepared, 0 measured, 3 cached, 0 compilations, 0:36
+b12x ready comm.roce: 28/28 ready, candidates 0/1 prepared, 0 measured, 1 cached, 0 compilations, 0:37
+b12x ready comm.roce: 58/58 ready, candidates 0/1 prepared, 0 measured, 2 cached, 0 compilations, 0:39
+b12x ready comm.roce: 30/30 ready, candidates 0/1 prepared, 0 measured, 1 cached, 0 compilations, 0:40
+b12x ready comm.roce: 40/40 ready, candidates 0/1 prepared, 0 measured, 2 cached, 0 compilations, 0:41
+b12x ready comm.roce: 33/33 ready, candidates 0/1 prepared, 0 measured, 1 cached, 0 compilations, 0:43
+b12x ready comm.roce: 30/30 ready, candidates 0/1 prepared, 0 measured, 1 cached, 0 compilations, 0:44
+b12x ready comm.roce: 52/52 ready, candidates 0/1 prepared, 0 measured, 2 cached, 0 compilations, 0:45
+b12x ready comm.roce: 30/30 ready, candidates 0/1 prepared, 0 measured, 1 cached, 0 compilations, 0:47
+b12x ready comm.roce: 50/50 ready, candidates 0/1 prepared, 0 measured, 2 cached, 0 compilations, 0:48
+b12x ready comm.roce: 42/42 ready, candidates 0/1 prepared, 0 measured, 2 cached, 0 compilations, 0:50
+b12x ready comm.roce: 31/31 ready, candidates 0/1 prepared, 0 measured, 1 cached, 0 compilations, 0:51
+b12x ready comm.roce: 59/59 ready, candidates 0/1 prepared, 0 measured, 2 cached, 0 compilations, 0:52
+b12x ready comm.roce: 28/28 ready, candidates 0/1 prepared, 0 measured, 1 cached, 0 compilations, 0:53
+b12x ready comm.roce: 59/59 ready, candidates 0/1 prepared, 0 measured, 2 cached, 0 compilations, 0:54
+b12x ready comm.roce: 51/51 ready, candidates 0/1 prepared, 0 measured, 2 cached, 0 compilations, 0:55
+b12x ready comm.roce: 28/28 ready, candidates 0/1 prepared, 0 measured, 1 cached, 0 compilations, 0:56
+b12x ready comm.roce: 60/60 ready, candidates 0/1 prepared, 0 measured, 2 cached, 0 compilations, 0:57
+b12x planning attention.gdn: 0/42 ready, candidates 0/2 prepared, 0 measured, 5 cached, 0 compilations, 0:57
+b12x ready comm.roce: 42/42 ready, candidates 0/1 prepared, 0 measured, 9 cached, 0 compilations, 0:59
+b12x ready comm.roce: 30/30 ready, candidates 0/1 prepared, 0 measured, 9 cached, 0 compilations, 1:00
+b12x ready comm.roce: 59/59 ready, candidates 0/1 prepared, 0 measured, 19 cached, 0 compilations, 1:01
+b12x ready comm.roce: 59/59 ready, candidates 0/1 prepared, 0 measured, 19 cached, 0 compilations, 1:02
+b12x priming attention.dsa_indexer.glm_pool: 18/59 ready, candidates 0/1 prepared, 0 measured, 18 cached, 0 compilations, 1:02
+b12x ready comm.roce: 59/59 ready, candidates 0/1 prepared, 0 measured, 18 cached, 0 compilations, 1:04
+b12x ready comm.roce: 27/27 ready, candidates 0/1 prepared, 0 measured, 2 cached, 0 compilations, 1:05
+b12x ready comm.roce: 59/59 ready, candidates 0/1 prepared, 0 measured, 8 cached, 0 compilations, 1:05
+b12x ready comm.roce: 82/82 ready, candidates 0/1 prepared, 0 measured, 21 cached, 0 compilations, 1:07
+b12x ready comm.roce: 27/27 ready, candidates 0/1 prepared, 0 measured, 2 cached, 0 compilations, 1:08
+b12x ready comm.roce: 82/82 ready, candidates 0/1 prepared, 0 measured, 7 cached, 0 compilations, 1:08
+b12x ready comm.roce: 59/59 ready, candidates 0/1 prepared, 0 measured, 5 cached, 0 compilations, 1:09
+b12x priming attention.gdn: 12/50 ready, candidates 0/2 prepared, 0 measured, 3 cached, 0 compilations, 1:09
+b12x ready comm.roce: 50/50 ready, candidates 0/1 prepared, 0 measured, 3 cached, 0 compilations, 1:10
+b12x ready comm.roce: 34/34 ready, candidates 0/1 prepared, 0 measured, 2 cached, 0 compilations, 1:11
+b12x ready comm.roce: 61/61 ready, candidates 0/1 prepared, 0 measured, 18 cached, 0 compilations, 1:12
+b12x ready comm.roce: 82/82 ready, candidates 0/1 prepared, 0 measured, 7 cached, 0 compilations, 1:13
+b12x ready comm.roce: 27/27 ready, candidates 0/1 prepared, 0 measured, 2 cached, 0 compilations, 1:13
+b12x ready comm.roce: 59/59 ready, candidates 0/1 prepared, 0 measured, 4 cached, 0 compilations, 1:14
+b12x ready comm.roce: 61/61 ready, candidates 0/1 prepared, 0 measured, 4 cached, 0 compilations, 1:15
+b12x ready comm.roce: 32/32 ready, candidates 0/1 prepared, 0 measured, 2 cached, 0 compilations, 1:16
+b12x ready comm.roce: 5/5 ready, candidates 0/1 prepared, 0 measured, 0 cached, 0 compilations, 1:16
+[    OK    ] Prepare and tune kernels.  83.7s
+  selected kernels: {'fixed': 14415, 'cached': 16622}
+  after tuning: free=6393 MiB, allocated=48360 MiB, reserved=48766 MiB, 
+weights=45934 MiB, continuation=238 MiB, operator scratch=312 MiB
+[          ] Measure graph memory.  0/57  0.0s
+  capturing prefill4096: 6257 MiB free, 48425 MiB allocated, 48830 MiB reserved,
+69523 MiB outside PyTorch
+  captured prefill4096 in 2.01s
+  capturing prefill3584: 6130 MiB free, 48425 MiB allocated, 48914 MiB reserved,
+69566 MiB outside PyTorch
+  captured prefill3584 in 1.67s
+  capturing prefill3072: 6081 MiB free, 48425 MiB allocated, 48914 MiB reserved,
+69616 MiB outside PyTorch
+  captured prefill3072 in 1.45s
+  capturing prefill2560: 6036 MiB free, 48425 MiB allocated, 48914 MiB reserved,
+69660 MiB outside PyTorch
+  captured prefill2560 in 1.23s
+  capturing prefill2048: 5997 MiB free, 48425 MiB allocated, 48914 MiB reserved,
+69700 MiB outside PyTorch
+  captured prefill2048 in 1.01s
+  capturing prefill1536: 5953 MiB free, 48425 MiB allocated, 48914 MiB reserved,
+69744 MiB outside PyTorch
+  captured prefill1536 in 0.80s
+  capturing prefill1024: 5913 MiB free, 48425 MiB allocated, 48914 MiB reserved,
+69783 MiB outside PyTorch
+  captured prefill1024 in 0.57s
+  capturing prefill512: 5878 MiB free, 48425 MiB allocated, 48914 MiB reserved, 
+69818 MiB outside PyTorch
+  captured prefill512 in 0.36s
+  capturing prefill256: 5842 MiB free, 48425 MiB allocated, 48914 MiB reserved, 
+69855 MiB outside PyTorch
+  captured prefill256 in 0.29s
+  capturing prefill128: 5801 MiB free, 48425 MiB allocated, 48914 MiB reserved, 
+69896 MiB outside PyTorch
+  captured prefill128 in 0.29s
+  capturing prefill4096-no-mtp: 5757 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 69940 MiB outside PyTorch
+  captured prefill4096-no-mtp in 1.85s
+  capturing prefill3584-no-mtp: 5705 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 69992 MiB outside PyTorch
+  captured prefill3584-no-mtp in 1.63s
+  capturing prefill3072-no-mtp: 5659 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70038 MiB outside PyTorch
+  captured prefill3072-no-mtp in 1.41s
+  capturing prefill2560-no-mtp: 5613 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70083 MiB outside PyTorch
+  captured prefill2560-no-mtp in 1.19s
+  capturing prefill2048-no-mtp: 5572 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70125 MiB outside PyTorch
+  captured prefill2048-no-mtp in 0.98s
+  capturing prefill1536-no-mtp: 5527 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70170 MiB outside PyTorch
+  captured prefill1536-no-mtp in 0.77s
+  capturing prefill1024-no-mtp: 5487 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70209 MiB outside PyTorch
+  captured prefill1024-no-mtp in 0.54s
+  capturing prefill512-no-mtp: 5451 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70246 MiB outside PyTorch
+  captured prefill512-no-mtp in 0.34s
+  capturing prefill256-no-mtp: 5417 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70279 MiB outside PyTorch
+  captured prefill256-no-mtp in 0.28s
+  capturing prefill128-no-mtp: 5377 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70319 MiB outside PyTorch
+  captured prefill128-no-mtp in 0.27s
+  capturing decode4: 5324 MiB free, 48425 MiB allocated, 48914 MiB reserved, 
+70372 MiB outside PyTorch
+  captured decode4 in 0.26s
+  capturing decode2: 5302 MiB free, 48425 MiB allocated, 48914 MiB reserved, 
+70395 MiB outside PyTorch
+  captured decode2 in 0.21s
+  capturing decode1: 5275 MiB free, 48425 MiB allocated, 48914 MiB reserved, 
+70422 MiB outside PyTorch
+  captured decode1 in 0.22s
+  capturing speculative1x6: 5235 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70461 MiB outside PyTorch
+  captured speculative1x6 in 0.34s
+  capturing speculative2x3: 5182 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70515 MiB outside PyTorch
+  captured speculative2x3 in 0.29s
+  capturing speculative1x5: 5140 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70557 MiB outside PyTorch
+  captured speculative1x5 in 0.28s
+  capturing speculative1x4: 5092 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70604 MiB outside PyTorch
+  captured speculative1x4 in 0.27s
+  capturing speculative2x2: 5042 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70655 MiB outside PyTorch
+  captured speculative2x2 in 0.25s
+  capturing speculative4x1: 5017 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70679 MiB outside PyTorch
+  captured speculative4x1 in 0.24s
+  capturing speculative1x3: 4984 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70713 MiB outside PyTorch
+  captured speculative1x3 in 0.26s
+  capturing speculative1x2: 4947 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70750 MiB outside PyTorch
+  captured speculative1x2 in 0.25s
+  capturing speculative2x1: 4918 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70779 MiB outside PyTorch
+  captured speculative2x1 in 0.23s
+  capturing speculative1x1: 4884 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70813 MiB outside PyTorch
+  captured speculative1x1 in 0.22s
+  capturing resume4: 4858 MiB free, 48425 MiB allocated, 48914 MiB reserved, 
+70839 MiB outside PyTorch
+  captured resume4 in 0.02s
+  capturing init4: 4858 MiB free, 48425 MiB allocated, 48914 MiB reserved, 70839
+MiB outside PyTorch
+  captured init4 in 0.01s
+  capturing restore4: 4858 MiB free, 48425 MiB allocated, 48914 MiB reserved, 
+70839 MiB outside PyTorch
+  captured restore4 in 0.01s
+  capturing snapshot4: 4858 MiB free, 48425 MiB allocated, 48914 MiB reserved, 
+70839 MiB outside PyTorch
+  captured snapshot4 in 0.01s
+  capturing resume2: 4858 MiB free, 48425 MiB allocated, 48914 MiB reserved, 
+70839 MiB outside PyTorch
+  captured resume2 in 0.02s
+  capturing init2: 4858 MiB free, 48425 MiB allocated, 48914 MiB reserved, 70839
+MiB outside PyTorch
+  captured init2 in 0.01s
+  capturing restore2: 4858 MiB free, 48425 MiB allocated, 48914 MiB reserved, 
+70839 MiB outside PyTorch
+  captured restore2 in 0.01s
+  capturing snapshot2: 4857 MiB free, 48425 MiB allocated, 48914 MiB reserved, 
+70839 MiB outside PyTorch
+  captured snapshot2 in 0.01s
+  capturing resume1: 4857 MiB free, 48425 MiB allocated, 48914 MiB reserved, 
+70840 MiB outside PyTorch
+  captured resume1 in 0.02s
+  capturing init1: 4855 MiB free, 48425 MiB allocated, 48914 MiB reserved, 70841
+MiB outside PyTorch
+  captured init1 in 0.01s
+  capturing restore1: 4855 MiB free, 48425 MiB allocated, 48914 MiB reserved, 
+70841 MiB outside PyTorch
+  captured restore1 in 0.01s
+  capturing snapshot1: 4855 MiB free, 48425 MiB allocated, 48914 MiB reserved, 
+70842 MiB outside PyTorch
+  captured snapshot1 in 0.01s
+  capturing resume4-no-mtp: 4854 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70842 MiB outside PyTorch
+  captured resume4-no-mtp in 0.02s
+  capturing init4-no-mtp: 4854 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70842 MiB outside PyTorch
+  captured init4-no-mtp in 0.01s
+  capturing restore4-no-mtp: 4852 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70844 MiB outside PyTorch
+  captured restore4-no-mtp in 0.01s
+  capturing snapshot4-no-mtp: 4852 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70844 MiB outside PyTorch
+  captured snapshot4-no-mtp in 0.01s
+  capturing resume2-no-mtp: 4852 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70845 MiB outside PyTorch
+  captured resume2-no-mtp in 0.02s
+  capturing init2-no-mtp: 4852 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70845 MiB outside PyTorch
+  captured init2-no-mtp in 0.01s
+  capturing restore2-no-mtp: 4852 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70845 MiB outside PyTorch
+  captured restore2-no-mtp in 0.01s
+  capturing snapshot2-no-mtp: 4852 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70845 MiB outside PyTorch
+  captured snapshot2-no-mtp in 0.01s
+  capturing resume1-no-mtp: 4852 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70845 MiB outside PyTorch
+  captured resume1-no-mtp in 0.02s
+  capturing init1-no-mtp: 4846 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70850 MiB outside PyTorch
+  captured init1-no-mtp in 0.01s
+  capturing restore1-no-mtp: 4846 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70850 MiB outside PyTorch
+  captured restore1-no-mtp in 0.01s
+  capturing snapshot1-no-mtp: 4846 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70851 MiB outside PyTorch
+  captured snapshot1-no-mtp in 0.01s
+[    OK    ] Measure graph memory.  captured snapshot1-no-mtp in …  57/57  22.6s
+  after graph measurement (the package backs 8 preparation KV pages): free=4845 
+MiB, allocated=48424 MiB, reserved=48914 MiB, rss=6252 MiB
+[          ] Compile model forwards.  0/19  0.0s
+[    OK    ] Compile model forwards.  19/19  67.3s
+[━━━━━━━━━━] Allocate KV cache.  0.0s
+[    OK    ] Allocate KV cache.  0.01 GiB per GPU · 8,192 tokens  0.1s
+  after KV allocation: free=8012 MiB, allocated=48392 MiB, reserved=48914 MiB, 
+rss=5827 MiB
+[          ] Load compiled forwards.  0/39  0.0s
+[    OK    ] Load compiled forwards.  39/39  35.3s
+[          ] Warm compiled forwards.  0/39  0.0s
+[    OK    ] Warm compiled forwards.  39/39  18.2s
+[          ] Prepare serving graphs.  0/57  0.0s
+  capturing prefill4096: 5963 MiB free, 48425 MiB allocated, 48914 MiB reserved,
+69734 MiB outside PyTorch
+  instantiating prefill4096: 5959 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 69737 MiB outside PyTorch
+  captured prefill4096 in 0.27s
+  capturing prefill3584: 5951 MiB free, 48425 MiB allocated, 48914 MiB reserved,
+69745 MiB outside PyTorch
+  instantiating prefill3584: 5944 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 69753 MiB outside PyTorch
+  captured prefill3584 in 0.25s
+  capturing prefill3072: 5940 MiB free, 48425 MiB allocated, 48914 MiB reserved,
+69756 MiB outside PyTorch
+  instantiating prefill3072: 5936 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 69760 MiB outside PyTorch
+  captured prefill3072 in 0.24s
+  capturing prefill2560: 5928 MiB free, 48425 MiB allocated, 48914 MiB reserved,
+69768 MiB outside PyTorch
+  instantiating prefill2560: 5921 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 69776 MiB outside PyTorch
+  captured prefill2560 in 0.23s
+  capturing prefill2048: 5919 MiB free, 48425 MiB allocated, 48914 MiB reserved,
+69778 MiB outside PyTorch
+  instantiating prefill2048: 5917 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 69779 MiB outside PyTorch
+  captured prefill2048 in 0.21s
+  capturing prefill1536: 5909 MiB free, 48425 MiB allocated, 48914 MiB reserved,
+69787 MiB outside PyTorch
+  instantiating prefill1536: 5901 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 69795 MiB outside PyTorch
+  captured prefill1536 in 0.20s
+  capturing prefill1024: 5901 MiB free, 48425 MiB allocated, 48914 MiB reserved,
+69795 MiB outside PyTorch
+  instantiating prefill1024: 5898 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 69799 MiB outside PyTorch
+  captured prefill1024 in 0.17s
+  capturing prefill512: 5890 MiB free, 48425 MiB allocated, 48914 MiB reserved, 
+69807 MiB outside PyTorch
+  instantiating prefill512: 5890 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 69807 MiB outside PyTorch
+  captured prefill512 in 0.17s
+  capturing prefill256: 5882 MiB free, 48425 MiB allocated, 48914 MiB reserved, 
+69814 MiB outside PyTorch
+  instantiating prefill256: 5882 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 69814 MiB outside PyTorch
+  captured prefill256 in 0.18s
+  capturing prefill128: 5875 MiB free, 48425 MiB allocated, 48914 MiB reserved, 
+69822 MiB outside PyTorch
+  instantiating prefill128: 5875 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 69822 MiB outside PyTorch
+  captured prefill128 in 0.17s
+  capturing prefill4096-no-mtp: 5867 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 69829 MiB outside PyTorch
+  instantiating prefill4096-no-mtp: 5867 MiB free, 48425 MiB allocated, 48914 
+MiB reserved, 69830 MiB outside PyTorch
+  captured prefill4096-no-mtp in 0.26s
+  capturing prefill3584-no-mtp: 5852 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 69845 MiB outside PyTorch
+  instantiating prefill3584-no-mtp: 5852 MiB free, 48425 MiB allocated, 48914 
+MiB reserved, 69845 MiB outside PyTorch
+  captured prefill3584-no-mtp in 0.25s
+  capturing prefill3072-no-mtp: 5844 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 69853 MiB outside PyTorch
+  instantiating prefill3072-no-mtp: 5844 MiB free, 48425 MiB allocated, 48914 
+MiB reserved, 69853 MiB outside PyTorch
+  captured prefill3072-no-mtp in 0.24s
+  capturing prefill2560-no-mtp: 5836 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 69860 MiB outside PyTorch
+  instantiating prefill2560-no-mtp: 5835 MiB free, 48425 MiB allocated, 48914 
+MiB reserved, 69862 MiB outside PyTorch
+  captured prefill2560-no-mtp in 0.23s
+  capturing prefill2048-no-mtp: 5819 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 69878 MiB outside PyTorch
+  instantiating prefill2048-no-mtp: 5819 MiB free, 48425 MiB allocated, 48914 
+MiB reserved, 69878 MiB outside PyTorch
+  captured prefill2048-no-mtp in 0.21s
+  capturing prefill1536-no-mtp: 5815 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 69881 MiB outside PyTorch
+  instantiating prefill1536-no-mtp: 5811 MiB free, 48425 MiB allocated, 48914 
+MiB reserved, 69885 MiB outside PyTorch
+  captured prefill1536-no-mtp in 0.20s
+  capturing prefill1024-no-mtp: 5808 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 69889 MiB outside PyTorch
+  instantiating prefill1024-no-mtp: 5804 MiB free, 48425 MiB allocated, 48914 
+MiB reserved, 69893 MiB outside PyTorch
+  captured prefill1024-no-mtp in 0.17s
+  capturing prefill512-no-mtp: 5800 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 69897 MiB outside PyTorch
+  instantiating prefill512-no-mtp: 5796 MiB free, 48425 MiB allocated, 48914 MiB
+reserved, 69901 MiB outside PyTorch
+  captured prefill512-no-mtp in 0.17s
+  capturing prefill256-no-mtp: 5793 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 69904 MiB outside PyTorch
+  instantiating prefill256-no-mtp: 5791 MiB free, 48425 MiB allocated, 48914 MiB
+reserved, 69906 MiB outside PyTorch
+  captured prefill256-no-mtp in 0.17s
+  capturing prefill128-no-mtp: 5784 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 69913 MiB outside PyTorch
+  instantiating prefill128-no-mtp: 5751 MiB free, 48425 MiB allocated, 48914 MiB
+reserved, 69946 MiB outside PyTorch
+  captured prefill128-no-mtp in 0.17s
+  capturing decode4: 5741 MiB free, 48425 MiB allocated, 48914 MiB reserved, 
+69956 MiB outside PyTorch
+  instantiating decode4: 5720 MiB free, 48425 MiB allocated, 48914 MiB reserved,
+69977 MiB outside PyTorch
+  captured decode4 in 0.13s
+  capturing decode2: 5712 MiB free, 48425 MiB allocated, 48914 MiB reserved, 
+69984 MiB outside PyTorch
+  instantiating decode2: 5718 MiB free, 48425 MiB allocated, 48914 MiB reserved,
+69978 MiB outside PyTorch
+  captured decode2 in 0.13s
+  capturing decode1: 5715 MiB free, 48425 MiB allocated, 48914 MiB reserved, 
+69982 MiB outside PyTorch
+  instantiating decode1: 5714 MiB free, 48425 MiB allocated, 48914 MiB reserved,
+69982 MiB outside PyTorch
+  captured decode1 in 0.13s
+  capturing speculative1x6: 5711 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 69986 MiB outside PyTorch
+  instantiating speculative1x6: 5707 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 69990 MiB outside PyTorch
+  captured speculative1x6 in 0.16s
+  capturing speculative2x3: 5703 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 69993 MiB outside PyTorch
+  instantiating speculative2x3: 5699 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 69997 MiB outside PyTorch
+  captured speculative2x3 in 0.15s
+  capturing speculative1x5: 5695 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70001 MiB outside PyTorch
+  instantiating speculative1x5: 5691 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70005 MiB outside PyTorch
+  captured speculative1x5 in 0.16s
+  capturing speculative1x4: 5676 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70021 MiB outside PyTorch
+  instantiating speculative1x4: 5668 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70029 MiB outside PyTorch
+  captured speculative1x4 in 0.15s
+  capturing speculative2x2: 5661 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70036 MiB outside PyTorch
+  instantiating speculative2x2: 5653 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70044 MiB outside PyTorch
+  captured speculative2x2 in 0.14s
+  capturing speculative4x1: 5645 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70052 MiB outside PyTorch
+  instantiating speculative4x1: 5637 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70060 MiB outside PyTorch
+  captured speculative4x1 in 0.14s
+  capturing speculative1x3: 5634 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70063 MiB outside PyTorch
+  instantiating speculative1x3: 5625 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70072 MiB outside PyTorch
+  captured speculative1x3 in 0.15s
+  capturing speculative1x2: 5617 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70080 MiB outside PyTorch
+  instantiating speculative1x2: 5610 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70087 MiB outside PyTorch
+  captured speculative1x2 in 0.14s
+  capturing speculative2x1: 5606 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70091 MiB outside PyTorch
+  instantiating speculative2x1: 5602 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70095 MiB outside PyTorch
+  captured speculative2x1 in 0.14s
+  capturing speculative1x1: 5586 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70110 MiB outside PyTorch
+  instantiating speculative1x1: 5586 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70110 MiB outside PyTorch
+  captured speculative1x1 in 0.13s
+  capturing resume4: 5579 MiB free, 48425 MiB allocated, 48914 MiB reserved, 
+70118 MiB outside PyTorch
+  instantiating resume4: 5579 MiB free, 48425 MiB allocated, 48914 MiB reserved,
+70118 MiB outside PyTorch
+  captured resume4 in 0.02s
+  capturing init4: 5575 MiB free, 48425 MiB allocated, 48914 MiB reserved, 70122
+MiB outside PyTorch
+  instantiating init4: 5575 MiB free, 48425 MiB allocated, 48914 MiB reserved, 
+70122 MiB outside PyTorch
+  captured init4 in 0.22s
+  capturing restore4: 5575 MiB free, 48425 MiB allocated, 48914 MiB reserved, 
+70122 MiB outside PyTorch
+  instantiating restore4: 5575 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70122 MiB outside PyTorch
+  captured restore4 in 0.02s
+  capturing snapshot4: 5575 MiB free, 48425 MiB allocated, 48914 MiB reserved, 
+70122 MiB outside PyTorch
+  instantiating snapshot4: 5575 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70122 MiB outside PyTorch
+  captured snapshot4 in 0.01s
+  capturing resume2: 5575 MiB free, 48425 MiB allocated, 48914 MiB reserved, 
+70122 MiB outside PyTorch
+  instantiating resume2: 5575 MiB free, 48425 MiB allocated, 48914 MiB reserved,
+70122 MiB outside PyTorch
+  captured resume2 in 0.01s
+  capturing init2: 5575 MiB free, 48425 MiB allocated, 48914 MiB reserved, 70122
+MiB outside PyTorch
+  instantiating init2: 5575 MiB free, 48425 MiB allocated, 48914 MiB reserved, 
+70122 MiB outside PyTorch
+  captured init2 in 0.01s
+  capturing restore2: 5575 MiB free, 48425 MiB allocated, 48914 MiB reserved, 
+70122 MiB outside PyTorch
+  instantiating restore2: 5575 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70122 MiB outside PyTorch
+  captured restore2 in 0.01s
+  capturing snapshot2: 5575 MiB free, 48425 MiB allocated, 48914 MiB reserved, 
+70122 MiB outside PyTorch
+  instantiating snapshot2: 5575 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70122 MiB outside PyTorch
+  captured snapshot2 in 0.01s
+  capturing resume1: 5575 MiB free, 48425 MiB allocated, 48914 MiB reserved, 
+70122 MiB outside PyTorch
+  instantiating resume1: 5575 MiB free, 48425 MiB allocated, 48914 MiB reserved,
+70122 MiB outside PyTorch
+  captured resume1 in 0.01s
+  capturing init1: 5575 MiB free, 48425 MiB allocated, 48914 MiB reserved, 70122
+MiB outside PyTorch
+  instantiating init1: 5575 MiB free, 48425 MiB allocated, 48914 MiB reserved, 
+70122 MiB outside PyTorch
+  captured init1 in 0.01s
+  capturing restore1: 5575 MiB free, 48425 MiB allocated, 48914 MiB reserved, 
+70122 MiB outside PyTorch
+  instantiating restore1: 5575 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70122 MiB outside PyTorch
+  captured restore1 in 0.01s
+  capturing snapshot1: 5575 MiB free, 48425 MiB allocated, 48914 MiB reserved, 
+70122 MiB outside PyTorch
+  instantiating snapshot1: 5575 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70122 MiB outside PyTorch
+  captured snapshot1 in 0.01s
+  capturing resume4-no-mtp: 5575 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70122 MiB outside PyTorch
+  instantiating resume4-no-mtp: 5575 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70122 MiB outside PyTorch
+  captured resume4-no-mtp in 0.01s
+  capturing init4-no-mtp: 5575 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70122 MiB outside PyTorch
+  instantiating init4-no-mtp: 5575 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70122 MiB outside PyTorch
+  captured init4-no-mtp in 0.01s
+  capturing restore4-no-mtp: 5575 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70122 MiB outside PyTorch
+  instantiating restore4-no-mtp: 5575 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70122 MiB outside PyTorch
+  captured restore4-no-mtp in 0.01s
+  capturing snapshot4-no-mtp: 5575 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70122 MiB outside PyTorch
+  instantiating snapshot4-no-mtp: 5575 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70122 MiB outside PyTorch
+  captured snapshot4-no-mtp in 0.01s
+  capturing resume2-no-mtp: 5575 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70122 MiB outside PyTorch
+  instantiating resume2-no-mtp: 5575 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70122 MiB outside PyTorch
+  captured resume2-no-mtp in 0.01s
+  capturing init2-no-mtp: 5575 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70122 MiB outside PyTorch
+  instantiating init2-no-mtp: 5575 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70122 MiB outside PyTorch
+  captured init2-no-mtp in 0.01s
+  capturing restore2-no-mtp: 5575 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70122 MiB outside PyTorch
+  instantiating restore2-no-mtp: 5575 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70122 MiB outside PyTorch
+  captured restore2-no-mtp in 0.01s
+  capturing snapshot2-no-mtp: 5575 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70122 MiB outside PyTorch
+  instantiating snapshot2-no-mtp: 5575 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70122 MiB outside PyTorch
+  captured snapshot2-no-mtp in 0.01s
+  capturing resume1-no-mtp: 5575 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70122 MiB outside PyTorch
+  instantiating resume1-no-mtp: 5575 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70122 MiB outside PyTorch
+  captured resume1-no-mtp in 0.01s
+  capturing init1-no-mtp: 5575 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70122 MiB outside PyTorch
+  instantiating init1-no-mtp: 5575 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70122 MiB outside PyTorch
+  captured init1-no-mtp in 0.01s
+  capturing restore1-no-mtp: 5575 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70122 MiB outside PyTorch
+  instantiating restore1-no-mtp: 5575 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70122 MiB outside PyTorch
+  captured restore1-no-mtp in 0.01s
+  capturing snapshot1-no-mtp: 5575 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70122 MiB outside PyTorch
+  instantiating snapshot1-no-mtp: 5575 MiB free, 48425 MiB allocated, 48914 MiB 
+reserved, 70122 MiB outside PyTorch
+  captured snapshot1-no-mtp in 0.01s
+[    OK    ] Prepare serving graphs.  captured snapshot1-no-mtp in…  57/57  6.5s
+  after capture (process peak RSS 8169 MiB): free=5574 MiB, allocated=48424 MiB,
+reserved=48914 MiB, rss=8171 MiB
+  memory breakdown (MiB): weights=45934, continuation=238, kv=13, 
+operator_scratch=312, decoder_scratch=1592, other_allocated=334, 
+cached_unallocated=489, collective_pinned_host=381, 
+compiled_forward_reservation=0, headroom=5120, peak_rss=8169, available=61824, 
+cuda_free=5574
+[          ] Wait for tensor-parallel ranks.  0/3  0.0s
+[    OK    ] Wait for tensor-parallel ranks.  3/3  0.1s
+[━━━━━━━━━━] Export native packages.  0.0s
+  Cleared 2.96 GiB of disposable storage
+  External storage 0xfc52ca000000+1024: memory type 2, context 877893280, 
+recorded context 877893280, serving context 877893280
+  External storage 0xfc52ca000400+131072: memory type 2, context 877893280, 
+recorded context 877893280, serving context 877893280
+  External storage 0xfc52ca200000+67108864: memory type 2, context 877893280, 
+recorded context 877893280, serving context 877893280
+  Released 400.0 MiB of inactive allocation granules
+  Classified 1108 numeric tensor spans and 508 typed kernel signatures
+  Copy device-192: 0x80549a00000+2097152; live spans ((0, 2050048),)
+  Copy host-0: 0xc0000000000+399646720; live spans ((399644672, 2048),)
+  Copy device-214: 0x80608a00000+2097152; live spans ((0, 811040), (811520, 32),
+(812032, 32), (812544, 32), (813056, 32), (813568, 16), (814080, 16), (814592, 
+32), (815104, 32), (815616, 96), (816128, 16), (816640, 32), (817152, 256), 
+(817664, 16), (818176, 16), (818688, 256), (819200, 1277952))
+  Copy device-220: 0x8064a000000+2097152; live spans ((0, 1200144), (1200640, 
+32), (1201152, 4), (1201664, 16), (1202176, 16400), (1219072, 4), (1219584, 16),
+(1220096, 32), (1220608, 32), (1221120, 96), (1221632, 16), (1222144, 32), 
+(1222656, 256), (1223168, 16), (1223680, 16), (1224192, 32), (1224704, 32), 
+(1225216, 32), (1225728, 16), (1226240, 32), (1226752, 4), (1227264, 16), 
+(1227776, 4), (1228288, 8), (1230848, 8), (1232896, 568960), (1855488, 208512), 
+(2064384, 32768))
+  Copy device-215: 0x80608c00000+75497472; live spans ((0, 72065024), (73923584,
+1239040))
+  Copy device-200: 0x80589000000+2097152; live spans ((0, 2073728), (2074112, 
+776), (2075136, 16), (2075648, 1152), (2077184, 1152), (2078720, 16416), 
+(2095616, 32), (2096128, 4), (2096640, 32))
+  Copy device-242: 0x80709000000+2097152; live spans ((2080256, 32), (2080768, 
+16384))
+  Copy device-243: 0x80709200000+2097152; live spans ((394752, 32), (395264, 
+32), (395776, 2176), (398336, 278536), (677376, 8), (677888, 1), (678400, 4), 
+(678912, 8), (679424, 8), (679936, 8), (680448, 8), (680960, 4), (681472, 4), 
+(681984, 4), (682496, 81928), (764928, 8), (765440, 36872), (802816, 8), 
+(803328, 32), (803840, 40976), (845312, 16), (845824, 4), (846336, 8), (846848, 
+8), (847360, 4), (2092032, 32), (2092544, 128), (2093056, 8), (2093568, 8), 
+(2094080, 8), (2094592, 4), (2095616, 8), (2096128, 8), (2096640, 1))
+  Copy device-249: 0x80748400000+2097152; live spans ((1636864, 151552), 
+(1796608, 32772), (1829888, 8), (1830400, 8), (1830912, 8), (1831424, 8), 
+(1831936, 4), (1832448, 4), (1832960, 4), (1833472, 71688), (1905664, 8), 
+(1906176, 32776), (1939456, 8), (1939968, 32), (1940480, 36880), (1977856, 16), 
+(1978368, 4), (1978880, 8), (1979392, 8), (1979904, 4), (2049536, 32), (2050048,
+128), (2050560, 43016), (2094080, 8), (2094592, 8), (2095104, 4), (2096128, 8), 
+(2096640, 8))
+  Copy device-180: 0x804c9200000+75497472; live spans ((0, 40894464),)
+  Copy device-0: 0x80000000000+1268776960; live spans ((0, 1268776960),)
+  Copy device-2: 0x8004bc00000+318767104; live spans ((0, 318767104),)
+  Copy device-1: 0x8004ba00000+2097152; live spans ((0, 557120), (557568, 256), 
+(558080, 96), (558592, 12), (559104, 96), (559616, 12), (560128, 64), (560640, 
+256), (561152, 96), (561664, 12), (562176, 96), (562688, 12), (563200, 64), 
+(563712, 256), (564224, 96), (564736, 12), (565248, 1525856), (2091520, 12), 
+(2092032, 4352), (2096640, 256))
+  Copy device-27: 0x800b7a00000+77594624; live spans ((0, 37748736), (71303168, 
+4194304))
+  Copy device-227: 0x80689400000+2097152; live spans ((0, 1048576), (2096640, 
+32))
+  Copy device-3: 0x8005ec00000+27262976; live spans ((0, 26994688),)
+  Copy device-4: 0x80060600000+2097152; live spans ((0, 2015328), (2015744, 12),
+(2016256, 64), (2016768, 1152), (2018304, 1152), (2019840, 96), (2020352, 776), 
+(2021376, 96), (2021888, 1152), (2023424, 1152), (2024960, 17536), (2042880, 
+12), (2043392, 96), (2043904, 12), (2044416, 1152), (2045952, 96), (2046464, 
+776), (2047488, 12), (2048000, 49152))
+  Copy device-5: 0x80060800000+20971520; live spans ((0, 19922944),)
+  Copy device-25: 0x800ad400000+153092096; live spans ((0, 79298560),)
+  Copy device-368: 0x80b82200000+268435456; live spans ((134217728, 54525952), 
+(209715200, 20971520), (247463936, 16777216))
+  Copy device-365: 0x80b5a200000+134217728; live spans ((33554432, 16705536), 
+(105858048, 1239040), (107446272, 23298048))
+  Copy device-8: 0x80064c00000+50331648; live spans ((0, 50331648),)
+  Copy device-6: 0x80061c00000+25165824; live spans ((0, 25165824),)
+  Copy device-11: 0x80069800000+2097152; live spans ((0, 2097152),)
+  Copy device-10: 0x80067e00000+27262976; live spans ((0, 26994688),)
+  Copy device-9: 0x80067c00000+2097152; live spans ((0, 2074688), (2075136, 
+256), (2075648, 4), (2076160, 776), (2077184, 1152), (2078720, 16640), (2095616,
+1152))
+  Copy device-12: 0x80069a00000+25165824; live spans ((0, 25165824),)
+  Copy device-13: 0x8006b200000+50331648; live spans ((0, 50331648),)
+  Copy device-7: 0x80063400000+25165824; live spans ((0, 25165824),)
+  Copy device-14: 0x8006e200000+27262976; live spans ((0, 26994688),)
+  Copy device-16: 0x8006fe00000+2097152; live spans ((0, 2087040), (2087424, 
+1152), (2088960, 1152), (2090496, 12), (2091008, 96), (2091520, 12), (2092032, 
+1152), (2093568, 96), (2094080, 12), (2094592, 64), (2095104, 256), (2095616, 
+4), (2096128, 4), (2096640, 12))
+  Copy device-19: 0x80073000000+50331648; live spans ((0, 50331648),)
+  Copy device-17: 0x80070000000+25165824; live spans ((0, 25165824),)
+  Copy device-18: 0x80071800000+25165824; live spans ((0, 23986176),)
+  Copy device-15: 0x8006fc00000+2097152; live spans ((0, 2083968), (2084352, 
+12416))
+  Copy device-22: 0x80077200000+2097152; live spans ((0, 2083592), (2083840, 
+96), (2084352, 1152), (2085888, 1152), (2087424, 9472))
+  Copy device-221: 0x8064a200000+2097152; live spans ((0, 524288), (1048576, 
+524288))
+  Copy device-208: 0x805c9800000+2097152; live spans ((0, 2050048),)
+  Copy device-337: 0x80a47a00000+2097152; live spans ((0, 309760), (565248, 
+696960), (1262592, 309760), (1636352, 309760), (1947136, 176), (1947648, 176), 
+(1948160, 16), (1948672, 16), (1949184, 16), (1949696, 176), (1950208, 176), 
+(1950720, 16), (1951232, 16), (1951744, 16), (1952256, 176), (1952768, 176), 
+(1953280, 16), (1953792, 16), (1954304, 16), (1954816, 16), (1955328, 32), 
+(1955840, 16), (1956352, 16), (1956864, 4), (1957376, 16392), (1979392, 176), 
+(1979904, 176), (1980416, 16), (1980928, 16), (1981440, 16), (1981952, 176), 
+(1982464, 176), (1982976, 16), (1983488, 16), (1984000, 16), (1984512, 176), 
+(1985024, 176), (1985536, 16), (1986048, 16), (1986560, 16), (1987072, 8), 
+(1987584, 32), (1988096, 16), (1988608, 16), (1989120, 4), (1989632, 85632), 
+(2075648, 16), (2076160, 16), (2076672, 176), (2077184, 176), (2077696, 16), 
+(2078208, 16), (2078720, 16), (2079232, 4), (2079744, 8), (2081280, 2))
+  Copy device-366: 0x80b62200000+268435456; live spans ((176209920, 33554432),)
+  Copy device-129: 0x802f8e00000+301989888; live spans ((0, 301989888),)
+  Copy device-20: 0x80076000000+16777216; live spans ((0, 16777216),)
+  Copy device-21: 0x80077000000+2097152; live spans ((0, 2097152),)
+  Copy device-26: 0x800b6600000+20971520; live spans ((0, 20899840),)
+  Copy device-23: 0x80077400000+603979776; live spans ((0, 603979776),)
+  Copy device-68: 0x800ce400000+75497472; live spans ((0, 75497472),)
+  Copy device-24: 0x8009b400000+301989888; live spans ((0, 301989888),)
+  Copy device-69: 0x800d2c00000+37748736; live spans ((0, 37748736),)
+  Copy device-29: 0x800c0c00000+37748736; live spans ((0, 37480448),)
+  Copy device-30: 0x800c3000000+2097152; live spans ((0, 811264), (811520, 
+2176), (814080, 64), (814592, 256), (815104, 1152), (816640, 4), (817152, 1152),
+(818688, 4), (819200, 1277952))
+  Copy device-70: 0x800d5000000+603979776; live spans ((0, 603979776),)
+  Copy device-75: 0x8010d800000+75497472; live spans ((0, 75497472),)
+  Copy device-71: 0x800f9000000+301989888; live spans ((0, 301989888),)
+  Copy device-76: 0x80112000000+37748736; live spans ((0, 37748736),)
+  Copy device-67: 0x800cc000000+37748736; live spans ((0, 37552128),)
+  Copy device-32: 0x800c3400000+2097152; live spans ((0, 1614976), (1615360, 
+96), (1615872, 12), (1616384, 96), (1616896, 1152), (1618432, 12), (1618944, 
+64), (1619456, 256), (1619968, 4), (1620480, 4), (1620992, 776), (1622016, 
+475136))
+  Copy device-31: 0x800c3200000+2097152; live spans ((0, 2092160), (2092544, 
+96), (2093056, 12), (2093568, 256), (2094080, 256), (2094592, 4), (2095104, 
+776), (2096128, 776))
+  Copy device-77: 0x80114400000+603979776; live spans ((0, 603979776),)
+  Copy device-82: 0x8014f000000+75497472; live spans ((0, 75497472),)
+  Copy device-78: 0x80138400000+301989888; live spans ((0, 301989888),)
+  Copy device-83: 0x80153800000+37748736; live spans ((0, 37748736),)
+  Copy device-87: 0x8018be00000+37748736; live spans ((0, 37617664),)
+  Copy device-34: 0x800c3800000+2097152; live spans ((0, 2097152),)
+  Copy device-74: 0x8010b400000+37748736; live spans ((0, 37480448),)
+  Copy device-28: 0x800bc400000+75497472; live spans ((0, 75366400),)
+  Copy device-84: 0x80155c00000+603979776; live spans ((0, 603979776),)
+  Copy device-88: 0x8018e200000+75497472; live spans ((0, 75497472),)
+  Copy device-85: 0x80179c00000+301989888; live spans ((0, 301989888),)
+  Copy device-89: 0x80192a00000+37748736; live spans ((0, 37748736),)
+  Copy device-94: 0x801cb200000+37748736; live spans ((0, 37289984),)
+  Copy device-33: 0x800c3600000+2097152; live spans ((0, 1772672), (1773056, 
+1152), (1774592, 776), (1775616, 296064), (2072064, 12), (2072576, 96), 
+(2073088, 12), (2073600, 4), (2074112, 96), (2074624, 1152), (2076160, 1152), 
+(2077696, 16480), (2094592, 12), (2095104, 96), (2095616, 12), (2096128, 64), 
+(2096640, 256))
+  Copy device-35: 0x800c3a00000+2097152; live spans ((0, 2081920), (2082304, 
+96), (2082816, 12), (2083328, 1152), (2084864, 1152), (2086400, 10368))
+  Copy device-36: 0x800c3c00000+2097152; live spans ((0, 2097152),)
+  Copy device-90: 0x80194e00000+603979776; live spans ((0, 603979776),)
+  Copy device-95: 0x801cd600000+75497472; live spans ((0, 75497472),)
+  Copy device-91: 0x801b8e00000+301989888; live spans ((0, 301989888),)
+  Copy device-96: 0x801d1e00000+37748736; live spans ((0, 37748736),)
+  Copy device-102: 0x8020ca00000+20971520; live spans ((0, 20971520),)
+  Copy device-38: 0x800c4000000+2097152; live spans ((0, 2097152),)
+  Copy device-97: 0x801d4200000+603979776; live spans ((0, 603979776),)
+  Copy device-103: 0x8020de00000+75497472; live spans ((0, 75497472),)
+  Copy device-98: 0x801f8200000+301989888; live spans ((0, 301989888),)
+  Copy device-104: 0x80212600000+37748736; live spans ((0, 37748736),)
+  Copy device-39: 0x800c4200000+2097152; live spans ((0, 786688), (786944, 
+1152), (788480, 4), (788992, 96), (789504, 1152), (791040, 1152), (792576, 96), 
+(793088, 1152), (794624, 1152), (796160, 12), (796672, 64), (797184, 256), 
+(797696, 1152), (799232, 1152), (800768, 4), (801280, 776), (802304, 12), 
+(802816, 1294336))
+  Copy device-101: 0x8020a600000+37748736; live spans ((0, 37480448),)
+  Copy device-37: 0x800c3e00000+2097152; live spans ((0, 2094208), (2094592, 
+96), (2095104, 12), (2095616, 64), (2096128, 776))
+  Copy device-105: 0x80214a00000+603979776; live spans ((0, 603979776),)
+  Copy device-110: 0x8024d200000+75497472; live spans ((0, 75497472),)
+  Copy device-106: 0x80238a00000+301989888; live spans ((0, 301989888),)
+  Copy device-111: 0x80251a00000+37748736; live spans ((0, 37748736),)
+  Copy device-40: 0x800c4400000+2097152; live spans ((0, 2092160), (2092544, 
+96), (2093056, 12), (2093568, 96), (2094080, 12), (2094592, 256), (2095104, 
+776), (2096128, 776))
+  Copy device-109: 0x8024ae00000+37748736; live spans ((0, 37480448),)
+  Copy device-41: 0x800c4600000+2097152; live spans ((0, 2084960), (2085376, 
+12), (2085888, 64), (2086400, 256), (2086912, 4), (2087424, 1152), (2088960, 
+1152), (2090496, 5248), (2096128, 96), (2096640, 12))
+  Copy device-117: 0x8028c600000+20971520; live spans ((0, 20578304),)
+  Copy device-112: 0x80253e00000+603979776; live spans ((0, 603979776),)
+  Copy device-118: 0x8028da00000+75497472; live spans ((0, 75497472),)
+  Copy device-113: 0x80277e00000+301989888; live spans ((0, 301989888),)
+  Copy device-119: 0x80292200000+37748736; live spans ((0, 37748736),)
+  Copy device-42: 0x800c4800000+2097152; live spans ((0, 2081920), (2082304, 
+8448), (2091008, 1800), (2093056, 1152), (2094592, 1152), (2096128, 12), 
+(2096640, 96))
+  Copy device-116: 0x8028a200000+37748736; live spans ((0, 37486592),)
+  Copy device-43: 0x800c4a00000+2097152; live spans ((0, 2097152),)
+  Copy device-120: 0x80294600000+603979776; live spans ((0, 603979776),)
+  Copy device-126: 0x802ce200000+75497472; live spans ((0, 75497472),)
+  Copy device-121: 0x802b8600000+301989888; live spans ((0, 301989888),)
+  Copy device-127: 0x802d2a00000+37748736; live spans ((0, 37748736),)
+  Copy device-125: 0x802cce00000+20971520; live spans ((0, 20971520),)
+  Copy device-45: 0x800c4e00000+2097152; live spans ((0, 2065536), (2065920, 
+1152), (2067456, 3076), (2071040, 1152), (2072576, 1152), (2074112, 1152), 
+(2075648, 12), (2076160, 64), (2076672, 256), (2077184, 1152), (2078720, 776), 
+(2079744, 12), (2080256, 96), (2080768, 16384))
+  Copy device-124: 0x802caa00000+37748736; live spans ((0, 36503552),)
+  Copy device-128: 0x802d4e00000+603979776; live spans ((0, 603979776),)
+  Copy device-132: 0x8030d400000+75497472; live spans ((0, 75497472),)
+  Copy device-133: 0x80311c00000+37748736; live spans ((0, 37748736),)
+  Copy device-44: 0x800c4c00000+2097152; live spans ((0, 2084096), (2084352, 
+256), (2084864, 1800), (2086912, 1152), (2088448, 1152), (2089984, 96), 
+(2090496, 12), (2091008, 96), (2091520, 1152), (2093056, 12), (2093568, 96), 
+(2094080, 12), (2094592, 1152), (2096128, 4), (2096640, 96))
+  Copy device-131: 0x8030b000000+37748736; live spans ((0, 37480448),)
+  Copy device-47: 0x800c5200000+2097152; live spans ((0, 2097152),)
+  Copy device-134: 0x80314000000+603979776; live spans ((0, 603979776),)
+  Copy device-139: 0x8034c800000+75497472; live spans ((0, 75497472),)
+  Copy device-135: 0x80338000000+301989888; live spans ((0, 301989888),)
+  Copy device-140: 0x80351000000+37748736; live spans ((0, 37748736),)
+  Copy device-48: 0x800c5400000+2097152; live spans ((0, 812160), (812544, 4), 
+(813056, 96), (813568, 1152), (815104, 1152), (816640, 12), (817152, 96), 
+(817664, 12), (818176, 776), (819200, 1277952))
+  Copy device-46: 0x800c5000000+2097152; live spans ((0, 2068576), (2068992, 
+12), (2069504, 96), (2070016, 12), (2070528, 64), (2071040, 256), (2071552, 4), 
+(2072064, 96), (2072576, 1152), (2074112, 1152), (2075648, 17536), (2093568, 
+12), (2094080, 1152), (2095616, 776), (2096640, 4))
+  Copy device-138: 0x8034a400000+37748736; live spans ((0, 37480448),)
+  Copy device-49: 0x800c5600000+2097152; live spans ((0, 1970240), (1970688, 
+256), (1971200, 4), (1971712, 1152), (1973248, 1152), (1974784, 8204), (1983488,
+96), (1984000, 12), (1984512, 1152), (1986048, 96), (1986560, 107648), (2094592,
+1152), (2096128, 776))
+  Copy device-141: 0x80353400000+603979776; live spans ((0, 603979776),)
+  Copy device-146: 0x8038e000000+75497472; live spans ((0, 75497472),)
+  Copy device-142: 0x80377400000+301989888; live spans ((0, 301989888),)
+  Copy device-147: 0x80392800000+37748736; live spans ((0, 37748736),)
+  Copy device-51: 0x800c5a00000+2097152; live spans ((0, 2082828), (2083328, 
+64), (2083840, 256), (2084352, 1152), (2085888, 1152), (2087424, 4), (2087936, 
+1152), (2089472, 1152), (2091008, 1152), (2092544, 12), (2093056, 96), (2093568,
+12), (2094080, 1028), (2095616, 96), (2096128, 776))
+  Copy device-66: 0x800c7800000+75497472; live spans ((0, 74252288),)
+  Copy device-50: 0x800c5800000+2097152; live spans ((0, 2097152),)
+  Copy device-148: 0x80394c00000+603979776; live spans ((0, 603979776),)
+  Copy device-153: 0x803cd400000+75497472; live spans ((0, 75497472),)
+  Copy device-149: 0x803b8c00000+301989888; live spans ((0, 301989888),)
+  Copy device-154: 0x803d1c00000+37748736; live spans ((0, 37748736),)
+  Copy device-159: 0x8040a400000+37748736; live spans ((0, 37289984),)
+  Copy device-152: 0x803cb000000+37748736; live spans ((0, 37480448),)
+  Copy device-52: 0x800c5c00000+2097152; live spans ((0, 2097152),)
+  Copy device-155: 0x803d4000000+603979776; live spans ((0, 603979776),)
+  Copy device-160: 0x8040c800000+75497472; live spans ((0, 75497472),)
+  Copy device-156: 0x803f8000000+301989888; live spans ((0, 301989888),)
+  Copy device-161: 0x80411000000+37748736; live spans ((0, 37748736),)
+  Copy device-167: 0x8044bc00000+20971520; live spans ((0, 20709376),)
+  Copy device-54: 0x800c6000000+2097152; live spans ((0, 1664128), (1664512, 
+96), (1665024, 12), (1665536, 96), (1666048, 1152), (1667584, 12), (1668096, 
+64), (1668608, 256), (1669120, 776), (1670144, 776), (1671168, 425984))
+  Copy device-53: 0x800c5e00000+2097152; live spans ((0, 2094856), (2095104, 
+1152), (2096640, 96))
+  Copy device-162: 0x80413400000+603979776; live spans ((0, 603979776),)
+  Copy device-168: 0x8044d000000+75497472; live spans ((0, 75497472),)
+  Copy device-163: 0x80437400000+301989888; live spans ((0, 301989888),)
+  Copy device-169: 0x80451800000+37748736; live spans ((0, 37748736),)
+  Copy device-56: 0x800c6400000+2097152; live spans ((0, 2080832), (2081280, 
+256), (2081792, 1152), (2083328, 1152), (2084864, 1152), (2086400, 8448), 
+(2095104, 256), (2095616, 1028))
+  Copy device-166: 0x80449800000+37748736; live spans ((0, 37480448),)
+  Copy device-170: 0x80453c00000+603979776; live spans ((0, 603979776),)
+  Copy device-174: 0x8048c200000+75497472; live spans ((0, 75497472),)
+  Copy device-171: 0x80477c00000+301989888; live spans ((0, 301989888),)
+  Copy device-175: 0x80490a00000+37748736; live spans ((0, 37748736),)
+  Copy device-55: 0x800c6200000+2097152; live spans ((0, 2095168), (2095616, 
+256), (2096128, 12), (2096640, 96))
+  Copy device-173: 0x80489e00000+37748736; live spans ((0, 37545984),)
+  Copy device-57: 0x800c6600000+2097152; live spans ((0, 2097152),)
+  Copy device-58: 0x800c6800000+2097152; live spans ((0, 2097152),)
+  Copy device-176: 0x80492e00000+603979776; live spans ((0, 603979776),)
+  Copy device-181: 0x804cda00000+75497472; live spans ((0, 75497472),)
+  Copy device-177: 0x804b6e00000+301989888; live spans ((0, 301989888),)
+  Copy device-182: 0x804d2200000+37748736; live spans ((0, 37748736),)
+  Copy device-187: 0x8050aa00000+37748736; live spans ((0, 37289984),)
+  Copy device-60: 0x800c6c00000+2097152; live spans ((0, 1008768), (1009152, 
+1152), (1010688, 1152), (1012224, 1152), (1013760, 96), (1014272, 12), (1014784,
+64), (1015296, 4), (1015808, 1066112), (2082304, 1152), (2083840, 1280), 
+(2085376, 256), (2085888, 4), (2086400, 4), (2086912, 96), (2087424, 1152), 
+(2088960, 1152), (2090496, 12), (2091008, 64), (2091520, 256), (2092032, 1152), 
+(2093568, 12), (2094080, 96), (2094592, 1152), (2096128, 96), (2096640, 12))
+  Copy device-81: 0x8014a800000+75497472; live spans ((0, 75229184),)
+  Copy device-183: 0x804d4600000+603979776; live spans ((0, 603979776),)
+  Copy device-188: 0x8050ce00000+75497472; live spans ((0, 75497472),)
+  Copy device-184: 0x804f8600000+301989888; live spans ((0, 301989888),)
+  Copy device-189: 0x80511600000+37748736; live spans ((0, 37748736),)
+  Copy device-194: 0x80549e00000+37748736; live spans ((0, 37289984),)
+  Copy device-61: 0x800c6e00000+2097152; live spans ((0, 2097152),)
+  Copy device-59: 0x800c6a00000+2097152; live spans ((0, 2094208), (2094592, 
+12), (2095104, 96), (2095616, 12), (2096128, 776))
+  Copy device-190: 0x80513a00000+603979776; live spans ((0, 603979776),)
+  Copy device-195: 0x8054c200000+75497472; live spans ((0, 75497472),)
+  Copy device-191: 0x80537a00000+301989888; live spans ((0, 301989888),)
+  Copy device-196: 0x80550a00000+37748736; live spans ((0, 37748736),)
+  Copy device-202: 0x8058b600000+20971520; live spans ((0, 20578304),)
+  Copy device-62: 0x800c7000000+2097152; live spans ((0, 2094856), (2095104, 
+1152), (2096640, 96))
+  Copy device-63: 0x800c7200000+2097152; live spans ((0, 2086016), (2086400, 
+8448), (2095104, 1152), (2096640, 4))
+  Copy device-197: 0x80552e00000+603979776; live spans ((0, 603979776),)
+  Copy device-203: 0x8058ca00000+75497472; live spans ((0, 75497472),)
+  Copy device-198: 0x80576e00000+301989888; live spans ((0, 301989888),)
+  Copy device-204: 0x80591200000+37748736; live spans ((0, 37748736),)
+  Copy device-201: 0x80589200000+37748736; live spans ((0, 36962304),)
+  Copy device-64: 0x800c7400000+2097152; live spans ((0, 2097152),)
+  Copy device-65: 0x800c7600000+2097152; live spans ((0, 2097152),)
+  Copy device-205: 0x80593600000+603979776; live spans ((0, 603979776),)
+  Copy device-210: 0x805cbe00000+75497472; live spans ((0, 75497472),)
+  Copy device-206: 0x805b7600000+301989888; live spans ((0, 301989888),)
+  Copy device-211: 0x805d0600000+37748736; live spans ((0, 37748736),)
+  Copy device-73: 0x8010b200000+2097152; live spans ((0, 1582208), (1582592, 
+17536), (1600512, 96), (1601024, 12), (1601536, 96), (1602048, 1152), (1603584, 
+12), (1604096, 64), (1604608, 256), (1605120, 4), (1605632, 484480), (2090496, 
+1152), (2092032, 2176), (2094592, 96), (2095104, 12), (2095616, 96), (2096128, 
+776))
+  Copy device-209: 0x805c9a00000+37748736; live spans ((0, 37480448),)
+  Copy device-212: 0x805d2a00000+603979776; live spans ((0, 603979776),)
+  Copy device-216: 0x8060d400000+75497472; live spans ((0, 75497472),)
+  Copy device-213: 0x805f6a00000+301989888; live spans ((0, 301989888),)
+  Copy device-217: 0x80611c00000+37748736; live spans ((0, 37748736),)
+  Copy device-222: 0x8064a400000+37748736; live spans ((0, 37289984),)
+  Copy device-72: 0x8010b000000+2097152; live spans ((0, 2082828), (2083328, 
+2176), (2085888, 776), (2086912, 12), (2087424, 96), (2087936, 776), (2088960, 
+96), (2089472, 1152), (2091008, 1152), (2092544, 4224))
+  Copy device-80: 0x8014a600000+2097152; live spans ((0, 1262848), (1263104, 
+256), (1263616, 2176), (1266176, 4), (1266688, 776), (1267712, 96), (1268224, 
+12), (1268736, 96), (1269248, 1152), (1270784, 1152), (1272320, 1152), (1273856,
+12), (1274368, 64), (1274880, 256), (1275392, 1152), (1276928, 776), (1277952, 
+819200))
+  Copy device-145: 0x80389800000+75497472; live spans ((0, 75300864),)
+  Copy device-218: 0x80614000000+603979776; live spans ((0, 603979776),)
+  Copy device-223: 0x8064c800000+75497472; live spans ((0, 75497472),)
+  Copy device-219: 0x80638000000+301989888; live spans ((0, 301989888),)
+  Copy device-224: 0x80651000000+37748736; live spans ((0, 37748736),)
+  Copy device-229: 0x80689800000+37748736; live spans ((0, 37617664),)
+  Copy device-86: 0x8018bc00000+2097152; live spans ((0, 811020), (811520, 64), 
+(812032, 256), (812544, 1152), (814080, 1152), (815616, 3076), (819200, 
+1277952))
+  Copy device-79: 0x8014a400000+2097152; live spans ((0, 2094208), (2094592, 
+1152), (2096128, 4), (2096640, 96))
+  Copy device-92: 0x801cae00000+2097152; live spans ((0, 1971328), (1971712, 
+1152), (1973248, 9344), (1982976, 96), (1983488, 12), (1984000, 64), (1984512, 
+256), (1985024, 4), (1985536, 4), (1986048, 12), (1986560, 106508), (2093568, 
+96), (2094080, 12), (2094592, 1152), (2096128, 776))
+  Copy device-225: 0x80653400000+603979776; live spans ((0, 603979776),)
+  Copy device-230: 0x8068bc00000+75497472; live spans ((0, 75497472),)
+  Copy device-226: 0x80677400000+301989888; live spans ((0, 301989888),)
+  Copy device-231: 0x80690400000+37748736; live spans ((0, 37748736),)
+  Copy device-237: 0x806cb000000+20971520; live spans ((0, 20971520),)
+  Copy device-99: 0x8020a200000+2097152; live spans ((0, 2083968), (2084352, 
+1152), (2085888, 9344), (2095616, 12), (2096128, 64), (2096640, 256))
+  Copy device-93: 0x801cb000000+2097152; live spans ((0, 2097152),)
+  Copy device-232: 0x80692800000+603979776; live spans ((0, 603979776),)
+  Copy device-238: 0x806cc400000+75497472; live spans ((0, 75497472),)
+  Copy device-233: 0x806b6800000+301989888; live spans ((0, 301989888),)
+  Copy device-239: 0x806d0c00000+37748736; live spans ((0, 37748736),)
+  Copy device-236: 0x806c8c00000+37748736; live spans ((0, 37480448),)
+  Copy device-100: 0x8020a400000+2097152; live spans ((0, 2097152),)
+  Copy device-240: 0x806d3000000+603979776; live spans ((0, 603979776),)
+  Copy device-245: 0x8070b800000+75497472; live spans ((0, 75497472),)
+  Copy device-241: 0x806f7000000+301989888; live spans ((0, 301989888),)
+  Copy device-246: 0x80710000000+37748736; live spans ((0, 37748736),)
+  Copy device-108: 0x8024ac00000+2097152; live spans ((0, 1606784), (1607168, 
+1152), (1608704, 9344), (1618432, 96), (1618944, 12), (1619456, 96), (1619968, 
+12), (1620480, 64), (1620992, 776), (1622016, 475136))
+  Copy device-244: 0x80709400000+37748736; live spans ((0, 37480448),)
+  Copy device-107: 0x8024aa00000+2097152; live spans ((0, 2083968), (2084352, 
+3076), (2087936, 776), (2088960, 96), (2089472, 1152), (2091008, 1152), 
+(2092544, 96), (2093056, 12), (2093568, 64), (2094080, 1152), (2095616, 776), 
+(2096640, 96))
+  Copy device-252: 0x8074ac00000+20971520; live spans ((0, 20899840),)
+  Copy device-247: 0x80712400000+603979776; live spans ((0, 603979776),)
+  Copy device-253: 0x8074c000000+75497472; live spans ((0, 75497472),)
+  Copy device-248: 0x80736400000+301989888; live spans ((0, 301989888),)
+  Copy device-254: 0x80750800000+37748736; live spans ((0, 37748736),)
+  Copy device-115: 0x8028a000000+2097152; live spans ((0, 2097152),)
+  Copy device-251: 0x80748800000+37748736; live spans ((0, 37480448),)
+  Copy device-255: 0x80752c00000+603979776; live spans ((0, 603979776),)
+  Copy device-259: 0x8078b200000+75497472; live spans ((0, 75497472),)
+  Copy device-256: 0x80776c00000+301989888; live spans ((0, 301989888),)
+  Copy device-260: 0x8078fa00000+37748736; live spans ((0, 37748736),)
+  Copy device-114: 0x80289e00000+2097152; live spans ((0, 2095360), (2095616, 
+1152))
+  Copy device-258: 0x80788e00000+37748736; live spans ((0, 37545984),)
+  Copy device-122: 0x802ca600000+2097152; live spans ((0, 2097152),)
+  Copy device-123: 0x802ca800000+2097152; live spans ((0, 1969280), (1969664, 
+4), (1970176, 96), (1970688, 776), (1971712, 96), (1972224, 1152), (1973760, 
+1152), (1975296, 8204), (1984000, 96), (1984512, 106752), (2091520, 1152), 
+(2093056, 4), (2093568, 1152), (2095104, 1152), (2096640, 12))
+  Copy device-261: 0x80791e00000+603979776; live spans ((0, 603979776),)
+  Copy device-266: 0x807cca00000+75497472; live spans ((0, 75497472),)
+  Copy device-262: 0x807b5e00000+301989888; live spans ((0, 301989888),)
+  Copy device-267: 0x807d1200000+37748736; live spans ((0, 37748736),)
+  Copy device-130: 0x8030ae00000+2097152; live spans ((0, 2097152),)
+  Copy device-136: 0x8034a000000+2097152; live spans ((0, 2094856), (2095104, 
+1152), (2096640, 96))
+  Copy device-272: 0x80809a00000+37748736; live spans ((0, 37289984),)
+  Copy device-268: 0x807d3600000+603979776; live spans ((0, 603979776),)
+  Copy device-273: 0x8080be00000+75497472; live spans ((0, 75497472),)
+  Copy device-269: 0x807f7600000+301989888; live spans ((0, 301989888),)
+  Copy device-274: 0x80810600000+37748736; live spans ((0, 37748736),)
+  Copy device-137: 0x8034a200000+2097152; live spans ((0, 196672), (197120, 
+256), (197632, 1152), (199168, 4), (199680, 1152), (201216, 256), (201728, 
+1152), (203264, 4), (203776, 4), (204288, 1152), (205824, 1152), (207360, 256), 
+(207872, 256), (208384, 2176), (210944, 12), (211456, 96), (211968, 12), 
+(212480, 64), (212992, 1884160))
+  Copy device-279: 0x80848e00000+37748736; live spans ((0, 37289984),)
+  Copy device-275: 0x80812a00000+603979776; live spans ((0, 603979776),)
+  Copy device-280: 0x8084b200000+75497472; live spans ((0, 75497472),)
+  Copy device-276: 0x80836a00000+301989888; live spans ((0, 301989888),)
+  Copy device-281: 0x8084fa00000+37748736; live spans ((0, 37748736),)
+  Copy device-143: 0x80389400000+2097152; live spans ((0, 2092160), (2092544, 
+1280), (2094080, 2176), (2096640, 96))
+  Copy device-144: 0x80389600000+2097152; live spans ((0, 2093068), (2093568, 
+96), (2094080, 12), (2094592, 1152), (2096128, 776))
+  Copy device-287: 0x8088a600000+20971520; live spans ((0, 20578304),)
+  Copy device-282: 0x80851e00000+603979776; live spans ((0, 603979776),)
+  Copy device-288: 0x8088ba00000+75497472; live spans ((0, 75497472),)
+  Copy device-283: 0x80875e00000+301989888; live spans ((0, 301989888),)
+  Copy device-289: 0x80890200000+37748736; live spans ((0, 37748736),)
+  Copy device-150: 0x803cac00000+2097152; live spans ((0, 2097152),)
+  Copy device-286: 0x80888200000+37748736; live spans ((0, 37486592),)
+  Copy device-151: 0x803cae00000+2097152; live spans ((0, 2097152),)
+  Copy device-290: 0x80892600000+603979776; live spans ((0, 603979776),)
+  Copy device-295: 0x808cae00000+75497472; live spans ((0, 75497472),)
+  Copy device-291: 0x808b6600000+301989888; live spans ((0, 301989888),)
+  Copy device-296: 0x808cf600000+37748736; live spans ((0, 37748736),)
+  Copy device-301: 0x8090a000000+20971520; live spans ((0, 20971520),)
+  Copy device-158: 0x8040a200000+2097152; live spans ((0, 2097152),)
+  Copy device-294: 0x808c8a00000+37748736; live spans ((0, 36503552),)
+  Copy device-297: 0x808d1a00000+603979776; live spans ((0, 603979776),)
+  Copy device-302: 0x8090b400000+75497472; live spans ((0, 75497472),)
+  Copy device-298: 0x808f5a00000+301989888; live spans ((0, 301989888),)
+  Copy device-303: 0x8090fc00000+37748736; live spans ((0, 37748736),)
+  Copy device-164: 0x80449400000+2097152; live spans ((0, 803968), (804352, 
+1152), (805888, 9344), (815616, 12), (816128, 96), (816640, 12), (817152, 64), 
+(817664, 256), (818176, 776), (819200, 1277952))
+  Copy device-157: 0x8040a000000+2097152; live spans ((0, 2093152), (2093568, 
+12), (2094080, 256), (2094592, 1152), (2096128, 96), (2096640, 12))
+  Copy device-300: 0x80907c00000+37748736; live spans ((0, 37480448),)
+  Copy device-165: 0x80449600000+2097152; live spans ((0, 2092160), (2092544, 
+12), (2093056, 96), (2093568, 12), (2094080, 1152), (2095616, 96), (2096128, 
+776))
+  Copy device-304: 0x80912000000+603979776; live spans ((0, 603979776),)
+  Copy device-309: 0x8094a800000+75497472; live spans ((0, 75497472),)
+  Copy device-305: 0x80936000000+301989888; live spans ((0, 301989888),)
+  Copy device-310: 0x8094f000000+37748736; live spans ((0, 37748736),)
+  Copy device-172: 0x80489c00000+2097152; live spans ((0, 794688), (795136, 
+256), (795648, 4), (796160, 1152), (797696, 1152), (799232, 12), (799744, 96), 
+(800256, 4), (800768, 96), (801280, 1152), (802816, 1152), (804352, 8204), 
+(813056, 64), (813568, 256), (814080, 1152), (815616, 1152), (817152, 4), 
+(817664, 776), (818688, 12), (819200, 1277952))
+  Copy device-308: 0x80948400000+37748736; live spans ((0, 37480448),)
+  Copy device-316: 0x80989c00000+20971520; live spans ((0, 20578304),)
+  Copy device-311: 0x80951400000+603979776; live spans ((0, 603979776),)
+  Copy device-317: 0x8098b000000+75497472; live spans ((0, 75497472),)
+  Copy device-312: 0x80975400000+301989888; live spans ((0, 301989888),)
+  Copy device-318: 0x8098f800000+37748736; live spans ((0, 37748736),)
+  Copy device-178: 0x804c8e00000+2097152; live spans ((0, 2086016), (2086400, 
+1152), (2087936, 8288), (2096640, 12))
+  Copy device-315: 0x80987800000+37748736; live spans ((0, 37486592),)
+  Copy device-179: 0x804c9000000+2097152; live spans ((0, 2097152),)
+  Copy device-319: 0x80991c00000+603979776; live spans ((0, 603979776),)
+  Copy device-325: 0x809cb800000+75497472; live spans ((0, 75497472),)
+  Copy device-320: 0x809b5c00000+301989888; live spans ((0, 301989888),)
+  Copy device-326: 0x809d0000000+37748736; live spans ((0, 37748736),)
+  Copy device-324: 0x809ca400000+20971520; live spans ((0, 20971520),)
+  Copy device-185: 0x8050a600000+2097152; live spans ((0, 2092288), (2092544, 
+776), (2093568, 1152), (2095104, 1152), (2096640, 96))
+  Copy device-323: 0x809c8000000+37748736; live spans ((0, 36503552),)
+  Copy device-186: 0x8050a800000+2097152; live spans ((0, 2097152),)
+  Copy device-327: 0x809d2400000+603979776; live spans ((0, 603979776),)
+  Copy device-332: 0x80a0ac00000+75497472; live spans ((0, 75497472),)
+  Copy device-328: 0x809f6400000+301989888; live spans ((0, 301989888),)
+  Copy device-333: 0x80a0f400000+37748736; live spans ((0, 37748736),)
+  Copy device-193: 0x80549c00000+2097152; live spans ((0, 1672320), (1672704, 
+8448), (1681408, 2176), (1683968, 64), (1684480, 256), (1684992, 1152), 
+(1686528, 4), (1687040, 4), (1687552, 409600))
+  Copy device-331: 0x80a08800000+37748736; live spans ((0, 37480448),)
+  Copy device-334: 0x80a11800000+603979776; live spans ((0, 603979776),)
+  Copy device-340: 0x80a4b400000+75497472; live spans ((0, 75497472),)
+  Copy device-335: 0x80a35800000+301989888; live spans ((0, 301989888),)
+  Copy device-341: 0x80a4fc00000+37748736; live spans ((0, 37748736),)
+  Copy device-338: 0x80a47c00000+37748736; live spans ((0, 37480448),)
+  Copy device-339: 0x80a4a000000+20971520; live spans ((0, 20447232),)
+  Copy device-342: 0x80a52000000+603979776; live spans ((0, 603979776),)
+  Copy device-346: 0x80a8a600000+75497472; live spans ((0, 75497472),)
+  Copy device-343: 0x80a76000000+301989888; live spans ((0, 301989888),)
+  Copy device-347: 0x80a8ee00000+37748736; live spans ((0, 37748736),)
+  Copy device-353: 0x80ac9a00000+20971520; live spans ((0, 19136512),)
+  Copy device-199: 0x80588e00000+2097152; live spans ((0, 1744000), (1744384, 
+32), (1744896, 32), (1745408, 32), (1745920, 32), (1746432, 32), (1746944, 32), 
+(1747456, 32), (1747968, 1152), (1749504, 1152), (1751040, 319500), (2071040, 
+96), (2071552, 12), (2072064, 1152), (2073600, 96), (2074112, 12), (2074624, 
+256), (2075136, 1152), (2076672, 1280), (2078208, 1800), (2080256, 96), 
+(2080768, 12), (2081280, 776), (2082304, 96), (2082816, 1152), (2084352, 1152), 
+(2085888, 11264))
+  Copy device-345: 0x80a88200000+37748736; live spans ((0, 36569088),)
+  Copy device-207: 0x805c9600000+2097152; live spans ((0, 2097152),)
+  Copy device-348: 0x80a91200000+603979776; live spans ((0, 603979776),)
+  Copy device-354: 0x80acae00000+75497472; live spans ((0, 75497472),)
+  Copy device-349: 0x80ab5200000+301989888; live spans ((0, 301989888),)
+  Copy device-355: 0x80acf600000+37748736; live spans ((0, 37748736),)
+  Copy device-352: 0x80ac7600000+37748736; live spans ((0, 37480448),)
+  Copy device-356: 0x80ad1a00000+603979776; live spans ((0, 603979776),)
+  Copy device-360: 0x80b0a200000+75497472; live spans ((0, 75497472),)
+  Copy device-357: 0x80af5a00000+301989888; live spans ((0, 301989888),)
+  Copy device-361: 0x80b0ea00000+37748736; live spans ((0, 37748736),)
+  Copy device-250: 0x80748600000+2097152; live spans ((1668096, 90112), 
+(1766400, 28673), (1795584, 4), (1796096, 8), (1796608, 8), (1797120, 8), 
+(1797632, 8), (1798144, 4), (1798656, 4), (1799168, 4), (1799680, 61448), 
+(1861632, 8), (1862144, 28680), (1891328, 8), (1891840, 32), (1892352, 32784), 
+(1925632, 16), (1926144, 4), (1926656, 8), (1927168, 8), (1927680, 4), (1997312,
+32), (1997824, 128), (1998336, 61448), (2060288, 8), (2060800, 28680), (2089984,
+4), (2091008, 8), (2091520, 8), (2092032, 1), (2092544, 4), (2093056, 8), 
+(2093568, 8), (2094080, 8), (2094592, 8), (2095104, 4), (2095616, 4), (2096128, 
+4), (2096640, 8))
+  Copy device-359: 0x80b07e00000+37748736; live spans ((0, 37545984),)
+  Copy device-257: 0x80788c00000+2097152; live spans ((1858560, 24576), 
+(1891328, 75784), (1967616, 24584), (1992704, 8), (1993216, 32), (1993728, 
+28688), (2022912, 16), (2023424, 4), (2023936, 8), (2024448, 8), (2024960, 4), 
+(2094592, 32), (2095104, 128), (2095616, 8), (2096128, 8), (2096640, 8))
+  Copy device-263: 0x807c7e00000+2097152; live spans ((1239040, 96260), 
+(1344000, 20480), (1364992, 8), (1365504, 8), (1366016, 1), (1366528, 4), 
+(1367040, 8), (1367552, 8), (1368064, 8), (1368576, 8), (1369088, 4), (1369600, 
+4), (1370112, 4), (1370624, 40968), (1412096, 8), (1412608, 20488), (1433600, 
+8), (1434112, 32), (1434624, 24592), (1459712, 16), (1460224, 4), (1460736, 8), 
+(1461248, 8), (1461760, 4), (2086912, 32), (2087424, 128), (2087936, 8200), 
+(2096640, 8))
+  Copy device-264: 0x807c8000000+2097152; live spans ((683520, 69640), (753664, 
+4), (762368, 16384), (779264, 8), (779776, 8), (780288, 1), (780800, 4), 
+(781312, 8), (781824, 8), (782336, 8), (782848, 8), (783360, 4), (783872, 4), 
+(784384, 4), (784896, 30728), (816128, 8), (816640, 16392), (833536, 8), 
+(834048, 32), (834560, 20496), (855552, 16), (856064, 4), (856576, 8), (857088, 
+8), (857600, 4), (1546752, 32), (1547264, 128), (1547776, 30728), (1579008, 8), 
+(1579520, 28680), (1608704, 4), (1617408, 12288), (1630208, 8), (1630720, 8), 
+(1631232, 1), (1631744, 4), (1632256, 8), (1632768, 8), (1633280, 8), (1633792, 
+8), (1634304, 4), (1634816, 4), (1635328, 4), (1635840, 20488), (1656832, 8), 
+(1657344, 12296), (1670144, 8), (1670656, 32), (1671168, 16400), (1688064, 16), 
+(1688576, 4), (1689088, 8), (1689600, 8), (1690112, 4), (1755136, 8200), 
+(1763840, 4), (1764352, 102408), (1867264, 32), (1867776, 40976), (1909248, 16),
+(1909760, 4), (1910272, 8), (1910784, 8), (1911296, 4), (1980928, 8), (1981440, 
+8), (1981952, 1), (1982464, 4), (1982976, 8), (1983488, 8), (1984000, 8), 
+(1984512, 8), (1985024, 4), (1985536, 4), (1986048, 4), (1986560, 71688), 
+(2058752, 8), (2059264, 32776), (2092544, 8), (2093056, 32), (2093568, 16), 
+(2094080, 16), (2094592, 4), (2095104, 8), (2095616, 8), (2096128, 4))
+  Copy device-364: 0x80b47200000+123731968; live spans ((12582912, 12582912), 
+(33554432, 8388608), (62102528, 1239040), (70775808, 51951616))
+  Copy device-270: 0x80809600000+2097152; live spans ((1927168, 32), (1927680, 
+128), (1928192, 20488), (1949184, 8), (1949696, 20488), (1970688, 4), (1979392, 
+8192), (1988096, 8), (1988608, 8), (1989120, 1), (1989632, 4), (1990144, 8), 
+(1990656, 8), (1991168, 8), (1991680, 8), (1992192, 4), (1992704, 4), (1993216, 
+4), (1993728, 10248), (2004480, 8), (2004992, 8200), (2013696, 8), (2014208, 
+32), (2014720, 12304), (2027520, 16), (2028032, 4), (2028544, 8), (2029056, 8), 
+(2029568, 4), (2035200, 32), (2035712, 128), (2036224, 10248), (2046976, 8), 
+(2047488, 12296), (2060288, 4), (2068992, 4096), (2073600, 8), (2074112, 8), 
+(2074624, 1), (2075136, 4), (2075648, 8), (2076160, 8), (2076672, 8), (2077184, 
+8), (2077696, 4), (2078208, 4), (2078720, 4), (2079232, 5128), (2084864, 8), 
+(2085376, 6152), (2092032, 8), (2092544, 32), (2093056, 2064), (2095616, 16), 
+(2096128, 4), (2096640, 8))
+  Copy device-271: 0x80809800000+2097152; live spans ((1927680, 32), (1928192, 
+128), (1928704, 5128), (1934336, 8), (1934848, 8200), (1943552, 4), (1952256, 
+2048), (1954816, 8), (1955328, 8), (1955840, 1), (1956352, 4), (1956864, 8), 
+(1957376, 8), (1957888, 8), (1958400, 8), (1958912, 4), (1959424, 4), (1959936, 
+4), (1960448, 2568), (1963520, 8), (1964032, 5128), (1969664, 8), (1970176, 32),
+(1970688, 9232), (1980416, 16), (1980928, 4), (1981440, 8), (1981952, 8), 
+(1982464, 4), (2052096, 32), (2052608, 128), (2053120, 2568), (2056192, 8), 
+(2056704, 6152), (2063360, 4), (2072064, 1024), (2073600, 8), (2074112, 8), 
+(2074624, 1), (2075136, 4), (2075648, 8), (2076160, 8), (2076672, 8), (2077184, 
+8), (2077696, 4), (2078208, 4), (2078720, 4), (2079232, 16392), (2096128, 8), 
+(2096640, 8))
+  Copy device-372: 0x80be9800000+33554432; live spans ((0, 33554432),)
+  Copy device-375: 0x80bf1800000+33554432; live spans ((0, 33554432),)
+  Copy device-277: 0x80848a00000+2097152; live spans ((1668096, 8), (1668608, 
+4), (1669120, 20488), (1690112, 8), (1690624, 4), (1946624, 12), (1947136, 16), 
+(1947648, 2), (1948160, 8), (1948672, 16), (1949184, 16), (1949696, 16), 
+(1950208, 16), (1950720, 8), (1951232, 4), (1951744, 4), (1952256, 16), 
+(1952768, 16), (1953280, 8), (1953792, 16), (1954304, 12), (1954816, 8208), 
+(1963520, 16), (1964032, 16), (1964544, 32), (1965056, 16), (1965568, 8208), 
+(1974272, 16), (1974784, 4), (1975296, 16), (1975808, 16), (1976320, 8), 
+(2045952, 8), (2046464, 8), (2046976, 8), (2047488, 8), (2048000, 4), (2048512, 
+4), (2049024, 4), (2049536, 8), (2050048, 48), (2050560, 48), (2051072, 24), 
+(2051584, 8), (2052096, 8), (2052608, 4144), (2057216, 8), (2057728, 48), 
+(2058240, 8), (2058752, 8), (2059264, 1), (2059776, 4), (2060288, 64), (2060800,
+8), (2061312, 8), (2061824, 8), (2062336, 4), (2062848, 4), (2063360, 4), 
+(2063872, 8), (2064384, 4), (2064896, 8), (2065408, 8), (2065920, 4104), 
+(2070528, 8), (2071040, 8), (2071552, 32), (2072064, 8), (2072576, 8208), 
+(2081280, 16), (2081792, 4), (2082304, 8), (2082816, 8), (2083328, 4), (2083840,
+4), (2084352, 4), (2084864, 4), (2085376, 4), (2085888, 272), (2086400, 272), 
+(2086912, 272), (2087424, 272), (2087936, 272), (2088448, 272), (2088960, 8), 
+(2089472, 8), (2089984, 4), (2090496, 8), (2091008, 8), (2091520, 4104), 
+(2096128, 8), (2096640, 8))
+  Copy device-278: 0x80848c00000+2097152; live spans ((1858560, 36864), 
+(1964032, 8), (1964544, 8), (1965056, 1), (1965568, 4), (1966080, 8), (1966592, 
+8), (1967104, 8), (1967616, 8), (1968128, 4), (1968640, 4), (1969152, 4), 
+(1969664, 61448), (2031616, 8), (2032128, 28680), (2061312, 8), (2061824, 32), 
+(2062336, 32784), (2095616, 16), (2096128, 4), (2096640, 8))
+  Copy device-284: 0x80887e00000+2097152; live spans ((0, 1048576), (1977856, 
+48), (1978368, 48), (1978880, 24), (1979392, 8), (1979904, 8), (1980416, 4144), 
+(1985024, 49200), (2034688, 8), (2035200, 4), (2055168, 8), (2055680, 48), 
+(2056192, 912), (2057216, 912), (2058240, 24), (2058752, 8), (2059264, 8), 
+(2059776, 152), (2060288, 152), (2060800, 4), (2061312, 8), (2061824, 8), 
+(2062336, 152), (2062848, 152), (2063360, 4), (2063872, 8), (2064384, 8), 
+(2064896, 152), (2065408, 152), (2065920, 4), (2066432, 8), (2066944, 8), 
+(2067456, 152), (2067968, 152), (2068480, 4), (2068992, 8), (2069504, 8), 
+(2070016, 152), (2070528, 152), (2071040, 4), (2074624, 8), (2075136, 48), 
+(2075648, 8), (2076160, 8), (2076672, 48), (2077184, 64), (2077696, 16), 
+(2078208, 48), (2078720, 48), (2079232, 4), (2079744, 4), (2080256, 4), 
+(2080768, 4), (2081280, 8), (2081792, 8), (2082304, 16), (2082816, 32), 
+(2083328, 64), (2083840, 40), (2084352, 768), (2085376, 192), (2085888, 16), 
+(2086400, 24), (2086912, 48), (2087424, 64), (2087936, 272), (2088448, 16), 
+(2088960, 2), (2089472, 8), (2089984, 16), (2090496, 16), (2091008, 16), 
+(2091520, 16), (2092032, 8), (2092544, 4), (2093056, 4), (2093568, 16), 
+(2094080, 48), (2094592, 48), (2095104, 24), (2095616, 16), (2096128, 12), 
+(2096640, 48))
+  Copy device-285: 0x80888000000+2097152; live spans ((1927680, 8), (1928192, 
+8), (1928704, 1), (1929216, 4), (1929728, 8), (1930240, 8), (1930752, 8), 
+(1931264, 8), (1931776, 4), (1932288, 4), (1932800, 4), (1933312, 51208), 
+(1985024, 8), (1985536, 24584), (2010624, 8), (2011136, 32), (2011648, 28688), 
+(2040832, 16), (2041344, 4), (2041856, 8), (2042368, 8), (2042880, 4), (2048512,
+8), (2049024, 8), (2049536, 1), (2050048, 4), (2050560, 8), (2051072, 8), 
+(2051584, 8), (2052096, 8), (2052608, 4), (2053120, 4), (2053632, 4), (2054144, 
+40968), (2095616, 8), (2096128, 8), (2096640, 8))
+  Copy device-292: 0x808c8600000+2097152; live spans ((1922560, 20512), 
+(1943552, 24592), (1968640, 16), (1969152, 4), (1969664, 8), (1970176, 8), 
+(1970688, 4), (2040320, 8), (2040832, 8), (2041344, 1), (2041856, 4), (2042368, 
+8), (2042880, 8), (2043392, 8), (2043904, 8), (2044416, 4), (2044928, 4), 
+(2045440, 4), (2045952, 30728), (2077184, 8), (2077696, 16392), (2094592, 8), 
+(2095104, 32), (2095616, 16), (2096128, 16), (2096640, 4))
+  Copy device-293: 0x808c8800000+2097152; live spans ((1927680, 8), (1928192, 
+8), (1928704, 1), (1929216, 4), (1929728, 8), (1930240, 8), (1930752, 8), 
+(1931264, 8), (1931776, 4), (1932288, 4), (1932800, 4), (1933312, 20488), 
+(1954304, 8), (1954816, 12296), (1967616, 8), (1968128, 32), (1968640, 16400), 
+(1985536, 16), (1986048, 4), (1986560, 8), (1987072, 8), (1987584, 4), (2057216,
+8), (2057728, 8), (2058240, 1), (2058752, 4), (2059264, 8), (2059776, 8), 
+(2060288, 8), (2060800, 8), (2061312, 4), (2061824, 4), (2062336, 4), (2062848, 
+10248), (2073600, 8), (2074112, 8200), (2082816, 8), (2083328, 32), (2083840, 
+12304), (2096640, 16))
+  Copy device-299: 0x80907a00000+2097152; live spans ((1858560, 4), (1859072, 
+8), (1859584, 8), (1860096, 4), (1929728, 8), (1930240, 8), (1930752, 1), 
+(1931264, 4), (1931776, 8), (1932288, 8), (1932800, 8), (1933312, 8), (1933824, 
+4), (1934336, 4), (1934848, 4), (1935360, 5128), (1940992, 8), (1941504, 6152), 
+(1948160, 8), (1948672, 32), (1949184, 10256), (1959936, 16), (1960448, 4), 
+(1960960, 8), (1961472, 8), (1961984, 4), (2031616, 8), (2032128, 8), (2032640, 
+1), (2033152, 4), (2033664, 8), (2034176, 8), (2034688, 8), (2035200, 8), 
+(2035712, 4), (2036224, 4), (2036736, 4), (2037248, 2568), (2040320, 8), 
+(2040832, 5128), (2046464, 8), (2046976, 32), (2047488, 9232), (2057216, 16), 
+(2057728, 4), (2058240, 8), (2058752, 8), (2059264, 4), (2064896, 20), (2065408,
+32), (2065920, 4), (2066432, 16), (2066944, 32), (2067456, 32), (2067968, 32), 
+(2068480, 32), (2068992, 16), (2069504, 4), (2070016, 4), (2070528, 32), 
+(2071040, 32), (2071552, 16), (2072064, 32), (2072576, 20), (2073088, 16416), 
+(2089984, 32), (2090496, 32), (2091008, 32), (2091520, 32), (2092032, 16), 
+(2092544, 16), (2093056, 4), (2093568, 32), (2094080, 32), (2094592, 16))
+  Copy device-306: 0x80948000000+2097152; live spans ((1922560, 8192), (2061824,
+8), (2062336, 8), (2062848, 1), (2063360, 4), (2063872, 8), (2064384, 8), 
+(2064896, 8), (2065408, 8), (2065920, 4), (2066432, 4), (2066944, 4), (2067456, 
+8), (2067968, 8), (2068480, 4), (2068992, 8), (2069504, 8), (2070016, 4104), 
+(2074624, 8), (2075136, 8), (2075648, 32), (2076160, 8), (2076672, 8208), 
+(2085376, 16), (2085888, 4), (2086400, 8), (2086912, 8), (2087424, 4), (2093056,
+8), (2093568, 48), (2094080, 48), (2094592, 64), (2095104, 272), (2095616, 8), 
+(2096128, 1), (2096640, 4))
+  Copy device-307: 0x80948200000+2097152; live spans ((1858560, 8196), (1945088,
+8204), (1953792, 48), (1954304, 12), (1954816, 16), (1955328, 2), (1955840, 8), 
+(1956352, 128), (1956864, 16), (1957376, 16), (1957888, 16), (1958400, 8), 
+(1958912, 4), (1959424, 4), (1959936, 16), (1960448, 8), (1960960, 16), 
+(1961472, 12), (1961984, 8208), (1970688, 16), (1971200, 16), (1971712, 32), 
+(1972224, 16), (1972736, 8208), (1981440, 16), (1981952, 4), (1982464, 16), 
+(1982976, 16), (1983488, 8), (1984000, 8), (1984512, 8), (1985024, 8), (1985536,
+8), (1986048, 272), (1986560, 272), (1987072, 272), (1987584, 272), (1988096, 
+272), (1988608, 272), (1989120, 16), (1989632, 16), (1990144, 8), (1990656, 16),
+(1991168, 12), (1991680, 8208), (2000384, 16400), (2017280, 16), (2017792, 4), 
+(2018304, 48), (2018816, 48), (2019328, 24), (2019840, 16), (2020352, 12), 
+(2020864, 8240), (2029568, 49200), (2079232, 16), (2079744, 4), (2085376, 16), 
+(2085888, 24), (2086400, 912), (2087424, 912), (2088448, 24), (2088960, 16), 
+(2089472, 8), (2089984, 304), (2090496, 304), (2091008, 8), (2091520, 16), 
+(2092032, 8), (2092544, 304), (2093056, 304), (2093568, 8))
+  Copy device-313: 0x80987400000+2097152; live spans ((1239040, 383232), 
+(1806336, 16), (1806848, 24), (1807360, 16), (1807872, 16), (1808384, 24), 
+(1808896, 64), (1809408, 16), (1809920, 48), (1810432, 48), (1810944, 8), 
+(1811456, 8), (1811968, 8), (1812480, 8), (1812992, 16), (1813504, 16), 
+(1814016, 32), (1814528, 32), (1815040, 64), (1815552, 40), (1816064, 768), 
+(1817088, 192), (1817600, 8), (1818112, 40), (1818624, 40), (1819136, 64), 
+(1819648, 272), (1820160, 8), (1820672, 1), (1821184, 4), (1821696, 8), 
+(1822208, 8), (1822720, 8), (1823232, 8), (1823744, 4), (1824256, 4), (1824768, 
+4), (1825280, 8), (1825792, 40), (1826304, 40), (1826816, 20), (1827328, 8), 
+(1827840, 8), (1828352, 4136), (1832960, 8), (1833472, 40), (1833984, 8), 
+(1834496, 8), (1835008, 1), (1835520, 4), (1836032, 64), (1836544, 8), (1837056,
+8), (1837568, 8), (1838080, 4), (1838592, 4), (1839104, 4), (1839616, 8), 
+(1840128, 4), (1840640, 8), (1841152, 8), (1841664, 4104), (1846272, 8), 
+(1846784, 8), (1847296, 32), (1847808, 8), (1848320, 8208), (1857024, 16), 
+(1857536, 4), (1858048, 8), (1858560, 8), (1859072, 4), (1859584, 4), (1860096, 
+4), (1860608, 4), (1861120, 4), (1861632, 272), (1862144, 272), (1862656, 272), 
+(1863168, 272), (1863680, 272), (1864192, 272), (1864704, 8), (1865216, 8), 
+(1865728, 4), (1866240, 8), (1866752, 8), (1867264, 4104), (1871872, 8200), 
+(1880576, 8), (1881088, 4), (1959424, 40), (1959936, 40), (1960448, 20), 
+(1960960, 8), (1961472, 8), (1961984, 4136), (1966592, 41000), (2008064, 8), 
+(2008576, 4), (2028544, 8), (2029056, 40), (2029568, 760), (2030592, 760), 
+(2031616, 20), (2032128, 8), (2032640, 8), (2033152, 152), (2033664, 152), 
+(2034176, 4), (2034688, 8), (2035200, 8), (2035712, 152), (2036224, 152), 
+(2036736, 4), (2037248, 8), (2037760, 8), (2038272, 152), (2038784, 152), 
+(2039296, 4), (2039808, 8), (2040320, 8), (2040832, 152), (2041344, 152), 
+(2041856, 4), (2045440, 8), (2045952, 40), (2046464, 8), (2046976, 8), (2047488,
+40), (2048000, 64), (2048512, 16), (2049024, 40), (2049536, 40), (2050048, 4), 
+(2050560, 4), (2051072, 4), (2051584, 4), (2052096, 8), (2052608, 8), (2053120, 
+16), (2053632, 32), (2054144, 64), (2054656, 40), (2055168, 768), (2056192, 
+192), (2056704, 8), (2057216, 32), (2057728, 32), (2058240, 64), (2058752, 272),
+(2059264, 8), (2059776, 1), (2060288, 4), (2060800, 8), (2061312, 8), (2061824, 
+8), (2062336, 8), (2062848, 4), (2063360, 4), (2063872, 4), (2064384, 8), 
+(2064896, 32), (2065408, 32), (2065920, 16), (2066432, 8), (2066944, 8), 
+(2067456, 4128), (2072064, 8), (2072576, 32), (2073088, 8), (2073600, 8), 
+(2074112, 1), (2074624, 4), (2075136, 64), (2075648, 8), (2076160, 8), (2076672,
+8), (2077184, 4), (2077696, 4), (2078208, 4), (2078720, 8), (2079232, 4), 
+(2079744, 8), (2080256, 8), (2080768, 4104), (2085376, 8), (2085888, 8), 
+(2086400, 32), (2086912, 8), (2087424, 8208), (2096128, 16), (2096640, 4))
+  Copy device-362: 0x80b10e00000+603979776; live spans ((0, 603979776),)
+  Copy device-363: 0x80b34e00000+301989888; live spans ((0, 301989888),)
+  Copy device-265: 0x807c8200000+75497472; live spans ((0, 75497472),)
+  Copy device-314: 0x80987600000+2097152; live spans ((0, 619520), (1239040, 
+383232), (1932288, 8), (1932800, 8), (1933312, 4), (1933824, 4), (1934336, 4), 
+(1934848, 4), (1935360, 4), (1935872, 272), (1936384, 272), (1936896, 272), 
+(1937408, 272), (1937920, 272), (1938432, 272), (1938944, 8), (1939456, 8), 
+(1939968, 4), (1940480, 8), (1940992, 8), (1941504, 4104), (1946112, 8200), 
+(1954816, 8), (1955328, 4), (2033664, 32), (2034176, 32), (2034688, 16), 
+(2035200, 8), (2035712, 8), (2036224, 4128), (2040832, 32800), (2074112, 8), 
+(2074624, 4), (2094592, 8), (2095104, 32), (2095616, 608), (2096640, 16))
+  Copy device-321: 0x809c7c00000+2097152; live spans ((0, 1558528), (1868288, 
+608), (1869312, 8), (1869824, 8), (1870336, 152), (1870848, 152), (1871360, 4), 
+(1871872, 8), (1872384, 8), (1872896, 152), (1873408, 152), (1873920, 4), 
+(1874432, 8), (1874944, 8), (1875456, 152), (1875968, 152), (1876480, 4), 
+(1880064, 8), (1880576, 32), (1881088, 8), (1881600, 8), (1882112, 32), 
+(1882624, 64), (1883136, 16), (1883648, 32), (1884160, 32), (1884672, 4), 
+(1885184, 4), (1885696, 4), (1886208, 4), (1886720, 8), (1887232, 8), (1887744, 
+16), (1888256, 32), (1888768, 64), (1889280, 40), (1889792, 768), (1890816, 
+192), (1891328, 16), (1891840, 16), (1892352, 32), (1892864, 64), (1893376, 
+272), (1893888, 16), (1894400, 2), (1894912, 8), (1895424, 16), (1895936, 16), 
+(1896448, 16), (1896960, 16), (1897472, 8), (1897984, 4), (1898496, 4), 
+(1899008, 16), (1899520, 32), (1900032, 32), (1900544, 16), (1901056, 16), 
+(1901568, 12), (1902080, 8224), (1910784, 12), (1911296, 32), (1911808, 12), 
+(1912320, 16), (1912832, 2), (1913344, 8), (1913856, 128), (1914368, 16), 
+(1914880, 16), (1915392, 16), (1915904, 8), (1916416, 4), (1916928, 4), 
+(1917440, 16), (1917952, 8), (1918464, 16), (1918976, 12), (1919488, 8208), 
+(1928192, 16), (1928704, 16), (1929216, 32), (1929728, 16), (1930240, 8208), 
+(1938944, 16), (1939456, 4), (1939968, 16), (1940480, 16), (1940992, 8), 
+(1941504, 8), (1942016, 8), (1942528, 8), (1943040, 8), (1943552, 272), 
+(1944064, 272), (1944576, 272), (1945088, 272), (1945600, 272), (1946112, 272), 
+(1946624, 16), (1947136, 16), (1947648, 8), (1948160, 16), (1948672, 12), 
+(1949184, 8208), (1957888, 16400), (1974784, 16), (1975296, 4), (1975808, 32), 
+(1976320, 32), (1976832, 16), (1977344, 16), (1977856, 12), (1978368, 8224), 
+(1987072, 32800), (2020352, 16), (2020864, 4), (2055168, 16), (2055680, 16), 
+(2056192, 608), (2057216, 608), (2058240, 16), (2058752, 16), (2059264, 8), 
+(2059776, 304), (2060288, 304), (2060800, 8), (2064384, 16), (2064896, 16), 
+(2065408, 16), (2065920, 16), (2066432, 16), (2066944, 64), (2067456, 16), 
+(2067968, 32), (2068480, 32), (2068992, 8), (2069504, 8), (2070016, 8), 
+(2070528, 8), (2071040, 16), (2071552, 16), (2072064, 32), (2072576, 32), 
+(2073088, 64), (2073600, 40), (2074112, 768), (2075136, 192), (2075648, 32), 
+(2076160, 8), (2076672, 32), (2077184, 64), (2077696, 272), (2078208, 16), 
+(2078720, 4), (2079232, 4), (2079744, 32), (2080256, 32), (2080768, 16), 
+(2081280, 32), (2081792, 20), (2082304, 32), (2082816, 32), (2083328, 32), 
+(2083840, 32), (2084352, 32), (2084864, 16), (2085376, 32), (2085888, 20), 
+(2086400, 32), (2086912, 20), (2087424, 32), (2087936, 20), (2088448, 32), 
+(2088960, 4), (2089472, 16), (2089984, 256), (2090496, 32), (2091008, 32), 
+(2091520, 32), (2092032, 16), (2092544, 4), (2093056, 4), (2093568, 32), 
+(2094080, 4), (2094592, 16), (2095104, 32), (2095616, 32), (2096128, 32), 
+(2096640, 32))
+  Copy device-322: 0x809c7e00000+2097152; live spans ((0, 875008), (1649664, 
+288288), (1938432, 32), (1938944, 8208), (1947648, 16), (1948160, 4), (1948672, 
+32), (1949184, 32), (1949696, 16), (1950208, 16), (1950720, 16), (1951232, 16), 
+(1951744, 16), (1952256, 272), (1952768, 272), (1953280, 272), (1953792, 272), 
+(1954304, 272), (1954816, 272), (1955328, 32), (1955840, 32), (1956352, 16), 
+(1956864, 32), (1957376, 20), (1957888, 16416), (1974784, 32800), (2008064, 32),
+(2008576, 4), (2009088, 32), (2009600, 32), (2010112, 16), (2010624, 32), 
+(2011136, 20), (2011648, 16416), (2028544, 32800), (2061824, 32), (2062336, 4))
+  Copy device-329: 0x80a08400000+2097152; live spans ((0, 619520), (646656, 32),
+(647168, 8), (647680, 608), (648704, 608), (649728, 16), (650240, 255488), 
+(908800, 32), (909312, 8), (909824, 32), (910336, 32), (910848, 8), (911360, 
+64), (911872, 16), (912384, 32), (912896, 32), (913408, 16), (913920, 16), 
+(914432, 16), (914944, 16), (915456, 32), (915968, 32), (916480, 64), (916992, 
+32), (917504, 64), (918016, 40), (918528, 768), (919552, 192), (920064, 8), 
+(920576, 24), (921088, 24), (921600, 64), (922112, 272), (922624, 8), (923136, 
+1), (923648, 4), (924160, 8), (924672, 8), (925184, 8), (925696, 8), (926208, 
+4), (926720, 4), (927232, 4), (927744, 8), (928256, 24), (928768, 24), (929280, 
+12), (929792, 8), (930304, 8), (930816, 4120), (935424, 8), (935936, 24), 
+(936448, 8), (936960, 8), (937472, 1), (937984, 4), (938496, 64), (939008, 8), 
+(939520, 8), (940032, 8), (940544, 4), (941056, 4), (941568, 4), (942080, 8), 
+(942592, 4), (943104, 8), (943616, 8), (944128, 4104), (948736, 8), (949248, 8),
+(949760, 32), (950272, 8), (950784, 8208), (959488, 16), (960000, 4), (960512, 
+8), (961024, 8), (961536, 4), (962048, 4), (962560, 4), (963072, 4), (963584, 
+4), (964096, 272), (964608, 272), (965120, 272), (965632, 272), (966144, 272), 
+(966656, 272), (967168, 8), (967680, 8), (968192, 4), (968704, 8), (969216, 8), 
+(969728, 4104), (974336, 8200), (983040, 8), (983552, 4), (1061888, 24), 
+(1062400, 24), (1062912, 12), (1063424, 8), (1063936, 8), (1064448, 24), 
+(1064960, 619520), (1994240, 28696), (2023424, 8), (2023936, 4), (2043904, 8), 
+(2044416, 24), (2044928, 456), (2045440, 456), (2045952, 12), (2046464, 8), 
+(2046976, 8), (2047488, 152), (2048000, 152), (2048512, 4), (2049024, 8), 
+(2049536, 8), (2050048, 152), (2050560, 152), (2051072, 4), (2054656, 8), 
+(2055168, 24), (2055680, 8), (2056192, 8), (2056704, 24), (2057216, 64), 
+(2057728, 16), (2058240, 24), (2058752, 24), (2059264, 4), (2059776, 4), 
+(2060288, 4), (2060800, 4), (2061312, 8), (2061824, 8), (2062336, 16), (2062848,
+32), (2063360, 64), (2063872, 40), (2064384, 768), (2065408, 192), (2065920, 8),
+(2066432, 16), (2066944, 16), (2067456, 64), (2067968, 272), (2068480, 8), 
+(2068992, 1), (2069504, 4), (2070016, 8), (2070528, 8), (2071040, 8), (2071552, 
+8), (2072064, 4), (2072576, 4), (2073088, 4), (2073600, 8), (2074112, 16), 
+(2074624, 16), (2075136, 8), (2075648, 8), (2076160, 8), (2076672, 4112), 
+(2081280, 8), (2081792, 16), (2082304, 8), (2082816, 8), (2083328, 1), (2083840,
+4), (2084352, 64), (2084864, 8), (2085376, 8), (2085888, 8), (2086400, 4), 
+(2086912, 4), (2087424, 4), (2087936, 8), (2088448, 4), (2088960, 8), (2089472, 
+8), (2089984, 4104), (2094592, 8), (2095104, 8), (2095616, 32), (2096128, 8), 
+(2096640, 16))
+  Copy device-330: 0x80a08600000+2097152; live spans ((0, 191744), (192000, 
+8208), (200704, 4), (201216, 8), (201728, 8), (202240, 4), (202752, 4), (203264,
+4), (203776, 4), (204288, 4), (204800, 272), (205312, 272), (205824, 272), 
+(206336, 272), (206848, 272), (207360, 272), (207872, 8), (208384, 8), (208896, 
+4), (209408, 8), (209920, 8), (210432, 4104), (215040, 8200), (223744, 8), 
+(224256, 4), (302592, 16), (303104, 16), (303616, 8), (304128, 8), (304640, 8), 
+(305152, 4112), (309760, 16400), (326656, 8), (327168, 4), (347136, 619520), 
+(1276416, 8), (1276928, 16), (1277440, 304), (1277952, 304), (1278464, 8), 
+(1278976, 8), (1279488, 8), (1280000, 152), (1280512, 152), (1281024, 4), 
+(1281536, 127744), (1412608, 8), (1413120, 16), (1413632, 8), (1414144, 8), 
+(1414656, 16), (1415168, 64), (1415680, 16), (1416192, 16), (1416704, 16), 
+(1417216, 4), (1417728, 4), (1418240, 4), (1418752, 4), (1419264, 8), (1419776, 
+8), (1420288, 16), (1420800, 32), (1421312, 64), (1421824, 40), (1422336, 768), 
+(1423360, 192), (1423872, 16), (1424384, 8), (1424896, 16), (1425408, 64), 
+(1425920, 272), (1426432, 16), (1426944, 2), (1427456, 8), (1427968, 16), 
+(1428480, 16), (1428992, 16), (1429504, 16), (1430016, 8), (1430528, 4), 
+(1431040, 4), (1431552, 16), (1432064, 16), (1432576, 16), (1433088, 8), 
+(1433600, 16), (1434112, 12), (1434624, 8208), (1443328, 12), (1443840, 16), 
+(1444352, 12), (1444864, 16), (1445376, 2), (1445888, 8), (1446400, 128), 
+(1446912, 16), (1447424, 16), (1447936, 16), (1448448, 8), (1448960, 4), 
+(1449472, 4), (1449984, 16), (1450496, 8), (1451008, 16), (1451520, 12), 
+(1452032, 8208), (1460736, 16), (1461248, 16), (1461760, 32), (1462272, 16), 
+(1462784, 8208), (1471488, 16), (1472000, 4), (1472512, 16), (1473024, 16), 
+(1473536, 8), (1474048, 8), (1474560, 8), (1475072, 8), (1475584, 8), (1476096, 
+272), (1476608, 272), (1477120, 272), (1477632, 272), (1478144, 272), (1478656, 
+272), (1479168, 16), (1479680, 16), (1480192, 8), (1480704, 16), (1481216, 12), 
+(1481728, 8208), (1490432, 16400), (1507328, 16), (1507840, 4), (1508352, 16), 
+(1508864, 16), (1509376, 8), (1509888, 16), (1510400, 12), (1510912, 8208), 
+(1519616, 16400), (1536512, 16), (1537024, 4), (1570304, 16), (1570816, 8), 
+(1571328, 304), (1571840, 304), (1572352, 8), (1572864, 127744), (1703936, 16), 
+(1704448, 8), (1704960, 16), (1705472, 16), (1705984, 8), (1706496, 64), 
+(1707008, 16), (1707520, 16), (1708032, 16), (1708544, 8), (1709056, 8), 
+(1709568, 8), (1710080, 8), (1710592, 16), (1711104, 16), (1711616, 32), 
+(1712128, 32), (1712640, 64), (1713152, 40), (1713664, 768), (1714688, 192), 
+(1715200, 8), (1715712, 8), (1716224, 8), (1716736, 64), (1717248, 272), 
+(1717760, 8), (1718272, 1), (1718784, 4), (1719296, 8), (1719808, 8), (1720320, 
+8), (1720832, 8), (1721344, 4), (1721856, 4), (1722368, 4), (1722880, 8), 
+(1723392, 8), (1723904, 8), (1724416, 4), (1724928, 8), (1725440, 8), (1725952, 
+4104), (1730560, 8), (1731072, 8), (1731584, 8), (1732096, 8), (1732608, 1), 
+(1733120, 4), (1733632, 64), (1734144, 8), (1734656, 8), (1735168, 8), (1735680,
+4), (1736192, 4), (1736704, 4), (1737216, 8), (1737728, 4), (1738240, 8), 
+(1738752, 8), (1739264, 4104), (1743872, 8), (1744384, 8), (1744896, 32), 
+(1745408, 8), (1745920, 8208), (1754624, 16), (1755136, 4), (1755648, 8), 
+(1756160, 8), (1756672, 4), (1757184, 4), (1757696, 4), (1758208, 4), (1758720, 
+4), (1759232, 272), (1759744, 272), (1760256, 272), (1760768, 272), (1761280, 
+272), (1761792, 272), (1762304, 8), (1762816, 8), (1763328, 4), (1763840, 8), 
+(1764352, 8), (1764864, 4104), (1769472, 8200), (1778176, 8), (1778688, 4), 
+(1779200, 8), (1779712, 8), (1780224, 4), (1780736, 8), (1781248, 8), (1781760, 
+4104), (1786368, 8200), (1795072, 8), (1795584, 4), (1814528, 8), (1815040, 8), 
+(1815552, 152), (1816064, 152), (1816576, 4), (1817088, 64000), (1884160, 8), 
+(1884672, 8), (1885184, 8), (1885696, 8), (1886208, 8), (1886720, 64), (1887232,
+16), (1887744, 8), (1888256, 8), (1888768, 4), (1889280, 4), (1889792, 4), 
+(1890304, 4), (1890816, 8), (1891328, 8), (1891840, 16), (1892352, 32), 
+(1892864, 64), (1893376, 40), (1893888, 768), (1894912, 192), (1895424, 32), 
+(1895936, 32), (1896448, 16), (1896960, 16), (1897472, 4), (1897984, 32784), 
+(1936384, 64), (1936896, 256), (1937408, 16), (1937920, 16), (1938432, 176), 
+(1938944, 176), (1939456, 16), (1939968, 16), (1940480, 16), (1940992, 16), 
+(1941504, 16), (1942016, 176), (1942528, 176), (1943040, 16), (1943552, 16), 
+(1944064, 16), (1944576, 16), (1945088, 16), (1945600, 176), (1946112, 176), 
+(1946624, 16), (1947136, 16), (1947648, 16), (1948160, 16), (1948672, 32), 
+(1949184, 16), (1949696, 16), (1950208, 4), (1950720, 16384), (2095104, 32), 
+(2095616, 128), (2096128, 16), (2096640, 16))
+  Copy device-336: 0x80a47800000+2097152; live spans ((0, 2013440), (2013696, 
+8), (2019328, 176), (2019840, 176), (2020352, 16), (2020864, 16), (2021376, 16),
+(2021888, 16), (2022400, 16), (2022912, 176), (2023424, 176), (2023936, 16), 
+(2024448, 16), (2024960, 16), (2025472, 16), (2025984, 16), (2026496, 176), 
+(2027008, 176), (2027520, 16), (2028032, 16), (2028544, 16), (2029056, 8), 
+(2029568, 32), (2030080, 16), (2030592, 16), (2031104, 4), (2031616, 8196), 
+(2045440, 32), (2045952, 128), (2046464, 16), (2046976, 16), (2047488, 176), 
+(2048000, 176), (2048512, 16), (2049024, 16), (2049536, 16), (2050048, 16), 
+(2050560, 16), (2051072, 176), (2051584, 176), (2052096, 16), (2052608, 16), 
+(2053120, 16), (2053632, 16), (2054144, 16), (2054656, 176), (2055168, 176), 
+(2055680, 16), (2056192, 16), (2056704, 16), (2057216, 32), (2057728, 32), 
+(2058240, 16), (2058752, 16), (2059264, 4), (2059776, 32784))
+  Copy device-344: 0x80a88000000+2097152; live spans ((1494528, 154880), 
+(1777664, 309764), (2093056, 176), (2093568, 176), (2094080, 16), (2094592, 16),
+(2095104, 16), (2095616, 176), (2096128, 176), (2096640, 16))
+  Copy device-350: 0x80ac7200000+2097152; live spans ((0, 619520),)
+  Omitted 2 unreachable allocations (98.0 MiB)
+  received rank 2 export: 0.28 GiB via agent-ring-tcp (32 streams, 1.59s, 1.51 
+Gbit/s)
+  received rank 3 export: 0.06 GiB via agent-ring-tcp (32 streams, 0.09s, 6.39 
+Gbit/s)
+  received rank 1 export: 0.06 GiB via agent-ring-tcp (32 streams, 0.08s, 7.05 
+Gbit/s)
+VRAM inventory at export (physical bytes; aliased storage counted once)
+Rank 0 / CUDA 0: 122,570.66 MiB used, 2,039.91 MiB free
+  Package fixed mappings: 48,482.00 MiB; kernel globals: 505.37 KiB
+  Retained storage: 48,482.49 MiB
+    Weights / numeric constants: 45,820.36 MiB
+      24,192.00 MiB  
+resources[0]<ModelWeights>.layers[*]<LayerWeights>.mlp<MoEWeights>.experts<Prepa
+redExperts>._impl<B12XFP4ExpertWeights>.w1_fp4 — 
+.venv/lib/python3.12/site-packages/flashinfer/experimental/b12x/moe/fused_moe/_i
+mpl.py:430
+      12,096.00 MiB  
+resources[0]<ModelWeights>.layers[*]<LayerWeights>.mlp<MoEWeights>.experts<Prepa
+redExperts>._impl<B12XFP4ExpertWeights>.w2_fp4 — 
+.venv/lib/python3.12/site-packages/flashinfer/experimental/b12x/moe/fused_moe/_i
+mpl.py:430
+      3,024.00 MiB  
+resources[0]<ModelWeights>.layers[*]<LayerWeights>.mlp<MoEWeights>.experts<Prepa
+redExperts>._impl<B12XFP4ExpertWeights>.w1_blockscale — 
+.venv/lib/python3.12/site-packages/flashinfer/experimental/b12x/moe/fused_moe/_i
+mpl.py:430
+      1,512.00 MiB  
+resources[0]<ModelWeights>.layers[*]<LayerWeights>.mlp<MoEWeights>.experts<Prepa
+redExperts>._impl<B12XFP4ExpertWeights>.w2_blockscale — 
+.venv/lib/python3.12/site-packages/flashinfer/experimental/b12x/moe/fused_moe/_i
+mpl.py:430
+      1,210.00 MiB  
+resources[8]['prefill4096']<PreparedDecoder>.embedding<PreparedEmbedding>.weight
+— ignition/components/embedding.py:11
+      3,786.36 MiB  in 152 other source groups
+    Disposable storage: 1,799.39 MiB
+      526.14 MiB  resources[10]<DecoderScratch>.mla<MLAScratch>.slab — 
+ignition/recipes/glm53/mla.py:33
+      132.00 MiB  resources[10]<DecoderScratch>.mla<MLAScratch>.records — 
+ignition/recipes/glm53/mla.py:33
+      128.00 MiB  
+resources[10]<DecoderScratch>.attention_hc<MHCScratch>.residual — 
+ignition/components/mhc.py:24
+      128.00 MiB  resources[10]<DecoderScratch>.mlp_hc<MHCScratch>.residual — 
+ignition/components/mhc.py:24
+      128.00 MiB  resources[10]<DecoderScratch>.residual — 
+ignition/recipes/glm53/stack.py:22
+      757.25 MiB  in 765 other source groups
+    Other owned tensors: 347.47 MiB
+      67.50 MiB  
+resources[0]<ModelWeights>.layers[*]<LayerWeights>.residual['hc_attn_fn'] — 
+ignition/recipes/glm53/weights.py:31
+      67.50 MiB  
+resources[0]<ModelWeights>.layers[*]<LayerWeights>.residual['hc_ffn_fn'] — 
+ignition/recipes/glm53/weights.py:31
+      32.00 MiB  
+resources[7]['prefill4096']<PreparedPrefill>.metadata<DraftMetadata>.hidden — 
+ignition/recipes/glm53/mtp.py:124
+      28.00 MiB  
+resources[7]['prefill3584']<PreparedPrefill>.metadata<DraftMetadata>.hidden — 
+ignition/recipes/glm53/mtp.py:124
+      24.00 MiB  
+resources[7]['prefill3072']<PreparedPrefill>.metadata<DraftMetadata>.hidden — 
+ignition/recipes/glm53/mtp.py:124
+      128.47 MiB  in 2112 other source groups
+    Operator scratch: 312.21 MiB
+      308.07 MiB  
+resources[7]['prefill4096']<PreparedPrefill>.absorb<PreparedMTP>.attention<Prepa
+redGlmMLA>.projections['qkv_a_proj']<QuantizedProjection>.workspace — 
+ignition/components/linear.py:75
+      2.57 MiB  
+resources[7]['speculative1x6']<PreparedRound>.draft<PreparedMTP>.moe<PreparedGlm
+Moe>.experts<PreparedRoutedExperts>.scratch — ignition/components/moe.py:95
+      1.57 MiB  
+resources[7]['speculative2x3']<PreparedRound>.draft<PreparedMTP>.moe<PreparedGlm
+Moe>.experts<PreparedRoutedExperts>.scratch — ignition/components/moe.py:95
+      1 B  
+resources[7]['speculative1x6']<PreparedRound>.kda_commit<PreparedKDACommit>.repl
+ay<PreparedKDAReplay>.binding<KdaCommitBinding>.scratch — 
+.venv/lib/python3.12/site-packages/flashinfer/experimental/b12x/sequence/gdn_dec
+ode/_commit.py:13
+    Unknown storage: 96.00 MiB
+      96.00 MiB  unattributed
+    Graph capture pool: 52.00 MiB
+      52.00 MiB  shared CUDA graph pool — ignition/preparation/capture.py
+    Allocator slack: 26.48 MiB
+      26.48 MiB  inactive blocks / alignment
+    Graph scratch pools: 25.50 MiB
+      11.36 MiB  
+resources[21]<SpeculativePreparation>.sampling_buffers<GraphBufferPool> — 
+ignition/preparation/scratch.py:315
+      2.95 MiB  resources[7]['speculative1x6']<PreparedRound>.probabilities — 
+ignition/recipes/glm53/speculative.py:159
+      2.95 MiB  
+resources[7]['speculative1x6']<PreparedRound>.sampling_scratch['target']['probab
+ilities'] — ignition/recipes/glm53/speculative.py:159
+      2.36 MiB  
+resources[7]['speculative1x6']<PreparedRound>.sampling_scratch['verify']['safe_t
+arget_probs'] — ignition/recipes/glm53/speculative.py:159
+      1.77 MiB  
+resources[7]['speculative1x6']<PreparedRound>.sampling_scratch['verify']['safe_d
+raft_probs'] — ignition/recipes/glm53/speculative.py:159
+      4.09 MiB  in 39 other source groups
+    Graph I/O / persistent state: 2.59 MiB
+      2.36 MiB  resources[4]<AdmissionBuffers>.admission_histogram — 
+ignition/components/sampling.py:155
+      75.62 KiB  resources[2]<DeviceRequestState>.grammar_mask — 
+ignition/components/sampling.py:60
+      75.62 KiB  resources[4]<AdmissionBuffers>.admission_grammar_mask — 
+ignition/components/sampling.py:155
+      32.00 KiB  resources[3]<BatchInputs>.token_ids — 
+ignition/recipes/glm53/batch.py:14
+      16.00 KiB  resources[21]<SpeculativePreparation>.draft_tables — 
+ignition/recipes/glm53/speculative.py:88
+      29.05 KiB  in 30 other source groups
+    Kernel globals: 505.37 KiB
+      100.00 KiB  module-97.precalc_xorwow_matrix
+      100.00 KiB  module-97.precalc_xorwow_offset_matrix
+      100.00 KiB  module-98.precalc_xorwow_matrix
+      100.00 KiB  module-98.precalc_xorwow_offset_matrix
+      2.25 KiB  module-97.mrg32k3aM1
+      103.12 KiB  in 3687 other source groups
+  Preparation-only storage: 784.13 MiB
+    Allocator slack: 400.00 MiB
+      400.00 MiB  inactive blocks / alignment
+    Preparation cache backing: 288.00 MiB
+      240.00 MiB  continuations — 
+ignition/preparation/package_storage.py:PackageStorage.device_allocate
+      2.00 MiB  kv-11-index — 
+ignition/preparation/package_storage.py:PackageStorage.device_allocate
+      2.00 MiB  kv-11-latent — 
+ignition/preparation/package_storage.py:PackageStorage.device_allocate
+      2.00 MiB  kv-15-index — 
+ignition/preparation/package_storage.py:PackageStorage.device_allocate
+      2.00 MiB  kv-15-latent — 
+ignition/preparation/package_storage.py:PackageStorage.device_allocate
+      40.00 MiB  in 20 other source groups
+    Unknown storage: 64.13 MiB
+      64.13 MiB  unattributed
+    Graph capture pool: 32.00 MiB
+      32.00 MiB  shared CUDA graph pool — ignition/preparation/capture.py
+  PyTorch allocated / reserved: 48,424.82 MiB / 48,914.00 MiB (overlaps storage 
+above)
+  Cache physically backed for preparation: 288.00 MiB; serving capacity is sized
+at load
+  Mapped host: 381.13 MiB; imported peers: 0 B (excluded from local VRAM)
+  Graphs: 57; kernels: 1584 in 1554 modules (219.17 MiB cubin data, not resident
+VRAM)
+  Device usage minus tracked physical storage: 73,304.04 MiB
+Rank 1 / CUDA 0: 118,521.00 MiB used, 6,089.79 MiB free
+  Package fixed mappings: 48,454.00 MiB; kernel globals: 505.37 KiB
+  Retained storage: 48,454.49 MiB
+    Weights / numeric constants: 45,820.36 MiB
+      24,192.00 MiB  
+resources[0]<ModelWeights>.layers[*]<LayerWeights>.mlp<MoEWeights>.experts<Prepa
+redExperts>._impl<B12XFP4ExpertWeights>.w1_fp4 — 
+.venv/lib/python3.12/site-packages/flashinfer/experimental/b12x/moe/fused_moe/_i
+mpl.py:430
+      12,096.00 MiB  
+resources[0]<ModelWeights>.layers[*]<LayerWeights>.mlp<MoEWeights>.experts<Prepa
+redExperts>._impl<B12XFP4ExpertWeights>.w2_fp4 — 
+.venv/lib/python3.12/site-packages/flashinfer/experimental/b12x/moe/fused_moe/_i
+mpl.py:430
+      3,024.00 MiB  
+resources[0]<ModelWeights>.layers[*]<LayerWeights>.mlp<MoEWeights>.experts<Prepa
+redExperts>._impl<B12XFP4ExpertWeights>.w1_blockscale — 
+.venv/lib/python3.12/site-packages/flashinfer/experimental/b12x/moe/fused_moe/_i
+mpl.py:430
+      1,512.00 MiB  
+resources[0]<ModelWeights>.layers[*]<LayerWeights>.mlp<MoEWeights>.experts<Prepa
+redExperts>._impl<B12XFP4ExpertWeights>.w2_blockscale — 
+.venv/lib/python3.12/site-packages/flashinfer/experimental/b12x/moe/fused_moe/_i
+mpl.py:430
+      1,210.00 MiB  
+resources[8]['prefill4096']<PreparedDecoder>.embedding<PreparedEmbedding>.weight
+— ignition/components/embedding.py:11
+      3,786.36 MiB  in 152 other source groups
+    Disposable storage: 1,769.57 MiB
+      526.14 MiB  resources[10]<DecoderScratch>.mla<MLAScratch>.slab — 
+ignition/recipes/glm53/mla.py:33
+      132.00 MiB  resources[10]<DecoderScratch>.mla<MLAScratch>.records — 
+ignition/recipes/glm53/mla.py:33
+      128.00 MiB  
+resources[10]<DecoderScratch>.attention_hc<MHCScratch>.residual — 
+ignition/components/mhc.py:24
+      128.00 MiB  resources[10]<DecoderScratch>.mlp_hc<MHCScratch>.residual — 
+ignition/components/mhc.py:24
+      128.00 MiB  resources[10]<DecoderScratch>.residual — 
+ignition/recipes/glm53/stack.py:22
+      727.43 MiB  in 557 other source groups
+    Other owned tensors: 347.47 MiB
+      67.50 MiB  
+resources[0]<ModelWeights>.layers[*]<LayerWeights>.residual['hc_attn_fn'] — 
+ignition/recipes/glm53/weights.py:31
+      67.50 MiB  
+resources[0]<ModelWeights>.layers[*]<LayerWeights>.residual['hc_ffn_fn'] — 
+ignition/recipes/glm53/weights.py:31
+      32.00 MiB  
+resources[7]['prefill4096']<PreparedPrefill>.metadata<DraftMetadata>.hidden — 
+ignition/recipes/glm53/mtp.py:124
+      28.00 MiB  
+resources[7]['prefill3584']<PreparedPrefill>.metadata<DraftMetadata>.hidden — 
+ignition/recipes/glm53/mtp.py:124
+      24.00 MiB  
+resources[7]['prefill3072']<PreparedPrefill>.metadata<DraftMetadata>.hidden — 
+ignition/recipes/glm53/mtp.py:124
+      128.47 MiB  in 2109 other source groups
+    Operator scratch: 312.21 MiB
+      308.07 MiB  
+resources[7]['prefill4096']<PreparedPrefill>.absorb<PreparedMTP>.attention<Prepa
+redGlmMLA>.projections['qkv_a_proj']<QuantizedProjection>.workspace — 
+ignition/components/linear.py:75
+      2.57 MiB  
+resources[7]['speculative1x6']<PreparedRound>.draft<PreparedMTP>.moe<PreparedGlm
+Moe>.experts<PreparedRoutedExperts>.scratch — ignition/components/moe.py:95
+      1.57 MiB  
+resources[7]['speculative2x3']<PreparedRound>.draft<PreparedMTP>.moe<PreparedGlm
+Moe>.experts<PreparedRoutedExperts>.scratch — ignition/components/moe.py:95
+      1 B  
+resources[7]['speculative1x6']<PreparedRound>.kda_commit<PreparedKDACommit>.repl
+ay<PreparedKDAReplay>.binding<KdaCommitBinding>.scratch — 
+.venv/lib/python3.12/site-packages/flashinfer/experimental/b12x/sequence/gdn_dec
+ode/_commit.py:13
+    Unknown storage: 96.00 MiB
+      96.00 MiB  unattributed
+    Graph capture pool: 52.00 MiB
+      52.00 MiB  shared CUDA graph pool — ignition/preparation/capture.py
+    Allocator slack: 28.30 MiB
+      28.30 MiB  inactive blocks / alignment
+    Graph scratch pools: 25.50 MiB
+      11.36 MiB  
+resources[21]<SpeculativePreparation>.sampling_buffers<GraphBufferPool> — 
+ignition/preparation/scratch.py:315
+      2.95 MiB  resources[7]['speculative1x6']<PreparedRound>.probabilities — 
+ignition/recipes/glm53/speculative.py:159
+      2.95 MiB  
+resources[7]['speculative1x6']<PreparedRound>.sampling_scratch['target']['probab
+ilities'] — ignition/recipes/glm53/speculative.py:159
+      2.36 MiB  
+resources[7]['speculative1x6']<PreparedRound>.sampling_scratch['verify']['safe_t
+arget_probs'] — ignition/recipes/glm53/speculative.py:159
+      1.77 MiB  
+resources[7]['speculative1x6']<PreparedRound>.sampling_scratch['verify']['safe_d
+raft_probs'] — ignition/recipes/glm53/speculative.py:159
+      4.09 MiB  in 36 other source groups
+    Graph I/O / persistent state: 2.59 MiB
+      2.36 MiB  resources[4]<AdmissionBuffers>.admission_histogram — 
+ignition/components/sampling.py:155
+      75.62 KiB  resources[2]<DeviceRequestState>.grammar_mask — 
+ignition/components/sampling.py:60
+      75.62 KiB  resources[4]<AdmissionBuffers>.admission_grammar_mask — 
+ignition/components/sampling.py:155
+      32.00 KiB  resources[3]<BatchInputs>.token_ids — 
+ignition/recipes/glm53/batch.py:14
+      16.00 KiB  resources[21]<SpeculativePreparation>.draft_tables — 
+ignition/recipes/glm53/speculative.py:88
+      29.05 KiB  in 30 other source groups
+    Kernel globals: 505.37 KiB
+      100.00 KiB  module-97.precalc_xorwow_matrix
+      100.00 KiB  module-97.precalc_xorwow_offset_matrix
+      100.00 KiB  module-98.precalc_xorwow_matrix
+      100.00 KiB  module-98.precalc_xorwow_offset_matrix
+      2.25 KiB  module-97.mrg32k3aM1
+      103.12 KiB  in 3687 other source groups
+  Preparation-only storage: 798.13 MiB
+    Allocator slack: 414.00 MiB
+      414.00 MiB  inactive blocks / alignment
+    Preparation cache backing: 288.00 MiB
+      240.00 MiB  continuations — 
+ignition/preparation/package_storage.py:PackageStorage.device_allocate
+      2.00 MiB  kv-11-index — 
+ignition/preparation/package_storage.py:PackageStorage.device_allocate
+      2.00 MiB  kv-11-latent — 
+ignition/preparation/package_storage.py:PackageStorage.device_allocate
+      2.00 MiB  kv-15-index — 
+ignition/preparation/package_storage.py:PackageStorage.device_allocate
+      2.00 MiB  kv-15-latent — 
+ignition/preparation/package_storage.py:PackageStorage.device_allocate
+      40.00 MiB  in 20 other source groups
+    Unknown storage: 64.13 MiB
+      64.13 MiB  unattributed
+    Graph capture pool: 32.00 MiB
+      32.00 MiB  shared CUDA graph pool — ignition/preparation/capture.py
+  PyTorch allocated / reserved: 48,394.10 MiB / 48,900.00 MiB (overlaps storage 
+above)
+  Cache physically backed for preparation: 288.00 MiB; serving capacity is sized
+at load
+  Mapped host: 381.13 MiB; imported peers: 0 B (excluded from local VRAM)
+  Graphs: 57; kernels: 1587 in 1557 modules (219.27 MiB cubin data, not resident
+VRAM)
+  Device usage minus tracked physical storage: 69,268.38 MiB
+Rank 2 / CUDA 0: 115,809.36 MiB used, 8,801.44 MiB free
+  Package fixed mappings: 48,454.00 MiB; kernel globals: 505.37 KiB
+  Retained storage: 48,454.49 MiB
+    Weights / numeric constants: 45,820.36 MiB
+      24,192.00 MiB  
+resources[0]<ModelWeights>.layers[*]<LayerWeights>.mlp<MoEWeights>.experts<Prepa
+redExperts>._impl<B12XFP4ExpertWeights>.w1_fp4 — 
+.venv/lib/python3.12/site-packages/flashinfer/experimental/b12x/moe/fused_moe/_i
+mpl.py:430
+      12,096.00 MiB  
+resources[0]<ModelWeights>.layers[*]<LayerWeights>.mlp<MoEWeights>.experts<Prepa
+redExperts>._impl<B12XFP4ExpertWeights>.w2_fp4 — 
+.venv/lib/python3.12/site-packages/flashinfer/experimental/b12x/moe/fused_moe/_i
+mpl.py:430
+      3,024.00 MiB  
+resources[0]<ModelWeights>.layers[*]<LayerWeights>.mlp<MoEWeights>.experts<Prepa
+redExperts>._impl<B12XFP4ExpertWeights>.w1_blockscale — 
+.venv/lib/python3.12/site-packages/flashinfer/experimental/b12x/moe/fused_moe/_i
+mpl.py:430
+      1,512.00 MiB  
+resources[0]<ModelWeights>.layers[*]<LayerWeights>.mlp<MoEWeights>.experts<Prepa
+redExperts>._impl<B12XFP4ExpertWeights>.w2_blockscale — 
+.venv/lib/python3.12/site-packages/flashinfer/experimental/b12x/moe/fused_moe/_i
+mpl.py:430
+      1,210.00 MiB  
+resources[8]['prefill4096']<PreparedDecoder>.embedding<PreparedEmbedding>.weight
+— ignition/components/embedding.py:11
+      3,786.36 MiB  in 152 other source groups
+    Disposable storage: 1,769.57 MiB
+      526.14 MiB  resources[10]<DecoderScratch>.mla<MLAScratch>.slab — 
+ignition/recipes/glm53/mla.py:33
+      132.00 MiB  resources[10]<DecoderScratch>.mla<MLAScratch>.records — 
+ignition/recipes/glm53/mla.py:33
+      128.00 MiB  
+resources[10]<DecoderScratch>.attention_hc<MHCScratch>.residual — 
+ignition/components/mhc.py:24
+      128.00 MiB  resources[10]<DecoderScratch>.mlp_hc<MHCScratch>.residual — 
+ignition/components/mhc.py:24
+      128.00 MiB  resources[10]<DecoderScratch>.residual — 
+ignition/recipes/glm53/stack.py:22
+      727.43 MiB  in 557 other source groups
+    Other owned tensors: 347.47 MiB
+      67.50 MiB  
+resources[0]<ModelWeights>.layers[*]<LayerWeights>.residual['hc_attn_fn'] — 
+ignition/recipes/glm53/weights.py:31
+      67.50 MiB  
+resources[0]<ModelWeights>.layers[*]<LayerWeights>.residual['hc_ffn_fn'] — 
+ignition/recipes/glm53/weights.py:31
+      32.00 MiB  
+resources[7]['prefill4096']<PreparedPrefill>.metadata<DraftMetadata>.hidden — 
+ignition/recipes/glm53/mtp.py:124
+      28.00 MiB  
+resources[7]['prefill3584']<PreparedPrefill>.metadata<DraftMetadata>.hidden — 
+ignition/recipes/glm53/mtp.py:124
+      24.00 MiB  
+resources[7]['prefill3072']<PreparedPrefill>.metadata<DraftMetadata>.hidden — 
+ignition/recipes/glm53/mtp.py:124
+      128.47 MiB  in 2109 other source groups
+    Operator scratch: 312.21 MiB
+      308.07 MiB  
+resources[7]['prefill4096']<PreparedPrefill>.absorb<PreparedMTP>.attention<Prepa
+redGlmMLA>.projections['qkv_a_proj']<QuantizedProjection>.workspace — 
+ignition/components/linear.py:75
+      2.57 MiB  
+resources[7]['speculative1x6']<PreparedRound>.draft<PreparedMTP>.moe<PreparedGlm
+Moe>.experts<PreparedRoutedExperts>.scratch — ignition/components/moe.py:95
+      1.57 MiB  
+resources[7]['speculative2x3']<PreparedRound>.draft<PreparedMTP>.moe<PreparedGlm
+Moe>.experts<PreparedRoutedExperts>.scratch — ignition/components/moe.py:95
+      1 B  
+resources[7]['speculative1x6']<PreparedRound>.kda_commit<PreparedKDACommit>.repl
+ay<PreparedKDAReplay>.binding<KdaCommitBinding>.scratch — 
+.venv/lib/python3.12/site-packages/flashinfer/experimental/b12x/sequence/gdn_dec
+ode/_commit.py:13
+    Unknown storage: 96.00 MiB
+      96.00 MiB  unattributed
+    Graph capture pool: 52.00 MiB
+      52.00 MiB  shared CUDA graph pool — ignition/preparation/capture.py
+    Allocator slack: 28.30 MiB
+      28.30 MiB  inactive blocks / alignment
+    Graph scratch pools: 25.50 MiB
+      11.36 MiB  
+resources[21]<SpeculativePreparation>.sampling_buffers<GraphBufferPool> — 
+ignition/preparation/scratch.py:315
+      2.95 MiB  resources[7]['speculative1x6']<PreparedRound>.probabilities — 
+ignition/recipes/glm53/speculative.py:159
+      2.95 MiB  
+resources[7]['speculative1x6']<PreparedRound>.sampling_scratch['target']['probab
+ilities'] — ignition/recipes/glm53/speculative.py:159
+      2.36 MiB  
+resources[7]['speculative1x6']<PreparedRound>.sampling_scratch['verify']['safe_t
+arget_probs'] — ignition/recipes/glm53/speculative.py:159
+      1.77 MiB  
+resources[7]['speculative1x6']<PreparedRound>.sampling_scratch['verify']['safe_d
+raft_probs'] — ignition/recipes/glm53/speculative.py:159
+      4.09 MiB  in 36 other source groups
+    Graph I/O / persistent state: 2.59 MiB
+      2.36 MiB  resources[4]<AdmissionBuffers>.admission_histogram — 
+ignition/components/sampling.py:155
+      75.62 KiB  resources[2]<DeviceRequestState>.grammar_mask — 
+ignition/components/sampling.py:60
+      75.62 KiB  resources[4]<AdmissionBuffers>.admission_grammar_mask — 
+ignition/components/sampling.py:155
+      32.00 KiB  resources[3]<BatchInputs>.token_ids — 
+ignition/recipes/glm53/batch.py:14
+      16.00 KiB  resources[21]<SpeculativePreparation>.draft_tables — 
+ignition/recipes/glm53/speculative.py:88
+      29.05 KiB  in 30 other source groups
+    Kernel globals: 505.37 KiB
+      100.00 KiB  module-97.precalc_xorwow_matrix
+      100.00 KiB  module-97.precalc_xorwow_offset_matrix
+      100.00 KiB  module-98.precalc_xorwow_matrix
+      100.00 KiB  module-98.precalc_xorwow_offset_matrix
+      2.25 KiB  module-97.mrg32k3aM1
+      103.12 KiB  in 3687 other source groups
+  Preparation-only storage: 798.13 MiB
+    Allocator slack: 414.00 MiB
+      414.00 MiB  inactive blocks / alignment
+    Preparation cache backing: 288.00 MiB
+      240.00 MiB  continuations — 
+ignition/preparation/package_storage.py:PackageStorage.device_allocate
+      2.00 MiB  kv-11-index — 
+ignition/preparation/package_storage.py:PackageStorage.device_allocate
+      2.00 MiB  kv-11-latent — 
+ignition/preparation/package_storage.py:PackageStorage.device_allocate
+      2.00 MiB  kv-15-index — 
+ignition/preparation/package_storage.py:PackageStorage.device_allocate
+      2.00 MiB  kv-15-latent — 
+ignition/preparation/package_storage.py:PackageStorage.device_allocate
+      40.00 MiB  in 20 other source groups
+    Unknown storage: 64.13 MiB
+      64.13 MiB  unattributed
+    Graph capture pool: 32.00 MiB
+      32.00 MiB  shared CUDA graph pool — ignition/preparation/capture.py
+  PyTorch allocated / reserved: 48,394.10 MiB / 48,900.00 MiB (overlaps storage 
+above)
+  Cache physically backed for preparation: 288.00 MiB; serving capacity is sized
+at load
+  Mapped host: 381.13 MiB; imported peers: 0 B (excluded from local VRAM)
+  Graphs: 57; kernels: 1587 in 1557 modules (219.24 MiB cubin data, not resident
+VRAM)
+  Device usage minus tracked physical storage: 66,556.74 MiB
+Rank 3 / CUDA 0: 116,861.65 MiB used, 7,749.14 MiB free
+  Package fixed mappings: 48,454.00 MiB; kernel globals: 505.37 KiB
+  Retained storage: 48,454.49 MiB
+    Weights / numeric constants: 45,820.36 MiB
+      24,192.00 MiB  
+resources[0]<ModelWeights>.layers[*]<LayerWeights>.mlp<MoEWeights>.experts<Prepa
+redExperts>._impl<B12XFP4ExpertWeights>.w1_fp4 — 
+.venv/lib/python3.12/site-packages/flashinfer/experimental/b12x/moe/fused_moe/_i
+mpl.py:430
+      12,096.00 MiB  
+resources[0]<ModelWeights>.layers[*]<LayerWeights>.mlp<MoEWeights>.experts<Prepa
+redExperts>._impl<B12XFP4ExpertWeights>.w2_fp4 — 
+.venv/lib/python3.12/site-packages/flashinfer/experimental/b12x/moe/fused_moe/_i
+mpl.py:430
+      3,024.00 MiB  
+resources[0]<ModelWeights>.layers[*]<LayerWeights>.mlp<MoEWeights>.experts<Prepa
+redExperts>._impl<B12XFP4ExpertWeights>.w1_blockscale — 
+.venv/lib/python3.12/site-packages/flashinfer/experimental/b12x/moe/fused_moe/_i
+mpl.py:430
+      1,512.00 MiB  
+resources[0]<ModelWeights>.layers[*]<LayerWeights>.mlp<MoEWeights>.experts<Prepa
+redExperts>._impl<B12XFP4ExpertWeights>.w2_blockscale — 
+.venv/lib/python3.12/site-packages/flashinfer/experimental/b12x/moe/fused_moe/_i
+mpl.py:430
+      1,210.00 MiB  
+resources[8]['prefill4096']<PreparedDecoder>.embedding<PreparedEmbedding>.weight
+— ignition/components/embedding.py:11
+      3,786.36 MiB  in 152 other source groups
+    Disposable storage: 1,769.57 MiB
+      526.14 MiB  resources[10]<DecoderScratch>.mla<MLAScratch>.slab — 
+ignition/recipes/glm53/mla.py:33
+      132.00 MiB  resources[10]<DecoderScratch>.mla<MLAScratch>.records — 
+ignition/recipes/glm53/mla.py:33
+      128.00 MiB  
+resources[10]<DecoderScratch>.attention_hc<MHCScratch>.residual — 
+ignition/components/mhc.py:24
+      128.00 MiB  resources[10]<DecoderScratch>.mlp_hc<MHCScratch>.residual — 
+ignition/components/mhc.py:24
+      128.00 MiB  resources[10]<DecoderScratch>.residual — 
+ignition/recipes/glm53/stack.py:22
+      727.43 MiB  in 557 other source groups
+    Other owned tensors: 347.47 MiB
+      67.50 MiB  
+resources[0]<ModelWeights>.layers[*]<LayerWeights>.residual['hc_attn_fn'] — 
+ignition/recipes/glm53/weights.py:31
+      67.50 MiB  
+resources[0]<ModelWeights>.layers[*]<LayerWeights>.residual['hc_ffn_fn'] — 
+ignition/recipes/glm53/weights.py:31
+      32.00 MiB  
+resources[7]['prefill4096']<PreparedPrefill>.metadata<DraftMetadata>.hidden — 
+ignition/recipes/glm53/mtp.py:124
+      28.00 MiB  
+resources[7]['prefill3584']<PreparedPrefill>.metadata<DraftMetadata>.hidden — 
+ignition/recipes/glm53/mtp.py:124
+      24.00 MiB  
+resources[7]['prefill3072']<PreparedPrefill>.metadata<DraftMetadata>.hidden — 
+ignition/recipes/glm53/mtp.py:124
+      128.47 MiB  in 2109 other source groups
+    Operator scratch: 312.21 MiB
+      308.07 MiB  
+resources[7]['prefill4096']<PreparedPrefill>.absorb<PreparedMTP>.attention<Prepa
+redGlmMLA>.projections['qkv_a_proj']<QuantizedProjection>.workspace — 
+ignition/components/linear.py:75
+      2.57 MiB  
+resources[7]['speculative1x6']<PreparedRound>.draft<PreparedMTP>.moe<PreparedGlm
+Moe>.experts<PreparedRoutedExperts>.scratch — ignition/components/moe.py:95
+      1.57 MiB  
+resources[7]['speculative2x3']<PreparedRound>.draft<PreparedMTP>.moe<PreparedGlm
+Moe>.experts<PreparedRoutedExperts>.scratch — ignition/components/moe.py:95
+      1 B  
+resources[7]['speculative1x6']<PreparedRound>.kda_commit<PreparedKDACommit>.repl
+ay<PreparedKDAReplay>.binding<KdaCommitBinding>.scratch — 
+.venv/lib/python3.12/site-packages/flashinfer/experimental/b12x/sequence/gdn_dec
+ode/_commit.py:13
+    Unknown storage: 96.00 MiB
+      96.00 MiB  unattributed
+    Graph capture pool: 52.00 MiB
+      52.00 MiB  shared CUDA graph pool — ignition/preparation/capture.py
+    Allocator slack: 28.30 MiB
+      28.30 MiB  inactive blocks / alignment
+    Graph scratch pools: 25.50 MiB
+      11.36 MiB  
+resources[21]<SpeculativePreparation>.sampling_buffers<GraphBufferPool> — 
+ignition/preparation/scratch.py:315
+      2.95 MiB  resources[7]['speculative1x6']<PreparedRound>.probabilities — 
+ignition/recipes/glm53/speculative.py:159
+      2.95 MiB  
+resources[7]['speculative1x6']<PreparedRound>.sampling_scratch['target']['probab
+ilities'] — ignition/recipes/glm53/speculative.py:159
+      2.36 MiB  
+resources[7]['speculative1x6']<PreparedRound>.sampling_scratch['verify']['safe_t
+arget_probs'] — ignition/recipes/glm53/speculative.py:159
+      1.77 MiB  
+resources[7]['speculative1x6']<PreparedRound>.sampling_scratch['verify']['safe_d
+raft_probs'] — ignition/recipes/glm53/speculative.py:159
+      4.09 MiB  in 36 other source groups
+    Graph I/O / persistent state: 2.59 MiB
+      2.36 MiB  resources[4]<AdmissionBuffers>.admission_histogram — 
+ignition/components/sampling.py:155
+      75.62 KiB  resources[2]<DeviceRequestState>.grammar_mask — 
+ignition/components/sampling.py:60
+      75.62 KiB  resources[4]<AdmissionBuffers>.admission_grammar_mask — 
+ignition/components/sampling.py:155
+      32.00 KiB  resources[3]<BatchInputs>.token_ids — 
+ignition/recipes/glm53/batch.py:14
+      16.00 KiB  resources[21]<SpeculativePreparation>.draft_tables — 
+ignition/recipes/glm53/speculative.py:88
+      29.05 KiB  in 30 other source groups
+    Kernel globals: 505.37 KiB
+      100.00 KiB  module-97.precalc_xorwow_matrix
+      100.00 KiB  module-97.precalc_xorwow_offset_matrix
+      100.00 KiB  module-98.precalc_xorwow_matrix
+      100.00 KiB  module-98.precalc_xorwow_offset_matrix
+      2.25 KiB  module-97.mrg32k3aM1
+      103.12 KiB  in 3687 other source groups
+  Preparation-only storage: 798.13 MiB
+    Allocator slack: 414.00 MiB
+      414.00 MiB  inactive blocks / alignment
+    Preparation cache backing: 288.00 MiB
+      240.00 MiB  continuations — 
+ignition/preparation/package_storage.py:PackageStorage.device_allocate
+      2.00 MiB  kv-11-index — 
+ignition/preparation/package_storage.py:PackageStorage.device_allocate
+      2.00 MiB  kv-11-latent — 
+ignition/preparation/package_storage.py:PackageStorage.device_allocate
+      2.00 MiB  kv-15-index — 
+ignition/preparation/package_storage.py:PackageStorage.device_allocate
+      2.00 MiB  kv-15-latent — 
+ignition/preparation/package_storage.py:PackageStorage.device_allocate
+      40.00 MiB  in 20 other source groups
+    Unknown storage: 64.13 MiB
+      64.13 MiB  unattributed
+    Graph capture pool: 32.00 MiB
+      32.00 MiB  shared CUDA graph pool — ignition/preparation/capture.py
+  PyTorch allocated / reserved: 48,394.10 MiB / 48,900.00 MiB (overlaps storage 
+above)
+  Cache physically backed for preparation: 288.00 MiB; serving capacity is sized
+at load
+  Mapped host: 381.13 MiB; imported peers: 0 B (excluded from local VRAM)
+  Graphs: 57; kernels: 1587 in 1557 modules (219.22 MiB cubin data, not resident
+VRAM)
+  Device usage minus tracked physical storage: 67,609.03 MiB
+Graph executable overhead, resident kernel code, untracked driver/library 
+allocations, and other processes are included in device usage but cannot be 
+separated by this snapshot.
+Shared scratch lists representative tensor owners; source lines identify owning 
+classes or closures.
+Scratch totals count reserved storage, including chunk padding; they do not 
+measure a peak of live values.
+[    OK    ] Export native packages.  /home/nvidia/erakhmatulin/flare-g…  821.6s
+Exported package: /home/nvidia/erakhmatulin/flare-glm53-ring-20261020/packages/glm53-merged-fixed-ring32-tp4-c4-mtp5.safetensors

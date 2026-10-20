@@ -1,0 +1,114 @@
+[rank 0 spark-1ae8] [ PENDING  ] Verify package.  0.0s
+[rank 0 spark-1ae8] [    OK    ] Verify package.  signatures  0.0s
+[rank 0 spark-1ae8] [ PENDING  ] Verify stored data.  0.0s
+[rank 3 localhost] [ PENDING  ] Verify package.  0.0s
+[rank 3 localhost] [    OK    ] Verify package.  signatures  0.0s
+[rank 3 localhost] [ PENDING  ] Verify stored data.  0.0s
+[rank 3 localhost] [    OK    ] Verify stored data.  stored-data contents  20.9s
+[rank 3 localhost] [ PENDING  ] Join rank zero.  0.0s
+[rank 1 spark-1afa] [ PENDING  ] Verify package.  0.0s
+[rank 1 spark-1afa] [    OK    ] Verify package.  signatures  0.0s
+[rank 1 spark-1afa] [ PENDING  ] Verify stored data.  0.0s
+[rank 1 spark-1afa] [    OK    ] Verify stored data.  stored-data contents  21.2s
+[rank 1 spark-1afa] [ PENDING  ] Join rank zero.  0.0s
+[rank 2 spark-1b6f] [ PENDING  ] Verify package.  0.0s
+[rank 2 spark-1b6f] [    OK    ] Verify package.  signatures  0.0s
+[rank 2 spark-1b6f] [ PENDING  ] Verify stored data.  0.0s
+[rank 2 spark-1b6f] [    OK    ] Verify stored data.  stored-data contents  21.2s
+[rank 2 spark-1b6f] [ PENDING  ] Join rank zero.  0.0s
+[rank 0 spark-1ae8] [    OK    ] Verify stored data.  stored-data contents  235.0s
+[rank 0 spark-1ae8] [ PENDING  ] Wait for tensor-parallel hosts.  0.0s
+[rank 0 spark-1ae8] Rank 2 joined
+[rank 0 spark-1ae8] Rank 1 joined
+[rank 2 spark-1b6f] [    OK    ] Join rank zero.  rank 2 of 4 at 10.137.203.173:29800  213.8s
+[rank 2 spark-1b6f] [ PENDING  ] Prepare model.  0.0s
+[rank 1 spark-1afa] [    OK    ] Join rank zero.  rank 1 of 4 at 10.137.203.173:29800  213.8s
+[rank 1 spark-1afa] [ PENDING  ] Prepare model.  0.0s
+[rank 1 spark-1afa] [    OK    ] Prepare model.  1 rank  0.0s
+[rank 1 spark-1afa] [ PENDING  ] Initialize GPU.  0.0s
+[rank 2 spark-1b6f] [    OK    ] Prepare model.  1 rank  0.0s
+[rank 2 spark-1b6f] [ PENDING  ] Initialize GPU.  0.0s
+[rank 0 spark-1ae8] Rank 3 joined
+[rank 0 spark-1ae8] [    OK    ] Wait for tensor-parallel hosts.  3 peer ranks at 0.0.0.0:29800  0.2s
+[rank 0 spark-1ae8] [ PENDING  ] Prepare model.  0.0s
+[rank 3 localhost] [    OK    ] Join rank zero.  rank 3 of 4 at 10.137.203.173:29800  214.2s
+[rank 3 localhost] [ PENDING  ] Prepare model.  0.0s
+[rank 3 localhost] [    OK    ] Prepare model.  1 rank  0.0s
+[rank 3 localhost] [ PENDING  ] Initialize GPU.  0.0s
+[rank 0 spark-1ae8] [    OK    ] Prepare model.  1 rank  0.0s
+[rank 0 spark-1ae8] [ PENDING  ] Initialize GPU.  0.0s
+[rank 1 spark-1afa] [    OK    ] Initialize GPU.  GPU 0 · SM121  0.3s
+[rank 1 spark-1afa] [ PENDING  ] Allocate model memory.  0.0s
+[rank 2 spark-1b6f] [    OK    ] Initialize GPU.  GPU 0 · SM121  0.3s
+[rank 2 spark-1b6f] [ PENDING  ] Allocate model memory.  0.0s
+[rank 3 localhost] [    OK    ] Initialize GPU.  GPU 0 · SM121  0.3s
+[rank 3 localhost] [ PENDING  ] Allocate model memory.  0.0s
+[rank 0 spark-1ae8] [    OK    ] Initialize GPU.  GPU 0 · SM121  0.4s
+[rank 0 spark-1ae8] [ PENDING  ] Allocate model memory.  0.0s
+[rank 2 spark-1b6f] [    OK    ] Allocate model memory.  47.3 GiB GPU · 0.4 GiB host  2.2s
+[rank 2 spark-1b6f] [ PENDING  ] Load weights.  0.0s
+[rank 0 spark-1ae8] [    OK    ] Allocate model memory.  47.3 GiB GPU · 0.4 GiB host  2.6s
+[rank 0 spark-1ae8] [ PENDING  ] Load weights.  0.0s
+[rank 3 localhost] [    OK    ] Allocate model memory.  47.3 GiB GPU · 0.4 GiB host  3.5s
+[rank 3 localhost] [ PENDING  ] Load weights.  0.0s
+[rank 1 spark-1afa] [    OK    ] Allocate model memory.  47.3 GiB GPU · 0.4 GiB host  3.9s
+[rank 1 spark-1afa] [ PENDING  ] Load weights.  0.0s
+[rank 2 spark-1b6f] [    OK    ] Load weights.  44.9 GiB  4.5s
+[rank 2 spark-1b6f] [ PENDING  ] Prepare kernels.  0.0s
+[rank 2 spark-1b6f] [    OK    ] Prepare kernels.  1376 kernels  0.8s
+[rank 2 spark-1b6f] [ PENDING  ] Prepare execution.  0.0s
+[rank 0 spark-1ae8] [    OK    ] Load weights.  44.9 GiB  4.9s
+[rank 0 spark-1ae8] [ PENDING  ] Prepare kernels.  0.0s
+[rank 2 spark-1b6f] [    OK    ] Prepare execution.  concurrency 4  0.5s
+[rank 1 spark-1afa] [    OK    ] Load weights.  44.9 GiB  4.3s
+[rank 1 spark-1afa] [ PENDING  ] Prepare kernels.  0.0s
+[rank 3 localhost] [    OK    ] Load weights.  44.9 GiB  4.9s
+[rank 3 localhost] [ PENDING  ] Prepare kernels.  0.0s
+[rank 0 spark-1ae8] [    OK    ] Prepare kernels.  1376 kernels  1.0s
+[rank 0 spark-1ae8] [ PENDING  ] Prepare execution.  0.0s
+[rank 1 spark-1afa] [    OK    ] Prepare kernels.  1376 kernels  0.5s
+[rank 1 spark-1afa] [ PENDING  ] Prepare execution.  0.0s
+[rank 1 spark-1afa] [    OK    ] Prepare execution.  concurrency 4  0.4s
+[rank 0 spark-1ae8] [    OK    ] Prepare execution.  concurrency 4  0.4s
+[rank 3 localhost] [    OK    ] Prepare kernels.  1376 kernels  0.9s
+[rank 3 localhost] [ PENDING  ] Prepare execution.  0.0s
+[rank 3 localhost] [    OK    ] Prepare execution.  concurrency 4  0.5s
+[rank 0 spark-1ae8] [ PENDING  ] Plan cache.  0.0s
+[rank 0 spark-1ae8] [    OK    ] Plan cache.  per GPU: 49.54 GiB loaded · 55.92 GiB cache budget · reserve 4GiB  0.0s
+[rank 0 spark-1ae8] [ PENDING  ] Allocate cache.  0.0s
+[rank 3 localhost] [ PENDING  ] Plan cache.  0.0s
+[rank 3 localhost] [    OK    ] Plan cache.  per GPU: 49.45 GiB loaded · 56.07 GiB cache budget · reserve 4GiB  0.0s
+[rank 3 localhost] [ PENDING  ] Allocate cache.  0.0s
+[rank 2 spark-1b6f] [ PENDING  ] Plan cache.  0.0s
+[rank 2 spark-1b6f] [    OK    ] Plan cache.  per GPU: 49.44 GiB loaded · 56.14 GiB cache budget · reserve 4GiB  0.0s
+[rank 2 spark-1b6f] [ PENDING  ] Allocate cache.  0.0s
+[rank 1 spark-1afa] [ PENDING  ] Plan cache.  0.0s
+[rank 1 spark-1afa] [    OK    ] Plan cache.  per GPU: 48.72 GiB loaded · 56.03 GiB cache budget · reserve 4GiB  0.0s
+[rank 1 spark-1afa] [ PENDING  ] Allocate cache.  0.0s
+[rank 2 spark-1b6f] [    OK    ] Allocate cache.  55.9 GiB · 35539968 KV tokens · 32 shared snapshot slots · limited by memory  2.3s
+[rank 2 spark-1b6f] [ PENDING  ] Connect RoCE transport.  0.0s
+[rank 0 spark-1ae8] [    OK    ] Allocate cache.  55.9 GiB · 35539968 KV tokens · 32 shared snapshot slots · limited by memory  2.3s
+[rank 0 spark-1ae8] [ PENDING  ] Read model configuration.  0.0s
+[rank 0 spark-1ae8] [    OK    ] Read model configuration.  nvidia/GLM-5.3-Flash-FP4-Local  0.0s
+[rank 0 spark-1ae8] [ PENDING  ] Load tokenizer.  0.0s
+[rank 0 spark-1ae8] [ PENDING  ] Connect RoCE transport.  0.0s
+[rank 3 localhost] [    OK    ] Allocate cache.  55.9 GiB · 35539968 KV tokens · 32 shared snapshot slots · limited by memory  2.4s
+[rank 3 localhost] [ PENDING  ] Connect RoCE transport.  0.0s
+[rank 1 spark-1afa] [    OK    ] Allocate cache.  55.9 GiB · 35539968 KV tokens · 32 shared snapshot slots · limited by memory  2.7s
+[rank 1 spark-1afa] [ PENDING  ] Connect RoCE transport.  0.0s
+[rank 0 spark-1ae8] [    OK    ] Connect RoCE transport.  2 rails per neighbor (experimental CPU relay ring) over roceP2p1s0f0,roceP2p1s0f1,rocep1s0f0,rocep1s0f1  0.6s
+[rank 1 spark-1afa] [    OK    ] Connect RoCE transport.  2 rails per neighbor (experimental CPU relay ring) over roceP2p1s0f0,roceP2p1s0f1,rocep1s0f0,rocep1s0f1  0.2s
+[rank 1 spark-1afa] Serving rank 1 of 4 for rank zero at 10.137.203.173:29800
+[rank 3 localhost] [    OK    ] Connect RoCE transport.  2 rails per neighbor (experimental CPU relay ring) over roceP2p1s0f0,roceP2p1s0f1,rocep1s0f0,rocep1s0f1  0.5s
+[rank 3 localhost] Serving rank 3 of 4 for rank zero at 10.137.203.173:29800
+[rank 2 spark-1b6f] [    OK    ] Connect RoCE transport.  2 rails per neighbor (experimental CPU relay ring) over roceP2p1s0f0,roceP2p1s0f1,rocep1s0f0,rocep1s0f1  0.6s
+[rank 2 spark-1b6f] Serving rank 2 of 4 for rank zero at 10.137.203.173:29800
+[rank 0 spark-1ae8] [    OK    ] Load tokenizer.  154880 token vocabulary  1.0s
+[rank 0 spark-1ae8] [ PENDING  ] Start server.  0.0s
+[rank 0 spark-1ae8] [    OK    ] Start server.  http://127.0.0.1:8001 · 1048576 tokens/request  0.6s
+[rank 0 spark-1ae8] [ PENDING  ] Shut down server.  0.0s
+[rank 0 spark-1ae8] [    OK    ] Shut down server.  1.5s
+[rank 2 spark-1b6f] exited with status 0
+[rank 0 spark-1ae8] exited with status 0
+[rank 3 localhost] exited with status 0
+[rank 1 spark-1afa] exited with status 0

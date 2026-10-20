@@ -1,0 +1,24 @@
+placement of glm53-latest (gb10, 4 hosts):
+rank 0 on spark-1ae8: gpu 0 NVIDIA GB10 (cached)
+rank 1 on spark-1afa: gpu 0 NVIDIA GB10 (not cached)
+rank 2 on spark-1b6f: gpu 0 NVIDIA GB10 (not cached)
+rank 3 on localhost: gpu 0 NVIDIA GB10 (not cached)
+group glm53-latest-20261020T234420Z-42d7: 4 ranks, rendezvous 10.137.203.173:29800
+  rank 0 on spark-1ae8: gpu 0 NVIDIA GB10
+  rank 1 on spark-1afa: gpu 0 NVIDIA GB10
+  rank 2 on spark-1b6f: gpu 0 NVIDIA GB10
+  rank 3 on localhost: gpu 0 NVIDIA GB10
+spark-1ae8: received flare executable flare-58318f86f145e50ad0f26f16
+spark-1afa: received flare executable flare-58318f86f145e50ad0f26f16
+spark-1b6f: received flare executable flare-58318f86f145e50ad0f26f16
+localhost: received flare executable flare-58318f86f145e50ad0f26f16
+localhost: fetching 0.3 GiB from spark-1ae8, then verifying
+spark-1b6f: fetching 0.3 GiB from spark-1ae8, then verifying
+spark-1afa: fetching 0.3 GiB from spark-1ae8, then verifying
+localhost: received and verified 0.3 GiB
+spark-1afa: received and verified 0.3 GiB
+spark-1b6f: received and verified 0.3 GiB
+group glm53-latest-20261020T234420Z-42d7 started; once loaded, rank zero on spark-1ae8 serves http://127.0.0.1:8001
+`flare orbit attach glm53-latest` follows its output; `flare orbit stop glm53-latest` stops it
+{"stage": "orbit-started", "seconds": 62.218761271913536}
+{"stage": "http-ready", "orbit_seconds": 62.218761271913536, "ready_seconds": 328.40111763600726, "health": {"status": "ok"}}

@@ -1,0 +1,13 @@
+ 0 correct   completion_tokens=159 'is **2U2GYCZF**, and the record written immediately before the line stating it is **Record 198**.\n\nAnswer: 2U2GYCZF, 198'
+ 1 correct   completion_tokens=141 'n Record 198 and Record 199 — meaning Record 198 was the record written immediately before the line containing the code.'
+ 2 correct   completion_tokens=102 '2U2GYCZF, 198'
+3 correct of 3 (answer 2U2GYCZF, 198) in 21.4s
+speculative rounds by batch x width: 1x3:149; 0 of 149 in graphs above 16 query rows
+Exact prior requests verified: cold {'correct': 3}
+ 0 correct   completion_tokens=189 ') appears immediately after Record 198 and before Record 199, so the record written just before that line is Record 198.'
+ 1 correct   completion_tokens=264 'or is with or by that at from.") and Record 199, so Record 198 was written immediately before the line stating the code.'
+ 2 correct   completion_tokens=173 'is line appears between Record 198 and Record 199, so the record immediately before it is Record 198.\n\n**2U2GYCZF, 198**'
+ 3 correct   completion_tokens=191 'The vault access code is **2U2GYCZF**, and the record immediately before that line is **Record 198**.\n\n**2U2GYCZF, 198**'
+4 correct of 4 (answer 2U2GYCZF, 198) in 16.4s
+speculative rounds by batch x width: 1x1:72 1x3:1 2x1:1 2x2:1 4x1:188; 0 of 263 in graphs above 16 query rows
+Exact prior requests verified: cached {'correct': 4}

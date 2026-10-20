@@ -1,0 +1,23 @@
+	Command being timed: "/bin/bash /home/nvidia/erakhmatulin/flare-glm53-ring-20261020/setup/prepare-latest.sh"
+	User time (seconds): 628.83
+	System time (seconds): 166.40
+	Percent of CPU this job got: 61%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 21:26.16
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 8432048
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 31
+	Minor (reclaiming a frame) page faults: 6341745
+	Voluntary context switches: 8108373
+	Involuntary context switches: 31034
+	Swaps: 0
+	File system inputs: 78304072
+	File system outputs: 2396664
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
