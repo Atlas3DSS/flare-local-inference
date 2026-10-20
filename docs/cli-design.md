@@ -125,9 +125,11 @@ defaulting to `~/.config/flare/orbit.toml` and
 flags of `flare run` and applies them to every rank; `--host`, `--port`,
 `--served-model-name`, `--scheduler-policy`, and `--api-key-file` apply to rank
 zero. `--api-key-file` names a file rank zero must be able to read; Orbit does
-not upload it. Package inputs are controller-local files or
-`NODE:/absolute/path` on a paired node. Download Hugging Face packages with
-`flare download` first, then supply the returned path.
+not upload it. Package inputs are Hugging Face repositories
+`ORG/NAME[@REVISION]`, controller-local files, or `NODE:/absolute/path` on a
+paired node. Orbit downloads repository packages on a candidate node and
+verifies their publisher on the controller. Download flags apply to that
+node's cache; `--token-file` is read on the controller.
 
 Ranks use each node's installed agent executable by default. An explicit
 `--executable PATH`, or a saved group's override, uploads the chosen build.

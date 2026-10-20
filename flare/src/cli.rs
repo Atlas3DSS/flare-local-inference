@@ -41,7 +41,7 @@ pub enum Command {
     },
 }
 
-#[derive(Debug, Args, Default, Clone)]
+#[derive(Debug, Args, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct HubOptions {
     /// Hub revision; defaults to gb10 or gb202 detected from the selected GPUs.
     #[arg(long, value_name = "REVISION", help_heading = "Download options")]
@@ -292,7 +292,7 @@ pub enum ControllersCommand {
 #[derive(Debug, Args)]
 #[command(args_override_self = true)]
 pub struct OrbitRun {
-    /// A local package path or NODE:/absolute/path on a node; omitted when --name names a
+    /// A Hugging Face repository, local package path, or NODE:/absolute/path; omitted when --name names a
     /// [[group]] of the orbit file, which supplies it.
     #[arg(value_name = "PACKAGE")]
     pub package: Option<String>,

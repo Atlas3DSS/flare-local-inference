@@ -108,6 +108,20 @@ fn choose_file(files: impl IntoIterator<Item = String>, requested: Option<&str>)
 }
 
 pub fn download(source: &str, options: &HubOptions, gpu_count: usize) -> Result<PathBuf> {
+    let access_token = if options.offline {
+        None
+    } else {
+        token(options)?
+    };
+    download_with_token(source, options, gpu_count, access_token)
+}
+
+pub(crate) fn download_with_token(
+    source: &str,
+    options: &HubOptions,
+    gpu_count: usize,
+    access_token: Option<String>,
+) -> Result<PathBuf> {
     let (id, given_revision) = repository(source)?;
     let revision = match options.revision.as_deref().or(given_revision) {
         Some(revision) => revision.to_owned(),
@@ -128,7 +142,7 @@ pub fn download(source: &str, options: &HubOptions, gpu_count: usize) -> Result<
         return cached(&cache, &repo, options.filename.as_deref());
     }
     let api = ApiBuilder::from_cache(cache.clone())
-        .with_token(token(options)?)
+        .with_token(access_token)
         .with_endpoint("https://huggingface.co".into())
         .with_progress(std::io::stderr().is_terminal())
         .with_retries(3)
@@ -385,7 +399,7 @@ fn collect_files(root: &Path, directory: &Path, files: &mut Vec<String>) -> Resu
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::{
         io::{BufRead, BufReader, Write},
@@ -396,7 +410,7 @@ mod tests {
 
     const COMMIT: &str = "0123456789012345678901234567890123456789";
 
-    fn fixture(companions: &[&str]) -> Vec<u8> {
+    pub(crate) fn fixture(companions: &[&str]) -> Vec<u8> {
         fn bytes(field: u8, body: &[u8]) -> Vec<u8> {
             let mut out = vec![field * 8 + 2];
             let mut n = body.len();

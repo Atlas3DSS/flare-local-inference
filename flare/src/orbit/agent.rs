@@ -59,6 +59,27 @@ impl Hello {
     }
 }
 
+/// A repository download on the node, using a controller-resolved revision and access token.
+#[derive(Serialize, Deserialize)]
+pub struct DownloadRequest {
+    pub source: String,
+    pub options: crate::cli::HubOptions,
+    pub access_token: Option<String>,
+}
+
+fn download(request: DownloadRequest) -> Result<Vec<u8>, Failure> {
+    if request.options.revision.is_none() || request.options.token_file.is_some() {
+        return Err(
+            "DOWNLOAD requires an explicit revision; token-file paths stay on the controller"
+                .into(),
+        );
+    }
+    let path =
+        crate::hub::download_with_token(&request.source, &request.options, 0, request.access_token)
+            .map_err(|e| e.to_string())?;
+    Ok(serde_json::to_vec(&json!({"path": path}))?)
+}
+
 /// Exchange HELLO frames: the initiator sends first. The peer's HELLO must name the key that
 /// authenticated the session and speak the same protocol.
 pub fn exchange_hello(session: &mut Session, mine: &Hello) -> Result<Hello, Failure> {
@@ -654,6 +675,10 @@ fn session(agent: &Arc<Agent>, stream: TcpStream) -> Result<(), Failure> {
             frame::STAT => {
                 let request = json_body(&mut session, length)?;
                 stat(&request)
+            }
+            frame::DOWNLOAD => {
+                let request = serde_json::from_value(json_body(&mut session, length)?)?;
+                download(request)
             }
             _ => Err(format!("unknown request {tag}").into()),
         };
@@ -1370,6 +1395,37 @@ pub mod tests {
     use super::*;
     use crate::orbit::grant::{ControllerKey, ControllerSet, Member, Package, Source};
     use std::net::TcpListener;
+
+    #[test]
+    fn repository_downloads_require_pairing_and_resolve_on_the_node() {
+        let harness = harness(73);
+        let cache = harness.temp.path().join("hub");
+        let commit = "0123456789012345678901234567890123456789";
+        let snapshot = cache.join("models--owner--model/snapshots").join(commit);
+        fs::create_dir_all(&snapshot).unwrap();
+        let primary = snapshot.join("model.safetensors");
+        fs::write(&primary, crate::hub::tests::fixture(&[])).unwrap();
+        let request = serde_json::to_value(DownloadRequest {
+            source: "owner/model".into(),
+            options: crate::cli::HubOptions {
+                revision: Some(commit.into()),
+                cache_dir: Some(cache),
+                offline: true,
+                ..Default::default()
+            },
+            access_token: None,
+        })
+        .unwrap();
+        let mut unauthorized = connect(&harness, &harness.controller);
+        assert!(unauthorized.request(frame::DOWNLOAD, &request).is_err());
+        let mut session = pair_accept_first(&harness);
+        let reply: Value =
+            serde_json::from_slice(&session.request(frame::DOWNLOAD, &request).unwrap()).unwrap();
+        assert_eq!(reply["path"], primary.to_str().unwrap());
+        let mut invalid = request;
+        invalid["options"]["token_file"] = json!("/node/secret");
+        assert!(session.request(frame::DOWNLOAD, &invalid).is_err());
+    }
 
     #[test]
     fn package_stat_rejects_a_nonregular_primary_before_reading_metadata() {

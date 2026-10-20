@@ -124,22 +124,26 @@ or a key filename. See [controller-set management](orbit.md#controller-set).
 
 ## Package sources
 
-Orbit accepts a local primary path or `NODE:/absolute/path`, where NODE is a
-paired node's name. Use a path on the intended rank-zero host to keep the full
-package off the controller. A source node reads that package in place; other
-hosts receive their required data through the agents.
+Orbit accepts a Hugging Face repository `ORG/NAME[@REVISION]`, a local primary
+path, or `NODE:/absolute/path`, where NODE is a paired node's name. Repository
+packages download on a candidate node, keeping the full package off the
+controller. A source node reads its package in place; other hosts receive
+their required data through the agents.
 
-For a package published on Hugging Face, run the download on the source host:
+For a package published on Hugging Face, launch from its repository:
 
 ```sh
-flare download local-inference-lab/Qwen3.8-Flash-Next-FLARE --revision gb10
+flare orbit run local-inference-lab/Qwen3.8-Flash-Next-FLARE --revision gb10
 ```
 
 If the revision contains several primary files, select the multi-host package
-with `--filename FILE`. The command prints its primary path in the Hugging Face
-cache. Use that exact path as `NODE:/absolute/path` in Orbit. `gb10` selects the
-Spark hardware revision even when downloading from a controller without a GPU.
-Orbit does not resolve Hugging Face repository IDs directly.
+with `--filename FILE`. `gb10` selects the Spark hardware revision even from
+a controller without a GPU. Without an explicit revision, Orbit infers one
+from available candidate GPUs and refuses ambiguous mixed hardware.
+`--offline` and `--cache-dir` apply to the downloading node; `--token-file`
+is read on the controller and its token travels through the encrypted session.
+To download on a particular source host before launching, run `flare download`
+there and pass its returned primary path as `NODE:/absolute/path`.
 
 Downloads reuse the Hugging Face cache. Keep the primary and its companion
 filenames and symlink targets intact. To inspect the package's rank count and
@@ -331,7 +335,7 @@ Orbit groups; file distribution and process management belong to the operator.
 | Agent protocol mismatch | Update controller and agents to compatible protocol versions. |
 | Agent does not advertise an installed executable | Update the agent with `flare agent install`, or supply a node-compatible `--executable PATH`. |
 | No eligible GPU or GPU held by a group | Inspect `orbit status`; stop the owning group or select other candidates. |
-| `cannot access package` | Supply a local primary or `NODE:/absolute/path`; download repository references first. |
+| `cannot access package` | Check the local primary or `NODE:/absolute/path`; repository inputs use `ORG/NAME[@REVISION]`. |
 | `/health` unavailable after `--detach` | Follow startup logs; check rank-zero bind address, port, and model-loading progress. |
 | Preparation authentication failed | Identical private checkpoint-token contents on every preparation host. |
 | Checkpoint source changed | Keep source checkpoint files unchanged through loading. |

@@ -792,10 +792,7 @@ impl Controller {
             if cluster.is_some() {
                 label.clone()
             } else {
-                Path::new(&package)
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "group".into())
+                default_group_name(&package)
             }
         });
         let mut serving = spec.as_ref().map_or_else(Vec::new, |s| s.serving.clone());
@@ -835,7 +832,12 @@ impl Controller {
             }
         }
         let executable = read_executable(options.executable.as_deref())?;
-        let resolved = self.resolve_package(&package, &mut options.run_args, verify_weights)?;
+        let repository = crate::hub::is_repository(Path::new(&package));
+        let resolved = if repository {
+            None
+        } else {
+            Some(self.resolve_package(&package, &mut options.run_args, verify_weights)?)
+        };
 
         // The banner circles while the nodes are read and the group placed; nothing else is
         // printed until it has completed a revolution.
@@ -884,6 +886,23 @@ impl Controller {
             )
             .into());
         }
+        if let Some(banner) = banner {
+            banner.finish();
+        }
+        let resolved = match resolved {
+            Some(resolved) => resolved,
+            None => self.resolve_repository(
+                &package,
+                &nodes,
+                &statuses,
+                &gpus,
+                &mut options.run_args,
+                verify_weights,
+            )?,
+        };
+        if repository {
+            statuses = all(parallel(&nodes, |_, node| self.query_status(node, None)))?;
+        }
         let names: Vec<String> = nodes.iter().map(|n| n.name.clone()).collect();
         let length = resolved.files[0].size;
         let needs = plan::Needs {
@@ -905,9 +924,6 @@ impl Controller {
             gpus: gpus.clone(),
         };
         let placements = plan::plan(&needs, &names, &statuses, &constraints);
-        if let Some(banner) = banner {
-            banner.finish();
-        }
         for line in &skipped {
             eprintln!("{line}");
         }
@@ -1127,6 +1143,69 @@ impl Controller {
         run_args: &mut crate::cli::Run,
         verify_weights: bool,
     ) -> Result<ResolvedPackage, Failure> {
+        self.resolve_package_from(reference, run_args, verify_weights, None)
+    }
+
+    fn resolve_repository(
+        &self,
+        source: &str,
+        nodes: &[Node],
+        statuses: &[NodeStatus],
+        gpus: &[u32],
+        run_args: &mut crate::cli::Run,
+        verify_weights: bool,
+    ) -> Result<ResolvedPackage, Failure> {
+        let options = &run_args.hub;
+        let revision = repository_revision(source, options, statuses, gpus)?;
+        let node = nodes
+            .iter()
+            .zip(statuses)
+            .find(|(_, status)| {
+                status.gpus.iter().any(|gpu| {
+                    gpu.group.is_none() && (gpus.is_empty() || gpus.contains(&gpu.index))
+                })
+            })
+            .map(|(node, _)| node)
+            .ok_or("no candidate node has an available GPU for the repository package")?;
+        let access_token = if options.offline {
+            None
+        } else {
+            crate::hub::token(options).map_err(|e| e.to_string())?
+        };
+        let request = super::agent::DownloadRequest {
+            source: source.into(),
+            options: crate::cli::HubOptions {
+                revision: Some(revision.clone()),
+                token_file: None,
+                ..options.clone()
+            },
+            access_token,
+        };
+        eprintln!(
+            "{}: resolving and downloading {source} at revision {revision}",
+            node.name
+        );
+        let (mut session, _) = self.node_session(node)?;
+        let reply: Value = serde_json::from_slice(
+            &session
+                .request(frame::DOWNLOAD, &serde_json::to_value(request)?)
+                .map_err(|e| at(&node.name, e))?,
+        )?;
+        let path = reply["path"]
+            .as_str()
+            .ok_or("DOWNLOAD reply lacks a path")?;
+        let reference = format!("{}:{path}", node.name);
+        let (id, _) = crate::hub::repository(source).map_err(|e| e.to_string())?;
+        self.resolve_package_from(&reference, run_args, verify_weights, Some(id))
+    }
+
+    fn resolve_package_from(
+        &self,
+        reference: &str,
+        run_args: &mut crate::cli::Run,
+        verify_weights: bool,
+        origin: Option<&str>,
+    ) -> Result<ResolvedPackage, Failure> {
         // The controller computes every rank's ranges, so it verifies every rank's index.
         run_args.rank = None;
         match parse_package_reference(reference, |name| self.orbit.node(name).is_some()) {
@@ -1135,7 +1214,7 @@ impl Controller {
                     format!("cannot access package {reference}: {e}; a node-held package is NODE:/ABSOLUTE/PATH with NODE a orbit node")
                 })?;
                 run_args.serving.verify_weights = verify_weights;
-                let (authorized, publisher) = verify(&primary, run_args)?;
+                let (authorized, publisher) = verify(&primary, run_args, origin)?;
                 describe(
                     &authorized,
                     &primary,
@@ -1156,7 +1235,7 @@ impl Controller {
                     .mirror_package(&node, &path, &mirror.0)
                     .map_err(|e| at(&node.name, e))?;
                 run_args.serving.verify_weights = false;
-                let (authorized, publisher) = verify(&primary, run_args)?;
+                let (authorized, publisher) = verify(&primary, run_args, origin)?;
                 describe(
                     &authorized,
                     &primary,
@@ -2054,6 +2133,43 @@ fn report_end(end: &RankEnd) {
 
 // ---- packages ----------------------------------------------------------------------------------
 
+fn default_group_name(package: &str) -> String {
+    if crate::hub::is_repository(Path::new(package)) {
+        let (id, _) = crate::hub::repository(package).unwrap();
+        return id.rsplit('/').next().unwrap().into();
+    }
+    Path::new(package)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "group".into())
+}
+
+/// Explicit revisions win; otherwise infer one hardware revision from the candidate nodes.
+fn repository_revision(
+    source: &str,
+    options: &crate::cli::HubOptions,
+    statuses: &[NodeStatus],
+    gpus: &[u32],
+) -> Result<String, Failure> {
+    let (_, suffix) = crate::hub::repository(source).map_err(|e| e.to_string())?;
+    if let Some(revision) = options.revision.as_deref().or(suffix) {
+        return Ok(revision.into());
+    }
+    let revisions: std::collections::BTreeSet<_> = statuses
+        .iter()
+        .flat_map(|status| &status.gpus)
+        .filter(|gpu| gpu.group.is_none() && (gpus.is_empty() || gpus.contains(&gpu.index)))
+        .map(|gpu| gpu.revision.as_str())
+        .collect();
+    if revisions.is_empty() {
+        return Err("candidate nodes have no available selected GPUs".into());
+    }
+    if revisions.len() > 1 {
+        return Err("candidate GPUs do not identify one hardware revision; specify --revision or constrain --nodes/--gpus".into());
+    }
+    Ok(revisions.into_iter().next().unwrap().into())
+}
+
 /// Parse `NODE:/ABSOLUTE/PATH`, where NODE is a node name `is_node` accepts; anything else is a
 /// local path.
 pub fn parse_package_reference(text: &str, is_node: impl Fn(&str) -> bool) -> PackageReference {
@@ -2077,9 +2193,11 @@ pub fn parse_package_reference(text: &str, is_node: impl Fn(&str) -> bool) -> Pa
 fn verify(
     primary: &Path,
     args: &crate::cli::Run,
+    origin: Option<&str>,
 ) -> Result<(AuthorizedPackage, Publisher), Failure> {
     let mut progress = StartupProgress::silent();
-    crate::trust::load(primary, args, &mut progress, None).map_err(|e| Failure::from(e.to_string()))
+    crate::trust::load(primary, args, &mut progress, origin)
+        .map_err(|e| Failure::from(e.to_string()))
 }
 
 /// A verified package's files and every rank's byte ranges.
@@ -2741,6 +2859,61 @@ mod tests {
         drop(zero_session);
         drop(one_session);
         let _ = Arc::clone(&zero.agent);
+    }
+
+    #[test]
+    fn default_group_names_preserve_repository_names_and_omit_revisions() {
+        assert_eq!(
+            default_group_name("owner/Qwen3.8-Flash-Next-FLARE"),
+            "Qwen3.8-Flash-Next-FLARE"
+        );
+        assert_eq!(
+            default_group_name("owner/Qwen3.8-Flash-Next-FLARE@release/gb10"),
+            "Qwen3.8-Flash-Next-FLARE"
+        );
+        assert_eq!(default_group_name("/models/qwen3.8.safetensors"), "qwen3.8");
+    }
+
+    #[test]
+    fn repository_revisions_follow_candidate_gpus_and_explicit_values() {
+        let status = |revision: &str, index: u32, group: Option<&str>| {
+            serde_json::from_value::<NodeStatus>(json!({
+                "fingerprint": "node", "free_bytes": 0, "controllers_revision": 1,
+                "gpus": [{"index": index, "uuid": "GPU", "name": "GPU", "revision": revision,
+                    "memory_total": 0, "memory_free": 0, "group": group}]
+            }))
+            .unwrap()
+        };
+        let options = crate::cli::HubOptions::default();
+        let sparks = vec![status("gb10", 0, None), status("gb10", 0, None)];
+        assert_eq!(
+            repository_revision("owner/model", &options, &sparks, &[]).unwrap(),
+            "gb10"
+        );
+        assert_eq!(
+            repository_revision("owner/model@release", &options, &[], &[]).unwrap(),
+            "release"
+        );
+        let explicit = crate::cli::HubOptions {
+            revision: Some("chosen".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            repository_revision("owner/model@release", &explicit, &[], &[]).unwrap(),
+            "chosen"
+        );
+        let mixed = vec![status("gb10", 0, None), status("gb202", 1, None)];
+        assert!(repository_revision("owner/model", &options, &mixed, &[]).is_err());
+        assert_eq!(
+            repository_revision("owner/model", &options, &mixed, &[0]).unwrap(),
+            "gb10"
+        );
+        let occupied = vec![status("gb202", 0, Some("running")), status("gb10", 0, None)];
+        assert_eq!(
+            repository_revision("owner/model", &options, &occupied, &[]).unwrap(),
+            "gb10"
+        );
+        assert!(repository_revision("owner/model", &options, &[], &[]).is_err());
     }
 
     #[test]

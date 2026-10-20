@@ -179,11 +179,10 @@ the other controllers' local files.
 [serving options]` proceeds as follows, after [placement](#placement) has
 chosen the member nodes and their GPUs.
 
-PACKAGE is a primary file on the controller or `NODE:/absolute/path` on a paired
-node. A Hugging Face repository ID is not resolved by Orbit. Run `flare download`
-on the intended source host, then pass its returned path to Orbit; see
-[package sources](multi-host.md#package-sources). Symlinks to regular files are
-accepted, including Hugging Face cache snapshots.
+PACKAGE is a Hugging Face repository `ORG/NAME[@REVISION]`, a primary file on
+the controller, or `NODE:/absolute/path` on a paired node. Repository packages
+download on a candidate node; see [package sources](multi-host.md#package-sources).
+Symlinks to regular files are accepted, including Hugging Face cache snapshots.
 
 This sequence shows a two-rank launch with the package source on rank zero:
 
@@ -209,7 +208,20 @@ sequenceDiagram
     P-->>C: LOG …
 ```
 
-1. The controller resolves PACKAGE. A local path is read directly. `NODE:PATH`
+1. The controller resolves PACKAGE. `ORG/NAME[@REVISION]` selects a Hugging Face
+   repository. An explicit `--revision` overrides the suffix; otherwise the
+   controller infers the revision from available candidate GPUs, refusing mixed
+   hardware unless the operator supplies a revision or narrower node/GPU constraints.
+   The first candidate node with an available selected GPU downloads the pinned
+   package and its companions. `--filename`, `--offline`, and `--cache-dir`
+   apply to that node's Hub cache. The controller reads `--token-file` locally
+   and sends its token through the encrypted agent session. It then resolves
+   the downloaded file as a node-held package, including publisher verification
+   and acceptance on the controller, and refreshes candidate status before
+   placement. A repository's default group name is its repository name without
+   the owner or revision suffix. Repository resolution can download files
+   even with `--dry-run`; no serving process starts in that mode.
+   A local path is read directly. `NODE:PATH`
    refers to a package a node holds, from which the controller fetches the
    safetensors header, the signed index, and each companion's header into a
    sparse mirror. The controller verifies the index and obtains
@@ -549,6 +561,7 @@ with a message; an ERROR closes the session.
 | FETCH | Node to node | Grant, file name, ranges | Streams the file's bytes to a node the grant names, from the package the node holds or its cache |
 | GET | Controller to node | Absolute path, offset, length | Streams up to 256 MiB of a node-local file, used to mirror a package's header and index |
 | STAT | Controller to node | Absolute path | The package file's size and its companions' names and sizes |
+| DOWNLOAD | Controller to node | Repository, resolved revision, filename and cache options, optional access token | Downloads a pinned package and its companions into the node's Hugging Face cache and returns its absolute path |
 | RUN | Controller to node | Grant, rank, optional cached executable name, publisher profile | Starts this host's rank on the GPUs the grant's member names, beside other groups on other GPUs, then streams LOG and EXIT; an absent or null executable name selects the agent's installed Flare |
 | ATTACH | Controller to node | Group identifier, required when several groups are on the node | Streams the rank's retained output, then live output |
 | STOP | Controller to node | Group identifier, required when several groups are on the node | Sends SIGTERM to the rank |
