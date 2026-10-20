@@ -28,6 +28,8 @@ pub enum Command {
     Run(Box<Run>),
     /// Download a prepared package from the hardware's Hugging Face revision.
     Download(Download),
+    /// Show a package's signed metadata: model, limits, caches, sampling defaults, frontend, ranks and graphs.
+    Inspect(Inspect),
     /// Run this host's agent, which pairs with controllers and runs its rank of a orbit's serving group.
     Agent(AgentArgs),
     /// Control a orbit of agents from this machine.
@@ -60,6 +62,34 @@ pub struct HubOptions {
     /// Use only cached files, without contacting Hugging Face.
     #[arg(long, help_heading = "Download options")]
     pub offline: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct Inspect {
+    /// Local prepared .safetensors package.
+    #[arg(value_name = "PACKAGE")]
+    pub package: PathBuf,
+
+    /// Print the metadata as JSON instead of the terminal dossier.
+    #[arg(long)]
+    pub json: bool,
+
+    /// Print the dossier without colors, as a redirected stream receives it.
+    #[arg(long, conflicts_with = "json")]
+    pub plain: bool,
+
+    /// Verify only this rank of a multi-host package whose copy holds that rank's bytes alone.
+    #[arg(long, value_name = "N")]
+    pub rank: Option<usize>,
+
+    /// Additional publisher verification profiles (JSON).
+    /// Development packages default to ~/.config/flare/development-publisher.json.
+    #[arg(long, value_name = "PATH", action = clap::ArgAction::Append)]
+    pub publisher_keys: Vec<PathBuf>,
+
+    /// Persistent trust file whose remembered keys also verify [default: ~/.config/flare/trust.toml].
+    #[arg(long, value_name = "PATH")]
+    pub trust_store: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]

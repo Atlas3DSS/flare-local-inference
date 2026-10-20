@@ -6,6 +6,7 @@ mod environment;
 mod hardware;
 mod hub;
 mod identity;
+mod inspect;
 #[cfg(unix)]
 mod orbit;
 mod trust;
@@ -39,6 +40,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("{}", path.display());
             return Ok(());
         }
+        cli::Command::Inspect(args) => return inspect::run(args),
         #[cfg(windows)]
         cli::Command::Agent(_) => {
             return Err("multi-host serving is not supported on Windows".into());

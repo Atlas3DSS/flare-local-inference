@@ -4,6 +4,7 @@ mod archive;
 mod cache_memory;
 #[cfg(test)]
 mod cooperative_tests;
+mod describe;
 mod device_memory;
 pub mod driver;
 mod engram;

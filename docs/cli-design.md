@@ -99,6 +99,7 @@ flare/target/release/flare run PACKAGE --gpus 0 --host 127.0.0.1 --port 8000
 ```
 flare run PACKAGE [flags]                 serve a package on this host
 flare download REPOSITORY [flags]         download a prepared package
+flare inspect PACKAGE [--json | --plain]  a package's signed metadata
 flare agent [--listen IP:PORT]            run this host's orbit agent
 flare agent install [--join-code CODE | --accept-first] [--listen IP:PORT]
 flare agent reset                         forget the host's controllers
@@ -797,6 +798,34 @@ A narrow terminal truncates the description while preserving status and timing.
 Redirected output contains plain start and completion lines without animation.
 After startup, a usable terminal switches to the live metrics dashboard.
 Shutdown restores the terminal after draining active execution.
+
+### 5.4 `flare inspect`
+
+Verify the package's signed index with the embedded publisher profiles, the
+profiles given with `--publisher-keys` (development packages default to
+`~/.config/flare/development-publisher.json`), and the keys remembered in the
+trust store, then print what the index records. Nothing is authorized,
+decrypted, or loaded: no license acceptance, no GPU, no network. `--rank N`
+verifies one rank of a multi-host package from a copy holding that rank alone.
+
+The dossier covers the package file and its companions, publisher, signing key,
+source, and license; the model id, identity, served names, vocabulary, GPU
+architecture, and declared weight bytes per decode step; context, prefill
+chunk, concurrency, default output limit, body limit, queue, and reserve;
+cache page geometry, prepared KV extent, per-page and per-token KV bytes
+across ranks, state rows, snapshots, and history regions; speculation source,
+widths, and capacity; sampling defaults, with gauges for the bounded values;
+prompt encoder, EOS and special tokens, tool and reasoning parsers, markers,
+and frontend assets; vision limits and the image profile; Engram tables; each
+rank's architecture, device, host, and peer bytes, graph, module, and kernel
+counts, and RoCE transport; and rank zero's execution graphs with their
+capacities and estimated durations.
+
+On a terminal the dossier is drawn in color, sized to the terminal between 64
+and 100 columns. A redirected stream, `TERM=dumb`, or `--plain` prints the same
+characters without escape sequences at 80 columns. `--json` prints the
+metadata as one JSON document for other programs, with enumerations by name
+and byte counts exact.
 
 ## 6. Capacity errors
 
