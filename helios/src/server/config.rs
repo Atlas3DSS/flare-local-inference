@@ -352,7 +352,7 @@ impl Bootstrap {
     }
 }
 
-fn image_limits(vision: &crate::model::VisionCapabilities) -> Result<ImageLimits> {
+pub(crate) fn image_limits(vision: &crate::model::VisionCapabilities) -> Result<ImageLimits> {
     let max_total_patches = vision
         .features_per_request
         .checked_mul(vision.patches_per_feature)
@@ -367,6 +367,7 @@ fn image_limits(vision: &crate::model::VisionCapabilities) -> Result<ImageLimits
         max_images: vision.image_count_capacity(),
         max_patches_per_image,
         max_total_patches,
+        patches_per_feature: vision.patches_per_feature,
         ..ImageLimits::default()
     })
 }
@@ -396,6 +397,9 @@ mod tests {
             assert_eq!(limits.max_images, features);
             assert_eq!(limits.max_total_patches, total);
             assert_eq!(limits.max_patches_per_image, graph_patches.min(total));
+            assert_eq!(limits.patches_per_feature, merge);
+            assert_eq!(limits.max_image_tokens_per_prompt(), features);
+            assert_eq!(limits.max_image_tokens_per_image(), graph_patches.min(total) / merge);
             let processor = ImageProcessor::load(ImageSettings::Moonvit {}, limits).unwrap();
             let geometry = processor.geometry(3584, 3584);
             if graph_patches == 65536 {

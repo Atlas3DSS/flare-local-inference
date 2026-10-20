@@ -272,7 +272,7 @@ native speculative contract; Helios contains no DSpark model implementation.
 DeepSeek V4 Flash uses `local-inference-lab/DeepSeek-V4-Flash-Vision-Exp-lossless-CSF`, including its
 vision encoder and checkpoint-integrated DSpark model. The `deepseek-v4-flash`
 alias prepares five draft tokens by default, with adaptive verification. It
-accepts images within its visual-token budget and has no offloaded embedding tables.
+accepts images within its image-token budget and has no offloaded embedding tables.
 Exports use the native DeepSeek V4 prompt encoder, carry only the tokenizer asset,
 and bind the atomic `<｜deepseek_image｜>` placeholder as token 129264.
 Both native DeepSeek encoders default to thinking enabled and high effort, accept

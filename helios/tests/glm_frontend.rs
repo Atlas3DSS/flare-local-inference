@@ -60,6 +60,7 @@ fn checkpoint_template_tokenization_requests_and_instruction_prefix_match_transf
         speculative_widths: vec![],
         speculative_fixed_width: None,
         speculative_token_capacity: 0,
+        decode_weight_bytes: 0,
         history_drafts: false,
         speculative_proposal_source: Default::default(),
     };

@@ -39,14 +39,7 @@ impl PatchProcessor {
         }
         let (height, width) = (target_h as usize, target_w as usize);
         let patches = height / PATCH * (width / PATCH);
-        if patches > self.limits.max_patches_per_image {
-            return Err(Error::frontend(FrontendError::Input(Failure::new(
-                format!(
-                    "processed image has {patches} patches, limit is {}",
-                    self.limits.max_patches_per_image
-                ),
-            ))));
-        }
+        check_image_patches(self.limits, patches)?;
         Ok(ImageGeometry {
             height,
             width,

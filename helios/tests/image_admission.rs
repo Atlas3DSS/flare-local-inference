@@ -64,6 +64,7 @@ fn jpeg_and_oriented_png_use_actual_checkpoint_request_preparation() {
         speculative_widths: vec![],
         speculative_fixed_width: None,
         speculative_token_capacity: 0,
+        decode_weight_bytes: 0,
         history_drafts: false,
         speculative_proposal_source: Default::default(),
     };

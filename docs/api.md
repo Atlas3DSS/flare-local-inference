@@ -38,8 +38,11 @@ The additional `flare` object reports prepared and selected serving metadata:
 | `prefill_chunk_size` | Maximum tokens in a prefill chunk, not the context limit |
 | `default_max_tokens` | Default output-token budget when a request omits it; remaining context still bounds output |
 | `sampling_defaults` | Packaged seed, temperature, filters, and penalties used for omitted request fields |
-| `max_images_per_prompt` | Upper bound from feature storage; actual image sizes and the total visual-token budget bound admission; zero for text-only packages |
-| `max_image_tokens_per_prompt` | Total visual-token budget shared by every image in a request; zero for text-only packages |
+| `max_images_per_prompt` | Upper bound from feature storage; actual image sizes and the total image-token budget bound admission; zero for text-only packages |
+| `max_image_tokens_per_prompt` | Total image-token budget shared by every image in a request, fixed by the package's prepared feature storage; zero for text-only packages |
+| `max_image_tokens_per_image` | Image tokens one image may cost after the profile's normalization; the smaller of one prepared vision graph and the request budget; zero for text-only packages |
+| `max_image_pixels` | Largest decoded image extent (width times height) accepted before normalization; zero for text-only packages |
+| `max_image_bytes` | Largest encoded image accepted; zero for text-only packages |
 | `input_modalities` | `text`, plus `image` when vision is prepared |
 | `output_modalities` | `text` |
 
@@ -207,9 +210,23 @@ assistant message.
 Named tool selection and strict function schemas are rejected. Hosted search,
 computer execution, file stores, audio, and remote image downloads are unsupported. Images must be
 base64 PNG, JPEG, or static WebP data. Images are encoded sequentially and share
-the loaded package's visual-token budget; there is no separate four-image limit.
+the loaded package's image-token budget; there is no separate four-image limit.
 Each image must fit a prepared vision graph, and the whole request must fit the
 HTTP body limit and text context. Animated images are unsupported.
+
+Image costs are the token counts that usage reports in
+`prompt_tokens_details.multimodal_tokens.image`: the profile normalizes each
+image to its own grid, then merges a fixed number of encoder patches into one
+token. Admission costs every image before rejecting, so a budget rejection
+(HTTP 400) states the whole request's image tokens against
+`max_image_tokens_per_prompt`, with the patch counts in parentheses, and names
+the first image that crossed the budget with its position, pixel size, and
+tokens. Oversized single images are rejected against
+`max_image_tokens_per_image` or `max_image_pixels` with the observed size.
+Images are not downscaled to fit a budget; a client re-renders at a lower
+resolution. Chat templates add fixed framing tokens around each image that
+count toward `prompt_tokens` but not toward the image budget or
+`multimodal_tokens.image`.
 
 Anthropic histories accept inline system text and preserve text, thinking, tool
 use/results, errors, and image blocks. Message-level control metadata, including

@@ -16,6 +16,7 @@ mod radio;
 mod resize;
 mod step;
 
+use std::fmt::Write as _;
 use std::io::Cursor;
 
 use super::Frontend;
@@ -26,6 +27,10 @@ const MERGE: usize = 2;
 const FEATURES: usize = 3 * 2 * PATCH * PATCH;
 const IMAGE_TOKEN: &str = "<|image_pad|>";
 
+/// Admission limits for one request's images. Patch counts are the encoder's unit;
+/// `patches_per_feature` patches merge into one image token, the unit that the model card
+/// (`max_image_tokens_per_prompt`, `max_image_tokens_per_image`), usage reports, and
+/// rejection messages use.
 #[derive(Clone, Copy)]
 pub struct ImageLimits {
     pub max_input_pixels: usize,
@@ -33,6 +38,7 @@ pub struct ImageLimits {
     pub max_images: usize,
     pub max_patches_per_image: usize,
     pub max_total_patches: usize,
+    pub patches_per_feature: usize,
 }
 
 impl Default for ImageLimits {
@@ -43,18 +49,67 @@ impl Default for ImageLimits {
             max_images: 16_384,
             max_patches_per_image: 16_384,
             max_total_patches: 16_384,
+            patches_per_feature: 1,
         }
     }
 }
 
+/// The first image whose cost crosses a request's image-token budget.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ImageOverrun {
+    /// One-based position among the request's images.
+    pub ordinal: usize,
+    pub width: usize,
+    pub height: usize,
+    pub tokens: usize,
+}
+
 impl ImageLimits {
+    /// Image tokens for `patches`, rounding partial features up.
+    pub fn tokens(&self, patches: usize) -> usize {
+        patches.div_ceil(self.patches_per_feature.max(1))
+    }
+
+    pub fn max_image_tokens_per_prompt(&self) -> usize {
+        self.max_total_patches / self.patches_per_feature.max(1)
+    }
+
+    pub fn max_image_tokens_per_image(&self) -> usize {
+        self.max_patches_per_image / self.patches_per_feature.max(1)
+    }
+
     pub(crate) fn check_batch(&self, images: usize, patches: usize) -> Result<()> {
+        self.check_budget(images, patches, None)
+    }
+
+    /// Checks the image count and the whole request's patch total. `patches` must be the
+    /// complete total, so the message reports what the request needs rather than a running
+    /// sum; `overrun` names the image that crossed the budget when the caller tracked it.
+    pub(crate) fn check_budget(
+        &self,
+        images: usize,
+        patches: usize,
+        overrun: Option<ImageOverrun>,
+    ) -> Result<()> {
         let message = if images == 0 {
             "image input must contain at least one image".to_owned()
         } else if images > self.max_images {
-            format!("request has {images} images; image capacity is {}", self.max_images)
+            format!("request has {images} images; max_images_per_prompt is {}", self.max_images)
         } else if patches > self.max_total_patches {
-            format!("images require {patches} visual patches; request budget is {}", self.max_total_patches)
+            let mut message = format!(
+                "request needs {} image tokens ({patches} patches); max_image_tokens_per_prompt is {} ({} patches)",
+                self.tokens(patches),
+                self.max_image_tokens_per_prompt(),
+                self.max_total_patches
+            );
+            if let Some(overrun) = overrun {
+                let _ = write!(
+                    message,
+                    "; image {} of {images} ({}x{} px, {} tokens) crosses the budget",
+                    overrun.ordinal, overrun.width, overrun.height, overrun.tokens
+                );
+            }
+            message
         } else {
             return Ok(());
         };
@@ -208,6 +263,7 @@ impl ImageProcessor {
             limits.max_images,
             limits.max_patches_per_image,
             limits.max_total_patches,
+            limits.patches_per_feature,
         ]
         .contains(&0)
             || limits.max_total_patches > i32::MAX as usize
@@ -241,8 +297,21 @@ impl ImageProcessor {
         self.limits.max_encoded_bytes
     }
 
+    pub fn limits(&self) -> ImageLimits {
+        self.limits
+    }
+
     pub(crate) fn check_batch(&self, images: usize, patches: usize) -> Result<()> {
         self.limits.check_batch(images, patches)
+    }
+
+    pub(crate) fn check_budget(
+        &self,
+        images: usize,
+        patches: usize,
+        overrun: Option<ImageOverrun>,
+    ) -> Result<()> {
+        self.limits.check_budget(images, patches, overrun)
     }
 
     /// Decodes PNG with the prepared profile’s alpha and orientation semantics.
@@ -490,7 +559,12 @@ impl ImageProcessor {
             Profile::Qwen(profile) => profile.process(images),
             Profile::MiMo(profile) => profile.process(images),
             Profile::DeepSeek4 => deepseek4::process(self.limits, images),
-            Profile::DeepseekRowMajor(settings) => deepseek4::pack(self.limits, images, |image| deepseek_row_major::resized_rgb(settings, self.limits, image)),
+            Profile::DeepseekRowMajor(settings) => deepseek4::pack(
+                self.limits,
+                images,
+                |image| deepseek_row_major::geometry(settings, self.limits, image.width, image.height),
+                |image| deepseek_row_major::resized_rgb(settings, self.limits, image),
+            ),
             Profile::Moonvit => moonvit::process(self.limits, images),
             Profile::Step => step::process(self.limits, images),
             Profile::Radio => radio::process(self.limits, images),
@@ -513,15 +587,33 @@ impl ImageProcessor {
     }
 }
 fn check_input_extent(limits: ImageLimits, width: usize, height: usize) -> Result<()> {
-    if width == 0
-        || height == 0
-        || width
-            .checked_mul(height)
-            .is_none_or(|pixels| pixels > limits.max_input_pixels)
-    {
+    if width == 0 || height == 0 {
         return Err(Error::frontend(FrontendError::Input(Failure::new(
-            "image exceeds the configured input pixel limit or has zero extent",
+            format!("image is {width}x{height} px; width and height must be positive"),
         ))));
+    }
+    if width
+        .checked_mul(height)
+        .is_none_or(|pixels| pixels > limits.max_input_pixels)
+    {
+        return Err(Error::frontend(FrontendError::Input(Failure::new(format!(
+            "image is {width}x{height} px; max_image_pixels is {}",
+            limits.max_input_pixels
+        )))));
+    }
+    Ok(())
+}
+
+/// The per-image rejection shared by every profile: the processed image needs more patches
+/// than one prepared vision graph holds.
+fn check_image_patches(limits: ImageLimits, patches: usize) -> Result<()> {
+    if patches > limits.max_patches_per_image {
+        return Err(Error::frontend(FrontendError::Input(Failure::new(format!(
+            "image needs {} image tokens ({patches} patches); max_image_tokens_per_image is {} ({} patches)",
+            limits.tokens(patches),
+            limits.max_image_tokens_per_image(),
+            limits.max_patches_per_image
+        )))));
     }
     Ok(())
 }
@@ -631,7 +723,10 @@ mod tests {
             let processed = processor.process(&images[..5]).unwrap();
             assert_eq!(processed.geometry.len(), 5);
             assert_eq!(processed.geometry.iter().map(|g| g.patches).sum::<usize>(), 5 * patches);
-            assert!(processor.process(&images).err().unwrap().to_string().contains("request budget"));
+            let message = processor.process(&images).err().unwrap().to_string();
+            assert!(message.contains("max_image_tokens_per_prompt is"), "{message}");
+            assert!(message.contains(&format!("request needs {} image tokens ({} patches)",
+                limits.tokens(6 * patches), 6 * patches)), "{message}");
         }
     }
 

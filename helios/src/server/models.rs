@@ -37,6 +37,13 @@ impl ModelCatalog {
             .cloned()
             .collect();
         // One card represents the loaded model; its other names only resolve lookups.
+        // Bootstrap validated these capacities before serving; a text-only package has none.
+        let limits = model
+            .contract
+            .vision
+            .enabled()
+            .then(|| super::config::image_limits(&model.contract.vision).ok())
+            .flatten();
         // Match vLLM's ModelCard / ModelPermission wire fields while
         // advertising only features supported by this server.
         let card = json!({
@@ -69,6 +76,9 @@ impl ModelCatalog {
                 "sampling_defaults": model.sampling_defaults,
                 "max_images_per_prompt": model.contract.vision.image_count_capacity(),
                 "max_image_tokens_per_prompt": model.contract.vision.features_per_request,
+                "max_image_tokens_per_image": limits.map_or(0, |l| l.max_image_tokens_per_image()),
+                "max_image_pixels": limits.map_or(0, |l| l.max_input_pixels),
+                "max_image_bytes": limits.map_or(0, |l| l.max_encoded_bytes),
                 "input_modalities": if model.contract.vision.enabled() {
                     vec!["text", "image"]
                 } else {
@@ -177,6 +187,9 @@ mod tests {
         assert_eq!(text["flare"]["input_modalities"], json!(["text"]));
         assert_eq!(text["flare"]["output_modalities"], json!(["text"]));
         assert_eq!(text["flare"]["max_images_per_prompt"], 0);
+        assert_eq!(text["flare"]["max_image_tokens_per_image"], 0);
+        assert_eq!(text["flare"]["max_image_pixels"], 0);
+        assert_eq!(text["flare"]["max_image_bytes"], 0);
         assert_eq!(text["permission"][0]["allow_logprobs"], false);
         assert_eq!(text["permission"][0]["allow_sampling"], true);
         assert_eq!(text["permission"][0]["allow_fine_tuning"], false);
@@ -205,6 +218,10 @@ mod tests {
             vision["flare"]["max_image_tokens_per_prompt"],
             model.contract.vision.features_per_request
         );
+        // One image fits the smaller of one graph's patches and the request budget.
+        assert_eq!(vision["flare"]["max_image_tokens_per_image"], 256);
+        assert_eq!(vision["flare"]["max_image_pixels"], 64 * 1024 * 1024);
+        assert_eq!(vision["flare"]["max_image_bytes"], 32 * 1024 * 1024);
     }
 
     #[test]

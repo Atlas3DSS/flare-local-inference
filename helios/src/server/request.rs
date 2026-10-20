@@ -411,6 +411,115 @@ fn number(object: &Map<String, Value>, name: &str, default: f32) -> Result<f32> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn png_data_url(width: u32, height: u32) -> String {
+        let mut info = png::Info::with_size(width, height);
+        info.color_type = png::ColorType::Rgb;
+        info.bit_depth = png::BitDepth::Eight;
+        let mut bytes = vec![];
+        {
+            let encoder = png::Encoder::with_info(&mut bytes, info).unwrap();
+            let mut writer = encoder.write_header().unwrap();
+            writer
+                .write_image_data(&vec![255; width as usize * height as usize * 3])
+                .unwrap();
+        }
+        format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        )
+    }
+
+    #[test]
+    fn image_budget_rejections_report_the_whole_request_in_tokens_and_name_the_overrun() {
+        use crate::frontend::images::{ImageLimits, ImageProcessor, ImageSettings};
+        // DeepSeek merges nine 14-px patches into one image token.
+        let page = ImageProcessor::load(ImageSettings::Deepseek4 {}, ImageLimits::default())
+            .unwrap()
+            .geometry(1075, 1521)
+            .unwrap();
+        let small = ImageProcessor::load(ImageSettings::Deepseek4 {}, ImageLimits::default())
+            .unwrap()
+            .geometry(200, 200)
+            .unwrap();
+        assert_eq!(page.patches, page.tokens * 9);
+        let budget = 4 * page.tokens;
+        let processor = ImageProcessor::load(
+            ImageSettings::Deepseek4 {},
+            ImageLimits {
+                max_total_patches: budget * 9,
+                max_patches_per_image: page.patches,
+                patches_per_feature: 9,
+                ..ImageLimits::default()
+            },
+        )
+        .unwrap();
+        let four = vec![png_data_url(1075, 1521); 4];
+        assert_eq!(decode_images(&four, Some(&processor)).unwrap().len(), 4);
+
+        // Five pages: the fifth crosses the budget; the total covers all five.
+        let five = vec![png_data_url(1075, 1521); 5];
+        let error = decode_images(&five, Some(&processor)).map(|images| images.len()).unwrap_err();
+        assert!(matches!(error, Error::Admission(AdmissionError::Image(_))));
+        let message = error.to_string();
+        assert!(
+            message.contains(&format!(
+                "request needs {} image tokens ({} patches); max_image_tokens_per_prompt is {budget} ({} patches)",
+                5 * page.tokens,
+                5 * page.patches,
+                budget * 9
+            )),
+            "{message}"
+        );
+        assert!(
+            message.contains(&format!("image 5 of 5 (1075x1521 px, {} tokens) crosses the budget", page.tokens)),
+            "{message}"
+        );
+
+        // The total is the request's, whatever the image order; only the named image moves.
+        let crossing = |costs: &[usize]| {
+            let mut sum = 0;
+            costs.iter().position(|cost| { sum += cost; sum > budget }).unwrap() + 1
+        };
+        let mut mixed = vec![png_data_url(200, 200); 10];
+        mixed.extend(five.iter().cloned());
+        let mut costs = vec![small.tokens; 10];
+        costs.extend([page.tokens; 5]);
+        let total = 10 * small.patches + 5 * page.patches;
+        let forward = decode_images(&mixed, Some(&processor)).map(|images| images.len()).unwrap_err().to_string();
+        let forward_crossing = crossing(&costs);
+        mixed.reverse();
+        costs.reverse();
+        let reverse = decode_images(&mixed, Some(&processor)).map(|images| images.len()).unwrap_err().to_string();
+        let reverse_crossing = crossing(&costs);
+        assert_ne!(forward_crossing, reverse_crossing);
+        for message in [&forward, &reverse] {
+            assert!(
+                message.contains(&format!("request needs {} image tokens ({total} patches)", processor.limits().tokens(total))),
+                "{message}"
+            );
+        }
+        assert!(forward.contains(&format!("image {forward_crossing} of 15 (1075x1521 px")), "{forward}");
+        assert!(reverse.contains(&format!("image {reverse_crossing} of 15 (1075x1521 px")), "{reverse}");
+
+        // Single-image limits name the observed size and the limit in effect: a square image
+        // normalizes to more tokens than one page, which is this processor's per-image cap.
+        let oversized = decode_images(&[png_data_url(2000, 2000)], Some(&processor))
+            .map(|_| ())
+            .unwrap_err()
+            .to_string();
+        assert!(oversized.contains("max_image_tokens_per_image is"), "{oversized}");
+        let processor = ImageProcessor::load(
+            ImageSettings::Deepseek4 {},
+            ImageLimits { max_input_pixels: 1000, ..ImageLimits::default() },
+        )
+        .unwrap();
+        let pixels = decode_images(&[png_data_url(40, 40)], Some(&processor))
+            .map(|_| ())
+            .unwrap_err()
+            .to_string();
+        assert!(pixels.contains("image is 40x40 px; max_image_pixels is 1000"), "{pixels}");
+    }
     #[test]
     fn omitted_output_limit_uses_remaining_context_and_explicit_limits_win() {
         let limit = |value: Value, configured, prompt| {
@@ -511,9 +620,13 @@ fn decode_images(
     sources: &[String],
     processor: Option<&ImageProcessor>,
 ) -> Result<Vec<crate::frontend::images::RgbImage>> {
+    // Every image is decoded and costed before the budget verdict, so a rejection reports
+    // the request's complete image-token total and the image that crossed the budget.
+    // Images past the overrun are costed but not retained.
     let mut images = Vec::new();
     let mut image_patches = 0usize;
-    for url in sources {
+    let mut overrun = None;
+    for (index, url) in sources.iter().enumerate() {
         let processor = processor.ok_or_else(|| {
             Error::admission(
                 AdmissionError::Feature,
@@ -521,7 +634,7 @@ fn decode_images(
             )
         })?;
         processor
-            .check_batch(images.len() + 1, image_patches)
+            .check_batch(index + 1, 0)
             .map_err(|error| error.admission_context(AdmissionError::Image))?;
         let (data, decode): (_, fn(&ImageProcessor, &[u8]) -> Result<_>) =
             if let Some(data) = url.strip_prefix("data:image/png;base64,") {
@@ -558,10 +671,22 @@ fn decode_images(
         image_patches = image_patches
             .checked_add(geometry.patches)
             .ok_or_else(|| Error::admission(AdmissionError::Image, "image patch count overflow"))?;
+        if overrun.is_none() && image_patches > processor.limits().max_total_patches {
+            overrun = Some(crate::frontend::images::ImageOverrun {
+                ordinal: index + 1,
+                width: image.width(),
+                height: image.height(),
+                tokens: geometry.tokens,
+            });
+        }
+        if overrun.is_none() {
+            images.push(image);
+        }
+    }
+    if let Some(processor) = processor.filter(|_| !sources.is_empty()) {
         processor
-            .check_batch(images.len() + 1, image_patches)
+            .check_budget(sources.len(), image_patches, overrun)
             .map_err(|error| error.admission_context(AdmissionError::Image))?;
-        images.push(image);
     }
     Ok(images)
 }
