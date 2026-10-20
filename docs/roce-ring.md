@@ -252,11 +252,17 @@ The [raw measurements](measurements/roce-distribution-20261020/) include command
 timings, agent logs, interface addresses and speeds, and byte counters spanning
 the bulk transfer. Fabric counters show rank 1 receiving two shards and forwarding
 one; management traffic remained below 1.1 MB per host in that window. These
-hosts report 200 Gb/s fabric ports and 1 Gb/s management links. The experiment
-used isolated agents on port 29910 and fresh caches; existing agents, caches,
-host routes, and SSH configuration were preserved.
+hosts report 200 Gb/s fabric ports and 1 Gb/s management links. For this setup,
+the operator identifies a 100 Gb/s TCP ceiling per twin interface. Concurrent
+transfers in both ring directions can reach at most 100 Gb/s each: the two
+physical Spark ports share a 200 Gb/s ceiling through the same PCIe lanes.
+Reported port speeds therefore do not represent independent TCP budgets.
+The experiment used isolated agents on port 29910 and fresh caches; existing
+agents, caches, host routes, and SSH configuration were preserved.
 
-This validates TCP distribution and package verification, not 200 Gb/s throughput.
+The measured 489–529 MiB/s is about 4.1–4.4 Gb/s per peer, well below the
+100 Gb/s interface ceiling. The experiment validates TCP distribution and
+package verification; it does not measure the hardware ceilings above.
 Files alternate rails sequentially; a file is not striped across parallel
 connections. A matching cold management-transfer baseline, throughput bottleneck
 profiling, and a new inference run were not performed. Socket tests cover six
