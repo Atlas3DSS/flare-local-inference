@@ -1,0 +1,9 @@
+........................................................................ [ 78%]
+....................                                                     [100%]
+=============================== warnings summary ===============================
+tests/preparation/test_remote_weights_cuda.py::test_remote_native_copies_preserve_bits_strides_expansion_and_csf[1]
+  /home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/flashinfer/cute_dsl/availability.py:136: DeprecationWarning: Arch from arch.py is deprecated. Use Arch from enums.py instead.
+    from cutlass.base_dsl.arch import Arch
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+92 passed, 1 warning in 9.32s

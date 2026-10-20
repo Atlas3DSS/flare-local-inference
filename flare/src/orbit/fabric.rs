@@ -5,7 +5,11 @@ use std::net::{Ipv4Addr, SocketAddrV4};
 use flare_helios::execution::roce_fabric;
 use serde::{Deserialize, Serialize};
 
-use super::{Failure, grant::Grant, store::Node};
+use super::{
+    Failure,
+    grant::{Grant, Member},
+    store::Node,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Link {
@@ -92,19 +96,26 @@ pub fn path(world: usize, source: usize, destination: usize) -> Result<Vec<usize
 }
 
 pub fn validate(grant: &Grant) -> Result<(), Failure> {
-    let world = grant.members.len();
-    if !grant.roce_ring || !(2..=16).contains(&world) || grant.transfer_ring.len() != world {
+    if !grant.roce_ring {
         return Err("ring transfer lacks a signed fabric topology".into());
     }
-    for (rank, member) in grant.members.iter().enumerate() {
+    validate_ring(&grant.members, &grant.transfer_ring)
+}
+
+pub fn validate_ring(members: &[Member], ring: &[Vec<Link>]) -> Result<(), Failure> {
+    let world = members.len();
+    if !(2..=16).contains(&world) || ring.len() != world {
+        return Err("ring transfer lacks a signed fabric topology".into());
+    }
+    for (rank, member) in members.iter().enumerate() {
         if member.rank != rank
-            || grant.members[..rank]
+            || members[..rank]
                 .iter()
                 .any(|m| m.public_key == member.public_key)
         {
             return Err("transfer ring members must have distinct keys in rank order".into());
         }
-        let links = &grant.transfer_ring[rank];
+        let links = &ring[rank];
         if links.is_empty() || links.len() > roce_fabric::MAX_RAILS {
             return Err("ring edge lacks fabric TCP links".into());
         }
@@ -143,7 +154,18 @@ pub fn hop(
     rail: usize,
 ) -> Result<(Ipv4Addr, SocketAddrV4), Failure> {
     validate(grant)?;
-    let world = grant.members.len();
+    ring_hop(&grant.members, &grant.transfer_ring, from, to, rail)
+}
+
+pub fn ring_hop(
+    members: &[Member],
+    ring: &[Vec<Link>],
+    from: usize,
+    to: usize,
+    rail: usize,
+) -> Result<(Ipv4Addr, SocketAddrV4), Failure> {
+    validate_ring(members, ring)?;
+    let world = members.len();
     if from >= world || to >= world {
         return Err("fabric hop is outside the ring".into());
     }
@@ -154,7 +176,7 @@ pub fn hop(
     } else {
         return Err("fabric TCP connections must join ring neighbors".into());
     };
-    let links = &grant.transfer_ring[edge];
+    let links = &ring[edge];
     // A two-rank ring can reach its one neighbor in either direction using the same links.
     let link = &links[rail % links.len()];
     Ok(if forward {

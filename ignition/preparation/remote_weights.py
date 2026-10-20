@@ -1,9 +1,10 @@
 """Adapt b12x's exact routed reads to an owned network checkpoint source."""
 
 from array import array
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 import os
-from pathlib import Path
-import tempfile
 
 from b12x.loader._checkpoint import DirectWeightSession, TensorRange
 
@@ -58,7 +59,7 @@ class RemoteWeightSession(DirectWeightSession):
     """Keep b12x routing and native copies while replacing only checkpoint reads.
 
     Source IDs identify authenticated remote files, never local descriptors. Only
-    received bounded buffers have an O_DIRECT descriptor, private to this session.
+    received bounded buffers have a memory-backed descriptor, private to this session.
     """
 
     def __init__(self, source, manifest, *, device):
@@ -67,14 +68,12 @@ class RemoteWeightSession(DirectWeightSession):
         self.names = tuple(source.name(manifest.snapshot / shard.path) for shard in manifest.shards)
         self.ids = {name: index for index, name in enumerate(self.names)}
         self.shards = {name: shard.path for name, shard in zip(self.names, manifest.shards, strict=True)}
-        self.buffer_directory = tempfile.TemporaryDirectory(prefix="read-", dir=source.temporary.name)
-        path = Path(self.buffer_directory.name) / "buffer"
-        self.buffer_write = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600)
+        self.buffer_write = os.memfd_create("flare-checkpoint-read", os.MFD_CLOEXEC)
         try:
-            self.buffer_read = os.open(path, os.O_RDONLY | os.O_DIRECT | os.O_CLOEXEC)
+            # Keep b12x's bounded bounce reader without writing every network block to NVMe.
+            self.buffer_read = os.open(f"/proc/self/fd/{self.buffer_write}", os.O_RDONLY | os.O_DIRECT | os.O_CLOEXEC)
         except BaseException:
             os.close(self.buffer_write)
-            self.buffer_directory.cleanup()
             super()._close()
             raise
 
@@ -90,17 +89,27 @@ class RemoteWeightSession(DirectWeightSession):
         import torch
 
         values = {}
-        for entry in entries:
-            self.metadata_bytes += entry.nbytes
-            if self.metadata_bytes > 64 << 20:
-                raise ValueError("declared metadata spans exceed the 64 MiB session budget")
-            content = bytearray()
-            for offset in range(0, entry.nbytes, BLOCK_BYTES):
-                content.extend(self.source.read(self.names[entry.fd], entry.offset + offset,
-                                                min(BLOCK_BYTES, entry.nbytes - offset)))
-            values[entry.name] = (torch.frombuffer(content, dtype=entry.dtype, count=math.prod(entry.shape))
-                                  .reshape(entry.shape) if entry.nbytes
-                                  else torch.empty(entry.shape, dtype=entry.dtype))
+        def requests():
+            for entry in entries:
+                self.metadata_bytes += entry.nbytes
+                if self.metadata_bytes > 64 << 20:
+                    raise ValueError("declared metadata spans exceed the 64 MiB session budget")
+                if not entry.nbytes:
+                    yield None, (entry, True)
+                for offset in range(0, entry.nbytes, BLOCK_BYTES):
+                    count = min(BLOCK_BYTES, entry.nbytes - offset)
+                    yield ((self.names[entry.fd], entry.offset + offset, count),
+                           (entry, offset + count == entry.nbytes))
+        content = bytearray()
+        with closing(self._prefetch(requests())) as received:
+            for (entry, last), block in received:
+                if block is not None:
+                    content.extend(block)
+                if last:
+                    values[entry.name] = (torch.frombuffer(content, dtype=entry.dtype, count=math.prod(entry.shape))
+                                          .reshape(entry.shape) if entry.nbytes
+                                          else torch.empty(entry.shape, dtype=entry.dtype))
+                    content = bytearray()
         return values
 
     def _execute(self, records):
@@ -130,17 +139,25 @@ class RemoteWeightSession(DirectWeightSession):
                     break
                 if destinations_overlap(previous, following):
                     raise ValueError("overlapping checkpoint destinations require an explicit dependency")
-        for index in range(0, len(records), 8):
-            identifier, offset, width, pointer, transform, rows, source_stride, destination_stride = records[index:index + 8]
-            if transform == 2:
-                # These records name owned CPU scalar storage, not a checkpoint source ID.
-                super()._execute(array("Q", records[index:index + 8]))
-                continue
-            name = self.names[identifier]
-            for start, count, batch, stride, target, target_stride in chunks(
-                    offset, width, rows, source_stride, pointer, destination_stride, transform):
-                row_extent(self.source.files[name]["bytes"], start, count, batch, stride)
-                content = self.source.read(name, start, count, batch, stride)
+        def requests():
+            for index in range(0, len(records), 8):
+                identifier, offset, width, pointer, transform, rows, source_stride, destination_stride = records[index:index + 8]
+                if transform == 2:
+                    # These records name owned CPU scalar storage, not a checkpoint source ID.
+                    yield None, array("Q", records[index:index + 8])
+                    continue
+                name = self.names[identifier]
+                for start, count, batch, stride, target, target_stride in chunks(
+                        offset, width, rows, source_stride, pointer, destination_stride, transform):
+                    row_extent(self.source.files[name]["bytes"], start, count, batch, stride)
+                    yield ((name, start, count, batch, stride),
+                           array("Q", (self.buffer_read, 0, count, target, transform, batch, count, target_stride)))
+
+        with closing(self._prefetch(requests())) as received:
+            for record, content in received:
+                if content is None:
+                    super()._execute(record)
+                    continue
                 os.ftruncate(self.buffer_write, len(content))
                 written = 0
                 while written < len(content):
@@ -149,12 +166,44 @@ class RemoteWeightSession(DirectWeightSession):
                         raise OSError("checkpoint transfer buffer write did not advance")
                     written += size
                 # The synchronous native reader owns all destination and buffer access until it returns.
-                super()._execute(array("Q", (self.buffer_read, 0, count, target, transform,
-                                             batch, count, target_stride)))
+                super()._execute(record)
+
+    def _prefetch(self, requests):
+        """Hold at most one bounded read per channel; native destination writes stay serial."""
+        workers = self.source.streams
+        if workers == 1:
+            for request, record in requests:
+                yield record, None if request is None else self.source.read(*request)
+            return
+        pending = deque()
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="flare-checkpoint-read") as executor:
+            try:
+                exhausted = False
+                while pending or not exhausted:
+                    while len(pending) < workers and not exhausted:
+                        item = next(requests, None)
+                        if item is None:
+                            exhausted = True
+                        else:
+                            request, record = item
+                            pending.append((record, None if request is None else executor.submit(self.source.read, *request)))
+                    if pending:
+                        record, future = pending[0]
+                        content = None if future is None else future.result()
+                        yield record, content
+                        # Retain the slot through the synchronous GPU copy before replacing its buffer.
+                        pending.popleft()
+                        del content, future
+            finally:
+                if pending:
+                    self.source.abort_reads()
+                    for _, future in pending:
+                        if future is not None:
+                            future.cancel()
 
     def stats(self, *, flush=True):
         result = super().stats(flush=flush)
-        result["remote_source"] = dict(self.source.stats)
+        result["remote_source"] = self.source.report()
         return result
 
     def _close(self):
@@ -163,4 +212,3 @@ class RemoteWeightSession(DirectWeightSession):
         finally:
             os.close(self.buffer_read)
             os.close(self.buffer_write)
-            self.buffer_directory.cleanup()

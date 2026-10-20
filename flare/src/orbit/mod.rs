@@ -11,6 +11,7 @@
 pub mod agent;
 pub mod banner;
 pub mod cache;
+pub mod checkpoint;
 pub mod controller;
 pub mod dashboard;
 pub mod fabric;
@@ -54,6 +55,7 @@ pub mod frame {
     pub const DOWNLOAD: u8 = 20;
     pub const FABRIC: u8 = 21;
     pub const FETCH_RING: u8 = 22;
+    pub const CHECKPOINT_OPEN: u8 = 23;
 }
 
 pub fn hex(bytes: &[u8]) -> String {

@@ -185,8 +185,9 @@ Provision the same preparation token on every host before starting. Set
 `[preparation] checkpoint_token_file` in `~/.config/flare/config.toml`, or use
 its default `~/.config/flare/agent.token`. The file needs identical contents of
 at least 32 random bytes and mode `600` on each host. This token is separate
-from Orbit identities. Checkpoint transfers are authenticated, but their bytes
-are not encrypted.
+from Orbit identities. The default rendezvous checkpoint transfer authenticates
+its bytes without encryption. With `--roce-ring`, checkpoint tensor ranges use
+encrypted TCP through the paired Flare agents on the RoCE interfaces.
 
 The example prepares GLM-5.3 Flash on two Sparks. Run from each checkout root.
 On `maxwell`, whose preparation address is `10.200.0.12`, select an unused output:
@@ -207,6 +208,30 @@ For four hosts, use `--ranks 4` and start peer ranks 1, 2, and 3. Rank zero
 admits each peer once, serves checkpoint metadata and selected byte ranges,
 and coordinates preparation. Peers do not create full checkpoint shards.
 Keep checkpoint source files unchanged during loading.
+
+For a physical ring, add `--roce-ring --cluster NAME` to rank zero's export or
+serve command. The Orbit cluster must list exactly these hosts in preparation
+rank order, including rank zero; admission checks each rank's GPU UUID against
+its paired agent. `--orbit-file PATH` and `--key-file PATH` select nondefault
+controller files. All hosts need the matching Flare executable on `PATH` or at
+`flare/target/release/flare`, and updated paired agents listening on their fabric
+interfaces. The peer `join` command stays the same.
+
+Checkpoint loading uses eight TCP streams per peer by default. Select 1 through
+64 with `--transfer-streams N`. Streams alternate between the neighbor rails;
+the opposite host receives its requested ranges through a shortest ring path,
+with clockwise ties. Each hop binds and checks the signed fabric IPs. A failed
+fabric channel ends preparation instead of retrying through management.
+Admission metadata, coordination, and export assembly continue using the
+rendezvous connection. This changes neither host routes nor collective transport.
+
+Prefetch retains at most one 4 MiB payload per stream plus bounded transport
+buffers. b12x destination copies remain ordered, with exact packed rows,
+strides, and conversions. Peers retain metadata and one reusable 4 MiB
+memory-backed transfer descriptor, without writing checkpoint weights to disk.
+The preparation report records the checkpoint
+transport, stream count, payload bytes, and the interval from the first payload
+read to the last; this interval includes intervening loading work.
 
 Each rank loads its weights and prepares its graphs. Forward compilation is
 shared across ranks, and compiled artifacts go to the ranks that need them.

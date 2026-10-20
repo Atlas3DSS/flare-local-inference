@@ -1,0 +1,10 @@
+     2.8s rank 2: joined rank zero at 10.137.203.173:29630 as rank 2 of 4
+    10.1s rank 2: Inspect checkpoint started
+    11.2s rank 2: Inspect checkpoint complete in 1.15s
+   375.6s rank 2: after weights: free=53296 MiB, allocated=45934 MiB, reserved=47394 MiB, rss=2526 MiB
+   375.6s rank 2: Allocate model state and collectives started
+   376.0s rank 2: Allocate model state and collectives complete in 0.39s
+   376.0s rank 2: after model state (continuation 238 MiB, 5 rows): free=51220 MiB, allocated=47562 MiB, reserved=48776 MiB, rss=2915 MiB
+   376.0s rank 2: Construct graph catalog started
+2026-10-20 13:00:31,446 - INFO - core.py:595 - flashinfer.jit: Building JIT module sampling; this can take several minutes on first use.
+flare: rank zero disconnected before shutdown

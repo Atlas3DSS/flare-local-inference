@@ -1,0 +1,4 @@
+     5.8s rank 2: joined rank zero at 10.137.203.173:29630 as rank 2 of 4
+    16.1s rank 2: Inspect checkpoint started
+    17.4s rank 2: Inspect checkpoint complete in 1.26s
+flare: rank zero disconnected before shutdown

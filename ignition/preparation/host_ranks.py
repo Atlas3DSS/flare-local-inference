@@ -274,12 +274,14 @@ class _Peer:
 class HostRendezvous:
     """Rank zero's listener: admits one process per peer rank, each on its own host."""
 
-    def __init__(self, address, world, *, identity, topology, checkpoint_token_file="~/.config/flare/agent.token"):
+    def __init__(self, address, world, *, identity, topology, checkpoint_token_file="~/.config/flare/agent.token",
+                 checkpoint_ring=None):
         if world not in (2, 4):
             raise ValueError("multi-host tensor parallelism requires two or four ranks")
         self.address, self.world = parse_address(address), world
         self.identity, self.topology = identity, topology
         self.checkpoint_token_file = checkpoint_token_file
+        self.checkpoint_ring = checkpoint_ring
         self.session = secrets.token_hex(16)
         self.listener = socket.create_server(self.address, reuse_port=False)
         self.peers = {}
@@ -384,12 +386,20 @@ class HostRendezvous:
 
         source = RootSource(snapshot, checkpoint)
         readers = []
+        ring = None
         try:
             key = token(self.checkpoint_token_file)
             with phase(progress, "Admit checkpoint range readers"):
+                if self.checkpoint_ring is not None:
+                    from .checkpoint_ring import RingSource
+
+                    ring = RingSource(source, key, self.identity, self.topologies, **self.checkpoint_ring)
+                    if progress is not None:
+                        progress(f"checkpoint ranges: agent ring TCP, {ring.streams} streams per peer")
                 for rank, control in enumerate(controls, 1):
                     send_object(control, ("checkpoint-source", checkpoint))
-                    reader = SourceServer(source, control, key, rank, self.identity)
+                    reader = SourceServer(source, control, key, rank, self.identity,
+                                          transport=None if ring is None else ring.grant)
                     readers.append(reader)
                     reader.thread.start()
                 for reader in readers:
@@ -411,6 +421,8 @@ class HostRendezvous:
             # Loading owns each socket's reader until its authenticated end marker is acknowledged.
             for reader in readers:
                 reader.join()
+            if ring is not None:
+                ring.join()
             with phase(progress, "Wait for tensor-parallel ranks", total=len(controls)) as stage:
                 reports = []
                 for control in controls:
@@ -425,6 +437,8 @@ class HostRendezvous:
             print("flare: terminating tensor-parallel rank group: preparation failed", flush=True)
             os._exit(1)
         finally:
+            if ring is not None:
+                ring.close()
             source.close()
 
     def finish(self):
@@ -643,9 +657,12 @@ def serve_peer(control, executor, rank, world, *, hub_cache, progress=None, expo
         else:
             model = prepare(snapshot, config, rank=rank, group=dist.group.WORLD, progress=progress)
         source.finish()
-        model.memory_report["checkpoint_source"] = dict(source.stats)
+        model.memory_report["checkpoint_source"] = source.report()
         if progress is not None:
-            progress(f"received {source.stats['payload_bytes'] / (1 << 30):.2f} GiB of checkpoint ranges")
+            report = source.report()
+            progress(f"received {source.stats['payload_bytes'] / (1 << 30):.2f} GiB of checkpoint ranges "
+                     f"via {report['transport']} ({source.streams} streams, "
+                     f"{report['payload_seconds']:.2f}s, {report['payload_gbps']:.2f} Gbit/s)")
         model.manifest()
         send_object(control, {"report": model.memory_report})
         command = receive_object(control)

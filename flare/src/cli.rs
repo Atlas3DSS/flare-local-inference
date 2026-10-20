@@ -34,6 +34,18 @@ pub enum Command {
     Agent(AgentArgs),
     /// Control an orbit of agents from this machine.
     Orbit(OrbitArgs),
+    #[cfg(unix)]
+    #[command(hide = true)]
+    CheckpointConnect {
+        #[arg(long)]
+        grant: PathBuf,
+        #[arg(long)]
+        rank: usize,
+        #[arg(long)]
+        stream: usize,
+        #[arg(long)]
+        fd: i32,
+    },
     /// Manage remembered publisher trust.
     Trust {
         #[command(subcommand)]
@@ -172,6 +184,12 @@ pub struct OrbitArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum OrbitCommand {
+    /// Internal Ignition request: sign a fabric route for an admitted checkpoint source.
+    #[command(hide = true)]
+    CheckpointRoute {
+        #[arg(long)]
+        cluster: Option<String>,
+    },
     /// Pair this controller with the agents on HOSTS.
     Pair {
         #[arg(required = true, value_name = "HOST")]

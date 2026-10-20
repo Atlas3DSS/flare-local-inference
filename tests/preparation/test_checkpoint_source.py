@@ -5,8 +5,10 @@ from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
+import queue
 import socket
 import struct
+import threading
 from types import SimpleNamespace
 from unittest import mock
 
@@ -32,7 +34,7 @@ def checkpoint(directory):
 
 
 @contextmanager
-def connected(tmp_path):
+def connected(tmp_path, streams=1):
     original = tmp_path / "original"
     offset = checkpoint(original)
     description = SimpleNamespace(repository=str(original), revision="immutable")
@@ -43,15 +45,47 @@ def connected(tmp_path):
     server = transport.SourceServer(root, sender, b"k" * 32, 1, "code")
     server.thread.start()
     client = None
+    channels = []
     try:
         client = transport.RemoteSource(receiver, b"k" * 32, 1, "code", description, directory=tmp_path)
         server.wait_ready()
+        if streams > 1:
+            client.control_stats = dict(client.stats)
+            client.channels = queue.Queue()
+            client.streams = streams
+            for _ in range(streams):
+                left, right = socket.socketpair()
+                left.settimeout(5)
+                right.settimeout(5)
+                reader = transport.SourceServer(root, left, b"k" * 32, 1, "code")
+                reader.thread.start()
+                channels.append((reader, right))
+                channel, _ = transport.authenticate(right, b"k" * 32, rank=1, identity="code")
+                channel.receive("catalog")
+                channel.send("ready")
+                channel.receive("ready")
+                stats = dict(payload_bytes=0, metadata_bytes=0, requests=0)
+                client.channel_stats.append((channel, stats))
+                client.channels.put((channel, stats))
         yield client, server, offset
         if not client.finished and server.error is None:
             client.finish()
         if server.error is None:
             server.join()
+        for reader, _ in channels:
+            reader.join()
+        if client.finished:
+            assert {field: server.stats[field] + sum(reader.stats[field] for reader, _ in channels)
+                    for field in client.stats} == client.stats
     finally:
+        for reader, connection in channels:
+            connection.close()
+            try:
+                reader.connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            reader.thread.join(5)
+            reader.connection.close()
         receiver.close()
         sender.shutdown(socket.SHUT_RDWR)
         server.thread.join(5)
@@ -76,6 +110,73 @@ def test_only_selected_row_bytes_cross_the_wire(tmp_path):
         receiver = client.channel.connection
         transport._packet(receiver, b"prepared report")
         assert transport._receive(server.connection) == b"prepared report"
+
+
+def test_parallel_prefetch_is_bounded_and_drains_before_return(tmp_path):
+    from contextlib import closing
+    from ignition.preparation.remote_weights import RemoteWeightSession
+
+    with connected(tmp_path, 4) as (client, server, start):
+        adapter = RemoteWeightSession.__new__(RemoteWeightSession)
+        adapter.source = client
+        barrier = threading.Barrier(4, timeout=5)
+        read = client.read
+        def gated(*args):
+            barrier.wait()
+            return read(*args)
+        client.read = gated
+        requests = ((("weights.safetensors", start + index, 1, 1, 0), index) for index in range(12))
+        with closing(adapter._prefetch(requests)) as received:
+            first = next(received)
+            assert first == (0, bytes([0]))
+            # The consumer holds the first buffer; no fifth read can replace it yet.
+            assert sum(stats["requests"] for _, stats in client.channel_stats) <= 4
+            result = [first, *received]
+        assert result == [(index, bytes([index])) for index in range(12)]
+        assert client.stats["payload_bytes"] == 12
+        assert server.stats["payload_bytes"] == 0
+
+
+def test_failed_parallel_read_closes_and_joins_all_workers(tmp_path):
+    from contextlib import closing
+    from ignition.preparation.remote_weights import RemoteWeightSession
+
+    with pytest.raises(ConnectionError):
+        with connected(tmp_path, 4) as (client, server, start):
+            adapter = RemoteWeightSession.__new__(RemoteWeightSession)
+            adapter.source = client
+            original = server.source.read
+            def failing(name, offset, *args, **kwargs):
+                if offset == start + 2:
+                    raise ConnectionError("interrupted source range")
+                return original(name, offset, *args, **kwargs)
+            server.source.read = failing
+            requests = ((("weights.safetensors", start + index, 1, 1, 0), index) for index in range(12))
+            try:
+                with closing(adapter._prefetch(requests)) as received:
+                    list(received)
+            finally:
+                assert not any(thread.name.startswith("flare-checkpoint-read") for thread in threading.enumerate())
+
+
+@pytest.mark.parametrize("streams", [1, 4, 8])
+def test_calibration_prefetch_preserves_values_empty_tensors_and_budget(tmp_path, streams):
+    import torch
+    from b12x.loader._checkpoint import TensorRange
+    from ignition.preparation.remote_weights import RemoteWeightSession
+
+    with connected(tmp_path, streams) as (client, _, start):
+        adapter = RemoteWeightSession.__new__(RemoteWeightSession)
+        adapter.source, adapter.names, adapter.metadata_bytes = client, ("weights.safetensors",), 0
+        entries = [TensorRange(str(index), 0, start + index, 1, (1,), torch.uint8) for index in range(16)]
+        entries.insert(4, TensorRange("empty", 0, start, 0, (0,), torch.uint8))
+        values = adapter._metadata_values(entries)
+        assert values["empty"].numel() == 0
+        assert [values[str(index)].item() for index in range(16)] == list(range(16))
+        assert adapter.metadata_bytes == client.stats["payload_bytes"] == 16
+        adapter.metadata_bytes = 64 << 20
+        with pytest.raises(ValueError, match="64 MiB"):
+            adapter._metadata_values(entries[:1])
 
 
 def test_headers_and_file_sources_require_the_scoped_owner(tmp_path):
@@ -160,10 +261,11 @@ def test_end_marker_byte_accounting_is_authenticated(tmp_path):
         assert "accounting" in str(server.error)
 
 
-def test_adapter_preserves_packed_rows_and_cpu_pointer_records(tmp_path):
+@pytest.mark.parametrize("streams", [1, 4, 8])
+def test_adapter_preserves_packed_rows_and_cpu_pointer_records(tmp_path, streams):
     from ignition.preparation.remote_weights import RemoteWeightSession
 
-    with connected(tmp_path) as (client, _, start), client.activate():
+    with connected(tmp_path, streams) as (client, _, start), client.activate():
         manifest = inspect_indexed_checkpoint(client.snapshot)
         adapter = RemoteWeightSession.__new__(RemoteWeightSession)
         adapter.source, adapter.checkpoint = client, manifest
@@ -298,6 +400,8 @@ def test_peer_export_keeps_the_remote_owner_for_cleanup(tmp_path, monkeypatch, f
     events = []
     class Owner:
         stats = dict(payload_bytes=0, metadata_bytes=0, requests=0)
+        def report(self):
+            return dict(self.stats)
         @contextlib.contextmanager
         def activate(self):
             yield tmp_path
@@ -312,7 +416,8 @@ def test_peer_export_keeps_the_remote_owner_for_cleanup(tmp_path, monkeypatch, f
     class Control:
         def getsockname(self):
             return "127.0.0.1", 0
-        def sendfile(self, stream):
+        def sendfile(self, stream, *, count):
+            assert stream.read(count) == b"synthetic package"
             events.append("package-sent")
             if failed_send:
                 raise ConnectionError("synthetic interrupted export")
@@ -321,9 +426,11 @@ def test_peer_export_keeps_the_remote_owner_for_cleanup(tmp_path, monkeypatch, f
     model = SimpleNamespace(memory_report={}, manifest=lambda: None, close=lambda: events.append("model-closed"))
     assignment = {"config": None, "prepare": lambda *args, **kwargs: model,
                   "store": ("127.0.0.1", 1234), "packaged": False}
-    commands = iter((("checkpoint-source", None), assignment, ("export", {}), "close"))
+    blob = tmp_path / "source-data"
+    commands = iter((("checkpoint-source", None), assignment, ("export", {}), [str(blob)], "close"))
     def export(*args, **kwargs):
-        args[3].write_bytes(b"synthetic package")
+        blob.write_bytes(b"synthetic package")
+        args[3].write_text(json.dumps({"payload": [["data", str(blob), 0, blob.stat().st_size]]}))
         return SimpleNamespace(memory_inventory={})
     monkeypatch.setattr(transport, "RemoteSource", remote)
     monkeypatch.setattr(transport, "token", lambda path: b"test" * 8)

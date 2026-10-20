@@ -284,6 +284,16 @@ are selected only by `--tuning-gpus`.
 
 Both Ignition commands accept `--config`.
 
+For multi-host `ignition export` and `ignition serve`, `--roce-ring` also sends
+checkpoint tensor ranges through the paired agents' RoCE-interface TCP paths.
+`--cluster NAME` selects an Orbit cluster whose host order matches preparation
+ranks; `--orbit-file PATH` and `--key-file PATH` override the usual Orbit files.
+`--transfer-streams N` selects 1 through 64 concurrent checkpoint reads per peer
+(default 8), split across the available rails. These controller and stream
+flags require `--roce-ring`; peers receive the signed route during admission.
+See [checkpoint preparation](multi-host.md#prepare-the-package) for credentials,
+buffer bounds, and traffic that remains on the rendezvous connection.
+
 #### Development without package export
 
 For development, `ignition serve` prepares graphs and hands them directly to
@@ -1106,7 +1116,13 @@ ranks. The transport accepts 2..16
 ranks, while recipe validation retains each model's supported TP sizes. This
 option is recorded in the preparation plan, sent to preparation peers, and
 forwarded to serving peers. It changes native transport routing, not the
-captured collective operation contracts. `flare orbit run --roce-ring` also
+captured collective operation contracts. During preparation it also sends
+checkpoint tensor ranges through paired agents over the ring's fabric TCP
+interfaces. `--orbit-file`, `--key-file`, and `--cluster` select the controller
+and the exact rank-ordered cluster; `--transfer-streams N` selects 1..64
+checkpoint streams per peer (default 8). Peers retain `ignition join` without
+additional flags. Metadata, preparation coordination, and final export assembly
+still use the rendezvous connection. `flare orbit run --roce-ring` also
 distributes package bytes over TCP through the ring's fabric interfaces.
 `flare orbit push --roce-ring --to NODE,...` uses the same distribution path
 without starting ranks; it requires exactly one target per package rank, in

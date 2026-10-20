@@ -1,0 +1,149 @@
+     0.8s rank 1: joined rank zero at 10.137.203.173:29630 as rank 1 of 4
+     7.2s rank 1: Inspect checkpoint started
+     8.5s rank 1: Inspect checkpoint complete in 1.28s
+   199.1s rank 1: after weights: free=52002 MiB, allocated=45934 MiB, reserved=47394 MiB, rss=2471 MiB
+   199.1s rank 1: Allocate model state and collectives started
+   203.5s rank 1: Allocate model state and collectives complete in 4.42s
+   203.5s rank 1: after model state (continuation 238 MiB, 5 rows): free=49943 MiB, allocated=47562 MiB, reserved=48776 MiB, rss=2860 MiB
+   203.5s rank 1: Construct graph catalog started
+   223.7s rank 1: Construct graph catalog complete in 20.23s
+   223.7s rank 1: after graph catalog (operator scratch 0 MiB): free=49090 MiB, allocated=47967 MiB, reserved=48776 MiB, rss=3437 MiB
+   223.7s rank 1: Prepare and tune kernels started
+   809.2s rank 1: Prepare and tune kernels complete in 585.54s
+   809.2s rank 1: selected kernels: {'fixed': 14415, 'tuned': 15330, 'cached': 1292}
+   809.3s rank 1: after tuning: free=46982 MiB, allocated=48330 MiB, reserved=48752 MiB, weights=45934 MiB, continuation=238 MiB, operator scratch=312 MiB
+   809.3s rank 1: Measure graph memory started
+   813.3s rank 1: capturing prefill4096: 46945 MiB free, 48394 MiB allocated, 48816 MiB reserved, 28849 MiB outside PyTorch
+   813.5s rank 1: captured prefill4096 in 4.25s
+   815.1s rank 1: capturing prefill3584: 46881 MiB free, 48394 MiB allocated, 48900 MiB reserved, 28830 MiB outside PyTorch
+   815.3s rank 1: captured prefill3584 in 1.77s
+   816.6s rank 1: capturing prefill3072: 46851 MiB free, 48394 MiB allocated, 48900 MiB reserved, 28860 MiB outside PyTorch
+   816.8s rank 1: captured prefill3072 in 1.53s
+   817.9s rank 1: capturing prefill2560: 46815 MiB free, 48394 MiB allocated, 48900 MiB reserved, 28896 MiB outside PyTorch
+   818.1s rank 1: captured prefill2560 in 1.30s
+   819.0s rank 1: capturing prefill2048: 46785 MiB free, 48394 MiB allocated, 48900 MiB reserved, 28926 MiB outside PyTorch
+   819.2s rank 1: captured prefill2048 in 1.09s
+   819.9s rank 1: capturing prefill1536: 46751 MiB free, 48394 MiB allocated, 48900 MiB reserved, 28960 MiB outside PyTorch
+   820.0s rank 1: captured prefill1536 in 0.85s
+   820.6s rank 1: capturing prefill1024: 46723 MiB free, 48394 MiB allocated, 48900 MiB reserved, 28988 MiB outside PyTorch
+   820.7s rank 1: captured prefill1024 in 0.64s
+   821.0s rank 1: capturing prefill512: 46702 MiB free, 48394 MiB allocated, 48900 MiB reserved, 29009 MiB outside PyTorch
+   821.1s rank 1: captured prefill512 in 0.43s
+   821.4s rank 1: capturing prefill256: 46662 MiB free, 48394 MiB allocated, 48900 MiB reserved, 29049 MiB outside PyTorch
+   821.5s rank 1: captured prefill256 in 0.37s
+   821.7s rank 1: capturing prefill128: 46619 MiB free, 48394 MiB allocated, 48900 MiB reserved, 29092 MiB outside PyTorch
+   821.8s rank 1: captured prefill128 in 0.36s
+   823.5s rank 1: capturing prefill4096-no-mtp: 46594 MiB free, 48394 MiB allocated, 48900 MiB reserved, 29117 MiB outside PyTorch
+   823.7s rank 1: captured prefill4096-no-mtp in 1.86s
+   825.1s rank 1: capturing prefill3584-no-mtp: 46576 MiB free, 48394 MiB allocated, 48900 MiB reserved, 29135 MiB outside PyTorch
+   825.3s rank 1: captured prefill3584-no-mtp in 1.63s
+   826.6s rank 1: capturing prefill3072-no-mtp: 46565 MiB free, 48394 MiB allocated, 48900 MiB reserved, 29146 MiB outside PyTorch
+   826.8s rank 1: captured prefill3072-no-mtp in 1.42s
+   827.8s rank 1: capturing prefill2560-no-mtp: 46533 MiB free, 48394 MiB allocated, 48900 MiB reserved, 29178 MiB outside PyTorch
+   827.9s rank 1: captured prefill2560-no-mtp in 1.19s
+   828.8s rank 1: capturing prefill2048-no-mtp: 46518 MiB free, 48394 MiB allocated, 48900 MiB reserved, 29192 MiB outside PyTorch
+   828.9s rank 1: captured prefill2048-no-mtp in 0.98s
+   829.5s rank 1: capturing prefill1536-no-mtp: 46476 MiB free, 48394 MiB allocated, 48900 MiB reserved, 29234 MiB outside PyTorch
+   829.7s rank 1: captured prefill1536-no-mtp in 0.77s
+   830.1s rank 1: capturing prefill1024-no-mtp: 46438 MiB free, 48394 MiB allocated, 48900 MiB reserved, 29273 MiB outside PyTorch
+   830.2s rank 1: captured prefill1024-no-mtp in 0.55s
+   830.5s rank 1: capturing prefill512-no-mtp: 46412 MiB free, 48394 MiB allocated, 48900 MiB reserved, 29299 MiB outside PyTorch
+   830.6s rank 1: captured prefill512-no-mtp in 0.34s
+   830.7s rank 1: capturing prefill256-no-mtp: 46381 MiB free, 48394 MiB allocated, 48900 MiB reserved, 29330 MiB outside PyTorch
+   830.9s rank 1: captured prefill256-no-mtp in 0.28s
+   831.0s rank 1: capturing prefill128-no-mtp: 46340 MiB free, 48394 MiB allocated, 48900 MiB reserved, 29371 MiB outside PyTorch
+   831.1s rank 1: captured prefill128-no-mtp in 0.27s
+   833.1s rank 1: capturing decode4: 46311 MiB free, 48394 MiB allocated, 48900 MiB reserved, 29399 MiB outside PyTorch
+   833.1s rank 1: Measure graph memory failed in 23.84s
+Traceback (most recent call last):
+  File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/ignition/preparation/capture.py", line 66, in capture_forwards
+    function()
+  File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/ignition/recipes/glm53/generation.py", line 45, in __call__
+    self.decoder()
+  File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/ignition/recipes/glm53/stack.py", line 149, in __call__
+    value = layer(value)
+            ^^^^^^^^^^^^
+  File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/ignition/recipes/glm53/decoder.py", line 116, in __call__
+    self.attention_reduce(self.attention(self.attention_hc(*inputs)))
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/ignition/recipes/glm53/mla.py", line 384, in __call__
+    chain.start()
+  File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/ignition/recipes/glm53/mla.py", line 179, in start
+    _start_query_chain(self.source, self.query, self.absorbed, self.gathered, self.workspace, self.handle,
+  File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/torch/_library/custom_ops.py", line 866, in __call__
+    return self._opoverload(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/torch/_ops.py", line 916, in __call__
+    return self._op(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/torch/_library/autograd.py", line 147, in autograd_impl
+    result = redispatch_no_grad(keyset, args, keyword_only_args)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/torch/_library/autograd.py", line 43, in redispatch_no_grad
+    result = op.redispatch(keyset & _C._after_autograd_keyset, *args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/torch/_ops.py", line 925, in redispatch
+    return pyobj_dispatcher.redispatch(keyset, *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/torch/_library/custom_ops.py", line 829, in adinplaceorview_impl
+    return op.redispatch(keyset & after_ADInplaceOrView_keyset, *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/torch/_ops.py", line 925, in redispatch
+    return pyobj_dispatcher.redispatch(keyset, *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/torch/_library/custom_ops.py", line 442, in backend_impl
+    result = self._backend_fns[device_type](*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/torch/_compile.py", line 54, in inner
+    return disable_fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/torch/_dynamo/eval_frame.py", line 1548, in _fn
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/torch/_library/custom_ops.py", line 503, in wrapped_fn
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/ignition/recipes/glm53/mla.py", line 116, in _start_query_chain
+    _CHAINS[handle].run(source, workspace)
+  File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/ignition/recipes/glm53/mla.py", line 176, in run
+    self.gather.run_eager(self.absorbed.view(rows, -1))
+  File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/ignition/components/collectives.py", line 479, in run_eager
+    _gather_columns(source, self.output, self.handle)
+  File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/ignition/components/collectives.py", line 258, in _gather_columns
+    runtime.all_gather(source, dim=-1, out=output, plan=owner.plan)
+  File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/flashinfer/experimental/b12x/comm/roce/roce_oneshot.py", line 1044, in all_gather
+    return self._run_prepared_all_gather(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/flashinfer/experimental/b12x/comm/roce/roce_oneshot.py", line 1093, in _run_prepared_all_gather
+    self._order_stream(capturing)
+  File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/flashinfer/experimental/b12x/comm/roce/roce_oneshot.py", line 898, in _order_stream
+    raise RuntimeError(
+RuntimeError: RoCE collectives must all be captured on one stream
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/ignition/preparation/host_ranks.py", line 655, in serve_peer
+    model = prepare(snapshot, config, rank=rank, group=dist.group.WORLD, progress=progress,
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/ignition/recipes/glm53/bootstrap.py", line 456, in prepare_rank
+    trials, _ = capture_forwards(forwards, signatures, session=session, device=device,
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/contextlib.py", line 81, in inner
+    return func(*args, **kwds)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/ignition/preparation/capture.py", line 65, in capture_forwards
+    with communication, session.capture(), torch.cuda.graph(graph, pool=pool, stream=stream):
+  File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/torch/cuda/graphs.py", line 1210, in __exit__
+    self.cuda_graph.capture_end()
+  File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/torch/cuda/graphs.py", line 649, in capture_end
+    self.capture_end_pre()
+  File "/home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/torch/cuda/graphs.py", line 630, in capture_end_pre
+    super().capture_end_pre()
+torch.AcceleratorError: CUDA error: capturing stream has unjoined work
+Search for `cudaErrorStreamCaptureUnjoined' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
+
+Graph 'decode4' on cuda:0: 46311 MiB free, 48394 MiB allocated, 48900 MiB reserved, 29399 MiB outside PyTorch

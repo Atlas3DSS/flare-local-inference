@@ -307,6 +307,57 @@ impl Controller {
         self.cluster(name)
     }
 
+    pub fn checkpoint_route(
+        &self,
+        cluster: Option<&str>,
+        request: super::checkpoint::RouteRequest,
+    ) -> Result<Signed, Failure> {
+        let (_, nodes) = self.cluster(cluster)?;
+        if nodes.len() != request.gpu_uuids.len() {
+            return Err(
+                "checkpoint cluster must list exactly one agent per preparation rank".into(),
+            );
+        }
+        let mut records = Vec::new();
+        let mut members = Vec::new();
+        for (rank, node) in nodes.iter().enumerate() {
+            let status = self.node_status(node, None)?;
+            if !status
+                .gpus
+                .iter()
+                .any(|gpu| gpu.uuid == request.gpu_uuids[rank])
+            {
+                return Err(format!(
+                    "checkpoint rank {rank}'s GPU is not on orbit node {}; check cluster order",
+                    node.name
+                )
+                .into());
+            }
+            let (mut session, _) = self.node_session(node)?;
+            session.write_frame(frame::FABRIC, b"{}")?;
+            records.push(session.expect(frame::OK)?);
+            members.push(Member {
+                rank,
+                name: node.name.clone(),
+                public_key: node.public_key.clone(),
+                address: node.address.clone(),
+                gpus: vec![request.gpu_uuids[rank].clone()],
+            });
+        }
+        let grant = super::checkpoint::Grant {
+            purpose: "checkpoint-stream-v1".into(),
+            ring: super::fabric::plan(&nodes, &records)?,
+            members,
+            source_port: request.source_port,
+            streams: request.streams,
+            catalog_sha256: request.catalog_sha256,
+            identity: request.identity,
+            expires: now() + 3600,
+        };
+        grant.validate()?;
+        Signed::sign(&self.key, &grant)
+    }
+
     /// The orbit file's nodes of a cluster, in rank order.
     fn cluster(&self, name: Option<&str>) -> Result<(String, Vec<Node>), Failure> {
         let (name, nodes) = self.orbit.cluster(name)?;

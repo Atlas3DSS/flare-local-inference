@@ -622,6 +622,22 @@ fn session(agent: &Arc<Agent>, stream: TcpStream) -> Result<(), Failure> {
                     Err(error) => Err(error),
                 }
             }
+            frame::CHECKPOINT_OPEN => {
+                let request: super::checkpoint::Open =
+                    serde_json::from_value(json_body(&mut session, length)?)?;
+                match super::checkpoint::authorize(&agent.dir, &request.grant) {
+                    Ok(grant) => {
+                        return super::checkpoint::relay(
+                            session,
+                            &agent.key,
+                            &agent.hello()?,
+                            grant,
+                            request,
+                        );
+                    }
+                    Err(error) => Err(error),
+                }
+            }
             _ if !authorized => Err(format!(
                 "{} is not an authorized controller of this node",
                 session.remote().fingerprint()

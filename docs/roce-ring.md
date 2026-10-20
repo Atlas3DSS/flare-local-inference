@@ -12,10 +12,12 @@ in the prepared GPU programs. Routing, registered relay buffers, and RDMA
 progress belong to the native transport. Serving has no Python callback,
 runtime compilation, or steady-state GPU allocation.
 
-Orbit also uses this rank order and fabric discovery for encrypted TCP package
-distribution when `--roce-ring` is selected. Agents stream shards through their
-neighbors before serving starts; this is separate from the RDMA proxy and its
-captured regions. See [fabric TCP transfers](orbit.md#package-transfers-through-ring-interfaces).
+Orbit also uses this rank order and fabric discovery for encrypted TCP checkpoint
+reads during preparation and package distribution before serving when
+`--roce-ring` is selected. Agents stream bytes through their neighbors; this is
+separate from the RDMA proxy and its captured regions. See
+[checkpoint range reads](multi-host.md) and
+[package transfers](orbit.md#package-transfers-through-ring-interfaces).
 
 The ring can run over a switch or hosts cabled directly to their neighbors.
 Forwarding runs on host CPUs; ConnectX hardware hairpin forwarding is not
@@ -135,7 +137,8 @@ On `maxwell`, choose an unused output filename and an available rendezvous port:
 
 ```sh
 .venv/bin/ignition export glm-5.3-flash --gpus 0 --ranks 4 \
-  --rendezvous maxwell:29630 --roce-ring --max-concurrency 4 \
+  --rendezvous maxwell:29630 --roce-ring --cluster ring --transfer-streams 8 \
+  --max-concurrency 4 \
   --output /data/flare-runtime/glm53-ring-tp4.safetensors --verbose
 ```
 
@@ -155,6 +158,18 @@ Run the corresponding command on each peer from its checkout root:
 Rank zero sends the preparation option to peers. The plan records `roce_ring`,
 and the package cache key includes it. `ignition serve` also accepts the option
 with `--ranks` for development without package export.
+
+The paired agent cluster must list exactly these hosts in preparation rank
+order. GPU UUIDs validate that mapping before the controller signs the
+checkpoint route. `--orbit-file` and `--key-file` select nondefault controller
+files. Each peer fetches only its routed checkpoint ranges through 1..64 streams
+(eight by default), alternating the available fabric rails. Rank 2 reads through
+rank 1. Range requests retain their authenticated catalog, exact bounds, and
+completion accounting. Buffering is bounded by the stream count; one reusable
+4 MiB memory-backed buffer feeds the native weight loader without writing received
+weights to peer NVMe. Metadata and coordination stay on the management
+rendezvous, as does final export assembly. Agents on every hop and the Flare
+executable used by Ignition must include checkpoint transport support.
 
 ### Serve through the agents
 
@@ -269,6 +284,50 @@ cold management-transfer baseline, throughput profiling, or a new inference run.
 Socket tests cover six agents, multiple relay hops in both directions, sparse
 range contents, cache reuse, signed-interface and peer-identity rejection, and
 interrupted streams.
+
+### Checkpoint sharding through the agents
+
+The preparation path was measured separately on the same four directly cabled
+Sparks with `nvidia/GLM-5.3-Flash-FP4-Local` revision
+`5b865baa418c3ebd339c310df11b5e4faa2daa18`: TP4, concurrency four, 4096-token
+prefill, five MTP draft tokens, context parallelism and stream overlap enabled.
+Only rank zero held the complete 165.5 GiB checkpoint. The
+[checkpoint measurements](measurements/roce-distribution-20261020/checkpoint/)
+retain preparation logs, live sockets, CPU/storage/interface samples and an
+analysis script. These are ordinary page-cache conditions, not cold-cache tests.
+
+| Loading path | Rank 1 after weights | Rank 2 after weights | Rank 3 after weights |
+| --- | ---: | ---: | ---: |
+| Management rendezvous, one stream | Incomplete | Incomplete | Incomplete |
+| Fabric TCP, eight streams, disk buffer | 310.5 s | 375.6 s | 326.4 s |
+| Fabric TCP, eight streams, memory buffer and parallel calibration reads | 199.1 s | 204.0 s | 200.2 s |
+
+Times are each peer's process elapsed time at the recipe's `after weights`
+marker, including admission and loading. The management run was stopped after
+505–511 seconds with only 13.9–14.9 GiB received per peer; it supplies no completed
+baseline time. The fabric runs loaded every rank. The disk-buffer run stopped
+before graph preparation finished. The memory-buffer run later failed capturing
+GLM's `decode4` graph because an auxiliary-stream query gather violated
+RoCEnante's single capture-stream requirement; it did not export or serve a model.
+
+During the memory-buffer loading window, source fabric TX was 155.25 GiB.
+Rank 1 received 103.62 GiB and transmitted 52.02 GiB; ranks 2 and 3 received
+51.77 and 51.75 GiB. Live TCP sockets used the same two rails per hop listed
+below. Management RX was about 69.4 MiB per peer for checkpoint metadata and
+coordination. Peer NVMe reads fell from about 49.5 GiB each to zero, and writes
+from about 49.6 GiB to less than 61 MiB, by replacing the bounded disk bounce
+file with a memory-backed descriptor. Native destination copies remain serial
+and preserve their existing precision, stride, and lifetime contracts.
+
+This workload does not saturate the fabric. Rank zero read about 356 GiB from
+NVMe while loading its own shard and serving strided ranges to its peers; the
+checkpoint ranges carry much less data than their physical read extents.
+Package-copy throughput below does not describe checkpoint-loading throughput.
+Focused tests cover exact GPU copies with one, four and eight streams, bounded
+parallel calibration/weight reads, authenticated completion accounting,
+multi-hop encrypted streams, invalid routes, replay/tampering and interrupted
+connections. Final export assembly still transfers missing prepared payloads
+over the preparation rendezvous.
 
 ### TCP interface recheck
 
