@@ -46,8 +46,3 @@ Compare the engines on your actual model and workload.
 Start with [model preparation and serving](docs/model-preparation.md).
 See the [CLI guide](docs/cli-design.md) for configuration and the
 [core design](docs/core-design.md) for the architectural reasoning.
-
-## Contributing
-
-Before opening a pull request, join [the Discord server](https://discord.gg/Bp8KaCN5H)
-and request a collaborator role in the `#flare` channel.

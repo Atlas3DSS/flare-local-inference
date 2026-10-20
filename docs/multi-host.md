@@ -133,11 +133,11 @@ their required data through the agents.
 For a package published on Hugging Face, launch from its repository:
 
 ```sh
-flare orbit run local-inference-lab/Qwen3.8-Flash-Next-FLARE --revision gb10
+flare orbit run ORG/MODEL --revision gb10
 ```
 
-If the revision contains several primary files, select the multi-host package
-with `--filename FILE`. `gb10` selects the Spark hardware revision even from
+Replace `ORG/MODEL` with the package repository. If the revision contains several
+primary files, select the multi-host package with `--filename FILE`. `gb10` selects the Spark hardware revision even from
 a controller without a GPU. Without an explicit revision, Orbit infers one
 from available candidate GPUs and refuses ambiguous mixed hardware.
 `--offline` and `--cache-dir` apply to the downloading node; `--token-file`

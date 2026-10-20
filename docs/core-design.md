@@ -46,8 +46,7 @@ prepared forwards before warmup and CUDA graph capture. Model structure,
 numerical semantics, compiler optimizations, and kernel preparation remain
 connected to the Python ecosystem throughout execution construction.
 
-The vLLM fork's Qwen and GLM paths maintain engine-specific model
-implementations. vLLM also offers a
+vLLM offers a
 [Transformers backend](https://huggingface.co/docs/transformers/main/en/transformers_as_backend),
 whose attention, state, and execution contracts still need to fit each model.
 Flare's preparation boundary lets canonical model code and PyTorch compilation
@@ -73,17 +72,6 @@ communication plan, and serving integration together. The remaining work is
 concentrated on composing those capabilities into a service; Flare does not
 need to establish a competing model ecosystem or develop another kernel
 library to become useful.
-
-The [Local Inference Lab vLLM fork](https://github.com/local-inference-lab/vllm/tree/dev/karmic-kraken)
-already integrates this stack. Its support extends through checkpoint
-transfers, compressed-scale expansion, PCIe and RoCE collectives, coordinated
-kernel preparation, graph workspaces, decode context parallelism, recurrent
-prefix checkpoints, external checkpoint transfers, speculative verification,
-and prefill scheduling. Those concerns cross model, worker, scheduler, cache,
-and allocator interfaces. Maintaining a specialized serving contract is already
-part of supporting these models in vLLM. The cost comparison is between
-carrying those integrations through a general engine and maintaining a smaller
-runtime whose invariants directly express their requirements.
 
 vLLM's device, backend, model, and distributed-execution breadth creates a
 large compatibility matrix. Changes to cache layouts, compilation, offload,
@@ -156,10 +144,9 @@ Keeping a conversation outside GPU memory imposes related requirements. A
 resumable endpoint includes recurrent matrices, selector state, attention
 tails, and saved hidden state alongside its KV pages. Every part must describe
 the same committed token prefix. Transfer sources must remain immutable, and
-destinations cannot be recycled while a copy can still write to them. The
-vLLM fork's offload integration spans these rules, from frozen recurrent
-snapshots and padded selector tails to restore admission, cancellation, and
-cache reset. A disk transport depends on all of them.
+destinations cannot be recycled while a copy can still write to them. Offload
+integration spans frozen recurrent snapshots, padded selector tails, restore
+admission, cancellation, and cache reset. A disk transport depends on all of them.
 
 The [tiered prefix-cache design](prefix-cache-offload.md) extends the checkpoint
 object Helios already owns. Stores retain published immutable page chains and

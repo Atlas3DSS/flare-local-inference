@@ -703,18 +703,18 @@ mod tests {
     #[test]
     fn acceptance_is_exact_and_requires_a_complete_bounded_line() {
         assert_eq!(
-            acceptance_line(&b"local-inference-lab\n"[..]).unwrap(),
-            "local-inference-lab"
+            acceptance_line(&b"example-publisher\n"[..]).unwrap(),
+            "example-publisher"
         );
         assert_eq!(
-            acceptance_line(&b"local-inference-lab\r\n"[..]).unwrap(),
-            "local-inference-lab"
+            acceptance_line(&b"example-publisher\r\n"[..]).unwrap(),
+            "example-publisher"
         );
         assert_eq!(
-            acceptance_line(&b" local-inference-lab \n"[..]).unwrap(),
-            " local-inference-lab "
+            acceptance_line(&b" example-publisher \n"[..]).unwrap(),
+            " example-publisher "
         );
-        assert!(acceptance_line(&b"local-inference-lab"[..]).is_err());
+        assert!(acceptance_line(&b"example-publisher"[..]).is_err());
         assert!(acceptance_line([vec![b'x'; 256], vec![b'\n']].concat().as_slice()).is_err());
         assert!(acceptance_line(&b""[..]).is_err());
     }

@@ -1,19 +1,14 @@
 # Production signing
 
-Ignition signs runtime packages with Ed25519. Helios embeds the public identity
-**Local Inference Lab, Inc.**, namespace `local-inference-lab`, from
-[`publishers.json`](../helios/src/runtime_package/publishers.json). Its SHA-256
-public-key fingerprint is:
+Ignition signs runtime packages with Ed25519. Source builds contain no embedded
+publisher profiles. Supply a public profile with `--publisher-keys`, or provision
+profiles when building a distribution as described in
+[runtime package protection](runtime-package-design.md#publisher-authentication-and-executable-access).
 
-```text
-937c0143f6856d3ee8ad164f62e3d804bd825d7a8750d0accb9a5849f703a8c1
-```
-
-The embedded profile lets Flare verify signatures without consulting the network;
-it does not verify identity. Every publisher, including this one, is verified the
-same way: by the `publisher.json` at the root of the package's official source
-repository. Execution still requires first-use acceptance. Private keys never
-belong in source control, packages, or publisher profiles.
+Publisher profiles verify signatures; they do not verify identity. Flare checks
+identity through `publisher.json` at the root of the package's official source
+repository. Execution requires first-use acceptance. Private keys never belong
+in source control, packages, or publisher profiles.
 
 ## Publish the verification key
 
@@ -38,16 +33,15 @@ Run key creation in your own interactive terminal:
 
 ```sh
 .venv/bin/ignition keygen \
-  --directory ~/.config/flare/signing/local-inference-lab \
-  --name 'Local Inference Lab, Inc.' --namespace local-inference-lab
+  --directory ~/.config/flare/signing/example-publisher \
+  --name 'Example Publisher' --namespace example-publisher
 ```
 
 This creates a random Ed25519 key encrypted as PKCS#8 PEM using the entered
 passphrase, and a separate `publisher.json` containing only its public identity.
 The directory must not already exist; key creation never overwrites a key.
 On POSIX, the directory is mode `0700` and both files are mode `0600`.
-Generating another key creates a different identity and does not match the
-fingerprint above.
+Generating another key creates a different identity and fingerprint.
 
 Use a unique, randomly generated passphrase stored in a password manager.
 Ignition requires at least 16 UTF-8 bytes and confirms the passphrase. Enter it
@@ -63,9 +57,10 @@ protect the stored key; they do not protect an unlocked signing process from a
 compromised account or root. Sign only on a trusted host and review the package
 being promoted.
 
-For rotation, generate into a different directory and add the replacement public
-profile to Helios. Previously signed packages require their original public key;
-execution acceptance is specific to the key and namespace. If a private key is
+For rotation, generate into a different directory and supply the replacement public
+profile through `--publisher-keys` or a provisioned distribution. Previously signed
+packages require their original public key; execution acceptance is specific to
+the key and namespace. If a private key is
 compromised, remove its identity from distributed builds and revoke its acceptance
 in affected trust stores with `flare trust revoke FINGERPRINT`.
 
@@ -73,7 +68,7 @@ in affected trust stores with `flare trust revoke FINGERPRINT`.
 
 ```sh
 .venv/bin/ignition key-password \
-  --signing-key ~/.config/flare/signing/local-inference-lab/signing-key.pem
+  --signing-key ~/.config/flare/signing/example-publisher/signing-key.pem
 ```
 
 The command prompts for the existing passphrase, then the replacement twice.
@@ -96,13 +91,13 @@ package will be published:
 ```sh
 .venv/bin/ignition sign /data/flare-runtime/development.safetensors \
   --output /data/flare-runtime/production.safetensors \
-  --signing-key ~/.config/flare/signing/local-inference-lab/signing-key.pem \
-  --namespace local-inference-lab \
-  --official-source https://huggingface.co/local-inference-lab/REPOSITORY
+  --signing-key ~/.config/flare/signing/example-publisher/signing-key.pem \
+  --namespace example-publisher \
+  --official-source https://huggingface.co/example-publisher/REPOSITORY
 ```
 
-Replace `REPOSITORY` with the intended repository name. The command does not
-upload anything. The three publishing values can instead come from `[publishing]`
+Replace `example-publisher` and `REPOSITORY` with your namespace and repository.
+The command does not upload anything. The three publishing values can instead come from `[publishing]`
 in the [configuration file](cli-design.md#signing-and-local-development); explicit
 flags take precedence. It locates `development-publisher.json` beside that config
 file. For a package prepared elsewhere, supply the original trusted public profile

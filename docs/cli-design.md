@@ -508,13 +508,13 @@ from `ignition export` and the diagnostic `ignition serve` commands.
 ### Downloading published packages
 
 ```sh
-flare download local-inference-lab/MODEL --gpus 0,1,2,3
-flare run local-inference-lab/MODEL --gpus 0,1,2,3
-flare download local-inference-lab/MODEL --revision gb10
-flare run local-inference-lab/MODEL@gb202 --filename model.safetensors --gpus 0,1,2,3
+flare download ORG/MODEL --gpus 0,1,2,3
+flare run ORG/MODEL --gpus 0,1,2,3
+flare download ORG/MODEL --revision gb10
+flare run ORG/MODEL@gb202 --filename model.safetensors --gpus 0,1,2,3
 ```
 
-These examples use `MODEL` as a repository-name placeholder. Repositories contain
+These examples use `ORG/MODEL` as a repository placeholder. Repositories contain
 prepared Flare packages, not source Transformers checkpoints. Hardware variants
 are separate Hugging Face revisions named `gb10` and `gb202`. Automatic selection
 queries the selected GPUs' PCI device identifiers through the CUDA driver without
@@ -591,7 +591,7 @@ With the default package cache, the layout is:
 ```text
 ~/.cache/flare/packages/
   blobs/<sha256>.safetensors
-  models--local-inference-lab--Qwen3.8-Flash-Next-FLARE/
+  models--qwen38/
     snapshots/<snapshot-id>/
       model.safetensors
       <sha256>.safetensors
@@ -652,8 +652,8 @@ Configure published exports with all three values:
 ```toml
 [publishing]
 signing_key = "/private/flare-signing-key.pem"
-namespace = "local-inference-lab"
-official_source = "https://huggingface.co/local-inference-lab/foobar"
+namespace = "example-publisher"
+official_source = "https://huggingface.co/example-publisher/MODEL"
 ```
 
 The key must be an owner-only Ed25519 PKCS#8 PEM file. Encrypted keys prompt

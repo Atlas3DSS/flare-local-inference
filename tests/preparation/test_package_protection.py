@@ -447,7 +447,7 @@ def test_stamped_profiles_verify_signatures_without_conferring_identity(flare, t
     from ignition.release import stamp
     signer = publisher()
     path, _ = fixture(tmp_path, size=41)
-    profile = profiles(tmp_path / 'publisher.json', signer, 'Local Inference Lab fixture')
+    profile = profiles(tmp_path / 'publisher.json', signer, 'Example publisher fixture')
     executable = tmp_path / 'flare-publisher'
     stamp(flare, executable, json.loads(profile.read_text()))
     store = tmp_path / 'trust.toml'
@@ -455,7 +455,7 @@ def test_stamped_profiles_verify_signatures_without_conferring_identity(flare, t
     assert unknown.returncode != 0 and 'publish the key in publisher.json' in unknown.stderr
     assert 'https://huggingface.co/flare-tests/fixture' in unknown.stderr and not store.exists()
     known = launch(executable, path, None, store, *approval(signer))
-    assert 'Publisher:  Local Inference Lab fixture' in known.stderr
+    assert 'Publisher:  Example publisher fixture' in known.stderr
     assert 'Identity:   Unverified' in known.stderr and 'Verified via' not in known.stderr
     assert 'model rank count must match distinct selected devices' in known.stderr
     with pytest.raises(ValueError, match='not an empty release slot'):

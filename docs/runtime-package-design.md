@@ -501,9 +501,9 @@ pathname cannot redirect those reads. Package files must remain immutable while
 loaded. Signatures authenticate bytes and do not sandbox executable code.
 Encryption does not prevent a user controlling the runtime from recovering code.
 
-Helios embeds the Local Inference Lab, Inc. public profile from
-`helios/src/runtime_package/publishers.json` in source builds. It also reserves an
-ELF `.flare_publishers` section for additional release-provisioned profiles.
+Source builds contain no embedded publisher profiles:
+`helios/src/runtime_package/publishers.json` is an empty array. Helios reserves an
+ELF `.flare_publishers` section for release-provisioned profiles.
 Embedded profiles verify signatures when the publisher's repository cannot be
 consulted; they confer no verified identity. The private release command stamps
 a JSON profile array into a separately named executable:

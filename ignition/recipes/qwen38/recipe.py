@@ -57,7 +57,6 @@ def usage(prepared):
 
 RECIPE = Recipe(
     name="qwen38", served_model_name="Qwen3.8-Flash-Next", prepare=prepare, usage=usage,
-    export_repository="local-inference-lab/Qwen3.8-Flash-Next-FLARE",
     # Thinking defaults; bounds span thinking/instruct presets: https://huggingface.co/Qwen/Qwen3.8-Flash-Next#best-practices.
     sampling_defaults=SamplingDefaults(temperature=1., top_p=.95, top_k=20,
         ranges={"temperature": SamplingRange(.7, 1.), "top_p": SamplingRange(.8, .95),

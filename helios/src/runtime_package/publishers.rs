@@ -63,17 +63,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn source_build_contains_production_identity() {
-        let profiles = embedded().unwrap();
-        let profile = profiles
-            .iter()
-            .find(|profile| profile.namespace == "local-inference-lab")
-            .unwrap();
-        assert_eq!(profile.name, "Local Inference Lab, Inc.");
-        assert!(!profile.development);
-        assert_eq!(
-            profile.fingerprint(),
-            "937c0143f6856d3ee8ad164f62e3d804bd825d7a8750d0accb9a5849f703a8c1"
-        );
+    fn source_build_has_no_embedded_publishers() {
+        assert!(embedded().unwrap().is_empty());
     }
 }
