@@ -1019,11 +1019,6 @@ fn run(agent: &Arc<Agent>, request: &Value) -> Result<Arc<Group>, Failure> {
     if !package.is_file() {
         return Err(format!("package {} is not on this node", package.display()).into());
     }
-    let port = grant
-        .rendezvous
-        .rsplit_once(':')
-        .map(|(_, port)| port)
-        .ok_or("grant rendezvous lacks a port")?;
     let profile = agent
         .cache
         .join("publishers")
@@ -1032,6 +1027,11 @@ fn run(agent: &Arc<Agent>, request: &Value) -> Result<Arc<Group>, Failure> {
     let mut command = Command::new(&binary);
     command.arg("run").arg(&package);
     if !grant.single_host {
+        let port = grant
+            .rendezvous
+            .rsplit_once(':')
+            .map(|(_, port)| port)
+            .ok_or("grant rendezvous lacks a port")?;
         command
             .arg("--rank")
             .arg(rank.to_string())

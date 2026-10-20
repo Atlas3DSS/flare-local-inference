@@ -665,6 +665,7 @@ running ranks.
 ## Limitations
 
 The controller does not proxy HTTP; clients reach rank zero's host directly.
+The controller and agents must share the agent protocol version.
 Restarting an agent stops its ranks. Routing between controller and nodes uses
 the addresses recorded at pairing. Orbit does not configure the RoCE fabric,
 interfaces, or firewalls, and package transfers use encrypted TCP rather than

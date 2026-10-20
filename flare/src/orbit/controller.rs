@@ -2522,6 +2522,47 @@ mod tests {
                 reserve_bytes: 0,
             },
         };
+        let single_host = ResolvedPackage {
+            ranks: vec![package.ranks[0].clone()],
+            needs: PackageNeeds {
+                multi_host: false,
+                ..package.needs.clone()
+            },
+            ..package.clone()
+        };
+        let launch = controller
+            .launch(
+                "single",
+                &nodes[..1],
+                &single_host,
+                executable,
+                &LaunchOptions {
+                    name: "single".into(),
+                    placements: vec![vec![]],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(launch.grant.single_host);
+        assert!(launch.grant.rendezvous.is_empty());
+        let events = follow(
+            launch
+                .ranks
+                .into_iter()
+                .map(|(node, session)| (0, node.name, session))
+                .collect(),
+        );
+        assert_eq!(
+            events
+                .recv_timeout(Duration::from_secs(20))
+                .unwrap()
+                .result
+                .unwrap(),
+            0
+        );
+        controller.save().unwrap();
+        controller.remove(&launch.grant.group).unwrap();
+
         let launch = controller
             .launch(
                 "pair",

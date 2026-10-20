@@ -27,7 +27,7 @@ pub type Failure = Box<dyn std::error::Error + Send + Sync>;
 /// The agent's default port on every host.
 pub const PORT: u16 = 29900;
 /// The agent protocol every node and controller of a orbit must share.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// Frame tags. A request receives OK with a body or ERROR with a message.
 pub mod frame {
