@@ -394,7 +394,7 @@ nodes = ["maxwell", "hertz"]
 when the command names none, puts the group's `serving` words before the
 command line's serving options so the command line overrides them, and puts the
 group's `rank_zero` words before explicit command-line HTTP options. It takes
-`nodes`, `gpus`, `roce_ring`, and `executable`
+`nodes`, `gpus`, `roce_ring`, `transfer_streams`, and `executable`
 as constraints when the command line gives none. `nodes` lists candidate
 nodes in rank order; `gpus` lists the NVML indices every member uses on its
 node. A group without them is placed from the whole orbit.
@@ -541,9 +541,9 @@ A record is a big-endian `u16` length and ciphertext of at most 65535 bytes,
 so a record carries at most 65519 plaintext bytes. A frame is a tag byte, a
 little-endian `u64` body length, and the body; its header starts a record and
 the body continues across as many records as its length needs, so a PUT or
-FETCH body of hundreds of gigabytes is one frame. Encryption bounds a transfer
-to one core's ChaCha20-Poly1305 rate, so transfers to different nodes run on
-separate connections in parallel.
+FETCH body of hundreds of gigabytes is one frame. Each connection encrypts on
+one thread. Ring transfers use multiple independent connections per destination
+file, and transfers to different nodes also run in parallel.
 
 After the handshake the agent classifies the remote key as an authorized
 controller, a node named in an active grant, or unknown. Unknown keys may only
@@ -565,15 +565,27 @@ agents forward encrypted sessions one record at a time, without storing another
 rank's shard. TCP backpressure bounds buffering, and each hop verifies its peer
 identity and the signed local and remote interface addresses. Connections bind
 their local fabric IP; failed links report errors without retrying through the
-management network. Files alternate between the available rails. A transfer
-connection fails after 120 seconds without read or write progress.
+management network. `--transfer-streams N` selects 1..8 parallel TCP streams per
+destination file (default 8), divided between the available rails. Each stream
+pulls a disjoint, approximately equal share of the requested bytes; sparse holes
+remain holes. Files are processed one at a time. A saved group's
+`transfer_streams` value is reused by `orbit run`, and an explicit CLI value
+overrides it. This setting requires ring distribution and does not affect
+collectives. A transfer connection fails after 120 seconds without read or write
+progress.
 
 Destination cache lookup, sparse writes, content-addressed blob reuse, and
 signed-package verification follow the ordinary transfer path. Cached files do
-not open transfer connections. A failed stream closes the connection and removes
-its partial file; it cannot publish a verified package. A controller-held package
-first uploads to rank zero. A source node outside the selected ring first stages
-a complete copy on rank zero, then ring members fetch from that copy.
+not open transfer connections. Each receiving worker buffers at most 1 MiB of
+file data in addition to encrypted records. Workers write to disjoint offsets
+in one partial file and all finish before it is published. A failed stream
+cancels its siblings, closes their connections, and removes the partial file
+after the workers drain; it cannot publish a verified package. Content-addressed
+payloads are hashed from the assembled file before entering the immutable blob
+store. Signed-package verification still runs after all files arrive.
+A controller-held package first uploads to rank zero. A source node outside the
+selected ring first stages a complete copy on rank zero, then ring members fetch
+from that copy.
 
 Controller connections, metadata lookup, and serving rendezvous continue to use
 the configured management addresses. These transfers use TCP, not RDMA, and

@@ -197,6 +197,8 @@ pub struct GroupSpec {
     pub gpus: Vec<u32>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub roce_ring: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transfer_streams: Option<u8>,
     /// Controller-local executable override; absent sends the controller's running binary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub executable: Option<PathBuf>,
@@ -406,6 +408,7 @@ mod tests {
             nodes: vec!["node".into()],
             gpus: vec![0],
             roce_ring: true,
+            transfer_streams: Some(8),
             executable: Some("/bin/flare-pinned".into()),
             publisher_keys: vec!["/keys/publisher.json".into()],
             trust_store: Some("/keys/trust.toml".into()),

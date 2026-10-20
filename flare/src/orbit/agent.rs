@@ -864,6 +864,16 @@ fn transfer(agent: &Agent, pinned: &mut Pinned, request: &Value) -> Result<Vec<u
     } else {
         None
     };
+    let streams = match request.get("streams") {
+        None => 1,
+        Some(value) => value
+            .as_u64()
+            .filter(|n| (1..=8).contains(n))
+            .ok_or("transfer streams must be in 1..=8")? as usize,
+    };
+    if streams > 1 && ring_source.is_none() {
+        return Err("parallel package transfers require ring fabric interfaces".into());
+    }
     let mut received = 0u64;
     for (file_index, file) in files.iter().enumerate() {
         let name = field(file, "name")?;
@@ -877,24 +887,35 @@ fn transfer(agent: &Agent, pinned: &mut Pinned, request: &Value) -> Result<Vec<u
         // Bytes are arriving, so whatever the directory held is no longer verified.
         let _ = fs::remove_file(&marker);
         let started = Instant::now();
-        let mut session = if let Some(source) = ring_source {
+        let path = if let Some(source) = ring_source {
             let route = super::fabric::path(grant.members.len(), source, rank)?;
             eprintln!(
-                "{name}: fabric TCP {}",
+                "{name}: fabric TCP {} ({streams} streams)",
                 route
                     .iter()
                     .map(|r| grant.members[*r].name.as_str())
                     .collect::<Vec<_>>()
                     .join(" -> ")
             );
-            ring_upstream(
-                agent,
-                &grant,
-                &json!({
-                    "grant": request["grant"], "source_rank": source, "destination_rank": rank,
-                    "rail": file_index % 2, "name": name, "size": size, "ranges": ranges,
-                }),
-                rank,
+            cache::store_parallel(
+                &agent.cache,
+                &entry,
+                size,
+                &ranges,
+                streams,
+                |stream, part| {
+                    let upstream = ring_upstream(
+                        agent,
+                        &grant,
+                        &json!({
+                            "grant": request["grant"], "source_rank": source, "destination_rank": rank,
+                            "rail": (file_index + stream) % 2,
+                            "name": name, "size": size, "ranges": part,
+                        }),
+                        rank,
+                    )?;
+                    Ok(upstream.into_body())
+                },
             )?
         } else {
             let mut session = Session::connect(address, &agent.key)?;
@@ -906,17 +927,16 @@ fn transfer(agent: &Agent, pinned: &mut Pinned, request: &Value) -> Result<Vec<u
                 }))?,
             )?;
             expect_bytes(&mut session, cache::range_bytes(&ranges))?;
-            session
+            cache::store(
+                &agent.cache,
+                "package",
+                &entry,
+                size,
+                &ranges,
+                &mut session.body(),
+            )?
         };
         let length = cache::range_bytes(&ranges);
-        let path = cache::store(
-            &agent.cache,
-            "package",
-            &entry,
-            size,
-            &ranges,
-            &mut session.body(),
-        )?;
         pinned.pin(cache::unit(&agent.cache, &path));
         received += length;
         eprintln!(
@@ -2738,9 +2758,22 @@ pub mod tests {
                 "grant": Signed::sign(&hosts[0].controller, grant).unwrap(), "publisher": publisher(),
                 "source": {"public_key": nodes[0].public_key, "address": "127.0.0.1:1"},
                 "directory": format!("ring-{}-rank{rank}", bytes.len()),
+                "streams": if rank % 2 == 0 { 8 } else { 4 },
                 "files": [{"name": "model.safetensors", "size": bytes.len(), "ranges": ranges}],
             })
         };
+        for count in [json!(0), json!(9), json!("8")] {
+            let mut invalid = request(&grant, 1);
+            invalid["streams"] = count;
+            let error = connect(&hosts[1], &hosts[1].controller)
+                .request(frame::TRANSFER, &invalid)
+                .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("transfer streams must be in 1..=8")
+            );
+        }
         // The source's management address is deliberately unusable. Rank 2 must go through 1.
         thread::scope(|scope| {
             for rank in 1..hosts.len() {

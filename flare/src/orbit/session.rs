@@ -453,6 +453,11 @@ impl Session {
         Body { session: self }
     }
 
+    /// Consume a fetch connection as a reader; dropping it closes the transfer.
+    pub fn into_body(self) -> impl Read {
+        OwnedBody(self)
+    }
+
     /// The current frame's body, which must not exceed `limit` bytes.
     pub fn read_body(&mut self, length: u64, limit: u64) -> Result<Vec<u8>, Failure> {
         if length > limit {
@@ -502,6 +507,14 @@ use std::net::ToSocketAddrs;
 /// Reads the current frame's body.
 pub struct Body<'a> {
     session: &'a mut Session,
+}
+
+struct OwnedBody(Session);
+
+impl Read for OwnedBody {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        self.0.body().read(buffer)
+    }
 }
 
 impl Read for Body<'_> {

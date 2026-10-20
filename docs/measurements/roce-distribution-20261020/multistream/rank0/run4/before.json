@@ -1,0 +1,97 @@
+{
+  "time": 1792518531.342218,
+  "interfaces": {
+    "enP7s7": {
+      "ipv4": [
+        "10.137.203.173"
+      ],
+      "speed_mbps": 1000,
+      "mtu": 1500,
+      "rdma_device": null,
+      "rx_bytes": 776958473808,
+      "tx_bytes": 665196721531
+    },
+    "enp1s0f0np0": {
+      "ipv4": [
+        "10.10.4.1"
+      ],
+      "speed_mbps": 200000,
+      "mtu": 1500,
+      "rdma_device": "rocep1s0f0",
+      "rx_bytes": 3058720706,
+      "tx_bytes": 1740078375232
+    },
+    "enp1s0f1np1": {
+      "ipv4": [
+        "10.10.0.2"
+      ],
+      "speed_mbps": 200000,
+      "mtu": 1500,
+      "rdma_device": "rocep1s0f1",
+      "rx_bytes": 1690344647,
+      "tx_bytes": 763359204186
+    },
+    "enx00e04c680550": {
+      "ipv4": [],
+      "speed_mbps": -1,
+      "mtu": 1500,
+      "rdma_device": null,
+      "rx_bytes": 0,
+      "tx_bytes": 0
+    },
+    "enP2p1s0f0np0": {
+      "ipv4": [
+        "10.10.5.1"
+      ],
+      "speed_mbps": 200000,
+      "mtu": 1500,
+      "rdma_device": "roceP2p1s0f0",
+      "rx_bytes": 402102543,
+      "tx_bytes": 582515152810
+    },
+    "enP2p1s0f1np1": {
+      "ipv4": [
+        "10.10.1.2"
+      ],
+      "speed_mbps": 200000,
+      "mtu": 1500,
+      "rdma_device": "roceP2p1s0f1",
+      "rx_bytes": 187160698,
+      "tx_bytes": 215235876601
+    }
+  },
+  "routes": [
+    {
+      "dst": "10.10.4.2",
+      "from": "10.10.4.1",
+      "dev": "enp1s0f0np0",
+      "flags": [],
+      "uid": 1000,
+      "cache": []
+    },
+    {
+      "dst": "10.10.0.1",
+      "from": "10.10.0.2",
+      "dev": "enp1s0f1np1",
+      "flags": [],
+      "uid": 1000,
+      "cache": []
+    },
+    {
+      "dst": "10.10.5.2",
+      "from": "10.10.5.1",
+      "dev": "enP2p1s0f0np0",
+      "flags": [],
+      "uid": 1000,
+      "cache": []
+    },
+    {
+      "dst": "10.10.1.1",
+      "from": "10.10.1.2",
+      "dev": "enP2p1s0f1np1",
+      "flags": [],
+      "uid": 1000,
+      "cache": []
+    }
+  ]
+}

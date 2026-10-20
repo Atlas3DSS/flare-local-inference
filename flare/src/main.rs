@@ -223,9 +223,12 @@ fn orbit_command(args: cli::OrbitArgs, matches: &clap::ArgMatches) -> Result<(),
         }
         cli::OrbitCommand::Rm { group } => controller.remove(&group),
         cli::OrbitCommand::Forget { node } => controller.forget(&node),
-        cli::OrbitCommand::Push(push) => {
-            controller.push(&push.package, &push.to, &mut push.run_args())
-        }
+        cli::OrbitCommand::Push(push) => controller.push(
+            &push.package,
+            &push.to,
+            &mut push.run_args(),
+            push.transfer_streams,
+        ),
         cli::OrbitCommand::Packages { cluster } => controller.packages(cluster.as_deref()),
         cli::OrbitCommand::Run(run) => controller.run(
             run.package.as_deref(),
@@ -248,6 +251,7 @@ fn orbit_command(args: cli::OrbitArgs, matches: &clap::ArgMatches) -> Result<(),
                 serving: run.rank_options(matches.subcommand_matches("run").unwrap()),
                 rank_zero: run.rank_zero_options(),
                 roce_ring: run.roce_ring,
+                transfer_streams: run.transfer_streams,
                 executable: run.executable.clone(),
                 detach: run.detach,
                 verify_weights: run.serving.verify_weights,

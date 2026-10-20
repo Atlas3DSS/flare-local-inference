@@ -263,11 +263,12 @@ agents, caches, host routes, and SSH configuration were preserved.
 The measured 489–529 MiB/s is about 4.1–4.4 Gb/s per peer, well below the
 100 Gb/s interface ceiling. The experiment validates TCP distribution and
 package verification; it does not measure the hardware ceilings above.
-Files alternate rails sequentially; a file is not striped across parallel
-connections. This initial run did not include a matching cold management-transfer
-baseline, throughput profiling, or a new inference run. Socket tests cover six
-agents, multiple relay hops in both directions, sparse range contents, cache
-reuse, signed-interface and peer-identity rejection, and interrupted streams.
+In this initial implementation files alternated rails sequentially; a file was
+not striped across parallel connections. This run did not include a matching
+cold management-transfer baseline, throughput profiling, or a new inference run.
+Socket tests cover six agents, multiple relay hops in both directions, sparse
+range contents, cache reuse, signed-interface and peer-identity rejection, and
+interrupted streams.
 
 ### TCP interface recheck
 
@@ -311,6 +312,48 @@ reads and I/O wait; transfer threads were not continuously CPU-saturated. The
 samples establish costs to investigate, not a single proven throughput limit.
 The interface selection is correct; separating storage waits from encrypted
 streaming costs remains necessary before choosing an optimization.
+
+### Parallel TCP streams
+
+The same signed TP4 fixture was distributed again with 1, 4, and 8 streams per
+file, in that order, using the parallel range writer for all three runs. Each run
+used a new empty destination cache and waited for verification to finish before
+the next began. Each peer received and verified 118.5 GiB in three files. The
+[raw measurements](measurements/roce-distribution-20261020/multistream/) retain
+per-file timings, complete command timings, fabric sockets, interface counters,
+and CPU/NVMe samples.
+
+| Streams per destination file | Large-file MiB/s per peer | Slowest peer's payload time | Full push including verification |
+| ---: | ---: | ---: | ---: |
+| 1 | 485–523 | 244.88 s | 396.83 s |
+| 4 | 1,533–2,084 | 76.76 s | 262.74 s |
+| 8 | 2,749–3,324 | 42.18 s | 179.62 s |
+
+Payload time is the sum of the destination's three logged receive durations,
+including cache writes and file sync, before signed-package verification.
+Eight streams reduced that maximum by 5.8× and full staging time by 2.2× versus
+one stream. A warm eight-stream push reused all verified caches in 0.18 seconds.
+These are single runs per count with ordinary OS page caching; caches were not
+flushed and these measurements do not establish run-to-run variance. No new
+inference run was performed.
+
+The eight-stream socket snapshot shows four connections on each rail per
+destination. Rank zero had eight connections on each 0–1 rail (rank 1's shard
+plus the shard relayed to rank 2), and four on each 0–3 rail. Rank 1's downstream
+connections stayed on the 1–2 fabric links. Management RX plus TX remained below
+0.9 MB per host in every measured run. No host routing, MTU, or SSH settings
+changed.
+
+Twenty-second source samples recorded about 1.5, 4.4, and 9.2 GiB/s of disk reads
+at 1, 4, and 8 streams, with process CPU usage of 140%, 599%, and 1,121%
+respectively (100% is one core). Sample windows differ and include file
+transitions; they characterize resource use rather than isolate a bottleneck.
+Eight streams are the default for ring package transfers; `--transfer-streams 4`
+selects the smaller worker count. Eight streams reached about 23–28 Gb/s per
+peer including file writes, still below the 100 Gb/s direct TCP ceiling. Package
+verification remains a separate substantial cost. All temporary agents were
+stopped and their test caches and copied credentials removed; installed agents
+and the original verified caches were preserved.
 
 ## Protocol model and runtime checks
 

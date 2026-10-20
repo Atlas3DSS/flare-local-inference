@@ -256,6 +256,10 @@ pub struct OrbitPush {
     #[arg(long)]
     pub roce_ring: bool,
 
+    /// Parallel TCP streams per destination file over the ring fabric [default: 8].
+    #[arg(long, value_name = "N", requires = "roce_ring", value_parser = clap::value_parser!(u8).range(1..=8))]
+    pub transfer_streams: Option<u8>,
+
     #[command(flatten)]
     pub serving: ServingOptions,
 }
@@ -335,6 +339,10 @@ pub struct OrbitRun {
     /// native CPU relays forward non-neighbor traffic. Also emulates a ring on a switch.
     #[arg(long, help_heading = "Multi-host options")]
     pub roce_ring: bool,
+
+    /// Parallel TCP streams per destination file over the ring fabric [default: saved group or 8].
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u8).range(1..=8), help_heading = "Multi-host options")]
+    pub transfer_streams: Option<u8>,
 
     /// IP address for rank zero's HTTP server [default: saved group or 127.0.0.1].
     #[arg(long, value_name = "ADDR", help_heading = "Serving options")]
@@ -997,6 +1005,8 @@ mod tests {
             "--to",
             "zero,one,two,three",
             "--roce-ring",
+            "--transfer-streams",
+            "8",
         ])
         .unwrap();
         let Command::Orbit(OrbitArgs {
@@ -1007,7 +1017,68 @@ mod tests {
             panic!("expected prestaging command");
         };
         assert_eq!(push.to, ["zero", "one", "two", "three"]);
+        assert_eq!(push.transfer_streams, Some(8));
         assert!(push.run_args().roce_ring);
+    }
+
+    #[test]
+    fn transfer_stream_counts_are_bounded_and_stay_out_of_rank_arguments() {
+        for count in ["1", "4", "8"] {
+            let parsed = Cli::try_parse_from([
+                "flare",
+                "orbit",
+                "run",
+                "model.safetensors",
+                "--roce-ring",
+                "--transfer-streams",
+                count,
+            ])
+            .unwrap();
+            let Command::Orbit(OrbitArgs {
+                command: OrbitCommand::Run(run),
+                ..
+            }) = parsed.command
+            else {
+                panic!("expected orbit run");
+            };
+            assert_eq!(run.transfer_streams, Some(count.parse().unwrap()));
+            assert!(
+                !run.run_args()
+                    .rank_options()
+                    .iter()
+                    .any(|s| s.contains("transfer-streams"))
+            );
+        }
+        for command in ["run", "push"] {
+            for count in ["0", "9", "256"] {
+                let mut args = vec![
+                    "flare",
+                    "orbit",
+                    command,
+                    "m.safetensors",
+                    "--roce-ring",
+                    "--transfer-streams",
+                    count,
+                ];
+                if command == "push" {
+                    args.extend(["--to", "zero,one"]);
+                }
+                assert!(Cli::try_parse_from(args).is_err());
+            }
+        }
+        assert!(
+            Cli::try_parse_from([
+                "flare",
+                "orbit",
+                "push",
+                "m.safetensors",
+                "--to",
+                "zero,one",
+                "--transfer-streams",
+                "4"
+            ])
+            .is_err()
+        );
     }
 
     #[test]

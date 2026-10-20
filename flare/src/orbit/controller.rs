@@ -159,6 +159,7 @@ pub struct RunOptions {
     /// Options for rank zero alone: the HTTP bind and request handling.
     pub rank_zero: Vec<String>,
     pub roce_ring: bool,
+    pub transfer_streams: Option<u8>,
     /// An executable to upload; absent means each node uses its installed agent executable.
     pub executable: Option<PathBuf>,
     /// Return once every rank has started instead of following the group.
@@ -179,6 +180,7 @@ pub struct LaunchOptions {
     pub serving: Vec<String>,
     pub rank_zero: Vec<String>,
     pub roce_ring: bool,
+    pub transfer_streams: Option<u8>,
     /// Place and verify the package on the members without sending the executable or
     /// starting ranks; the returned launch then has no rank sessions.
     pub stage_only: bool,
@@ -806,6 +808,10 @@ impl Controller {
         let mut rank_zero = spec.as_ref().map_or_else(Vec::new, |s| s.rank_zero.clone());
         rank_zero.extend(options.rank_zero.iter().cloned());
         let roce_ring = options.roce_ring || spec.as_ref().is_some_and(|s| s.roce_ring);
+        let transfer_streams = options
+            .transfer_streams
+            .or_else(|| spec.as_ref().and_then(|s| s.transfer_streams));
+        package_streams(roce_ring, transfer_streams)?;
         let gpus = if options.gpus.is_empty() {
             spec.as_ref().map_or_else(Vec::new, |s| s.gpus.clone())
         } else {
@@ -956,6 +962,7 @@ impl Controller {
                 nodes: candidates.clone(),
                 gpus,
                 roce_ring,
+                transfer_streams,
                 executable: options
                     .executable
                     .as_deref()
@@ -997,6 +1004,7 @@ impl Controller {
                 serving,
                 rank_zero: rank_zero.clone(),
                 roce_ring,
+                transfer_streams,
                 stage_only: false,
             },
         )?;
@@ -1022,7 +1030,9 @@ impl Controller {
         package: &str,
         to: &[String],
         run_args: &mut crate::cli::Run,
+        transfer_streams: Option<u8>,
     ) -> Result<(), Failure> {
+        package_streams(run_args.roce_ring, transfer_streams)?;
         let resolved = self.resolve_package(package, run_args, false)?;
         let world = resolved.ranks.len();
         let nodes: Vec<Node> = to
@@ -1043,6 +1053,7 @@ impl Controller {
             placements: vec![Vec::new(); world],
             stage_only: true,
             roce_ring: run_args.roce_ring,
+            transfer_streams,
             ..LaunchOptions::default()
         };
         if nodes.len() == world {
@@ -1328,6 +1339,7 @@ impl Controller {
         if options.roce_ring && !(package.needs.multi_host && (2..=16).contains(&world)) {
             return Err("--roce-ring requires a multi-host package with 2..16 ranks".into());
         }
+        let streams = package_streams(options.roce_ring, options.transfer_streams)?;
 
         // Every node must be free. Rank zero reports the address it routes toward its peers,
         // where they reach its rendezvous.
@@ -1519,6 +1531,7 @@ impl Controller {
                 &source,
                 &complete,
                 &files,
+                1,
             )?;
             source = nodes[0].clone();
         }
@@ -1549,6 +1562,7 @@ impl Controller {
                 &source,
                 &directory,
                 &files,
+                streams,
             )
             .map_err(|e| at(&nodes[rank].name, e))
         }))?;
@@ -1949,6 +1963,18 @@ fn put(
     Ok(())
 }
 
+fn package_streams(roce_ring: bool, selected: Option<u8>) -> Result<u8, Failure> {
+    match (roce_ring, selected) {
+        (true, None) => Ok(8),
+        (true, Some(streams @ 1..=8)) => Ok(streams),
+        (true, Some(_)) => Err("transfer streams must be in 1..=8".into()),
+        (false, None) => Ok(1),
+        (false, Some(_)) => {
+            Err("--transfer-streams requires --roce-ring or a saved ring group".into())
+        }
+    }
+}
+
 /// Have the node fetch `files` from `source` into its cache under `directory`, skipping files it
 /// already holds, and verify the directory's stored data unless it verified before.
 #[allow(clippy::too_many_arguments)]
@@ -1961,6 +1987,7 @@ fn transfer(
     source: &Node,
     directory: &str,
     files: &[RankFile],
+    streams: u8,
 ) -> Result<(), Failure> {
     let mut needed = 0;
     for file in files {
@@ -1987,6 +2014,7 @@ fn transfer(
         "publisher": publisher,
         "source": {"public_key": source.public_key, "address": source.address},
         "directory": directory,
+        "streams": streams,
         "files": files
             .iter()
             .map(|f| json!({"name": f.name, "size": f.size, "ranges": f.ranges}))
@@ -2740,6 +2768,7 @@ mod tests {
                     serving: vec![],
                     rank_zero: vec!["--port".into(), "8001".into()],
                     roce_ring: true,
+                    transfer_streams: Some(8),
                     stage_only: false,
                 },
             )
