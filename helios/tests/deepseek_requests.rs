@@ -80,6 +80,13 @@ fn tokenizer_asset() -> Asset {
 impl Fixture {
     fn new(encoder: PromptEncoder) -> Self {
         let asset = tokenizer_asset();
+        let template = (encoder == PromptEncoder::Jinja).then(|| {
+            let text = "{{ messages | tojson }}\n{{ tools | default([]) | tojson }}\n{{ tool_choice | default('auto') }}";
+            let path = asset.path.with_extension("jinja");
+            std::fs::write(&path, text).unwrap();
+            Asset { path, range: None, sha256: format!("{:x}", Sha256::digest(text.as_bytes())) }
+        });
+        let template_path = template.as_ref().map(|asset| asset.path.clone());
         let settings: FrontendSettings = serde_json::from_value(json!({
             "prompt_encoder": i32::from(encoder), "tokenizer": {}, "eos_token_ids": [257],
             "image_placeholder_token_id":Tokenizer::from_file(&asset.path).unwrap().token_to_id("<｜deepseek_image｜>").unwrap()
@@ -93,13 +100,16 @@ impl Fixture {
                     range: asset.range,
                 },
                 tokens: TokenizerSettings::default(),
-                chat_template: None,
+                chat_template: template,
             },
             Map::new(),
             &settings,
         )
         .unwrap();
         std::fs::remove_file(asset.path).unwrap();
+        if let Some(path) = template_path {
+            std::fs::remove_file(path).unwrap();
+        }
         let mut config =
             support::model_config(support::contract(if encoder == PromptEncoder::DeepseekV4 {
                 "deepseek4"
@@ -143,6 +153,47 @@ impl Fixture {
             .into_iter()
             .chain(self.config.eos_token_ids.iter().copied())
             .all(|token| grammar.advance(token).is_ok())
+    }
+}
+
+#[test]
+fn named_selection_only_filters_tools_and_none_restores_a_text_turn() {
+    for encoder in [PromptEncoder::Jinja, PromptEncoder::DeepseekV4, PromptEncoder::DeepseekV41] {
+        let fixture = Fixture::new(encoder);
+        let tools = json!([
+            {"type":"function","function":{"name":"lookup","description":"Find a value",
+                "parameters":{"type":"object","properties":{"query":{"type":"string"}}}}},
+            {"type":"function","function":{"name":"other","description":"Another tool",
+                "parameters":{"type":"object"}}}
+        ]);
+        let messages = json!([
+            {"role":"system","content":"Policy"},
+            {"role":"user","content":"Find a value"},
+            {"role":"assistant","tool_calls":[{"id":"prior","type":"function","function":{"name":"other","arguments":"{}"}}]},
+            {"role":"tool","tool_call_id":"prior","content":"Previous result"},
+            {"role":"user","content":"Now look it up"}
+        ]);
+        let named = fixture.prepare(json!({"messages":messages,"tools":tools,
+            "tool_choice":{"type":"function","function":{"name":"lookup"}}})).unwrap();
+        let selected = fixture.prepare(json!({"messages":messages,"tools":[tools[0]],
+            "tool_choice":"auto"})).unwrap();
+        assert_eq!(named.rendered_prompt, selected.rendered_prompt, "{encoder:?}");
+        assert_eq!(named.prompt.tokens, selected.prompt.tokens);
+        assert!(named.prompt.grammar.is_none());
+        assert!(named.rendered_prompt.contains("Previous result"));
+        assert_eq!(named.output.content.tools.len(), 1);
+        assert_eq!(named.output.content.tools[0]["function"]["name"], "lookup");
+
+        let followup = json!([
+            {"role":"user","content":"Find a value"},
+            {"role":"assistant","tool_calls":[{"id":"chosen","type":"function","function":{"name":"lookup","arguments":"{\"query\":\"x\"}"}}]},
+            {"role":"tool","tool_call_id":"chosen","content":"42"}
+        ]);
+        let none = fixture.prepare(json!({"messages":followup,"tools":tools,"tool_choice":"none"})).unwrap();
+        let empty = fixture.prepare(json!({"messages":followup,"tools":[],"tool_choice":"none"})).unwrap();
+        assert_eq!(none.rendered_prompt, empty.rendered_prompt);
+        assert!(none.output.content.tools.is_empty());
+        assert!(none.prompt.grammar.is_none());
     }
 }
 

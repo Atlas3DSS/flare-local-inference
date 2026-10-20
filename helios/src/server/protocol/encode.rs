@@ -376,6 +376,11 @@ impl Encoder {
         let mut frames = vec![];
         let mut content_logprobs = Vec::new();
         for event in events {
+            if matches!(self.tool_choice, ToolChoice::Named(_))
+                && matches!(&event, Event::Content(_) | Event::ContentLogprobs(_))
+            {
+                continue;
+            }
             match &event {
                 Event::TokenLogprobs(entries) => {
                     if self.protocol != Protocol::Responses {
@@ -404,6 +409,11 @@ impl Encoder {
                 _ => {}
             }
             if let Event::ToolBegin { name, .. } = &event {
+                if let ToolChoice::Named(selected) = &self.tool_choice {
+                    if name != selected {
+                        return Err(format!("model emitted tool {name:?}, but tool_choice selects {selected:?}").into());
+                    }
+                }
                 if !self.parallel_tool_calls && self.outputs[index].has_tools() {
                     return Err("parallel tool calls are disabled, but the model produced more than one tool call".into());
                 }
@@ -462,7 +472,9 @@ impl Encoder {
             }
             frames.extend(self.change(change)?);
         }
-        if self.tool_choice == ToolChoice::Required && !self.outputs[index].has_tools() {
+        if matches!(self.tool_choice, ToolChoice::Required | ToolChoice::Named(_))
+            && !self.outputs[index].has_tools()
+        {
             return Err("required tool choice was not satisfied: the model did not produce a completed tool call".into());
         }
         let reason = if cause == Termination::OutputLimit {
@@ -568,7 +580,16 @@ impl Encoder {
             Protocol::Responses => {
                 let complete = self.reasons[0].is_some();
                 let incomplete = self.reasons[0] == Some("length");
-                json!({"id":self.id,"object":"response","created_at":self.created,"model":self.model,"status":if !complete{"in_progress"}else if incomplete{"incomplete"}else{"completed"},"error":null,"incomplete_details":if incomplete{json!({"reason":"max_output_tokens"})}else{Value::Null},"output":(0..self.outputs[0].blocks.len()).map(|i|self.item(i,complete)).collect::<Vec<_>>(),"usage":if complete{self.usage_value()}else{Value::Null},"store":false,"metadata":self.metadata,"parallel_tool_calls":self.parallel_tool_calls,"tool_choice":self.tool_choice,"tools":[],"text":{"format":{"type":"text"}}})
+                let tool_choice = match &self.tool_choice {
+                    ToolChoice::Auto => json!("auto"),
+                    ToolChoice::None => json!("none"),
+                    ToolChoice::Required => json!("required"),
+                    ToolChoice::Named(name) => json!({
+                        "type": if self.tool(name).is_some_and(|tool| tool.custom) { "custom" } else { "function" },
+                        "name": name,
+                    }),
+                };
+                json!({"id":self.id,"object":"response","created_at":self.created,"model":self.model,"status":if !complete{"in_progress"}else if incomplete{"incomplete"}else{"completed"},"error":null,"incomplete_details":if incomplete{json!({"reason":"max_output_tokens"})}else{Value::Null},"output":(0..self.outputs[0].blocks.len()).map(|i|self.item(i,complete)).collect::<Vec<_>>(),"usage":if complete{self.usage_value()}else{Value::Null},"store":false,"metadata":self.metadata,"parallel_tool_calls":self.parallel_tool_calls,"tool_choice":tool_choice,"tools":[],"text":{"format":{"type":"text"}}})
             }
         }
     }

@@ -103,7 +103,7 @@ pub(super) fn prepare_inference(
             super::inference::template_messages(
                 messages,
                 if legacy_prompt {
-                    request.tool_choice
+                    request.tool_choice.clone()
                 } else {
                     ToolChoice::Auto
                 },
@@ -138,6 +138,7 @@ pub(super) fn prepare_inference(
         ToolChoice::Auto => None,
         ToolChoice::None => Some("none"),
         ToolChoice::Required => Some("required"),
+        ToolChoice::Named(_) => Some("auto"),
     };
     if let Some(choice) = tool_choice {
         options.insert("tool_choice".into(), choice.into());
@@ -160,7 +161,12 @@ pub(super) fn prepare_inference(
     if request.tool_choice == ToolChoice::None {
         options.insert("tools".into(), Value::Array(vec![]));
     } else if !request.tools.is_empty() {
-        options.insert("tools".into(), Value::Array(request.tools.iter().map(|tool| {
+        options.insert("tools".into(), Value::Array(request.tools.iter().filter(|tool| {
+            match &request.tool_choice {
+                ToolChoice::Named(name) => tool.native_name() == *name,
+                _ => true,
+            }
+        }).map(|tool| {
             let description = if let Some(grammar) = &tool.grammar {
                 format!("{}\nPut the complete tool input in the input string. It must match this {} grammar exactly:\n{}", tool.description, grammar.syntax, grammar.source)
             } else { tool.description.clone() };

@@ -232,8 +232,23 @@ MiMo's compact tags preserve their values verbatim, including indentation and
 newlines.
 
 Supported tools are client-executed JSON functions with `tool_choice` set to
-`"auto"`, `"none"`, or `"required"`. Anthropic's `{"type":"any"}` selects the same
-required mode. With tools enabled and `tool_choice: "auto"`, parseable calls to
+`"auto"`, `"none"`, `"required"`, or a named tool. Anthropic's `{"type":"any"}`
+selects required mode. Named selection uses
+`{"type":"function","function":{"name":"lookup"}}` in Chat Completions,
+`{"type":"tool","name":"lookup"}` in Messages, and
+`{"type":"function","name":"lookup"}` in Responses. Responses custom tools use
+`{"type":"custom","name":"lookup"}`; namespaced tools use `namespace__name`.
+The selected tool must be declared and its type must match.
+
+Named selection presents only the selected tool definition to the model, retaining
+conversation history and adding no instructions or decoding constraints.
+Buffered and streaming responses omit ordinary assistant answer text while
+preserving reasoning and tool arguments. Usage includes all generated tokens,
+including omitted answer text. Every emitted call must target the selected tool,
+and at least one completed call is required. A call to another tool fails before
+that call is emitted. Missing and incomplete calls fail as in required mode.
+
+With tools enabled and `tool_choice: "auto"`, parseable calls to
 undeclared tools are returned with their generated names and arguments in both
 buffered and streaming responses across all three chat APIs. Clients can repair
 or reject these calls and provide feedback in a subsequent turn. Declared schemas
@@ -245,7 +260,7 @@ generation produced at least one
 completed call to a declared tool. Sampling is unchanged; no calls are fabricated
 and no retries are attempted. Missing calls, including output truncated before a
 complete call, produce HTTP 500 for buffered requests or a terminal error event
-for streams. A stream may deliver partial text before that error, but does not
+for streams. A required-mode stream may deliver partial text before that error, but does not
 emit a success terminator. Responses also supports text custom tools by presenting a
 JSON `{ "input": string }` function to the model and restoring the custom call on
 output. Anthropic's `type: "custom"` uses its ordinary `input_schema` contract.

@@ -59,12 +59,12 @@ pub struct ToolGrammar {
     pub syntax: String,
     pub source: String,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Clone, Debug, PartialEq)]
 pub enum ToolChoice {
     Auto,
     None,
     Required,
+    Named(String),
 }
 impl Tool {
     pub fn native_name(&self) -> String {
@@ -148,6 +148,11 @@ impl Request {
         }
         if self.tool_choice == ToolChoice::Required && self.tools.is_empty() {
             return Err("required tool choice needs at least one tool".into());
+        }
+        if let ToolChoice::Named(name) = &self.tool_choice {
+            if !names.contains(name) {
+                return Err(format!("selected tool {name:?} is not declared in tools").into());
+            }
         }
         Ok(())
     }

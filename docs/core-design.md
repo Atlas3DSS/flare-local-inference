@@ -1524,8 +1524,12 @@ and speculative grammar advancement apply to the complete composed grammar.
 `tool_choice=required` adds a prompt
 instruction and validates that the model produced a completed call to a declared
 tool. Generation uses ordinary sampling; an unsatisfied requirement fails the
-response. `tool_choice=none` removes tools from the template. Named tool selection
-and strict function schemas are unsupported. See [the API contracts](api.md) for
+response. Named tool selection filters the available definitions to the selected
+tool without adding instructions or decoding constraints. Output validation
+requires a completed call to that tool and rejects other tool names; presentation
+omits ordinary answer text while preserving reasoning and tool arguments.
+`tool_choice=none` removes tools from the template. Strict function schemas are
+unsupported. See [the API contracts](api.md) for
 protocol mappings and streamed errors.
 
 Bounded top-k sampling and compact recurrent commit require separate component

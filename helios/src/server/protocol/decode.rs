@@ -637,9 +637,21 @@ pub(crate) fn decode(protocol: Protocol, body: Value, count: bool) -> Result<Dec
         Some(v) if v == "none" || v["type"] == "none" => ToolChoice::None,
         Some(v) if v == "required" => ToolChoice::Required,
         Some(v) if protocol == Protocol::Messages && v["type"] == "any" => ToolChoice::Required,
+        Some(v) if protocol == Protocol::Chat && v["type"] == "function" => {
+            ToolChoice::Named(field(&v["function"], "name")?.into())
+        }
+        Some(v) if protocol == Protocol::Messages && v["type"] == "tool" => {
+            ToolChoice::Named(field(v, "name")?.into())
+        }
+        Some(v)
+            if protocol == Protocol::Responses
+                && (v["type"] == "function" || v["type"] == "custom") =>
+        {
+            ToolChoice::Named(field(v, "name")?.into())
+        }
         _ => {
             return Err(unsupported(
-                "tool_choice supports auto, none, or required (Anthropic any); named tool selection is not implemented",
+                "tool_choice supports auto, none, required (Anthropic any), or a named tool",
             ));
         }
     };
@@ -720,6 +732,16 @@ pub(crate) fn decode(protocol: Protocol, body: Value, count: bool) -> Result<Dec
         choices,
     };
     request.validate()?;
+    if protocol == Protocol::Responses {
+        if let ToolChoice::Named(name) = &request.tool_choice {
+            let selected = request.tools.iter()
+                .find(|tool| tool.native_name() == *name)
+                .ok_or("selected tool is not declared in tools")?;
+            if selected.custom != (body["tool_choice"]["type"] == "custom") {
+                return Err("tool_choice type must match the selected tool definition".into());
+            }
+        }
+    }
     let observation = ObservationOptions::parse(body.as_object().unwrap())?;
     if protocol != Protocol::Chat && (observation.token_ids || observation.timestamps) {
         return Err(unsupported(
