@@ -2,7 +2,7 @@
 
 from types import MappingProxyType
 
-from ignition.recipes.declaration import Checkpoint, RankCosts, RankUsage, Recipe, SamplingDefaults
+from ignition.recipes.declaration import Checkpoint, RankCosts, RankUsage, Recipe, SamplingDefaults, SamplingRange
 
 
 def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress, retain_graphs=False,
@@ -26,9 +26,11 @@ def usage(prepared):
 
 RECIPE = Recipe(
     name="qwen38_dense", prepare=prepare, usage=usage,
-    # Thinking-mode recommendations: https://huggingface.co/Qwen/Qwen3.8-27B#best-practices.
+    # Thinking defaults; bounds span thinking/instruct presets: https://huggingface.co/Qwen/Qwen3.8-27B#best-practices.
     sampling_defaults=SamplingDefaults(temperature=1., top_p=.95, top_k=20, min_p=0.,
-        presence_penalty=0., repetition_penalty=1., frequency_penalty=0.),
+        presence_penalty=0., repetition_penalty=1., frequency_penalty=0.,
+        ranges={"temperature": SamplingRange(.7, 1.), "top_p": SamplingRange(.8, .95),
+                "presence_penalty": SamplingRange(0., 2.)}),
     checkpoints=(Checkpoint(alias="qwen3.8-27b", repository="nvidia/Qwen3.8-27B-NVFP4",
         revision="482ca0f3832238542f8f5295dde86b5f22711d80", architecture="Qwen3_5ForConditionalGeneration",
         stored_bytes=21_921_428_072, device_bytes=20_150_569_096, expansion_bytes=307_871_744),),

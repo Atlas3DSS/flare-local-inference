@@ -20,14 +20,16 @@ impl ToolDialect for ArgumentTags {
         let body = body.trim();
         let split = body.find("<arg_key>").unwrap_or(body.len());
         let name = body[..split].trim();
+        if name.is_empty() {
+            return Err("tool function name is empty".into());
+        }
         let mut rest = &body[split..];
         let function = tools
             .iter()
             .filter_map(|tool| tool.get("function"))
-            .find(|function| function.get("name").and_then(Value::as_str) == Some(name))
-            .ok_or_else(|| format!("model called unregistered tool {name:?}"))?;
+            .find(|function| function.get("name").and_then(Value::as_str) == Some(name));
         let properties = function
-            .get("parameters")
+            .and_then(|function| function.get("parameters"))
             .and_then(|parameters| parameters.get("properties"))
             .and_then(Value::as_object);
         let mut arguments = Map::new();
@@ -125,9 +127,9 @@ mod tests {
     }
 
     #[test]
-    fn malformed_and_unregistered_calls_fail_without_coercion() {
+    fn malformed_calls_fail_without_coercion() {
         for body in [
-            "unknown",
+            "",
             "run<arg_key></arg_key><arg_value>x</arg_value>",
             "run<arg_key>count</arg_key><arg_value>two</arg_value>",
             "run<arg_key>text</arg_key><arg_value>a</arg_value><arg_key>text</arg_key><arg_value>b</arg_value>",

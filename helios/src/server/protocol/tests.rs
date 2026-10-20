@@ -246,6 +246,203 @@ fn required_tool_choice_accepts_complete_calls_and_rejects_unknown_or_unfinished
 }
 
 #[test]
+fn auto_tool_choice_returns_unknown_calls_across_parsers_and_protocols() {
+    use crate::{
+        model::contract::{ToolParser, ToolParserKind},
+        output::{Input as OutputInput, OutputConfig, OutputPipeline, Piece, tagged},
+    };
+
+    let cases = [
+        (
+            ToolParserKind::QwenCoder,
+            1,
+            "",
+            "<tool_call><function=missing__lookup><parameter=query>\ncafé\n</parameter></function></tool_call>",
+        ),
+        (
+            ToolParserKind::QwenCoder,
+            0,
+            "",
+            "<tool_call><function=missing__lookup><parameter=query>café</parameter></function></tool_call>",
+        ),
+        (
+            ToolParserKind::GlmArgumentTags,
+            0,
+            "",
+            "<tool_call>missing__lookup<arg_key>query</arg_key><arg_value>café</arg_value></tool_call>",
+        ),
+        (
+            ToolParserKind::Dsml,
+            0,
+            "",
+            "<｜DSML｜tool_calls><｜DSML｜invoke name=\"missing__lookup\"><｜DSML｜parameter name=\"query\" string=\"true\">café</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls>",
+        ),
+        (
+            ToolParserKind::Dsml,
+            0,
+            " ",
+            "<｜DSML｜ calls><｜DSML｜ invoke name=\"missing__lookup\"><｜DSML｜ parameter name=\"query\" string=\"true\">café</｜DSML｜ parameter></｜DSML｜ invoke></｜DSML｜ calls>",
+        ),
+        (
+            ToolParserKind::Xtml,
+            0,
+            "",
+            concat!(
+                "<|close|>response<|sep|><|open|>tools<|sep|>",
+                "<|open|>call tool=\"missing__lookup\" index=\"1\"<|sep|>",
+                "<|open|>argument key=\"query\" type=\"string\"<|sep|>café",
+                "<|close|>argument<|sep|><|close|>call<|sep|>",
+                "<|close|>tools<|sep|><|close|>message<|sep|>"
+            ),
+        ),
+    ];
+    let markers = [(1, "<|open|>"), (2, "<|close|>"), (3, "<|sep|>")];
+    for (kind, wrapping_newlines, separator, text) in cases {
+        let mut pieces = Vec::new();
+        let mut rest = text;
+        while let Some((at, id, marker)) = markers
+            .iter()
+            .filter_map(|(id, marker)| rest.find(marker).map(|at| (at, *id, *marker)))
+            .min_by_key(|(at, _, _)| *at)
+        {
+            pieces.push(Piece::Text(rest[..at].into()));
+            pieces.push(Piece::Token(id));
+            pieces.push(Piece::Text(marker.into()));
+            rest = &rest[at + marker.len()..];
+        }
+        pieces.push(Piece::Text(rest.into()));
+        for protocol in [Protocol::Chat, Protocol::Messages, Protocol::Responses] {
+            for split_characters in [false, true] {
+                let mut syntax = crate::model::testing::metadata().frontend;
+                syntax.tools = Some(ToolParser {
+                    kind,
+                    wrapping_newlines,
+                    tag_separator: separator.into(),
+                });
+                let mut parser = OutputPipeline::new(OutputConfig {
+                    syntax,
+                    control_tokens: markers
+                        .iter()
+                        .map(|(id, text)| (*id, (*text).into()))
+                        .collect(),
+                    content: tagged::OutputConfig {
+                        structured: false,
+                        start: tagged::OutputStart::Content,
+                        tools: vec![json!({"type":"function","function":{
+                            "name":"lookup","parameters":{"type":"object","properties":{"query":{"type":"string"}}}
+                        }})],
+                    },
+                });
+                let mut enc = encoder(protocol);
+                let mut frames = enc.start();
+                let mut events = Vec::new();
+                for piece in &pieces {
+                    let inputs: Vec<_> = match piece {
+                        Piece::Logprob(_) => {
+                            unreachable!("tool parser fixture contains only tokens and text")
+                        }
+                        Piece::Token(id) => vec![OutputInput::Token(*id)],
+                        Piece::Text(text) if split_characters => text
+                            .char_indices()
+                            .map(|(at, ch)| OutputInput::Text(&text[at..at + ch.len_utf8()]))
+                            .collect(),
+                        Piece::Text(text) => vec![OutputInput::Text(text)],
+                    };
+                    for input in inputs {
+                        let parsed = parser.push(input).unwrap();
+                        events.extend(parsed.clone());
+                        frames.extend(enc.apply(0, parsed).unwrap());
+                    }
+                }
+                let parsed = parser.finish(Termination::Eos).unwrap();
+                events.extend(parsed.clone());
+                frames.extend(enc.apply(0, parsed).unwrap());
+                frames.extend(enc.finish(0, Termination::Eos, 12, 0, None).unwrap());
+                let response = enc.response();
+                let expected = json!({"query":"café"});
+                match protocol {
+                    Protocol::Chat => {
+                        let call = &response["choices"][0]["message"]["tool_calls"][0];
+                        assert_eq!(call["function"]["name"], "missing__lookup");
+                        assert_eq!(
+                            serde_json::from_str::<Value>(
+                                call["function"]["arguments"].as_str().unwrap()
+                            )
+                            .unwrap(),
+                            expected
+                        );
+                        assert_eq!(response["choices"][0]["finish_reason"], "tool_calls");
+                        assert!(frames.iter().any(|f| f.data["choices"][0]["delta"]["tool_calls"][0]["function"]["name"] == "missing__lookup"));
+                        assert!(frames.last().unwrap().done);
+                    }
+                    Protocol::Messages => {
+                        assert_eq!(response["content"][0]["name"], "missing__lookup");
+                        assert_eq!(response["content"][0]["input"], expected);
+                        assert_eq!(response["stop_reason"], "tool_use");
+                        assert!(
+                            frames
+                                .iter()
+                                .any(|f| f.data["content_block"]["name"] == "missing__lookup")
+                        );
+                        assert_eq!(frames.last().unwrap().data["type"], "message_stop");
+                    }
+                    Protocol::Responses => {
+                        let call = &response["output"][0];
+                        assert_eq!(call["type"], "function_call");
+                        assert_eq!(call["name"], "missing__lookup");
+                        assert!(call.get("namespace").is_none());
+                        assert_eq!(
+                            serde_json::from_str::<Value>(call["arguments"].as_str().unwrap())
+                                .unwrap(),
+                            expected
+                        );
+                        assert_eq!(response["status"], "completed");
+                        assert!(
+                            frames
+                                .iter()
+                                .any(|f| f.data["item"]["name"] == "missing__lookup")
+                        );
+                        assert_eq!(frames.last().unwrap().data["type"], "response.completed");
+                    }
+                    _ => unreachable!(),
+                }
+                let streamed_arguments: String =
+                    frames
+                        .iter()
+                        .filter_map(|frame| {
+                            match protocol {
+                                Protocol::Chat => frame.data["choices"][0]["delta"]["tool_calls"]
+                                    [0]["function"]["arguments"]
+                                    .as_str(),
+                                Protocol::Messages => frame.data["delta"]["partial_json"].as_str(),
+                                Protocol::Responses
+                                    if frame.data["type"]
+                                        == "response.function_call_arguments.delta" =>
+                                {
+                                    frame.data["delta"].as_str()
+                                }
+                                _ => None,
+                            }
+                        })
+                        .collect();
+                assert_eq!(
+                    serde_json::from_str::<Value>(&streamed_arguments).unwrap(),
+                    expected
+                );
+                let mut required = encoder_with_choice(protocol, ToolChoice::Required);
+                assert!(
+                    required
+                        .apply(0, events)
+                        .unwrap_err()
+                        .to_string()
+                        .contains("undeclared tool")
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn parallel_tool_controls_decode_to_the_same_limit() {
     for (protocol, body) in [
         (

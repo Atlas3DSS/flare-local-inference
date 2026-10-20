@@ -75,6 +75,7 @@ impl ModelCatalog {
                 "prefill_chunk_size": model.limits.prefill_chunk_size,
                 "default_max_tokens": model.max_new_tokens,
                 "sampling_defaults": model.sampling_defaults,
+                "sampling_ranges": model.sampling_ranges,
                 "max_images_per_prompt": model.contract.vision.image_count_capacity(),
                 "max_image_tokens_per_prompt": model.contract.vision.features_per_request,
                 "max_image_tokens_per_image": limits.map_or(0, |l| l.max_image_tokens_per_image()),
@@ -157,6 +158,7 @@ mod tests {
                 snapshots: 8,
             },
             eos_token_ids: vec![2],
+            sampling_ranges: Default::default(),
             sampling_defaults: SamplingParameters {
                 temperature: 0.75,
                 top_p: 1.,
@@ -186,6 +188,7 @@ mod tests {
             text["flare"]["sampling_defaults"],
             json!(model.sampling_defaults)
         );
+        assert_eq!(text["flare"]["sampling_ranges"], json!(model.sampling_ranges));
         assert_eq!(text["flare"]["input_modalities"], json!(["text"]));
         assert_eq!(text["flare"]["output_modalities"], json!(["text"]));
         assert_eq!(text["flare"]["max_images_per_prompt"], 0);

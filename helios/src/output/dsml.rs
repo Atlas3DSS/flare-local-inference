@@ -27,7 +27,6 @@ pub struct DsmlOutput<const SPACED: bool> {
     pending: String,
     last_action: OutputAction,
     call: Option<Call>,
-    tools: Vec<Value>,
     calls: usize,
     structured: bool,
     verbatim: bool,
@@ -79,13 +78,8 @@ impl<const SPACED: bool> DsmlOutput<SPACED> {
                         .as_ref()
                         .ok_or("DeepSeek tool name has no call")?
                         .name;
-                    if name.is_empty()
-                        || !self
-                            .tools
-                            .iter()
-                            .any(|tool| tool["function"]["name"].as_str() == Some(name))
-                    {
-                        return Err(format!("model called unregistered tool {name:?}").into());
+                    if name.is_empty() {
+                        return Err("tool function name is empty".into());
                     }
                 }
                 OutputAction::LabelToolCallArguments { label, .. } if !repeated => {
@@ -190,7 +184,6 @@ impl<const SPACED: bool> ModelOutput for DsmlOutput<SPACED> {
             pending: String::new(),
             last_action: OutputAction::Skip,
             call: None,
-            tools: config.tools,
             calls: 0,
             structured: config.structured,
             verbatim: false,

@@ -34,10 +34,9 @@ fn parse_tool(body: &str, tools: &[Value], wrapped_parameters: bool) -> Result<(
     let function = tools
         .iter()
         .filter_map(|tool| tool.get("function"))
-        .find(|function| function.get("name").and_then(Value::as_str) == Some(name))
-        .ok_or_else(|| format!("model called unregistered tool {name:?}"))?;
+        .find(|function| function.get("name").and_then(Value::as_str) == Some(name));
     let properties = function
-        .get("parameters")
+        .and_then(|function| function.get("parameters"))
         .and_then(|parameters| parameters.get("properties"))
         .and_then(Value::as_object);
     let mut arguments = Map::new();
@@ -288,7 +287,7 @@ mod tests {
         assert_eq!(parser.message(), expected);
     }
     #[test]
-    fn incomplete_unknown_and_duplicate_calls_fail() {
+    fn incomplete_empty_and_duplicate_calls_fail() {
         let mut parser = Harness::new(
             OutputConfig {
                 structured: false,
@@ -299,7 +298,7 @@ mod tests {
         );
         parser.push("<tool_call><function=lookup>").unwrap();
         assert!(parser.finish().is_err());
-        assert!(parse_tool("<function=unknown></function>", &config().tools, true).is_err());
+        assert!(parse_tool("<function=></function>", &config().tools, true).is_err());
         assert!(
             parse_tool(
                 "<function=lookup><parameter=n>1</parameter><parameter=n>2</parameter></function>",

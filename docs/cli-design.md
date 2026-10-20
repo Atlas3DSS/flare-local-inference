@@ -760,7 +760,9 @@ limit, are a separate mechanism that this specification does not yet define.
 Requests receive the checkpoint's template defaults, the recipe's manually
 verified model-card sampling defaults, and the engine's output limit.
 Sampling defaults are explicit package metadata; config-file sampling values
-do not select them. Explicit request values override those defaults.
+do not select them. Sampling requests are clamped to the package's inclusive
+model-author ranges; parameters without ranges are fixed at their defaults.
+Seed remains request-controlled.
 
 `memory.reserve` exists for one case: a process that starts after Flare and
 needs GPU memory. Processes already running when Flare starts need no
@@ -804,9 +806,10 @@ Configuration assigns each decision to one owner:
 | CUDA toolkit | Installed packages, then `[paths] cuda` |
 | Served names | Recipe alias and repository ID, exposed through `/v1/models` |
 | API key | Ignition configuration or native `--api-key-file`; excluded from packages |
-| Seed, sampling controls, output limit, and stops | Request fields, with declared defaults for missing values |
+| Sampling distribution controls | Recipe defaults and optional model-author ranges; request values clamp to ranges, or to defaults when no range exists |
+| Seed, output limit, and stops | Request fields, with declared defaults for missing values |
 
-Explicit request values take precedence over defaults. Speculation's benefit
+Explicit request values take precedence within the declared sampling bounds. Speculation's benefit
 depends on native confidence or measured acceptance and execution cost. Reducing the draft limit at
 load time retains draft weights; freeing those weights requires preparation
 with `--no-mtp`.

@@ -91,6 +91,7 @@ pub struct ModelConfig {
     pub limits: SchedulerLimits,
     pub eos_token_ids: Vec<u32>,
     pub sampling_defaults: SamplingParameters,
+    pub sampling_ranges: SamplingRanges,
     pub max_new_tokens: u32,
     pub speculative_widths: Vec<usize>,
     pub speculative_fixed_width: Option<usize>,
@@ -129,6 +130,79 @@ impl Default for SamplingParameters {
             frequency_penalty: 0.,
             top_k: 20,
         }
+    }
+}
+
+#[cfg_attr(
+    any(feature = "server", feature = "runtime-package"),
+    derive(serde::Serialize, serde::Deserialize)
+)]
+#[cfg_attr(
+    any(feature = "server", feature = "runtime-package"),
+    serde(deny_unknown_fields)
+)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SamplingRange<T> {
+    pub min: T,
+    pub max: T,
+}
+
+impl<T: Copy> SamplingRange<T> {
+    pub fn fixed(value: T) -> Self {
+        Self {
+            min: value,
+            max: value,
+        }
+    }
+}
+
+#[cfg_attr(
+    any(feature = "server", feature = "runtime-package"),
+    derive(serde::Serialize, serde::Deserialize)
+)]
+#[cfg_attr(
+    any(feature = "server", feature = "runtime-package"),
+    serde(default, deny_unknown_fields)
+)]
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SamplingRanges {
+    pub temperature: Option<SamplingRange<f32>>,
+    pub top_k: Option<SamplingRange<i32>>,
+    pub top_p: Option<SamplingRange<f32>>,
+    pub min_p: Option<SamplingRange<f32>>,
+    pub repetition_penalty: Option<SamplingRange<f32>>,
+    pub presence_penalty: Option<SamplingRange<f32>>,
+    pub frequency_penalty: Option<SamplingRange<f32>>,
+}
+
+impl SamplingRanges {
+    pub fn validate(&self, defaults: &SamplingParameters) -> Result<()> {
+        defaults.validate()?;
+        let mut min = defaults.clone();
+        let mut max = defaults.clone();
+        macro_rules! bounds {
+            ($($field:ident),*) => { $(
+                if let Some(range) = self.$field {
+                    if !(range.min <= defaults.$field && defaults.$field <= range.max) {
+                        return Err(concat!("sampling range must contain the default: ", stringify!($field)).into());
+                    }
+                    min.$field = range.min;
+                    max.$field = range.max;
+                }
+            )* };
+        }
+        bounds!(
+            temperature,
+            top_k,
+            top_p,
+            min_p,
+            repetition_penalty,
+            presence_penalty,
+            frequency_penalty
+        );
+        min.validate()?;
+        max.validate()?;
+        Ok(())
     }
 }
 

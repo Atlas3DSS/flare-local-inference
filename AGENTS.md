@@ -245,7 +245,10 @@ architectural boundary before committing the change.
   declaration. Never infer sampling policy from `generation_config.json`,
   `config.json`, Transformers defaults, or another model. Model-card recommendations
   take precedence over conflicting config files; unspecified filters are disabled
-  and penalties are neutral. Explicit request sampling parameters override defaults.
+  and penalties are neutral. Declare optional inclusive sampling ranges only from
+  the model author's recommendations. Clamp request distribution parameters to
+  those ranges; an absent range fixes the parameter at its declared default.
+  Seed remains request-controlled.
 - Ignition validates checkpoint configuration for structural data, including
   EOS and template tokens, image preprocessing, and vision position geometry.
   Export only the fields Helios consumes in first-class Protobuf messages.

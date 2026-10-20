@@ -79,7 +79,9 @@ before committing; a design acknowledgment cannot authorize them.
     recipe; never derive sampling policy from checkpoint config files or another
     model. Persist complete sampling defaults and only consumed structural
     frontend settings in typed Protobuf fields. Runtime assets are limited to
-    the tokenizer and chat template. Explicit request values override defaults.
+    the tokenizer and chat template. Clamp request distribution parameters to
+    recipe-declared model-author ranges, or to their defaults when ranges are
+    absent. Seed remains request-controlled.
 11. **Optimize the complete GPU computation.** Consider compatible projection and
     residual/normalization fusion, independent branch overlap, and TP vocabulary
     sharding. Preserve strides, precision, mutations, and scratch lifetimes across

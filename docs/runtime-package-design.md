@@ -174,7 +174,13 @@ The index stores complete recipe-declared sampling parameters in
 `FrontendSettings`. Sampling defaults are manually verified against model-card
 recommendations for the default serving mode; checkpoint configuration does not
 select sampling policy. Missing values reject loading rather than inheriting
-another model's settings. Explicit request parameters override these defaults.
+another model's settings. `DefaultSamplingParameters.ranges` contains optional
+inclusive `min` and `max` bounds for temperature, top-p, top-k, min-p, and the
+repetition, presence, and frequency penalties. Each supplied range must contain
+its existing default, and both endpoints must be valid sampler values. Numeric
+request values are clamped to these bounds; omitted ranges fix parameters at
+their defaults. Packages without range fields remain loadable without re-export
+and use this fixed-default policy. Seed remains request-controlled.
 
 `FrontendSettings` contains EOS token IDs, the special-token strings used by the
 chat template, and optional image settings. Qwen image settings contain resize

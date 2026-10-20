@@ -17,9 +17,13 @@ def serving(index, server):
     if any(key in server for key in ("generation_defaults", "eos_token_ids")):
         raise ValueError("sampling and token defaults require typed package fields")
     sampling = server["sampling_defaults"]
-    expected = {field.name for field in proto.DefaultSamplingParameters.DESCRIPTOR.fields}
-    if set(sampling) != expected:
+    expected = {field.name for field in proto.DefaultSamplingParameters.DESCRIPTOR.fields} - {"ranges"}
+    if set(sampling) - {"ranges"} != expected:
         raise ValueError("sampling defaults must explicitly declare every parameter")
+    from ignition.recipes.declaration import SamplingDefaults, SamplingRange
+    SamplingDefaults(**{name: sampling[name] for name in expected}, ranges={
+        name: SamplingRange(**bounds) for name, bounds in sampling.get("ranges", {}).items()
+    })
     ParseDict(sampling, index.sampling_defaults)
     ParseDict(server["frontend"], index.frontend)
     ParseDict({"speculative_proposal_source": "mtp", **{key: value for key, value in server.items()

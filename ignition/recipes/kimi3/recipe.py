@@ -3,7 +3,7 @@
 from pathlib import Path
 from types import MappingProxyType
 
-from ignition.recipes.declaration import Checkpoint, RankCosts, RankUsage, Recipe, SamplingDefaults, Speculation
+from ignition.recipes.declaration import Checkpoint, RankCosts, RankUsage, Recipe, SamplingDefaults, SamplingRange, Speculation
 
 
 def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress, retain_graphs=False,
@@ -46,8 +46,9 @@ def usage(prepared):
 
 RECIPE = Recipe(
     name="kimi3", prepare=prepare, usage=usage,
-    # Agentic sampling: https://huggingface.co/moonshotai/Kimi-K3#3-evaluation-results.
-    sampling_defaults=SamplingDefaults(temperature=1., top_p=1., top_k=-1),
+    # Agentic defaults; top-p spans single-step/agentic presets: https://huggingface.co/moonshotai/Kimi-K3#3-evaluation-results.
+    sampling_defaults=SamplingDefaults(temperature=1., top_p=1., top_k=-1,
+        ranges={"top_p": SamplingRange(.95, 1.)}),
     checkpoints=(Checkpoint(alias="kimi-k3-mxfp4-csf", repository="/data/models/Kimi-K3-MXFP4-CSF",
         revision="local", architecture="KimiK3ForConditionalGeneration",
         stored_bytes=1_491_026_420_236, device_bytes=1_498_926_420_236, draft_bytes=7_900_000_000),

@@ -2,7 +2,7 @@ use super::runtime::Prompt;
 use crate::{
     AdmissionError, Error, Failure, FrontendError, Result,
     frontend::{Frontend, images::ImageProcessor},
-    model::{ModelConfig, SamplingParameters},
+    model::{ModelConfig, SamplingParameters, SamplingRange, SamplingRanges},
 };
 use base64::Engine;
 use serde_json::{Map, Value};
@@ -252,7 +252,7 @@ pub(super) fn prepare_inference(
             .map(|(_, additional)| additional)
             .sum::<usize>();
     }
-    let mut sampling = sampling_parameters(object, &config.sampling_defaults)?;
+    let mut sampling = sampling_parameters(object, &config.sampling_defaults, &config.sampling_ranges)?;
     sampling.seed = sampling.seed.wrapping_add(index as u64);
     let stop_sequences = opts.token_stops.clone();
     super::stops::TokenStops::new(stop_sequences.clone(), config.contract.vocabulary)?;
@@ -360,22 +360,50 @@ fn requests_continuation(value: Option<&Value>) -> bool {
 pub(super) fn sampling_parameters(
     object: &Map<String, Value>,
     defaults: &SamplingParameters,
+    ranges: &SamplingRanges,
 ) -> Result<SamplingParameters> {
+    ranges.validate(defaults)?;
+    let top_k = ranges
+        .top_k
+        .unwrap_or_else(|| SamplingRange::fixed(defaults.top_k));
     let sampling = SamplingParameters {
         seed: integer(object, "seed", defaults.seed)?,
-        temperature: number(object, "temperature", defaults.temperature)?,
-        top_p: number(object, "top_p", defaults.top_p)?,
-        min_p: number(object, "min_p", defaults.min_p)?,
-        repetition_penalty: number(object, "repetition_penalty", defaults.repetition_penalty)?,
-        presence_penalty: number(object, "presence_penalty", defaults.presence_penalty)?,
-        frequency_penalty: number(object, "frequency_penalty", defaults.frequency_penalty)?,
+        temperature: sampling_number(
+            object,
+            "temperature",
+            defaults.temperature,
+            ranges.temperature,
+        )?,
+        top_p: sampling_number(object, "top_p", defaults.top_p, ranges.top_p)?,
+        min_p: sampling_number(object, "min_p", defaults.min_p, ranges.min_p)?,
+        repetition_penalty: sampling_number(
+            object,
+            "repetition_penalty",
+            defaults.repetition_penalty,
+            ranges.repetition_penalty,
+        )?,
+        presence_penalty: sampling_number(
+            object,
+            "presence_penalty",
+            defaults.presence_penalty,
+            ranges.presence_penalty,
+        )?,
+        frequency_penalty: sampling_number(
+            object,
+            "frequency_penalty",
+            defaults.frequency_penalty,
+            ranges.frequency_penalty,
+        )?,
         top_k: object
             .get("top_k")
+            .filter(|value| !value.is_null())
             .map(|value| {
                 value
                     .as_i64()
-                    .and_then(|v| i32::try_from(v).ok())
-                    .ok_or("top_k must be int32")
+                    .map(i128::from)
+                    .or_else(|| value.as_u64().map(i128::from))
+                    .map(|v| v.clamp(i128::from(top_k.min), i128::from(top_k.max)) as i32)
+                    .ok_or("top_k must be an integer")
             })
             .transpose()?
             .unwrap_or(defaults.top_k),
@@ -384,17 +412,31 @@ pub(super) fn sampling_parameters(
     Ok(sampling)
 }
 
-#[cfg(test)]
-fn boolean(object: &Map<String, Value>, name: &str, default: bool) -> Result<bool> {
+fn sampling_number(
+    object: &Map<String, Value>,
+    name: &str,
+    default: f32,
+    range: Option<SamplingRange<f32>>,
+) -> Result<f32> {
+    let range = range.unwrap_or_else(|| SamplingRange::fixed(default));
     object
         .get(name)
-        .map(|v| {
-            v.as_bool().ok_or_else(|| {
-                Error::admission(AdmissionError::Invalid, format!("{name} must be boolean"))
-            })
+        .filter(|value| !value.is_null())
+        .map(|value| {
+            value
+                .as_f64()
+                .filter(|v| v.is_finite())
+                .map(|v| v.clamp(f64::from(range.min), f64::from(range.max)) as f32)
+                .ok_or_else(|| {
+                    Error::admission(
+                        AdmissionError::Invalid,
+                        format!("{name} must be a finite number"),
+                    )
+                })
         })
         .unwrap_or(Ok(default))
 }
+
 fn integer(object: &Map<String, Value>, name: &str, default: u64) -> Result<u64> {
     object
         .get(name)
@@ -405,22 +447,6 @@ fn integer(object: &Map<String, Value>, name: &str, default: u64) -> Result<u64>
                     format!("{name} must be a nonnegative integer"),
                 )
             })
-        })
-        .unwrap_or(Ok(default))
-}
-fn number(object: &Map<String, Value>, name: &str, default: f32) -> Result<f32> {
-    object
-        .get(name)
-        .map(|v| {
-            v.as_f64()
-                .filter(|v| v.is_finite() && v.abs() <= f32::MAX as f64)
-                .map(|v| v as f32)
-                .ok_or_else(|| {
-                    Error::admission(
-                        AdmissionError::Invalid,
-                        format!("{name} must be finite float32"),
-                    )
-                })
         })
         .unwrap_or(Ok(default))
 }
@@ -583,17 +609,7 @@ mod tests {
         assert!(limit(serde_json::json!({}), 262144, 262145).is_err());
     }
     #[test]
-    fn explicit_zero_values_survive_defaults_and_nonfinite_casts_fail() {
-        let values = serde_json::json!({"temperature":0,"seed":0,"stream":false,"large":1e100});
-        let object = values.as_object().unwrap();
-        assert_eq!(number(object, "temperature", 1.).unwrap(), 0.);
-        assert_eq!(integer(object, "seed", 42).unwrap(), 0);
-        assert!(!boolean(object, "stream", true).unwrap());
-        assert!(number(object, "large", 0.).is_err());
-    }
-
-    #[test]
-    fn request_sampling_overrides_only_explicit_fields_in_prepared_defaults() {
+    fn absent_sampling_ranges_fix_distribution_parameters_and_preserve_seed() {
         let defaults = SamplingParameters {
             seed: 123,
             temperature: 1.,
@@ -601,34 +617,72 @@ mod tests {
             top_k: -1,
             ..SamplingParameters::default()
         };
-        let empty = sampling_parameters(&Map::new(), &defaults).unwrap();
+        let ranges = SamplingRanges::default();
+        let empty = sampling_parameters(&Map::new(), &defaults, &ranges).unwrap();
         assert_eq!(empty.top_k, -1);
         assert_eq!(empty.temperature, 1.);
-        let values = serde_json::json!({"seed":0,"temperature":0.5,"top_p":1,"top_k":0});
-        let explicit = sampling_parameters(values.as_object().unwrap(), &defaults).unwrap();
+        let values = serde_json::json!({"seed":0,"temperature":0.,"top_p":1,"top_k":0,
+            "min_p":1.,"repetition_penalty":0.,"presence_penalty":-3.,"frequency_penalty":9.});
+        let explicit = sampling_parameters(values.as_object().unwrap(), &defaults, &ranges).unwrap();
         assert_eq!(explicit.seed, 0);
-        assert_eq!(explicit.temperature, 0.5);
-        assert_eq!(explicit.top_k, 0);
-        assert_eq!(explicit.top_p, 1.);
-        assert_eq!(explicit.repetition_penalty, 1.);
+        assert_eq!(explicit.values(), defaults.values());
+        assert_eq!(explicit.top_k, defaults.top_k);
         assert_eq!(defaults.seed, 123);
         assert_eq!(defaults.temperature, 1.);
     }
 
     #[test]
-    fn zero_temperature_is_rejected_without_replacing_it_with_the_default() {
-        for temperature in [0., -0.] {
-            let values = serde_json::json!({"temperature": temperature});
-            let error =
-                sampling_parameters(values.as_object().unwrap(), &SamplingParameters::default())
-                    .unwrap_err();
-            assert!(matches!(
-                error,
-                Error::Admission(AdmissionError::Invalid(_))
-            ));
-            assert!(error.to_string().contains(
-                "greedy decoding incorrectly collapses the model’s probability distribution"
-            ));
+    fn sampling_clamps_at_inclusive_model_bounds_before_validation_and_narrowing() {
+        let defaults = SamplingParameters::default();
+        let ranges = SamplingRanges {
+            temperature: Some(SamplingRange { min: 0.5, max: 1.5 }),
+            top_p: Some(SamplingRange { min: 0.5, max: 1. }),
+            min_p: Some(SamplingRange { min: 0., max: 0.5 }),
+            repetition_penalty: Some(SamplingRange { min: 0.5, max: 2. }),
+            presence_penalty: Some(SamplingRange { min: -2., max: 2. }),
+            frequency_penalty: Some(SamplingRange { min: -1., max: 1. }),
+            top_k: Some(SamplingRange { min: 1, max: 100 }),
+        };
+        for (value, top_k, expected, expected_k) in [
+            (
+                -1e100,
+                serde_json::json!(i64::MIN),
+                [0.5, 0.5, 0., 0.5, -2., -1.],
+                1,
+            ),
+            (
+                1e100,
+                serde_json::json!(u64::MAX),
+                [1.5, 1., 0.5, 2., 2., 1.],
+                100,
+            ),
+            (0.5, serde_json::json!(50), [0.5; 6], 50),
+        ] {
+            let body = serde_json::json!({"seed":u64::MAX,"temperature":value,"top_p":value,
+                "min_p":value,"repetition_penalty":value,"presence_penalty":value,"frequency_penalty":value,"top_k":top_k});
+            let result = sampling_parameters(body.as_object().unwrap(), &defaults, &ranges).unwrap();
+            assert_eq!(result.values(), expected);
+            assert_eq!(result.top_k, expected_k);
+            assert_eq!(result.seed, u64::MAX);
+        }
+    }
+
+    #[test]
+    fn sampling_rejects_nonnumeric_values_and_fractional_top_k() {
+        for body in [
+            serde_json::json!({"temperature":"0.5"}),
+            serde_json::json!({"temperature":false}),
+            serde_json::json!({"top_k":1.5}),
+            serde_json::json!({"seed":-1}),
+        ] {
+            assert!(
+                sampling_parameters(
+                    body.as_object().unwrap(),
+                    &SamplingParameters::default(),
+                    &SamplingRanges::default()
+                )
+                .is_err()
+            );
         }
     }
 }

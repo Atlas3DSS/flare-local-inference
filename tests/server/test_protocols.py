@@ -548,17 +548,12 @@ def test_unsupported_features_and_error_shapes(clients):
     ("/v1/messages", {"messages": USER, "max_tokens": 4}),
     ("/v1/responses", {"input": USER, "max_output_tokens": 4}),
 ])
-def test_zero_temperature_returns_explained_api_error(clients, temperature, path, body):
+def test_zero_temperature_clamps_to_model_sampling_policy(clients, temperature, path, body):
     _, _, http = clients
     response = http.post(path, json={**body, "temperature": temperature},
                          headers={"anthropic-version": "2023-06-01"})
-    assert response.status_code == 400
-    error = response.json()["error"]
-    assert error["type"] == "invalid_request_error"
-    assert error["message"] == (
-        "temperature=0 is unsupported because greedy decoding incorrectly collapses the model’s "
-        "probability distribution, and is not appropriate for most use cases"
-    )
+    assert response.status_code == 200, response.text
+    assert "error" not in response.json() or response.json()["error"] is None
 
 
 def test_mixed_endpoint_concurrency(clients):

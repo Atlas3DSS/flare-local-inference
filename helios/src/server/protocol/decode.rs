@@ -873,6 +873,70 @@ mod native_prompt_tests {
     }
 
     #[test]
+    fn every_protocol_clamps_sampling_before_native_admission() {
+        use crate::model::{SamplingRange, SamplingRanges};
+        let (frontend, compiler, mut config) = native(PromptEncoder::DeepseekV4);
+        for (protocol, input) in [
+            (Protocol::Completions, json!({"prompt":"hello"})),
+            (
+                Protocol::Chat,
+                json!({"messages":[{"role":"user","content":"hello"}]}),
+            ),
+            (
+                Protocol::Messages,
+                json!({"messages":[{"role":"user","content":"hello"}]}),
+            ),
+            (Protocol::Responses, json!({"input":"hello"})),
+        ] {
+            for bounded in [false, true] {
+                config.sampling_ranges = if bounded {
+                    SamplingRanges {
+                        temperature: Some(SamplingRange { min: 0.5, max: 1.5 }),
+                        top_k: Some(SamplingRange { min: -1, max: 100 }),
+                        ..Default::default()
+                    }
+                } else {
+                    SamplingRanges::default()
+                };
+                for temperature in [0., 1e100] {
+                    let mut body = input.clone();
+                    body.as_object_mut().unwrap().extend(
+                        json!({
+                            "model":config.model_id, "max_tokens":4, "max_output_tokens":4,
+                            "temperature":temperature, "top_k":u64::MAX, "seed":u64::MAX,
+                            "top_p":-1e100, "min_p":1e100, "repetition_penalty":0.,
+                            "presence_penalty":1e100, "frequency_penalty":-1e100,
+                        })
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                    );
+                    let decoded = decode(protocol, body, false).unwrap();
+                    let prepared = crate::server::request::prepare_inference(
+                        &frontend,
+                        None,
+                        &compiler,
+                        &config,
+                        &decoded.request,
+                        0,
+                        false,
+                    )
+                    .unwrap();
+                    let sampling = prepared.prompt.sampling;
+                    let mut expected = config.sampling_defaults.clone();
+                    if bounded {
+                        expected.temperature = if temperature == 0. { 0.5 } else { 1.5 };
+                        expected.top_k = 100;
+                    }
+                    assert_eq!(sampling.values(), expected.values(), "{protocol:?}");
+                    assert_eq!(sampling.top_k, expected.top_k);
+                    assert_eq!(sampling.seed, u64::MAX);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn raw_completion_bypasses_native_conversation_options_and_keeps_token_ids() {
         for encoder in [PromptEncoder::DeepseekV4, PromptEncoder::DeepseekV41] {
             let (frontend, compiler, config) = native(encoder);

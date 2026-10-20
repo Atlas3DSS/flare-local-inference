@@ -90,6 +90,7 @@ pub fn model_config(contract: crate::model::PreparedContract) -> crate::model::M
             snapshots: 16,
         },
         eos_token_ids: vec![1],
+        sampling_ranges: Default::default(),
         sampling_defaults: Default::default(),
         max_new_tokens: 2048,
         speculative_widths: vec![],

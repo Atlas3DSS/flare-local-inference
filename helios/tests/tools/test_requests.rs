@@ -64,6 +64,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             snapshots: 37,
         },
         eos_token_ids: vec![248046, 248044],
+        sampling_ranges: Default::default(),
         sampling_defaults: SamplingParameters {
             temperature: 0.25,
             top_k: 50,
@@ -133,11 +134,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             if serde_json::to_value(&prepared.prompt.tokens).unwrap() != case["token_ids"] {
                 return Err((format!("{}: request token IDs differ", case["name"])).into());
             }
-            if prepared.prompt.sampling.temperature != 0.
+            if prepared.prompt.sampling.temperature != 0.25
                 || prepared.prompt.sampling.top_k != 50
                 || prepared.prompt.max_new_tokens != 17
             {
-                return Err("explicit request values did not override configured defaults".into());
+                return Err("request sampling did not clamp to model defaults or output limit changed".into());
             }
             let mut wire = body;
             let mut changed = false;

@@ -23,6 +23,7 @@ pub(super) fn config() -> ModelConfig {
             snapshots: 40,
         },
         eos_token_ids: vec![248046, 248044],
+        sampling_ranges: Default::default(),
         sampling_defaults: SamplingParameters::default(),
         max_new_tokens: 256,
         speculative_widths: Vec::new(),

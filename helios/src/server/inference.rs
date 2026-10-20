@@ -79,19 +79,19 @@ pub struct Sampling {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seed: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub temperature: Option<f32>,
+    pub temperature: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub top_p: Option<f32>,
+    pub top_p: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub min_p: Option<f32>,
+    pub min_p: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub top_k: Option<i32>,
+    pub top_k: Option<serde_json::Number>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub repetition_penalty: Option<f32>,
+    pub repetition_penalty: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub presence_penalty: Option<f32>,
+    pub presence_penalty: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub frequency_penalty: Option<f32>,
+    pub frequency_penalty: Option<f64>,
 }
 #[derive(Clone, Debug, PartialEq)]
 pub enum Constraint {

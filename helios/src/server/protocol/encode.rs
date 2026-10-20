@@ -407,9 +407,7 @@ impl Encoder {
                 if !self.parallel_tool_calls && self.outputs[index].has_tools() {
                     return Err("parallel tool calls are disabled, but the model produced more than one tool call".into());
                 }
-                if (self.protocol != Protocol::Chat || self.tool_choice == ToolChoice::Required)
-                    && self.tool(name).is_none()
-                {
+                if self.tool_choice != ToolChoice::Auto && self.tool(name).is_none() {
                     return Err(format!("model emitted undeclared tool {name}").into());
                 }
             }

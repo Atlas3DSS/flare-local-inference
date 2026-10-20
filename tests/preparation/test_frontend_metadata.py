@@ -11,15 +11,22 @@ from ignition.preparation.package_file import combine, read_index, write_sources
 from ignition.preparation.package_proto import serving
 from ignition.preparation.runtime_package_pb2 import BundleIndex, ModelIndex
 from ignition.recipes import recipes
-from ignition.recipes.declaration import SamplingDefaults
+from ignition.recipes.declaration import SamplingDefaults, SamplingRange
 
 
-@pytest.mark.parametrize("name,top_k", [("qwen38", 20), ("qwen38_dense", 20), ("glm53", -1), ("deepseek41", -1),
-                                      ("deepseek4", -1), ("mimo_v2", -1)])
-def test_default_mode_uses_manually_declared_model_card_sampling(name, top_k):
-    defaults = next(recipe for recipe in recipes() if recipe.name == name).sampling_defaults
-    assert defaults.as_dict() == dict(seed=0, temperature=1., top_p=1. if name == "deepseek41" else .95, top_k=top_k,
-        min_p=0., repetition_penalty=1., presence_penalty=0., frequency_penalty=0.)
+@pytest.mark.parametrize("recipe", recipes(), ids=lambda recipe: recipe.name)
+def test_default_mode_uses_manually_declared_model_card_sampling(recipe):
+    qwen = recipe.name in ("qwen38", "qwen38_dense")
+    expected = dict(seed=0, temperature=1., top_p=1. if recipe.name in ("deepseek41", "kimi3") else .95,
+        top_k=20 if qwen else -1, min_p=0., repetition_penalty=1., presence_penalty=0., frequency_penalty=0.)
+    if qwen:
+        expected["ranges"] = {"temperature": {"min": .7, "max": 1.}, "top_p": {"min": .8, "max": .95},
+                              "presence_penalty": {"min": 0., "max": 2.}}
+    elif recipe.name == "glm53":
+        expected["ranges"] = {"temperature": {"min": .95, "max": 1.}, "top_p": {"min": .95, "max": 1.}}
+    elif recipe.name == "kimi3":
+        expected["ranges"] = {"top_p": {"min": .95, "max": 1.}}
+    assert recipe.sampling_defaults.as_dict() == expected
 
 
 @pytest.mark.parametrize("temperature", [0., -0., -1., float("nan"), float("inf")])
@@ -86,11 +93,18 @@ def server():
         assets={"tokenizer": {}, "chat_template": {}})
 
 
-def test_typed_settings_survive_publication_and_tensor_parallel_assembly(tmp_path):
+@pytest.mark.parametrize("ranges", [{}, {
+    "temperature": {"min": .5, "max": 1.5}, "top_k": {"min": -1, "max": 100},
+    "presence_penalty": {"min": 0., "max": 0.},
+}])
+def test_typed_settings_survive_publication_and_tensor_parallel_assembly(tmp_path, ranges):
+    source = server()
+    if ranges:
+        source["sampling_defaults"]["ranges"] = ranges
     paths = []
     for rank in range(2):
         index = ModelIndex(version=4, ranks=[BundleIndex()])
-        serving(index, server())
+        serving(index, source)
         assert index.contract.model_id == "fixture"
         assert list(index.contract.served_names) == ["fixture-alias"]
         assert index.contract.reserve_bytes == 1 << 30
@@ -104,11 +118,34 @@ def test_typed_settings_survive_publication_and_tensor_parallel_assembly(tmp_pat
     combine(result, paths, [])
     index, _ = read_index(result)
     assert MessageToDict(index.sampling_defaults, preserving_proto_field_name=True) == {
-        **server()["sampling_defaults"], "seed": "0"}
+        **source["sampling_defaults"], "seed": "0"}
+    assert index.sampling_defaults.HasField("ranges") == bool(ranges)
     assert list(index.frontend.eos_token_ids) == [17]
     assert index.frontend.tokenizer.eos_token == "<eos>"
     assert len(index.frontend.image.mimo.image_mean) == 3
     assert not index.assets
+
+
+def test_recipe_sampling_ranges_are_optional_and_preserve_defaults():
+    defaults = SamplingDefaults(temperature=1., top_p=.95, top_k=20,
+                               ranges={"temperature": SamplingRange(.5, 1.5)})
+    assert defaults.as_dict()["temperature"] == 1.
+    assert defaults.as_dict()["ranges"] == {"temperature": {"min": .5, "max": 1.5}}
+    with pytest.raises(TypeError):
+        defaults.ranges["temperature"] = SamplingRange(0., 2.)
+
+
+@pytest.mark.parametrize("name,bounds", [
+    ("seed", (0, 1)), ("unknown", (0, 1)), ("temperature", (0., 1.)),
+    ("temperature", (1.5, 2.)), ("temperature", (2., 1.)),
+    ("temperature", (float("nan"), 2.)), ("temperature", (.5, float("inf"))),
+    ("temperature", (1e-100, 2.)), ("temperature", (.5, 1e100)),
+    ("top_p", (.5, 1.1)), ("min_p", (-.5, .5)), ("repetition_penalty", (0., 2.)),
+    ("top_k", (-2, 20)), ("top_k", (1., 20)), ("top_k", (1, 2**31)),
+])
+def test_recipe_rejects_invalid_sampling_ranges(name, bounds):
+    with pytest.raises(ValueError):
+        SamplingDefaults(temperature=1., top_p=.95, top_k=20, ranges={name: SamplingRange(*bounds)})
 
 
 def test_runtime_config_blobs_and_partial_sampling_defaults_are_rejected():
@@ -157,7 +194,8 @@ def test_cached_checkpoint_structural_metadata_extracts_without_model_weights(re
 def test_kimi3_agentic_sampling_defaults():
     defaults = next(recipe for recipe in recipes() if recipe.name == 'kimi3').sampling_defaults
     assert defaults.as_dict() == dict(seed=0, temperature=1., top_p=1., top_k=-1,
-        min_p=0., repetition_penalty=1., presence_penalty=0., frequency_penalty=0.)
+        min_p=0., repetition_penalty=1., presence_penalty=0., frequency_penalty=0.,
+        ranges={"top_p": {"min": .95, "max": 1.}})
 
 
 @pytest.mark.parametrize("encoder", ["DEEPSEEK_V4", "DEEPSEEK_V41", 1, 2])

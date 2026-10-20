@@ -300,11 +300,11 @@ async fn json_literals_keep_markup_as_content_and_tool_blocks_end_output() {
 }
 
 #[test]
-fn complete_calls_validate_registered_names_and_json_arguments() {
+fn complete_calls_validate_nonempty_names_and_json_arguments() {
     for spaced in [false, true] {
         let (open, body, close) = block(spaced);
         for invalid in [
-            body.replace("name=\"lookup\"", "name=\"unknown\""),
+            body.replace("name=\"lookup\"", "name=\"\""),
             body.replace(">3</", ">not-json</"),
         ] {
             let text = format!("{open}{invalid}{close}");

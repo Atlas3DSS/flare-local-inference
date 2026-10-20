@@ -2,6 +2,10 @@
     Qwen, GLM, DeepSeek, MiMo, Step, and Nemotron services. See
     core-design.md#exact-endpoint-capture and scheduling-runtime-design.md.
 
+[ ] Investigate Step 5 seeded request repeatability: repeated completions with
+    seed 119 and unchanged sampling defaults produce different text using
+    step5-tp4-mtp3-c16-fp8kv-signed.safetensors, including prompt-cache hits.
+
 [ ] Orbit: mDNS discovery, the fabric check with a ring-order proposal,
     preparation through agents (PREPARE, `flare orbit prepare`), and
     reconciliation (`flare orbit apply`). See orbit.md#unimplemented-parts.

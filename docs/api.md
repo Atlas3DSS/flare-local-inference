@@ -40,6 +40,7 @@ The additional `flare` object reports prepared and selected serving metadata:
 | `prefill_chunk_size` | Maximum tokens in a prefill chunk, not the context limit |
 | `default_max_tokens` | Default output-token budget when a request omits it; remaining context still bounds output |
 | `sampling_defaults` | Packaged seed, temperature, filters, and penalties used for omitted request fields |
+| `sampling_ranges` | Inclusive `{min, max}` bounds for distribution parameters; null fixes a parameter at its packaged default; seed remains request-controlled |
 | `max_images_per_prompt` | Upper bound from feature storage; actual image sizes and the total image-token budget bound admission; zero for text-only packages |
 | `max_image_tokens_per_prompt` | Total image-token budget shared by every image in a request, fixed by the package's prepared feature storage; zero for text-only packages |
 | `max_image_tokens_per_image` | Image tokens one image may cost after the profile's normalization; the smaller of one prepared vision graph and the request budget; zero for text-only packages |
@@ -213,7 +214,7 @@ its output limit; recognized but incomplete calls at natural completion are erro
 
 DeepSeek reasoning and both DSML tool syntaxes use the pinned official
 `deepseek-recipe` state machine. Helios adapts its actions into the same neutral
-events, validates registered tool names and JSON objects with nonempty, unique
+events, validates nonempty tool names and JSON objects with nonempty, unique
 argument names, and publishes each call when its arguments complete. Closing the
 outer calls block ends parsed output; subsequent generated text is discarded.
 The official parser owns markup recognition, including its tolerance of omitted
@@ -232,8 +233,15 @@ newlines.
 
 Supported tools are client-executed JSON functions with `tool_choice` set to
 `"auto"`, `"none"`, or `"required"`. Anthropic's `{"type":"any"}` selects the same
-required mode. Required mode needs at least one declared tool, adds an instruction
-to call a tool to the prompt, and validates that generation produced at least one
+required mode. With tools enabled and `tool_choice: "auto"`, parseable calls to
+undeclared tools are returned with their generated names and arguments in both
+buffered and streaming responses across all three chat APIs. Clients can repair
+or reject these calls and provide feedback in a subsequent turn. Declared schemas
+guide argument conversion where the tool syntax requires it; unknown tools have
+no schema for that conversion. Malformed envelopes, empty names, and invalid
+argument syntax still fail parsing. Required mode needs at least one declared
+tool, adds an instruction to call a tool to the prompt, and validates that
+generation produced at least one
 completed call to a declared tool. Sampling is unchanged; no calls are fabricated
 and no retries are attempted. Missing calls, including output truncated before a
 complete call, produce HTTP 500 for buffered requests or a terminal error event
@@ -316,12 +324,41 @@ provider reasoning signatures or encrypted continuation state.
 
 ## Reasoning, sampling, and usage
 
-Prepared model defaults fill omitted sampling fields; explicit request values
-win. Temperature must be positive. Explicit `temperature: 0` (including negative
-zero) returns HTTP 400 with `invalid_request_error` and the message:
-“temperature=0 is unsupported because greedy decoding incorrectly collapses the
-model’s probability distribution, and is not appropriate for most use cases”.
-Omit temperature to use the model default, or provide a positive value. The request is never silently clamped or replaced.
+Prepared model defaults fill omitted sampling fields. Numeric request values for
+`temperature`, `top_p`, `top_k`, `min_p`, `repetition_penalty`, `presence_penalty`,
+and `frequency_penalty` are clamped to the inclusive ranges declared in the
+package. A parameter without a range is fixed at its packaged default, including
+in packages exported without range metadata. Ranges must contain their defaults
+and valid sampler values; temperature bounds are positive. For example,
+`temperature: 0` becomes the declared minimum, or the default if no range exists.
+Malformed types still return HTTP 400; `top_k` must be an integer. `seed` remains
+request-controlled and uses its packaged default when omitted. Sampling defaults
+and ranges come from the model author's recommendations declared in the recipe.
+
+The recipes use these default-mode settings. Parameters without an interval in
+the table are fixed at their defaults. Bounds span the minimum and maximum values
+across each card's task or mode presets, including intermediate values and
+independent combinations. Qwen presence-penalty bounds are an explicit interval
+in both cards. Changing request reasoning mode does not change sampling defaults.
+
+| Recipe | Temperature | Top-p | Top-k | Declared interval | Model-card basis |
+| --- | --- | --- | --- | --- | --- |
+| `qwen38` | 1 | 0.95 | 20 | Temperature [0.7, 1]; top-p [0.8, 0.95]; presence penalty [0, 2] | [Qwen3.8-Flash-Next thinking/instruct presets](https://huggingface.co/Qwen/Qwen3.8-Flash-Next#best-practices) |
+| `qwen38_dense` | 1 | 0.95 | 20 | Temperature [0.7, 1]; top-p [0.8, 0.95]; presence penalty [0, 2] | [Qwen3.8-27B thinking/instruct presets](https://huggingface.co/Qwen/Qwen3.8-27B#best-practices) |
+| `glm53` | 1 | 0.95 | Disabled | Temperature [0.95, 1]; top-p [0.95, 1] | [GLM-5.3-Flash evaluation presets](https://huggingface.co/zai-org/GLM-5.3-Flash#footnotes) |
+| `deepseek4` | 1 | 0.95 | Disabled | None | [DeepSeek-V4-Flash-Vision-Exp agent evaluations](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-Vision-Exp#introduction) |
+| `deepseek41` | 1 | 1 | Disabled | None | [DeepSeek-V4.1-Flash-1017 inference recommendations](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017#minimal-inference) |
+| `mimo_v2` | 1 | 0.95 | Disabled | None | [MiMo-V2.6-Pro-MOPD deployment](https://huggingface.co/XiaomiMiMo/MiMo-V2.6-Pro-MOPD#4-deployment) |
+| `kimi3` | 1 | 1 | Disabled | Top-p [0.95, 1] | [Kimi-K3 single-step/agentic evaluations](https://huggingface.co/moonshotai/Kimi-K3#3-evaluation-results) |
+| `step5` | 1 | 0.95 | Disabled | None | [Step-5-Preview-NVFP4 inference recommendations](https://huggingface.co/stepfun-ai/Step-5-Preview-NVFP4#evaluation-notes) |
+| `nemotron_h` | 1 | 0.95 | Disabled | None | [Nemotron-3.5-Bolt text recommendations](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB#model-summary) |
+
+All recipes default to `min_p=0`, `repetition_penalty=1`, and zero presence and
+frequency penalties. Unspecified filters are disabled and unspecified penalties
+are neutral. Disabled top-k is stored as `-1`; Step 5's recommended `0` has the
+same meaning. Packages exported without ranges continue to fix every distribution
+parameter at their stored defaults, including Qwen presence penalties.
+
 Native extensions such as `top_k`, `min_p`, repetition penalties, token stops,
 `grammar`, and `chat_template_kwargs` remain available. JSON output formats and
 Lark output grammars constrain the final answer while permitting the model's

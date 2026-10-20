@@ -79,6 +79,7 @@ impl Fixture {
                     snapshots: 16,
                 },
                 eos_token_ids: vec![5],
+                sampling_ranges: Default::default(),
                 sampling_defaults: SamplingParameters::default(),
                 max_new_tokens: 16,
                 speculative_widths: vec![],

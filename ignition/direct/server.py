@@ -14,6 +14,7 @@ steps take Python's time rather than the graph's, schedules instead.
 """
 
 import json
+import math
 import os
 import queue
 import signal
@@ -73,13 +74,20 @@ class _Frontend:
 
 
 def _sampling(body, defaults):
+    def clamp(name, value, default):
+        bounds = defaults.get("ranges", {}).get(name, {"min": default, "max": default})
+        return min(max(value, bounds["min"]), bounds["max"])
+
     def number(name):
+        default = float(defaults.get(name, SamplingParameters.__dataclass_fields__[name].default))
         value = body.get(name)
         if value is None:
-            return float(defaults.get(name, SamplingParameters.__dataclass_fields__[name].default))
+            return default
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise AdmissionError(f"{name} must be a number")
-        return float(value)
+        if isinstance(value, float) and not math.isfinite(value):
+            raise AdmissionError(f"{name} must be finite")
+        return float(clamp(name, value, default))
 
     def integer(name, default):
         value = body.get(name)
@@ -87,7 +95,7 @@ def _sampling(body, defaults):
             return default
         if isinstance(value, bool) or not isinstance(value, int):
             raise AdmissionError(f"{name} must be an integer")
-        return value
+        return value if name == "seed" else clamp(name, value, default)
 
     return SamplingParameters(
         seed=integer("seed", int(defaults.get("seed", 0))), temperature=number("temperature"),

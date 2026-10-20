@@ -1240,7 +1240,10 @@ against the model card for the default serving mode. `generation_config.json`
 and `config.json` do not select sampling policy. Unspecified filters are disabled
 and penalties are neutral. Complete defaults are stored in the package's
 `DefaultSamplingParameters` protobuf message; missing or invalid defaults reject
-loading. Explicit request parameters take precedence. Qwen's default thinking-mode
+loading. Optional inclusive ranges in that message bound request distribution
+parameters; values outside those ranges clamp to the nearest endpoint. An absent
+range fixes the parameter at its declared default, including for packages without
+range metadata. Seed remains request-controlled. Qwen's default thinking-mode
 recommendation is temperature 1.0, top-k 20, and top-p 0.95.
 
 ### Scheduling and output

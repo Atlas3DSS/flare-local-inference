@@ -5,11 +5,19 @@ PyTorch.
 """
 
 from collections.abc import Callable, Mapping
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, field, fields, replace
 import math
 from types import MappingProxyType
 
 from ignition.components.capacity import request_capacity
+
+@dataclass(frozen=True)
+class SamplingRange:
+    """Inclusive bounds from the model author's sampling recommendations."""
+
+    min: float | int
+    max: float | int
+
 
 @dataclass(frozen=True)
 class SamplingDefaults:
@@ -23,18 +31,35 @@ class SamplingDefaults:
     repetition_penalty: float = 1.
     presence_penalty: float = 0.
     frequency_penalty: float = 0.
+    ranges: Mapping[str, SamplingRange] = field(default_factory=dict)
 
     def __post_init__(self):
         values = (self.temperature, self.top_p, self.min_p, self.repetition_penalty,
                   self.presence_penalty, self.frequency_penalty)
-        if (any(not math.isfinite(v) for v in values) or self.temperature <= 0
+        if (any(type(v) not in (int, float) or not math.isfinite(v)
+                or abs(v) > float.fromhex("0x1.fffffep+127") for v in values)
+                or any(v < float.fromhex("0x1p-126") for v in
+                       (self.temperature, self.top_p, self.repetition_penalty))
                 or not 0 < self.top_p <= 1 or not 0 <= self.min_p <= 1
-                or self.repetition_penalty <= 0 or type(self.top_k) is not int or self.top_k < -1
+                or type(self.top_k) is not int or not -1 <= self.top_k < 2**31
                 or type(self.seed) is not int or not 0 <= self.seed < 2**64):
             raise ValueError("invalid recipe sampling defaults")
+        names = {item.name for item in fields(self)} - {"seed", "ranges"}
+        for name, bounds in self.ranges.items():
+            if (name not in names or not isinstance(bounds, SamplingRange)
+                    or any(type(v) not in (int, float) or not math.isfinite(v)
+                           for v in (bounds.min, bounds.max))
+                    or not bounds.min <= getattr(self, name) <= bounds.max):
+                raise ValueError(f"invalid sampling range for {name}")
+            for value in (bounds.min, bounds.max):
+                replace(self, **{name: value}, ranges={})
+        object.__setattr__(self, "ranges", MappingProxyType(dict(self.ranges)))
 
     def as_dict(self):
-        return asdict(self)
+        result = {item.name: getattr(self, item.name) for item in fields(self) if item.name != "ranges"}
+        if self.ranges:
+            result["ranges"] = {name: asdict(bounds) for name, bounds in self.ranges.items()}
+        return result
 
 
 @dataclass(frozen=True)
