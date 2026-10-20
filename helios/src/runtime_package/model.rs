@@ -736,8 +736,17 @@ impl NativeModel {
             .iter()
             .map(|rank| rank.context_handle())
             .collect();
-        let prepared =
-            crate::offload::prepare(&options.prefix_cache, root, identity, geometry, contexts)?;
+        let contract: crate::model::PreparedContract =
+            serde_json::from_value(self.server_config["model_contract"].clone())
+                .map_err(|error| invalid(format!("invalid prepared contract: {error}")))?;
+        let manifest = self.ranks[0].execution_manifest()?;
+        let staging = crate::offload::input_staging_bytes(&contract, |name| {
+            manifest.buffers.iter().find(|buffer| buffer.name == name)
+                .map(|buffer| buffer.nbytes as u64)
+        })?;
+        let prepared = crate::offload::prepare_with_inputs(
+            &options.prefix_cache, root, identity, geometry, contexts, staging,
+        )?;
         let summary = prepared.summary();
         self.offload = prepared.into_shared();
         phase.finish(summary);

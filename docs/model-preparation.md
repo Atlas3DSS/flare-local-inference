@@ -196,11 +196,13 @@ Vision recipes accept `--image-concurrency N`, independently of
 as `image_concurrency` in `[defaults]` or a model's configuration section.
 Explicit flags override configuration. Text-only recipes ignore the configured
 image default and reject an explicit image-concurrency flag.
-Helios queues image requests when their feature slots are occupied and admits
-eligible text requests from the queue. An image request retains its slot until
+Helios reserves a feature slot when a request needs vision computation. Requests
+whose image spans are already covered by a reused prefix checkpoint need no
+feature slot. Requests needing a slot queue when those slots are occupied;
+eligible requests continue to admit. A reserved slot remains owned until
 request retirement, including completion of outstanding GPU work after cancellation.
-The limit counts requests containing images; it does not change images per request
-or the prepared patch capacities. Changing it requires exporting the package again.
+The limit does not change images per request or the prepared patch capacities.
+Changing it requires exporting the package again.
 Packages with vision require the prepared feature-slot capacity and binding.
 Images replay one at a time into the request's feature buffer. Requests may carry
 more than four images when their combined visual tokens fit that buffer. Each

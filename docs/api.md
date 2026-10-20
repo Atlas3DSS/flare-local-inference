@@ -309,6 +309,20 @@ resolution. Chat templates add fixed framing tokens around each image that
 count toward `prompt_tokens` but not toward the image budget or
 `multimodal_tokens.image`.
 
+Requests include the image data again when continuing a conversation. Prefix
+identity includes the image content and its processing settings. When a reused
+GPU or host checkpoint covers an image's entire input span, Flare skips its
+preprocessing and vision graph. Appending an image preserves reuse of earlier
+unchanged messages. A prefix ending inside an image requires that image's
+complete vision computation.
+
+Configured host memory and disk retention also cache source descriptions and
+CPU vision inputs. These records can avoid decoding and preprocessing even when
+changed text prevents prefix reuse; the vision graph still runs for images
+outside the reused prefix. No persistent GPU image embeddings are retained.
+Cache eviction or corruption causes reconstruction from the supplied image
+data. Reuse does not increase image, context, or HTTP body limits.
+
 Anthropic histories accept inline system text and preserve text, thinking, tool
 use/results, errors, and image blocks. Message-level control metadata, including
 `output_config.effort`, is ignored; top-level generation controls apply to the

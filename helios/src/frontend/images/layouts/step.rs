@@ -3,7 +3,7 @@ use crate::{
     cache::ConditioningEvent,
     frontend::{
         Frontend, RenderedPrompt,
-        images::{ImageProcessor, RgbImage},
+        images::{ImageProcessor, ImageDescription},
     },
     model::{PreparedInput, PromptData},
 };
@@ -12,7 +12,7 @@ pub(crate) fn prepare_input(
     frontend: &Frontend,
     processor: Option<&ImageProcessor>,
     rendered: &RenderedPrompt,
-    images: Vec<RgbImage>,
+    images: &[ImageDescription],
 ) -> Result<PreparedInput> {
     let ids = frontend.encode("<im_patch>", false)?;
     let [image_token] = ids.as_slice() else {
@@ -33,7 +33,7 @@ pub(crate) fn prepare_input(
         Some(
             processor
                 .ok_or("image processing is unavailable")?
-                .process(&images)?,
+                .describe_inputs(images)?,
         )
     };
     let (mut tokens, mut data, mut conditioning) = (vec![], PromptData::default(), vec![]);
@@ -58,15 +58,9 @@ pub(crate) fn prepare_input(
         }
         let source = &images[image];
         let g = &processed.as_ref().unwrap().geometry[image];
-        use sha2::{Digest, Sha256};
-        let mut hash = Sha256::new();
-        hash.update(b"flare-step-image-v1\0");
-        hash.update((source.width() as u64).to_le_bytes());
-        hash.update((source.height() as u64).to_le_bytes());
-        hash.update(source.pixels());
         conditioning.push(ConditioningEvent {
             position: tokens.len() as u64,
-            identity: hash.finalize().into(),
+            identity: source.identity,
         });
         // Every crop has 81 features; the global view follows all crop rows.
         for row in 0..g.grid_thw[1] {
@@ -106,6 +100,6 @@ pub(crate) fn prepare_input(
         token_expansions,
         data,
         conditioning,
-        images: processed,
+        conditioned_inputs: vec![],
     })
 }

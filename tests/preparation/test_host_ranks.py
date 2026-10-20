@@ -174,6 +174,97 @@ def test_export_manifest_transfers_only_absent_files(tmp_path, monkeypatch):
     assert requests[1] == [str(code)]
 
 
+def test_export_transfers_more_sources_than_the_descriptor_limit(tmp_path):
+    import socket
+    import subprocess
+    import sys
+    from pathlib import Path
+    from ignition.preparation.package_file import write_sources, read_sources
+    from ignition.preparation.package_snapshot import ExportOptions
+    from ignition.preparation.runtime_package_pb2 import ModelIndex, BundleIndex, Span
+
+    pytest.importorskip('resource')
+    payload, resources = [], {}
+    for item in range(256):
+        source = tmp_path / f'global-{item}.bin'
+        source.write_bytes(item.to_bytes(4, 'little'))
+        payload.append((item * 4096, source, 0, 4))
+        resources[str(item)] = Span(offset=item * 4096, nbytes=4)
+    manifest = tmp_path / 'rank.json'
+    index = ModelIndex(version=4, ranks=[BundleIndex(resources=resources)])
+    write_sources(manifest, index, payload)
+    destination = tmp_path / 'received.json'
+    receiver, sender = socket.socketpair()
+    receiver.settimeout(10)
+    code = """
+import resource, socket, sys
+from ignition.preparation.host_ranks import send_export_sources
+resource.setrlimit(resource.RLIMIT_NOFILE, (64, resource.getrlimit(resource.RLIMIT_NOFILE)[1]))
+with socket.socket(fileno=int(sys.argv[1])) as control:
+    control.settimeout(10)
+    send_export_sources(control, sys.argv[2], {})
+"""
+    child = subprocess.Popen([sys.executable, '-c', code, str(sender.fileno()), str(manifest)],
+                             pass_fds=(sender.fileno(),), stderr=subprocess.PIPE)
+    sender.close()
+    try:
+        description = host_ranks.receive_object(receiver)['sources']
+        host_ranks.receive_export_sources(receiver, description, destination, ExportOptions(tmp_path / 'cache'))
+        _, locate = read_sources(destination)
+        for item, span in index.ranks[0].resources.items():
+            path, offset, size = locate(span)[0]
+            assert Path(path).read_bytes()[offset:offset + size] == int(item).to_bytes(4, 'little')
+        _, errors = child.communicate(timeout=10)
+        assert child.returncode == 0, errors.decode()
+    finally:
+        receiver.close()
+        if child.poll() is None:
+            child.kill()
+        child.communicate(timeout=10)
+
+
+@pytest.mark.parametrize('change', ['replace', 'truncate'])
+def test_export_rejects_source_changes_before_transfer(tmp_path, change):
+    import socket
+    from ignition.preparation.package_file import write_sources
+    from ignition.preparation.runtime_package_pb2 import ModelIndex, BundleIndex, Span
+
+    source = tmp_path / 'global.bin'
+    source.write_bytes(b'original')
+    manifest = tmp_path / 'rank.json'
+    index = ModelIndex(version=4, ranks=[BundleIndex(resources={'global': Span(nbytes=8)})])
+    write_sources(manifest, index, [(0, source, 0, 8)])
+    receiver, sender = socket.socketpair()
+    receiver.settimeout(5)
+    sender.settimeout(5)
+    failures = []
+    def transmit():
+        try:
+            host_ranks.send_export_sources(sender, manifest, {})
+        except Exception as error:
+            failures.append(error)
+    thread = threading.Thread(target=transmit)
+    thread.start()
+    try:
+        host_ranks.receive_object(receiver)
+        if change == 'replace':
+            replacement = tmp_path / 'replacement'
+            replacement.write_bytes(b'original')
+            replacement.replace(source)
+        else:
+            source.write_bytes(b'short')
+        host_ranks.send_object(receiver, [str(source)])
+        thread.join(5)
+        assert not thread.is_alive()
+        assert len(failures) == 1
+        assert isinstance(failures[0], ValueError)
+        assert 'changed before transfer' in str(failures[0])
+    finally:
+        receiver.close()
+        sender.close()
+        thread.join(5)
+
+
 def test_cluster_export_combines_received_manifests_into_signed_snapshot(tmp_path, monkeypatch):
     import socket
     from types import SimpleNamespace

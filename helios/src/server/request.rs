@@ -74,6 +74,21 @@ pub(super) fn prepare_inference(
     index: usize,
     count_only: bool,
 ) -> Result<PreparedInference> {
+    prepare_inference_cached(
+        frontend, processor, compiler, config, request, index, count_only, None,
+    )
+}
+
+pub(super) fn prepare_inference_cached(
+    frontend: &Frontend,
+    processor: Option<&ImageProcessor>,
+    compiler: &crate::grammar::GrammarCompiler,
+    config: &ModelConfig,
+    request: &super::inference::Request,
+    index: usize,
+    count_only: bool,
+    input_store: Option<&crate::offload::input::InputStore>,
+) -> Result<PreparedInference> {
     use super::inference::{Constraint, Input, RawPrompt, ToolChoice};
     let opts = &request.options;
     if let Some(logprobs) = opts.logprobs {
@@ -210,7 +225,7 @@ pub(super) fn prepare_inference(
     } else {
         (frontend.render_chat(&normalized, &options)?, String::new())
     };
-    let images = decode_images(&rendered.image_sources, processor)?;
+    let images = describe_images(&rendered.image_sources, processor, input_store)?;
     let output = if raw.is_some() {
         None
     } else {
@@ -249,8 +264,8 @@ pub(super) fn prepare_inference(
         token_expansions,
         data,
         conditioning,
-        images,
-    } = crate::model::prepare_input(config, frontend, processor, &rendered, images)?;
+        conditioned_inputs,
+    } = crate::model::prepare_image_inputs(config, frontend, processor, &rendered, images)?;
     for boundary in &mut message_boundaries {
         let original = *boundary;
         *boundary += token_expansions.iter()
@@ -301,7 +316,7 @@ pub(super) fn prepare_inference(
             tokens,
             message_boundaries,
             data,
-            images,
+            conditioned_inputs,
             conditioning,
             sampling,
             max_new_tokens,
@@ -504,11 +519,11 @@ mod tests {
         )
         .unwrap();
         let four = vec![png_data_url(1075, 1521); 4];
-        assert_eq!(decode_images(&four, Some(&processor)).unwrap().len(), 4);
+        assert_eq!(describe_images(&four, Some(&processor), None).unwrap().len(), 4);
 
         // Five pages: the fifth crosses the budget; the total covers all five.
         let five = vec![png_data_url(1075, 1521); 5];
-        let error = decode_images(&five, Some(&processor)).map(|images| images.len()).unwrap_err();
+        let error = describe_images(&five, Some(&processor), None).map(|images| images.len()).unwrap_err();
         assert!(matches!(error, Error::Admission(AdmissionError::Image(_))));
         let message = error.to_string();
         assert!(
@@ -535,11 +550,11 @@ mod tests {
         let mut costs = vec![small.tokens; 10];
         costs.extend([page.tokens; 5]);
         let total = 10 * small.patches + 5 * page.patches;
-        let forward = decode_images(&mixed, Some(&processor)).map(|images| images.len()).unwrap_err().to_string();
+        let forward = describe_images(&mixed, Some(&processor), None).map(|images| images.len()).unwrap_err().to_string();
         let forward_crossing = crossing(&costs);
         mixed.reverse();
         costs.reverse();
-        let reverse = decode_images(&mixed, Some(&processor)).map(|images| images.len()).unwrap_err().to_string();
+        let reverse = describe_images(&mixed, Some(&processor), None).map(|images| images.len()).unwrap_err().to_string();
         let reverse_crossing = crossing(&costs);
         assert_ne!(forward_crossing, reverse_crossing);
         for message in [&forward, &reverse] {
@@ -553,7 +568,7 @@ mod tests {
 
         // Single-image limits name the observed size and the limit in effect: a square image
         // normalizes to more tokens than one page, which is this processor's per-image cap.
-        let oversized = decode_images(&[png_data_url(2000, 2000)], Some(&processor))
+        let oversized = describe_images(&[png_data_url(2000, 2000)], Some(&processor), None)
             .map(|_| ())
             .unwrap_err()
             .to_string();
@@ -563,12 +578,50 @@ mod tests {
             ImageLimits { max_input_pixels: 1000, ..ImageLimits::default() },
         )
         .unwrap();
-        let pixels = decode_images(&[png_data_url(40, 40)], Some(&processor))
+        let pixels = describe_images(&[png_data_url(40, 40)], Some(&processor), None)
             .map(|_| ())
             .unwrap_err()
             .to_string();
         assert!(pixels.contains("image is 40x40 px; max_image_pixels is 1000"), "{pixels}");
     }
+    #[test]
+    fn source_cache_coalesces_decoding_and_preserves_media_validation() {
+        use crate::frontend::images::{ImageLimits, ImageSettings};
+        use crate::offload::input::{DiskBudget, InputStore};
+        use std::sync::{Arc, Barrier};
+
+        let processor = ImageProcessor::load(ImageSettings::Deepseek4 {}, ImageLimits::default()).unwrap();
+        let store = InputStore::start(2 << 20, None, DiskBudget::new(0, 0)).unwrap();
+        let source = png_data_url(200, 200);
+        let barrier = Arc::new(Barrier::new(4));
+        std::thread::scope(|scope| {
+            let handles = (0..4).map(|_| {
+                let barrier = barrier.clone();
+                let processor = &processor;
+                let store = &store;
+                let source = &source;
+                scope.spawn(move || {
+                    barrier.wait();
+                    describe_images(std::slice::from_ref(source), Some(processor), Some(store))
+                        .unwrap()[0].description.clone()
+                })
+            }).collect::<Vec<_>>();
+            let descriptions = handles.into_iter().map(|handle| handle.join().unwrap()).collect::<Vec<_>>();
+            assert!(descriptions.windows(2).all(|pair| pair[0] == pair[1]));
+        });
+        assert_eq!(processor.preparation_counts().decoded_images, 1);
+        assert_eq!(processor.preparation_counts().prepared_images, 0);
+        let invalid = source.replacen("image/png", "image/jpeg", 1);
+        assert!(describe_images(&[invalid], Some(&processor), Some(&store)).is_err());
+
+        let restricted = ImageProcessor::load(
+            ImageSettings::Deepseek4 {},
+            ImageLimits { max_input_pixels: 1000, ..ImageLimits::default() },
+        ).unwrap();
+        let error = describe_images(&[source], Some(&restricted), Some(&store)).unwrap_err();
+        assert!(error.to_string().contains("max_image_pixels is 1000"), "{error}");
+    }
+
     #[test]
     fn omitted_output_limit_uses_remaining_context_and_explicit_limits_win() {
         let limit = |value: Value, configured, prompt| {
@@ -693,11 +746,15 @@ mod tests {
     }
 }
 
-fn decode_images(
+fn describe_images(
     sources: &[String],
     processor: Option<&ImageProcessor>,
-) -> Result<Vec<crate::frontend::images::RgbImage>> {
-    // Every image is decoded and costed before the budget verdict, so a rejection reports
+    input_store: Option<&crate::offload::input::InputStore>,
+) -> Result<Vec<crate::frontend::images::ImageInput>> {
+    use crate::frontend::images::{ImageDescription, ImageEncoding, ImageInput};
+    use std::sync::Arc;
+
+    // Every image is described and costed before the budget verdict, so a rejection reports
     // the request's complete image-token total and the image that crossed the budget.
     // Images past the overrun are costed but not retained.
     let mut images = Vec::new();
@@ -713,13 +770,13 @@ fn decode_images(
         processor
             .check_batch(index + 1, 0)
             .map_err(|error| error.admission_context(AdmissionError::Image))?;
-        let (data, decode): (_, fn(&ImageProcessor, &[u8]) -> Result<_>) =
+        let (data, encoding) =
             if let Some(data) = url.strip_prefix("data:image/png;base64,") {
-                (data, ImageProcessor::decode_png)
+                (data, ImageEncoding::Png)
             } else if let Some(data) = url.strip_prefix("data:image/jpeg;base64,") {
-                (data, ImageProcessor::decode_jpeg)
+                (data, ImageEncoding::Jpeg)
             } else if let Some(data) = url.strip_prefix("data:image/webp;base64,") {
-                (data, ImageProcessor::decode_webp)
+                (data, ImageEncoding::Webp)
             } else {
                 return Err(Error::admission(
                     AdmissionError::Image,
@@ -740,10 +797,43 @@ fn decode_images(
                     error,
                 )))
             })?;
-        let image = decode(processor, &bytes)
-            .map_err(|error| error.admission_context(AdmissionError::Image))?;
+        if bytes.len() > processor.max_encoded_bytes() {
+            return Err(Error::admission(
+                AdmissionError::Image,
+                "encoded image exceeds the configured byte limit",
+            ));
+        }
+        let source_key = processor.source_identity(encoding, &bytes);
+        let _source_guard = input_store.map(|store| store.source_guard(source_key));
+        let description = input_store.and_then(|store| {
+            let record = store.get_blocking(source_key, false)?;
+            let description = ImageDescription::decode(&record.metadata).ok().filter(|description| {
+                processor.geometry(description.width, description.height).ok()
+                    == Some(description.geometry)
+            });
+            if description.is_none() {
+                store.invalidate(source_key);
+            }
+            description
+        });
+        let (description, decoded) = match description {
+            Some(description) => (description, None),
+            None => {
+                let image = processor.decode_encoded(encoding, &bytes)
+                    .map_err(|error| error.admission_context(AdmissionError::Image))?;
+                let description = processor.describe_image(&image)
+                    .map_err(|error| error.admission_context(AdmissionError::Image))?;
+                if let Some(store) = input_store {
+                    store.insert(source_key, Arc::new(crate::offload::input::PreparedInputRecord {
+                        metadata: description.encode()?.into(),
+                        payload: None,
+                    }));
+                }
+                (description, Some(image))
+            }
+        };
         let geometry = processor
-            .geometry(image.width(), image.height())
+            .geometry(description.width, description.height)
             .map_err(|error| error.admission_context(AdmissionError::Image))?;
         image_patches = image_patches
             .checked_add(geometry.patches)
@@ -751,13 +841,16 @@ fn decode_images(
         if overrun.is_none() && image_patches > processor.limits().max_total_patches {
             overrun = Some(crate::frontend::images::ImageOverrun {
                 ordinal: index + 1,
-                width: image.width(),
-                height: image.height(),
+                width: description.width,
+                height: description.height,
                 tokens: geometry.tokens,
             });
         }
         if overrun.is_none() {
-            images.push(image);
+            images.push(ImageInput {
+                description,
+                source: processor.encoded_source(encoding, bytes.into(), decoded),
+            });
         }
     }
     if let Some(processor) = processor.filter(|_| !sources.is_empty()) {

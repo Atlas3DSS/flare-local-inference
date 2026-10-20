@@ -636,11 +636,11 @@ pub struct ServingOptions {
     )]
     pub no_mtp_adaptive_verification: bool,
 
-    /// Host memory for prefix checkpoints, e.g. 16G; 0 disables [default: disabled].
+    /// Host memory for prefix checkpoints and prepared inputs, e.g. 16G; 0 disables [default: disabled].
     #[arg(long, value_name = "SIZE", value_parser = parse_size, help_heading = "Prefix cache options")]
     pub prefix_cache_memory: Option<u64>,
 
-    /// Directory for prefix checkpoints on disk [default: disabled].
+    /// Directory for prefix checkpoints and prepared inputs on disk [default: disabled].
     #[arg(long, value_name = "DIR", help_heading = "Prefix cache options")]
     pub prefix_cache_disk: Option<PathBuf>,
 

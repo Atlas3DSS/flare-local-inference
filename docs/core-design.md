@@ -46,8 +46,7 @@ prepared forwards before warmup and CUDA graph capture. Model structure,
 numerical semantics, compiler optimizations, and kernel preparation remain
 connected to the Python ecosystem throughout execution construction.
 
-The vLLM fork's Qwen and GLM paths maintain engine-specific model
-implementations. vLLM also offers a
+vLLM offers a
 [Transformers backend](https://huggingface.co/docs/transformers/main/en/transformers_as_backend),
 whose attention, state, and execution contracts still need to fit each model.
 Flare's preparation boundary lets canonical model code and PyTorch compilation
@@ -73,17 +72,6 @@ communication plan, and serving integration together. The remaining work is
 concentrated on composing those capabilities into a service; Flare does not
 need to establish a competing model ecosystem or develop another kernel
 library to become useful.
-
-The [Local Inference Lab vLLM fork](https://github.com/local-inference-lab/vllm/tree/dev/karmic-kraken)
-already integrates this stack. Its support extends through checkpoint
-transfers, compressed-scale expansion, PCIe and RoCE collectives, coordinated
-kernel preparation, graph workspaces, decode context parallelism, recurrent
-prefix checkpoints, external checkpoint transfers, speculative verification,
-and prefill scheduling. Those concerns cross model, worker, scheduler, cache,
-and allocator interfaces. Maintaining a specialized serving contract is already
-part of supporting these models in vLLM. The cost comparison is between
-carrying those integrations through a general engine and maintaining a smaller
-runtime whose invariants directly express their requirements.
 
 vLLM's device, backend, model, and distributed-execution breadth creates a
 large compatibility matrix. Changes to cache layouts, compilation, offload,
@@ -156,10 +144,9 @@ Keeping a conversation outside GPU memory imposes related requirements. A
 resumable endpoint includes recurrent matrices, selector state, attention
 tails, and saved hidden state alongside its KV pages. Every part must describe
 the same committed token prefix. Transfer sources must remain immutable, and
-destinations cannot be recycled while a copy can still write to them. The
-vLLM fork's offload integration spans these rules, from frozen recurrent
-snapshots and padded selector tails to restore admission, cancellation, and
-cache reset. A disk transport depends on all of them.
+destinations cannot be recycled while a copy can still write to them. Offload
+integration spans frozen recurrent snapshots, padded selector tails, restore
+admission, cancellation, and cache reset. A disk transport depends on all of them.
 
 The [tiered prefix-cache design](prefix-cache-offload.md) extends the checkpoint
 object Helios already owns. Stores retain published immutable page chains and
@@ -1440,15 +1427,31 @@ Padding must never address another request's writable state.
 
 ### Multimodal identity
 
-Extend the chained prefix digest with conditioning identities at the point where
+The chained prefix digest includes conditioning identities at the point where
 those inputs enter the token stream.
 
-Include image content identity, relevant processor settings, grid/position
-information, and model/recipe identity. Appending another image must not alter
-the digest of an earlier unchanged prefix.
+Image identity includes the complete decoded representation consumed by its
+preprocessing profile and the profile's settings. The prefix also identifies
+the model and token layout. Appending another image preserves the digest of an
+earlier unchanged prefix. Encoded-source keys are separate: they include the
+declared encoding and source bytes and accelerate description lookup.
 
 A sequence of image-placeholder token IDs alone is insufficient to identify
 model state.
+
+Canonical positions, token dependencies, and feature indices describe the whole
+prompt. Admission derives a separate execution plan from the consumed endpoint
+of the selected GPU or host checkpoint. Only inputs whose dependency spans
+extend beyond that endpoint require preprocessing and vision replay. Selected
+features occupy contiguous storage beginning at zero; input packing maps the
+canonical indices into that storage without changing prompt identity.
+
+CPU descriptions and prepared tensors use the host retention tiers beside
+complete model checkpoints. Their eviction is independent: a checkpoint needs
+no original image tensors to resume after an image span, and prepared tensors
+can be reused when the surrounding text changes. Requests retain reconstructible
+sources through preemption and restore failure, so readmission can select work
+against a shallower prefix.
 
 ### Memory significance
 

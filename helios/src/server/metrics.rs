@@ -5,6 +5,37 @@ use std::{
 
 pub(super) mod scheduler;
 
+pub(super) fn input_metrics(
+    stats: crate::offload::input::InputStats,
+    preparation: crate::frontend::images::ImagePreparationCounts,
+) -> Vec<(&'static str, &'static str, &'static str, u64)> {
+    vec![
+        ("input_decoded_images_total", "counter", "Images decoded from encoded request sources.", preparation.decoded_images),
+        ("input_prepared_images_total", "counter", "Images resized and converted into vision input tensors.", preparation.prepared_images),
+        ("input_decoded_source_bytes", "gauge", "Decoded source bytes retained for one-use image preparation.", preparation.decoded_source_bytes),
+        ("input_decoded_source_capacity", "gauge", "Maximum decoded source bytes retained across requests.", preparation.decoded_source_capacity),
+        ("input_cache_metadata_hits_total", "counter", "Coalesced source-description lookups served by host retention.", stats.metadata_hits),
+        ("input_cache_metadata_misses_total", "counter", "Coalesced source-description lookups requiring decoding.", stats.metadata_misses),
+        ("input_cache_payload_hits_total", "counter", "Coalesced prepared-input lookups served by host retention.", stats.payload_hits),
+        ("input_cache_payload_misses_total", "counter", "Coalesced prepared-input lookups requiring preprocessing.", stats.payload_misses),
+        ("input_cache_memory_hits_total", "counter", "Prepared-input records read from host memory.", stats.memory_hits),
+        ("input_cache_disk_hits_total", "counter", "Prepared-input records read from disk.", stats.disk_hits),
+        ("input_cache_failures_total", "counter", "Failed prepared-input reads or writes.", stats.failures),
+        ("input_cache_stored_total", "counter", "Prepared-input records committed to disk.", stats.stored),
+        ("input_cache_skipped_total", "counter", "Prepared-input jobs skipped because a resource bound was reached.", stats.skipped),
+        ("input_cache_queued", "gauge", "Outstanding prepared-input retention jobs.", stats.queued as u64),
+        ("input_cache_pending_writes", "gauge", "Prepared-input writes waiting for shared disk capacity.", stats.pending_writes as u64),
+        ("input_cache_staging_bytes", "gauge", "Prepared-input bytes held by queued writes and disk-read leases.", stats.staging_bytes),
+        ("input_cache_staging_limit", "gauge", "Prepared-input serialization and disk-read window capacity.", stats.staging_limit),
+        ("input_cache_index_bytes", "gauge", "Host bytes charged to the prepared-input disk index.", stats.index_bytes),
+        ("input_cache_memory_limit", "gauge", "Host memory capacity reserved for prepared-input retention.", stats.memory_limit),
+        ("input_cache_memory_records", "gauge", "Prepared-input records retained in host memory.", stats.memory_records as u64),
+        ("input_cache_memory_bytes", "gauge", "Host bytes charged to prepared-input retention and active leases.", stats.memory_bytes),
+        ("input_cache_disk_records", "gauge", "Prepared-input records retained on disk.", stats.disk_records as u64),
+        ("input_cache_disk_bytes", "gauge", "Prepared-input record bytes retained on disk.", stats.disk_bytes),
+    ]
+}
+
 use serde::{Deserialize, Serialize};
 
 use crate::{

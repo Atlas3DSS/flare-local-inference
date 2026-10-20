@@ -25,7 +25,7 @@ pub struct Prompt {
     /// Sorted token counts of exact rendered message prefixes.
     pub message_boundaries: Vec<usize>,
     pub data: crate::model::PromptData,
-    pub images: Option<crate::frontend::images::ProcessedImages>,
+    pub conditioned_inputs: Vec<crate::frontend::images::PreparedImageInput>,
     pub conditioning: Vec<ConditioningEvent>,
     pub sampling: SamplingParameters,
     pub max_new_tokens: u32,
@@ -203,6 +203,8 @@ struct Active<'a> {
     incoming: Incoming,
     last_token: Option<u32>,
     next_image: usize,
+    selected_images: Vec<crate::frontend::images::PreparedImageInput>,
+    prepared_image: Option<crate::frontend::images::ProcessedImages>,
     stops: super::stops::TokenStops,
     text_stops: Option<super::stops::TextStops<'a>>,
     carried: Carried,
@@ -234,7 +236,6 @@ fn continuation_seed(seed: u64, generated: u32) -> u64 {
 /// The output state of a preempted request whose history waits for readmission.
 struct Parked<'a> {
     last_token: Option<u32>,
-    next_image: usize,
     stops: super::stops::TokenStops,
     text_stops: Option<super::stops::TextStops<'a>>,
     carried: Carried,
@@ -290,6 +291,7 @@ pub struct ModelRuntime {
     shutdown: Mutex<Option<Shutdown>>,
     finished: Arc<(Mutex<bool>, Condvar)>,
     metrics: Arc<super::metrics::Metrics>,
+    input_store: Option<crate::offload::input::InputStore>,
 }
 
 impl ModelRuntime {
@@ -313,6 +315,11 @@ impl ModelRuntime {
         let capacity = Arc::new(tokio::sync::Semaphore::new(
             queue_capacity + config.limits.max_active,
         ));
+        let input_store = manifest
+            .offload
+            .as_ref()
+            .and_then(|binding| binding.inputs());
+        let worker_input_store = input_store.clone();
         let config = Arc::new(config);
         let (sender, receiver) = mpsc::sync_channel(queue_capacity);
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
@@ -484,6 +491,9 @@ impl ModelRuntime {
                     queue_capacity,
                 );
                 worker.attach_store(store);
+                if worker.config.contract.vision.enabled() {
+                    worker.image_preparation = Some(ImagePreparation::new(worker_input_store));
+                }
                 worker_metrics.scheduler(worker.scheduler.stats());
                 worker_health.store(true, Ordering::Release);
                 let _ = ready_tx.send(Ok(()));
@@ -530,6 +540,7 @@ impl ModelRuntime {
                 healthy,
                 config,
                 event_capacity,
+                input_store,
                 capacity,
                 thread: Mutex::new(Some(thread)),
                 shutdown: Mutex::new(None),
@@ -549,6 +560,10 @@ impl ModelRuntime {
                 })
             }
         }
+    }
+
+    pub(super) fn input_store(&self) -> Option<&crate::offload::input::InputStore> {
+        self.input_store.as_ref()
     }
 
     pub fn healthy(&self) -> bool {
@@ -723,6 +738,64 @@ impl Drop for ModelRuntime {
     }
 }
 
+type ImagePreparationJob = (
+    RequestHandle,
+    crate::frontend::images::PreparedImageInput,
+    Arc<AtomicBool>,
+);
+type ImagePreparationResult = (
+    RequestHandle,
+    Result<Option<crate::frontend::images::ProcessedImages>>,
+);
+
+struct ImagePreparation {
+    sender: Option<mpsc::SyncSender<ImagePreparationJob>>,
+    receiver: Option<mpsc::Receiver<ImagePreparationResult>>,
+    stop: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl ImagePreparation {
+    fn new(store: Option<crate::offload::input::InputStore>) -> Self {
+        let (sender, jobs) = mpsc::sync_channel::<ImagePreparationJob>(1);
+        let (results, receiver) = mpsc::sync_channel(1);
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = stop.clone();
+        let thread = thread::spawn(move || {
+            while let Ok((handle, image, cancelled)) = jobs.recv() {
+                if worker_stop.load(Ordering::Acquire) {
+                    break;
+                }
+                let prepared = if cancelled.load(Ordering::Acquire) {
+                    Ok(None)
+                } else {
+                    image.materialize_cached(store.as_ref()).map(Some)
+                };
+                if results.send((handle, prepared)).is_err() {
+                    break;
+                }
+            }
+        });
+        Self {
+            sender: Some(sender),
+            receiver: Some(receiver),
+            stop,
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for ImagePreparation {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        self.sender.take();
+        self.receiver.take();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
 struct Worker<'a> {
     config: &'a ModelConfig,
     frontend: &'a crate::frontend::Frontend,
@@ -741,6 +814,9 @@ struct Worker<'a> {
     /// Prefill tokens per second measured from completed prefill frames, which
     /// the host-store fetch policy compares with transfer time.
     prefill_rate: f64,
+    image_preparation: Option<ImagePreparation>,
+    preparing_image: Option<RequestHandle>,
+    image_preparation_cursor: usize,
     prefill_started: VecDeque<(crate::cache::Fence, std::time::Instant, u64)>,
 }
 
@@ -770,6 +846,9 @@ impl<'a> Worker<'a> {
             inputs: None,
             prefill_rate: crate::offload::INITIAL_PREFILL_RATE,
             prefill_started: VecDeque::new(),
+            image_preparation: None,
+            preparing_image: None,
+            image_preparation_cursor: 0,
         }
     }
 
@@ -874,10 +953,53 @@ impl<'a> Worker<'a> {
         }
     }
 
+    fn complete_image_preparation(&mut self) -> Result<bool> {
+        let mut progress = false;
+        loop {
+            let Some(worker) = self.image_preparation.as_ref() else {
+                break;
+            };
+            let result = match worker.receiver.as_ref().unwrap().try_recv() {
+                Ok(result) => result,
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    return Err("image preparation worker disconnected".into());
+                }
+            };
+            let (handle, prepared) = result;
+            let slot = handle.slot as usize;
+            let Some(active) = self.active[slot]
+                .as_mut()
+                .filter(|active| active.request == handle)
+            else {
+                self.preparing_image = None;
+                continue;
+            };
+            match prepared {
+                Ok(Some(images)) => {
+                    active.prepared_image = Some(images);
+                    self.scheduler.conditioned_inputs_ready(handle, true)?;
+                }
+                Ok(None) => {
+                    self.preparing_image = None;
+                }
+                Err(error) => {
+                    self.preparing_image = None;
+                    self.scheduler.cancel(handle)?;
+                    let active = self.active[slot].take().unwrap();
+                    self.admissions[slot] = None;
+                    active.incoming.fail(error);
+                }
+            }
+            progress = true;
+        }
+        Ok(progress)
+    }
+
     fn admit(&mut self) -> Result<std::ops::ControlFlow<(), bool>> {
         self.scheduler
             .advance_to(super::observation::monotonic_ns())?;
-        let mut progress = false;
+        let mut progress = self.complete_image_preparation()?;
         self.pending.retain(|request| {
             let cancelled = request.cancelled.load(Ordering::Acquire);
             if cancelled {
@@ -911,15 +1033,17 @@ impl<'a> Worker<'a> {
                 .as_ref()
                 .is_some_and(|a| a.incoming.cancelled.load(Ordering::Acquire))
             {
-                self.scheduler
-                    .cancel(self.active[slot].take().unwrap().request)?;
+                let active = self.active[slot].take().unwrap();
+                if active.prepared_image.is_some() {
+                    self.preparing_image = None;
+                }
+                self.scheduler.cancel(active.request)?;
                 self.metrics.cancelled.fetch_add(1, Ordering::Relaxed);
                 self.admissions[slot] = None;
                 progress = true;
             }
         }
         while self.scheduler.has_available_slot() {
-            let images_available = self.scheduler.has_available_image_slot();
             let stats = self.scheduler.stats();
             let resources = (
                 self.scheduler.completed(),
@@ -927,11 +1051,11 @@ impl<'a> Worker<'a> {
                 stats.free_snapshots,
                 stats.free_slots,
             );
-            let eligible = |incoming: &Incoming| {
-                (images_available || incoming.prompt.images.is_none())
-                    && incoming.blocked != Some(resources)
-            };
-            let parked = self.parked.iter().position(|(incoming, _)| eligible(incoming));
+            let eligible = |incoming: &Incoming| incoming.blocked != Some(resources);
+            let parked = self
+                .parked
+                .iter()
+                .position(|(incoming, _)| eligible(incoming));
             let (mut incoming, parked, position) = match parked {
                 Some(index) => {
                     let (incoming, parked) = self.parked.remove(index).unwrap();
@@ -952,10 +1076,6 @@ impl<'a> Worker<'a> {
                 incoming.reject_admission("logprobs are not available in this model package".into());
                 continue;
             }
-            // Causal history pages grow independently of fixed continuation rows.
-            // Image-feature replay across readmission requires retained frontend state.
-            let growable =
-                incoming.prompt.images.is_none() && incoming.prompt.conditioning.is_empty();
             let spec = RequestSpec {
                 message_boundaries: incoming.prompt.message_boundaries.clone(),
                 prompt: incoming.prompt.tokens.clone(),
@@ -963,7 +1083,7 @@ impl<'a> Worker<'a> {
                 max_new_tokens: incoming.prompt.max_new_tokens,
                 grammar_constrained: incoming.prompt.grammar.is_some(),
                 host_stops: incoming.prompt.has_host_stops(),
-                growable_output: growable,
+                growable_output: true,
             };
             self.scheduler
                 .advance_to(super::observation::monotonic_ns())?;
@@ -993,9 +1113,6 @@ impl<'a> Worker<'a> {
             incoming.blocked = None;
             self.scheduler.set_arrival(handle, incoming.arrival_ns)?;
             let slot = handle.slot as usize;
-            if !incoming.readmitted {
-                self.metrics.admitted.fetch_add(1, Ordering::Relaxed);
-            }
             if let Err(error) = self
                 .scheduler
                 .set_prefill_spans(handle, &incoming.prompt.data.spans)
@@ -1004,19 +1121,50 @@ impl<'a> Worker<'a> {
                 incoming.fail(error);
                 continue;
             }
-            if let Some(images) = &incoming.prompt.images {
-                if let Err(error) = self.scheduler.set_vision_images(
-                    handle,
-                    &images
-                        .geometry
-                        .iter()
-                        .map(|geometry| geometry.patches)
-                        .collect::<Vec<_>>(),
-                ) {
+            let consumed = self.scheduler.request(handle)?.consumed_tokens as usize;
+            for image in incoming
+                .prompt
+                .conditioned_inputs
+                .iter()
+                .filter(|image| image.token_span.end <= consumed)
+            {
+                image.release_decoded();
+            }
+            let selected_images: Vec<_> = incoming
+                .prompt
+                .conditioned_inputs
+                .iter()
+                .filter(|input| input.token_span.end > consumed)
+                .cloned()
+                .collect();
+            self.scheduler.set_conditioned_features(
+                handle,
+                &selected_images
+                    .iter()
+                    .map(|image| image.feature_range.clone())
+                    .collect::<Vec<_>>(),
+            )?;
+            let patches = selected_images
+                .iter()
+                .map(|image| image.geometry.patches)
+                .collect::<Vec<_>>();
+            if !patches.is_empty() {
+                if let Err(error) = self.scheduler.set_vision_images(handle, &patches) {
                     self.scheduler.cancel(handle)?;
-                    incoming.fail(error);
+                    if matches!(error, Error::Admission(AdmissionError::Capacity(_))) {
+                        incoming.blocked = Some(resources);
+                        match parked {
+                            Some(parked) => self.parked.insert(position, (incoming, parked)),
+                            None => self.pending.insert(position, incoming),
+                        }
+                    } else {
+                        incoming.fail(error);
+                    }
                     continue;
                 }
+            }
+            if !selected_images.is_empty() {
+                self.scheduler.conditioned_inputs_ready(handle, false)?;
             }
             self.admissions[slot] = Some(crate::model::Admission::from_prompt(
                 self.config,
@@ -1041,11 +1189,13 @@ impl<'a> Worker<'a> {
                         Some(stops)
                     },
                     last_token: None,
-                    next_image: 0,
                     carried: Carried::default(),
                     held_logprobs: VecDeque::new(),
                 },
             };
+            if !incoming.readmitted {
+                self.metrics.admitted.fetch_add(1, Ordering::Relaxed);
+            }
             incoming.notify_admission(Ok(()));
             self.active[slot] = Some(Active {
                 request: handle,
@@ -1053,11 +1203,46 @@ impl<'a> Worker<'a> {
                 text_stops: parked.text_stops,
                 incoming,
                 last_token: parked.last_token,
-                next_image: parked.next_image,
+                next_image: 0,
+                selected_images,
+                prepared_image: None,
                 carried: parked.carried,
                 held_logprobs: parked.held_logprobs,
             });
             progress = true;
+        }
+        if self.preparing_image.is_none() {
+            if let Some(preparation) = &self.image_preparation {
+                for offset in 0..self.active.len() {
+                    let slot = (self.image_preparation_cursor + offset) % self.active.len();
+                    let Some(active) = &self.active[slot] else {
+                        continue;
+                    };
+                    if self.scheduler.request(active.request)?.phase == RequestPhase::Inbound {
+                        continue;
+                    }
+                    let Some(image) = active.selected_images.get(active.next_image) else {
+                        continue;
+                    };
+                    let job = (
+                        active.request,
+                        image.clone(),
+                        active.incoming.cancelled.clone(),
+                    );
+                    match preparation.sender.as_ref().unwrap().try_send(job) {
+                        Ok(()) => {
+                            self.preparing_image = Some(active.request);
+                            self.image_preparation_cursor = (slot + 1) % self.active.len();
+                            progress = true;
+                            break;
+                        }
+                        Err(mpsc::TrySendError::Full(_)) => break,
+                        Err(mpsc::TrySendError::Disconnected(_)) => {
+                            return Err("image preparation worker disconnected".into());
+                        }
+                    }
+                }
+            }
         }
         Ok(std::ops::ControlFlow::Continue(progress))
     }
@@ -1429,7 +1614,6 @@ impl<'a> Worker<'a> {
         incoming.prompt.sampling.seed = continuation_seed(seed, generated_tokens);
         let parked = Parked {
             last_token: active.last_token,
-            next_image: active.next_image,
             stops: active.stops,
             text_stops: active.text_stops,
             held_logprobs: active.held_logprobs,
@@ -1520,14 +1704,22 @@ impl<'a> Worker<'a> {
                 self.scheduler.request(request.request)?.image_slot
                     .ok_or("vision request lacks an image feature slot")?,
                 request
-                    .incoming
-                    .prompt
-                    .images
+                    .prepared_image
                     .as_ref()
-                    .ok_or("missing prepared vision inputs")?,
-                request.next_image,
+                    .ok_or("missing selected vision inputs")?,
+                0,
+                request
+                    .selected_images
+                    .iter()
+                    .take(request.next_image)
+                    .map(|image| image.feature_range.len())
+                    .sum(),
             )?;
+            request.prepared_image = None;
             request.next_image += 1;
+            self.preparing_image = None;
+            self.scheduler
+                .conditioned_inputs_ready(request.request, false)?;
         } else {
             crate::model::pack_inputs(
                 inputs,
@@ -1662,10 +1854,22 @@ impl<'a> Worker<'a> {
             return;
         };
         self.admissions[slot] = None;
+        if active.prepared_image.is_some() {
+            self.preparing_image = None;
+        }
         let mut incoming = active.incoming;
         incoming.host_lookup = false;
         incoming.readmitted = true;
-        self.pending.push_front(incoming);
+        self.parked.push_front((
+            incoming,
+            Parked {
+                last_token: active.last_token,
+                stops: active.stops,
+                text_stops: active.text_stops,
+                carried: active.carried,
+                held_logprobs: active.held_logprobs,
+            },
+        ));
     }
 
     fn observe_prefill_rate(&mut self, fence: crate::cache::Fence, tokens: u64) {
@@ -2111,7 +2315,7 @@ mod tests {
                     vision_token_indices: vec![-1],
                     ..Default::default()
                 },
-                images: None,
+                conditioned_inputs: vec![],
                 conditioning: vec![],
                 sampling: SamplingParameters::default(),
                 max_new_tokens: 10,
@@ -2386,6 +2590,8 @@ mod tests {
             incoming,
             last_token: None,
             next_image: 0,
+            selected_images: vec![],
+            prepared_image: None,
             stops: super::super::stops::TokenStops::new(vec![], 6).unwrap(),
             text_stops: None,
             held_logprobs: VecDeque::new(),
@@ -2571,6 +2777,8 @@ mod tests {
             incoming,
             last_token: None,
             next_image: 0,
+            selected_images: vec![],
+            prepared_image: None,
             stops: super::super::stops::TokenStops::new(vec![], 248320).unwrap(),
             held_logprobs: VecDeque::new(),
             text_stops: Some(

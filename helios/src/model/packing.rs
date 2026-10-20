@@ -258,6 +258,7 @@ impl Inputs {
         image_slot: usize,
         images: &crate::frontend::images::ProcessedImages,
         image: usize,
+        destination_feature_offset: usize,
     ) -> Result<()> {
         let graph = self
             .contract
@@ -265,7 +266,13 @@ impl Inputs {
             .iter()
             .find(|g| g.kind == GraphKind::Vision && g.tokens == step.token_capacity)
             .ok_or("vision submission lacks a prepared packing plan")?;
-        let tensors = crate::frontend::images::packing::prepare(config, handle, images, image)?;
+        let tensors = crate::frontend::images::packing::prepare(
+            config,
+            handle,
+            images,
+            image,
+            destination_feature_offset,
+        )?;
         let tensors = tensors.uploads();
         self.staging.clear();
         for input in &graph.inputs {
@@ -511,7 +518,10 @@ impl Inputs {
                                     .get(start..end)
                                     .ok_or("image indices exceed admission")?
                                     .iter()
-                                    .map(|v| *v as i64),
+                                    .map(|v| {
+                                        frame.scheduler.request(lane.request)?.feature_index(*v)
+                                    })
+                                    .collect::<Result<Vec<_>>>()?,
                             ),
                             _ => {
                                 values.resize(lane.tokens, 0);

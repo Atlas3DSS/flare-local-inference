@@ -85,7 +85,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &prompt,
         images,
     )?;
-    let processed = input.images.unwrap();
+    let mut processed = flare_helios::frontend::images::ProcessedImages::default();
+    for image in &input.conditioned_inputs { processed.append(image.materialize()?); }
     fs::write(
         output.join("pixels.f32"),
         processed

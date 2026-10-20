@@ -8,6 +8,7 @@ pub(super) enum Normalization {
     Channel { mean: [f32; 3], std: [f32; 3] },
 }
 
+#[derive(Clone)]
 pub(super) struct PatchProcessor {
     pub(super) limits: ImageLimits,
     pub(super) min_pixels: usize,
@@ -82,6 +83,7 @@ impl PatchProcessor {
             interpolation_weights: Vec::new(),
             cu_seqlens: vec![0],
         };
+        result.reserve_outputs(total, FEATURES, false, images.len(), images.len() + 1)?;
         let normalized: [Vec<f32>; 3] = std::array::from_fn(|channel| {
             (0..256)
                 .map(|value| match self.normalization {

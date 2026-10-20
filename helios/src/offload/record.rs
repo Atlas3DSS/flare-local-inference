@@ -615,10 +615,10 @@ pub struct Scanned {
 }
 
 /// Exclusive ownership of a disk prefix cache, held through pending I/O.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct DirectoryLock {
     path: PathBuf,
-    _file: fs::File,
+    _file: std::sync::Arc<fs::File>,
 }
 
 impl DirectoryLock {
@@ -680,7 +680,7 @@ impl DirectoryLock {
         };
         Ok(Self {
             path: path.to_owned(),
-            _file: file,
+            _file: std::sync::Arc::new(file),
         })
     }
 

@@ -1400,6 +1400,7 @@ pub struct DiskStore {
     identity: [u8; 32],
     fingerprint: [u8; 16],
     limit: u64,
+    budget: Option<Arc<super::input::DiskBudget>>,
     used: u64,
     transport: Box<dyn DiskTransport>,
     stats: StoreStats,
@@ -1463,6 +1464,7 @@ impl DiskStore {
             identity,
             fingerprint,
             limit,
+            budget: None,
             used,
             transport,
             stats: StoreStats::default(),
@@ -1477,6 +1479,31 @@ impl DiskStore {
             inbound_rate: Rate(rate),
             directory_lock,
         })
+    }
+
+    pub fn share_budget(&mut self, budget: Arc<super::input::DiskBudget>) {
+        budget.set_checkpoint(self.used);
+        self.budget = Some(budget);
+    }
+
+    fn reclaim_inputs(&mut self) {
+        let pressure = self.budget.as_ref().map_or(0, |b| b.checkpoint_pressure());
+        if pressure != 0 {
+            let _ = self.make_room(pressure);
+        }
+    }
+
+    fn sync_budget(&self) {
+        if let Some(budget) = &self.budget {
+            budget.set_checkpoint(
+                self.used.saturating_add(
+                    self.maintenance
+                        .values()
+                        .map(|reclaim| reclaim.bytes)
+                        .sum::<u64>(),
+                ),
+            );
+        }
     }
 
     pub fn index(&self) -> &Index<DiskRecord> {
@@ -1545,6 +1572,7 @@ impl DiskStore {
     /// Drain the transport's completions without applying them, for a
     /// composite store that drives the transport directly.
     pub(crate) fn poll_transport(&mut self, events: &mut Vec<TransportEvent>) {
+        self.reclaim_inputs();
         self.transport.poll(events);
     }
 
@@ -1618,6 +1646,11 @@ impl DiskStore {
         if !room? {
             return Ok(None);
         }
+        if let Some(budget) = &self.budget
+            && !budget.reserve_checkpoint(bytes)
+        {
+            return Ok(None);
+        }
         let path = self.directory().join(record::file_name(&key));
         let temporary = self.directory().join(record::temporary_name(&key));
         self.index.insert(
@@ -1667,7 +1700,13 @@ impl DiskStore {
         if bytes > self.limit {
             return Ok(false);
         }
-        while self.used.saturating_add(bytes) > self.limit {
+        while self.used.saturating_add(bytes)
+            > self
+                .budget
+                .as_ref()
+                .map_or(self.limit, |b| b.checkpoint_limit())
+                .min(self.limit)
+        {
             match self.index.evict(true, |_| true) {
                 Some(Eviction::Leaves(nodes)) => {
                     for node in nodes {
@@ -1675,7 +1714,12 @@ impl DiskStore {
                     }
                 }
                 Some(Eviction::Compacted(key)) => self.compact(&key)?,
-                None => return Ok(false),
+                None => {
+                    if let Some(budget) = &self.budget {
+                        budget.request_input_reclaim(bytes);
+                    }
+                    return Ok(false);
+                }
             }
         }
         Ok(true)
@@ -1695,7 +1739,17 @@ impl DiskStore {
                 bytes: node.location.bytes,
             },
         );
-        self.transport.unlink(id, node.location.path)?;
+        self.sync_budget();
+        if let Err(error) = self.transport.unlink(id, node.location.path) {
+            self.apply(
+                TransportEvent::Unlinked {
+                    id,
+                    result: Err(error.clone()),
+                },
+                &mut Vec::new(),
+            );
+            return Err(error);
+        }
         self.evicted.push(node.key);
         Ok(())
     }
@@ -1719,7 +1773,18 @@ impl DiskStore {
                 bytes: freed,
             },
         );
-        self.transport.truncate(id, path, length)
+        self.sync_budget();
+        if let Err(error) = self.transport.truncate(id, path, length) {
+            self.apply(
+                TransportEvent::Truncated {
+                    id,
+                    result: Err(error.clone()),
+                },
+                &mut Vec::new(),
+            );
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// Drop a record whose write failed. It leaves the index unless children
@@ -1740,6 +1805,7 @@ impl DiskStore {
         } else {
             node.row = false;
         }
+        self.sync_budget();
         Ok(())
     }
 
@@ -1859,6 +1925,7 @@ impl DiskStore {
                     return;
                 };
                 if result.is_ok() {
+                    self.sync_budget();
                     return;
                 }
                 // The file keeps the bytes, so they stay charged against the
@@ -1871,6 +1938,7 @@ impl DiskStore {
                     node.location.bytes += reclaim.bytes;
                 }
                 self.used = self.used.saturating_add(reclaim.bytes);
+                self.sync_budget();
             }
         }
     }
@@ -1968,6 +2036,7 @@ impl PrefixStore for DiskStore {
     }
 
     fn poll(&mut self, events: &mut Vec<StoreEvent>) {
+        self.reclaim_inputs();
         let mut completed = Vec::new();
         self.transport.poll(&mut completed);
         for event in completed {
@@ -2283,6 +2352,51 @@ mod tests {
         let reopened = record::DirectoryLock::acquire(&path).unwrap();
         drop(reopened);
         fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn shared_disk_budget_keeps_maintenance_bytes_until_success() {
+        let history = history(700);
+        let header = header(&geometry(), &history, 700, None);
+        let bytes = header.length_with_row();
+        let (mut store, log) =
+            store_with(vec![scanned(&directory(), header.clone(), 0, true)], bytes);
+        let budget = super::super::input::DiskBudget::new(bytes, bytes);
+        store.share_budget(budget.clone());
+        let nodes = store.index.remove(&header.key).unwrap();
+        for node in nodes {
+            store.unlink(node).unwrap();
+        }
+        assert_eq!(store.used(), 0);
+        assert!(!budget.reserve_checkpoint(1));
+        let id = *store.maintenance.keys().next().unwrap();
+        complete(
+            &log,
+            TransportEvent::Unlinked {
+                id,
+                result: Err(invalid("unlink refused")),
+            },
+            &mut store,
+        );
+        assert_eq!(store.used(), bytes);
+        assert!(!budget.reserve_checkpoint(1));
+        drop(store);
+
+        let (mut store, log) =
+            store_with(vec![scanned(&directory(), header.clone(), 0, true)], bytes);
+        let budget = super::super::input::DiskBudget::new(bytes, bytes);
+        store.share_budget(budget.clone());
+        let nodes = store.index.remove(&header.key).unwrap();
+        for node in nodes {
+            store.unlink(node).unwrap();
+        }
+        let id = *store.maintenance.keys().next().unwrap();
+        complete(
+            &log,
+            TransportEvent::Unlinked { id, result: Ok(()) },
+            &mut store,
+        );
+        assert!(budget.reserve_checkpoint(bytes));
     }
 
     fn complete(

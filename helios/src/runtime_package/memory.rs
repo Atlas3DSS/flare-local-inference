@@ -509,7 +509,11 @@ impl NativeModel {
             .map(|rank| unsafe { rank.memory_snapshot() })
             .collect::<Result<Vec<_>>>()?;
         let integrated = self.ranks.iter().filter(|rank| rank.integrated).count() as u64;
-        let (offload_bytes, host_future) = if options.prefix_cache.enabled() {
+        let input_window = crate::offload::input_staging_bytes(&contract, |name| {
+            packages[0].execution.as_ref()?.buffers.iter()
+                .find(|buffer| buffer.name == name).map(|buffer| buffer.nbytes)
+        })?;
+        let (offload_bytes, offload_host) = if options.prefix_cache.enabled() {
             let geometry = packages
                 .iter()
                 .map(|package| {
@@ -521,12 +525,28 @@ impl NativeModel {
                     )
                 })
                 .collect::<Result<Vec<_>>>()?;
-            options
+            let staging = input_window;
+            let (device, host) = options
                 .prefix_cache
-                .headroom_bytes(self.ranks.len(), &crate::offload::Layout::new(&geometry)?)?
+                .headroom_with_inputs(
+                    self.ranks.len(), &crate::offload::Layout::new(&geometry)?, staging != 0,
+                )?;
+            let index = if staging == 0 { 0 } else { crate::offload::input::INDEX_HEADROOM_BYTES };
+            let host = host.checked_add(staging).and_then(|n| n.checked_add(index))
+                .ok_or_else(|| invalid("prepared input staging overflows host memory"))?;
+            (device, host)
         } else {
             (0, 0)
         };
+        #[cfg(feature = "images")]
+        let source_window = if input_window == 0 { 0 } else {
+            crate::frontend::images::ImageLimits::default().source_retention_bytes()?
+        };
+        #[cfg(not(feature = "images"))]
+        let source_window = 0;
+        let host_future = offload_host.checked_add(input_window)
+            .and_then(|bytes| bytes.checked_add(source_window))
+            .ok_or_else(|| invalid("CPU image input windows overflow host memory"))?;
         let mut available = Vec::new();
         let mut loaded_bytes = Vec::new();
         for (index, (rank, package)) in self.ranks.iter().zip(packages.iter()).enumerate() {

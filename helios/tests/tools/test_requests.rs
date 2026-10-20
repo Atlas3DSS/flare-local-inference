@@ -239,7 +239,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         if serde_json::to_value(&prepared.prompt.tokens).unwrap() != case["token_ids"] {
             return Err((format!("{}: image request token IDs differ", case["name"])).into());
         }
-        let processed = prepared.prompt.images.as_ref().unwrap();
+        let mut processed = flare_helios::frontend::images::ProcessedImages::default();
+        for image in &prepared.prompt.conditioned_inputs { processed.append(image.materialize()?); }
         let bytes: Vec<_> = processed
             .pixel_values
             .iter()

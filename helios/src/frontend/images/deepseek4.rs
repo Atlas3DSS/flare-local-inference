@@ -123,6 +123,7 @@ pub(super) fn pack(
         interpolation_weights: Vec::new(),
         cu_seqlens: vec![0],
     };
+    output.reserve_outputs(total, FEATURES, false, images.len(), images.len() + 1)?;
     for image in images {
         let (g, pixels) = resize(image)?;
         let h = g.height / PATCH;

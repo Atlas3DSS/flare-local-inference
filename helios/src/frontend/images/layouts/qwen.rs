@@ -4,7 +4,7 @@ use crate::{
     cache::ConditioningEvent,
     frontend::{
         Frontend, RenderedPrompt,
-        images::{ImageProcessor, RgbImage},
+        images::{ImageProcessor, ImageDescription},
     },
     model::PreparedInput,
 };
@@ -12,7 +12,7 @@ pub(crate) fn prepare_input(
     frontend: &Frontend,
     processor: Option<&ImageProcessor>,
     rendered: &RenderedPrompt,
-    images: Vec<RgbImage>,
+    images: &[ImageDescription],
 ) -> Result<PreparedInput> {
     let placeholders = [
         frontend.encode("<|image_pad|>", false)?,
@@ -40,7 +40,7 @@ pub(crate) fn prepare_input(
         )
     } else {
         let processor = processor.ok_or("image processing is unavailable")?;
-        let processed = processor.process(&images)?;
+        let processed = processor.describe_inputs(images)?;
         let expanded = processor.expand_prompt(frontend, &rendered.text, &processed)?;
         let positions = (0..expanded.token_ids.len())
             .map(|position| {
@@ -53,18 +53,12 @@ pub(crate) fn prepare_input(
             .collect();
         let mut conditioning = Vec::with_capacity(images.len());
         let mut image = 0;
-        use sha2::{Digest, Sha256};
         for (position, kind) in expanded.mm_token_type_ids.iter().enumerate() {
             if *kind == 1 && (position == 0 || expanded.mm_token_type_ids[position - 1] != 1) {
                 let source = &images[image];
-                let mut hash = Sha256::new();
-                hash.update(b"flare-rgb-image-v1\0");
-                hash.update((source.width() as u64).to_le_bytes());
-                hash.update((source.height() as u64).to_le_bytes());
-                hash.update(source.pixels());
                 conditioning.push(ConditioningEvent {
                     position: position as u64,
-                    identity: hash.finalize().into(),
+                    identity: source.identity,
                 });
                 image += 1;
             }
@@ -108,6 +102,6 @@ pub(crate) fn prepare_input(
             spans: Vec::new(),
         },
         conditioning,
-        images,
+        conditioned_inputs: vec![],
     })
 }

@@ -179,6 +179,30 @@ def test_calibration_prefetch_preserves_values_empty_tensors_and_budget(tmp_path
             adapter._metadata_values(entries[:1])
 
 
+def test_source_disables_read_ahead_before_serving_selective_ranges(tmp_path, monkeypatch):
+    advise, read = os.posix_fadvise, os.pread
+    random_access = set()
+    reads = []
+
+    def fadvise(descriptor, offset, length, advice):
+        if advice == os.POSIX_FADV_RANDOM:
+            random_access.add(descriptor)
+        return advise(descriptor, offset, length, advice)
+
+    def pread(descriptor, length, offset):
+        assert descriptor in random_access
+        reads.append((descriptor, length, offset))
+        return read(descriptor, length, offset)
+
+    monkeypatch.setattr(os, "posix_fadvise", fadvise)
+    monkeypatch.setattr(os, "pread", pread)
+    with connected(tmp_path) as (client, server, start):
+        assert {held.descriptor for held in server.source.files.values()} == random_access
+        assert client.read("weights.safetensors", start, 8, 2, 16) == bytes((*range(8), *range(16, 24)))
+        assert reads
+        assert client.stats == server.stats
+
+
 def test_headers_and_file_sources_require_the_scoped_owner(tmp_path):
     with connected(tmp_path) as (client, _, start):
         with pytest.raises(RuntimeError, match="active source owner"):
@@ -420,21 +444,24 @@ def test_peer_export_keeps_the_remote_owner_for_cleanup(tmp_path, monkeypatch, f
         def getsockname(self):
             return "127.0.0.1", 0
         def sendfile(self, stream, *, count):
-            assert stream.read(count) == b"synthetic package"
             events.append("package-sent")
             if failed_send:
                 raise ConnectionError("synthetic interrupted export")
-            return count
+            return len(stream.read(count))
         def close(self):
             pass
     model = SimpleNamespace(memory_report={}, manifest=lambda: None, close=lambda: events.append("model-closed"))
     assignment = {"config": None, "prepare": lambda *args, **kwargs: model,
                   "store": ("127.0.0.1", 1234), "packaged": False}
-    blob = tmp_path / "source-data"
-    commands = iter((("checkpoint-source", None), assignment, ("export", {}), [str(blob)], "close"))
+    source = tmp_path / "weights.bin"
+    source.write_bytes(b"synthetic weights")
+    commands = iter((("checkpoint-source", None), assignment, ("export", {}), [str(source)], "close"))
     def export(*args, **kwargs):
-        blob.write_bytes(b"synthetic package")
-        args[3].write_text(json.dumps({"payload": [["data", str(blob), 0, blob.stat().st_size]]}))
+        from ignition.preparation.package_file import write_sources
+        from ignition.preparation.runtime_package_pb2 import ModelIndex, BundleIndex, Span
+        size = source.stat().st_size
+        index = ModelIndex(version=4, ranks=[BundleIndex(resources={'weights': Span(nbytes=size)})])
+        write_sources(args[3], index, [(0, source, 0, size)])
         return SimpleNamespace(memory_inventory={})
     monkeypatch.setattr(transport, "RemoteSource", remote)
     monkeypatch.setattr(transport, "token", lambda path: b"test" * 8)

@@ -4,7 +4,7 @@ use crate::{
     cache::ConditioningEvent,
     frontend::{
         Frontend, RenderedPrompt,
-        images::{ImageProcessor, RgbImage},
+        images::{ImageProcessor, ImageDescription},
     },
     model::PreparedInput,
 };
@@ -13,7 +13,7 @@ pub(crate) fn prepare_input(
     frontend: &Frontend,
     processor: Option<&ImageProcessor>,
     rendered: &RenderedPrompt,
-    images: Vec<RgbImage>,
+    images: &[ImageDescription],
 ) -> Result<PreparedInput> {
     let image_ids = frontend.encode("<|image_pad|>", false)?;
     let [image_token] = image_ids.as_slice() else {
@@ -35,7 +35,7 @@ pub(crate) fn prepare_input(
         Some(
             processor
                 .ok_or("image processing is unavailable")?
-                .process(&images)?,
+                .describe_inputs(images)?,
         )
     };
     let mut tokens = Vec::new();
@@ -52,15 +52,9 @@ pub(crate) fn prepare_input(
         }
         let source = &images[image];
         let count = processed.as_ref().unwrap().geometry[image].tokens;
-        use sha2::{Digest, Sha256};
-        let mut hash = Sha256::new();
-        hash.update(b"flare-rgb-image-v1\0");
-        hash.update((source.width() as u64).to_le_bytes());
-        hash.update((source.height() as u64).to_le_bytes());
-        hash.update(source.pixels());
         conditioning.push(ConditioningEvent {
             position: tokens.len() as u64,
-            identity: hash.finalize().into(),
+            identity: source.identity,
         });
         tokens.extend(std::iter::repeat_n(image_token, count));
         data.vision_token_indices
@@ -74,6 +68,6 @@ pub(crate) fn prepare_input(
         token_expansions,
         data,
         conditioning,
-        images: processed,
+        conditioned_inputs: vec![],
     })
 }

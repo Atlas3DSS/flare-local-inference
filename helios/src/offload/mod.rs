@@ -19,6 +19,7 @@ pub mod disk;
 pub mod disk_store;
 pub mod geometry;
 pub mod index;
+pub mod input;
 pub mod memory;
 pub mod record;
 pub mod slab;
@@ -62,7 +63,8 @@ pub enum Transport {
 /// staged transport.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PrefixCacheOffload {
-    /// Registered host memory for retained records; zero selects no memory store.
+    /// Host retention budget shared by registered checkpoints and ordinary CPU inputs.
+    /// Zero selects no memory retention.
     pub memory_bytes: Option<u64>,
     /// Directory under which the model's record directory is created.
     pub disk: Option<PathBuf>,
@@ -80,6 +82,15 @@ impl PrefixCacheOffload {
     /// pool costs each device about 2 MiB per GiB, plus transfer streams and events. Without
     /// a disk tier the retaining pool is split by rank; disk staging is shared by all ranks.
     pub fn headroom_bytes(&self, ranks: usize, layout: &Layout) -> Result<(u64, u64)> {
+        self.headroom_with_inputs(ranks, layout, false)
+    }
+
+    pub fn headroom_with_inputs(
+        &self,
+        ranks: usize,
+        layout: &Layout,
+        inputs: bool,
+    ) -> Result<(u64, u64)> {
         if !self.enabled() {
             return Ok((0, 0));
         }
@@ -102,10 +113,12 @@ impl PrefixCacheOffload {
         let host = memory
             .checked_add(staging)
             .ok_or("prefix cache host memory overflows the device budget")?;
+        let ordinary = input_memory_bytes(memory, slab::SlabPool::minimum_bytes(layout), inputs);
+        let pinned = memory - ordinary;
         let mapped = if disk {
-            host
+            pinned + staging
         } else {
-            memory.div_ceil(ranks.max(1) as u64)
+            pinned.div_ceil(ranks.max(1) as u64)
         };
         Ok((mapped.div_ceil(512) + STORE_DEVICE_MARGIN_BYTES, host))
     }
@@ -161,6 +174,8 @@ pub struct Resolved {
 /// turns into a store: registered pools, the scanned record directory, and
 /// every rank's geometry and CUDA context.
 pub struct Prepared {
+    pub inputs: Option<input::InputStore>,
+    pub disk_budget: std::sync::Arc<input::DiskBudget>,
     pub resolved: Resolved,
     pub identity: [u8; 32],
     pub fingerprint: [u8; 16],
@@ -192,6 +207,7 @@ impl Preparation {
         match self {
             Self::Store(prepared) => Some(std::sync::Arc::new(Shared {
                 summary: prepared.summary(),
+                inputs: prepared.inputs.clone(),
                 prepared: std::sync::Mutex::new(Some(*prepared)),
             })),
             Self::None(_) => None,
@@ -213,6 +229,13 @@ impl Prepared {
                 } else {
                     ""
                 }
+            ));
+        }
+        if let Some(inputs) = &self.inputs {
+            parts.push(format!(
+                "CPU inputs {} limit, {} staging",
+                gibibytes(inputs.stats().memory_limit),
+                gibibytes(inputs.stats().staging_limit)
             ));
         }
         if let Some(pool) = &self.staging_pool {
@@ -241,6 +264,7 @@ fn gibibytes(bytes: u64) -> String {
 /// Shared ownership of prepared resources across rank manifests; the model
 /// worker takes them once when it opens the store.
 pub struct Shared {
+    inputs: Option<input::InputStore>,
     prepared: std::sync::Mutex<Option<Prepared>>,
     pub summary: String,
 }
@@ -255,6 +279,10 @@ pub struct Binding {
 impl Binding {
     pub fn new(shared: std::sync::Arc<Shared>, rank: usize) -> Self {
         Self { shared, rank }
+    }
+
+    pub fn inputs(&self) -> Option<input::InputStore> {
+        self.shared.inputs.clone()
     }
 
     pub fn rank(&self) -> usize {
@@ -302,6 +330,17 @@ pub fn prepare(
     identity: [u8; 32],
     geometry: Vec<CacheGeometry>,
     contexts: Vec<(usize, i32)>,
+) -> Result<Preparation> {
+    prepare_with_inputs(options, package, identity, geometry, contexts, 0)
+}
+
+pub fn prepare_with_inputs(
+    options: &PrefixCacheOffload,
+    package: &std::path::Path,
+    identity: [u8; 32],
+    geometry: Vec<CacheGeometry>,
+    contexts: Vec<(usize, i32)>,
+    input_staging: u64,
 ) -> Result<Preparation> {
     if !options.enabled() {
         return Ok(Preparation::None("disabled".to_owned()));
@@ -362,12 +401,14 @@ pub fn prepare(
         .first()
         .ok_or("the host prefix store requires at least one rank")?
         .0;
-    let memory_pool = (memory_bytes != 0)
+    let input_memory = input_memory_bytes(memory_bytes, minimum, input_staging != 0);
+    let checkpoint_memory = memory_bytes - input_memory;
+    let memory_pool = (checkpoint_memory != 0)
         .then(|| {
             if directory.is_none() {
-                return slab::SlabPool::sized_by_rank(&layout, memory_bytes, &contexts);
+                return slab::SlabPool::sized_by_rank(&layout, checkpoint_memory, &contexts);
             }
-            let mut pool = slab::SlabPool::sized(&layout, memory_bytes)?;
+            let mut pool = slab::SlabPool::sized(&layout, checkpoint_memory)?;
             pool.register(context)?;
             Ok::<_, crate::Error>(pool)
         })
@@ -384,7 +425,23 @@ pub fn prepare(
         Some(directory) => record::scan(directory, &identity, &fingerprint, &geometry)?,
         None => Vec::new(),
     };
+    let disk_budget = input::DiskBudget::new(disk_limit, scanned.iter().map(|r| r.bytes).sum());
+    let inputs = (input_staging != 0)
+        .then(|| {
+            input::InputStore::start_bounded(
+                input_memory,
+                directory.clone(),
+                disk_budget.clone(),
+                input_staging,
+            )
+        })
+        .transpose()?;
+    if let (Some(inputs), Some(guard)) = (&inputs, &directory_lock) {
+        inputs.retain_directory(guard.clone());
+    }
     Ok(Preparation::Store(Box::new(Prepared {
+        inputs,
+        disk_budget,
         resolved: Resolved {
             memory_bytes,
             directory,
@@ -401,6 +458,45 @@ pub fn prepare(
         scanned,
         directory_lock,
     })))
+}
+
+/// One bounded ordinary-memory window for serialized prepared inputs and disk-read leases.
+pub fn input_staging_bytes(
+    contract: &crate::model::PreparedContract,
+    buffer_bytes: impl Fn(&str) -> Option<u64>,
+) -> Result<u64> {
+    use crate::model::contract::ValueSource;
+    let mut maximum = 0;
+    for graph in &contract.graphs {
+        let mut bytes = 0u64;
+        for binding in graph
+            .inputs
+            .iter()
+            .filter(|binding| binding.source == ValueSource::ImageTensor)
+        {
+            let input =
+                buffer_bytes(&binding.buffer).ok_or("prepared image input buffer is absent")?;
+            bytes = bytes
+                .checked_add(input)
+                .ok_or("prepared image input extent overflows")?;
+        }
+        maximum = maximum.max(bytes);
+    }
+    if maximum == 0 {
+        Ok(0)
+    } else {
+        maximum
+            .checked_add(4096)
+            .ok_or_else(|| "prepared input staging extent overflows".into())
+    }
+}
+
+/// Ordinary CPU retention leaves enough registered memory for checkpoint transfers.
+pub fn input_memory_bytes(memory: u64, checkpoint_minimum: u64, enabled: bool) -> u64 {
+    if !enabled {
+        return 0;
+    }
+    (memory / 8).min(memory.saturating_sub(checkpoint_minimum)) / 4096 * 4096
 }
 
 /// Free bytes on the filesystem holding `path`.
@@ -425,6 +521,8 @@ fn free_space(path: &std::path::Path) -> Result<u64> {
 /// transfer threads on every rank's context.
 pub fn open(prepared: Prepared) -> Result<Box<dyn PrefixStore>> {
     let Prepared {
+        inputs: _,
+        disk_budget,
         resolved,
         identity,
         fingerprint,
@@ -467,7 +565,7 @@ pub fn open(prepared: Prepared) -> Result<Box<dyn PrefixStore>> {
                     return Err("the direct prefix cache transport is not available".into());
                 }
             };
-            disk_store::DiskStore::new(
+            let mut store = disk_store::DiskStore::new(
                 directory,
                 identity,
                 fingerprint,
@@ -475,7 +573,9 @@ pub fn open(prepared: Prepared) -> Result<Box<dyn PrefixStore>> {
                 geometry,
                 scanned,
                 Box::new(transport),
-            )
+            )?;
+            store.share_budget(disk_budget.clone());
+            Ok::<_, crate::Error>(store)
         })
         .transpose()?;
     // Inside a composite the disk index owns the tree; memory nodes are flat.
@@ -784,6 +884,32 @@ mod tests {
         );
         options.disk_limit = Some(0);
         assert_eq!(options.headroom_bytes(2, &layout).unwrap().1, 16 << 30);
+    }
+
+    #[test]
+    fn ordinary_input_share_preserves_checkpoint_minimum_and_mapping() {
+        assert_eq!(input_memory_bytes(0, 4096, true), 0);
+        assert_eq!(input_memory_bytes(8192, 4096, true), 0);
+        assert_eq!(input_memory_bytes(1 << 30, 128 << 20, true), 128 << 20);
+        assert_eq!(input_memory_bytes(1 << 30, 1000 << 20, true), 24 << 20);
+        assert_eq!(input_memory_bytes(1 << 30, 128 << 20, false), 0);
+        let layout = Layout {
+            page_tokens: 64,
+            ranks: Vec::new(),
+            page_record_bytes: 4096,
+            row_record_bytes: 4096,
+        };
+        let options = PrefixCacheOffload {
+            memory_bytes: Some(1 << 30),
+            ..Default::default()
+        };
+        let ordinary = input_memory_bytes(1 << 30, slab::SlabPool::minimum_bytes(&layout), true);
+        let (device, host) = options.headroom_with_inputs(2, &layout, true).unwrap();
+        assert_eq!(host, 1 << 30);
+        assert_eq!(
+            device,
+            ((1u64 << 30) - ordinary).div_ceil(2).div_ceil(512) + STORE_DEVICE_MARGIN_BYTES
+        );
     }
 
     #[test]

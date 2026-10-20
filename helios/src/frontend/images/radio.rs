@@ -71,6 +71,8 @@ pub(super) fn process(limits: ImageLimits, images: &[RgbImage]) -> Result<Proces
         .map(|image| geometry(limits, image.width, image.height))
         .collect::<Result<_>>()?;
     limits.check_batch(images.len(), geometries.iter().map(|g| g.patches).sum())?;
+    result.reserve_outputs(geometries.iter().map(|g| g.patches).sum(), 768, true,
+        images.len(), images.len() + 1)?;
     for (image, geometry) in images.iter().zip(geometries) {
         let pixels = resize::float_bicubic(image, geometry.width, geometry.height);
         let (h, w) = (geometry.height / 16, geometry.width / 16);

@@ -607,12 +607,12 @@ def test_shard_policy_reaches_export_and_separates_cached_packages(host):
     assert host["exec"][2] == default and host["exports"] == 2
 
 
-def test_export_uses_recipe_repository_without_output(host, capsys):
+def test_export_defaults_to_local_recipe_namespace_and_honors_repository(host, capsys):
     assert main(['export', 'qwen3.8-flash']) == 0
     cache = Configuration.load().directory('package_cache')
-    snapshots = list((cache / 'models--local-inference-lab--Qwen3.8-Flash-Next-FLARE' / 'snapshots').glob('*/model.safetensors'))
+    snapshots = list((cache / 'models--qwen38' / 'snapshots').glob('*/model.safetensors'))
     assert len(snapshots) == 1 and snapshots[0].is_file()
-    assert 'Hugging Face target: local-inference-lab/Qwen3.8-Flash-Next-FLARE' in capsys.readouterr().out
+    assert 'Hugging Face target:' not in capsys.readouterr().out
     assert main(['export', 'qwen3.8-flash', '--repo-id', 'example/custom']) == 0
     assert len(list((cache / 'models--example--custom' / 'snapshots').glob('*/model.safetensors'))) == 1
 

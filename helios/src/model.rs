@@ -18,7 +18,7 @@ pub use contract::PreparedContract;
 pub use inputs::{InputStep, pack_inputs};
 pub use packing::Inputs;
 #[cfg(feature = "server")]
-pub use prompt::{prepare_input, prepare_output, message_boundaries};
+pub use prompt::{prepare_image_inputs, prepare_input, prepare_output, message_boundaries};
 
 #[cfg_attr(
     any(feature = "frontend", feature = "runtime-package"),
@@ -284,7 +284,7 @@ pub struct PreparedInput {
     pub token_expansions: Vec<(usize, usize)>,
     pub data: PromptData,
     pub conditioning: Vec<crate::cache::ConditioningEvent>,
-    pub images: Option<crate::frontend::images::ProcessedImages>,
+    pub conditioned_inputs: Vec<crate::frontend::images::PreparedImageInput>,
 }
 
 pub fn scheduler_capabilities(config: &ModelConfig) -> SchedulerCapabilities {

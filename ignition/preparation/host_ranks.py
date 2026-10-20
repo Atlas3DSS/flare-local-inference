@@ -116,7 +116,7 @@ def send_export_sources(control, path, inventory, *, channels=None):
             identity = file_identity(source.fileno())
             digest = hashlib.file_digest(source, 'sha256').hexdigest()
             if file_identity(source.fileno()) != identity:
-                raise RuntimeError('rank export source changed during metadata scan')
+                raise ValueError('rank export source changed during metadata scan')
         identities[name] = identity
         metadata[name] = {'size': identity[2], 'sha256': digest,
                           'blob': Path(name).name == digest + '.safetensors'}
@@ -133,7 +133,7 @@ def send_export_sources(control, path, inventory, *, channels=None):
         for name in names:
             with Path(name).open('rb') as source:
                 if file_identity(source.fileno()) != identities[name]:
-                    raise RuntimeError('rank export source changed before transfer')
+                    raise ValueError('rank export source changed before transfer')
                 size = metadata[name]['size']
                 if channel is None:
                     if control.sendfile(source, count=size) != size:
@@ -145,7 +145,7 @@ def send_export_sources(control, path, inventory, *, channels=None):
                             raise ConnectionError('rank export source ended before its declared size')
                         channel.send('export-data', block, name=name, offset=offset)
                 if file_identity(source.fileno()) != identities[name]:
-                    raise RuntimeError('rank export source changed during transfer')
+                    raise ValueError('rank export source changed during transfer')
                 total += size
         if channel is not None:
             stats = dict(files=len(names), payload_bytes=total)
