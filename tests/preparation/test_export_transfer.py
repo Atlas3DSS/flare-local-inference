@@ -2,6 +2,7 @@
 
 from contextlib import ExitStack
 import hashlib
+import os
 from pathlib import Path
 import resource
 import socket
@@ -218,3 +219,100 @@ def test_checkpoint_completion_hands_authenticated_channel_to_export(tmp_path):
         thread.join(5)
         assert report['files'] == 3 and report['transport'] == 'agent-ring-tcp'
         assert not thread.is_alive() and not failures
+
+
+def test_export_reports_original_failure_before_aborting_other_streams(capsys):
+    with ExitStack() as stack:
+        root, peer = sockets(stack)
+        original = ValueError('invalid export source')
+        diagnostics = []
+
+        def transfer(stream):
+            if stream == 1:
+                raise original
+            assert root.recv(1) == b''
+            # Abort must report the original failure before waking this worker.
+            diagnostics.append(capsys.readouterr().err)
+            raise ConnectionError('secondary disconnect')
+
+        with pytest.raises(ValueError) as caught:
+            host_ranks._export_workers(transfer, [0, 1], [root])
+        assert caught.value is original
+        assert len(diagnostics) == 1 and 'ValueError: invalid export source' in diagnostics[0]
+
+
+@pytest.mark.parametrize('concurrent_miss', [False, True])
+def test_concurrent_rank_reuse_waits_for_publication_cleanup(tmp_path, monkeypatch, concurrent_miss):
+    path, contents = manifest(tmp_path, 1)
+    settings = ExportOptions(tmp_path / 'root-cache')
+    linked, release, verifying = threading.Event(), threading.Event(), threading.Event()
+    link, verify = os.link, BlobStore.verify
+    observed_links, failures, reports = [], [], []
+    requested = threading.Barrier(2)
+    send_object = host_ranks.send_object
+
+    def request_before_receiving(control, value):
+        send_object(control, value)
+        if concurrent_miss and isinstance(value, list) and value:
+            # Both ranks decide the blob is absent before either publishes it.
+            requested.wait(5)
+
+    def delayed_link(source, destination):
+        link(source, destination)
+        if Path(source).name.startswith('.rank-blob-'):
+            linked.set()
+            if not release.wait(5):
+                raise TimeoutError('publication cleanup was not released')
+
+    def observe_verification(path, expected, size):
+        observed_links.append(path.stat().st_nlink)
+        verifying.set()
+        return verify(path, expected, size)
+
+    monkeypatch.setattr(os, 'link', delayed_link)
+    monkeypatch.setattr(BlobStore, 'verify', staticmethod(observe_verification))
+    monkeypatch.setattr(host_ranks, 'send_object', request_before_receiving)
+    with ExitStack() as stack:
+        workers = []
+
+        def launch(function):
+            def run():
+                try:
+                    function()
+                except BaseException as error:
+                    failures.append(error)
+            thread = threading.Thread(target=run)
+            workers.append(thread)
+            thread.start()
+
+        try:
+            for rank in range(2):
+                control, peer = sockets(stack)
+                roots, peers = channels(stack, 1)
+                launch(lambda peer=peer, peers=peers: host_ranks.send_export_sources(
+                    peer, path, {}, channels=peers))
+                description = host_ranks.receive_object(control)['sources']
+                destination = tmp_path / f'rank-{rank}.json'
+                launch(lambda control=control, description=description, destination=destination, roots=roots:
+                    reports.append(host_ranks.receive_export_sources(control, description, destination,
+                                                                      settings, channels=roots)))
+                if not concurrent_miss:
+                    assert linked.wait(5)
+            assert linked.wait(5)
+            # The second receiver sees a published name while its publisher is
+            # paused before unlinking the temporary name. It must defer hashing.
+            verifying.wait(0.1)
+        finally:
+            release.set()
+            for worker in workers:
+                worker.join(5)
+        assert all(not worker.is_alive() for worker in workers)
+        assert not failures
+        assert observed_links == [1]
+        assert sorted(report['files'] for report in reports) == ([1, 1] if concurrent_miss else [0, 1])
+        for rank in range(2):
+            index, locate = read_sources(tmp_path / f'rank-{rank}.json')
+            name, offset, size = locate(index.ranks[0].resources['0'])[0]
+            with Path(name).open('rb') as source:
+                source.seek(offset)
+                assert source.read(size) == contents['0']

@@ -41,6 +41,7 @@ _MAX_MESSAGE = 1 << 30
 _SHUTDOWN_SECONDS = 120
 _JSON, _PICKLE = b"J", b"P"
 _COPY_BLOCK = 16 << 20
+_EXPORT_PUBLICATION_LOCK = threading.Lock()
 
 
 def _send(sock, kind, payload):
@@ -85,20 +86,35 @@ def receive_object(sock):
 def _export_workers(function, items, connections):
     """Abort every stream before joining workers when one export transfer fails."""
     from concurrent.futures import ThreadPoolExecutor
+    import sys
+
+    failure, lock = [], threading.Lock()
 
     def run(item):
         try:
             return function(item)
-        except BaseException:
-            for connection in connections:
-                try:
-                    connection.shutdown(socket.SHUT_RDWR)
-                except OSError:
-                    pass
+        except BaseException as error:
+            with lock:
+                if not failure:
+                    failure.append(error)
+                    # Closing control sockets can make the rank lifetime watcher
+                    # exit this process before the caller reports the exception.
+                    print(traceback.format_exc(), file=sys.stderr, flush=True)
+                    for connection in connections:
+                        try:
+                            connection.shutdown(socket.SHUT_RDWR)
+                        except OSError:
+                            pass
             raise
 
     with ThreadPoolExecutor(max_workers=len(items), thread_name_prefix='flare-export') as pool:
-        return list(pool.map(run, items))
+        try:
+            return list(pool.map(run, items))
+        except BaseException:
+            # A lower-numbered worker may wake with a secondary disconnect first.
+            if failure:
+                raise failure[0]
+            raise
 
 
 def send_export_sources(control, path, inventory, *, channels=None):
@@ -181,7 +197,11 @@ def receive_export_sources(control, description, destination, settings, *, chann
         target = (store.root / (digest + '.safetensors') if info['blob'] else
                   destination.parent / (digest + '.source'))
         targets[name] = target
-        if target.exists():
+        # Another rank may publish the same content. Wait until its private
+        # hard link is removed, since unlink changes the inode's ctime.
+        with _EXPORT_PUBLICATION_LOCK:
+            exists = target.exists()
+        if exists:
             store.verify(target, bytes.fromhex(digest), size)
         else:
             if info['blob'] and settings.no_weights:
@@ -215,9 +235,15 @@ def receive_export_sources(control, description, destination, settings, *, chann
                     os.fchmod(output.fileno(), 0o444)
             if digest.hexdigest() != info['sha256']:
                 raise ValueError('rank payload digest mismatch')
-            try:
-                os.link(partial, target)
-            except FileExistsError:
+            with _EXPORT_PUBLICATION_LOCK:
+                try:
+                    os.link(partial, target)
+                    published = True
+                except FileExistsError:
+                    published = False
+                finally:
+                    partial.unlink(missing_ok=True)
+            if not published:
                 store.verify(target, bytes.fromhex(info['sha256']), info['size'])
         finally:
             partial.unlink(missing_ok=True)
