@@ -14,6 +14,9 @@ Python, the CUDA toolkit, WSL, and Wine are not runtime dependencies.
 Install the NVIDIA driver and the Microsoft Visual C++ Redistributable for the
 host architecture.
 
+On Windows terminals, startup displays the banner's final frame once.
+Loading progress continues below the static banner.
+
 ## Build from Linux
 
 Install Rust, Clang/LLVM with `lld-link`, CMake, Ninja, NASM, and Protobuf's

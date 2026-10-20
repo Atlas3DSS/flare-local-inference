@@ -43,7 +43,7 @@ impl StartupProgress {
             return;
         }
         let (width, height) = terminal_size();
-        if banner::frame(0.0, width).lines().count() + 2 >= height {
+        if cfg!(windows) || banner::frame(0.0, width).lines().count() + 2 >= height {
             let mut out = std::io::stderr().lock();
             let _ = out.write_all(banner::frame(1.0, width).as_bytes());
             let _ = out.flush();
