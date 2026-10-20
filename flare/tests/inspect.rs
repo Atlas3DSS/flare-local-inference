@@ -6,6 +6,7 @@ use std::{
 fn flare(arguments: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_flare"))
         .args(arguments)
+        .arg("--unverified")
         .output()
         .unwrap()
 }
@@ -80,6 +81,7 @@ fn fixture(directory: &std::path::Path, version: u64, maximum: u64) -> PathBuf {
     .concat();
     let contract = [
         message(1, b"owner/model"),
+        message(3, &integer(2, 128)),
         integer(4, 32768),
         integer(5, 4096),
         integer(16, 2),
@@ -97,6 +99,8 @@ fn fixture(directory: &std::path::Path, version: u64, maximum: u64) -> PathBuf {
     let index = [
         integer(1, version),
         message(7, &sampling),
+        message(8, &[]),
+        message(9, &integer(1, 2)),
         message(10, &contract),
     ]
     .concat();
@@ -147,70 +151,124 @@ fn inspection_reads_primary_metadata_without_cuda_trust_or_companions() {
     for version in [4, 5] {
         let path = fixture(temp.path(), version, 10);
         let path = path.to_str().unwrap();
-        let basic = flare(&["info", path]);
+        let basic = flare(&["inspect", path]);
         assert!(basic.status.success(), "{basic:?}");
         assert!(basic.stderr.is_empty(), "{basic:?}");
         let text = String::from_utf8(basic.stdout).unwrap();
         for expected in [
-            "owner/model",
             "local-model",
-            "32768",
-            "Sampling defaults",
+            "32,768",
+            "Sampling",
             "unverified",
-            "Rank 0",
-            "Rank 1",
+            "Rank resources",
+            "2 requests",
         ] {
             assert!(text.contains(expected), "{expected}: {text}");
         }
-        assert!(!text.contains("Captured graphs"));
+        assert!(!text.contains("owner/model"));
+        assert!(!text.contains("Graphs · rank"));
         assert!(!text.contains("Memory map"));
         for (flag, expected, omitted) in [
-            ("--memory-map", "Memory map", "Captured graphs"),
-            ("--graphs", "Captured graphs", "Memory map"),
-            ("--all", "Frontend settings", "never-present"),
+            ("--memory-map", "Memory map", "Graphs · rank"),
+            ("--graphs", "Graphs · rank", "Memory map"),
+            ("--all", "FRONTEND", "never-present"),
         ] {
-            let output = flare(&["info", path, flag]);
+            let output = flare(&["inspect", path, flag]);
             assert!(output.status.success(), "{output:?}");
             let text = String::from_utf8(output.stdout).unwrap();
             assert!(text.contains(expected), "{text}");
             assert!(!text.contains(omitted), "{text}");
+            if flag == "--all" {
+                assert!(text.contains("owner/model"), "{text}");
+            }
             if flag == "--memory-map" {
                 assert!(text.contains("0x0000000000200000"), "{text}");
-                assert!(text.contains("3072"), "{text}");
+                assert!(text.contains("max 10 units"), "{text}");
                 assert!(text.contains("absent-data.safetensors"), "{text}");
             }
         }
-        let output = flare(&["info", path, "--json"]);
+        let summary = flare(&["inspect", path, "--json"]);
+        assert!(summary.status.success(), "{summary:?}");
+        let summary: serde_json::Value = serde_json::from_slice(&summary.stdout).unwrap();
+        assert!(summary.get("frontend").is_none());
+        assert!(summary["ranks"][0].get("memory_map").is_none());
+        assert!(summary["ranks"][0].get("execution_graphs").is_none());
+        let output = flare(&["inspect", path, "--all", "--json"]);
         assert!(output.status.success(), "{output:?}");
         let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(json["signatures_verified"], false);
+        assert_eq!(json["package"]["signatures_verified"], false);
         assert_eq!(json["sampling_defaults"]["temperature"], 0.0);
         assert_eq!(json["sampling_defaults"]["seed"], u64::MAX);
         assert_eq!(json["sampling_defaults"]["top_k"], -1);
         assert!(json["sampling_defaults"]["top_p"].is_null());
-        assert_eq!(json["ranks"][0]["allocations"][0]["virtual_bytes"], 3072);
-        assert_eq!(json["ranks"][1]["graphs"][0]["packed_tokens"], 1);
+        assert_eq!(
+            json["ranks"][0]["memory_map"]["allocations"][0]["virtual_bytes"],
+            3072
+        );
+        assert_eq!(json["ranks"][1]["execution_graphs"][0]["packed_tokens"], 1);
     }
+}
+
+#[test]
+fn rank_selection_preserves_the_package_rank_number() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = fixture(temp.path(), 5, 10);
+    let output = flare(&[
+        "inspect",
+        path.to_str().unwrap(),
+        "--rank",
+        "1",
+        "--graphs",
+        "--json",
+    ]);
+    assert!(output.status.success(), "{output:?}");
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["ranks"].as_array().unwrap().len(), 1);
+    assert_eq!(json["ranks"][0]["rank"], 1);
+    assert_eq!(json["package"]["cluster"]["world"], 2);
+}
+
+#[test]
+fn inspection_authenticates_unless_unverified_was_explicitly_selected() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = fixture(temp.path(), 5, 10);
+    let output = Command::new(env!("CARGO_BIN_EXE_flare"))
+        .args(["inspect", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let output = Command::new(env!("CARGO_BIN_EXE_flare"))
+        .args([
+            "inspect",
+            path.to_str().unwrap(),
+            "--unverified",
+            "--publisher-keys",
+            "/nonexistent/profile",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
 }
 
 #[test]
 fn invalid_packages_fail_before_loading() {
     let temp = tempfile::tempdir().unwrap();
     let path = fixture(temp.path(), 5, u64::MAX);
-    let output = flare(&["info", path.to_str().unwrap()]);
+    let output = flare(&["inspect", path.to_str().unwrap(), "--memory-map"]);
     assert!(!output.status.success());
     let error = String::from_utf8(output.stderr).unwrap();
     assert!(error.contains("allocation extent overflow"), "{error}");
     std::fs::write(&path, 65537u64.to_le_bytes()).unwrap();
-    let output = flare(&["info", path.to_str().unwrap()]);
+    let output = flare(&["inspect", path.to_str().unwrap()]);
     assert!(!output.status.success());
     let error = String::from_utf8(output.stderr).unwrap();
     assert!(error.contains("invalid safetensors header size"), "{error}");
-    let output = flare(&["info", "/nonexistent/package.safetensors"]);
+    let output = flare(&["inspect", "/nonexistent/package.safetensors"]);
     assert!(!output.status.success());
     assert!(
         String::from_utf8(output.stderr)
             .unwrap()
-            .contains("cannot inspect package")
+            .contains("No such file")
     );
 }

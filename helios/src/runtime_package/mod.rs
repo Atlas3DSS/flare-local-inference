@@ -5,6 +5,7 @@ mod cache_memory;
 #[cfg(test)]
 mod cooperative_tests;
 mod describe;
+pub use describe::InspectionOptions;
 mod device_memory;
 pub mod driver;
 mod engram;
@@ -15,7 +16,7 @@ mod format;
 mod host;
 mod limits;
 mod metadata;
-pub use metadata::package_metadata;
+pub use metadata::unverified_metadata;
 mod memory;
 mod model;
 mod payload;

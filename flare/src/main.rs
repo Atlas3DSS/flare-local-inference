@@ -6,7 +6,6 @@ mod environment;
 mod hardware;
 mod hub;
 mod identity;
-mod info;
 mod inspect;
 #[cfg(unix)]
 mod orbit;
@@ -35,7 +34,6 @@ extern "C" fn stop(_: libc::c_int) {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = match cli::Cli::parse().command {
         cli::Command::Run(args) => *args,
-        cli::Command::Info(args) => return info::run(args),
         cli::Command::Download(args) => {
             environment::configure(&args.gpus)?;
             let path = hub::download(&args.repository, &args.hub, args.gpus.len())?;

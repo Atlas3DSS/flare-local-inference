@@ -11,11 +11,20 @@ use super::{
 };
 use crate::Result;
 
+/// Detail sections included in package inspection output.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct InspectionOptions {
+    pub memory_map: bool,
+    pub graphs: bool,
+    pub frontend: bool,
+    pub all: bool,
+}
+
 impl VerifiedPackage {
     /// Describe the package from its verified index. Enumerations appear by name; byte counts
     /// are exact; every rank bundle the copy holds is listed in index order. The document does
     /// not name the file, which the caller knows by the path it opened.
-    pub fn describe(&self) -> Result<Value> {
+    pub fn describe(&self, options: InspectionOptions) -> Result<Value> {
         let index = &self.index;
         let publisher = self.publisher();
         let primary_bytes = self
@@ -28,112 +37,176 @@ impl VerifiedPackage {
             .archive
             .files
             .iter()
+            .filter(|(name, _)| !name.is_empty())
             .map(|(name, file)| json!({"name": name, "bytes": file.length}))
             .collect();
-        let contract = index
-            .contract
-            .as_ref()
-            .ok_or_else(|| invalid("model package lacks a typed serving contract"))?;
-        let model = contract
-            .model_contract
-            .as_ref()
-            .ok_or_else(|| invalid("model package lacks a model contract"))?;
-        let frontend = index
-            .frontend
-            .as_ref()
-            .ok_or_else(|| invalid("model package lacks frontend settings"))?;
-        let sampling = index
-            .sampling_defaults
-            .as_ref()
-            .ok_or_else(|| invalid("model package lacks sampling defaults"))?;
-        Ok(json!({
-            "package": {
-                "format_version": index.version,
-                "bytes": primary_bytes,
-                "companions": companions,
-                "ranks": index.ranks.len(),
-                "cluster": index.cluster.as_ref().map(|c| json!({
-                    "world": c.world, "export_id": c.export_id,
-                })),
-                "publisher": {
-                    "name": publisher.name,
-                    "namespace": publisher.namespace,
-                    "fingerprint": publisher.fingerprint(),
-                    "development": publisher.development,
-                },
-                "official_source": self.official_source(),
-                "license": self.license().map(|l| json!({"name": l.name, "link": l.link})),
+        let mut value = describe_index(index, options, self.verified_rank())?;
+        value["package"] = json!({
+            "signatures_verified": true,
+            "format_version": index.version,
+            "bytes": primary_bytes,
+            "companions": companions,
+            "ranks": index.ranks.len(),
+            "cluster": index.cluster.as_ref().map(|c| json!({
+                "world": c.world, "export_id": c.export_id,
+            })),
+            "publisher": {
+                "name": publisher.name,
+                "namespace": publisher.namespace,
+                "fingerprint": publisher.fingerprint(),
+                "development": publisher.development,
             },
-            "model": {
-                "model_id": contract.model_id,
-                "identity": contract.identity,
-                "served_names": contract.served_names,
-                "vocabulary": model.vocabulary,
-                "input_vocabulary": model.input_vocabulary,
-                "max_sequence_tokens": contract.max_sequence_tokens,
-                "prefill_chunk_size": contract.prefill_chunk_size,
-                "max_active": contract.max_active.or_else(|| {
-                    index.ranks.first().and_then(|r| r.execution.as_ref()).map(|e| e.max_active)
-                }),
-                "max_new_tokens": contract.max_new_tokens,
-                "decode_weight_bytes": contract.decode_weight_bytes,
-                "reserve_bytes": contract.reserve_bytes,
-                "queue_capacity": contract.queue_capacity,
-                "frontend_workers": contract.frontend_workers,
-                "max_body_bytes": contract.max_body_bytes,
-                "context_hint": contract.context_hint,
-                "capacity_hint": contract.capacity_hint,
-            },
-            "cache": {
-                "page_tokens": contract.page_tokens,
-                "pages": contract.pages,
-                "state_rows": contract.state_rows,
-                "snapshots": contract.snapshots,
-                "regions": model.cache.as_ref().map(|cache| cache.regions.iter().map(|r| json!({
-                    "kind": wire::HistoryKind::try_from(r.kind).map_or("UNKNOWN", |k| k.as_str_name()),
-                    "tokens_per_record": r.tokens_per_record,
-                    "window_tokens": r.window_tokens,
-                    "stride_bytes": r.storage.as_ref().map_or(0, |s| s.stride),
-                    "nbytes": r.storage.as_ref().map_or(0, |s| s.nbytes),
-                })).collect::<Vec<_>>()).unwrap_or_default(),
-            },
-            "speculation": {
-                "proposal_source": contract.speculative_proposal_source,
-                "widths": contract.speculative_widths,
-                "fixed_width": contract.speculative_fixed_width,
-                "token_capacity": contract.speculative_token_capacity,
-                "history_drafts": contract.history_drafts,
-            },
-            "sampling_defaults": {
-                "seed": sampling.seed,
-                "temperature": sampling.temperature,
-                "top_k": sampling.top_k,
-                "top_p": sampling.top_p,
-                "min_p": sampling.min_p,
-                "repetition_penalty": sampling.repetition_penalty,
-                "presence_penalty": sampling.presence_penalty,
-                "frequency_penalty": sampling.frequency_penalty,
-            },
-            "frontend": frontend_json(frontend, model.frontend.as_ref()),
-            "vision": vision_json(model.vision.as_ref(), frontend),
-            "assets": index.assets.iter().map(|a| json!({
-                "name": a.name,
-                "bytes": a.payload.as_ref().map_or(0, |p| p.nbytes),
-                "sha256": a.sha256,
-            })).collect::<Vec<_>>(),
-            "engram": index.engram.as_ref().map(engram_json),
-            "ranks": index.ranks.iter().enumerate().map(|(rank, bundle)| rank_json(rank, bundle)).collect::<Vec<_>>(),
-            "graph_contracts": model.graphs.iter().map(|g| json!({
-                "graph": g.graph,
-                "kind": wire::GraphOperation::try_from(g.kind).map_or("UNKNOWN", |k| k.as_str_name()),
-                "state_rows_per_request": g.state_rows_per_request,
-                "embedding_tables": g.embedding_tables,
-            })).collect::<Vec<_>>(),
-        }))
+            "official_source": self.official_source(),
+            "license": self.license().map(|l| json!({"name": l.name, "link": l.link})),
+        });
+        Ok(value)
     }
 }
 
-fn frontend_json(settings: &wire::FrontendSettings, contract: Option<&wire::FrontendContract>) -> Value {
+pub(super) fn describe_index(
+    index: &wire::ModelIndex,
+    options: InspectionOptions,
+    rank: Option<usize>,
+) -> Result<Value> {
+    let contract = index
+        .contract
+        .as_ref()
+        .ok_or_else(|| invalid("model package lacks a typed serving contract"))?;
+    let model = contract
+        .model_contract
+        .as_ref()
+        .ok_or_else(|| invalid("model package lacks a model contract"))?;
+    let frontend = index
+        .frontend
+        .as_ref()
+        .ok_or_else(|| invalid("model package lacks frontend settings"))?;
+    let sampling = index
+        .sampling_defaults
+        .as_ref()
+        .ok_or_else(|| invalid("model package lacks sampling defaults"))?;
+    let mut value = json!({
+        "model": {
+            "model_id": contract.model_id,
+            "identity": contract.identity,
+            "served_names": contract.served_names,
+            "vocabulary": model.vocabulary,
+            "input_vocabulary": model.input_vocabulary,
+            "max_sequence_tokens": contract.max_sequence_tokens,
+            "prefill_chunk_size": contract.prefill_chunk_size,
+            "max_active": contract.max_active.or_else(|| {
+                index.ranks.first().and_then(|r| r.execution.as_ref()).map(|e| e.max_active)
+            }),
+            "max_new_tokens": contract.max_new_tokens,
+            "decode_weight_bytes": contract.decode_weight_bytes,
+            "reserve_bytes": contract.reserve_bytes,
+            "queue_capacity": contract.queue_capacity,
+            "frontend_workers": contract.frontend_workers,
+            "max_body_bytes": contract.max_body_bytes,
+            "context_hint": contract.context_hint,
+            "capacity_hint": contract.capacity_hint,
+        },
+        "cache": {
+            "page_tokens": contract.page_tokens,
+            "pages": contract.pages,
+            "state_rows": contract.state_rows,
+            "snapshots": contract.snapshots,
+            "regions": model.cache.as_ref().map(|cache| cache.regions.iter().map(|r| json!({
+                "kind": wire::HistoryKind::try_from(r.kind).map_or("UNKNOWN", |k| k.as_str_name()),
+                "tokens_per_record": r.tokens_per_record,
+                "window_tokens": r.window_tokens,
+                "stride_bytes": r.storage.as_ref().map_or(0, |s| s.stride),
+                "nbytes": r.storage.as_ref().map_or(0, |s| s.nbytes),
+            })).collect::<Vec<_>>()).unwrap_or_default(),
+        },
+        "speculation": {
+            "proposal_source": contract.speculative_proposal_source,
+            "widths": contract.speculative_widths,
+            "fixed_width": contract.speculative_fixed_width,
+            "token_capacity": contract.speculative_token_capacity,
+            "history_drafts": contract.history_drafts,
+        },
+        "sampling_defaults": {
+            "seed": sampling.seed,
+            "temperature": sampling.temperature,
+            "top_k": sampling.top_k,
+            "top_p": sampling.top_p,
+            "min_p": sampling.min_p,
+            "repetition_penalty": sampling.repetition_penalty,
+            "presence_penalty": sampling.presence_penalty,
+            "frequency_penalty": sampling.frequency_penalty,
+            "ranges": sampling.ranges,
+        },
+        "frontend": frontend_json(frontend, model.frontend.as_ref()),
+        "vision": vision_json(model.vision.as_ref(), frontend),
+        "assets": index.assets.iter().map(|a| json!({
+            "name": a.name,
+            "bytes": a.payload.as_ref().map_or(0, |p| p.nbytes),
+            "sha256": a.sha256,
+        })).collect::<Vec<_>>(),
+        "engram": index.engram.as_ref().map(engram_json),
+        "ranks": index.ranks.iter().enumerate().map(|(i, bundle)| rank_json(rank.unwrap_or(i), bundle, options)).collect::<Result<Vec<_>>>()?,
+        "graph_contracts": model.graphs.iter().map(|g| json!({
+            "graph": g.graph,
+            "kind": wire::GraphOperation::try_from(g.kind).map_or("UNKNOWN", |k| k.as_str_name()),
+            "state_rows_per_request": g.state_rows_per_request,
+            "embedding_tables": g.embedding_tables,
+        })).collect::<Vec<_>>(),
+    });
+    let mut kv_page_bytes = 0u64;
+    let mut state_row_bytes = 0u64;
+    let mut max_pages = None::<u64>;
+    for bundle in &index.ranks {
+        for allocation in &bundle.allocations {
+            if let Some(s) = &allocation.sizing {
+                match wire::Capacity::try_from(s.capacity) {
+                    Ok(wire::Capacity::KvPages) => {
+                        kv_page_bytes = kv_page_bytes
+                            .checked_add(s.unit_bytes)
+                            .ok_or_else(|| invalid("KV page size overflow"))?;
+                        max_pages = Some(max_pages.map_or(s.maximum, |n| n.min(s.maximum)));
+                    }
+                    Ok(wire::Capacity::StateRows) => {
+                        state_row_bytes = state_row_bytes
+                            .checked_add(s.unit_bytes)
+                            .ok_or_else(|| invalid("state row size overflow"))?;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    value["cache"]["kv_page_bytes"] = kv_page_bytes.into();
+    value["cache"]["state_row_bytes"] = state_row_bytes.into();
+    value["cache"]["max_pages"] = max_pages.unwrap_or(contract.pages).into();
+    value["cache"]["history_kinds"] = json!(
+        model
+            .cache
+            .as_ref()
+            .map(|cache| cache
+                .regions
+                .iter()
+                .map(|r| wire::HistoryKind::try_from(r.kind).map_or("UNKNOWN", |k| k.as_str_name()))
+                .collect::<std::collections::BTreeSet<_>>())
+            .unwrap_or_default()
+    );
+    if !options.frontend && !options.all {
+        for key in ["frontend", "vision", "engram", "assets"] {
+            value.as_object_mut().unwrap().remove(key);
+        }
+    }
+    if options.all {
+        value["contract"] = json!(contract);
+    } else {
+        value.as_object_mut().unwrap().remove("graph_contracts");
+        value["cache"].as_object_mut().unwrap().remove("regions");
+    }
+    Ok(value)
+}
+
+fn frontend_json(
+    settings: &wire::FrontendSettings,
+    contract: Option<&wire::FrontendContract>,
+) -> Value {
     let tokenizer = settings.tokenizer.as_ref();
     let special = |token: Option<&String>| token.cloned();
     json!({
@@ -225,7 +298,7 @@ fn engram_json(engram: &wire::Engram) -> Value {
     })
 }
 
-fn rank_json(rank: usize, bundle: &wire::BundleIndex) -> Value {
+fn rank_json(rank: usize, bundle: &wire::BundleIndex, options: InspectionOptions) -> Result<Value> {
     let bytes = |memory: Memory| -> u64 {
         bundle
             .allocations
@@ -249,7 +322,7 @@ fn rank_json(rank: usize, bundle: &wire::BundleIndex) -> Value {
         })
         .collect();
     let execution = bundle.execution.as_ref();
-    json!({
+    let mut value = json!({
         "rank": rank,
         "architecture": bundle.architecture,
         "device_bytes": bytes(Memory::Device),
@@ -276,17 +349,163 @@ fn rank_json(rank: usize, bundle: &wire::BundleIndex) -> Value {
             "draft_source": wire::DraftSource::try_from(g.draft_source).map_or("UNKNOWN", |d| d.as_str_name()),
             "speculation_enabled": g.speculation_enabled,
             "estimated_duration_ns": g.estimated_duration_ns,
+            "node_count": bundle.graphs.iter().find(|graph| graph.name == g.name).map(|graph| graph.node_count),
+            "edge_count": bundle.graphs.iter().find(|graph| graph.name == g.name).map(|graph| graph.edge_count),
         })).collect::<Vec<_>>()).unwrap_or_default(),
         "roce": bundle.roce.as_ref().map(|r| json!({
             "world": r.world, "rank": r.rank, "proxy_abi": r.proxy_abi,
             "region_bytes": r.region_bytes, "varlen_bytes": r.varlen_bytes,
         })),
-    })
+    });
+    if !options.graphs && !options.all {
+        value.as_object_mut().unwrap().remove("execution_graphs");
+    }
+    if options.memory_map || options.all {
+        value["memory_map"] = json!({
+            "allocations": bundle.allocations.iter().map(|a| allocation_json(a, bundle)).collect::<Result<Vec<_>>>()?,
+            "reservations": bundle.reservations,
+            "buffers": execution.map(|e| &e.buffers),
+        });
+    }
+    if !options.all {
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("capacity_allocations");
+    }
+    Ok(value)
+}
+
+fn allocation_json(a: &wire::Allocation, bundle: &wire::BundleIndex) -> Result<Value> {
+    let memory =
+        wire::Memory::try_from(a.memory).map_err(|_| invalid("unknown allocation memory kind"))?;
+    let virtual_bytes = match &a.sizing {
+        Some(s) => {
+            if !a.alignment.is_power_of_two() {
+                return Err(invalid("invalid allocation alignment"));
+            }
+            s.unit_bytes
+                .checked_mul(s.maximum)
+                .and_then(|n| n.checked_add(a.alignment - 1))
+                .map(|n| n & !(a.alignment - 1))
+                .ok_or_else(|| invalid("allocation extent overflow"))?
+        }
+        None => a.nbytes,
+    };
+    let stored_bytes = a.data_spans.iter().try_fold(0u64, |n, s| {
+        n.checked_add(s.nbytes)
+            .ok_or_else(|| invalid("stored allocation size overflow"))
+    })?;
+    let sizing = a
+        .sizing
+        .as_ref()
+        .map(|s| -> Result<Value> {
+            let capacity = wire::Capacity::try_from(s.capacity)
+                .map_err(|_| invalid("unknown allocation capacity"))?;
+            Ok(
+                json!({"capacity": capacity.as_str_name(), "unit_bytes": s.unit_bytes,
+            "maximum": s.maximum}),
+            )
+        })
+        .transpose()?;
+    Ok(json!({
+        "name": a.name, "memory": memory.as_str_name(), "address": a.address,
+        "nbytes": a.nbytes, "virtual_bytes": virtual_bytes, "alignment": a.alignment,
+        "stored_bytes": stored_bytes, "sizing": sizing, "data_spans": a.data_spans,
+        "payload": a.file.as_ref().and_then(|name| bundle.resources.get(name)),
+    }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn summary_and_detail_sections_preserve_optional_values_and_selected_ranks() {
+        let index = wire::ModelIndex {
+            contract: Some(wire::ServingContract {
+                model_contract: Some(wire::ModelContract::default()),
+                max_new_tokens: Some(0),
+                ..Default::default()
+            }),
+            sampling_defaults: Some(wire::DefaultSamplingParameters {
+                seed: Some(u64::MAX),
+                temperature: Some(1.),
+                ranges: Some(wire::SamplingRanges {
+                    presence_penalty: Some(wire::SamplingFloatRange {
+                        min: Some(0.),
+                        max: Some(2.),
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            frontend: Some(wire::FrontendSettings::default()),
+            ranks: vec![wire::BundleIndex {
+                execution: Some(wire::Execution {
+                    max_active: 4,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let summary = describe_index(&index, InspectionOptions::default(), Some(3)).unwrap();
+        assert_eq!(summary["model"]["max_active"], 4);
+        assert_eq!(summary["model"]["max_new_tokens"], 0);
+        assert_eq!(summary["sampling_defaults"]["seed"], u64::MAX);
+        assert_eq!(
+            summary["sampling_defaults"]["ranges"]["presence_penalty"]["min"],
+            0.
+        );
+        assert_eq!(summary["ranks"][0]["rank"], 3);
+        assert!(summary["sampling_defaults"]["top_p"].is_null());
+        for key in [
+            "contract",
+            "frontend",
+            "assets",
+            "engram",
+            "graph_contracts",
+        ] {
+            assert!(summary.get(key).is_none(), "{key}");
+        }
+        for key in ["execution_graphs", "memory_map", "capacity_allocations"] {
+            assert!(summary["ranks"][0].get(key).is_none(), "{key}");
+        }
+        for options in [
+            InspectionOptions {
+                graphs: true,
+                ..Default::default()
+            },
+            InspectionOptions {
+                memory_map: true,
+                ..Default::default()
+            },
+            InspectionOptions {
+                frontend: true,
+                ..Default::default()
+            },
+            InspectionOptions {
+                all: true,
+                ..Default::default()
+            },
+        ] {
+            let detail = describe_index(&index, options, Some(3)).unwrap();
+            assert_eq!(
+                detail.get("frontend").is_some(),
+                options.frontend || options.all
+            );
+            assert_eq!(detail.get("contract").is_some(), options.all);
+            assert_eq!(
+                detail["ranks"][0].get("execution_graphs").is_some(),
+                options.graphs || options.all
+            );
+            assert_eq!(
+                detail["ranks"][0].get("memory_map").is_some(),
+                options.memory_map || options.all
+            );
+        }
+    }
 
     #[test]
     fn rank_bytes_split_by_memory_kind_and_graphs_report_packed_tokens() {
@@ -307,9 +526,16 @@ mod tests {
             architecture: vec![10, 3],
             allocations: vec![
                 allocation("weights", 1 << 30, Memory::Device, None),
-                allocation("kv", 1 << 20, Memory::Device, Some(wire::Sizing {
-                    capacity: wire::Capacity::KvPages as i32, unit_bytes: 4096, maximum: 1000,
-                })),
+                allocation(
+                    "kv",
+                    1 << 20,
+                    Memory::Device,
+                    Some(wire::Sizing {
+                        capacity: wire::Capacity::KvPages as i32,
+                        unit_bytes: 4096,
+                        maximum: 1000,
+                    }),
+                ),
                 allocation("host", 1 << 10, Memory::MappedHost, None),
                 allocation("peer", 1 << 8, Memory::Peer, None),
             ],
@@ -343,7 +569,15 @@ mod tests {
             events: vec![],
             roce: None,
         };
-        let value = rank_json(2, &bundle);
+        let value = rank_json(
+            2,
+            &bundle,
+            InspectionOptions {
+                all: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert_eq!(value["rank"], 2);
         assert_eq!(value["architecture"], json!([10, 3]));
         assert_eq!(value["device_bytes"], (1u64 << 30) + (1 << 20));
@@ -368,11 +602,21 @@ mod tests {
             prompt_encoder: wire::PromptEncoder::DeepseekV41 as i32,
             image_placeholder_token_id: Some(7),
         };
-        let disabled = wire::VisionCapacity { feature_slots: 0, features_per_request: 0, max_images: 0,
-            patches_per_feature: 0, patch_capacities: vec![] };
+        let disabled = wire::VisionCapacity {
+            feature_slots: 0,
+            features_per_request: 0,
+            max_images: 0,
+            patches_per_feature: 0,
+            patch_capacities: vec![],
+        };
         assert_eq!(vision_json(Some(&disabled), &settings), Value::Null);
-        let enabled = wire::VisionCapacity { feature_slots: 4, features_per_request: 4096, max_images: 4096,
-            patches_per_feature: 9, patch_capacities: vec![3456] };
+        let enabled = wire::VisionCapacity {
+            feature_slots: 4,
+            features_per_request: 4096,
+            max_images: 4096,
+            patches_per_feature: 9,
+            patch_capacities: vec![3456],
+        };
         let value = vision_json(Some(&enabled), &settings);
         assert_eq!(value["max_image_tokens_per_prompt"], 4096);
         assert_eq!(value["image"]["profile"], "deepseek4");

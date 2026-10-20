@@ -26,11 +26,9 @@ pub struct Cli {
 pub enum Command {
     /// Serve a local package or download a prepared package from Hugging Face.
     Run(Box<Run>),
-    /// Inspect a local package's model metadata without loading it onto GPUs.
-    Info(Info),
     /// Download a prepared package from the hardware's Hugging Face revision.
     Download(Download),
-    /// Show a package's signed metadata: model, limits, caches, sampling defaults, frontend, ranks and graphs.
+    /// Summarize a package's metadata, with optional memory, graph, and frontend details.
     Inspect(Inspect),
     /// Run this host's agent, which pairs with controllers and runs its rank of a orbit's serving group.
     Agent(AgentArgs),
@@ -41,29 +39,6 @@ pub enum Command {
         #[command(subcommand)]
         command: TrustCommand,
     },
-}
-
-#[derive(Debug, Args)]
-pub struct Info {
-    /// Local prepared .safetensors package.
-    #[arg(value_name = "PACKAGE")]
-    pub package: PathBuf,
-
-    /// Show recorded allocations, address reservations, and execution buffer views.
-    #[arg(long)]
-    pub memory_map: bool,
-
-    /// Show captured graph capacities and node counts for every rank.
-    #[arg(long)]
-    pub graphs: bool,
-
-    /// Show memory, graphs, and the complete serving and frontend contracts.
-    #[arg(long)]
-    pub all: bool,
-
-    /// Print all inspection metadata as JSON.
-    #[arg(long)]
-    pub json: bool,
 }
 
 #[derive(Debug, Args, Default, Clone)]
@@ -95,13 +70,33 @@ pub struct Inspect {
     #[arg(value_name = "PACKAGE")]
     pub package: PathBuf,
 
-    /// Print the metadata as JSON instead of the terminal dossier.
+    /// Print the selected sections as JSON.
     #[arg(long)]
     pub json: bool,
 
-    /// Print the dossier without colors, as a redirected stream receives it.
+    /// Disable terminal styling.
     #[arg(long, conflicts_with = "json")]
     pub plain: bool,
+
+    /// Include allocation addresses, reservations, and execution buffer views.
+    #[arg(long)]
+    pub memory_map: bool,
+
+    /// Include graph capacities, timings, and node counts for every selected rank.
+    #[arg(long)]
+    pub graphs: bool,
+
+    /// Include tokenizer, parser, vision, asset, and auxiliary table details.
+    #[arg(long)]
+    pub frontend: bool,
+
+    /// Include every detail section and the complete serving contract.
+    #[arg(long)]
+    pub all: bool,
+
+    /// Read only primary-file metadata without checking signatures or opening companions.
+    #[arg(long, conflicts_with_all = ["publisher_keys", "trust_store"])]
+    pub unverified: bool,
 
     /// Verify only this rank of a multi-host package whose copy holds that rank's bytes alone.
     #[arg(long, value_name = "N")]

@@ -217,6 +217,10 @@ pub struct AuthorizedPackage {
     pub(super) index: wire::ModelIndex,
 }
 impl VerifiedPackage {
+    pub(super) fn verified_rank(&self) -> Option<usize> {
+        self.archive.protection.rank
+    }
+
     /// Authenticate the package's index and publisher binding, for every rank or only `rank` of
     /// a multi-host package, which a copy holding that rank's bytes alone verifies completely.
     pub fn open(path: &Path, publishers: &[Publisher], rank: Option<usize>) -> Result<Self> {

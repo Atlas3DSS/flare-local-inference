@@ -100,9 +100,8 @@ flare/target/release/flare run PACKAGE --gpus 0 --host 127.0.0.1 --port 8000
 
 ```
 flare run PACKAGE [flags]                 serve a package on this host
-flare info PACKAGE [--memory-map] [--graphs] [--all] [--json]  inspect package metadata
 flare download REPOSITORY [flags]         download a prepared package
-flare inspect PACKAGE [--json | --plain]  a package's signed metadata
+flare inspect PACKAGE [--memory-map] [--graphs] [--frontend] [--all] [--json | --plain]
 flare agent [--listen IP:PORT]            run this host's orbit agent
 flare agent install [--join-code CODE | --accept-first] [--listen IP:PORT]
 flare agent reset                         forget the host's controllers
@@ -900,58 +899,52 @@ Shutdown restores the terminal after draining active execution.
 
 ### 5.4 `flare inspect`
 
-Verify the package's signed index with the embedded publisher profiles, the
-profiles given with `--publisher-keys` (development packages default to
-`~/.config/flare/development-publisher.json`), and the keys remembered in the
-trust store, then print what the index records. Nothing is authorized,
-decrypted, or loaded: no license acceptance, no GPU, no network. `--rank N`
-verifies one rank of a multi-host package from a copy holding that rank alone.
+Print a compact model summary: identity and publisher verification, architecture,
+served names, context and execution capacities, cache history kinds, speculation,
+sampling defaults and request ranges, and per-rank fixed memory and graph counts.
 
-The dossier covers the package file and its companions, publisher, signing key,
-source, and license; the model id, identity, served names, vocabulary, GPU
-architecture, and declared weight bytes per decode step; context, prefill
-chunk, concurrency, default output limit, body limit, queue, and reserve;
-cache page geometry, prepared KV extent, per-page and per-token KV bytes
-across ranks, state rows, snapshots, and history regions; speculation source,
-widths, and capacity; sampling defaults, with gauges for the bounded values;
-prompt encoder, EOS and special tokens, tool and reasoning parsers, markers,
-and frontend assets; vision limits and the image profile; Engram tables; each
-rank's architecture, device, host, and peer bytes, graph, module, and kernel
-counts, and RoCE transport; and rank zero's execution graphs with their
-capacities and estimated durations.
+The command verifies the signed index using embedded publisher profiles, profiles
+provided with `--publisher-keys` (development packages default to
+`~/.config/flare/development-publisher.json`), and remembered trust-store keys.
+It opens referenced companion files to check their layout, but reads no stored
+weights, decrypts no executables, initializes no GPU, and requests no license
+acceptance. Verification uses no network access. `--rank N` selects one rank of a
+multi-host package, including a copy holding only that rank's payloads.
 
-On a terminal the dossier is drawn in color, sized to the terminal between 64
-and 100 columns. A redirected stream, `TERM=dumb`, or `--plain` prints the same
-characters without escape sequences at 80 columns. `--json` prints the
-metadata as one JSON document for other programs, with enumerations by name
-and byte counts exact.
+Detail flags are additive:
 
-### 5.5 `flare info`
+| Flag | Additional sections |
+| --- | --- |
+| `--memory-map` | Recorded allocation addresses, fixed and virtual byte extents, stored payload locations, runtime sizing formulas, address reservations, and execution buffer shapes and strides, for each selected rank |
+| `--graphs` | Captured graph capacities, timing estimates, and node and edge counts for each selected rank |
+| `--frontend` | Tokenizer, tool and reasoning parsers, markers, vision, frontend assets, and auxiliary embedding table layouts |
+| `--all` | All detail sections, including package, model, cache, and speculation settings; JSON also includes the complete serving contract |
 
-Read a local package's primary-file metadata without initializing CUDA, opening
-companion files, reading weight or executable payloads, contacting the network,
-or requesting publisher acceptance. Output identifies metadata as unverified:
-inspection does not authenticate publisher signatures or grant execution trust.
+`--json` changes the format of the selected sections. With no detail flags it
+prints the summary, excluding graph catalogs, allocation maps, frontend details,
+and the full contract. Byte counts and addresses remain exact integers; absent
+optional values remain null, and explicit zeroes are preserved. Packages contain
+prepared serving metadata rather than the checkpoint's raw model configuration.
 
-The default view shows model identity, served names, prepared context and execution
-capacities, sampling defaults, publisher and license metadata, and per-rank resource
-totals. Unrecorded optional values are shown as `not recorded`; explicit zeroes
-remain zeroes. Packages contain serving metadata rather than the checkpoint's raw
-model configuration.
+Text uses aligned values and tables inside light single-line boxes, with cyan
+section labels and muted field labels on a terminal. A compact five-line outlined
+block rendering of the first served name uses a gold-to-orange gradient and
+spaced letters, with the exact name in the Model box's `name` field. Long names
+wrap at separators, splitting individual words only when necessary. Names
+containing unsupported characters appear only as ordinary text in the Model box.
+The recorded model ID is used when no served name is present; its literal value is
+also available in JSON and `--all`. Values wrap to the available width between
+64 and 120 columns.
+Redirected output and `--plain` disable styling; redirected output uses 80 columns.
+`TERM=dumb` also disables styling. Tables wrap identifiers rather than truncating
+them. The memory map distinguishes virtual reservations and cache capacity limits
+from physical backing, which serving selects at load time.
 
-`--memory-map` adds recorded allocations, payload locations relative to their
-file's payload base, virtual address reservations, runtime cache sizing formulas,
-and execution buffer views with shapes and strides. Fixed allocation bytes,
-runtime-sized virtual extents, mapped host storage, and peer views are reported
-separately. Address reservations and runtime cache maxima do not measure physical
-GPU memory consumption; serving chooses cache backing at load time.
-
-`--graphs` lists captured graph capacities, sampling modes, and node and edge counts
-for every rank. `--all` includes both detailed views and the full serving contract,
-frontend settings, assets, auxiliary table layouts, and cluster metadata.
-`--json` prints all inspection metadata as a JSON object regardless of detail flags;
-byte sizes and addresses are integers. Inspection supports model index versions 4
-and 5 without requiring re-export.
+`--unverified` reads only the bounded primary-file metadata, without requiring a
+publisher key, verifying signatures, or opening companion files. Output explicitly
+labels this mode unverified. It accepts the same section flags, JSON output, and
+rank selection. `--publisher-keys` and `--trust-store` cannot be combined with it.
+Inspection supports model index versions 4 and 5 without re-export.
 
 ## 6. Capacity errors
 
