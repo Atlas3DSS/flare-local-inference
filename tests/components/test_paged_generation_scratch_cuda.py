@@ -6,6 +6,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from tests.components.completion_support import completion_outputs
+
 from ignition.components.paged_batch import BatchInputs
 from ignition.components.paged_generation import PreparedGeneration
 from ignition.components.sampling import DeviceRequestState, PreparedSampling
@@ -32,7 +34,7 @@ def test_sampling_rank_preserves_subsequent_shared_graph_aliases():
         validation = torch.zeros(1, 32, dtype=torch.bfloat16, device=device)
         batch = SimpleNamespace(inputs=inputs, rows=16, requests=requests, shard=SimpleNamespace(rank=rank),
                                 validation_input=validation, validation_sum=torch.empty_like(validation))
-        forward = PreparedGeneration(decoder, batch, records, frame, sequence, runtime=None,
+        forward = PreparedGeneration(decoder, batch, completion_outputs(records), frame, sequence, runtime=None,
             coordinator=None, session=None, name="decode16", workspace=None, buffers=pool.cursor())
         assert forward.compilation_variant == ("sample" if rank == 0 else "consume")
         shared = bind_scratch(PreparedSampling.scratch_layout(4, requests.vocab_size),

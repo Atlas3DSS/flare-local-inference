@@ -127,6 +127,7 @@ impl ThreadedExecutor {
                             };
                         }
                     };
+                    executor.copy_logprobs = false;
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         rank_loop(&mut executor, commands, &replies)
                     }))
@@ -407,7 +408,8 @@ fn rank_loop(
 
 fn same_layout(a: &ExecutionManifest, b: &ExecutionManifest) -> bool {
     match (&a.engram, &b.engram) {
-        (Some(a), Some(b)) if !Arc::ptr_eq(&a.shared, &b.shared) || a.rank == b.rank => {
+        // Partitioned tables have independent delivery groups, each numbered from zero.
+        (Some(a), Some(b)) if Arc::ptr_eq(&a.shared, &b.shared) && a.rank == b.rank => {
             return false;
         }
         (Some(_), None) | (None, Some(_)) => return false,
@@ -517,5 +519,159 @@ mod tests {
         assert!(same_layout(&root, &peer));
         peer.cache.as_mut().unwrap().planes[0].unit_bytes += 1;
         assert!(!same_layout(&root, &peer));
+    }
+
+    #[test]
+    fn rank_layout_accepts_shared_and_partitioned_engram_delivery() {
+        use crate::engram::{Binding, Index, Plane, Shared, Table};
+
+        for partitioned in [false, true] {
+            let groups: Vec<_> = (0..if partitioned { 4 } else { 1 })
+                .map(|rank| {
+                    Shared::layout_fixture(
+                        Index {
+                            tables: vec![Table {
+                                planes: [256, 8].map(|row_bytes| Plane {
+                                    file: rank,
+                                    offset: rank as u64 * 4096,
+                                    nbytes: (100 + rank) * row_bytes,
+                                    row_bytes,
+                                }),
+                                heads: 24,
+                                weights: "weights".into(),
+                                scales: "scales".into(),
+                                hashes: "hashes".into(),
+                                event: "ready".into(),
+                                request: Some("requests".into()),
+                            }],
+                        },
+                        if partitioned { 1 } else { 4 },
+                    )
+                })
+                .collect();
+            let ranks: Vec<_> = (0..4)
+                .map(|rank| {
+                    let mut manifest = super::super::tests::manifest();
+                    manifest.context += rank;
+                    manifest.device = rank as i32;
+                    for buffer in &mut manifest.buffers {
+                        buffer.address += rank * 0x100000;
+                    }
+                    for graph in &mut manifest.graphs {
+                        graph.handle += rank * 0x100000;
+                    }
+                    manifest.engram = Some(Binding {
+                        shared: groups[if partitioned { rank } else { 0 }].clone(),
+                        rank: if partitioned { 0 } else { rank },
+                        events: vec![rank + 1],
+                    });
+                    manifest.validate().unwrap();
+                    manifest
+                })
+                .collect();
+            for peer in &ranks[1..] {
+                assert!(same_layout(&ranks[0], peer));
+            }
+            // A delivery group cannot count the same member twice.
+            let mut duplicate = ranks[1].clone();
+            duplicate.engram = ranks[0].engram.clone();
+            assert!(!same_layout(&ranks[0], &duplicate));
+            let mut missing = ranks[1].clone();
+            missing.engram = None;
+            assert!(!same_layout(&ranks[0], &missing));
+            let mut mismatch = ranks[1].clone();
+            mismatch.graphs[0].input_bindings[0].host_offset += 8;
+            assert!(!same_layout(&ranks[0], &mismatch));
+        }
+    }
+
+    #[test]
+    fn tp4_catalog_accepts_shared_and_partitioned_embedding_delivery() {
+        use super::super::{BufferDescriptor, Dtype, GraphKind, InputBinding};
+        use crate::engram::{Binding, Index, Plane, Shared, Table};
+
+        for logprobs in [false, true] {
+            let mut root = if logprobs {
+                super::super::tests::with_logprobs(20)
+            } else {
+                super::super::tests::manifest()
+            };
+            root.abi_version = 3;
+            let records = root.buffers.iter_mut().find(|b| b.name == "completion_records").unwrap();
+            records.nbytes = 2 * 4 * 24 * 8;
+            records.shape = vec![2, 4, 24];
+            records.strides = vec![4 * 24, 24, 1];
+            root.buffers.push(BufferDescriptor {
+                name: "proposal_confidence".into(), address: 0x30000, nbytes: 4 * 5 * 4,
+                dtype: Dtype::Float32, shape: vec![4, 5], strides: vec![5, 1],
+            });
+            root.buffers.push(BufferDescriptor {
+                name: "prefill_row".into(), address: 0x40000, nbytes: 4,
+                dtype: Dtype::Int32, shape: vec![1], strides: vec![1],
+            });
+            let template = root.graphs[0].clone();
+            root.graphs = [
+                ("prefill", GraphKind::Prefill, 1, 4096, 0, 0),
+                ("decode", GraphKind::Decode, 4, 1, 0, 0),
+                ("resume", GraphKind::Resume, 4, 1, 0, 0),
+                ("speculative", GraphKind::Speculative, 4, 6, 0, 0),
+                ("proposal", GraphKind::Proposal, 4, 6, 0, 0),
+                ("verification", GraphKind::Verification, 4, 6, 0, 0),
+                ("packed", GraphKind::Verification, 4, 6, 0, 12),
+                ("mixed", GraphKind::Mixed, 4, 6, 4096, 0),
+            ].into_iter().enumerate().map(|(index, (name, kind, batch, width, prefill, packed))| {
+                let mut graph = template.clone();
+                graph.name = name.into();
+                graph.kind = kind;
+                graph.handle += index;
+                graph.batch_capacity = batch;
+                graph.token_capacity = width;
+                graph.prefill_capacity = prefill;
+                graph.packed_token_capacity = packed;
+                if kind == GraphKind::Mixed {
+                    graph.input_bindings.push(InputBinding {
+                        buffer_name: "prefill_row".into(), host_offset: root.input_frame_bytes, nbytes: 4,
+                    });
+                }
+                graph
+            }).collect();
+            root.input_frame_bytes += 8;
+            root.validate().unwrap();
+
+            for partitioned in [false, true] {
+                let groups: Vec<_> = (0..if partitioned { 4 } else { 1 }).map(|rank| {
+                    Shared::layout_fixture(Index { tables: vec![Table {
+                        planes: [256, 8].map(|row_bytes| Plane {
+                            file: rank, offset: rank as u64 * 4096,
+                            nbytes: (100 + rank) * row_bytes, row_bytes,
+                        }),
+                        heads: 24, weights: "weights".into(), scales: "scales".into(),
+                        hashes: "hashes".into(), event: "ready".into(), request: Some("requests".into()),
+                    }] }, if partitioned { 1 } else { 4 })
+                }).collect();
+                let ranks: Vec<_> = (0..4).map(|rank| {
+                    let mut manifest = root.clone();
+                    manifest.context += rank;
+                    manifest.device = rank as i32;
+                    for buffer in &mut manifest.buffers { buffer.address += rank * 0x100000; }
+                    for graph in &mut manifest.graphs { graph.handle += rank * 0x100000; }
+                    manifest.engram = Some(Binding {
+                        shared: groups[if partitioned { rank } else { 0 }].clone(),
+                        rank: if partitioned { 0 } else { rank }, events: vec![rank + 1],
+                    });
+                    manifest.validate().unwrap();
+                    manifest
+                }).collect();
+                for peer in &ranks[1..] { assert!(same_layout(&ranks[0], peer)); }
+                // A repeated member of one delivery group would corrupt its completion accounting.
+                assert!(!same_layout(&ranks[0], &ranks[0]));
+                let mut bad = ranks[1].clone();
+                bad.graphs[6].input_bindings[0].host_offset += 8;
+                assert!(!same_layout(&ranks[0], &bad));
+                let mut bad = ranks[1].clone();
+                bad.buffers[2].shape[1] += 1;
+                assert!(!same_layout(&ranks[0], &bad));
+            }
+        }
     }
 }

@@ -15,7 +15,7 @@ class PreparedGeneration:
     must wait for every rank before retiring a step or reusing its cache pages.
     """
 
-    def __init__(self, decoder: PreparedDecoder, batch: PreparedBatch, completion_records,
+    def __init__(self, decoder: PreparedDecoder, batch: PreparedBatch, completion,
                  frame_index, submission_sequence, *, pool, runtime, coordinator, session, name, replicated_sampling=False):
         if decoder.metadata is not batch.metadata or decoder.weights.shard != batch.shard:
             raise ValueError("GLM generation requires the decoder's metadata and rank")
@@ -26,7 +26,7 @@ class PreparedGeneration:
             runtime=runtime, coordinator=coordinator, session=session, name=f"{name}.validation")
         b, rows = batch.inputs, batch.rows
         arguments = (batch.requests, b.row_slot_ids[:rows], b.row_generations[:rows], b.live_rows,
-                     completion_records, frame_index, submission_sequence)
+                     completion, frame_index, submission_sequence)
         self.completion = PreparedCompletion(*arguments) if decoder.weights.shard.rank != 0 and not replicated_sampling else PreparedSampling(
             decoder.scratch.logits, *arguments, sample_enabled=b.sample_enabled[:rows])
         self.completion.prepare()

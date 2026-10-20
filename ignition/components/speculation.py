@@ -15,6 +15,7 @@ import torch
 from ignition.components.flashinfer_sampling import filter_probabilities_out, probability_filter_workspace, verify_chain
 
 from ignition.components.capacity import BATCH_CAPACITIES
+from ignition.components.logprobs import PreparedLogprobs
 from ignition.components.sampling import (
     DUPLICATE_SLOT,
     ERROR,
@@ -417,8 +418,9 @@ class PreparedSpeculativeCommit:
     """
 
     def __init__(self, requests: DeviceRequestState, acceptance: SpeculativeAcceptance,
-                 input_ids, slots, generations, live_rows, completion_records, frame_index,
-                 submission_sequence, *, rng=None, copy_offered_mask=None, draft_context_lag=1, token_limits=None, buffers=None):
+                 input_ids, slots, generations, live_rows, completion, frame_index,
+                 submission_sequence, *, logits, rng=None, copy_offered_mask=None, draft_context_lag=1, token_limits=None, buffers=None):
+        records = completion.records
         batch, width = input_ids.shape
         _geometry(batch, width)
         device = input_ids.device
@@ -429,10 +431,13 @@ class PreparedSpeculativeCommit:
         if token_limits is not None:
             _tensor(token_limits, (batch,), torch.int32, device, "token_limits")
         self.token_limits = token_limits
+        if logits.dtype not in (torch.bfloat16, torch.float32):
+            raise ValueError("target_logits requires BF16 or FP32 storage")
+        _tensor(logits, (batch, width, requests.vocab_size), logits.dtype, device, "target_logits")
         _tensor(input_ids, (batch, width), torch.int64, device, "input_ids")
         _metadata(requests, slots, generations, live_rows, batch, device)
         acceptance.validate(batch, width, device)
-        _tensor(completion_records, (2, requests.capacity, 24), torch.int64, device, "completion_records")
+        _tensor(records, (2, requests.capacity, 24), torch.int64, device, "completion_records")
         _tensor(frame_index, (1,), torch.int32, device, "frame_index")
         _tensor(submission_sequence, (1,), torch.int64, device, "submission_sequence")
         self.copy_offered_mask = torch.zeros(batch, dtype=torch.int64, device=device) if copy_offered_mask is None else copy_offered_mask
@@ -440,8 +445,9 @@ class PreparedSpeculativeCommit:
         if rng is not None:
             for name in ("generation", "target_offset"):
                 _tensor(getattr(rng, name), (requests.capacity,), torch.int64, device, f"rng.{name}")
+        self.logprobs = PreparedLogprobs(logits, completion, slots, generations, live_rows, frame_index)
         self.state, self.acceptance, self.inputs, self.slots = requests, acceptance, input_ids, slots
-        self.generations, self.live, self.records, self.frame, self.sequence = generations, live_rows, completion_records, frame_index, submission_sequence
+        self.generations, self.live, self.records, self.frame, self.sequence = generations, live_rows, records, frame_index, submission_sequence
         self.rng = rng
         self.rows, self.columns = torch.arange(batch, device=device), torch.arange(width, device=device)
         self.eos_columns = torch.arange(requests.eos_token_ids.shape[1], device=device)
@@ -467,6 +473,9 @@ class PreparedSpeculativeCommit:
         self.idle_record[[4, 12, *range(16, 24)]] = -1
         if draft_context_lag is None:
             self.idle_record[13] = -1
+
+    def prepare(self):
+        self.logprobs.prepare()
 
     def __call__(self):
         state, acceptance, columns = self.state, self.acceptance, self.columns
@@ -592,4 +601,5 @@ class PreparedSpeculativeCommit:
         if self.history is not None:
             self.history.copy_(self.history_after)
         self.records.index_copy_(0, self.frame.long(), self._records.unsqueeze(0))
+        self.logprobs()
         return self

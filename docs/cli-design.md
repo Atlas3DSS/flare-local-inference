@@ -56,7 +56,8 @@ then use `.venv/bin/ignition` or `.venv/bin/python -m ignition`.
 
 ```
 ignition run     [MODEL] [flags]     cache a runtime package and launch Flare
-ignition export  [MODEL] --output FILE [flags]  prepare a native model package
+ignition export  [MODEL] [--output FILE] [flags]  prepare a native model package
+ignition convert FILE [--output FILE] [flags]   convert a package to shared blobs
 ```
 
 Every command has exactly one name. `MODEL` is a recipe alias, a Hugging Face
@@ -78,8 +79,9 @@ Flare banner on a terminal and reports model loading through Helios.
 
 `export` imports the `flare_heliopause` CPython extension in Ignition's process.
 Ignition performs weight loading, tuning, compilation, warmup, and capture. It writes compiled CUDA modules,
-allocation contents, graph descriptions, and frontend assets to a `.safetensors`
-primary and optional sibling data files. Every destination must be unused. It
+allocation contents, graph descriptions, and frontend assets to content-addressed
+payload blobs with a metadata-only `.safetensors` primary. Every destination must
+be unused. It
 then exits without opening a listener. `run` caches the resulting package in
 `paths.package_cache` and replaces its Python process with the Rust `flare` executable. Cache keys
 include checkpoint identity, preparation settings, dependency versions, and
@@ -99,16 +101,19 @@ flare/target/release/flare run PACKAGE --gpus 0 --host 127.0.0.1 --port 8000
 ```
 flare run PACKAGE [flags]                 serve a package on this host
 flare download REPOSITORY [flags]         download a prepared package
+flare inspect PACKAGE [--memory-map] [--graphs] [--frontend] [--all] [--json | --plain]
 flare agent [--listen IP:PORT]            run this host's orbit agent
 flare agent install [--join-code CODE | --accept-first] [--listen IP:PORT]
-flare agent reset                         forget the host's controllers
+flare agent reset                        forget authorized controllers and pairing codes
 flare orbit pair HOST... [--code CODE]    pair this controller with hosts
 flare orbit controllers add NAME KEY | remove KEY
 flare orbit status [--cluster NAME]
-flare orbit run [PACKAGE] [--cluster NAME | --nodes N,...] [--name GROUP] [--dry-run] [serving flags] [--detach]
-flare orbit attach | stop [--cluster NAME]
+flare orbit run [PACKAGE] [--cluster NAME | --nodes NODE,...] [--name GROUP] [--persistent] [--executable PATH] [--dry-run] [serving flags] [--detach]
+flare orbit attach [GROUP] [--cluster NAME]
+flare orbit stop [GROUP] [--cluster NAME]
+flare orbit rm GROUP                     remove a stopped definition or retained launch
 flare orbit forget NODE                   remove a node from the orbit file
-flare orbit push PACKAGE --to NODE,...    stage and verify a package on nodes
+flare orbit push PACKAGE --to NODE,...    stage package data without starting ranks
 flare orbit packages [--cluster NAME]     what each node's cache holds
 flare orbit ls | dashboard [--cluster NAME]  groups on the cluster's nodes; their live metrics
 flare trust revoke FINGERPRINT
@@ -119,7 +124,19 @@ defaulting to `~/.config/flare/orbit.toml` and
 `~/.config/flare/orbit/controller.key`. `flare orbit run` takes the serving
 flags of `flare run` and applies them to every rank; `--host`, `--port`,
 `--served-model-name`, `--scheduler-policy`, and `--api-key-file` apply to rank
-zero. See [orbit](orbit.md).
+zero. `--api-key-file` names a file rank zero must be able to read; Orbit does
+not upload it. Package inputs are Hugging Face repositories
+`ORG/NAME[@REVISION]`, controller-local files, or `NODE:/absolute/path` on a
+paired node. Orbit downloads repository packages on a candidate node and
+verifies their publisher on the controller. Download flags apply to that
+node's cache; `--token-file` is read on the controller.
+
+Ranks use each node's installed agent executable by default. An explicit
+`--executable PATH`, or a saved group's override, uploads the chosen build.
+`--persistent --name GROUP` saves a launch for manual reuse;
+`--detach` returns when processes start, before HTTP readiness is guaranteed.
+See [Orbit](orbit.md) and the [multi-host guide](multi-host.md). Orbit commands
+are implemented in Unix builds; Windows builds reject them.
 
 For MSVC cross-compilation, native Windows builds, and GPU compatibility
 requirements, see [Windows serving](windows.md).
@@ -141,7 +158,7 @@ storage according to those selections and available GPU memory.
 ### 3.1 Ignition command-line flags
 
 `run` accepts the following flags. `export` accepts the same preparation flags,
-requires `--output FILE`, and excludes `--host` and `--port`.
+accepts `--output FILE` and defaults to a local snapshot; it excludes `--host` and `--port`.
 
 | Flag | Meaning | Default |
 |---|---|---|
@@ -155,7 +172,9 @@ requires `--output FILE`, and excludes `--host` and `--port`.
 | `--kv-cache-limit concurrency\|context\|memory` | `run` only: pass the shared KV-pool ceiling to Flare without changing preparation | `memory` |
 | `--memory-limit LIMIT` | `run` only: pass an occupied size (`30G`), free reserve (`-30G`), or total-memory fraction (`0.8`) to Flare | Package serving reserve |
 | `--config PATH` | Configuration file | `~/.config/flare/config.toml` |
-| `--shard-size SIZE` | Soft file-size target for export/run; `0` keeps one file | `[publishing] shard_size`, else `64G` |
+| `--shard-size SIZE` | Hard payload-file limit for export/run/sign/convert, at most 64 GiB | `[publishing] shard_size`, else `64G` |
+| `--no-weights` | Export only when exact stored-data blobs are cached | Off |
+| `--repo-id NAMESPACE/REPOSITORY` | Export repository namespace for the default local snapshot path | Recipe `export_repository` |
 | `--official-source URL` | Published repository URL under the configured publisher namespace | `[publishing] official_source` |
 | `--publisher-keys PATH` | Additional publisher profiles passed to Flare; repeatable, `run` only | Embedded keys plus the local development profile when applicable |
 | `--trust-store PATH` | Remembered execution trust passed to Flare; `run` only | `~/.config/flare/trust.toml` |
@@ -384,6 +403,7 @@ Help exits with status 0; usage errors go to stderr with status 2. Its options a
 | `--mtp-max-verification-token-budget N` | Retain all captured packed verification capacities at or below a total-row ceiling | All captured capacities |
 | `--embedding-table-storage disk\|ram` | PLE and Engram table storage; both modes deliver compact GPU rows | `disk` |
 | `--embedding-table-cache-size SIZE` | Per-host budget for cached disk-backed PLE/Engram rows, including the index, usage counters and miss workspace; accepts sizes such as `1G` or `2GiB` | `0` (disabled) |
+| `--embedding-table-resident-scales` | Keep original embedding scale bytes in host RAM while weights remain on disk; adds to the row-cache budget | Disabled |
 
 `--embedding-table-workers 1|2|4|8` controls Windows disk-reader workers.
 Workers share 128 I/O slots and 8 MiB of direct-read staging per embedding table.
@@ -399,6 +419,24 @@ tables and local tensor-parallel ranks. The loader commits cache memory before
 sizing KV and continuation pools, so the cache uses part of the integrated GPU's
 existing memory budget. The cache remains fixed in size while serving and warms
 from requests each time the server starts.
+
+`--embedding-table-resident-scales` loads the original scale plane into immutable
+host RAM before KV sizing. It applies to every table in the package's embedding
+catalog, including Qwen PLE and DeepSeek Engram. The loader uses the declared
+weight and scale row sizes; it does not select behavior by model identity.
+Weight rows remain on disk, and a row-cache miss reads
+only the weight plane. The resident scale allocation is additional to
+`--embedding-table-cache-size` and is included in the integrated GPU memory
+budget. This option works with existing packages and requires disk table storage;
+RAM table storage already retains both planes. The metric
+`flare_engram_resident_scale_bytes` reports the scale allocation separately from
+the row cache.
+
+Ignition exports each recipe's canonical model name as its default serving
+alias, such as `DeepSeek-V4.1-Flash`. Checkpoint selectors such as
+`deepseek-v4.1-flash` select preparation inputs and configuration sections;
+they do not set the advertised API name. Existing packages retain their
+embedded aliases.
 
 `--served-model-name` changes the name advertised by `/v1/models` and accepted
 for requests. It replaces the package aliases; the canonical model ID remains
@@ -488,14 +526,13 @@ revision. GPU selection follows `CUDA_VISIBLE_DEVICES` for both commands.
 An explicit `--revision` overrides `@revision` and hardware detection. It accepts
 a branch, tag, or commit, and permits downloading on a machine without NVIDIA
 hardware. Online resolution obtains the revision's commit and downloads from
-that exact commit. Flare excludes `*-data-NN-of-NN.safetensors` companions when
-selecting the primary; multiple primaries require `--filename`. Referenced
-companions download from the primary's directory at that same commit. Offline
-resolution requires every referenced file. Multi-file packages use regular
-hardlinks in the Hub cache's `flare-packages` directory so the loader can reject
-symlink companions; filesystems without hardlink support report an error. Hardware selection does not infer tensor-parallel size or graph capacities
-from filenames. The selected package must match the serving GPU count, topology,
-and capacities; the native loader validates its contract.
+that exact commit. Flare excludes SHA-256 blob filenames and
+`*-data-NN-of-NN.safetensors` companions when selecting the primary; multiple
+primaries require `--filename`. Referenced companions resolve from the primary's
+directory at that same commit. Offline resolution requires every referenced file.
+Hardware selection does not infer tensor-parallel size or graph capacities from
+filenames. The selected package must match the serving GPU count, topology, and
+capacities; the native loader validates its contract.
 
 `flare download` prints only the cached package path on stdout; resolution and
 terminal download progress go to stderr. It does not load or execute the package,
@@ -515,13 +552,97 @@ Both commands accept these download options:
 | `--offline` | Resolve only from cached refs and snapshots and skip the publisher identity check; make no network requests. Accepted with a local package path | Off |
 
 The native client uses Hugging Face's `refs`, `snapshots`, and `blobs` cache
-layout. Existing cached files can be reused without copying their weights.
+layout. It loads regular snapshot files directly. Multi-file snapshots containing
+symlinks, including those created by Python's Hub client, use regular hardlinks in
+the cache's `flare-packages` directory. These links share the cached file's bytes
+and preserve companion paths when the primary path is canonicalized. Filesystems
+without hardlink support report an error instead of copying payloads. Local
+package companions may also be symbolic links to regular files on other storage
+devices; the loader validates and retains the opened targets.
+
+When a file is absent from a snapshot, Flare checks its Hub ETag and size against
+the repository's blob cache. An existing blob is hardlinked into the snapshot
+without downloading its body. Identical files therefore share disk storage across
+revisions of the same repository. Concurrent Flare downloads serialize the blob
+lookup and transfer to preserve that sharing. Reuse operates on complete files;
+downloads use resumable HTTP transfers through `hf-hub`, without Xet chunk
+reconstruction. A cached blob with an unexpected size or file type reports an
+error. Package signature verification still occurs when serving.
+
 Offline automatic filename selection considers the files present in that cached
 snapshot; use `--filename` to select one explicitly. Cache paths, endpoint, and
 authentication are configured explicitly; native commands do not interpret
 `HF_HOME`, `HF_HUB_CACHE`, `HF_TOKEN`, or `HF_ENDPOINT`.
-Downloads use resumable HTTP transfers through `hf-hub`; Xet chunk reconstruction
-is not used.
+
+### Package snapshots
+
+`ignition export MODEL` writes a unique local snapshot without requiring
+`--output`. A recipe's `export_repository` supplies its Hugging Face target;
+`--repo-id NAMESPACE/REPOSITORY` overrides it. Recipes without a target use their
+local recipe name as the cache namespace. For Qwen Flash:
+
+```sh
+ignition export qwen3.8-flash
+ignition export qwen3.8-flash --no-weights
+```
+
+With the default package cache, the layout is:
+
+```text
+~/.cache/flare/packages/
+  blobs/<sha256>.safetensors
+  models--local-inference-lab--Qwen3.8-Flash-Next-FLARE/
+    snapshots/<snapshot-id>/
+      model.safetensors
+      <sha256>.safetensors
+```
+
+Each payload filename hashes the complete file. Snapshot payloads are read-only
+hardlinks to `blobs/`, so identical bytes occupy disk space once. Every primary
+contains only the signed model envelope and the storage layout. All model payloads,
+including graphs and kernels, follow in separate files no larger than 64 GB
+(64,000,000,000 bytes). Size suffixes are binary; packing also applies this
+publication cap when the configured limit is `64G`.
+`--output FILE` selects another primary location on the cache's filesystem;
+a different filesystem requires a package cache on that filesystem. Configure
+`paths.package_cache` accordingly.
+
+Weight resources are packed into shards by rank and logical file, separately
+from executable and supporting resources. `--no-weights` requires both the
+captured allocations and the resulting stored-data shards to be cached.
+A missing or changed payload fails export before publishing
+the primary. This includes initialized persistent buffers as well as weights.
+The flag avoids temporary allocation files and duplicate weight writes. It still
+loads and prepares the checkpoint and reads captured storage to establish exact
+content identity. Changed graph captures and encrypted executable resources may
+produce additional blobs. Regular exports also reuse matching cached blobs.
+
+Multi-host preparation keeps a blob cache on each host. Peers send manifests;
+rank zero requests only files absent from its own cache. Orbit distributes only
+the payload blobs needed by each serving rank and reuses blobs across snapshots.
+
+Convert an existing package without a GPU or private signing key:
+
+```sh
+ignition convert /models/existing.safetensors \
+  --publisher-keys /keys/publisher.json
+```
+
+Conversion accepts monolithic, numbered-shard, and snapshot packages, verifies
+signed resources and stored data, and preserves the exact signed envelope. Supply
+the public publisher profile for a production package; the local development
+profile is loaded automatically. `--output FILE` selects a destination. Conversion
+leaves its source intact and needs space for payload bytes absent from the cache.
+It reads the complete package to verify its contents. Identical conversions reuse
+blobs without rewriting them. A resource larger than the selected limit is
+rejected because native resources must remain contiguous.
+
+The printed snapshot directory is self-contained. Upload that directory to the
+recipe's repository using the Hugging Face upload client; hardlinks appear as
+ordinary files. Export and conversion do not upload or change publisher trust.
+Keep every referenced payload beside its primary when copying a snapshot. Removing
+a snapshot removes its hardlinks; cached blobs remain available for other exports.
+There is no automatic blob garbage collection.
 
 ### Signing and local development
 
@@ -542,13 +663,11 @@ accepted. Runtime publisher profiles contain only the verification key.
 identity field requires all three identity fields. `[publishing] shard_size` may
 be configured independently and does not select a production identity.
 
-`shard_size = "64G"` is the default soft target; export/run/sign accept
-`--shard-size SIZE` to override it, and `0` requests one file. An indivisible
-resource may exceed the target. `example.safetensors` keeps metadata, encrypted
-resources, and supporting assets; companions are named
-`example-data-01-of-02.safetensors` through `example-data-02-of-02.safetensors`.
-At most 99 companions are supported, and no resource crosses a file boundary.
-Move or upload the complete set together.
+`shard_size = "64G"` is the hard payload-file limit; export/run/sign/convert
+accept `--shard-size SIZE` up to 64 GiB, including each file's header. Zero and
+limits at or below 4096 bytes are invalid. A resource larger than the limit fails
+export. The primary contains metadata only; all resources reside in immutable
+content-addressed blobs. See [package snapshots](#package-snapshots).
 
 `ignition keygen` creates an encrypted production key and public profile.
 `ignition key-password` changes the key's passphrase while preserving its identity.
@@ -664,7 +783,9 @@ limit, are a separate mechanism that this specification does not yet define.
 Requests receive the checkpoint's template defaults, the recipe's manually
 verified model-card sampling defaults, and the engine's output limit.
 Sampling defaults are explicit package metadata; config-file sampling values
-do not select them. Explicit request values override those defaults.
+do not select them. Sampling requests are clamped to the package's inclusive
+model-author ranges; parameters without ranges are fixed at their defaults.
+Seed remains request-controlled.
 
 `memory.reserve` exists for one case: a process that starts after Flare and
 needs GPU memory. Processes already running when Flare starts need no
@@ -708,9 +829,10 @@ Configuration assigns each decision to one owner:
 | CUDA toolkit | Installed packages, then `[paths] cuda` |
 | Served names | Recipe alias and repository ID, exposed through `/v1/models` |
 | API key | Ignition configuration or native `--api-key-file`; excluded from packages |
-| Seed, sampling controls, output limit, and stops | Request fields, with declared defaults for missing values |
+| Sampling distribution controls | Recipe defaults and optional model-author ranges; request values clamp to ranges, or to defaults when no range exists |
+| Seed, output limit, and stops | Request fields, with declared defaults for missing values |
 
-Explicit request values take precedence over defaults. Speculation's benefit
+Explicit request values take precedence within the declared sampling bounds. Speculation's benefit
 depends on native confidence or measured acceptance and execution cost. Reducing the draft limit at
 load time retains draft weights; freeing those weights requires preparation
 with `--no-mtp`.
@@ -772,9 +894,10 @@ Native startup and runtime failures exit 1.
 ### 5.2 `ignition export`
 
 Resolve the model and preparation settings as for `run`, then prepare and write
-a runtime package to `--output FILE`, appending `.safetensors` if needed.
-The destination must not exist. Export
-closes the prepared model and exits without starting a listener.
+a runtime package in a unique local snapshot under the recipe's export repository.
+`--output FILE` selects another destination, appending `.safetensors` if needed;
+the destination must not exist. `--no-weights` requires exact cached stored-data
+blobs. Export closes the prepared model and exits without starting a listener.
 
 ### 5.3 `flare run`
 
@@ -797,6 +920,55 @@ A narrow terminal truncates the description while preserving status and timing.
 Redirected output contains plain start and completion lines without animation.
 After startup, a usable terminal switches to the live metrics dashboard.
 Shutdown restores the terminal after draining active execution.
+
+### 5.4 `flare inspect`
+
+Print a compact model summary: identity and publisher verification, architecture,
+served names, context and execution capacities, cache history kinds, speculation,
+sampling defaults and request ranges, and per-rank fixed memory and graph counts.
+
+The command verifies the signed index using embedded publisher profiles, profiles
+provided with `--publisher-keys` (development packages default to
+`~/.config/flare/development-publisher.json`), and remembered trust-store keys.
+It opens referenced companion files to check their layout, but reads no stored
+weights, decrypts no executables, initializes no GPU, and requests no license
+acceptance. Verification uses no network access. `--rank N` selects one rank of a
+multi-host package, including a copy holding only that rank's payloads.
+
+Detail flags are additive:
+
+| Flag | Additional sections |
+| --- | --- |
+| `--memory-map` | Recorded allocation addresses, fixed and virtual byte extents, stored payload locations, runtime sizing formulas, address reservations, and execution buffer shapes and strides, for each selected rank |
+| `--graphs` | Captured graph capacities, timing estimates, and node and edge counts for each selected rank |
+| `--frontend` | Tokenizer, tool and reasoning parsers, markers, vision, frontend assets, and auxiliary embedding table layouts |
+| `--all` | All detail sections, including package, model, cache, and speculation settings; JSON also includes the complete serving contract |
+
+`--json` changes the format of the selected sections. With no detail flags it
+prints the summary, excluding graph catalogs, allocation maps, frontend details,
+and the full contract. Byte counts and addresses remain exact integers; absent
+optional values remain null, and explicit zeroes are preserved. Packages contain
+prepared serving metadata rather than the checkpoint's raw model configuration.
+
+Text uses aligned values and tables inside light single-line boxes, with cyan
+section labels and muted field labels on a terminal. A compact five-line outlined
+block rendering of the first served name uses a gold-to-orange gradient and
+spaced letters, with the exact name in the Model box's `name` field. Long names
+wrap at separators, splitting individual words only when necessary. Names
+containing unsupported characters appear only as ordinary text in the Model box.
+The recorded model ID is used when no served name is present; its literal value is
+also available in JSON and `--all`. Values wrap to the available width between
+64 and 120 columns.
+Redirected output and `--plain` disable styling; redirected output uses 80 columns.
+`TERM=dumb` also disables styling. Tables wrap identifiers rather than truncating
+them. The memory map distinguishes virtual reservations and cache capacity limits
+from physical backing, which serving selects at load time.
+
+`--unverified` reads only the bounded primary-file metadata, without requiring a
+publisher key, verifying signatures, or opening companion files. Output explicitly
+labels this mode unverified. It accepts the same section flags, JSON output, and
+rank selection. `--publisher-keys` and `--trust-store` cannot be combined with it.
+Inspection supports model index versions 4 and 5 without re-export.
 
 ## 6. Capacity errors
 
@@ -915,7 +1087,12 @@ For the command line to stay this small, every recipe declares:
 - its speculation settings, whether drafts can be copied from request history,
   the draft model's share of weights and pages, and its costs with speculation
   disabled;
-- image limits.
+- image limits;
+- per checkpoint, optionally, the bytes of weights one decode step reads for
+  one request across every rank, dense weights plus the experts one token
+  activates at their stored precision, which the serving contract records as
+  `decode_weight_bytes` and the dashboards multiply by verification steps per
+  second to show weight bandwidth.
 
 Model-specific validation lives here, not in the entrypoint. A recipe that
 cannot honor the settings reports a capacity error in the section 6 form.
@@ -936,7 +1113,9 @@ limits.
 ## 10. Non-goals
 
 Topology files, model families, launch override blocks, per-host environment
-maps, container and multi-node discovery, multiple models in one process,
+maps, container orchestration, multiple models in one process,
 and serving an architecture no recipe supports.
-Multi-node tensor parallelism across DGX Spark hosts, if it arrives, is a
-separate command with its own discovery, not a layer inside `run`.
+Cross-node tensor parallelism across supported hosts is in scope. The
+`flare orbit` commands and `flare agent` own host discovery, pairing, package
+distribution, and rank process management. `flare run` executes its assigned
+rank. See [Orbit](orbit.md) and [multi-host serving](multi-host.md).

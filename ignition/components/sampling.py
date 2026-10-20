@@ -13,6 +13,8 @@ import torch
 import triton
 import triton.language as tl
 
+from .completion import CompletionOutputs
+from .logprobs import PreparedLogprobs
 from .capacity import BATCH_CAPACITIES
 from .flashinfer_sampling import filter_probabilities_out, probability_filter_workspace, sample_probabilities
 from ignition.preparation.scratch import bind_scratch
@@ -414,11 +416,12 @@ class PreparedCompletion:
     """Record consumption and errors without vocabulary outputs or RNG work."""
 
     def __init__(self, state: DeviceRequestState, row_slot_ids, row_generations, live_rows,
-                 completion_records, frame_index, submission_sequence):
+                 completion: CompletionOutputs, frame_index, submission_sequence):
+        records = completion.records
         rows, device = row_slot_ids.numel(), state.generation.device
         if device.type != "cuda" or not 1 <= rows <= state.capacity:
             raise ValueError("completion requires CUDA state and rows within request capacity")
-        fields = _completion_fields(completion_records, device, state.capacity)
+        fields = _completion_fields(records, device, state.capacity)
         for tensor, shape, dtype, name in ((row_slot_ids, (rows,), torch.int32, "row_slot_ids"),
                 (row_generations, (rows,), torch.int64, "row_generations"),
                 (live_rows, (1,), torch.int32, "live_rows"), (frame_index, (1,), torch.int32, "frame_index"),
@@ -427,7 +430,7 @@ class PreparedCompletion:
         self._args = (None, None, None, None, row_slot_ids, row_generations, live_rows, None,
             state.generation, state.consumed_tokens, state.generated_tokens, state.pending_token, state.status,
             state.error_code, state.rng_counter, state.histogram, state.max_new_tokens, state.eos_token_ids,
-            state.eos_count, completion_records, frame_index, submission_sequence,
+            state.eos_count, records, frame_index, submission_sequence,
             state.vocab_size, rows, state.consumed_tokens.stride(0), fields, False, state.capacity)
         self.capacity = state.capacity
         self._record = None
@@ -467,15 +470,16 @@ class PreparedSampling:
             sampled_tokens=((rows,), torch.int32), sample_valid=((rows,), torch.bool))
 
     def __init__(self, logits, state: DeviceRequestState, row_slot_ids, row_generations, live_rows,
-                 completion_records, frame_index, submission_sequence, *, sample_enabled: torch.Tensor | None = None,
+                 completion: CompletionOutputs, frame_index, submission_sequence, *, sample_enabled: torch.Tensor | None = None,
                  workspace=None):
+        records = completion.records
         rows, vocab = logits.shape
         if not 1 <= rows <= state.capacity or vocab != state.vocab_size or logits.dtype not in (torch.float32, torch.bfloat16):
             raise ValueError("sampling logits require rows within request capacity and the state vocabulary in FP32 or BF16")
         device = logits.device
         if device.type != "cuda" or not logits.is_contiguous() or state.generation.device != device:
             raise ValueError("sampling requires contiguous CUDA logits on the state device")
-        record_fields = _completion_fields(completion_records, device, state.capacity)
+        record_fields = _completion_fields(records, device, state.capacity)
         for tensor, shape, dtype, name in ((row_slot_ids, (rows,), torch.int32, "row_slot_ids"),
                 (row_generations, (rows,), torch.int64, "row_generations"), (live_rows, (1,), torch.int32, "live_rows"),
                 (frame_index, (1,), torch.int32, "frame_index"), (submission_sequence, (1,), torch.int64, "submission_sequence")):
@@ -505,8 +509,9 @@ class PreparedSampling:
             row_slot_ids, row_generations, live_rows, self.sample_enabled,
             state.generation, state.consumed_tokens, state.generated_tokens, state.pending_token, state.status,
             state.error_code, state.rng_counter, state.histogram, state.max_new_tokens,
-            state.eos_token_ids, state.eos_count, completion_records, frame_index, submission_sequence,
+            state.eos_token_ids, state.eos_count, records, frame_index, submission_sequence,
             vocab, rows, state.consumed_tokens.stride(0), record_fields, True, state.capacity)
+        self._logprob_args = (logits, completion, row_slot_ids, row_generations, live_rows, frame_index)
         self._prepared = False
         self.broadcast = None
 
@@ -518,6 +523,8 @@ class PreparedSampling:
 
     def prepare(self) -> None:
         """Compile and warm all operators before CUDA graph capture."""
+        self.logprobs = PreparedLogprobs(*self._logprob_args)
+        self.logprobs.prepare()
         self._scores = _compile(_scores, self._score_args, self._grid)
         self._complete = _compile(_complete, self._complete_args, (self.state.capacity, 1, 1))
         self._record = _compile(_complete, (*self._complete_args[:-2], False, self.state.capacity), (self.state.capacity, 1, 1))
@@ -575,6 +582,7 @@ class PreparedSampling:
         if self.broadcast is not None:
             self.broadcast()
         self._complete()
+        self.logprobs()
 
     def record_completion(self) -> None:
         """Record a consumption-only prefill without a vocabulary projection."""
@@ -685,7 +693,7 @@ class PreparedAdmission:
     """
 
     def __init__(self, state: DeviceRequestState, buffers: AdmissionBuffers,
-                 completion_records, frame_index, submission_sequence, *, capacity: int = 4):
+                 completion: CompletionOutputs, frame_index, submission_sequence, *, capacity: int = 4):
         if capacity not in BATCH_CAPACITIES or capacity > state.capacity:
             raise ValueError("admission graph capacity must fit request storage")
         device, vocab = state.generation.device, state.vocab_size
@@ -698,7 +706,8 @@ class PreparedAdmission:
                   torch.int64, torch.int32, torch.int32, torch.int32, torch.int32)
         for field, shape, dtype in zip(buffers.__dataclass_fields__, shapes, dtypes, strict=True):
             _check_tensor(getattr(buffers, field), shape, dtype, device, field)
-        record_fields = _completion_fields(completion_records, device, state.capacity)
+        records = completion.records
+        record_fields = _completion_fields(records, device, state.capacity)
         for tensor, shape, dtype, name in ((frame_index, (1,), torch.int32, "frame_index"), (submission_sequence, (1,), torch.int64, "submission_sequence")):
             _check_tensor(tensor, shape, dtype, device, name)
         self.state, self.buffers = state, buffers
@@ -714,7 +723,7 @@ class PreparedAdmission:
             b.admission_eos_count, b.admission_grammar_enabled, self.errors, state.generation, state.seed, state.rng_counter,
             state.parameters, state.top_k, state.max_new_tokens, state.eos_token_ids, state.eos_count, state.grammar_enabled,
             state.generated_tokens, state.pending_token, state.status, state.error_code, state.consumed_tokens,
-            completion_records, frame_index, submission_sequence, capacity, state.consumed_tokens.stride(0), record_fields, slots)
+            records, frame_index, submission_sequence, capacity, state.consumed_tokens.stride(0), record_fields, slots)
         self._grid = (capacity, triton.cdiv(vocab, 1024), 1)
         self._prepared = False
 

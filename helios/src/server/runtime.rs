@@ -22,8 +22,8 @@ use crate::{
 
 pub struct Prompt {
     pub tokens: Vec<u32>,
-    /// Exact token count of a verified instruction prefix, including its user header.
-    pub system_boundary: Option<usize>,
+    /// Sorted token counts of exact rendered message prefixes.
+    pub message_boundaries: Vec<usize>,
     pub data: crate::model::PromptData,
     pub images: Option<crate::frontend::images::ProcessedImages>,
     pub conditioning: Vec<ConditioningEvent>,
@@ -34,6 +34,7 @@ pub struct Prompt {
     pub grammar: Option<crate::grammar::RequestGrammar>,
     /// Generate through end-of-sequence tokens until the output limit, as vLLM's `ignore_eos`.
     pub ignore_eos: bool,
+    pub logprobs: bool,
 }
 
 impl Prompt {
@@ -45,6 +46,7 @@ impl Prompt {
 #[derive(Clone, Debug)]
 pub enum GenerationEvent {
     Token(u32),
+    LogprobToken(crate::execution::TokenLogprobs),
     Protocol(Vec<crate::output::Piece>),
     ObservedToken {
         token: u32,
@@ -181,7 +183,7 @@ impl Incoming {
     fn emit(&self, event: GenerationEvent) {
         let publishes = matches!(
             &event,
-            GenerationEvent::Token(_) | GenerationEvent::Protocol(_)
+            GenerationEvent::Token(_) | GenerationEvent::LogprobToken(_) | GenerationEvent::Protocol(_)
         );
         if self.events.try_send(event).is_err() {
             self.fail(Error::execution(
@@ -204,6 +206,7 @@ struct Active<'a> {
     stops: super::stops::TokenStops,
     text_stops: Option<super::stops::TextStops<'a>>,
     carried: Carried,
+    held_logprobs: VecDeque<Option<crate::execution::TokenLogprobs>>,
 }
 
 /// What earlier admissions of a preempted request already reported.
@@ -235,23 +238,41 @@ struct Parked<'a> {
     stops: super::stops::TokenStops,
     text_stops: Option<super::stops::TextStops<'a>>,
     carried: Carried,
+    held_logprobs: VecDeque<Option<crate::execution::TokenLogprobs>>,
 }
 
 impl Active<'_> {
-    fn emit_output(&mut self, token: u32, eos: &[u32]) -> Result<bool> {
+    fn emit_output(
+        &mut self,
+        token: u32,
+        eos: &[u32],
+        logprob: Option<crate::execution::TokenLogprobs>,
+    ) -> Result<bool> {
         if let Some(stops) = &mut self.text_stops {
-            if eos.contains(&token) {
-                return Ok(false);
-            }
-            let (pieces, matched) = stops.push(token)?;
+            let silent = eos.contains(&token);
+            let (pieces, matched) = if let Some(value) = logprob {
+                stops.push_logprob(token, value, silent)?
+            } else {
+                if silent {
+                    return Ok(false);
+                }
+                stops.push(token)?
+            };
             if !pieces.is_empty() {
                 self.incoming.emit(GenerationEvent::Protocol(pieces));
             }
             Ok(matched)
         } else {
+            if self.incoming.prompt.logprobs {
+                self.held_logprobs.push_back(logprob);
+            }
             let (visible, matched) = self.stops.push(token);
             for token in visible {
-                self.incoming.emit_token(token);
+                let value = self.held_logprobs.pop_front().flatten();
+                self.incoming.emit(match value {
+                    Some(value) => GenerationEvent::LogprobToken(value),
+                    None => GenerationEvent::Token(token),
+                });
             }
             Ok(matched)
         }
@@ -303,7 +324,11 @@ impl ModelRuntime {
         let finished = Arc::new((Mutex::new(false), Condvar::new()));
         let worker_finished = finished.clone();
         let mut metrics =
-            super::metrics::Metrics::new(config.limits.pages, config.contract.cache.page_tokens);
+            super::metrics::Metrics::new(
+                config.limits.pages,
+                config.contract.cache.page_tokens,
+                config.decode_weight_bytes,
+            );
         metrics.engram = manifest
             .engram
             .as_ref()
@@ -805,6 +830,7 @@ impl<'a> Worker<'a> {
                     std::hint::spin_loop();
                     thread::yield_now();
                 } else {
+                    self.scheduler.idle()?;
                     match self
                         .receiver
                         .recv_timeout(std::time::Duration::from_millis(2))
@@ -922,12 +948,16 @@ impl<'a> Worker<'a> {
                 self.metrics.cancelled.fetch_add(1, Ordering::Relaxed);
                 continue;
             }
+            if incoming.prompt.logprobs && self.config.max_top_logprobs == 0 {
+                incoming.reject_admission("logprobs are not available in this model package".into());
+                continue;
+            }
             // Causal history pages grow independently of fixed continuation rows.
             // Image-feature replay across readmission requires retained frontend state.
             let growable =
                 incoming.prompt.images.is_none() && incoming.prompt.conditioning.is_empty();
             let spec = RequestSpec {
-                system_boundary: incoming.prompt.system_boundary,
+                message_boundaries: incoming.prompt.message_boundaries.clone(),
                 prompt: incoming.prompt.tokens.clone(),
                 conditioning: incoming.prompt.conditioning.clone(),
                 max_new_tokens: incoming.prompt.max_new_tokens,
@@ -1004,14 +1034,16 @@ impl<'a> Worker<'a> {
                     text_stops: if incoming.prompt.stop_strings.is_empty() {
                         None
                     } else {
-                        Some(super::stops::TextStops::new(
-                            self.frontend,
-                            incoming.prompt.stop_strings.clone(),
-                        )?)
+                        let mut stops = super::stops::TextStops::new(self.frontend, incoming.prompt.stop_strings.clone())?;
+                        if incoming.prompt.logprobs {
+                            stops.track(self.frontend);
+                        }
+                        Some(stops)
                     },
                     last_token: None,
                     next_image: 0,
                     carried: Carried::default(),
+                    held_logprobs: VecDeque::new(),
                 },
             };
             incoming.notify_admission(Ok(()));
@@ -1023,6 +1055,7 @@ impl<'a> Worker<'a> {
                 last_token: parked.last_token,
                 next_image: parked.next_image,
                 carried: parked.carried,
+                held_logprobs: parked.held_logprobs,
             });
             progress = true;
         }
@@ -1037,6 +1070,7 @@ impl<'a> Worker<'a> {
         self.scheduler
             .advance_to(super::observation::monotonic_ns())?;
         let measured_step = self.scheduler.submitted_step(completion.fence)?.clone();
+        let selection = self.scheduler.submitted_timing(completion.fence)?;
         if measured_step.kind != kind {
             return Err("completion graph kind differs from submitted step".into());
         }
@@ -1112,9 +1146,12 @@ impl<'a> Worker<'a> {
         }
         self.metrics.scheduler_trace.completed(
             super::observation::monotonic_ns(),
+            completion.fence,
             completion.graph_index,
             &measured_step,
             completion.timing,
+            selection,
+            self.scheduler.refresh_credit_ns(),
         );
         if kind == GraphKind::Proposal {
             self.metrics.proposal_completed(measured_step.batch_capacity, measured_step.token_capacity,
@@ -1138,7 +1175,14 @@ impl<'a> Worker<'a> {
             );
         }
         let mut stopped = Vec::new();
+        let mut positions = [0usize; crate::execution::REQUEST_LANES];
         for token in generated {
+            let slot = token.request.slot as usize;
+            let position = positions[slot];
+            positions[slot] += 1;
+            if stopped.contains(&token.request) {
+                continue;
+            }
             if let Some(request) = self.active[token.request.slot as usize]
                 .as_mut()
                 .filter(|a| a.request == token.request)
@@ -1163,7 +1207,24 @@ impl<'a> Worker<'a> {
                         .grammar_updated(grammar.mask());
                 }
                 let before = request.incoming.publications.get();
-                let stop = match request.emit_output(token.token, &self.config.eos_token_ids) {
+                let terminating_eos = !request.incoming.prompt.ignore_eos
+                    && self.config.eos_token_ids.contains(&token.token);
+                let logprob = if request.incoming.prompt.logprobs && !terminating_eos {
+                    match completion.logprobs.as_ref().and_then(|v| v[slot][position]) {
+                        Some(value) if value.token == token.token => Some(value),
+                        _ => {
+                            request.incoming.fail(Error::execution(
+                                ExecutionError::Completion,
+                                "generated token is missing its raw logprob record",
+                            ));
+                            stopped.push(token.request);
+                            continue;
+                        }
+                    }
+                } else {
+                    None
+                };
+                let stop = match request.emit_output(token.token, &self.config.eos_token_ids, logprob) {
                     Ok(matched) => matched,
                     Err(error) => {
                         request.incoming.fail(error);
@@ -1237,7 +1298,7 @@ impl<'a> Worker<'a> {
                         let user_stop = if let Some(stops) = &mut request.text_stops {
                             let eos = request
                                 .last_token
-                                .filter(|token| self.config.eos_token_ids.contains(token));
+                                .filter(|token| !request.incoming.prompt.ignore_eos && self.config.eos_token_ids.contains(token));
                             match stops.finish(eos) {
                                 Ok((pieces, matched)) => {
                                     if !pieces.is_empty() {
@@ -1262,7 +1323,10 @@ impl<'a> Worker<'a> {
                             if request
                                 .incoming
                                 .events
-                                .try_send(GenerationEvent::Token(token))
+                                .try_send(match request.held_logprobs.pop_front().flatten() {
+                                    Some(value) => GenerationEvent::LogprobToken(value),
+                                    None => GenerationEvent::Token(token),
+                                })
                                 .is_err()
                             {
                                 request.incoming.fail(
@@ -1368,6 +1432,7 @@ impl<'a> Worker<'a> {
             next_image: active.next_image,
             stops: active.stops,
             text_stops: active.text_stops,
+            held_logprobs: active.held_logprobs,
             carried: Carried {
                 prompt_tokens: Some(active.carried.prompt_tokens.unwrap_or(prompt_tokens)),
                 reused_prompt_tokens: Some(active.carried.reused_prompt_tokens.unwrap_or(reused)),
@@ -1478,7 +1543,7 @@ impl<'a> Worker<'a> {
     fn submit(&mut self, executor: &mut RankExecutor, step: &ScheduledPlan) -> Result<bool> {
         self.scheduler
             .advance_to(super::observation::monotonic_ns())?;
-        if !executor.can_submit(step.requires_feedback)
+        if !executor.can_submit(self.scheduler.plan_requires_feedback(step))
             || !self
                 .scheduler
                 .submission_window_available(step.estimated_duration_ns())
@@ -1498,6 +1563,7 @@ impl<'a> Worker<'a> {
         )?;
         let fence = executor.next_fence()?;
         self.reserve_and_pack(step, fence)?;
+        let feedback = self.scheduler.submitted_step(fence)?.requires_feedback;
         if step
             .lanes
             .iter()
@@ -1519,14 +1585,21 @@ impl<'a> Worker<'a> {
                     .sum(),
             ));
         }
+        let mut flags = [0u8; crate::execution::REQUEST_LANES * size_of::<i32>()];
+        for lane in &step.lanes {
+            let slot = lane.request.slot as usize;
+            if self.active[slot].as_ref().is_some_and(|a| a.incoming.prompt.logprobs) {
+                flags[slot * size_of::<i32>()..(slot + 1) * size_of::<i32>()].copy_from_slice(&1i32.to_ne_bytes());
+            }
+        }
+        let mut uploads = crate::model::Inputs::uploads(self.inputs.as_ref().expect("worker inputs initialized before submission"));
+        if self.config.max_top_logprobs != 0 {
+            uploads.push(crate::execution::Upload { buffer: "logprob_requested", offset: 0, bytes: &flags[..self.config.limits.request_capacity() * size_of::<i32>()] });
+        }
         if executor.submit(
             graph,
-            &crate::model::Inputs::uploads(
-                self.inputs
-                    .as_ref()
-                    .expect("worker inputs initialized before submission"),
-            ),
-            step.requires_feedback,
+            &uploads,
+            feedback,
         )? != Some(fence)
         {
             return Err("executor refused a reserved scheduler submission".into());
@@ -1534,7 +1607,7 @@ impl<'a> Worker<'a> {
         observe_submission(self.metrics, &self.scheduler, step, executor.outstanding())?;
         self.metrics
             .scheduler_trace
-            .submitted(super::observation::monotonic_ns(), graph, step);
+            .submitted(super::observation::monotonic_ns(), graph, step, feedback);
         Ok(true)
     }
 
@@ -1961,7 +2034,7 @@ mod tests {
             .measured_graph_durations(&crate::scheduler::tests::duration_graphs(4))
             .unwrap();
         let spec = |token, grammar_constrained| RequestSpec {
-            system_boundary: None,
+            message_boundaries: vec![],
             prompt: vec![token],
             conditioning: vec![],
             max_new_tokens: 20,
@@ -2032,7 +2105,7 @@ mod tests {
             publications: Default::default(),
             prompt: Prompt {
                 tokens: vec![7],
-                system_boundary: None,
+                message_boundaries: vec![],
                 data: PromptData {
                     positions: vec![[0; 3]],
                     vision_token_indices: vec![-1],
@@ -2044,6 +2117,7 @@ mod tests {
                 max_new_tokens: 10,
                 stop_sequences: vec![],
                 stop_strings: vec![],
+                logprobs: false,
                 ignore_eos: false,
                 grammar: None,
             },
@@ -2178,7 +2252,7 @@ mod tests {
 
     fn retirement_spec(grammar_constrained: bool) -> RequestSpec {
         RequestSpec {
-            system_boundary: None,
+            message_boundaries: vec![],
             prompt: vec![0],
             conditioning: vec![],
             max_new_tokens: 10,
@@ -2314,6 +2388,7 @@ mod tests {
             next_image: 0,
             stops: super::super::stops::TokenStops::new(vec![], 6).unwrap(),
             text_stops: None,
+            held_logprobs: VecDeque::new(),
             carried: Carried::default(),
         };
         let mut active: [Option<Active<'_>>; 4] = std::array::from_fn(|_| None);
@@ -2497,15 +2572,16 @@ mod tests {
             last_token: None,
             next_image: 0,
             stops: super::super::stops::TokenStops::new(vec![], 248320).unwrap(),
+            held_logprobs: VecDeque::new(),
             text_stops: Some(
                 super::super::stops::TextStops::new(&frontend, vec!["END".into()]).unwrap(),
             ),
             carried: Carried::default(),
         };
         request.incoming.observe_token(0);
-        assert!(!request.emit_output(0, &[248046]).unwrap());
+        assert!(!request.emit_output(0, &[248046], None).unwrap());
         request.incoming.observe_token(1);
-        assert!(request.emit_output(1, &[248046]).unwrap());
+        assert!(request.emit_output(1, &[248046], None).unwrap());
         assert!(matches!(
             generation.events.try_recv(),
             Ok(GenerationEvent::ObservedToken {
@@ -2682,7 +2758,7 @@ mod tests {
         )
         .unwrap();
         let spec = || RequestSpec {
-            system_boundary: None,
+            message_boundaries: vec![],
             prompt: vec![7],
             conditioning: vec![],
             max_new_tokens: 10,

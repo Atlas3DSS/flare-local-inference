@@ -10,6 +10,7 @@ from b12x.sequence.engram.reference import hash_reference
 from b12x.sequence._shared.disk_table import MappedHostAllocation
 
 from ignition.components.engram import EngramInputs, PreparedEngramRequests
+from ignition.components.embedding_partition import EmbeddingHeadPartition
 from ignition.components.compressed_mla import PreparedCompressedCacheWriter, PreparedCompressedMLA
 from ignition.preparation.compilation import compile_forward
 from ignition.recipes.deepseek41.attention import _commit_window, PreparedCompressor
@@ -36,16 +37,15 @@ def test_graph_produced_hashes_publish_after_all_rows_are_visible(rank):
     counts = torch.tensor([9, 3], dtype=torch.int32, device=device)
     sequence = torch.tensor([1], device=device)
     mailbox = MappedHostAllocation((tokens * 24 + 1,), torch.int64, device)
-    bounds = None
+    mapping = None
     if rank is not None:
-        first = geometry.offsets[0][rank * 6]
-        last = geometry.offsets[0][(rank + 1) * 6] if rank < 3 else geometry.num_embeddings[0]
-        bounds = torch.tensor((first, last), device=device)
+        partition = EmbeddingHeadPartition.for_rank(geometry.offsets[0], geometry.num_embeddings[0], rank, 4)
+        mapping = torch.tensor(partition.row_mapping, device=device)
     try:
         with PreparationSession(device=device, autotune=False, compile_workers=2) as session:
             operation = PreparedEngramRequests(inputs, ids, starts, history, counts, mailbox.device_view, sequence,
                 layer=1, token_map=token_map, geometry=geometry, session=session, name="hash_requests",
-                row_bounds=bounds)
+                row_mapping=mapping)
             compiled = compile_forward(operation)
             compiled()
             torch.cuda.synchronize()
@@ -60,8 +60,13 @@ def test_graph_produced_hashes_publish_after_all_rows_are_visible(rank):
                 torch.cuda.synchronize()
                 expected = hash_reference(ids[:9].tolist(), [True] * 9, starts.tolist(), list(range(rows)),
                     history.tolist(), token_map, geometry, 1)
-                if bounds is not None:
-                    expected = torch.where((expected >= first) & (expected < last), expected - first, -1)
+                if mapping is not None:
+                    for head in range(24):
+                        if head not in partition.heads:
+                            expected[:, head] = -1
+                        else:
+                            first, _, destination = partition.row_mapping[head]
+                            expected[:, head] += destination - first
                     assert expected.ge(0).sum().item() == 9 * 6
                 assert mailbox.host_view[-1].item() == generation
                 assert torch.equal(mailbox.host_view[:-1].view(tokens, 24)[:9], expected)

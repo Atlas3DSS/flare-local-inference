@@ -25,7 +25,7 @@ use std::{
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 const SLOT_SIZE: usize = 65536;
 
-fn publishers(
+pub(crate) fn publishers(
     paths: &[PathBuf],
     development: bool,
     home: impl FnOnce() -> io::Result<PathBuf>,
@@ -111,6 +111,19 @@ impl Entry {
             development: self.namespace == "local-development",
         })
     }
+}
+/// The verification key remembered for the claim's signer and namespace when the store holds
+/// one, so a package accepted earlier verifies without a profile or a network request.
+pub(crate) fn remembered_profile(
+    claim: &PackageClaim,
+    store: Option<&Path>,
+) -> Result<Option<Publisher>> {
+    let store = load_store(&store_path(store)?)?;
+    Ok(store
+        .trusted
+        .iter()
+        .find(|e| e.fingerprint == claim.signer && e.namespace == claim.namespace)
+        .and_then(Entry::profile))
 }
 fn fingerprint_valid(value: &str) -> bool {
     value.len() == 64

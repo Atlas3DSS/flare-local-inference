@@ -9,6 +9,8 @@ from pathlib import Path
 
 import torch
 
+from ignition.components.completion import CompletionOutputs
+
 from ignition.components.capacity import speculative_token_capacity, batch_capacities, prefill_capacities, request_capacity
 from ignition.components.parallel import TensorParallelShard
 from ignition.components.sampling import AdmissionBuffers, DeviceRequestState
@@ -280,7 +282,7 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
         commands = StateCommands.allocate(device, capacity=slots)
         frame = torch.zeros(1, dtype=torch.int32, device=device)
         sequence = torch.zeros(1, dtype=torch.int64, device=device)
-        records = torch.zeros((2, slots, 24 if config.mtp else 8), dtype=torch.int64, device=device)
+        completion = CompletionOutputs.allocate((2, slots, 24 if config.mtp else 8), device=device)
         # One rank holds whole sums and vocabularies: it prepares no collectives.
         coordinator = CollectivePreparation(group) if group is not None else None
         ipc = None if package_storage is None else package_storage.peer_storage
@@ -336,7 +338,7 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
         buffers = dict(inputs.buffers(), **commands.buffers(), **{
             name: getattr(admission, name) for name in admission.__dataclass_fields__},
             state_pool=pool.backing, memory_capacity=pool.memory_capacity, sampling_grammar_mask=requests.grammar_mask, frame_index=frame,
-            submission_sequence=sequence, completion_records=records)
+            submission_sequence=sequence, **completion.buffers())
         forward_inputs = (*inputs.buffers(), "sampling_grammar_mask")
         context = None
         if config.context_parallel and group is not None:
@@ -372,7 +374,7 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
             from .speculative import SpeculativePreparation
 
             speculation = SpeculativePreparation(weights, pool, requests, inputs, decoder_storage, prefill_storage,
-                session=session, workspace=arena, records=records, frame=frame,
+                session=session, workspace=arena, completion=completion, frame=frame,
                 sequence=sequence, runtime=collective, vocabulary_runtime=vocabulary_collective, coordinator=coordinator,
                 max_cache_pages=max_cache_pages, prefill_tokens=config.prefill_chunk_size,
                 decode_tokens=decode_rows, context=context)
@@ -407,7 +409,7 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
                         max_cache_pages=max_cache_pages, context=context)
                     batch = PreparedBatch(inputs, requests, metadata[name], mode=mode, shard=shard,
                                           pages=pool.memory_capacity[1:], shards=shards)
-                    forward = PreparedGeneration(decoders[name], batch, records, frame, sequence,
+                    forward = PreparedGeneration(decoders[name], batch, completion, frame, sequence,
                         pool=pool, runtime=collective, coordinator=coordinator, session=session, name=f"{name}.generation", replicated_sampling=enabled)
                     if enabled:
                         from .speculative import PreparedPrefill
@@ -428,13 +430,13 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
             suffix = "-no-mtp" if config.mtp and not enabled else ""
             for capacity in config.batch_capacities:
                 name = f"resume{capacity}" + suffix
-                resume = PreparedResume(weights, requests, pool, inputs, records, frame, sequence,
+                resume = PreparedResume(weights, requests, pool, inputs, completion, frame, sequence,
                     rows=capacity, runtime=collective, vocabulary_runtime=vocabulary_collective,
                     coordinator=coordinator, session=session, name=name, replicated_sampling=enabled)
                 add(name, resume, "resume", capacity, 1, (*row_inputs, "sampling_grammar_mask"), enabled=enabled)
                 for mode in ("init", "restore", "snapshot"):
                     name = f"{mode}{capacity}" + suffix
-                    operation = PreparedMaintenance(mode, requests, pool, commands, inputs, records, frame, sequence,
+                    operation = PreparedMaintenance(mode, requests, pool, commands, inputs, completion, frame, sequence,
                         runtime=collective, coordinator=coordinator, session=session, name=name,
                         capacity=capacity, admission_buffers=admission,
                         draft_tables=speculation.draft_tables if enabled else None,
@@ -543,7 +545,7 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
     memory = {"rank": rank, "world_size": shard.world_size, "device": config.devices[rank],
         "weights_bytes": weights.allocated_bytes, "continuation_bytes": pool.backing.nbytes,
         "state_rows": state_rows, "pages": pages, "page_bytes": kv_bytes // pages, "kv_bytes": kv_bytes,
-        "operator_scratch_bytes": arena.nbytes, "graphs": len(graphs), "prefill_capacities": config.prefill_capacities,
+        "completion_output_bytes": completion.nbytes, "operator_scratch_bytes": arena.nbytes, "graphs": len(graphs), "prefill_capacities": config.prefill_capacities,
         "free_device_bytes": free, "total_device_bytes": total, "headroom_bytes": config.headroom_bytes, "page_tokens": config.page_tokens,
         "allocated_bytes": torch.cuda.memory_allocated(device), "reserved_bytes": torch.cuda.memory_reserved(device),
         "tuning": tuning, "compiled_decoder": config.compile_decoder, "breakdown": breakdown,
@@ -578,7 +580,7 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
     return PreparedModel(device=config.devices[rank], graphs=graphs, buffers=buffers, signatures=signatures,
         max_active=config.max_active, resources=resources, session=session,
         forwards={name: compiled.get(name, forward) for name, forward in forwards.items()},
-        export_zero_ranges=disposable_ranges((decoder_storage, prefill_storage), arena, forwards),
+        export_zero_ranges=(*disposable_ranges((decoder_storage, prefill_storage), arena, forwards), *completion.zero_ranges()),
         close_resources=(*(() if context is None else (context.heads, context.candidates)), *shared_pages,
                          *(() if virtual_pages is None else (virtual_pages,)),
                          *(runtime for runtime in (prefill_collective, vocabulary_collective, collective)

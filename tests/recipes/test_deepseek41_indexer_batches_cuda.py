@@ -61,11 +61,12 @@ def _check_topk(indices, scores, *, allowed=None):
 
 class BatchedSelection:
     def __init__(self, query, weights, cache, pages, lengths, active, output, *, page_size,
-                 session, arena, name, candidates=None, counts=None, produce=False, buffers=None):
+                 session, arena, name, candidates=None, counts=None, produce=False, buffers=None,
+                 batch_rows=INDEXER_QUERY_ROWS, mode="decode"):
         self.operations = []
         cursors = []
-        for first in range(0, query.shape[0], INDEXER_QUERY_ROWS):
-            last = min(first + INDEXER_QUERY_ROWS, query.shape[0])
+        for first in range(0, query.shape[0], batch_rows):
+            last = min(first + batch_rows, query.shape[0])
             options = {}
             if candidates is not None:
                 options = (dict(candidates_out=candidates[first:last], counts_out=counts[first:last])
@@ -75,7 +76,8 @@ class BatchedSelection:
                 cursors.append(cursor)
             self.operations.append(PreparedMXFP4Indexer(query[first:last], weights[first:last],
                 cache, pages[first:last], lengths[first:last], active, output[first:last],
-                page_size=page_size, session=session, name=f"{name}.{first}", workspace=arena, buffers=cursor, **options))
+                page_size=page_size, session=session, name=f"{name}.{first}", workspace=arena,
+                buffers=cursor, mode=mode, **options))
         if buffers is not None:
             buffers.join(*cursors)
 
@@ -85,9 +87,13 @@ class BatchedSelection:
 
 
 @pytest.mark.parametrize("page_size", [64, 128])
-@pytest.mark.parametrize("rows,independent_pages", [(257, False), (64, True)])
+@pytest.mark.parametrize("rows,independent_pages,batch_rows,index_mode", [
+    (257, False, 128, "decode"), (257, False, 128, "prefill"),
+    (257, False, 256, "prefill"), (64, True, 128, "decode"),
+])
 @torch.no_grad()
-def test_compiled_query_batches_match_independent_scores_with_candidate_reuse(page_size, rows, independent_pages):
+def test_compiled_query_batches_match_independent_scores_with_candidate_reuse(
+        page_size, rows, independent_pages, batch_rows, index_mode):
     device = torch.device("cuda", 0)
     torch.manual_seed(41128)
     records, heads = 32768, 32
@@ -129,7 +135,8 @@ def test_compiled_query_batches_match_independent_scores_with_candidate_reuse(pa
                 operations[mode] = BatchedSelection(queries[source], weights[source], cache, table,
                     lengths, active, outputs[mode], page_size=page_size, session=session, arena=arena,
                     name=mode, candidates=None if mode == "full" else candidates,
-                    counts=counts, produce=mode == "producer", buffers=buffers.cursor())
+                    counts=counts, produce=mode == "producer", buffers=buffers.cursor(),
+                    batch_rows=batch_rows, mode=index_mode)
             session.tune()
             operations["full"].operations[0].write_keys(keys, slots)
             saved_cache = cache.clone()

@@ -56,11 +56,11 @@ pub fn inspect(
             .filter_map(|asset| asset.payload.as_ref()),
     );
     for span in spans {
-        let mut reader = package.archive.protection.reader(
-            package.archive.file.clone(),
-            package.archive.start,
-            span,
-        )?;
+        let (source, offset) = package.archive.source(span)?;
+        let mut reader = package
+            .archive
+            .protection
+            .reader(source.file.clone(), offset, span)?;
         let mut digest = ring::digest::Context::new(&ring::digest::SHA256);
         let mut buffer = vec![0; 65536];
         loop {

@@ -2,7 +2,7 @@
 
 use crate::engram::Binding;
 #[cfg(unix)]
-use crate::engram::{PlaneSource, PreparedTables, TableSource};
+use crate::engram::{PlaneSource, PreparedTables, SourceSegment, TableSource};
 #[cfg(unix)]
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::{exceptions::PyKeyError, prelude::*};
@@ -18,10 +18,17 @@ fn sources(value: &Bound<'_, PyAny>) -> PyResult<(usize, Vec<TableSource>)> {
         let mut planes = Vec::new();
         for plane in table.get_item("planes")?.try_iter()? {
             let plane = plane?;
+            let mut segments = Vec::new();
+            for segment in plane.get_item("segments")?.try_iter()? {
+                let segment = segment?;
+                segments.push(SourceSegment {
+                    path: PathBuf::from(segment.get_item("path")?.extract::<String>()?),
+                    offset: segment.get_item("offset")?.extract()?,
+                    nbytes: segment.get_item("nbytes")?.extract()?,
+                });
+            }
             planes.push(PlaneSource {
-                path: PathBuf::from(plane.get_item("path")?.extract::<String>()?),
-                offset: plane.get_item("offset")?.extract()?,
-                nbytes: plane.get_item("nbytes")?.extract()?,
+                segments,
                 row_bytes: plane.get_item("row_bytes")?.extract()?,
             });
         }

@@ -19,6 +19,18 @@ from ignition.preparation.protection import CHUNK, License, Publisher, signature
 ROOT = Path(__file__).resolve().parents[2]
 
 
+@pytest.fixture(autouse=True)
+def legacy_container_fixtures(monkeypatch):
+    """Retain coverage of published version 4/5 container bytes and signatures."""
+    from helios.tests.signing import publish_legacy
+    from ignition.preparation import package_file, package_snapshot, resign as promotion
+    monkeypatch.setattr(package_file, 'publish', publish_legacy)
+    monkeypatch.setattr(__import__(__name__, fromlist=['publish']), 'publish', publish_legacy)
+    monkeypatch.setattr(package_snapshot, 'publish_snapshot',
+                        lambda path, index, protection, **kwargs:
+                        promotion._publish(path, index, protection.payload, protection))
+
+
 @pytest.fixture(scope='module')
 def native():
     subprocess.run(['cargo', 'build', '--manifest-path', str(ROOT / 'helios/Cargo.toml'),
@@ -33,7 +45,7 @@ def read(native, path, namespace='flare-tests', weights=False, profile=None, ran
         args.append(f'rank={rank}')
     if profile is not None:
         args.append(str(profile))
-    return subprocess.run(args, capture_output=True, text=True)
+    return subprocess.run(args, capture_output=True, text=True, timeout=30)
 
 
 def fixture(tmp_path, *, size=CHUNK + 39, signer=None):
@@ -115,7 +127,7 @@ def test_multichunk_export_is_read_and_authenticated_by_rust(native, tmp_path):
 
 
 def cluster_package(tmp_path, monkeypatch):
-    from ignition.preparation import model_package
+    from helios.tests import signing as model_package
     from types import SimpleNamespace
 
     def export(rank, path):
@@ -944,16 +956,77 @@ def test_signed_companion_names_cannot_select_paths(native, tmp_path, name):
     assert read(native, path).returncode != 0
 
 
-@pytest.mark.parametrize('corruption', ['symlink', 'missing', 'truncate', 'trailing', 'header', 'weights'])
+@pytest.mark.parametrize('relative', [False, True])
+def test_linked_companions_validate_targets_and_stored_data(native, tmp_path, relative):
+    path, expected = shard_fixture(tmp_path)
+    storage = tmp_path / 'storage'
+    storage.mkdir()
+    for companion in tmp_path.glob('model-data-*.safetensors'):
+        target = storage / companion.name
+        companion.rename(target)
+        companion.symlink_to(target.relative_to(tmp_path) if relative else target)
+    index = assert_shard_contents(path, expected)
+    result = read(native, path, weights=True)
+    assert result.returncode == 0, result.stderr
+    target = storage / index.ranks[0].resources['weight-0'].filename
+    overwrite(target, [(4096, 1)])
+    assert read(native, path, weights=False).returncode == 0
+    assert 'stored-data content verification failed' in read(native, path, weights=True).stderr
+    target.write_bytes(target.read_bytes()[:-1])
+    assert 'payload length' in read(native, path, weights=False).stderr
+    with pytest.raises(ValueError, match='payload length'):
+        assert_shard_contents(path, expected)
+
+
+def test_companion_handles_survive_link_retargeting(native, tmp_path):
+    from ignition.preparation.package_file import PackageFiles
+    path, expected = shard_fixture(tmp_path)
+    index, base = read_index(path)
+    _, primary = envelope(path)
+    span = index.ranks[0].resources['weight-0']
+    companion = path.with_name(span.filename)
+    target = companion.with_suffix('.held')
+    companion.rename(target)
+    companion.symlink_to(target)
+    replacement = tmp_path / 'replacement'
+    replacement.write_bytes(b'invalid replacement data')
+    with path.open('rb') as source, PackageFiles(path, source, base, len(primary)) as files:
+        opened, start, _ = files.get(span.filename)
+        result = subprocess.run([str(native), str(path), 'retarget-companion', span.filename,
+                                 str(replacement)], capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, result.stderr
+        assert companion.resolve() == replacement
+        assert files.get(span.filename)[0] is opened
+        opened.seek(start + span.offset)
+        assert opened.read(span.nbytes) == expected[0, 'weight-0']
+    assert read(native, path).returncode != 0
+
+
+@pytest.mark.parametrize('target_kind', ['missing', 'loop', 'directory', 'fifo'])
+def test_companion_links_reject_unreadable_or_nonregular_targets(native, tmp_path, target_kind):
+    path, expected = shard_fixture(tmp_path)
+    index, _ = read_index(path)
+    companion = path.with_name(index.ranks[0].resources['weight-0'].filename)
+    companion.unlink()
+    target = tmp_path / 'target'
+    if target_kind == 'loop':
+        target.symlink_to(companion)
+    elif target_kind == 'directory':
+        target.mkdir()
+    elif target_kind == 'fifo':
+        os.mkfifo(target)
+    companion.symlink_to(target)
+    assert read(native, path).returncode != 0
+    with pytest.raises((OSError, ValueError)):
+        assert_shard_contents(path, expected)
+
+
+@pytest.mark.parametrize('corruption', ['missing', 'truncate', 'trailing', 'header', 'weights'])
 def test_companion_validation_and_optional_weight_scan(native, tmp_path, corruption):
     path, _ = shard_fixture(tmp_path)
     index, _ = read_index(path)
     companion = path.with_name(index.ranks[0].resources['weight-0'].filename)
-    if corruption == 'symlink':
-        target = companion.with_suffix('.held')
-        companion.rename(target)
-        companion.symlink_to(target)
-    elif corruption == 'missing':
+    if corruption == 'missing':
         companion.unlink()
     elif corruption == 'truncate':
         companion.write_bytes(companion.read_bytes()[:-1])

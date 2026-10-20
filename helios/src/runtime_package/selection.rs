@@ -15,6 +15,8 @@ pub struct LoadOptions {
     pub embedding_table_storage: Option<crate::engram::Storage>,
     /// Per-host bytes for disk-backed embedding row caches; zero disables.
     pub embedding_table_cache_bytes: u64,
+    /// Keep original scale-plane bytes in host RAM while embedding weights remain on disk.
+    pub embedding_table_resident_scales: bool,
     /// Disk workers per table: four on Windows, one elsewhere. Share 128 slots and 8 MiB staging.
     pub embedding_table_workers: Option<usize>,
     pub max_concurrency: Option<usize>,
@@ -61,6 +63,11 @@ impl LoadOptions {
             && self.embedding_table_storage == Some(crate::engram::Storage::Ram)
         {
             return Err(invalid("embedding row cache requires disk table storage"));
+        }
+        if self.embedding_table_resident_scales
+            && self.embedding_table_storage == Some(crate::engram::Storage::Ram)
+        {
+            return Err(invalid("resident embedding scales require disk table storage; RAM storage already retains all planes"));
         }
         let execution = packages
             .first()
@@ -637,6 +644,20 @@ mod tests {
                 .to_string()
                 .contains("embedding row cache requires disk table storage")
         );
+    }
+
+    #[test]
+    fn resident_scales_allow_cached_disk_rows_and_reject_whole_table_ram() {
+        let mut options = LoadOptions {
+            embedding_table_resident_scales: true,
+            embedding_table_cache_bytes: 1 << 30,
+            ..Default::default()
+        };
+        options.select(&mut [package()], &mut config()).unwrap();
+        options.embedding_table_cache_bytes = 0;
+        options.embedding_table_storage = Some(crate::engram::Storage::Ram);
+        assert!(options.select(&mut [package()], &mut config()).unwrap_err().to_string()
+            .contains("resident embedding scales require disk table storage"));
     }
 
     #[test]

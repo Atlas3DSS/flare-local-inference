@@ -222,12 +222,14 @@ def _write_back(output):
         os.posix_fadvise(output.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
 
 
-def _write_allocation(cuda, allocation, path, *, visit=None):
+def _write_allocation(cuda, allocation, path, *, visit=None, blob_store=None, require_cached=False):
     """Pack nonzero ranges into a file; the loader zeroes omitted bytes."""
     import numpy as np
 
     if allocation.initialize == "zero":
         return None, []
+    if blob_store is not None:
+        return _cache_allocation(cuda, allocation, blob_store, visit, require_cached)
     stored = []
     block = 64 << 10
     with path.open("wb") as output:
@@ -265,6 +267,48 @@ def _write_allocation(cuda, allocation, path, *, visit=None):
         path.unlink()
         return None, []
     return path.name, stored
+
+
+def _cache_allocation(cuda, allocation, store, visit, required):
+    """Identify live initializer bytes, then reuse or write their immutable blob.
+
+    A cache hit reads GPU storage but creates no temporary weight file. The
+    recorded destination spans remain independent of the blob's physical path.
+    """
+    import numpy as np
+    from .package_snapshot import BLOCK
+
+    stored = []
+    unit = 64 << 10
+    def download(offset, count):
+        return (C.string_at(allocation.address + offset, count) if allocation.memory == 'mapped_host'
+                else cuda.download(allocation.address + offset, count))
+    for start, length in (allocation.snapshot_spans if allocation.snapshot_spans is not None
+                          else ((0, allocation.nbytes),)):
+        for offset in range(start, start + length, BLOCK):
+            data = download(offset, min(BLOCK, start + length - offset))
+            if visit is not None:
+                visit(allocation, offset, data)
+            full = len(data) // unit * unit
+            occupied = np.frombuffer(data, dtype=np.uint8, count=full).reshape(-1, unit).any(axis=1)
+            starts = np.flatnonzero(occupied).tolist()
+            if full < len(data) and any(data[full:]):
+                starts.append(full // unit)
+            for block in starts:
+                begin, count = offset + block * unit, min(unit, len(data) - block * unit)
+                if stored and sum(stored[-1]) == begin:
+                    stored[-1][1] += count
+                else:
+                    stored.append([begin, count])
+    if not stored:
+        return None, []
+    size = sum(n for _, n in stored)
+    def blocks():
+        for start, length in stored:
+            for offset in range(start, start + length, BLOCK):
+                yield download(offset, min(BLOCK, start + length - offset))
+    name = store.put(size, blocks, required=required)
+    return FileSource(store.root / name, 4096, size), stored
 
 
 class RuntimePackage:
@@ -487,6 +531,11 @@ class RuntimePackage:
                                     "nbytes": size.value, "relocations": []})
                 modules.append({"name": name, "file": file, "globals": globals})
             allocations = []
+            allocation_sources = {}
+            from .package_snapshot import _OPTIONS, BlobStore, ExportOptions
+            snapshot_options = _OPTIONS.get() or (ExportOptions(path.parent / '.flare-cache')
+                                                if publisher is not None else None)
+            blob_store = BlobStore(snapshot_options.cache) if snapshot_options is not None else None
             selected = (self.allocations if self.reachability is None
                         else iter(self.reachability.take, None))
             for allocation in selected:
@@ -499,7 +548,11 @@ class RuntimePackage:
                     progress(f"Copy {allocation.name}: {allocation.address:#x}+{allocation.nbytes}; "
                              f"live spans {allocation.snapshot_spans}")
                 file, data_spans = _write_allocation(cuda, allocation, stage / f"storage-{index}.bin",
-                    visit=None if self.reachability is None else self.reachability.contents)
+                    visit=None if self.reachability is None else self.reachability.contents,
+                    blob_store=blob_store, require_cached=snapshot_options.no_weights if snapshot_options else False)
+                if isinstance(file, FileSource):
+                    allocation_sources[f'storage-{index}.bin'] = file
+                    file = f'storage-{index}.bin'
                 for relocation in allocation.relocations:
                     width = 8 if relocation.kind == "pointer" else 128
                     data = cuda.download(allocation.address + relocation.offset, width)
@@ -557,6 +610,12 @@ class RuntimePackage:
                 cursor += size
 
             files = sorted(stage.iterdir())
+            for name, source in sorted(allocation_sources.items()):
+                cursor = align(cursor)
+                span = index.ranks[0].resources[name]
+                span.offset, span.nbytes = cursor, source.nbytes
+                payload.append((cursor, source.path, source.offset, source.nbytes))
+                cursor += source.nbytes
             for source in files:
                 if source.name in storage_files:
                     append_file(source)

@@ -6,6 +6,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from tests.components.completion_support import completion_outputs
+
 from ignition.components.sampling import AdmissionBuffers
 from ignition.preparation.graphs import PreparedGraphBundle
 from ignition.recipes.qwen38.attention import QSAState
@@ -84,7 +86,7 @@ def test_native_initialize_publish_restore_preserves_exact_hybrid_bytes(backing)
     for slot in range(4):
         requests.admit(slot, RequestAdmission(1, 51 + slot, eos_token_ids=()), [1, 2, 3],
                        consumed_tokens=3, ple_history=(2, 3))
-    common = (requests, pool, metadata, records, frame, sequence)
+    common = (requests, pool, metadata, completion_outputs(records), frame, sequence)
     init = PreparedMaintenance("init", *common, admission_buffers=admissions, forward_inputs=inputs, qsa_states=qsa)
     restore = PreparedMaintenance("restore", *common, admission_buffers=admissions, forward_inputs=inputs, qsa_states=qsa)
     snapshot = PreparedMaintenance("snapshot", *common, forward_inputs=inputs, qsa_states=qsa)
@@ -187,7 +189,7 @@ def test_maintenance_failure_precedes_mutation_and_preserves_other_generations(b
         inputs.live_rows.fill_(2)
         inputs.row_slot_ids[1], inputs.row_generations[1] = 1, 11
         _command(metadata, source=2, destination=5, operation=0, expected=128, row=1)
-    operation = PreparedMaintenance(mode, requests, pool, metadata, records, frame, sequence,
+    operation = PreparedMaintenance(mode, requests, pool, metadata, completion_outputs(records), frame, sequence,
         admission_buffers=admissions if mode != "snapshot" else None,
         forward_inputs=inputs, qsa_states=qsa)
     worker = _worker((operation,), records, (pool, requests, qsa, admissions, inputs))

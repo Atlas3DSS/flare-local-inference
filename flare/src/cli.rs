@@ -28,9 +28,11 @@ pub enum Command {
     Run(Box<Run>),
     /// Download a prepared package from the hardware's Hugging Face revision.
     Download(Download),
-    /// Run this host's agent, which pairs with controllers and runs its rank of a orbit's serving group.
+    /// Summarize a package's metadata, with optional memory, graph, and frontend details.
+    Inspect(Inspect),
+    /// Run this host's agent, which pairs with controllers and supervises serving ranks.
     Agent(AgentArgs),
-    /// Control a orbit of agents from this machine.
+    /// Control an orbit of agents from this machine.
     Orbit(OrbitArgs),
     /// Manage remembered publisher trust.
     Trust {
@@ -39,7 +41,7 @@ pub enum Command {
     },
 }
 
-#[derive(Debug, Args, Default, Clone)]
+#[derive(Debug, Args, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct HubOptions {
     /// Hub revision; defaults to gb10 or gb202 detected from the selected GPUs.
     #[arg(long, value_name = "REVISION", help_heading = "Download options")]
@@ -60,6 +62,54 @@ pub struct HubOptions {
     /// Use only cached files, without contacting Hugging Face.
     #[arg(long, help_heading = "Download options")]
     pub offline: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct Inspect {
+    /// Local prepared .safetensors package.
+    #[arg(value_name = "PACKAGE")]
+    pub package: PathBuf,
+
+    /// Print the selected sections as JSON.
+    #[arg(long)]
+    pub json: bool,
+
+    /// Disable terminal styling.
+    #[arg(long, conflicts_with = "json")]
+    pub plain: bool,
+
+    /// Include allocation addresses, reservations, and execution buffer views.
+    #[arg(long)]
+    pub memory_map: bool,
+
+    /// Include graph capacities, timings, and node counts for every selected rank.
+    #[arg(long)]
+    pub graphs: bool,
+
+    /// Include tokenizer, parser, vision, asset, and auxiliary table details.
+    #[arg(long)]
+    pub frontend: bool,
+
+    /// Include every detail section and the complete serving contract.
+    #[arg(long)]
+    pub all: bool,
+
+    /// Read only primary-file metadata without checking signatures or opening companions.
+    #[arg(long, conflicts_with_all = ["publisher_keys", "trust_store"])]
+    pub unverified: bool,
+
+    /// Verify only this rank of a multi-host package whose copy holds that rank's bytes alone.
+    #[arg(long, value_name = "N")]
+    pub rank: Option<usize>,
+
+    /// Additional publisher verification profiles (JSON).
+    /// Development packages default to ~/.config/flare/development-publisher.json.
+    #[arg(long, value_name = "PATH", action = clap::ArgAction::Append)]
+    pub publisher_keys: Vec<PathBuf>,
+
+    /// Persistent trust file whose remembered keys also verify [default: ~/.config/flare/trust.toml].
+    #[arg(long, value_name = "PATH")]
+    pub trust_store: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -90,7 +140,7 @@ pub struct AgentArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum AgentCommand {
-    /// Install the agent as a service on this host and pair its first controller.
+    /// Install and restart this host's agent service, and prepare controller pairing.
     Install {
         /// One-time code a controller presents to pair.
         #[arg(long, value_name = "CODE")]
@@ -102,7 +152,7 @@ pub enum AgentCommand {
         #[arg(long, value_name = "IP:PORT", default_value = "0.0.0.0:29900")]
         listen: String,
     },
-    /// Remove this host's pairings and cached files.
+    /// Remove this host's authorized controllers and pairing codes; keep its key and cache.
     Reset,
 }
 
@@ -135,24 +185,24 @@ pub enum OrbitCommand {
         #[command(subcommand)]
         command: ControllersCommand,
     },
-    /// Show each node's state and its running group.
+    /// Show each node's capacity, groups, and package cache.
     Status {
         #[arg(long, value_name = "NAME")]
         cluster: Option<String>,
     },
-    /// Launch a package across a cluster's nodes.
+    /// Launch a package across nodes or start a saved group.
     Run(Box<OrbitRun>),
     /// Show the live metrics dashboard for every group and GPU on the cluster's nodes.
     Dashboard {
         #[arg(long, value_name = "NAME")]
         cluster: Option<String>,
     },
-    /// List every group on the cluster's nodes.
+    /// List saved groups and retained runs on the cluster's nodes.
     Ls {
         #[arg(long, value_name = "NAME")]
         cluster: Option<String>,
     },
-    /// Follow running groups' output.
+    /// Follow retained and live rank output; Ctrl-C detaches without stopping ranks.
     Attach {
         #[arg(long, value_name = "NAME")]
         cluster: Option<String>,
@@ -168,12 +218,17 @@ pub enum OrbitCommand {
         #[arg(value_name = "GROUP")]
         group: Option<String>,
     },
+    /// Remove a stopped group's saved definition and retained run history.
+    Rm {
+        /// Group name or exact launch identifier; a launch identifier keeps its saved definition.
+        group: String,
+    },
     /// Remove a node from the orbit file.
     Forget {
         #[arg(value_name = "NODE")]
         node: String,
     },
-    /// Place a package on nodes and verify it there without starting it.
+    /// Stage package data on nodes without starting ranks.
     Push(Box<OrbitPush>),
     /// List what every node's package cache holds.
     Packages {
@@ -237,7 +292,7 @@ pub enum ControllersCommand {
 #[derive(Debug, Args)]
 #[command(args_override_self = true)]
 pub struct OrbitRun {
-    /// A local package path or NODE:/absolute/path on a node; omitted when --name names a
+    /// A Hugging Face repository, local package path, or NODE:/absolute/path; omitted when --name names a
     /// [[group]] of the orbit file, which supplies it.
     #[arg(value_name = "PACKAGE")]
     pub package: Option<String>,
@@ -252,19 +307,23 @@ pub struct OrbitRun {
     #[arg(long, value_name = "NAME")]
     pub name: Option<String>,
 
+    /// Save this named group's launch configuration for reuse after stopping or rebooting.
+    #[arg(long, requires = "name")]
+    pub persistent: bool,
+
     /// Candidate nodes in rank order, instead of a cluster or the whole orbit.
     #[arg(long, value_name = "NODE[,NODE...]", value_delimiter = ',')]
     pub nodes: Vec<String>,
 
-    /// Print the placement and what would be transferred, then exit.
+    /// Verify package metadata and print placement without starting ranks or saving a group.
     #[arg(long)]
     pub dry_run: bool,
 
-    /// Return once the group is serving instead of following its output.
+    /// Return once rank processes start; the HTTP server may still be loading the model.
     #[arg(long)]
     pub detach: bool,
 
-    /// Flare executable to send to nodes that run a different build [default: this executable].
+    /// Upload this Flare executable [default: saved override or each node's installed Flare].
     #[arg(long, value_name = "PATH")]
     pub executable: Option<PathBuf>,
 
@@ -273,32 +332,22 @@ pub struct OrbitRun {
     #[arg(long, help_heading = "Multi-host options")]
     pub roce_ring: bool,
 
-    /// IP address for the HTTP server on rank zero.
-    #[arg(
-        long,
-        value_name = "ADDR",
-        default_value = "127.0.0.1",
-        help_heading = "Serving options"
-    )]
-    pub host: IpAddr,
+    /// IP address for rank zero's HTTP server [default: saved group or 127.0.0.1].
+    #[arg(long, value_name = "ADDR", help_heading = "Serving options")]
+    pub host: Option<IpAddr>,
 
-    /// Port for the HTTP server on rank zero.
-    #[arg(
-        long,
-        value_name = "N",
-        default_value = "8000",
-        help_heading = "Serving options"
-    )]
-    pub port: u16,
+    /// Port for rank zero's HTTP server [default: saved group or 8000].
+    #[arg(long, value_name = "N", help_heading = "Serving options")]
+    pub port: Option<u16>,
 
     /// Replace the package's serving alias; the canonical model ID remains accepted.
     #[arg(long, value_name = "ALIAS", value_parser = served_model_name, help_heading = "Serving options")]
     pub served_model_name: Option<String>,
 
-    /// Favor token throughput or balance it with output cadence; both retain token-service fairness.
-    #[arg(long, value_name = "MODE", default_value = "balanced",
+    /// Favor throughput or output cadence [default: saved group or balanced].
+    #[arg(long, value_name = "MODE",
         value_parser = ["balanced", "throughput"], help_heading = "Serving options")]
-    pub scheduler_policy: String,
+    pub scheduler_policy: Option<String>,
 
     /// File on rank zero's node containing the serving API key; omit to disable authentication.
     #[arg(long, value_name = "PATH", help_heading = "Serving options")]
@@ -310,22 +359,39 @@ pub struct OrbitRun {
 
 impl OrbitRun {
     /// Serving options every rank loads with.
-    pub fn rank_options(&self) -> Vec<String> {
-        self.serving.rank_options(self.roce_ring)
+    pub fn rank_options(&self, matches: &clap::ArgMatches) -> Vec<String> {
+        let mut options = self.serving.rank_options(self.roce_ring);
+        // Explicit defaults must override saved values, while omitted defaults must not.
+        if self.serving.kv_cache_limit == KvCacheLimit::Memory
+            && matches.value_source("kv_cache_limit")
+                == Some(clap::parser::ValueSource::CommandLine)
+        {
+            options.extend(["--kv-cache-limit".into(), "memory".into()]);
+        }
+        if self.serving.embedding_table_cache_size == 0
+            && matches.value_source("embedding_table_cache_size")
+                == Some(clap::parser::ValueSource::CommandLine)
+        {
+            options.extend(["--embedding-table-cache-size".into(), "0".into()]);
+        }
+        options
     }
 
     /// Options only rank zero's HTTP server takes.
     pub fn rank_zero_options(&self) -> Vec<String> {
-        let mut options = vec![
-            "--host".into(),
-            self.host.to_string(),
-            "--port".into(),
-            self.port.to_string(),
-        ];
+        let mut options = Vec::new();
+        if let Some(host) = self.host {
+            options.extend(["--host".into(), host.to_string()]);
+        }
+        if let Some(port) = self.port {
+            options.extend(["--port".into(), port.to_string()]);
+        }
         if let Some(name) = &self.served_model_name {
             options.extend(["--served-model-name".into(), name.clone()]);
         }
-        options.extend(["--scheduler-policy".into(), self.scheduler_policy.clone()]);
+        if let Some(policy) = &self.scheduler_policy {
+            options.extend(["--scheduler-policy".into(), policy.clone()]);
+        }
         if let Some(path) = &self.api_key_file {
             options.extend(["--api-key-file".into(), path.display().to_string()]);
         }
@@ -336,14 +402,17 @@ impl OrbitRun {
     pub fn run_args(&self) -> Run {
         Run {
             package: PathBuf::from(self.package.as_deref().unwrap_or_default()),
-            host: self.host,
-            port: self.port,
+            host: self.host.unwrap_or_else(|| "127.0.0.1".parse().unwrap()),
+            port: self.port.unwrap_or(8000),
             served_model_name: self.served_model_name.clone(),
             roce_ring: self.roce_ring,
             rendezvous: None,
             rank: None,
             api_key_file: self.api_key_file.clone(),
-            scheduler_policy: self.scheduler_policy.clone(),
+            scheduler_policy: self
+                .scheduler_policy
+                .clone()
+                .unwrap_or_else(|| "balanced".into()),
             serving: self.serving.clone(),
         }
     }
@@ -490,6 +559,10 @@ pub struct ServingOptions {
     /// index, usage counters and miss workspace. Selects disk storage; 0 disables [default: 0].
     #[arg(long, value_name = "SIZE", value_parser = parse_size, default_value = "0", help_heading = "Serving options")]
     pub embedding_table_cache_size: u64,
+
+    /// Retain embedding scales in host RAM while weights remain on disk; adds to the row-cache budget.
+    #[arg(long, help_heading = "Serving options")]
+    pub embedding_table_resident_scales: bool,
 
     /// Disk workers per embedding table; shares a fixed I/O budget [default: 4 on Windows, 1 elsewhere].
     #[arg(long, value_name = "N", help_heading = "Advanced serving options",
@@ -639,6 +712,9 @@ impl ServingOptions {
                 self.embedding_table_cache_size.to_string(),
             ]);
         }
+        if self.embedding_table_resident_scales {
+            options.push("--embedding-table-resident-scales".into());
+        }
         options
     }
 
@@ -648,6 +724,7 @@ impl ServingOptions {
             memory_limit: self.memory_limit,
             embedding_table_storage: self.embedding_table_storage,
             embedding_table_cache_bytes: self.embedding_table_cache_size,
+            embedding_table_resident_scales: self.embedding_table_resident_scales,
             embedding_table_workers: self.embedding_table_workers,
             max_concurrency: self.max_concurrency.map(NonZeroUsize::get),
             mtp_draft_tokens: self.mtp_draft_tokens,
@@ -679,6 +756,89 @@ impl ServingOptions {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn persistent_orbit_options_preserve_saved_values_and_allow_explicit_defaults() {
+        use clap::{CommandFactory, FromArgMatches};
+        assert!(Cli::try_parse_from(["flare", "orbit", "run", "model", "--persistent"]).is_err());
+        for explicit in [false, true] {
+            let mut arguments = vec!["flare", "orbit", "run", "--name", "service", "--persistent"];
+            if explicit {
+                arguments.extend([
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    "8000",
+                    "--scheduler-policy",
+                    "balanced",
+                    "--kv-cache-limit",
+                    "memory",
+                    "--embedding-table-cache-size",
+                    "0",
+                    "--gpus",
+                    "0",
+                ]);
+            }
+            let matches = Cli::command().try_get_matches_from(arguments).unwrap();
+            let Command::Orbit(orbit) = Cli::from_arg_matches(&matches).unwrap().command else {
+                panic!()
+            };
+            let OrbitCommand::Run(orbit) = orbit.command else {
+                panic!()
+            };
+            assert!(orbit.persistent);
+            let run_matches = matches
+                .subcommand_matches("orbit")
+                .unwrap()
+                .subcommand_matches("run")
+                .unwrap();
+            let mut saved = vec![
+                "flare".to_string(),
+                "run".into(),
+                "model".into(),
+                "--host".into(),
+                "0.0.0.0".into(),
+                "--port".into(),
+                "8001".into(),
+                "--scheduler-policy".into(),
+                "throughput".into(),
+                "--kv-cache-limit".into(),
+                "context".into(),
+                "--embedding-table-cache-size".into(),
+                "1G".into(),
+            ];
+            saved.extend(orbit.rank_options(run_matches));
+            saved.extend(orbit.rank_zero_options());
+            let Command::Run(effective) = Cli::try_parse_from(saved).unwrap().command else {
+                panic!()
+            };
+            assert_eq!(effective.port, if explicit { 8000 } else { 8001 });
+            assert_eq!(
+                effective.host.to_string(),
+                if explicit { "127.0.0.1" } else { "0.0.0.0" }
+            );
+            assert_eq!(
+                effective.scheduler_policy,
+                if explicit { "balanced" } else { "throughput" }
+            );
+            assert_eq!(
+                effective.serving.kv_cache_limit,
+                if explicit {
+                    KvCacheLimit::Memory
+                } else {
+                    KvCacheLimit::Context
+                }
+            );
+            assert_eq!(
+                effective.serving.embedding_table_cache_size,
+                if explicit { 0 } else { 1 << 30 }
+            );
+            assert_eq!(
+                run_matches.value_source("gpus") == Some(clap::parser::ValueSource::CommandLine),
+                explicit
+            );
+        }
+    }
 
     fn run(arguments: &[&str]) -> Run {
         let Command::Run(args) = Cli::try_parse_from(arguments).unwrap().command else {
@@ -982,6 +1142,16 @@ mod tests {
             args.rank_options(),
             ["--embedding-table-cache-size", "1073741824"]
         );
+    }
+
+    #[test]
+    fn resident_embedding_scales_are_forwarded_to_every_rank() {
+        let args = run(&["flare", "run", "model.safetensors", "--embedding-table-resident-scales",
+                         "--embedding-table-cache-size", "1G"]);
+        assert!(args.load_options().embedding_table_resident_scales);
+        assert_eq!(args.load_options().embedding_table_cache_bytes, 1 << 30);
+        assert!(args.rank_options().contains(&"--embedding-table-resident-scales".to_owned()));
+        assert!(!run(&["flare", "run", "model.safetensors"]).load_options().embedding_table_resident_scales);
     }
 
     #[test]

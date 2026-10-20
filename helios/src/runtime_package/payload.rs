@@ -131,9 +131,8 @@ pub(super) unsafe fn load(
             continue;
         };
         let span = archive.span(package, file)?;
-        let source = archive.source(span)?;
+        let (source, mut file_offset) = archive.source(span)?;
         let file = source.direct()?;
-        let mut file_offset = source.start + span.offset;
         for [offset, nbytes] in allocation.spans() {
             for start in (0..nbytes).step_by(chunk_bytes) {
                 let nbytes = chunk_bytes.min(nbytes - start);

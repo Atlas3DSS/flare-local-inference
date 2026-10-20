@@ -9,6 +9,7 @@ use crate::{
 
 pub(super) fn config() -> ModelConfig {
     ModelConfig {
+        max_top_logprobs: 0,
         prepared_sequence_tokens: 2048,
         contract: super::testing::metadata(),
         identity: [1; 32],
@@ -22,11 +23,13 @@ pub(super) fn config() -> ModelConfig {
             snapshots: 40,
         },
         eos_token_ids: vec![248046, 248044],
+        sampling_ranges: Default::default(),
         sampling_defaults: SamplingParameters::default(),
         max_new_tokens: 256,
         speculative_widths: Vec::new(),
         speculative_fixed_width: None,
         speculative_token_capacity: 512,
+        decode_weight_bytes: 0,
         history_drafts: true,
         speculative_proposal_source: Default::default(),
     }
@@ -46,7 +49,7 @@ fn admission_histogram_seed_and_partial_page_uploads_preserve_native_semantics()
         .unwrap();
     let handle = scheduler
         .admit(RequestSpec {
-            system_boundary: None,
+            message_boundaries: vec![],
             prompt: vec![7; 65],
             conditioning: vec![],
             max_new_tokens: 4,
@@ -187,7 +190,7 @@ fn large_prefill_uploads_preserve_token_position_and_image_indices_without_tail_
     let prompt: Vec<u32> = (0..4113).collect();
     let handle = scheduler
         .admit(RequestSpec {
-            system_boundary: None,
+            message_boundaries: vec![],
             prompt: prompt.clone(),
             conditioning: vec![],
             max_new_tokens: 4,
@@ -491,7 +494,7 @@ fn packing_follows_value_bindings_after_buffers_and_model_are_renamed() {
         .unwrap();
     let handle = scheduler
         .admit(RequestSpec {
-            system_boundary: None,
+            message_boundaries: vec![],
             prompt: vec![7; 65],
             conditioning: vec![],
             max_new_tokens: 4,
@@ -626,7 +629,7 @@ fn copy_staging_uses_physical_slots_stochastic_defaults_and_bonus_mask() {
         .map(|slot| {
             scheduler
                 .admit(RequestSpec {
-                    system_boundary: None,
+                    message_boundaries: vec![],
                     prompt: vec![7; 65],
                     conditioning: vec![],
                     max_new_tokens: 16,
@@ -850,7 +853,7 @@ fn mixed_native_uploads_pack_prompt_after_the_decode_extent_and_sample_only_elig
             let h = scheduler
                 .admit(RequestSpec {
                     prompt: prompt.clone(),
-                    system_boundary: None,
+                    message_boundaries: vec![],
                     conditioning: vec![],
                     max_new_tokens: 16,
                     grammar_constrained: false,
@@ -1021,7 +1024,8 @@ fn mixed_manifest(config: &mut ModelConfig, width: usize) -> crate::execution::E
             -1,
         ));
         config.contract.graphs.push(semantics);
-        manifest.graphs.push(GraphDescriptor { packed_token_capacity: 0,
+        manifest.graphs.push(GraphDescriptor {
+            packed_token_capacity: 0,
             name,
             kind: GraphKind::Mixed,
             sampling_mode: SamplingMode::General,
@@ -1053,7 +1057,7 @@ fn state_transfer_and_resume_upload_fixture() {
         let prompt = vec![7; 64];
         let handle = scheduler
             .admit(RequestSpec {
-                system_boundary: None,
+                message_boundaries: vec![],
                 prompt: prompt.clone(),
                 conditioning: vec![],
                 max_new_tokens: 2,
@@ -1219,7 +1223,12 @@ fn retained_proposal_catalog_requires_prefix_coverage_and_proposal_free_decode()
     for state in &mut semantics.state {
         state.access = StateAccessKind::Read;
     }
-    let mut decode = manifest.graphs.iter().find(|g| g.kind == GraphKind::Speculative && g.token_capacity == 1).unwrap().clone();
+    let mut decode = manifest
+        .graphs
+        .iter()
+        .find(|g| g.kind == GraphKind::Speculative && g.token_capacity == 1)
+        .unwrap()
+        .clone();
     let mut decode_contract = config.contract.graph(&decode.name).unwrap().clone();
     decode.name = "Speculative-free-1".into();
     decode_contract.graph = decode.name.clone();
@@ -1258,7 +1267,12 @@ fn retained_proposal_catalog_requires_prefix_coverage_and_proposal_free_decode()
     catalog::validate(&config, &manifest).unwrap();
     // Packages with only the maximum proposal depth remain valid. Additional
     // captured depths use the same ownership and verification contract.
-    let mut shallow = manifest.graphs.iter().find(|g| g.kind == GraphKind::Proposal).unwrap().clone();
+    let mut shallow = manifest
+        .graphs
+        .iter()
+        .find(|g| g.kind == GraphKind::Proposal)
+        .unwrap()
+        .clone();
     let mut shallow_contract = config.contract.graph(&shallow.name).unwrap().clone();
     shallow.name = "Proposal-1-2".into();
     shallow.token_capacity = 2;
@@ -1267,8 +1281,20 @@ fn retained_proposal_catalog_requires_prefix_coverage_and_proposal_free_decode()
     manifest.graphs.insert(0, shallow);
     config.contract.graphs.push(shallow_contract);
     catalog::validate(&config, &manifest).unwrap();
-    assert_eq!(manifest.graphs[catalog::select(&config, &manifest, GraphKind::Proposal,
-        1, 2, 0, crate::execution::SamplingMode::General).unwrap()].token_capacity, 2);
+    assert_eq!(
+        manifest.graphs[catalog::select(
+            &config,
+            &manifest,
+            GraphKind::Proposal,
+            1,
+            2,
+            0,
+            crate::execution::SamplingMode::General
+        )
+        .unwrap()]
+        .token_capacity,
+        2
+    );
     let mut missing = manifest.clone();
     missing
         .graphs
@@ -1285,8 +1311,17 @@ fn retained_proposal_catalog_requires_prefix_coverage_and_proposal_free_decode()
         }
     }
     catalog::validate(&config, &packed).unwrap();
-    let index = catalog::select_shape(&config, &packed, GraphKind::Verification,
-        1, 8, 0, 3, crate::execution::SamplingMode::General).unwrap();
+    let index = catalog::select_shape(
+        &config,
+        &packed,
+        GraphKind::Verification,
+        1,
+        8,
+        0,
+        3,
+        crate::execution::SamplingMode::General,
+    )
+    .unwrap();
     assert_eq!(packed.graphs[index].packed_tokens(), 3);
     packed.graphs[index].packed_token_capacity = 9;
     assert!(catalog::validate(&config, &packed).is_err());
@@ -1358,7 +1393,7 @@ fn grammar_packing_fixture() -> (
     for _ in 0..8 {
         let handle = scheduler
             .admit(RequestSpec {
-                system_boundary: None,
+                message_boundaries: vec![],
                 prompt: vec![7; 66],
                 conditioning: vec![],
                 max_new_tokens: 512,

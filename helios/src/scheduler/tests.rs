@@ -199,7 +199,7 @@ pub(crate) fn duration_graphs(active: usize) -> Vec<crate::execution::GraphDescr
 
 pub(super) fn spec(tokens: usize, max_new: u32) -> RequestSpec {
     RequestSpec {
-        system_boundary: None,
+        message_boundaries: vec![],
         prompt: (0..tokens as u32).collect(),
         conditioning: vec![],
         max_new_tokens: max_new,
@@ -1923,7 +1923,7 @@ fn declared_model_capabilities_drive_state_slots_vision_buckets_and_copy_validat
     s.enable_speculation(&[1, 2]).unwrap();
     let handle = s
         .admit(RequestSpec {
-            system_boundary: None,
+            message_boundaries: vec![],
             prompt: vec![7; 4],
             conditioning: vec![],
             max_new_tokens: 8,
@@ -2817,7 +2817,7 @@ fn take_publications_reports_boundary_and_terminal_checkpoints_once() {
     let mut scheduler = host_scheduler(1, 8, 4);
     let handle = scheduler
         .admit(RequestSpec {
-            system_boundary: Some(64),
+            message_boundaries: vec![64],
             ..spec(130, 2)
         })
         .unwrap();

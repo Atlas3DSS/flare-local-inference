@@ -5,6 +5,8 @@ from dataclasses import replace
 
 import pytest
 import torch
+
+from tests.components.completion_support import completion_outputs
 import triton
 import triton.language as tl
 
@@ -170,7 +172,7 @@ def test_native_categorical_distribution_and_exact_seed_progression():
     logits = torch.full((4, 8), -torch.inf, device="cuda")
     probabilities = torch.tensor([.1, .3, .6])
     logits[:, :3].copy_(probabilities.log().expand(4, 3))
-    sampler = PreparedSampling(logits, state, *metadata)
+    sampler = PreparedSampling(logits, state, *metadata[:3], completion_outputs(metadata[3]), *metadata[4:])
     sampler.prepare()
     tokens = torch.empty(4, dtype=torch.int64, device="cuda")
     spans = torch.arange(5, dtype=torch.int32, device="cuda")
@@ -219,7 +221,7 @@ def test_native_sampling_full_vocabulary_batch_reordering_and_pending_consumptio
     for slot in range(4):
         state.admit(slot, params[slot], [0, 1, 1], consumed_tokens=3, ple_history=(1, 1))
         cpu_counts[slot, 0], cpu_counts[slot, 1] = 1, 2
-    sampler = PreparedSampling(logits, state, *metadata[:3], *metadata[3:])
+    sampler = PreparedSampling(logits, state, *metadata[:3], completion_outputs(metadata[3]), *metadata[4:])
     sampler.prepare()
     tokens = torch.empty(4, dtype=torch.int64, device="cuda")
     spans = torch.arange(5, dtype=torch.int32, device="cuda")
@@ -276,7 +278,7 @@ def test_terminal_grammar_errors_stale_epochs_and_inactive_lanes():
     state.grammar_mask[1, 0] = 1 << 8
     state.grammar_mask[3, 0] = 1 << 9
     epochs[3] = 99
-    sampler = PreparedSampling(logits, state, slots, epochs, live, records, frame, sequence)
+    sampler = PreparedSampling(logits, state, slots, epochs, live, completion_outputs(records), frame, sequence)
     sampler.prepare()
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
@@ -369,13 +371,13 @@ def test_native_admission_scatter_preserves_restored_state_and_gates_final_sampl
     slots.copy_(torch.tensor(order, dtype=torch.int32))
     epochs.copy_(torch.tensor([17 + slot for slot in order]))
     live.fill_(capacity)
-    admission = PreparedAdmission(state, buffers, records, frame, sequence, capacity=capacity)
+    admission = PreparedAdmission(state, buffers, completion_outputs(records), frame, sequence, capacity=capacity)
     admission.prepare()
     logits = torch.zeros((4, 32), device="cuda")
     logits.fill_(-torch.inf)
     logits[:, 8] = 2
     enabled = torch.zeros(4, dtype=torch.int32, device="cuda")
-    sampler = PreparedSampling(logits, state, *metadata, sample_enabled=enabled)
+    sampler = PreparedSampling(logits, state, *metadata[:3], completion_outputs(records), frame, sequence, sample_enabled=enabled)
     sampler.prepare()
     init_graph, sample_graph = torch.cuda.CUDAGraph(), torch.cuda.CUDAGraph()
     with torch.cuda.graph(init_graph):
@@ -437,7 +439,7 @@ def test_native_admission_errors_do_not_partially_mutate_resident_slots(fault):
     else:
         buffers.admission_parameters[0, 0] = float("nan")
     _, _, _, records, frame, sequence = _metadata()
-    admission = PreparedAdmission(state, buffers, records, frame, sequence)
+    admission = PreparedAdmission(state, buffers, completion_outputs(records), frame, sequence)
     admission.prepare()
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):

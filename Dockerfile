@@ -34,6 +34,7 @@ RUN apt-get update \
         --shell /usr/sbin/nologin flare
 
 COPY --from=build /out/flare /usr/local/bin/flare
+COPY LICENSE NOTICE /usr/share/doc/flare/
 
 USER flare
 WORKDIR /home/flare

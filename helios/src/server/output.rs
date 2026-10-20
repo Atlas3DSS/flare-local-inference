@@ -37,6 +37,7 @@ impl Accumulator {
         let mut deltas: Vec<Value> = Vec::new();
         for event in events {
             match event {
+                Event::TokenLogprobs(_) | Event::ContentLogprobs(_) => {},
                 Event::Content(text) => {
                     if !text.is_empty() {
                         self.content.push_str(&text);
@@ -138,6 +139,12 @@ impl Accumulator {
 
 pub(super) struct Decoder<'a, P: ModelOutput> {
     decoder: IncrementalDecoder<'a>,
+    tracking: Option<super::token_spans::TokenSpans<'a>>,
+    attribute_content: bool,
+    next_entries: Vec<super::token_spans::ReturnedLogprob>,
+    pending_entries: Vec<super::token_spans::ReturnedLogprob>,
+    text_bytes: usize,
+
     parser: Option<P>,
     eos: &'a [u32],
     finished: bool,
@@ -148,12 +155,44 @@ impl<'a, P: ModelOutput> Decoder<'a, P> {
     pub fn new(frontend: &'a Frontend, eos: &'a [u32], config: Option<P::Config>) -> Self {
         Self {
             decoder: frontend.incremental_decoder(false),
+            tracking: None,
+            attribute_content: false,
+            next_entries: vec![],
+            pending_entries: vec![],
+            text_bytes: 0,
             parser: config.map(P::new),
             eos,
             finished: false,
             worker_decoded: false,
             local_decoded: false,
         }
+    }
+    pub fn track_logprobs(&mut self, frontend: &'a Frontend, attribute_content: bool) {
+        self.attribute_content = attribute_content;
+        self.tracking = Some(super::token_spans::TokenSpans::new(frontend));
+    }
+    fn entries(&mut self, entries: impl IntoIterator<Item = super::token_spans::ReturnedLogprob>) {
+        for entry in entries {
+            if self.attribute_content && !entry.silent { self.pending_entries.push(entry.clone()); }
+            self.next_entries.push(entry);
+        }
+    }
+    pub fn push_logprob(&mut self, value: crate::execution::TokenLogprobs) -> Result<Vec<Event>> {
+        if self.finished || self.worker_decoded { return Err("invalid token decoding state".into()); }
+        self.local_decoded = true;
+        let token = value.token;
+        let mut events = self.parse(Input::Token(token))?;
+        let tracking = self.tracking.as_mut().ok_or("logprob decoder was not initialized")?;
+        if self.eos.contains(&token) {
+            if let Some(span) = tracking.silent(token, Some(value)) {
+                self.entries(span.tokens.into_iter().filter_map(|t| t.logprob));
+                events.extend(self.parse(Input::Text(""))?);
+            }
+        } else if let Some(span) = tracking.push(token, Some(value))? {
+            self.entries(span.tokens.into_iter().filter_map(|t| t.logprob));
+            events.extend(self.parse(Input::Text(&span.text))?);
+        }
+        Ok(events)
     }
     pub fn push(&mut self, token: u32) -> Result<Vec<Event>> {
         if self.finished {
@@ -182,6 +221,7 @@ impl<'a, P: ModelOutput> Decoder<'a, P> {
         let mut events = Vec::new();
         for piece in pieces {
             events.extend(match piece {
+                crate::output::Piece::Logprob(entry) => { self.entries([entry]); vec![] },
                 crate::output::Piece::Token(token) => self.parse(Input::Token(token))?,
                 crate::output::Piece::Text(text) => self.parse(Input::Text(&text))?,
             });
@@ -196,7 +236,15 @@ impl<'a, P: ModelOutput> Decoder<'a, P> {
             self.abort(cause);
             return Ok(vec![]);
         }
-        let final_text = if self.worker_decoded {
+        let final_text = if let Some(tracking) = &mut self.tracking {
+            if self.worker_decoded {
+                Ok(vec![])
+            } else {
+                let span = tracking.finish()?;
+                self.entries(span.tokens.into_iter().filter_map(|t| t.logprob));
+                self.parse(Input::Text(&span.text))
+            }
+        } else if self.worker_decoded {
             Ok(vec![])
         } else {
             self.decoder
@@ -212,7 +260,14 @@ impl<'a, P: ModelOutput> Decoder<'a, P> {
         };
         self.finished = true;
         if let Some(parser) = &mut self.parser {
-            events.extend(parser.finish(cause)?);
+            let final_events = parser.finish(cause)?;
+            let spans = if self.attribute_content {
+                parser.content_spans()
+            } else {
+                vec![]
+            };
+            let consumed = parser.consumed_bytes();
+            events.extend(self.decorate(final_events, spans, consumed));
         }
         Ok(events)
     }
@@ -230,15 +285,71 @@ impl<'a, P: ModelOutput> Decoder<'a, P> {
         }
     }
     fn parse(&mut self, input: Input<'_>) -> Result<Vec<Event>> {
-        if let Some(parser) = &mut self.parser {
-            parser.push(input)
+        if self.tracking.is_none() {
+            return if let Some(parser) = &mut self.parser {
+                parser.push(input)
+            } else {
+                Ok(match input {
+                    Input::Text(text) if !text.is_empty() => vec![Event::Content(text.into())],
+                    _ => vec![],
+                })
+            };
+        }
+        let start = self.text_bytes;
+        if let Input::Text(text) = input {
+            self.text_bytes += text.len();
+        }
+        let (events, spans, consumed) = if let Some(parser) = &mut self.parser {
+            let events = parser.push(input)?;
+            let spans = if self.attribute_content {
+                parser.content_spans()
+            } else {
+                vec![]
+            };
+            (events, spans, parser.consumed_bytes())
         } else {
-            Ok(match input {
+            let events = match input {
                 Input::Text(text) if !text.is_empty() => vec![Event::Content(text.into())],
                 _ => vec![],
-            })
-        }
+            };
+            (events, vec![Some(start..self.text_bytes)], self.text_bytes)
+        };
+        Ok(self.decorate(events, spans, consumed))
     }
+    fn decorate(
+        &mut self,
+        events: Vec<Event>,
+        spans: Vec<Option<std::ops::Range<usize>>>,
+        consumed: usize,
+    ) -> Vec<Event> {
+        if self.tracking.is_none() {
+            return events;
+        }
+        let mut result = Vec::new();
+        if !self.next_entries.is_empty() {
+            result.push(Event::TokenLogprobs(std::mem::take(&mut self.next_entries)));
+        }
+        let mut spans = spans.into_iter();
+        for event in events {
+            if self.attribute_content && matches!(event, Event::Content(_)) {
+                let range = spans.next().flatten();
+                let mut entries = Vec::new();
+                self.pending_entries.retain(|entry| {
+                    if range.as_ref().is_some_and(|r| r.contains(&entry.start)) {
+                        entries.push(entry.clone());
+                        false
+                    } else {
+                        true
+                    }
+                });
+                result.push(Event::ContentLogprobs(entries));
+            }
+            result.push(event);
+        }
+        self.pending_entries.retain(|entry| entry.start >= consumed);
+        result
+    }
+
 }
 
 impl<P: ModelOutput> Drop for Decoder<'_, P> {
@@ -558,31 +669,46 @@ pub(crate) mod tests {
         }
     }
     struct Controls {
+        content: bool,
         observed: Arc<Mutex<Vec<String>>>,
         reasoning: ControlReasoning,
         tools: ControlTools,
     }
     impl ModelOutput for Controls {
+        fn content_spans(&self) -> Vec<Option<std::ops::Range<usize>>> {
+            if self.content {
+                vec![None]
+            } else {
+                vec![]
+            }
+        }
+        fn consumed_bytes(&self) -> usize {
+            0
+        }
         type Config = Arc<Mutex<Vec<String>>>;
         fn new(observed: Self::Config) -> Self {
             Self {
+                content: false,
                 observed,
                 reasoning: ControlReasoning,
                 tools: ControlTools,
             }
         }
         fn push(&mut self, input: Input<'_>) -> Result<Vec<Event>> {
+            self.content = false;
             self.observed.lock().unwrap().push(format!("{input:?}"));
             let mut events = self.tools.push(input)?.events;
             events.extend(self.reasoning.push(input)?.events);
             if let Input::Text(text) = input {
                 if !text.is_empty() {
+                    self.content = true;
                     events.push(Event::Content(text.into()));
                 }
             }
             Ok(events)
         }
         fn finish(&mut self, cause: Termination) -> Result<Vec<Event>> {
+            self.content = false;
             self.observed
                 .lock()
                 .unwrap()
@@ -847,6 +973,7 @@ impl ResponseOutput {
     pub fn apply(&mut self, event: Event, request_id: &str) -> Result<Vec<Change>> {
         let mut changes = vec![];
         match event {
+            Event::TokenLogprobs(_) | Event::ContentLogprobs(_) => {},
             Event::Content(text) | Event::Reasoning(text) if text.is_empty() => {}
             event @ (Event::Content(_) | Event::Reasoning(_)) => {
                 let reasoning = matches!(event, Event::Reasoning(_));
@@ -947,5 +1074,31 @@ impl ResponseOutput {
             }
         }
         Ok(changes)
+    }
+}
+
+#[cfg(test)]
+mod logprob_retention_tests {
+    use super::*;
+    use crate::{execution::TokenLogprobs, output::{OutputConfig, OutputPipeline, tagged::{OutputConfig as Tags, OutputStart}}};
+    #[test]
+    fn responses_discard_unfinished_tool_body_entries_as_the_body_arrives() {
+        let frontend = super::tests::frontend(&["<tool_call>", "<function=lookup>", "xxxxxxxx"]);
+        let mut syntax = crate::model::testing::metadata().frontend;
+        syntax.tools = Some(crate::model::contract::ToolParser {
+            kind: crate::model::contract::ToolParserKind::QwenCoder,
+            wrapping_newlines: 0, tag_separator: String::new(),
+        });
+        let config = OutputConfig { syntax, control_tokens: vec![], content: Tags {
+            structured: false, start: OutputStart::Content,
+            tools: vec![json!({"type":"function","function":{"name":"lookup"}})],
+        } };
+        let mut decoder = Decoder::<OutputPipeline>::new(&frontend, &[], Some(config));
+        decoder.track_logprobs(&frontend, true);
+        for token in [vec![0,1],vec![2;1024]].concat() {
+            decoder.push_logprob(TokenLogprobs { token, logprob: -1., top: [(0,0.); crate::execution::MAX_TOP_LOGPROBS], top_count: 0 }).unwrap();
+            assert!(decoder.pending_entries.is_empty());
+        }
+        assert!(decoder.finish(Termination::OutputLimit).unwrap().is_empty());
     }
 }

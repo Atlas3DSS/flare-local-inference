@@ -5,11 +5,19 @@ PyTorch.
 """
 
 from collections.abc import Callable, Mapping
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, field, fields, replace
 import math
 from types import MappingProxyType
 
 from ignition.components.capacity import request_capacity
+
+@dataclass(frozen=True)
+class SamplingRange:
+    """Inclusive bounds from the model author's sampling recommendations."""
+
+    min: float | int
+    max: float | int
+
 
 @dataclass(frozen=True)
 class SamplingDefaults:
@@ -23,18 +31,35 @@ class SamplingDefaults:
     repetition_penalty: float = 1.
     presence_penalty: float = 0.
     frequency_penalty: float = 0.
+    ranges: Mapping[str, SamplingRange] = field(default_factory=dict)
 
     def __post_init__(self):
         values = (self.temperature, self.top_p, self.min_p, self.repetition_penalty,
                   self.presence_penalty, self.frequency_penalty)
-        if (any(not math.isfinite(v) for v in values) or self.temperature <= 0
+        if (any(type(v) not in (int, float) or not math.isfinite(v)
+                or abs(v) > float.fromhex("0x1.fffffep+127") for v in values)
+                or any(v < float.fromhex("0x1p-126") for v in
+                       (self.temperature, self.top_p, self.repetition_penalty))
                 or not 0 < self.top_p <= 1 or not 0 <= self.min_p <= 1
-                or self.repetition_penalty <= 0 or type(self.top_k) is not int or self.top_k < -1
+                or type(self.top_k) is not int or not -1 <= self.top_k < 2**31
                 or type(self.seed) is not int or not 0 <= self.seed < 2**64):
             raise ValueError("invalid recipe sampling defaults")
+        names = {item.name for item in fields(self)} - {"seed", "ranges"}
+        for name, bounds in self.ranges.items():
+            if (name not in names or not isinstance(bounds, SamplingRange)
+                    or any(type(v) not in (int, float) or not math.isfinite(v)
+                           for v in (bounds.min, bounds.max))
+                    or not bounds.min <= getattr(self, name) <= bounds.max):
+                raise ValueError(f"invalid sampling range for {name}")
+            for value in (bounds.min, bounds.max):
+                replace(self, **{name: value}, ranges={})
+        object.__setattr__(self, "ranges", MappingProxyType(dict(self.ranges)))
 
     def as_dict(self):
-        return asdict(self)
+        result = {item.name: getattr(self, item.name) for item in fields(self) if item.name != "ranges"}
+        if self.ranges:
+            result["ranges"] = {name: asdict(bounds) for name, bounds in self.ranges.items()}
+        return result
 
 
 @dataclass(frozen=True)
@@ -58,6 +83,10 @@ class Checkpoint:
     # Per-rank costs replacing the recipe's `ranks` and `plain_ranks` when this checkpoint's draft or state
     # layout differs, such as a draft model that only this checkpoint carries.
     ranks: Mapping[int, "RankCosts"] | None = None
+    # Bytes of weights one decode step reads for one request across every rank: dense weights
+    # plus the experts one token activates, at their stored precision. Zero leaves the serving
+    # contract without the value, and dashboards then show no weight bandwidth.
+    decode_weight_bytes: int = 0
     plain_ranks: Mapping[int, "RankCosts"] | None = None
 
 
@@ -124,6 +153,8 @@ class Recipe:
     `prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress)` loads,
     tunes, and captures the plan's serving catalog and returns the prepared model.
     `usage(prepared)` reports each rank's device memory in rank order.
+    `served_model_name` is the canonical model name advertised by the API,
+    independent of checkpoint selection aliases and storage formats.
 
     `ranks` holds each tensor-parallel size's costs as the recipe serves by
     default. A recipe that declares `speculation` drafts with those settings
@@ -139,11 +170,14 @@ class Recipe:
     encoder, rejecting images and leaving the encoder's memory to KV pages.
     `mla_compute_modes` declares the attention arithmetic constraints a plan may select,
     independently of KV storage encoding and kernel tuning.
+    `export_repository` names the Hugging Face destination and the default local snapshot
+    namespace. Export writes locally; it does not upload or select a signing identity.
     `b12x_environment` holds the b12x settings the recipe prepares with. b12x reads them
     only from its environment, so Ignition sets them for the preparing process.
     """
 
     name: str
+    served_model_name: str
     checkpoints: tuple[Checkpoint, ...]
     context: int
     page_tokens: int
@@ -168,6 +202,7 @@ class Recipe:
     language_model_only: bool = False
     b12x_environment: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
     mla_compute_modes: tuple[str, ...] = ("auto",)
+    export_repository: str = ""
 
     def mixed_shapes(self, concurrency, chunk, speculation):
         from ignition.components.capacity import mixed_shapes
@@ -180,6 +215,10 @@ class Recipe:
                                         speculation.token_capacity if enabled else None))
 
     def __post_init__(self):
+        if self.export_repository:
+            import re
+            if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*', self.export_repository) or '..' in self.export_repository:
+                raise ValueError('export_repository must be a Hugging Face namespace/repository')
         if any(not name.startswith("B12X_") or not isinstance(value, str)
                for name, value in self.b12x_environment.items()):
             raise ValueError("b12x settings name B12X_ variables with string values")

@@ -45,8 +45,9 @@ pub(super) fn geometry(
     }
     let tokens = (h / PATCH).div_ceil(3) * (w / PATCH).div_ceil(3);
     let patches = tokens * 9;
-    if h == 0 || w == 0 || cost(h, w) > settings.max_tokens || patches > limits.max_patches_per_image {
-        return Err("processed image exceeds the configured patch or token limit".into());
+    check_image_patches(limits, patches)?;
+    if h == 0 || w == 0 || cost(h, w) > settings.max_tokens {
+        return Err("processed image exceeds the recipe's image token limit".into());
     }
     Ok(ImageGeometry { height: h, width: w, grid_thw: [1, (h / PATCH) as i64, (w / PATCH) as i64], patches, tokens })
 }

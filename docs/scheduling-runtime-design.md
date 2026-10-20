@@ -105,6 +105,12 @@ calls before differently grouped verification calls.
 GPU replay and serial host handoff have separate duration estimates. Scheduling
 uses their sum; queued completion wall time does not become a handoff sample.
 Per-operation trace measurements retain GPU and wall intervals independently.
+The enabled scheduler trace records each completion's submission fence, physical
+graph, selected cost and observation age, selection reason, refresh episode,
+and credit before dispatch and after settlement. Selected costs remain attached
+to their plans even if another observation arrives before commit. Selection and
+commit clocks are recorded separately. The bounded completion history retains
+these fields independently of the most recent dispatch shown by the dashboard.
 `flare_proposal_rounds_total` and `flare_proposal_gpu_nanoseconds_total` expose
 separate proposal work by batch capacity and draft depth. The corresponding
 `flare_speculative_*` metrics cover combined or verification graphs by batch
@@ -222,24 +228,73 @@ cancellation paths preserve fenced resource ownership regardless of utility.
 
 Each prepared graph descriptor has one `estimated_duration_ns` field. Native
 estimates start at zero, including descriptors supplied with a nonzero value.
-Zero means indeterminate. Physical graph kind, batch capacity, and token capacity
-identify a cost entry; active row count does not change its identity.
+Zero means indeterminate. Physical graph kind, batch capacity, token capacity,
+mixed prefill capacity, and packed verification capacity identify a cost entry;
+active row count does not change its identity.
 
 The first positive device observation sets the estimate. Further valid samples
-before expiry use an EMA with weight 1/8. An entry expires after 30 seconds without
-a valid observation. Its next measurement replaces the expired estimate directly.
-This lets an initially slow or noisy graph compete again.
+while fresh use an EMA with weight 1/8. An entry becomes stale after 30 seconds
+without a valid observation. Its measured cost remains available for selection
+and service-rate normalization. The first valid observation of a stale entry
+replaces its estimate directly; elapsed time alone never makes a measured graph
+unknown.
 
-The observation is the maximum positive rank-local CUDA replay interval. Host
-queueing, input staging, polling, and publication delays do not replace GPU time.
-Missing or zero intervals neither change a cost nor refresh its expiry. Expired
-costs are also excluded from service-rate normalization.
+The device observation is the maximum positive rank-local CUDA replay interval.
+An isolated execution also measures host handoff as wall time minus device time,
+clamped at zero. Device and handoff components have separate EMA updates. Queued
+executions update device time without treating queue wait as handoff. Missing
+or zero device intervals neither change an estimate nor make it fresh.
+
+Prefill exploration excludes a larger unmeasured graph when a smaller prepared
+capacity consumes the same tokens up to the next message or prompt endpoint.
+Measured graphs remain eligible according to their observed costs.
 
 An indeterminate candidate wins over a determinate candidate, then competes by
 expected useful value. Equal values prefer shorter known time, less recently
 used requests, and smaller physical padding. Unknown graphs require an empty
 submission queue and completion feedback. A lone cold request consequently tries
 its largest useful prefill or speculation extent without a solo-request rule.
+
+Stale physical dispatches also require an empty queue and completion feedback,
+while retaining their measured costs for ranking. Commit rechecks freshness
+because a saved plan can outlive the estimate's freshness interval.
+
+## Funded timing refresh
+
+Ordinary valid completions earn `0.002 / 0.998` times their measured execution
+duration, capped at 5 ms. For queued executions, credited time is the maximum
+positive device interval; for isolated executions it is the larger of that
+interval and wall time. Initial discovery earns no credit. Idle discards
+positive credit and preserves debt.
+
+Full credit permits one stale alternative to displace the ordinary measured
+winner. Feasible alternatives are ordered by the later of their last valid
+observation and last attempted dispatch, then by ordinary useful-value ranking.
+Attempts advance only on committed execution. Invalid timing does not make
+the estimate fresh, and its isolated wall time still pays for the attempt.
+Ordinary winners update their costs through normal service without spending
+refresh credit.
+
+Split drafting can require a proposal before a verification shape becomes
+executable. A funded refresh includes that enabling proposal and the verification
+captures consuming its retained rows. Existing finalized prefixes stay fixed;
+fresh proposal rows use the selected verification capacity and causal allocation.
+Every physical capture in this refresh episode pays its actual duration once.
+Required verification continues through debt. Another episode cannot start
+until the first closes and credit reaches the cap again. Cancellation releases
+ownership without inventing a timing observation.
+
+For credited ordinary duration `O`, refresh duration `P`, and the actual duration
+`D` of the current or last refresh episode:
+
+```text
+P <= 0.002 / 0.998 * O + D.
+```
+
+The allowance bounds aggregate expense with one nonpreemptible episode overrun;
+it does not cap individual decode stalls. Funding the first refresh requires
+2,495 ms of credited ordinary execution. Repeated shorter busy periods separated
+by idle can leave unused graph estimates stale indefinitely.
 
 ## Service accounting and publication
 
@@ -287,7 +342,7 @@ Cancellation stops further selection immediately; pages and state slots remain
 owned through their last submitted fence.
 
 The transport has two frame slots. Known nonterminal prefill and ordinary decode
-can use both. Speculation, unknown timings, grammar, host stops, and operations
+can use both. Speculation, unknown or stale timings, grammar, host stops, and operations
 that change the request phase require completion feedback. A finishing prefill
 therefore exposes its decoder and checkpoint operation before another decision
 is committed.
@@ -314,7 +369,7 @@ Defaults specify these preferences:
 | `delivery_fairness` | 4 | Delivery-rate log-utility coefficient, value/ms |
 | `decode_age_price` | 0.1 | Linear output-age cost coefficient, value/ms² |
 | `adaptation_ms` | 100 | Service-price adaptation time |
-| `estimate_ttl_ns` | 30,000,000,000 | Cost expiry interval |
+| `estimate_ttl_ns` | 30,000,000,000 | Timing freshness interval |
 
 These weights express a throughput/cadence tradeoff. They are not graph timing
 measurements or latency guarantees. Setting fairness or age coefficients to zero

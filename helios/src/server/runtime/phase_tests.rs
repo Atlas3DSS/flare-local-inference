@@ -65,6 +65,7 @@ impl Fixture {
         std::fs::remove_dir_all(directory).unwrap();
         Self {
             config: ModelConfig {
+                max_top_logprobs: 0,
                 prepared_sequence_tokens: 128,
                 contract: crate::model::testing::metadata(),
                 identity: [23; 32],
@@ -78,11 +79,13 @@ impl Fixture {
                     snapshots: 16,
                 },
                 eos_token_ids: vec![5],
+                sampling_ranges: Default::default(),
                 sampling_defaults: SamplingParameters::default(),
                 max_new_tokens: 16,
                 speculative_widths: vec![],
                 speculative_fixed_width: None,
                 speculative_token_capacity: 512,
+                decode_weight_bytes: 0,
                 history_drafts: false,
                 speculative_proposal_source: Default::default(),
             },
@@ -115,7 +118,8 @@ impl Fixture {
                 GraphKind::Prefill,
             ] {
                 for width in 1..=if kind == GraphKind::Speculative { 8 } else { 1 } {
-                    graphs.push(crate::execution::GraphDescriptor { packed_token_capacity: 0,
+                    graphs.push(crate::execution::GraphDescriptor {
+                        packed_token_capacity: 0,
                         name: format!("{kind:?}-{batch}-{width}"),
                         kind,
                         sampling_mode: crate::execution::SamplingMode::General,
@@ -180,7 +184,7 @@ impl Fixture {
                 publications: Default::default(),
                 prompt: Prompt {
                     tokens,
-                    system_boundary: None,
+                    message_boundaries: vec![],
                     data,
                     images: None,
                     conditioning: vec![],
@@ -188,6 +192,7 @@ impl Fixture {
                     max_new_tokens: limit,
                     stop_sequences: vec![],
                     stop_strings: vec![],
+                    logprobs: false,
                     ignore_eos: false,
                     grammar: None,
                 },
@@ -223,8 +228,8 @@ fn image_admission_queues_excess_images_and_admits_text() {
         patches_per_feature: 4,
         patch_capacities: vec![256],
     };
-    let vision_contract: crate::model::contract::PreparedContract = serde_json::from_str(
-        include_str!("../../../tests/support/contracts/qwen38.json")).unwrap();
+    let vision_contract: crate::model::contract::PreparedContract =
+        serde_json::from_str(include_str!("../../../tests/support/contracts/qwen38.json")).unwrap();
     fixture.config.contract.frontend = vision_contract.frontend;
     let (sender, receiver) = mpsc::channel();
     let mut worker = fixture.worker(receiver);
@@ -233,9 +238,15 @@ fn image_admission_queues_excess_images_and_admits_text() {
         incoming.prompt.images = Some(ProcessedImages {
             pixel_values: vec![],
             geometry: vec![ImageGeometry {
-                height: 32, width: 32, grid_thw: [1, 16, 16], patches: 256, tokens: 64,
+                height: 32,
+                width: 32,
+                grid_thw: [1, 16, 16],
+                patches: 256,
+                tokens: 64,
             }],
-            position_ids: vec![], interpolation_indices: vec![], interpolation_weights: vec![],
+            position_ids: vec![],
+            interpolation_indices: vec![],
+            interpolation_weights: vec![],
             cu_seqlens: vec![0, 256],
         });
         (incoming, generation)
@@ -244,18 +255,33 @@ fn image_admission_queues_excess_images_and_admits_text() {
     let (waiting, waiting_generation) = image();
     let (text, text_generation) = fixture.incoming(vec![2, 3], 1);
     sender.send(vec![first, waiting, text]).unwrap();
-    assert!(matches!(worker.admit().unwrap(), ControlFlow::Continue(true)));
+    assert!(matches!(
+        worker.admit().unwrap(),
+        ControlFlow::Continue(true)
+    ));
     assert_eq!(worker.pending.len(), 1);
     assert_eq!(worker.active.iter().flatten().count(), 2);
-    assert!(worker.active.iter().flatten().any(|r| r.incoming.prompt.images.is_none()));
+    assert!(
+        worker
+            .active
+            .iter()
+            .flatten()
+            .any(|r| r.incoming.prompt.images.is_none())
+    );
     assert!(!worker.scheduler.has_available_image_slot());
     first_generation.cancelled.store(true, Ordering::Release);
-    assert!(matches!(worker.admit().unwrap(), ControlFlow::Continue(true)));
+    assert!(matches!(
+        worker.admit().unwrap(),
+        ControlFlow::Continue(true)
+    ));
     assert!(worker.pending.is_empty());
     assert_eq!(worker.active.iter().flatten().count(), 2);
     assert!(!worker.scheduler.has_available_image_slot());
     waiting_generation.cancelled.store(true, Ordering::Release);
-    assert!(matches!(worker.admit().unwrap(), ControlFlow::Continue(true)));
+    assert!(matches!(
+        worker.admit().unwrap(),
+        ControlFlow::Continue(true)
+    ));
     assert!(worker.scheduler.has_available_image_slot());
     assert_eq!(worker.active.iter().flatten().count(), 1);
     drop(text_generation);
@@ -289,6 +315,7 @@ fn completion(
         };
     }
     FrameCompletion {
+        logprobs: None,
         proposal_confidence: None,
         fence: Fence(sequence),
         graph_index: 0,
@@ -595,7 +622,7 @@ fn exact_system_and_prompt_checkpoints_publish_only_after_snapshot_completion() 
     let fixture = Fixture::new();
     let (sender, receiver) = mpsc::channel();
     let (mut incoming, mut generation) = fixture.incoming(vec![0; 13], 2);
-    incoming.prompt.system_boundary = Some(10);
+    incoming.prompt.message_boundaries = vec![10];
     sender.send(vec![incoming]).unwrap();
     let mut worker = fixture.worker(receiver);
     assert_eq!(worker.admit().unwrap(), ControlFlow::Continue(true));
@@ -606,7 +633,7 @@ fn exact_system_and_prompt_checkpoints_publish_only_after_snapshot_completion() 
         worker.scheduler.request(handle).unwrap().consumed_tokens,
         10
     );
-    assert_eq!(worker.scheduler.stats().system_checkpoints, 0);
+    assert_eq!(worker.scheduler.stats().message_checkpoints, 0);
     assert!(!worker.publish().unwrap());
     let snapshot = planned(&mut worker, GraphKind::Snapshot, 3);
     let uploads = crate::model::Inputs::uploads(worker.inputs.as_ref().unwrap());
@@ -615,11 +642,11 @@ fn exact_system_and_prompt_checkpoints_publish_only_after_snapshot_completion() 
         .find(|u| u.buffer == "state_expected_consumed")
         .unwrap();
     assert_eq!(&expected.bytes[..8], &10i64.to_le_bytes());
-    assert_eq!(worker.scheduler.stats().system_checkpoints, 0);
+    assert_eq!(worker.scheduler.stats().message_checkpoints, 0);
     worker
         .complete(GraphKind::Snapshot, completion(&worker, &snapshot, 3, None))
         .unwrap();
-    assert_eq!(worker.scheduler.stats().system_checkpoints, 1);
+    assert_eq!(worker.scheduler.stats().message_checkpoints, 1);
     assert_eq!(
         worker
             .scheduler
@@ -829,6 +856,7 @@ fn speculative_dashboard_counts_live_rounds_and_batched_forward_passes() {
                 .complete(
                     GraphKind::Speculative,
                     FrameCompletion {
+                        logprobs: None,
                         proposal_confidence: None,
                         records: invalid,
                         ..frame
@@ -1469,7 +1497,7 @@ fn exercise_text_preemption(
                 prompt: vec![3; page_tokens * 5],
                 max_new_tokens: 1,
                 growable_output: false,
-                system_boundary: None,
+                message_boundaries: vec![],
                 conditioning: vec![],
                 grammar_constrained: false,
                 host_stops: false,

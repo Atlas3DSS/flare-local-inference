@@ -2,9 +2,9 @@
 //! launching, attaching to, and stopping serving groups. See docs/orbit.md.
 //!
 //! A launch verifies the package at the controller, where the operator accepts its publisher;
-//! checks every node's STATUS; issues a grant in the cluster's rank order; gives every node the
-//! executable; places the package, either complete on rank zero from the controller or at the
-//! node that holds it, from where every other node fetches its ranks' byte ranges with TRANSFER;
+//! checks every node's STATUS; issues a grant in the cluster's rank order; transfers an explicit
+//! executable override; places the package, either complete on rank zero from the controller or
+//! at the node that holds it, from where every other node fetches its ranks' byte ranges with TRANSFER;
 //! and sends RUN to rank zero and then to the peers. Each rank's output is printed with a
 //! `[rank R name]` prefix.
 //!
@@ -34,7 +34,7 @@ use super::grant::{ControllerKey, ControllerSet, Grant, Member, Package, Signed,
 use super::identity::{Key, PublicKey};
 use super::plan;
 use super::session::{FRAME_LIMIT, Session};
-use super::store::{Node, Orbit, join_key};
+use super::store::{GroupSpec, Node, Orbit, join_key};
 use super::{
     Failure, PROTOCOL_VERSION, frame, hex, hmac_sha256, hostname, now, random, unhex, with_port,
 };
@@ -146,6 +146,8 @@ pub struct RunOptions {
     /// The operator's name for the group, and the orbit file's `[[group]]` of that name when
     /// one exists; the cluster's name or the package's stem when absent.
     pub name: Option<String>,
+    /// Save the effective launch configuration as a persistent named group.
+    pub persistent: bool,
     /// Candidate nodes in rank order; empty leaves them to the cluster, the group, or the pool.
     pub nodes: Vec<String>,
     /// NVML indices of the GPUs each member uses on its node; empty lets placement pick.
@@ -157,7 +159,7 @@ pub struct RunOptions {
     /// Options for rank zero alone: the HTTP bind and request handling.
     pub rank_zero: Vec<String>,
     pub roce_ring: bool,
-    /// The flare executable the nodes run; the running executable when absent.
+    /// An executable to upload; absent means each node uses its installed agent executable.
     pub executable: Option<PathBuf>,
     /// Return once every rank has started instead of following the group.
     pub detach: bool,
@@ -336,6 +338,7 @@ impl Controller {
             public_key: self.key.public().to_hex(),
             controllers_revision: self.revision()?,
             free_bytes: 0,
+            executable: None,
         };
         let hello = exchange_hello(&mut session, &mine)?;
         if hello.kind != "node" {
@@ -691,6 +694,13 @@ impl Controller {
         let (name, nodes) = self.cluster(cluster)?;
         let results = parallel(&nodes, |_, node| self.query_status(node, None));
         println!("cluster {name}");
+        for spec in &self.orbit.group {
+            if !spec.nodes.is_empty() && !nodes.iter().any(|node| spec.nodes.contains(&node.name)) {
+                continue;
+            }
+            let state = saved_group_state(spec, &results);
+            println!("persistent {}: {state}; {}", spec.name, spec.package);
+        }
         println!(
             "{:<16}  {:<36}  {:<10}  {:>4}  {:<24}  STATE",
             "NAME", "GROUP", "NODE", "RANK", "GPUS"
@@ -746,13 +756,13 @@ impl Controller {
     /// `flare orbit run`: launch a package on a cluster, then follow its output and stop the group
     /// on Ctrl-C, or, with `detach`, return once every rank has started.
     pub fn run(
-        &self,
+        &mut self,
         package: Option<&str>,
         cluster: Option<&str>,
         mut options: RunOptions,
     ) -> Result<(), Failure> {
         // A [[group]] of the orbit file supplies what the command line leaves out: its package,
-        // its serving options before the command line's, its rank-zero options after them, and
+        // its serving and rank-zero options before the command line's, and
         // its node and GPU constraints.
         let spec = options
             .name
@@ -782,22 +792,19 @@ impl Controller {
             if cluster.is_some() {
                 label.clone()
             } else {
-                Path::new(&package)
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "group".into())
+                default_group_name(&package)
             }
         });
         let mut serving = spec.as_ref().map_or_else(Vec::new, |s| s.serving.clone());
         serving.extend(options.serving.iter().cloned());
-        let verify_weights = options.verify_weights || options.run_args.serving.verify_weights;
+        let verify_weights = options.verify_weights
+            || options.run_args.serving.verify_weights
+            || serving.iter().any(|arg| arg == "--verify-weights");
         if verify_weights && !serving.iter().any(|a| a == "--verify-weights") {
             serving.push("--verify-weights".into());
         }
-        let mut rank_zero = options.rank_zero.clone();
-        if let Some(spec) = &spec {
-            rank_zero.extend(spec.rank_zero.iter().cloned());
-        }
+        let mut rank_zero = spec.as_ref().map_or_else(Vec::new, |s| s.rank_zero.clone());
+        rank_zero.extend(options.rank_zero.iter().cloned());
         let roce_ring = options.roce_ring || spec.as_ref().is_some_and(|s| s.roce_ring);
         let gpus = if options.gpus.is_empty() {
             spec.as_ref().map_or_else(Vec::new, |s| s.gpus.clone())
@@ -805,8 +812,32 @@ impl Controller {
             options.gpus.clone()
         };
 
+        if options.persistent
+            && options
+                .name
+                .as_deref()
+                .is_none_or(|name| name.trim().is_empty())
+        {
+            return Err("--persistent requires a nonempty --name".into());
+        }
+        if options.executable.is_none() {
+            options.executable = spec.as_ref().and_then(|s| s.executable.clone());
+        }
+        if let Some(spec) = &spec {
+            if options.run_args.serving.publisher_keys.is_empty() {
+                options.run_args.serving.publisher_keys = spec.publisher_keys.clone();
+            }
+            if options.run_args.serving.trust_store.is_none() {
+                options.run_args.serving.trust_store = spec.trust_store.clone();
+            }
+        }
         let executable = read_executable(options.executable.as_deref())?;
-        let resolved = self.resolve_package(&package, &mut options.run_args, verify_weights)?;
+        let repository = crate::hub::is_repository(Path::new(&package));
+        let resolved = if repository {
+            None
+        } else {
+            Some(self.resolve_package(&package, &mut options.run_args, verify_weights)?)
+        };
 
         // The banner circles while the nodes are read and the group placed; nothing else is
         // printed until it has completed a revolution.
@@ -845,6 +876,33 @@ impl Controller {
                 Err(error) => return Err(at(&node.name, error)),
             }
         }
+        if (options.persistent || spec.is_some())
+            && statuses
+                .iter()
+                .any(|status| status.running().any(|group| group.name == name))
+        {
+            return Err(format!(
+                "persistent group {name} is already running; stop it before starting it again"
+            )
+            .into());
+        }
+        if let Some(banner) = banner {
+            banner.finish();
+        }
+        let resolved = match resolved {
+            Some(resolved) => resolved,
+            None => self.resolve_repository(
+                &package,
+                &nodes,
+                &statuses,
+                &gpus,
+                &mut options.run_args,
+                verify_weights,
+            )?,
+        };
+        if repository {
+            statuses = all(parallel(&nodes, |_, node| self.query_status(node, None)))?;
+        }
         let names: Vec<String> = nodes.iter().map(|n| n.name.clone()).collect();
         let length = resolved.files[0].size;
         let needs = plan::Needs {
@@ -863,12 +921,9 @@ impl Controller {
         };
         let constraints = plan::Constraints {
             nodes: candidates.clone(),
-            gpus,
+            gpus: gpus.clone(),
         };
         let placements = plan::plan(&needs, &names, &statuses, &constraints);
-        if let Some(banner) = banner {
-            banner.finish();
-        }
         for line in &skipped {
             eprintln!("{line}");
         }
@@ -888,12 +943,54 @@ impl Controller {
             eprintln!("dry run: nothing started");
             return Ok(());
         }
+        if options.persistent {
+            let package = match &resolved.holder {
+                Holder::Controller { primary } => primary.to_string_lossy().into_owned(),
+                Holder::Node { node, path } => format!("{}:{path}", node.name),
+            };
+            let saved = GroupSpec {
+                name: name.clone(),
+                package,
+                serving: serving.clone(),
+                rank_zero: rank_zero.clone(),
+                nodes: candidates.clone(),
+                gpus,
+                roce_ring,
+                executable: options
+                    .executable
+                    .as_deref()
+                    .map(Path::canonicalize)
+                    .transpose()?,
+                publisher_keys: options
+                    .run_args
+                    .serving
+                    .publisher_keys
+                    .iter()
+                    .map(|path| path.canonicalize())
+                    .collect::<Result<_, _>>()?,
+                trust_store: options
+                    .run_args
+                    .serving
+                    .trust_store
+                    .as_deref()
+                    .map(absolute_path)
+                    .transpose()?,
+            };
+            // Persist validated intent before RUN so a failed launch remains restartable.
+            let mut orbit = Orbit::load(&self.orbit_path)?;
+            orbit.save_group(saved);
+            orbit.save(&self.orbit_path)?;
+            self.orbit = orbit;
+            eprintln!(
+                "saved persistent group {name}; start it again with `flare orbit run --name {name}`"
+            );
+        }
         let members: Vec<Node> = placements.iter().map(|p| nodes[p.node].clone()).collect();
         let launch = self.launch(
             &label,
             &members,
             &resolved,
-            &executable,
+            executable.as_deref(),
             &LaunchOptions {
                 name: name.clone(),
                 placements: placements.iter().map(|p| p.gpus.clone()).collect(),
@@ -948,7 +1045,7 @@ impl Controller {
             ..LaunchOptions::default()
         };
         if nodes.len() == world {
-            let launch = self.launch("push", &nodes, &resolved, &[], &options)?;
+            let launch = self.launch("push", &nodes, &resolved, None, &options)?;
             eprintln!(
                 "{} staged on {}",
                 launch.grant.name,
@@ -988,7 +1085,13 @@ impl Controller {
                 eprintln!("{}: holds the package", node.name);
                 continue;
             }
-            self.launch("push", std::slice::from_ref(node), &complete, &[], &options)?;
+            self.launch(
+                "push",
+                std::slice::from_ref(node),
+                &complete,
+                None,
+                &options,
+            )?;
             eprintln!("{}: complete package staged", node.name);
         }
         Ok(())
@@ -1040,6 +1143,69 @@ impl Controller {
         run_args: &mut crate::cli::Run,
         verify_weights: bool,
     ) -> Result<ResolvedPackage, Failure> {
+        self.resolve_package_from(reference, run_args, verify_weights, None)
+    }
+
+    fn resolve_repository(
+        &self,
+        source: &str,
+        nodes: &[Node],
+        statuses: &[NodeStatus],
+        gpus: &[u32],
+        run_args: &mut crate::cli::Run,
+        verify_weights: bool,
+    ) -> Result<ResolvedPackage, Failure> {
+        let options = &run_args.hub;
+        let revision = repository_revision(source, options, statuses, gpus)?;
+        let node = nodes
+            .iter()
+            .zip(statuses)
+            .find(|(_, status)| {
+                status.gpus.iter().any(|gpu| {
+                    gpu.group.is_none() && (gpus.is_empty() || gpus.contains(&gpu.index))
+                })
+            })
+            .map(|(node, _)| node)
+            .ok_or("no candidate node has an available GPU for the repository package")?;
+        let access_token = if options.offline {
+            None
+        } else {
+            crate::hub::token(options).map_err(|e| e.to_string())?
+        };
+        let request = super::agent::DownloadRequest {
+            source: source.into(),
+            options: crate::cli::HubOptions {
+                revision: Some(revision.clone()),
+                token_file: None,
+                ..options.clone()
+            },
+            access_token,
+        };
+        eprintln!(
+            "{}: resolving and downloading {source} at revision {revision}",
+            node.name
+        );
+        let (mut session, _) = self.node_session(node)?;
+        let reply: Value = serde_json::from_slice(
+            &session
+                .request(frame::DOWNLOAD, &serde_json::to_value(request)?)
+                .map_err(|e| at(&node.name, e))?,
+        )?;
+        let path = reply["path"]
+            .as_str()
+            .ok_or("DOWNLOAD reply lacks a path")?;
+        let reference = format!("{}:{path}", node.name);
+        let (id, _) = crate::hub::repository(source).map_err(|e| e.to_string())?;
+        self.resolve_package_from(&reference, run_args, verify_weights, Some(id))
+    }
+
+    fn resolve_package_from(
+        &self,
+        reference: &str,
+        run_args: &mut crate::cli::Run,
+        verify_weights: bool,
+        origin: Option<&str>,
+    ) -> Result<ResolvedPackage, Failure> {
         // The controller computes every rank's ranges, so it verifies every rank's index.
         run_args.rank = None;
         match parse_package_reference(reference, |name| self.orbit.node(name).is_some()) {
@@ -1048,7 +1214,7 @@ impl Controller {
                     format!("cannot access package {reference}: {e}; a node-held package is NODE:/ABSOLUTE/PATH with NODE a orbit node")
                 })?;
                 run_args.serving.verify_weights = verify_weights;
-                let (authorized, publisher) = verify(&primary, run_args)?;
+                let (authorized, publisher) = verify(&primary, run_args, origin)?;
                 describe(
                     &authorized,
                     &primary,
@@ -1069,7 +1235,7 @@ impl Controller {
                     .mirror_package(&node, &path, &mirror.0)
                     .map_err(|e| at(&node.name, e))?;
                 run_args.serving.verify_weights = false;
-                let (authorized, publisher) = verify(&primary, run_args)?;
+                let (authorized, publisher) = verify(&primary, run_args, origin)?;
                 describe(
                     &authorized,
                     &primary,
@@ -1137,7 +1303,7 @@ impl Controller {
         cluster: &str,
         nodes: &[Node],
         package: &ResolvedPackage,
-        executable: &[u8],
+        executable: Option<&[u8]>,
         options: &LaunchOptions,
     ) -> Result<Launch, Failure> {
         let world = package.ranks.len();
@@ -1162,7 +1328,15 @@ impl Controller {
         let toward = nodes.get(1).unwrap_or(&nodes[0]).address.clone();
         let opened = parallel(nodes, |rank, node| {
             (|| -> Result<(Session, NodeStatus), Failure> {
-                let (mut session, _) = self.node_session(node)?;
+                let (mut session, hello) = self.node_session(node)?;
+                if executable.is_none() && !options.stage_only {
+                    let installed = hello.installed_executable()?;
+                    eprintln!(
+                        "{}: using installed flare {}",
+                        node.name,
+                        installed.display()
+                    );
+                }
                 let status = status_on(&mut session, (rank == 0).then_some(toward.as_str()))?;
                 Ok((session, status))
             })()
@@ -1250,18 +1424,23 @@ impl Controller {
             );
         }
 
-        // Every node gets the executable; with the package at the controller, rank zero gets
-        // every file of it complete.
-        let binary = cache::binary_name(executable);
+        // Only an explicit override transfers an executable. With the package at the
+        // controller, rank zero gets every file of it complete.
+        let binary = executable.map(|bytes| (cache::binary_name(bytes), bytes));
         let complete = grant.complete_directory();
         all(parallel_mut(&mut sessions, |rank, session| {
             (|| -> Result<(), Failure> {
                 let mut needed = 0;
-                let send_binary = !options.stage_only
-                    && !have(session, "binary", &binary, executable.len() as u64)?;
-                if send_binary {
-                    needed += executable.len() as u64;
-                }
+                let send_binary = match &binary {
+                    Some((name, bytes))
+                        if !options.stage_only
+                            && !have(session, "binary", name, bytes.len() as u64)? =>
+                    {
+                        needed += bytes.len() as u64;
+                        Some((name, *bytes))
+                    }
+                    _ => None,
+                };
                 let mut sends = Vec::new();
                 if let (0, Holder::Controller { primary }) = (rank, &package.holder) {
                     for file in &package.files {
@@ -1273,15 +1452,9 @@ impl Controller {
                     }
                 }
                 check_space(&statuses[rank], needed)?;
-                if send_binary {
-                    put(
-                        session,
-                        "binary",
-                        &binary,
-                        executable.len() as u64,
-                        &mut &executable[..],
-                    )?;
-                    eprintln!("{}: received flare executable {binary}", nodes[rank].name);
+                if let Some((name, bytes)) = send_binary {
+                    put(session, "binary", name, bytes.len() as u64, &mut &bytes[..])?;
+                    eprintln!("{}: received flare executable {name}", nodes[rank].name);
                 }
                 for (path, name, size) in sends {
                     let mut source = File::open(&path)
@@ -1351,7 +1524,7 @@ impl Controller {
             let request = json!({
                 "grant": signed,
                 "rank": rank,
-                "binary": binary,
+                "binary": binary.as_ref().map(|(name, _)| name),
                 "publisher": publisher,
             });
             if let Err(error) = sessions[rank].request(frame::RUN, &request) {
@@ -1463,6 +1636,48 @@ impl Controller {
     }
 
     // ---- attaching and stopping ----------------------------------------------------------------
+
+    /// Remove a named definition and its stopped runs, or one exact run without its definition.
+    pub fn remove(&mut self, name: &str) -> Result<(), Failure> {
+        // Inspect every paired node before deleting anything. An unreachable node may still run
+        // this name, so partial visibility cannot authorize forgetting its saved definition.
+        let statuses = all(parallel(&self.orbit.node, |_, node| {
+            self.node_status(node, None)
+        }))?;
+        let mut runs = Vec::new();
+        for (node, status) in self.orbit.node.iter().zip(&statuses) {
+            for group in status
+                .groups
+                .iter()
+                .filter(|group| group.id == name || group.name == name)
+            {
+                if group.running {
+                    return Err(format!(
+                        "group {} is running on {}; stop it before removing it",
+                        group.id, node.name
+                    )
+                    .into());
+                }
+                runs.push((node.clone(), group.id.clone()));
+            }
+        }
+        if runs.is_empty() && self.orbit.group(name).is_none() {
+            return Err(format!("no saved group or retained run named {name}").into());
+        }
+        for (node, id) in &runs {
+            let (mut session, _) = self.node_session(node)?;
+            session.request(frame::REMOVE, &json!({"group": id}))?;
+        }
+        let mut orbit = Orbit::load(&self.orbit_path)?;
+        let before = orbit.group.len();
+        orbit.group.retain(|group| group.name != name);
+        if before != orbit.group.len() {
+            orbit.save(&self.orbit_path)?;
+        }
+        self.orbit = orbit;
+        eprintln!("removed {name}; model packages remain cached");
+        Ok(())
+    }
 
     /// Follow the groups on a cluster's nodes, or the group named `group`: retained output,
     /// then live output until every rank exits. Ctrl-C detaches and leaves the groups running.
@@ -1839,11 +2054,21 @@ fn mirror_file(
         let header: Value = serde_json::from_slice(&header)
             .map_err(|e| format!("{remote}: invalid safetensors header: {e}"))?;
         let offsets = &header["flare.metadata"]["data_offsets"];
-        let (Some(begin), Some(end)) = (offsets[0].as_u64(), offsets[1].as_u64()) else {
+        let (Some(begin), Some(mut end)) = (offsets[0].as_u64(), offsets[1].as_u64()) else {
             return Err(format!("{remote} is not a Flare package").into());
         };
+        if header["__metadata__"]["format"] == "flare-snapshot" {
+            let layout = &header["flare.layout"]["data_offsets"];
+            if layout[0].as_u64() != Some(end) {
+                return Err("snapshot layout must follow its signed metadata".into());
+            }
+            end = layout[1].as_u64().ok_or("snapshot lacks layout metadata")?;
+        }
         let start = 8 + header_size;
-        if end <= begin || start.checked_add(end).is_none_or(|e| e > size) {
+        if end <= begin
+            || end - begin > 256 << 20
+            || start.checked_add(end).is_none_or(|e| e > size)
+        {
             return Err(format!("{remote} has an invalid model index range").into());
         }
         get(
@@ -1908,6 +2133,43 @@ fn report_end(end: &RankEnd) {
 
 // ---- packages ----------------------------------------------------------------------------------
 
+fn default_group_name(package: &str) -> String {
+    if crate::hub::is_repository(Path::new(package)) {
+        let (id, _) = crate::hub::repository(package).unwrap();
+        return id.rsplit('/').next().unwrap().into();
+    }
+    Path::new(package)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "group".into())
+}
+
+/// Explicit revisions win; otherwise infer one hardware revision from the candidate nodes.
+fn repository_revision(
+    source: &str,
+    options: &crate::cli::HubOptions,
+    statuses: &[NodeStatus],
+    gpus: &[u32],
+) -> Result<String, Failure> {
+    let (_, suffix) = crate::hub::repository(source).map_err(|e| e.to_string())?;
+    if let Some(revision) = options.revision.as_deref().or(suffix) {
+        return Ok(revision.into());
+    }
+    let revisions: std::collections::BTreeSet<_> = statuses
+        .iter()
+        .flat_map(|status| &status.gpus)
+        .filter(|gpu| gpu.group.is_none() && (gpus.is_empty() || gpus.contains(&gpu.index)))
+        .map(|gpu| gpu.revision.as_str())
+        .collect();
+    if revisions.is_empty() {
+        return Err("candidate nodes have no available selected GPUs".into());
+    }
+    if revisions.len() > 1 {
+        return Err("candidate GPUs do not identify one hardware revision; specify --revision or constrain --nodes/--gpus".into());
+    }
+    Ok(revisions.into_iter().next().unwrap().into())
+}
+
 /// Parse `NODE:/ABSOLUTE/PATH`, where NODE is a node name `is_node` accepts; anything else is a
 /// local path.
 pub fn parse_package_reference(text: &str, is_node: impl Fn(&str) -> bool) -> PackageReference {
@@ -1931,9 +2193,11 @@ pub fn parse_package_reference(text: &str, is_node: impl Fn(&str) -> bool) -> Pa
 fn verify(
     primary: &Path,
     args: &crate::cli::Run,
+    origin: Option<&str>,
 ) -> Result<(AuthorizedPackage, Publisher), Failure> {
     let mut progress = StartupProgress::silent();
-    crate::trust::load(primary, args, &mut progress, None).map_err(|e| Failure::from(e.to_string()))
+    crate::trust::load(primary, args, &mut progress, origin)
+        .map_err(|e| Failure::from(e.to_string()))
 }
 
 /// A verified package's files and every rank's byte ranges.
@@ -2051,19 +2315,12 @@ impl Drop for Mirror {
     }
 }
 
-/// The executable nodes run: `path`, or this executable on a Linux aarch64 controller.
-fn read_executable(path: Option<&Path>) -> Result<Vec<u8>, Failure> {
-    let path = match path {
-        Some(path) => path.to_owned(),
-        None if cfg!(all(target_os = "linux", target_arch = "aarch64")) => std::env::current_exe()?,
-        None => {
-            return Err(
-                "nodes run a Linux aarch64 flare and this controller is another build; supply one with --executable PATH"
-                    .into(),
-            );
-        }
-    };
-    fs::read(&path).map_err(|e| format!("cannot read executable {}: {e}", path.display()).into())
+/// Read only an explicit override; the controller's own binary is never sent implicitly.
+fn read_executable(path: Option<&Path>) -> Result<Option<Vec<u8>>, Failure> {
+    path.map(|path| {
+        fs::read(path).map_err(|e| format!("cannot read executable {}: {e}", path.display()).into())
+    })
+    .transpose()
 }
 
 // ---- formatting --------------------------------------------------------------------------------
@@ -2182,6 +2439,28 @@ fn gib(bytes: u64) -> String {
 
 // ---- helpers -----------------------------------------------------------------------------------
 
+fn absolute_path(path: &Path) -> Result<PathBuf, Failure> {
+    Ok(if path.is_absolute() {
+        path.to_owned()
+    } else {
+        std::env::current_dir()?.join(path)
+    })
+}
+
+fn saved_group_state(spec: &GroupSpec, statuses: &[Result<NodeStatus, Failure>]) -> &'static str {
+    if statuses
+        .iter()
+        .filter_map(|status| status.as_ref().ok())
+        .any(|status| status.running().any(|group| group.name == spec.name))
+    {
+        "running"
+    } else if statuses.iter().any(Result::is_err) {
+        "unknown (node unreachable)"
+    } else {
+        "stopped"
+    }
+}
+
 /// Prefix an error with the node it concerns.
 fn at(node: &str, error: Failure) -> Failure {
     format!("{node}: {error}").into()
@@ -2257,12 +2536,36 @@ mod tests {
     use crate::orbit::agent::tests::{harness, pair_accept_first};
     use std::sync::Arc;
 
-    /// A controller over two in-process agents paired with its key, a script as the executable,
+    #[test]
+    fn reading_an_executable_requires_an_explicit_path_on_every_controller_platform() {
+        assert!(read_executable(None).unwrap().is_none());
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("flare");
+        assert!(read_executable(Some(&path)).is_err());
+        fs::write(&path, b"chosen executable").unwrap();
+        assert_eq!(
+            read_executable(Some(&path)).unwrap().unwrap(),
+            b"chosen executable"
+        );
+    }
+
+    #[test]
+    fn launching_uses_each_nodes_installed_executable_without_uploading_a_binary() {
+        check_launch(None);
+    }
+
+    #[test]
+    fn launching_uploads_and_runs_an_explicit_executable_override() {
+        check_launch(Some(
+            b"#!/bin/sh\necho \"$0\"\necho \"$@\"\nod -An -tx1 -j 40000 -N 4 \"$2\"\nexit 0\n",
+        ));
+    }
+
+    /// A controller over two in-process agents paired with its key, scripts as the executables,
     /// and a two-rank package whose "primary" is a plain file: rank 0 reads all of it, rank 1
     /// two ranges. Launching exercises PUT, TRANSFER, FETCH, RUN and output following end to
     /// end; only the rank processes are fakes.
-    #[test]
-    fn launching_places_the_executable_and_package_and_runs_every_rank() {
+    fn check_launch(executable: Option<&[u8]>) {
         let zero = harness(21);
         let one = crate::orbit::agent::tests::Harness {
             controller: Key::from_seed(&[21; 32]).unwrap(),
@@ -2294,7 +2597,7 @@ mod tests {
                 nodes: vec!["zero".into(), "one".into()],
             },
         );
-        let controller = Controller::new(
+        let mut controller = Controller::new(
             Key::from_seed(&[21; 32]).unwrap(),
             orbit,
             temp.path().join("orbit.toml"),
@@ -2303,7 +2606,6 @@ mod tests {
         let primary = temp.path().join("model.safetensors");
         let bytes: Vec<u8> = (0..50_000u32).map(|i| (i % 241) as u8).collect();
         fs::write(&primary, &bytes).unwrap();
-        let script = "#!/bin/sh\necho \"$@\"\nod -An -tx1 -j 40000 -N 4 \"$2\"\nexit 0\n";
         let package = ResolvedPackage {
             export: "export".into(),
             files: vec![PackageEntry {
@@ -2338,12 +2640,53 @@ mod tests {
                 reserve_bytes: 0,
             },
         };
+        let single_host = ResolvedPackage {
+            ranks: vec![package.ranks[0].clone()],
+            needs: PackageNeeds {
+                multi_host: false,
+                ..package.needs.clone()
+            },
+            ..package.clone()
+        };
+        let launch = controller
+            .launch(
+                "single",
+                &nodes[..1],
+                &single_host,
+                executable,
+                &LaunchOptions {
+                    name: "single".into(),
+                    placements: vec![vec![]],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(launch.grant.single_host);
+        assert!(launch.grant.rendezvous.is_empty());
+        let events = follow(
+            launch
+                .ranks
+                .into_iter()
+                .map(|(node, session)| (0, node.name, session))
+                .collect(),
+        );
+        assert_eq!(
+            events
+                .recv_timeout(Duration::from_secs(20))
+                .unwrap()
+                .result
+                .unwrap(),
+            0
+        );
+        controller.save().unwrap();
+        controller.remove(&launch.grant.group).unwrap();
+
         let launch = controller
             .launch(
                 "pair",
                 &nodes,
                 &package,
-                script.as_bytes(),
+                executable,
                 &LaunchOptions {
                     name: "pair".into(),
                     placements: vec![
@@ -2397,9 +2740,65 @@ mod tests {
         assert_eq!(copy[..4096], bytes[..4096]);
         assert_eq!(copy[40_000..48_000], bytes[40_000..48_000]);
         assert!(copy[4096..40_000].iter().all(|&b| b == 0));
-        let binary = cache::binary_name(script.as_bytes());
-        assert!(zero.agent.cache.join("bin").join(&binary).is_file());
-        assert!(one.agent.cache.join("bin").join(&binary).is_file());
+        for harness in [&zero, &one] {
+            let selected = match executable {
+                Some(bytes) => {
+                    let binary = harness
+                        .agent
+                        .cache
+                        .join("bin")
+                        .join(cache::binary_name(bytes));
+                    assert_eq!(fs::read(&binary).unwrap(), bytes);
+                    binary
+                }
+                None => {
+                    assert_eq!(
+                        fs::read_dir(harness.agent.cache.join("bin"))
+                            .unwrap()
+                            .count(),
+                        0
+                    );
+                    harness.temp.path().join("installed-flare")
+                }
+            };
+            let mut session = crate::orbit::agent::tests::connect(harness, &harness.controller);
+            session
+                .request(frame::ATTACH, &json!({"group": launch.grant.group}))
+                .unwrap();
+            let (lines, exit) = crate::orbit::agent::tests::collect(&mut session);
+            assert_eq!(exit, 0);
+            assert!(
+                lines.contains(&selected.to_string_lossy().into_owned()),
+                "{lines:?}"
+            );
+        }
+
+        controller.orbit.save_group(GroupSpec {
+            name: "pair".into(),
+            package: primary.to_string_lossy().into_owned(),
+            ..GroupSpec::default()
+        });
+        controller.save().unwrap();
+        controller.remove(&launch.grant.group).unwrap();
+        assert!(controller.orbit.group("pair").is_some());
+        for node in &nodes {
+            assert!(
+                controller
+                    .node_status(node, None)
+                    .unwrap()
+                    .groups
+                    .is_empty()
+            );
+        }
+        controller.remove("pair").unwrap();
+        assert!(
+            Orbit::load(&controller.orbit_path)
+                .unwrap()
+                .group
+                .is_empty()
+        );
+        assert!(complete.is_file());
+        assert!(partial.is_file());
 
         // Staging places and verifies the package without executables or ranks.
         let staged = ResolvedPackage {
@@ -2411,7 +2810,7 @@ mod tests {
                 "push",
                 &nodes,
                 &staged,
-                &[],
+                None,
                 &LaunchOptions {
                     name: "push-model".into(),
                     placements: vec![vec![], vec![]],
@@ -2447,7 +2846,7 @@ mod tests {
                 "pair",
                 &nodes,
                 &package,
-                script.as_bytes(),
+                executable,
                 &LaunchOptions {
                     name: "pair".into(),
                     placements: vec![vec![], vec![]],
@@ -2460,6 +2859,61 @@ mod tests {
         drop(zero_session);
         drop(one_session);
         let _ = Arc::clone(&zero.agent);
+    }
+
+    #[test]
+    fn default_group_names_preserve_repository_names_and_omit_revisions() {
+        assert_eq!(
+            default_group_name("owner/Qwen3.8-Flash-Next-FLARE"),
+            "Qwen3.8-Flash-Next-FLARE"
+        );
+        assert_eq!(
+            default_group_name("owner/Qwen3.8-Flash-Next-FLARE@release/gb10"),
+            "Qwen3.8-Flash-Next-FLARE"
+        );
+        assert_eq!(default_group_name("/models/qwen3.8.safetensors"), "qwen3.8");
+    }
+
+    #[test]
+    fn repository_revisions_follow_candidate_gpus_and_explicit_values() {
+        let status = |revision: &str, index: u32, group: Option<&str>| {
+            serde_json::from_value::<NodeStatus>(json!({
+                "fingerprint": "node", "free_bytes": 0, "controllers_revision": 1,
+                "gpus": [{"index": index, "uuid": "GPU", "name": "GPU", "revision": revision,
+                    "memory_total": 0, "memory_free": 0, "group": group}]
+            }))
+            .unwrap()
+        };
+        let options = crate::cli::HubOptions::default();
+        let sparks = vec![status("gb10", 0, None), status("gb10", 0, None)];
+        assert_eq!(
+            repository_revision("owner/model", &options, &sparks, &[]).unwrap(),
+            "gb10"
+        );
+        assert_eq!(
+            repository_revision("owner/model@release", &options, &[], &[]).unwrap(),
+            "release"
+        );
+        let explicit = crate::cli::HubOptions {
+            revision: Some("chosen".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            repository_revision("owner/model@release", &explicit, &[], &[]).unwrap(),
+            "chosen"
+        );
+        let mixed = vec![status("gb10", 0, None), status("gb202", 1, None)];
+        assert!(repository_revision("owner/model", &options, &mixed, &[]).is_err());
+        assert_eq!(
+            repository_revision("owner/model", &options, &mixed, &[0]).unwrap(),
+            "gb10"
+        );
+        let occupied = vec![status("gb202", 0, Some("running")), status("gb10", 0, None)];
+        assert_eq!(
+            repository_revision("owner/model", &options, &occupied, &[]).unwrap(),
+            "gb10"
+        );
+        assert!(repository_revision("owner/model", &options, &[], &[]).is_err());
     }
 
     #[test]

@@ -19,7 +19,7 @@ use std::{fs, path::PathBuf};
 
 #[test]
 #[ignore = "requires FLARE_GLM_TEST_SNAPSHOT and FLARE_GLM_FRONTEND_REFERENCE from generate_glm_fixtures.py"]
-fn checkpoint_template_tokenization_requests_and_instruction_prefix_match_transformers() {
+fn checkpoint_template_tokenization_requests_and_message_boundaries_match_transformers() {
     let snapshot = PathBuf::from(std::env::var_os("FLARE_GLM_TEST_SNAPSHOT").unwrap());
     let asset = |name: &str| {
         let path = snapshot.join(name);
@@ -42,6 +42,7 @@ fn checkpoint_template_tokenization_requests_and_instruction_prefix_match_transf
     )
     .unwrap();
     let config = ModelConfig {
+        max_top_logprobs: 0,
         prepared_sequence_tokens: 1048576,
         contract: support::contract("glm53"),
         identity: [9; 32],
@@ -55,11 +56,13 @@ fn checkpoint_template_tokenization_requests_and_instruction_prefix_match_transf
             snapshots: 16,
         },
         eos_token_ids: vec![154820, 154827, 154829],
+        sampling_ranges: Default::default(),
         sampling_defaults: SamplingParameters::default(),
         max_new_tokens: 128,
         speculative_widths: vec![],
         speculative_fixed_width: None,
         speculative_token_capacity: 0,
+        decode_weight_bytes: 0,
         history_drafts: false,
         speculative_proposal_source: Default::default(),
     };
@@ -84,15 +87,8 @@ fn checkpoint_template_tokenization_requests_and_instruction_prefix_match_transf
             case["token_ids"],
             "{name}"
         );
-        let boundary = prepared
-            .prompt
-            .system_boundary
-            .unwrap_or_else(|| panic!("{name}: missing instruction checkpoint"));
-        assert_eq!(
-            serde_json::to_value(&prepared.prompt.tokens[..boundary]).unwrap(),
-            case["prefix"],
-            "{name}"
-        );
+        assert_eq!(serde_json::to_value(&prepared.prompt.message_boundaries).unwrap(),
+            case["message_boundaries"], "{name}");
         assert_eq!(
             prepared.output.content.start == flare_helios::output::tagged::OutputStart::Reasoning,
             case["reasoning"].as_bool().unwrap(),

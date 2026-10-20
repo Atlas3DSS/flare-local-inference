@@ -248,13 +248,14 @@ class PreparedParallelDraftRound:
             o.inputs.row_slot_ids[:b],
             o.inputs.row_generations[:b],
             o.inputs.live_rows,
-            o.records,
+            o.completion,
             o.frame,
             o.sequence,
-            rng=o.rng,
+            logits=self.decoder.scratch.logits.view(b, w, -1), rng=o.rng,
             draft_context_lag=0,
             token_limits=o.inputs.query_lengths[:b],
         )
+        commit.prepare()
         self.operations = target, proposals, verify, commit
 
     def __call__(self):

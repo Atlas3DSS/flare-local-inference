@@ -40,7 +40,9 @@ pub(crate) fn prepare_input(
     let mut data = PromptData::default();
     let mut conditioning = Vec::new();
     let (mut image, mut offset) = (0, 0);
-    for token in &rendered.token_ids {
+    let mut token_expansions = Vec::new();
+    for (source_index, token) in rendered.token_ids.iter().enumerate() {
+        let before = tokens.len();
         if token != placeholder {
             tokens.push(*token);
             data.vision_token_indices.push(-1);
@@ -89,9 +91,11 @@ pub(crate) fn prepare_input(
         tokens.extend(suffix);
         offset += count;
         image += 1;
+        token_expansions.push((source_index, tokens.len() - before - 1));
     }
     Ok(PreparedInput {
         tokens,
+        token_expansions,
         data,
         conditioning,
         images: processed,

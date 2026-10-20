@@ -19,8 +19,18 @@ pub fn validate(config: &ModelConfig, manifest: &ExecutionManifest) -> Result<()
 
 fn validate_inner(config: &ModelConfig, manifest: &ExecutionManifest) -> Result<()> {
     manifest.validate()?;
+    if config.max_top_logprobs != manifest.max_top_logprobs()? {
+        return Err("model logprob capacity differs from its declared output buffers".into());
+    }
     config.contract.validate(manifest)?;
-    config.sampling_defaults.validate()?;
+    config.sampling_ranges.validate(&config.sampling_defaults)?;
+    if config
+        .sampling_ranges
+        .top_k
+        .is_some_and(|range| range.max > config.contract.vocabulary as i32)
+    {
+        return Err("sampling top_k range exceeds the prepared vocabulary".into());
+    }
     config.limits.validate_prefill()?;
     let proposals: Vec<_> = manifest
         .graphs

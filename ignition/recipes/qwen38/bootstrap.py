@@ -10,6 +10,8 @@ from pathlib import Path
 
 import torch
 
+from ignition.components.completion import CompletionOutputs
+
 from ignition.preparation.tuning_replicas import TuningReplica
 
 from ignition.components.parallel import TensorParallelShard
@@ -315,7 +317,7 @@ def _prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, t
             frame = torch.zeros(1, dtype=torch.int32, device=device)
             sequence = torch.zeros(1, dtype=torch.int64, device=device)
             table.sequence = sequence
-            completion = torch.zeros((2, slots, 24 if config.mtp or config.mixed_shapes else 8), dtype=torch.int64, device=device)
+            completion = CompletionOutputs.allocate((2, slots, 24 if config.mtp or config.mixed_shapes else 8), device=device)
             features = VisionFeatureState.allocate(device, capacity=slots, image_slots=config.image_concurrency,
                 feature_slot=inputs.vision_feature_slot)
             vision_inputs = VisionInputs.allocate(device)
@@ -323,7 +325,7 @@ def _prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, t
             buffers = {**inputs.buffers(), **table.buffers(), **{name: getattr(admission, name) for name in admission.__dataclass_fields__},
                 **{f"state_{name}": getattr(transfer, name) for name in transfer.__dataclass_fields__},
                 **{name: getattr(vision_inputs, name) for name in vision_inputs.__dataclass_fields__},
-                "frame_index": frame, "submission_sequence": sequence, "completion_records": completion,
+                "frame_index": frame, "submission_sequence": sequence, **completion.buffers(),
                 "sampling_grammar_mask": requests.grammar_mask, "state_pool": state.backing, "memory_capacity": state.memory_capacity}
             functions, signatures, decoders, owners = {}, {}, [], []
             speculation = None
@@ -525,7 +527,7 @@ def _prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, t
             "cached_token_capacity": page_capacity * 64, "headroom_bytes": config.headroom_bytes, "page_tokens": 64,
             "free_device_bytes": free, "total_device_bytes": total,
             "allocated_bytes": torch.cuda.memory_allocated(device), "reserved_bytes": torch.cuda.memory_reserved(device),
-            "operator_scratch_bytes": workspaces.nbytes, "graphs": len(graphs), "tuning": tuning,
+            "completion_output_bytes": completion.nbytes, "operator_scratch_bytes": workspaces.nbytes, "graphs": len(graphs), "tuning": tuning,
             "prefill_chunk_size": config.prefill_chunk_size, "prefill_capacities": config.prefill_capacities,
             "mixed_shapes": config.mixed_shapes,
             "mixed_prefill": config.mixed_prefill,
@@ -572,7 +574,7 @@ def _prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, t
 
         export_zero_ranges = (*export_zero_ranges, *storage_ranges(graph_buffers.chunks))
         return PreparedModel(device=device.index, max_active=config.max_active, graphs=graphs, buffers=buffers, signatures=signatures,
-            export_zero_ranges=(*export_zero_ranges, *((t.data_ptr(), t.nbytes) for t in table.buffers().values())),
+            export_zero_ranges=(*export_zero_ranges, *completion.zero_ranges(), *((t.data_ptr(), t.nbytes) for t in table.buffers().values())),
             export_events=table.events(), package_data=table if rank == 0 else None,
             resources=resources, server_config=server_config, memory_report=memory, session=session, close_resources=(table, *((vocabulary_collective, collective) if collective is not None else ())))
     except BaseException:

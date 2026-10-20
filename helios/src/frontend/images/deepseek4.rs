@@ -44,9 +44,7 @@ pub(super) fn geometry(limits: ImageLimits, width: usize, height: usize) -> Resu
     }
     let tokens = (h / PATCH).div_ceil(MERGE) * (w / PATCH).div_ceil(MERGE);
     let patches = tokens * MERGE * MERGE;
-    if patches > limits.max_patches_per_image {
-        return Err("processed image exceeds the configured patch limit".into());
-    }
+    check_image_patches(limits, patches)?;
     Ok(ImageGeometry {
         height: h,
         width: w,
@@ -96,14 +94,27 @@ pub(super) fn pad(image: &RgbImage, g: ImageGeometry) -> Result<(ImageGeometry, 
 }
 
 pub(super) fn process(limits: ImageLimits, images: &[RgbImage]) -> Result<ProcessedImages> {
-    pack(limits, images, |image| resized_rgb(limits, image))
+    pack(
+        limits,
+        images,
+        |image| geometry(limits, image.width, image.height),
+        |image| resized_rgb(limits, image),
+    )
 }
 
+/// Packs every image's patches after checking the whole batch against the request budget,
+/// so a rejection reports the complete total rather than the images packed so far.
 pub(super) fn pack(
     limits: ImageLimits, images: &[RgbImage],
+    geometry: impl Fn(&RgbImage) -> Result<ImageGeometry>,
     resize: impl Fn(&RgbImage) -> Result<(ImageGeometry, Vec<u8>)>,
 ) -> Result<ProcessedImages> {
     limits.check_batch(images.len(), 0)?;
+    let total = images
+        .iter()
+        .map(|image| geometry(image).map(|g| g.patches))
+        .try_fold(0usize, |sum, patches| patches.map(|p| sum.saturating_add(p)))?;
+    limits.check_batch(images.len(), total)?;
     let mut output = ProcessedImages {
         pixel_values: Vec::new(),
         geometry: Vec::new(),
@@ -114,7 +125,6 @@ pub(super) fn pack(
     };
     for image in images {
         let (g, pixels) = resize(image)?;
-        limits.check_batch(images.len(), output.position_ids.len() + g.patches)?;
         let h = g.height / PATCH;
         let w = g.width / PATCH;
         for row in 0..h {

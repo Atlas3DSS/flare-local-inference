@@ -131,10 +131,13 @@ impl StringStops {
 struct Span {
     tokens: Vec<u32>,
     text: String,
+    entries: Vec<(usize, super::token_spans::ReturnedLogprob)>,
 }
 
 pub(super) struct TextStops<'a> {
     decoder: crate::frontend::IncrementalDecoder<'a>,
+    tracked: Option<super::token_spans::TokenSpans<'a>>,
+    pending_entries: Vec<(usize, super::token_spans::ReturnedLogprob)>,
     stops: StringStops,
     pending_tokens: Vec<u32>,
     spans: std::collections::VecDeque<Span>,
@@ -147,11 +150,51 @@ impl<'a> TextStops<'a> {
     pub fn new(frontend: &'a crate::frontend::Frontend, strings: Vec<String>) -> Result<Self> {
         Ok(Self {
             decoder: frontend.incremental_decoder(false),
+            tracked: None,
+            pending_entries: vec![],
             stops: StringStops::new(strings)?,
             pending_tokens: Vec::new(),
             spans: std::collections::VecDeque::new(),
             visible_bytes: 0,
         })
+    }
+    pub fn track(&mut self, frontend: &'a crate::frontend::Frontend) {
+        self.tracked = Some(super::token_spans::TokenSpans::new(frontend));
+    }
+    pub fn push_logprob(
+        &mut self,
+        token: u32,
+        value: crate::execution::TokenLogprobs,
+        silent: bool,
+    ) -> Result<(Vec<crate::output::Piece>, bool)> {
+        let tracked = self.tracked.as_mut().ok_or("logprob stop decoder was not initialized")?;
+        if silent {
+            return Ok(match tracked.silent(token, Some(value)) {
+                Some(span) => self.accept_span(span, false),
+                None => (vec![], false),
+            });
+        }
+        match tracked.push(token, Some(value))? {
+            Some(span) => Ok(self.accept_span(span, false)),
+            None => Ok((vec![], false)),
+        }
+    }
+    fn accept_span(&mut self, span: super::token_spans::Span, finish: bool) -> (Vec<crate::output::Piece>, bool) {
+        let silent = !span.tokens.is_empty()
+            && span.tokens.iter().all(|token| token.logprob.as_ref().is_some_and(|e| e.silent));
+        for token in span.tokens {
+            self.pending_tokens.push(token.token);
+            if let Some(entry) = token.logprob {
+                self.pending_entries.push((token.start, entry));
+            }
+        }
+        if silent && span.text.is_empty() {
+            self.spans.push_back(Span {
+                text: String::new(), tokens: std::mem::take(&mut self.pending_tokens),
+                entries: std::mem::take(&mut self.pending_entries),
+            });
+        }
+        self.accept_text(span.text, finish)
     }
     pub fn push(&mut self, token: u32) -> Result<(Vec<crate::output::Piece>, bool)> {
         self.pending_tokens.push(token);
@@ -159,9 +202,15 @@ impl<'a> TextStops<'a> {
         Ok(self.accept_text(text.unwrap_or_default(), false))
     }
     pub fn finish(&mut self, eos: Option<u32>) -> Result<(Vec<crate::output::Piece>, bool)> {
-        let text = self.decoder.finish()?;
-        let (mut pieces, matched) = self.accept_text(text, true);
+        let (mut pieces, matched) = if let Some(tracked) = &mut self.tracked {
+            let span = tracked.finish()?;
+            self.accept_span(span, true)
+        } else {
+            let text = self.decoder.finish()?;
+            self.accept_text(text, true)
+        };
         if !matched {
+            pieces.extend(self.pending_entries.drain(..).map(|(_, entry)| crate::output::Piece::Logprob(entry)));
             pieces.extend(
                 self.pending_tokens
                     .drain(..)
@@ -178,6 +227,7 @@ impl<'a> TextStops<'a> {
         if !text.is_empty() {
             self.spans.push_back(Span {
                 tokens: std::mem::take(&mut self.pending_tokens),
+                entries: std::mem::take(&mut self.pending_entries),
                 text,
             });
         }
@@ -192,17 +242,28 @@ impl<'a> TextStops<'a> {
         {
             let span = self.spans.pop_front().unwrap();
             self.visible_bytes -= span.text.len();
+            pieces.extend(span.entries.into_iter().map(|(_, entry)| Piece::Logprob(entry)));
             pieces.extend(span.tokens.into_iter().map(Piece::Token));
             pieces.push(Piece::Text(span.text));
         }
         if matched {
             // A clipped token cannot act as a whole-token protocol control.
-            if self.visible_bytes != 0 {
-                let span = self.spans.front().unwrap();
-                pieces.push(Piece::Text(span.text[..self.visible_bytes].to_owned()));
+            if let Some(span) = self.spans.front() {
+                let mut discarded = false;
+                for (start, entry) in &span.entries {
+                    if *start < self.visible_bytes || (entry.silent && !discarded) {
+                        pieces.push(Piece::Logprob(entry.clone()));
+                    } else {
+                        discarded = true;
+                    }
+                }
+                if self.visible_bytes != 0 {
+                    pieces.push(Piece::Text(span.text[..self.visible_bytes].to_owned()));
+                }
             }
             self.visible_bytes = 0;
             self.pending_tokens.clear();
+            self.pending_entries.clear();
             self.spans.clear();
         }
         (pieces, matched)
@@ -261,7 +322,7 @@ pub(super) mod string_tests {
         std::fs::create_dir_all(&root).unwrap();
         let vocab: tokenizers::models::bpe::Vocab = [
             "before", "ENDafter", "<0xE4>", "<0xB8>", "<0x96>", "<0xE7>", "<0x95>", "<0x8C>", "x",
-            "ST", "OP",
+            "ST", "OP", "<0xEF>", "<0xBF>", "<0xBD>",
         ]
         .into_iter()
         .enumerate()

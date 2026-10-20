@@ -20,8 +20,10 @@ unqualified.
 
 ## Rank order and routes
 
-Ranks form the cycle `0,1,...,N-1,0`. The cluster's node list in the
-controller's orbit file gives the rank order: its first node is rank zero.
+Ranks form the cycle `0,1,...,N-1,0`. With exactly one candidate per rank,
+the cluster's node list in the controller's orbit file gives the rank order.
+Longer lists can skip unsuitable nodes during placement; use an exact list
+and inspect the printed placement to preserve physical neighbor order.
 During preparation, each peer's `ignition join --rank` assigns the
 corresponding position.
 
@@ -151,14 +153,24 @@ with `--ranks` for development without package export.
 
 ### Serve through the agents
 
-From the controller, with a cluster listing `maxwell, ampere, faraday, hertz`:
+From the controller, define the ring's exact node order in the orbit file:
+
+```toml
+[cluster.ring]
+nodes = ["maxwell", "ampere", "faraday", "hertz"]
+```
+
+Then launch:
 
 ```sh
 flare orbit run maxwell:/data/flare-runtime/glm53-ring-tp4.safetensors \
   --cluster ring --gpus 0 --roce-ring --host 127.0.0.1 --port 8001
 ```
 
-The grant carries `--roce-ring` to every rank. If starting ranks manually, pass
+The example binds HTTP to loopback on rank zero, so access it on Maxwell or
+select a reachable bind with `--host`. It uses each node's installed agent
+executable unless an explicit override is supplied. The grant carries
+`--roce-ring` to every rank. If starting ranks manually, pass
 it to every rank along with the usual rank and rendezvous options.
 Ranks that disagree about ring mode fail during transport record exchange.
 

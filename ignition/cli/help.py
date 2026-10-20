@@ -58,7 +58,7 @@ def recipe_help(model=None):
     lines.extend(f"    {feature}" for feature in optional)
     if not optional:
         lines.append("    none")
-    lines.extend(("  Images per request: bounded by the prepared visual-token budget" if recipe.max_images else
+    lines.extend(("  Images per request: bounded by the prepared image-token budget" if recipe.max_images else
                   "  Images: unavailable.",
                   "  Defaults above come from the recipe; configuration and explicit flags override them.",
                   "  Supported GPU counts do not guarantee that the selected capacities fit in memory."))

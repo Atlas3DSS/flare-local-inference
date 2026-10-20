@@ -42,10 +42,9 @@ class PreparedMixedRound:
         self.packing = MixedPacking(owner.inputs, self.prompt_inputs, self.decode_inputs, batch, width, prefill)
         self.prompt_state = PreparedDecoderState(self.prompt_inputs, owner.requests, owner.pool,
             tokens=prefill, rows=1, mode="prefill", maintain_draft_state=enabled)
-        self.prompt_completion = torch.zeros_like(owner.completion)
-        self.decode_completion = torch.zeros_like(owner.completion)
-        self.frames = torch.arange(2, device=owner.completion.device)
-        self.slots = torch.arange(owner.requests.capacity, device=owner.completion.device)
+        private = owner.completion.private_storage.cursor()
+        self.prompt_completion = owner.completion.private(private)
+        self.decode_completion = owner.completion.private(private)
         self.prompt_decoder = SimpleNamespace(state=self.prompt_state)
         self.absorb = None
         if enabled and owner.proposal_source == "mtp":
@@ -118,10 +117,8 @@ class PreparedMixedRound:
             self.prompt_sampler()
         if self.absorb is not None:
             self.absorb.finish()
-        prompt = self.slots == self.prompt_inputs.row_slot_ids[0]
-        records = torch.where(prompt[None, :, None], self.prompt_completion, self.decode_completion)
-        active_frame = self.frames == o.frame[0]
-        o.completion.copy_(torch.where(active_frame[:, None, None], records, o.completion))
+        o.completion.merge(self.prompt_completion, self.decode_completion,
+            self.prompt_inputs.row_slot_ids[0], o.frame)
 
 
 class DecodeTarget:

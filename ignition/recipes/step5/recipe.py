@@ -40,8 +40,9 @@ def usage(prepared):
     return tuple(RankUsage(rank["pages"], rank["free_device_bytes"]) for rank in report.get("ranks", (report,)))
 
 
-RECIPE = Recipe(name="step5", prepare=prepare, usage=usage,
+RECIPE = Recipe(name="step5", served_model_name="Step-5-Preview", prepare=prepare, usage=usage,
     # Recommended sampling: https://huggingface.co/stepfun-ai/Step-5-Preview-NVFP4#evaluation-notes.
+    # The card's top_k=0 and Flare's top_k=-1 both disable the filter.
     sampling_defaults=SamplingDefaults(temperature=1., top_p=.95, top_k=-1),
     checkpoints=(Checkpoint(alias="step5-preview-nvfp4", repository="stepfun-ai/Step-5-Preview-NVFP4",
         revision="bc246cc2848e17b37f377eda8fd825c5b3018d1f", architecture="Step5ForConditionalGeneration",

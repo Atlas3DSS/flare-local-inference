@@ -201,7 +201,7 @@ class PreparedDecoder:
 
     def __init__(self, weights: ModelWeights, scratch: DecoderScratch, state,
                  qsa_states, rotary, ple_table, workspaces: ScratchArena,
-                 completion_records, frame_index, submission_sequence,
+                 completion, frame_index, submission_sequence,
                  *, session, name: str, progress=None,
                  layer_outputs: torch.Tensor | None = None, embedding_injection=None,
                  stage_outputs: dict[str, torch.Tensor] | None = None,
@@ -302,7 +302,7 @@ class PreparedDecoder:
             state, inputs = self.state, self.state.inputs
             self.sampler = PreparedSampling(self.scratch.logits, state.requests,
                 inputs.row_slot_ids[:state.rows], inputs.row_generations[:state.rows],
-                inputs.live_rows, completion_records, frame_index, submission_sequence,
+                inputs.live_rows, completion, frame_index, submission_sequence,
                 sample_enabled=inputs.sample_enabled[:state.rows], workspace=sampling_workspace)
             self.sampler.prepare()
             self.sampler.prepare_broadcast(runtime=vocabulary_runtime, session=session,

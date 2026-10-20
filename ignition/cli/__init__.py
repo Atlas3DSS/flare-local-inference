@@ -32,8 +32,12 @@ def _parser() -> argparse.ArgumentParser:
 
     running = command("run", serve.run, "cache a runtime package and launch Flare")
     exporting = command("export", serve.export, "prepare a native model package")
-    exporting.add_argument("--output", type=Path, required=True, metavar="FILE",
-                           help="destination .safetensors file; must not already exist")
+    exporting.add_argument("--output", type=Path, metavar="FILE",
+                           help="destination .safetensors file (default: a snapshot in the package cache)")
+    exporting.add_argument("--no-weights", action="store_true",
+                           help="require cached stored-data blobs; export execution resources and metadata")
+    exporting.add_argument("--repo-id", metavar="NAMESPACE/REPOSITORY",
+                           help="Hugging Face target used to organize local exports (default: recipe target)")
     for preparing in (running, exporting):
         _preparation_arguments(preparing)
     running.add_argument("--publisher-keys", type=Path, action="append", default=[], metavar="PATH",
@@ -111,6 +115,11 @@ def _parser() -> argparse.ArgumentParser:
     signing.add_argument("--namespace", help="publisher namespace (default: publishing.namespace)")
     signing.add_argument("--official-source", help="published repository URL (default: publishing.official_source)")
     signing.add_argument("--development-publisher", type=Path, help="source public profile (default: beside config)")
+    converting = command("convert", publishing.convert, "convert a signed package to an immutable blob snapshot")
+    converting.add_argument("package", type=Path, help="existing signed .safetensors package")
+    converting.add_argument("--output", type=Path, help="destination primary (default: package cache snapshot)")
+    converting.add_argument("--publisher-keys", type=Path, action="append", default=[],
+                            help="trusted public publisher profiles; repeatable")
     def shard_size(value):
         from .config import parse_size
         try:
@@ -119,16 +128,16 @@ def _parser() -> argparse.ArgumentParser:
             raise argparse.ArgumentTypeError(str(error)) from error
         return value
 
-    for publishing in (running, exporting, signing):
+    for publishing in (running, exporting, signing, converting):
         publishing.add_argument("--shard-size", type=shard_size, metavar="SIZE",
-                                help="soft package file-size target (default: publishing.shard_size, else 64G); 0 keeps one file")
+                                help="maximum payload file size including its header; at most 64G (default: 64G)")
     return parser
 
 
 def _preparation_arguments(running):
     from .help import recipe_help
 
-    running.usage = "%(prog)s [MODEL] " + ("--output FILE " if running.prog.endswith(" export") else "") + "[options]"
+    running.usage = "%(prog)s [MODEL] [options]"
     running.epilog = recipe_help()
     running.set_defaults(roce_ring=False)
     running.add_argument("--official-source", metavar="URL", help="published checkpoint repository URL")

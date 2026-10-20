@@ -8,6 +8,7 @@ from b12x.preparation import PreparedCall
 from b12x.sequence import engram
 
 from ignition.components.engram import EngramInputs, PreparedEngramLookup, PreparedEngramRequests
+from ignition.components.embedding_partition import EmbeddingHeadPartition
 from ignition.components.linear import QuantizedProjection
 from ignition.components.collectives import PreparedChunkedAllReduce
 from ignition.components.state import gather_rows, save_hidden
@@ -25,7 +26,7 @@ class Tables:
     mailboxes: dict
     sequence: torch.Tensor
     shard: object
-    row_bounds: dict
+    row_mapping: dict
     columns: torch.Tensor
 
     @classmethod
@@ -44,8 +45,7 @@ class Tables:
             base_table_size=text["engram_vocab_size"], compressed_vocab_size=size)
         if geometry.num_embeddings != tuple(text["engram_num_embeddings"]):
             raise ValueError("Engram hash geometry differs from checkpoint tables")
-        sources, inputs, mailboxes, row_bounds = {}, {}, {}, {}
-        first, last = shard.partition(24)
+        sources, inputs, mailboxes, row_mapping = {}, {}, {}, {}
         with phase(progress, "Prepare embedding tables") as stage:
             for index, layer in enumerate(geometry.layer_ids):
                 rows = geometry.num_embeddings[index]
@@ -57,15 +57,16 @@ class Tables:
                         raise ValueError(f"{name}: invalid Engram table geometry or dtype")
                     pair.append(FileSource(manifest.snapshot / metadata.shard, metadata.offset, rows * columns))
                 sources[layer] = tuple(pair)
-                start = geometry.offsets[index][first]
-                end = geometry.offsets[index][last] if last < 24 else rows
-                row_bounds[layer] = torch.tensor((start, end), dtype=torch.int64, device=device)
+                partition = EmbeddingHeadPartition.for_rank(geometry.offsets[index], rows,
+                                                            shard.rank, shard.world_size)
+                row_mapping[layer] = torch.tensor(partition.row_mapping, dtype=torch.int64, device=device)
                 inputs[layer] = EngramInputs.allocate(tokens, device)
                 mailboxes[layer] = host_allocator(f"engram_{layer}_requests", (tokens * 24 + 1,), torch.int64)
                 mailboxes[layer].host_view.zero_()
             stage.update(f"{sum(source.nbytes for pair in sources.values() for source in pair) / (1 << 30):.1f} GiB in checkpoint spans")
-        columns = torch.arange(first * 256, last * 256, dtype=torch.int64, device=device)
-        return cls(geometry, tuple(token_map), sources, inputs, mailboxes, sequence, shard, row_bounds, columns)
+        columns = torch.tensor([head * 256 + column for head in range(shard.rank, 24, shard.world_size)
+                                for column in range(256)], dtype=torch.int64, device=device)
+        return cls(geometry, tuple(token_map), sources, inputs, mailboxes, sequence, shard, row_mapping, columns)
 
     def buffers(self):
         return {**{name: tensor for layer, inputs in self.inputs.items() for name, tensor in inputs.buffers(layer).items()},
@@ -77,21 +78,20 @@ class Tables:
     def resident_catalog(self):
         """Source spans and native bindings for shared RAM delivery without package export."""
         return {"vocabulary": len(self.token_map), "tables": [
-            {"planes": [{"path": str(source.path), "offset": source.offset + first * row_bytes,
-                         "nbytes": (last - first) * row_bytes, "row_bytes": row_bytes}
+            {"planes": [{"segments": [
+                            {"path": str(source.path), "offset": source.offset + first * row_bytes,
+                             "nbytes": (last - first) * row_bytes}
+                            for first, last in partition.source_rows], "row_bytes": row_bytes}
                         for source, row_bytes in zip(self.sources[layer], (256, 8), strict=True)],
              "heads": 24, "weights": f"engram_{layer}_weights", "scales": f"engram_{layer}_scales",
              "hashes": f"engram_{layer}_hashes", "event": f"engram_{layer}_ready",
              "request": f"engram_{layer}_requests"}
             for ordinal, layer in enumerate(self.geometry.layer_ids)
-            for first, last in (self.partition_rows(ordinal, self.shard.rank),)]}
+            for partition in (self.partition(ordinal, self.shard.rank),)]}
 
-    def partition_rows(self, ordinal, rank):
-        """Contiguous table rows belonging to a rank's complete hash heads."""
-        count = 24 // self.shard.world_size
-        first, last = rank * count, (rank + 1) * count
-        offsets = self.geometry.offsets[ordinal]
-        return offsets[first], offsets[last] if last < 24 else self.geometry.num_embeddings[ordinal]
+    def partition(self, ordinal, rank):
+        return EmbeddingHeadPartition.for_rank(self.geometry.offsets[ordinal],
+            self.geometry.num_embeddings[ordinal], rank, self.shard.world_size)
 
     def append(self, index, payload, cursor):
         from ignition.preparation.package_file import align
@@ -111,17 +111,24 @@ class Tables:
             table.hash.orders.extend(order for order in (2, 3, 4) for _ in range(8))
             table.hash.multipliers.extend(self.geometry.multipliers[ordinal])
             table.hash.primes.extend(self.geometry.primes[ordinal])
-            table.hash.offsets.extend(self.geometry.offsets[ordinal])
+            offsets = [0] * 24
+            first = 0
             for rank in range(self.shard.world_size):
-                first, last = self.partition_rows(ordinal, rank)
+                partition = self.partition(ordinal, rank)
+                for head in partition.heads:
+                    offsets[head] = first + partition.row_mapping[head][2]
                 planes = (table if self.shard.world_size == 1 else
-                          table.shards.add(rank=rank, first_row=first, rows=last - first))
+                          table.shards.add(rank=rank, first_row=first, rows=partition.rows))
                 for name, source, width in zip(("weights", "scales"), self.sources[layer], (256, 8), strict=True):
                     cursor = align(cursor)
                     span = getattr(planes, name)
-                    span.offset, span.nbytes = cursor, (last - first) * width
-                    payload.append((cursor, source.path, source.offset + first * width, span.nbytes))
-                    cursor += span.nbytes
+                    span.offset, span.nbytes = cursor, partition.rows * width
+                    for start, end in partition.source_rows:
+                        nbytes = (end - start) * width
+                        payload.append((cursor, source.path, source.offset + start * width, nbytes))
+                        cursor += nbytes
+                first += partition.rows
+            table.hash.offsets.extend(offsets)
         return cursor
 
 
@@ -136,7 +143,7 @@ class PreparedTableRequests:
         self.operations = tuple(PreparedEngramRequests(inputs, metadata.token_ids, metadata.query_start_loc,
             self.history, metadata.live_counts, tables.mailboxes[layer].device_view, tables.sequence,
             layer=layer, token_map=tables.token_map, geometry=tables.geometry, session=session,
-            name=f"{name}.{layer}", row_bounds=tables.row_bounds[layer]) for layer, inputs in tables.inputs.items())
+            name=f"{name}.{layer}", row_mapping=tables.row_mapping[layer]) for layer, inputs in tables.inputs.items())
 
     def __call__(self):
         m = self.metadata

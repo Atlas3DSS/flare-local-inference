@@ -5,6 +5,8 @@ from datetime import timedelta
 
 import pytest
 import torch
+
+from tests.components.completion_support import completion_outputs
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
@@ -51,7 +53,7 @@ def _run(rank, world, rendezvous=None):
         with preparation as session:
             for mode in ("init", "restore", "snapshot"):
                 if world > 1:
-                    operations[mode] = PreparedMaintenance(mode, requests, pool, commands, inputs, records, frame, sequence,
+                    operations[mode] = PreparedMaintenance(mode, requests, pool, commands, inputs, completion_outputs(records), frame, sequence,
                         runtime=runtime, coordinator=coordinator, session=session, name=mode, admission_buffers=admission)
                 else:
                     transfer = PreparedStateTransfer(pool, commands, inputs.page_tables,

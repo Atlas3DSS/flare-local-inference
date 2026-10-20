@@ -48,7 +48,9 @@ pub(crate) fn prepare_input(
     .map(|text| frontend.encode(text, false))
     .into_iter()
     .collect::<Result<Vec<_>>>()?;
-    for token in &rendered.token_ids {
+    let mut token_expansions = Vec::new();
+    for (source_index, token) in rendered.token_ids.iter().enumerate() {
+        let before = tokens.len();
         if token != image_token {
             tokens.push(*token);
             data.vision_token_indices.push(-1);
@@ -97,9 +99,11 @@ pub(crate) fn prepare_input(
         data.vision_token_indices
             .extend(std::iter::repeat_n(-1, markers[4].len()));
         image += 1;
+        token_expansions.push((source_index, tokens.len() - before - 1));
     }
     Ok(PreparedInput {
         tokens,
+        token_expansions,
         data,
         conditioning,
         images: processed,

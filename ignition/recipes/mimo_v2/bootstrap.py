@@ -8,6 +8,8 @@ from pathlib import Path
 
 import torch
 
+from ignition.components.completion import CompletionOutputs
+
 from ignition.components.capacity import (
     speculative_token_capacity,
     batch_capacities,
@@ -168,7 +170,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         admission = AdmissionBuffers.allocate(device, vocab_size=152576, capacity=slots)
         commands = StateCommands.allocate(device, capacity=slots)
         frame = torch.zeros(1, dtype=torch.int32, device=device)
-        records = torch.zeros((2, slots, 24 if config.dflash else 8), dtype=torch.int64, device=device)
+        completion = CompletionOutputs.allocate((2, slots, 24 if config.dflash else 8), device=device)
         coordinator = CollectivePreparation(group)
         ipc = package_storage.peer_storage
         draft_rows = slots * weights.config.draft.block_size if config.dflash else 0
@@ -234,7 +236,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
             sampling_grammar_mask=requests.grammar_mask,
             frame_index=frame,
             submission_sequence=sequence,
-            completion_records=records,
+            **completion.buffers(),
         )
         forwards, signatures, metadata, scratch = {}, {}, {}, {}
         speculation = None
@@ -246,7 +248,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                 requests,
                 inputs,
                 decoder_storage,
-                records=records,
+                completion=completion,
                 frame=frame,
                 sequence=sequence,
                 session=session,
@@ -312,7 +314,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                     forward = PreparedGeneration(
                         decoder,
                         batch,
-                        records,
+                        completion,
                         frame,
                         sequence,
                         runtime=collective,
@@ -360,7 +362,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                 name=name,
                 buffers=cursor,
             )
-            forward = PreparedVisionGeneration(encoder, vision_state, records, frame, sequence, buffers=cursor)
+            forward = PreparedVisionGeneration(encoder, vision_state, completion, frame, sequence, buffers=cursor)
             add(name, forward, "vision", 1, capacity, (*vision_inputs.buffers(), "vision_feature_slot"))
         row_inputs = ("request_state_rows", "row_slot_ids", "row_generations", "live_rows")
         for enabled in modes:
@@ -373,7 +375,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                     requests,
                     pool,
                     inputs,
-                    records,
+                    completion,
                     frame,
                     sequence,
                     rows=capacity,
@@ -400,7 +402,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                         pool,
                         commands,
                         inputs,
-                        records,
+                        completion,
                         frame,
                         sequence,
                         runtime=collective,
@@ -505,7 +507,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         "page_bytes": bytes_per_page,
         "page_tokens": PAGE_TOKENS,
         "kv_bytes": pages * bytes_per_page,
-        "operator_scratch_bytes": arena.nbytes,
+        "completion_output_bytes": completion.nbytes, "operator_scratch_bytes": arena.nbytes,
         "graphs": len(graphs),
         "prefill_capacities": config.prefill_capacities,
         "free_device_bytes": free,
@@ -551,7 +553,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         session=session,
         server_config=server_config,
         memory_report=memory,
-        export_zero_ranges=storage_ranges(disposable),
+        export_zero_ranges=(*storage_ranges(disposable), *completion.zero_ranges()),
         resources=(
             weights,
             vision_state,

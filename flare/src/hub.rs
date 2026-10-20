@@ -67,6 +67,14 @@ fn is_companion(filename: &str) -> bool {
     let Some(stem) = filename.strip_suffix(".safetensors") else {
         return false;
     };
+    let stem = stem.rsplit('/').next().unwrap_or(stem);
+    if stem.len() == 64
+        && stem
+            .bytes()
+            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+    {
+        return true;
+    }
     let Some((_, numbers)) = stem.rsplit_once("-data-") else {
         return false;
     };
@@ -100,6 +108,20 @@ fn choose_file(files: impl IntoIterator<Item = String>, requested: Option<&str>)
 }
 
 pub fn download(source: &str, options: &HubOptions, gpu_count: usize) -> Result<PathBuf> {
+    let access_token = if options.offline {
+        None
+    } else {
+        token(options)?
+    };
+    download_with_token(source, options, gpu_count, access_token)
+}
+
+pub(crate) fn download_with_token(
+    source: &str,
+    options: &HubOptions,
+    gpu_count: usize,
+    access_token: Option<String>,
+) -> Result<PathBuf> {
     let (id, given_revision) = repository(source)?;
     let revision = match options.revision.as_deref().or(given_revision) {
         Some(revision) => revision.to_owned(),
@@ -120,7 +142,7 @@ pub fn download(source: &str, options: &HubOptions, gpu_count: usize) -> Result<
         return cached(&cache, &repo, options.filename.as_deref());
     }
     let api = ApiBuilder::from_cache(cache.clone())
-        .with_token(token(options)?)
+        .with_token(access_token)
         .with_endpoint("https://huggingface.co".into())
         .with_progress(std::io::stderr().is_terminal())
         .with_retries(3)
@@ -155,29 +177,99 @@ fn fetch(api: &Api, cache: &Cache, repo: &Repo, requested: Option<&str>) -> Resu
         requested,
     )?;
     let pinned = Repo::with_revision(repo.url(), RepoType::Model, info.sha.clone());
-    let path = snapshot(cache, &pinned, &info.sha).join(&filename);
     eprintln!("Resolved package: {}@{} / {filename}", repo.url(), info.sha);
-    let path = if path.is_file() {
-        path
-    } else {
-        eprintln!("Downloading model: {filename}...");
-        api.repo(pinned.clone()).download(&filename)?
-    };
+    let path = fetch_file(api, cache, &pinned, &filename)?;
     let companions = flare_helios::runtime_package::package_companions(&path)?;
     let parent = Path::new(&filename).parent().unwrap();
     for name in &companions {
         let relative = parent.join(name).to_string_lossy().replace('\\', "/");
-        if !snapshot(cache, &pinned, &info.sha)
-            .join(&relative)
-            .is_file()
-        {
-            eprintln!("Downloading model data: {relative}...");
-            api.repo(pinned.clone()).download(&relative)?;
-        }
+        fetch_file(api, cache, &pinned, &relative)?;
     }
     let path = package_view(cache, repo, &info.sha, &filename, &companions)?;
     cache.repo(repo.clone()).create_ref(&info.sha)?;
     Ok(path)
+}
+
+/// Reuse the repository's content-addressed blob even when this revision has no pointer yet.
+fn fetch_file(api: &Api, cache: &Cache, pinned: &Repo, filename: &str) -> Result<PathBuf> {
+    let cached_repo = cache.repo(pinned.clone());
+    let path = cached_repo.pointer_path(pinned.revision()).join(filename);
+    if path.is_file() {
+        return Ok(path);
+    }
+    let remote = api.repo(pinned.clone());
+    let metadata = api.metadata(&remote.url(filename))?;
+    let etag = metadata.etag();
+    if metadata.commit_hash() != pinned.revision()
+        || etag.is_empty()
+        || !etag
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+    {
+        return Err("Hugging Face returned an invalid file identity".into());
+    }
+    let blob = cached_repo.blob_path(etag);
+    std::fs::create_dir_all(blob.parent().unwrap())?;
+    // hf-hub locks its transfer but replaces an existing blob. Serialize our lookup
+    // and transfer together so concurrent Flare downloads preserve shared inodes.
+    let _lock = blob_lock(&blob)?;
+    if path.is_file() {
+        return Ok(path);
+    }
+    match std::fs::symlink_metadata(&blob) {
+        Ok(info) => {
+            if !info.is_file() || info.len() != metadata.size() as u64 {
+                return Err(format!("invalid cached Hugging Face blob: {}", blob.display()).into());
+            }
+            std::fs::create_dir_all(path.parent().unwrap())?;
+            std::fs::hard_link(&blob, &path).map_err(|error| {
+                format!(
+                    "cannot hardlink cached package file {}: {error}",
+                    path.display()
+                )
+            })?;
+            eprintln!("Reusing cached model file: {filename}");
+            Ok(path)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("Downloading model file: {filename}...");
+            let downloaded = remote.download(filename)?;
+            // Without symlink privileges, hf-hub moves the blob into the snapshot.
+            // Retain a cache link so other revisions can still reuse those bytes.
+            #[cfg(windows)]
+            if !blob.exists() {
+                std::fs::hard_link(&downloaded, &blob)?;
+            }
+            Ok(downloaded)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn blob_lock(blob: &Path) -> Result<std::fs::File> {
+    let path = blob.with_extension("flare.lock");
+    #[cfg(unix)]
+    let lock = {
+        use std::os::unix::{fs::OpenOptionsExt, io::AsRawFd};
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(path)?;
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        file
+    };
+    #[cfg(windows)]
+    let lock = {
+        let file = crate::windows::private_file(&path, false)?;
+        crate::windows::lock(&file)?;
+        file
+    };
+    Ok(lock)
 }
 
 fn snapshot(cache: &Cache, repo: &Repo, commit: &str) -> PathBuf {
@@ -222,8 +314,8 @@ fn cached(cache: &Cache, repo: &Repo, requested: Option<&str>) -> Result<PathBuf
     package_view(cache, repo, &commit, &filename, &companions)
 }
 
-/// Snapshot entries may be symlinks to blobs. A package view uses regular hardlinks so the
-/// runtime can reject symlink companions without duplicating model bytes.
+/// Load regular snapshot entries directly. A hardlink view of symlink snapshots
+/// preserves companion paths when the primary is canonicalized, without copying bytes.
 fn package_view(
     cache: &Cache,
     repo: &Repo,
@@ -233,6 +325,16 @@ fn package_view(
 ) -> Result<PathBuf> {
     let primary = snapshot(cache, repo, commit).join(filename);
     if companions.is_empty() {
+        return Ok(primary);
+    }
+    if std::iter::once(primary.clone())
+        .chain(
+            companions
+                .iter()
+                .map(|name| primary.parent().unwrap().join(name)),
+        )
+        .all(|path| std::fs::symlink_metadata(path).is_ok_and(|info| info.is_file()))
+    {
         return Ok(primary);
     }
     let view = cache
@@ -297,7 +399,7 @@ fn collect_files(root: &Path, directory: &Path, files: &mut Vec<String>) -> Resu
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::{
         io::{BufRead, BufReader, Write},
@@ -308,7 +410,7 @@ mod tests {
 
     const COMMIT: &str = "0123456789012345678901234567890123456789";
 
-    fn fixture(companions: &[&str]) -> Vec<u8> {
+    pub(crate) fn fixture(companions: &[&str]) -> Vec<u8> {
         fn bytes(field: u8, body: &[u8]) -> Vec<u8> {
             let mut out = vec![field * 8 + 2];
             let mut n = body.len();
@@ -434,10 +536,17 @@ mod tests {
     }
 
     fn mock_hub(responses: Vec<(String, Vec<u8>)>) -> (String, thread::JoinHandle<()>) {
+        mock_hub_steps(responses, |_| {})
+    }
+
+    fn mock_hub_steps(
+        responses: Vec<(String, Vec<u8>)>,
+        mut after_response: impl FnMut(usize) + Send + 'static,
+    ) -> (String, thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let worker = thread::spawn(move || {
-            for (expected, response) in responses {
+            for (step, (expected, response)) in responses.into_iter().enumerate() {
                 let (mut socket, _) = listener.accept().unwrap();
                 socket
                     .set_read_timeout(Some(Duration::from_secs(5)))
@@ -454,18 +563,47 @@ mod tests {
                     }
                 }
                 socket.write_all(&response).unwrap();
+                after_response(step);
             }
         });
         (endpoint, worker)
     }
 
     fn metadata_response() -> Vec<u8> {
+        revision_response(COMMIT)
+    }
+
+    fn revision_response(commit: &str) -> Vec<u8> {
         let body =
-            format!(r#"{{"sha":"{COMMIT}","siblings":[{{"rfilename":"model.safetensors"}}]}}"#);
+            format!(r#"{{"sha":"{commit}","siblings":[{{"rfilename":"model.safetensors"}}]}}"#);
         format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         ).into_bytes()
+    }
+
+    fn file_metadata(commit: &str, etag: &str, size: usize) -> Vec<u8> {
+        format!("HTTP/1.1 206 Partial Content\r\nx-repo-commit: {commit}\r\netag: {etag}\r\nContent-Range: bytes 0-0/{size}\r\nContent-Length: 1\r\nConnection: close\r\n\r\np").into_bytes()
+    }
+
+    fn file_response(body: &[u8]) -> Vec<u8> {
+        [
+            format!(
+                "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .into_bytes(),
+            body.to_vec(),
+        ]
+        .concat()
+    }
+
+    #[cfg(unix)]
+    fn assert_same_file(left: &Path, right: &Path) {
+        use std::os::unix::fs::MetadataExt;
+        let left = std::fs::metadata(left).unwrap();
+        let right = std::fs::metadata(right).unwrap();
+        assert_eq!((left.dev(), left.ino()), (right.dev(), right.ino()));
     }
 
     fn test_api(cache: &Cache, endpoint: String) -> Api {
@@ -485,9 +623,19 @@ mod tests {
         let resolve = format!("/owner/model/resolve/{COMMIT}/model.safetensors");
         let package = fixture(&[]);
         let (endpoint, worker) = mock_hub(vec![
-            ("/api/models/owner/model/revision/gb202".into(), metadata_response()),
-            (resolve.clone(), format!("HTTP/1.1 206 Partial Content\r\nx-repo-commit: {COMMIT}\r\netag: fixture\r\nContent-Range: bytes 0-0/{}\r\nContent-Length: 1\r\nConnection: close\r\n\r\np", package.len()).into_bytes()),
-            (resolve, [format!("HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", package.len()).into_bytes(), package.clone()].concat()),
+            (
+                "/api/models/owner/model/revision/gb202".into(),
+                metadata_response(),
+            ),
+            (
+                resolve.clone(),
+                file_metadata(COMMIT, "fixture", package.len()),
+            ),
+            (
+                resolve.clone(),
+                file_metadata(COMMIT, "fixture", package.len()),
+            ),
+            (resolve, file_response(&package)),
         ]);
         let api = test_api(&cache, endpoint);
         let path = fetch(&api, &cache, &repo, None).unwrap();
@@ -534,7 +682,13 @@ mod tests {
         #[cfg(windows)]
         std::fs::hard_link(&blob, directory.join(name)).unwrap();
         let path = cached(&cache, &repo, None).unwrap();
-        assert_ne!(path, directory.join("model.safetensors"));
+        #[cfg(unix)]
+        {
+            assert_ne!(path, directory.join("model.safetensors"));
+            assert_same_file(&blob, &path.parent().unwrap().join(name));
+        }
+        #[cfg(windows)]
+        assert_eq!(path, directory.join("model.safetensors"));
         assert!(
             std::fs::symlink_metadata(path.parent().unwrap().join(name))
                 .unwrap()
@@ -562,9 +716,13 @@ mod tests {
         std::fs::write(directory.join("model.safetensors"), fixture(&[name])).unwrap();
         let resolve = format!("/owner/model/resolve/{COMMIT}/{name}");
         let (endpoint, worker) = mock_hub(vec![
-            ("/api/models/owner/model/revision/gb202".into(), metadata_response()),
-            (resolve.clone(), format!("HTTP/1.1 206 Partial Content\r\nx-repo-commit: {COMMIT}\r\netag: data-fixture\r\nContent-Range: bytes 0-0/4\r\nContent-Length: 1\r\nConnection: close\r\n\r\nd").into_bytes()),
-            (resolve, b"HTTP/1.1 206 Partial Content\r\nContent-Length: 4\r\nConnection: close\r\n\r\ndata".to_vec()),
+            (
+                "/api/models/owner/model/revision/gb202".into(),
+                metadata_response(),
+            ),
+            (resolve.clone(), file_metadata(COMMIT, "data-fixture", 4)),
+            (resolve.clone(), file_metadata(COMMIT, "data-fixture", 4)),
+            (resolve, file_response(b"data")),
         ]);
         let path = fetch(&test_api(&cache, endpoint), &cache, &repo, None).unwrap();
         worker.join().unwrap();
@@ -573,5 +731,229 @@ mod tests {
             b"data"
         );
         assert_eq!(cached(&cache, &repo, None).unwrap(), path);
+    }
+
+    #[test]
+    fn regular_snapshot_shards_load_in_place_offline() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = Cache::new(temp.path().to_owned());
+        let repo = Repo::with_revision("owner/model".into(), RepoType::Model, COMMIT.into());
+        let directory = snapshot(&cache, &repo, COMMIT).join("nested");
+        std::fs::create_dir_all(&directory).unwrap();
+        let name = format!("{}.safetensors", "a".repeat(64));
+        let primary = directory.join("model.safetensors");
+        std::fs::write(&primary, fixture(&[&name])).unwrap();
+        std::fs::write(directory.join(&name), b"data").unwrap();
+        assert_eq!(cached(&cache, &repo, None).unwrap(), primary);
+        assert!(
+            !temp
+                .path()
+                .join(repo.folder_name())
+                .join("flare-packages")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn cached_primary_blob_is_linked_without_downloading_its_body() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = Cache::new(temp.path().to_owned());
+        let repo = Repo::with_revision("owner/model".into(), RepoType::Model, "gb10".into());
+        let blob = cache.repo(repo.clone()).blob_path("fixture");
+        std::fs::create_dir_all(blob.parent().unwrap()).unwrap();
+        let package = fixture(&[]);
+        std::fs::write(&blob, &package).unwrap();
+        let (endpoint, worker) = mock_hub(vec![
+            (
+                "/api/models/owner/model/revision/gb10".into(),
+                metadata_response(),
+            ),
+            (
+                format!("/owner/model/resolve/{COMMIT}/model.safetensors"),
+                file_metadata(COMMIT, "fixture", package.len()),
+            ),
+        ]);
+        let path = fetch(&test_api(&cache, endpoint), &cache, &repo, None).unwrap();
+        worker.join().unwrap();
+        assert_eq!(
+            path,
+            snapshot(&cache, &repo, COMMIT).join("model.safetensors")
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), package);
+        #[cfg(unix)]
+        assert_same_file(&blob, &path);
+        assert_eq!(cached(&cache, &repo, None).unwrap(), path);
+    }
+
+    #[test]
+    fn revisions_share_downloaded_payload_without_replacing_the_blob() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = Cache::new(temp.path().to_owned());
+        let other_commit = "abcdef0123456789012345678901234567890123";
+        let first_repo = Repo::with_revision("owner/model".into(), RepoType::Model, "gb10".into());
+        let second_repo =
+            Repo::with_revision("owner/model".into(), RepoType::Model, "gb202".into());
+        let name = format!("{}.safetensors", "a".repeat(64));
+        for commit in [COMMIT, other_commit] {
+            let directory = snapshot(&cache, &first_repo, commit);
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(directory.join("model.safetensors"), fixture(&[&name])).unwrap();
+        }
+        let resolve = format!("/owner/model/resolve/{COMMIT}/{name}");
+        let (endpoint, worker) = mock_hub(vec![
+            (
+                "/api/models/owner/model/revision/gb10".into(),
+                metadata_response(),
+            ),
+            (resolve.clone(), file_metadata(COMMIT, "data-fixture", 4)),
+            (resolve.clone(), file_metadata(COMMIT, "data-fixture", 4)),
+            (resolve, file_response(b"data")),
+            (
+                "/api/models/owner/model/revision/gb202".into(),
+                revision_response(other_commit),
+            ),
+            (
+                format!("/owner/model/resolve/{other_commit}/{name}"),
+                file_metadata(other_commit, "data-fixture", 4),
+            ),
+        ]);
+        let api = test_api(&cache, endpoint);
+        let first = fetch(&api, &cache, &first_repo, None).unwrap();
+        let second = fetch(&api, &cache, &second_repo, None).unwrap();
+        worker.join().unwrap();
+        assert_eq!(
+            second,
+            snapshot(&cache, &second_repo, other_commit).join("model.safetensors")
+        );
+        let blob = cache.repo(first_repo.clone()).blob_path("data-fixture");
+        assert_eq!(std::fs::read(&blob).unwrap(), b"data");
+        #[cfg(unix)]
+        {
+            assert_same_file(&blob, &first.parent().unwrap().join(&name));
+            assert_same_file(&blob, &second.parent().unwrap().join(&name));
+        }
+        assert_eq!(cached(&cache, &first_repo, None).unwrap(), first);
+        assert_eq!(cached(&cache, &second_repo, None).unwrap(), second);
+    }
+
+    #[test]
+    fn concurrent_fetches_transfer_the_payload_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = Cache::new(temp.path().to_owned());
+        let repo = Repo::with_revision("owner/model".into(), RepoType::Model, COMMIT.into());
+        let blob = cache.repo(repo.clone()).blob_path("fixture");
+        std::fs::create_dir_all(blob.parent().unwrap()).unwrap();
+        let lock = blob_lock(&blob).unwrap();
+        let package = fixture(&[]);
+        let resolve = format!("/owner/model/resolve/{COMMIT}/model.safetensors");
+        let (ready, waiting) = std::sync::mpsc::channel();
+        let (endpoint, worker) = mock_hub_steps(
+            vec![
+                (
+                    resolve.clone(),
+                    file_metadata(COMMIT, "fixture", package.len()),
+                ),
+                (
+                    resolve.clone(),
+                    file_metadata(COMMIT, "fixture", package.len()),
+                ),
+                (
+                    resolve.clone(),
+                    file_metadata(COMMIT, "fixture", package.len()),
+                ),
+                (resolve, file_response(&package)),
+            ],
+            move |step| {
+                if step == 1 {
+                    ready.send(()).unwrap();
+                }
+            },
+        );
+        let clients: Vec<_> = (0..2)
+            .map(|_| {
+                let cache = cache.clone();
+                let repo = repo.clone();
+                let endpoint = endpoint.clone();
+                thread::spawn(move || {
+                    fetch_file(
+                        &test_api(&cache, endpoint),
+                        &cache,
+                        &repo,
+                        "model.safetensors",
+                    )
+                    .map_err(|error| error.to_string())
+                })
+            })
+            .collect();
+        // Both callers have missed the snapshot and fetched its identity before either
+        // can publish a blob. The waiting caller must reuse the completed transfer.
+        waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+        drop(lock);
+        for client in clients {
+            let path = client.join().unwrap().unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), package);
+            #[cfg(unix)]
+            assert_same_file(&blob, &path);
+        }
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn truncated_cached_blobs_are_rejected_without_modifying_them() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = Cache::new(temp.path().to_owned());
+        let repo = Repo::with_revision("owner/model".into(), RepoType::Model, COMMIT.into());
+        let blob = cache.repo(repo.clone()).blob_path("fixture");
+        std::fs::create_dir_all(blob.parent().unwrap()).unwrap();
+        std::fs::write(&blob, b"truncated").unwrap();
+        let (endpoint, worker) = mock_hub(vec![(
+            format!("/owner/model/resolve/{COMMIT}/model.safetensors"),
+            file_metadata(COMMIT, "fixture", 100),
+        )]);
+        let error = fetch_file(
+            &test_api(&cache, endpoint),
+            &cache,
+            &repo,
+            "model.safetensors",
+        )
+        .unwrap_err();
+        worker.join().unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("invalid cached Hugging Face blob")
+        );
+        assert_eq!(std::fs::read(blob).unwrap(), b"truncated");
+        assert!(!snapshot(&cache, &repo, COMMIT).exists());
+    }
+
+    #[test]
+    fn cache_lookup_rejects_escaping_etags_and_unpinned_commits() {
+        for (commit, etag) in [
+            (COMMIT, "../outside"),
+            (COMMIT, ""),
+            ("other-commit", "fixture"),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let cache = Cache::new(temp.path().to_owned());
+            let repo = Repo::with_revision("owner/model".into(), RepoType::Model, COMMIT.into());
+            let (endpoint, worker) = mock_hub(vec![(
+                format!("/owner/model/resolve/{COMMIT}/model.safetensors"),
+                file_metadata(commit, etag, 100),
+            )]);
+            let error = fetch_file(
+                &test_api(&cache, endpoint),
+                &cache,
+                &repo,
+                "model.safetensors",
+            )
+            .unwrap_err();
+            worker.join().unwrap();
+            assert!(
+                error.to_string().contains("invalid file identity"),
+                "{error}"
+            );
+            assert!(!snapshot(&cache, &repo, COMMIT).exists());
+        }
     }
 }

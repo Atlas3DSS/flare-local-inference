@@ -46,6 +46,7 @@ fn jpeg_and_oriented_png_use_actual_checkpoint_request_preparation() {
     )
     .unwrap();
     let config = ModelConfig {
+        max_top_logprobs: 0,
         prepared_sequence_tokens: 262144,
         contract: support::contract("qwen38"),
         model_id: "local-inference-lab/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD".into(),
@@ -59,11 +60,13 @@ fn jpeg_and_oriented_png_use_actual_checkpoint_request_preparation() {
             snapshots: 37,
         },
         eos_token_ids: vec![248046, 248044],
+        sampling_ranges: Default::default(),
         sampling_defaults: SamplingParameters::default(),
         max_new_tokens: 64,
         speculative_widths: vec![],
         speculative_fixed_width: None,
         speculative_token_capacity: 0,
+        decode_weight_bytes: 0,
         history_drafts: false,
         speculative_proposal_source: Default::default(),
     };
@@ -124,6 +127,12 @@ fn jpeg_and_oriented_png_use_actual_checkpoint_request_preparation() {
             .unwrap();
         assert_eq!(prepared.prompt.tokens, expanded.token_ids);
         assert_eq!(prepared.prompt.conditioning.len(), 1);
+        let complete_message = frontend.render_chat(messages.as_array().unwrap(),
+            json!({"add_generation_prompt":false}).as_object().unwrap()).unwrap();
+        let complete_message = processor.expand_prompt(&frontend, &complete_message.text,
+            &processed).unwrap();
+        assert!(prepared.prompt.tokens.starts_with(&complete_message.token_ids));
+        assert!(prepared.prompt.message_boundaries.contains(&complete_message.token_ids.len()));
         let limited = ImageProcessor::load(
             support::image(&asset("preprocessor_config.json"), &asset("config.json")).unwrap(),
             ImageLimits {

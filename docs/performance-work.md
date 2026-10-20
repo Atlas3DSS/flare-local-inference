@@ -6,11 +6,21 @@ against a baseline with the same checkpoint, GPU assignment, activation
 precision, graph capacity, sampling settings, cache conditions, and completed
 work. Correctness failures block performance claims.
 
+Before changing model or preparation code, read
+[model development](model-development.md) and
+[preparation development](preparation-development.md). Inspect fusion boundaries,
+precision, sharding, overlap, and selected kernel plans during implementation.
+Reuse FlashInfer/b12x mechanisms directly. Attribute gaps to emitted kernels,
+memory traffic, dependencies, or host work before changing architecture.
+Preserve correctness when changing layouts, fusion boundaries, scratch reuse,
+or stream overlap.
+
 ## Measurement
 
 Use `qualify.gpu_replay` for complete GPU graph duration, including vocabulary
-projection, collectives, and sampling. Under tensor parallelism, measure the
-interval spanning every rank. Collect batch-one and batch-four kernel
+projection, collectives, and sampling even when a reference engine executes them
+outside its main graph. Under tensor parallelism, measure the interval spanning
+every rank. Collect batch-one and batch-four kernel
 timelines with operator and layer attribution, kernel counts, summed kernel
 durations, and graph elapsed time. Host graph-launch traces alone cannot
 attribute GPU work.
@@ -24,9 +34,15 @@ change in `flare_speculative_gpu_nanoseconds_total`, multiplied by
 `1e9`. Emitted-token throughput also depends on draft acceptance.
 
 Separate GPU replay time, native scheduling and submission, and HTTP latency.
-Record raw measurements with their configuration, rerun noisy comparisons,
-and retain workload regressions. The single-token weight-traffic estimate is
-a bandwidth bound; the minimal replay harness supplies the measured floor.
+Compare equivalent shapes and execution configurations. Reuse valid baselines
+and use kernel traces or component measurements to attribute gaps before checking
+gains through the actual Helios service. Record raw measurements with their
+configuration, rerun noisy comparisons, and retain workload regressions. The
+single-token weight-traffic estimate is a bandwidth bound; the minimal replay
+harness supplies the measured floor.
+
+Verify allocation stability and scratch/input lifetime under repeated
+native replay, including poisoning reusable storage after its last permitted use.
 
 ## Fusion and precision
 

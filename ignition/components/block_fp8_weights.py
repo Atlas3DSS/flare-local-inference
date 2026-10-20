@@ -14,21 +14,31 @@ class BlockFP8WeightLoader(DirectWeightLoader):
         return shape[0]
 
     def load_linear_group(self, prefixes, *, row_ranges=None, column_range=None):
-        from b12x.gemm.blockscaled import pack_weight
-
         prefixes = tuple(prefixes)
         ranges = (None,) * len(prefixes) if row_ranges is None else row_ranges
         parts = [
             self._dense_blocks(prefix, rows=rows, columns=column_range)
             for prefix, rows in zip(prefixes, ranges, strict=True)
         ]
+        return self._pack_blocks(parts, dim=0)
+
+    def load_linear_columns(self, prefix, column_ranges, *, rows=None):
+        """Gather aligned input-column ranges without changing checkpoint values or scales."""
+        parts = [self._dense_blocks(prefix, rows=rows, columns=columns) for columns in column_ranges]
+        if not parts:
+            raise ValueError("a projection requires at least one input-column range")
+        return self._pack_blocks(parts, dim=1)
+
+    def _pack_blocks(self, parts, *, dim):
+        from b12x.gemm.blockscaled import pack_weight
+
         self._session.flush()
-        values = torch.cat([p[0] for p in parts]) if len(parts) > 1 else parts[0][0]
+        values = torch.cat([p[0] for p in parts], dim=dim) if len(parts) > 1 else parts[0][0]
         scales = torch.cat(
             [
                 p[1].repeat_interleave(self.block_size, dim=0).repeat_interleave(self.block_size // 32, dim=1)
                 for p in parts
-            ]
+            ], dim=dim,
         )
         return pack_weight(values, scales, recipe="mxfp8")
 

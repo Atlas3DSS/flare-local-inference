@@ -87,7 +87,7 @@ class PreparedKDACommit:
 
 class SpeculativePreparation:
     def __init__(self, weights, pool, requests, inputs, scratch, prefill_scratch, *, session,
-                 workspace, records, frame, sequence, runtime, vocabulary_runtime, coordinator, max_cache_pages=None,
+                 workspace, completion, frame, sequence, runtime, vocabulary_runtime, coordinator, max_cache_pages=None,
                  prefill_tokens=None, decode_tokens=None, context=None):
         self.weights, self.pool, self.requests, self.inputs = weights, pool, requests, inputs
         self.max_cache_pages, self.context = max_cache_pages, context
@@ -102,7 +102,7 @@ class SpeculativePreparation:
             self.draft_scratch["decode"] = MTPScratch.allocate(decode_tokens, weights.shard.world_size, blocks,
                 "decode", device, context_ranks=self.shards.world, remote=context is not None and context.remote)
         self.scratch, self.session, self.workspace = scratch, session, workspace
-        self.records, self.frame, self.sequence = records, frame, sequence
+        self.completion, self.frame, self.sequence = completion, frame, sequence
         self.collectives = dict(runtime=runtime, vocabulary_runtime=vocabulary_runtime, coordinator=coordinator)
         self.rng = SpeculativeRngState.allocate(pool.backing.device, capacity=requests.capacity)
         self.draft_tables = torch.full_like(inputs.page_tables, -1)
@@ -230,7 +230,8 @@ class PreparedRound:
                                     name=self.name, buffers=self.broadcast_buffers)
         commit = PreparedSpeculativeCommit(o.requests, verify.output, self.candidates,
             o.inputs.row_slot_ids[:b], o.inputs.row_generations[:b], o.inputs.live_rows,
-            o.records, o.frame, o.sequence, rng=o.rng, token_limits=o.inputs.query_lengths[:b])
+            o.completion, o.frame, o.sequence, logits=self.decoder.scratch.logits.view(b, w, -1), rng=o.rng, token_limits=o.inputs.query_lengths[:b])
+        commit.prepare()
         self.operations = target, proposals, verify, commit
 
     def rebind_pages(self, pages):

@@ -7,6 +7,10 @@ pub const SPECULATIVE_ABI_VERSION: u32 = 3;
 pub const VECTOR_RECORD_FIELDS: usize = 24;
 pub const MAX_OUTPUT_TOKENS: usize = 8;
 pub const REQUEST_LANES: usize = 64;
+pub const MAX_TOP_LOGPROBS: usize = 20;
+// Each token/logprob pair occupies two int32 words, starting with the chosen token.
+pub const LOGPROB_PAIR_FIELDS: usize = 2;
+pub const LOGPROB_FIELDS: usize = LOGPROB_PAIR_FIELDS * (1 + MAX_TOP_LOGPROBS);
 pub const RECORD_FIELDS: usize = 8;
 pub const BATCH_CAPACITIES: [usize; 7] = [1, 2, 4, 8, 16, 32, 64];
 
@@ -222,6 +226,51 @@ impl ExecutionManifest {
         self.request_capacity() * self.completion_fields() * 8
     }
 
+    pub fn max_top_logprobs(&self) -> Result<usize> {
+        let output = self.buffers.iter().find(|b| b.name == "completion_logprobs");
+        let flags = self.buffers.iter().find(|b| b.name == "logprob_requested");
+        match (output, flags) {
+            (None, None) => Ok(0),
+            (Some(output), Some(flags)) => {
+                let fields = output.shape.last().copied().unwrap_or(0);
+                let expected = [2, self.request_capacity(), MAX_OUTPUT_TOKENS, fields];
+                if fields < LOGPROB_PAIR_FIELDS * 2
+                    || fields > LOGPROB_FIELDS
+                    || fields % LOGPROB_PAIR_FIELDS != 0
+                    || output.dtype != Dtype::Int32
+                    || output.shape != expected
+                {
+                    return Err(Error::execution(
+                        ExecutionError::Manifest,
+                        format!(
+                            "completion_logprobs: expected Int32 shape {expected:?} with \
+                             even last extent {}..={LOGPROB_FIELDS}; got {:?} shape {:?}",
+                            LOGPROB_PAIR_FIELDS * 2, output.dtype, output.shape,
+                        ),
+                    ));
+                }
+                if flags.dtype != Dtype::Int32 || flags.shape != [self.request_capacity()] {
+                    return Err(Error::execution(
+                        ExecutionError::Manifest,
+                        format!(
+                            "logprob_requested: expected Int32 shape {:?}; got {:?} shape {:?}",
+                            [self.request_capacity()], flags.dtype, flags.shape,
+                        ),
+                    ));
+                }
+                Ok(fields / LOGPROB_PAIR_FIELDS - 1)
+            }
+            _ => Err(Error::execution(
+                ExecutionError::Manifest,
+                format!("generation logprobs missing buffer {}", if output.is_none() {
+                    "completion_logprobs"
+                } else {
+                    "logprob_requested"
+                }),
+            )),
+        }
+    }
+
     pub fn buffer(&self, name: &str) -> Result<&BufferDescriptor> {
         self.buffers
             .iter()
@@ -337,6 +386,7 @@ impl ExecutionManifest {
                 ));
             }
         }
+        let logprobs = self.max_top_logprobs()? != 0;
         let mut names = HashSet::new();
         let mut host_spans = HashMap::<&str, (usize, usize)>::new();
         for graph in &self.graphs {
@@ -407,7 +457,7 @@ impl ExecutionManifest {
             let mut bound = HashSet::new();
             for binding in &graph.input_bindings {
                 if !bound.insert(binding.buffer_name.as_str())
-                    || binding.buffer_name == "completion_records"
+                    || ["completion_records", "completion_logprobs"].contains(&binding.buffer_name.as_str())
                 {
                     return Err(Error::execution(
                         ExecutionError::Manifest,
@@ -439,6 +489,12 @@ impl ExecutionManifest {
                         ));
                     }
                 }
+            }
+            if logprobs && graph.kind.samples() && !bound.contains("logprob_requested") {
+                return Err(Error::execution(
+                    ExecutionError::Manifest,
+                    "sampling graphs require generation logprob request flags",
+                ));
             }
             if !bound.contains("frame_index") || !bound.contains("submission_sequence") {
                 return Err(Error::execution(

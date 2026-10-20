@@ -281,7 +281,7 @@ class PreparedAttention:
                     self.page_table[first:last],
                     self.lengths[first:last], self.active_width, scratch.selected[first:last],
                     page_size=128 // self.ratio, session=session, name=f"{name}.index{first}", workspace=workspace,
-                    buffers=cursor, **candidates)
+                    buffers=cursor, mode="prefill" if mode == "prefill" else "decode", **candidates)
                 self.selectors.append(selector)
             if buffers is not None:
                 buffers.join(*selector_cursors)

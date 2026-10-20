@@ -18,21 +18,22 @@ from .package_file import (DEFAULT_SHARD_SIZE, MAX_INDEX_BYTES, PackageFiles, _p
 from .protection import CHUNK, License, Protection, chunk_aad, resource_key, resource_roles, signature_message
 
 
-def _authenticate(source, profile):
+def _authenticate(source, profile, *, development_only=True):
+    from .package_snapshot import read_container
     index, base = read_index(source)
-    source.seek(8)
-    header = json.loads(source.read(base - 8))
-    if header['__metadata__']['format'] != 'flare':
+    header, base, encoded, layout = read_container(source)
+    if header['__metadata__']['format'] not in ('flare', 'flare-snapshot'):
         raise ValueError('re-signing requires a signed development package')
-    payload_size = header['flare.payload']['shape'][0]
+    payload_size = (sum(n for n, _ in layout['files']['']) if layout is not None
+                    else header['flare.payload']['shape'][0])
     size = header['flare.metadata']['shape'][0]
     if not 0 < size <= MAX_INDEX_BYTES:
         raise ValueError('invalid protected package envelope size')
-    source.seek(base + payload_size)
-    envelope = proto.ProtectedIndex.FromString(source.read(size))
+    envelope = proto.ProtectedIndex.FromString(encoded)
     if envelope.version != 4 or len(envelope.groups) != 3 or not envelope.ranks:
         raise ValueError('invalid protected package envelope')
-    if (not isinstance(profile, dict) or profile.get('namespace') != 'local-development' or profile.get('development') is not True
+    if (not isinstance(profile, dict)
+            or (development_only and (profile.get('namespace') != 'local-development' or profile.get('development') is not True))
             or not isinstance(profile.get('public_key'), list)
             or any(type(v) is not int or not 0 <= v <= 255 for v in profile['public_key'])):
         raise ValueError('source profile must identify a local-development Ed25519 key')
@@ -49,9 +50,11 @@ def _authenticate(source, profile):
         except InvalidSignature as error:
             raise ValueError('development package signature verification failed') from error
     metadata = proto.PublisherMetadata.FromString(envelope.groups[0].body)
-    if (not metadata.development or metadata.namespace != 'local-development'
+    if development_only and (not metadata.development or metadata.namespace != 'local-development'
             or metadata.official_source != 'local-development'):
         raise ValueError('only local-development packages can be promoted')
+    if metadata.namespace != profile.get('namespace') or metadata.development != profile.get('development', False):
+        raise ValueError('publisher profile does not match signed package identity')
     if (list(metadata.group_hashes) != [hashlib.sha256(g.body).digest() for g in envelope.groups[1:]]
             or metadata.ranks != len(envelope.ranks) or not metadata.HasField('index') or metadata.index.ranks
             or (metadata.index.HasField('cluster') and metadata.index.cluster.world != metadata.ranks)):
@@ -124,10 +127,11 @@ class _SourceVerifier:
         self.digest = hashlib.sha256()
 
     def _padding(self, end):
+        from .package_snapshot import read_at
         source = self.parts[self.position][0]
         while self.cursor < end:
             count = min(CHUNK, end - self.cursor)
-            block = os.pread(source.fileno(), count, self.cursor)
+            block = read_at(source, count, self.cursor)
             if len(block) != count or any(block):
                 raise ValueError('stored-data alignment padding is not zero')
             self.digest.update(block)
@@ -208,14 +212,14 @@ def _repack(destination, index, base, contents, package_id, public, resources, s
                 continue
             resource = resources[kind, owner, offset]
             plain = Path(temporary) / f'plain-{offset}'
-            contents.seek(base + offset)
+            source_file.seek(source_base + offset)
             cipher = AESGCM(resource_key(public, package_id, offset, 'local-development')) if kind == 2 else None
             digest = hashlib.sha256()
             remaining, counter = resource.plain_bytes, 0
             with plain.open('xb') as output:
                 while remaining:
                     count = min(CHUNK, remaining)
-                    block = contents.read(count + (16 if cipher else 0))
+                    block = source_file.read(count + (16 if cipher else 0))
                     if len(block) != count + (16 if cipher else 0):
                         raise ValueError('truncated development package resource')
                     if cipher:
@@ -239,5 +243,6 @@ def _repack(destination, index, base, contents, package_id, public, resources, s
     with phase(progress, 'Re-encrypt executable resources'):
         protection = Protection(index, payload, publisher, temporary, source_verifiers=verifiers,
                                 shard_size=shard_size, basename=destination.stem)
-    with phase(progress, 'Verify stored data and sign package'):
-        _publish(destination, index, protection.payload, protection)
+    with phase(progress, 'Verify stored data and sign package') as stage:
+        from .package_snapshot import publish_snapshot
+        publish_snapshot(destination, index, protection, shard_size=shard_size, progress=stage)

@@ -151,7 +151,10 @@ class Configuration:
         return Setting(recipe_default, "recipe")
 
     def shard_size(self, flag=None) -> int:
-        return parse_size(self.get("publishing.shard_size", flag).value, "shard size")
+        size = parse_size(self.get("publishing.shard_size", flag).value, "shard size")
+        if not 4096 < size <= 64 << 30:
+            raise UsageError('shard size must exceed 4096 bytes and be at most 64G')
+        return size
 
     @property
     def reserve_bytes(self) -> int:
@@ -180,7 +183,7 @@ class Configuration:
         lines = [
             "# Flare configuration. Every key is optional; remove a leading # to set it.",
             "", "[publishing]",
-            '# shard_size = "64G"             # soft file-size target; 0 keeps one file',
+            '# shard_size = "64G"             # hard payload-file limit, at most 64 GiB',
             "", "[server]",
             f'# host = "{self.get("server.host").value}"',
             f'# port = {self.get("server.port").value}',

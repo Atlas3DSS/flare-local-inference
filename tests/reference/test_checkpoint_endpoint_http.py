@@ -96,7 +96,7 @@ def duplicate_counters():
         'flare_graph_launches_total{kind="resume"}': 1,
         'flare_graph_launches_total{kind="snapshot"}': 1,
         "flare_snapshot_publications_total": 0, "flare_prompt_checkpoints_total": 0,
-        "flare_system_checkpoints_total": 0, "flare_snapshot_evictions_total": 0}
+        "flare_message_checkpoints_total": 0, "flare_snapshot_evictions_total": 0}
 
 
 @pytest.mark.parametrize("key,value,failed", [

@@ -34,7 +34,7 @@ class SpeculativePreparation:
         scratch,
         *,
         draft_tokens,
-        records,
+        completion,
         frame,
         sequence,
         session,
@@ -52,7 +52,7 @@ class SpeculativePreparation:
         self.page_tokens = page_tokens
         self.weights, self.tables, self.pool = weights, tables, pool
         self.requests, self.inputs, self.scratch = requests, inputs, scratch
-        self.records, self.frame, self.sequence = records, frame, sequence
+        self.completion, self.frame, self.sequence = completion, frame, sequence
         self.session, self.workspace = session, workspace
         self.collectives = {
             "runtime": runtime, "vocabulary_runtime": vocabulary_runtime, "coordinator": coordinator

@@ -2,9 +2,11 @@
 
 mod cost;
 mod policy;
+mod refresh;
 mod service;
 mod utility;
 pub use policy::{PolicyConfig, RequestAccounting};
+use refresh::PlanOrigin;
 pub mod speculation;
 pub mod split;
 #[cfg(test)]
@@ -99,7 +101,7 @@ pub struct SchedulerStats {
     pub reused_tokens: u64,
     pub snapshot_publications: u64,
     pub snapshot_evictions: u64,
-    pub system_checkpoints: u64,
+    pub message_checkpoints: u64,
     pub prompt_checkpoints: u64,
     pub active_requests: usize,
     pub free_slots: usize,
@@ -121,7 +123,7 @@ pub struct SchedulerStats {
 #[derive(Clone)]
 pub struct RequestSpec {
     pub prompt: Vec<u32>,
-    pub system_boundary: Option<usize>,
+    pub message_boundaries: Vec<usize>,
     pub conditioning: Vec<ConditioningEvent>,
     pub max_new_tokens: u32,
     pub grammar_constrained: bool,
@@ -148,7 +150,7 @@ pub enum RequestPhase {
 
 #[derive(Clone, Copy, Debug)]
 enum BoundaryKind {
-    System,
+    Message,
     Prompt,
 }
 #[derive(Clone, Copy, Debug)]
@@ -180,8 +182,8 @@ pub struct LiveRequest {
     prefix: Option<CheckpointId>,
     prefix_tokens: u64,
     admission_reused_tokens: u64,
-    system_boundary: Option<usize>,
-    system_snapshot: Option<SnapshotId>,
+    message_boundaries: Vec<usize>,
+    message_snapshot: Option<SnapshotId>,
     prompt_snapshot: Option<SnapshotId>,
     boundary_capture: Option<BoundaryCapture>,
     prefix_snapshot: Option<SnapshotId>,
@@ -333,8 +335,44 @@ impl ScheduledStep {
     }
 }
 
-/// An immutable selection tied to the participating requests' execution state.
-/// Unrelated admissions and cost observations do not invalidate it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CostFreshness {
+    #[default]
+    Unknown,
+    Fresh,
+    Stale,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TimingOrigin {
+    #[default]
+    Discovery,
+    Ordinary,
+    Refresh,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SubmittedTiming {
+    pub retained_ns: u64,
+    pub observed_at_ns: Option<u64>,
+    pub freshness: CostFreshness,
+    pub origin: TimingOrigin,
+    pub credit_ns: f64,
+    pub commit_ns: u64,
+    pub selected_at_ns: u64,
+    pub refresh_episode: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct SelectedCost {
+    retained_ns: u64,
+    observed_at_ns: Option<u64>,
+    freshness: CostFreshness,
+    selected_at_ns: u64,
+}
+
+/// An immutable selection with frozen estimates. Commit rechecks request state,
+/// feedback barriers, and refresh eligibility without rerunning selection.
 #[derive(Clone, Debug)]
 pub struct ScheduledPlan {
     owner: Arc<()>,
@@ -345,6 +383,8 @@ pub struct ScheduledPlan {
     selection_log_scale: f64,
     /// Physical verification rows selected before the proposal is sampled.
     verification_budget: Option<usize>,
+    origin: PlanOrigin,
+    selected_cost: SelectedCost,
 }
 
 impl ScheduledPlan {
@@ -364,6 +404,8 @@ struct Submission {
     expected_finish_ns: u64,
     estimated_duration_ns: u64,
     participants: [Option<service::ServiceParticipant>; REQUEST_LANES],
+    origin: PlanOrigin,
+    timing: SubmittedTiming,
 }
 impl std::ops::Deref for Submission {
     type Target = ScheduledStep;
@@ -474,6 +516,7 @@ pub struct RequestScheduler {
     proposal_source: speculation::ProposalSource,
     split: Option<split::SplitSpeculation>,
     costs: cost::ActionCosts,
+    refresh: refresh::RefreshState,
     tickets: HashMap<PrefixKey, Ticket>,
     track_publications: bool,
     publications: Vec<CheckpointId>,
@@ -544,6 +587,7 @@ impl RequestScheduler {
             proposal_source: speculation::ProposalSource::Mtp,
             split: None,
             costs: cost::ActionCosts::default(),
+            refresh: refresh::RefreshState::default(),
             tickets: HashMap::new(),
             track_publications: false,
             publications: Vec::new(),
@@ -756,6 +800,58 @@ impl RequestScheduler {
         timing: crate::execution::ExecutionTiming,
     ) {
         self.costs.observe(step, timing);
+    }
+
+    pub fn submitted_timing(&self, fence: Fence) -> Result<SubmittedTiming> {
+        self.submissions.get(&fence).map(|submission| submission.timing)
+            .ok_or_else(|| "unknown scheduled submission".into())
+    }
+
+    pub fn refresh_credit_ns(&self) -> f64 {
+        self.refresh.credit_ns
+    }
+
+    pub fn idle(&mut self) -> Result<()> {
+        if !self.submissions.is_empty() {
+            return Err("idle requires no submitted execution".into());
+        }
+        self.refresh.idle();
+        Ok(())
+    }
+
+    pub fn plan_requires_feedback(&self, plan: &ScheduledPlan) -> bool {
+        plan.requires_feedback || !self.costs.is_fresh(cost::Key::from_step(plan))
+            || matches!(plan.origin, PlanOrigin::RefreshStart(_) | PlanOrigin::RefreshContinuation(_))
+    }
+
+    fn selected_cost(&self, key: cost::Key) -> SelectedCost {
+        let (retained_ns, observed_at_ns, fresh) = self.costs.observation(key).unwrap_or((0, None, false));
+        SelectedCost { retained_ns, observed_at_ns, selected_at_ns: self.now_ns,
+            freshness: if observed_at_ns.is_none() { CostFreshness::Unknown }
+                else if fresh { CostFreshness::Fresh } else { CostFreshness::Stale } }
+    }
+
+    fn refresh_ready(&self) -> bool {
+        self.refresh.ready()
+    }
+
+    fn refresh_episode(&self) -> Option<&refresh::Episode> {
+        self.refresh.episode()
+    }
+
+    fn reconcile_refresh(&mut self) {
+        let mut keep = [false; REQUEST_LANES];
+        if let Some(episode) = self.refresh.episode() {
+            for (slot, owner) in episode.owners.iter().enumerate() {
+                let Some(owner) = owner else { continue; };
+                keep[slot] = self.request(owner.handle).is_ok() && (
+                    self.submissions.contains_key(&owner.fence)
+                    || self.split.as_ref().and_then(|split| split.retained[slot]).is_some_and(|proposal|
+                        proposal.request == owner.handle && proposal.consumed == owner.consumed
+                            && proposal.fence == owner.fence));
+            }
+        }
+        self.refresh.retain_owners(&keep);
     }
     pub fn submitted_step(&self, fence: Fence) -> Result<&ScheduledStep> {
         self.submissions
@@ -1025,9 +1121,9 @@ impl RequestScheduler {
     /// cache without reserving anything.
     pub fn plan_admission(&mut self, spec: &RequestSpec) -> Result<AdmissionPlan> {
         if spec.prompt.is_empty()
-            || spec
-                .system_boundary
-                .is_some_and(|n| n == 0 || n > spec.prompt.len())
+            || spec.message_boundaries.first() == Some(&0)
+            || spec.message_boundaries.last().is_some_and(|n| *n > spec.prompt.len())
+            || spec.message_boundaries.windows(2).any(|pair| pair[0] >= pair[1])
             || spec.max_new_tokens == 0
             || spec
                 .prompt
@@ -1238,8 +1334,8 @@ impl RequestScheduler {
             prefix,
             prefix_tokens: consumed,
             admission_reused_tokens: consumed,
-            system_boundary: spec.system_boundary,
-            system_snapshot: None,
+            message_boundaries: spec.message_boundaries,
+            message_snapshot: None,
             prompt_snapshot: None,
             boundary_capture: None,
             prefix_snapshot,
@@ -1435,8 +1531,8 @@ impl RequestScheduler {
                     || (s.start < request.consumed_tokens as usize
                         && (request.consumed_tokens as usize) < s.end)
                     || request
-                        .system_boundary
-                        .is_some_and(|n| s.start < n && n < s.end)
+                        .message_boundaries
+                        .iter().any(|&n| s.start < n && n < s.end)
             })
         {
             return Err("invalid atomic prefill spans or prefix boundary".into());
@@ -1527,8 +1623,32 @@ impl RequestScheduler {
         if fence <= self.submitted || fence.0 > i64::MAX as u64 {
             return Err("submission fences must increase within int64 range".into());
         }
+        let key = cost::Key::from_step(step);
+        let observed_at_ns = self.costs.observation(key).and_then(|(_, observed, _)| observed);
+        let owned = step.kind == GraphKind::Verification && self.refresh.episode().is_some_and(|episode|
+            step.lanes.iter().any(|lane| self.request(lane.request).ok()
+                .and_then(|request| self.retained_proposal(request))
+                .is_some_and(|proposal| episode.owns(lane.request, proposal.consumed, proposal.fence))));
+        let origin = match plan.origin {
+            PlanOrigin::Ordinary | PlanOrigin::Discovery if owned =>
+                PlanOrigin::RefreshContinuation(self.refresh.episode().unwrap().id),
+            PlanOrigin::RefreshContinuation(_) if !owned =>
+                return Err("refresh verification must consume an owned proposal".into()),
+            PlanOrigin::Ordinary if observed_at_ns.is_none() => PlanOrigin::Discovery,
+            origin => origin,
+        };
+        self.refresh.validate(origin)?;
+        if let PlanOrigin::RefreshStart(target) = origin {
+            if self.costs.duration_key(target).is_none_or(|duration| duration == 0) || self.costs.is_fresh(target) {
+                return Err("refresh target must have a stale measured cost".into());
+            }
+            if target != key && !(step.kind == GraphKind::Proposal && target.kind == GraphKind::Verification) {
+                return Err("refresh must execute its physical target or an enabling proposal".into());
+            }
+        }
+        let feedback = self.plan_requires_feedback(plan);
         if self.submissions.len() >= 2
-            || (step.requires_feedback && !self.submissions.is_empty())
+            || (feedback && !self.submissions.is_empty())
             || self.submissions.values().any(|step| step.requires_feedback)
         {
             return Err("submission window or feedback barrier is full".into());
@@ -1558,6 +1678,23 @@ impl RequestScheduler {
             needed.push((lane.request, pages, through));
         }
         let participants = self.service_participants();
+        let submitted_timing = SubmittedTiming {
+            retained_ns: plan.selected_cost.retained_ns,
+            observed_at_ns: plan.selected_cost.observed_at_ns,
+            freshness: plan.selected_cost.freshness,
+            origin: match origin {
+                PlanOrigin::Ordinary => TimingOrigin::Ordinary,
+                PlanOrigin::Discovery => TimingOrigin::Discovery,
+                _ => TimingOrigin::Refresh,
+            },
+            credit_ns: self.refresh.credit_ns, commit_ns: self.now_ns,
+            selected_at_ns: plan.selected_cost.selected_at_ns,
+            refresh_episode: match origin {
+                PlanOrigin::RefreshStart(_) => Some(fence.0),
+                PlanOrigin::RefreshContinuation(id) => Some(id),
+                _ => None,
+            },
+        };
         for (handle, pages, through) in needed {
             let request = self.request_mut(handle)?;
             let allocated: Vec<_> = (0..pages)
@@ -1572,6 +1709,11 @@ impl RequestScheduler {
             }
         }
         self.submitted = fence;
+        self.refresh.commit(origin, fence, step);
+        self.costs.record_attempt(key);
+        if let PlanOrigin::RefreshStart(target) = origin {
+            self.costs.record_attempt(target);
+        }
         if let Some(tokens) = plan.verification_budget {
             self.split.as_mut().unwrap().pending_budget = Some((fence, tokens));
         }
@@ -1587,10 +1729,12 @@ impl RequestScheduler {
         self.submissions.insert(
             fence,
             Submission {
-                step: step.clone(),
+                step: ScheduledStep { requires_feedback: feedback, ..step.clone() },
                 expected_finish_ns,
                 estimated_duration_ns: plan.estimated_duration_ns,
                 participants,
+                origin,
+                timing: submitted_timing,
             },
         );
         Ok(())
@@ -1702,7 +1846,9 @@ impl RequestScheduler {
                 );
             }
         }
+        self.refresh.validate_completion(step.origin, timing)?;
         let submission = self.submissions.remove(&fence).unwrap();
+        self.refresh.complete(submission.origin, timing);
         self.observe_execution(&submission.step, timing);
         let step = submission.step;
         let now_ns = self.now_ns;
@@ -1813,17 +1959,17 @@ impl RequestScheduler {
             };
             if kind == GraphKind::Prefill && request.error_code.is_none() {
                 let endpoint = request.consumed_tokens;
-                let capture = if request.system_boundary == Some(endpoint as usize)
+                let capture = if request.message_boundaries.binary_search(&(endpoint as usize)).is_ok()
                     && endpoint > request.prefix_tokens
                 {
-                    Some(BoundaryKind::System)
+                    Some(BoundaryKind::Message)
                 } else {
                     None
                 }
                 .or_else(|| {
                     (endpoint == request.prompt_tokens as u64
                         && endpoint > request.prefix_tokens
-                        && request.system_boundary != Some(request.prompt_tokens)
+                        && request.message_boundaries.last() != Some(&request.prompt_tokens)
                         && request.max_new_tokens > 1)
                         .then_some(BoundaryKind::Prompt)
                 });
@@ -1864,7 +2010,7 @@ impl RequestScheduler {
             if let Some(snapshot) = snapshot {
                 if let Some(kind) = kind {
                     match kind {
-                        BoundaryKind::System => request.system_snapshot = Some(snapshot),
+                        BoundaryKind::Message => request.message_snapshot = Some(snapshot),
                         BoundaryKind::Prompt => request.prompt_snapshot = Some(snapshot),
                     }
                     request.boundary_capture = Some(BoundaryCapture {
@@ -1883,6 +2029,7 @@ impl RequestScheduler {
         }
         self.observe_service(fence, &submission.participants, &useful_tokens, timing);
         self.refill_reservations()?;
+        self.reconcile_refresh();
         Ok(generated)
     }
 
@@ -1924,12 +2071,12 @@ impl RequestScheduler {
             self.release_snapshot(capture.snapshot);
         }
         match capture.kind {
-            BoundaryKind::System => self.stats.system_checkpoints += 1,
+            BoundaryKind::Message => self.stats.message_checkpoints += 1,
             BoundaryKind::Prompt => self.stats.prompt_checkpoints += 1,
         }
         let request = self.request_mut(handle)?;
         match capture.kind {
-            BoundaryKind::System => request.system_snapshot = None,
+            BoundaryKind::Message => request.message_snapshot = None,
             BoundaryKind::Prompt => request.prompt_snapshot = None,
         }
         request.boundary_capture = None;
@@ -1998,6 +2145,7 @@ impl RequestScheduler {
             self.cancel(handle)?;
         }
         self.submissions.clear();
+        self.refresh.abort();
         self.advance_retirement(self.submitted)
     }
 
@@ -2053,12 +2201,13 @@ impl RequestScheduler {
         self.retired.push(RetiredRequest {
             image_slot: request.image_slot,
             pages: request.private_pages,
-            snapshots: [snapshot, request.system_snapshot, request.prompt_snapshot],
+            snapshots: [snapshot, request.message_snapshot, request.prompt_snapshot],
             slot: handle.slot as usize,
             through: request.last_use,
         });
         self.advance_retirement(self.completed)?;
         self.refill_reservations()?;
+        self.reconcile_refresh();
         Ok(result.map(PublishResult::id).or(request.prefix))
     }
 }

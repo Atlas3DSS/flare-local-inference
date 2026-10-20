@@ -7,8 +7,9 @@ use std::{
 };
 
 use crate::{
+    cache::Fence,
     execution::{ExecutionTiming, GraphDescriptor, GraphKind, REQUEST_LANES},
-    scheduler::{RequestHandle, RequestPhase, ScheduledPlan, ScheduledStep},
+    scheduler::{RequestHandle, RequestPhase, ScheduledPlan, ScheduledStep, SubmittedTiming},
 };
 
 pub(in crate::server) const TRACE_CAPACITY: usize = 1024;
@@ -19,13 +20,19 @@ pub(in crate::server) struct GraphLabel {
     pub batch: usize,
     pub tokens: usize,
     pub prefill: usize,
+    pub packed: usize,
 }
 
 #[derive(Clone, Copy)]
 pub(in crate::server) struct GraphSample {
     pub at_ns: u64,
+    pub fence: Fence,
     pub graph: usize,
     pub gpu_ns: Option<u64>,
+    pub wall_ns: u64,
+    pub queued: bool,
+    pub selection: SubmittedTiming,
+    pub credit_after_ns: f64,
     pub generations: [u64; REQUEST_LANES],
 }
 
@@ -93,6 +100,7 @@ impl SchedulerMetrics {
                     batch: g.batch_capacity,
                     tokens: g.token_capacity,
                     prefill: g.prefill_capacity,
+                    packed: g.packed_token_capacity,
                 })
                 .collect(),
         );
@@ -129,14 +137,14 @@ impl SchedulerMetrics {
         }
     }
 
-    pub fn submitted(&self, at_ns: u64, graph: usize, plan: &ScheduledPlan) {
+    pub fn submitted(&self, at_ns: u64, graph: usize, plan: &ScheduledPlan, feedback: bool) {
         self.write(|trace| {
             trace.dispatch = Some(Dispatch {
                 at_ns,
                 graph,
                 requests: plan.lanes.len(),
                 estimate_ns: plan.estimated_duration_ns(),
-                feedback: plan.requires_feedback,
+                feedback,
             })
         });
     }
@@ -144,9 +152,12 @@ impl SchedulerMetrics {
     pub fn completed(
         &self,
         at_ns: u64,
+        fence: Fence,
         graph: usize,
         step: &ScheduledStep,
         timing: ExecutionTiming,
+        selection: SubmittedTiming,
+        credit_after_ns: f64,
     ) {
         self.write(|trace| {
             let mut generations = [0; REQUEST_LANES];
@@ -159,8 +170,13 @@ impl SchedulerMetrics {
             }
             trace.samples.push_back(GraphSample {
                 at_ns,
+                fence,
                 graph,
                 generations,
+                wall_ns: timing.wall_ns,
+                queued: timing.queued,
+                selection,
+                credit_after_ns,
                 gpu_ns: timing
                     .gpu_ns
                     .into_iter()
@@ -227,15 +243,16 @@ mod tests {
         let mut timing = ExecutionTiming::default();
         timing.gpu_ns[0] = Some(10);
         timing.gpu_ns[15] = Some(25);
-        metrics.completed(0, 3, &step, timing);
+        metrics.completed(0, Fence(1), 3, &step, timing, SubmittedTiming::default(), 0.0);
         assert!(metrics.buffer.get().is_none());
         metrics.start();
         let lock = metrics.buffer.get().unwrap().lock().unwrap();
-        metrics.completed(0, 3, &step, timing);
+        metrics.completed(0, Fence(1), 3, &step, timing, SubmittedTiming::default(), 0.0);
         assert_eq!(metrics.dropped.load(Ordering::Relaxed), 1);
         drop(lock);
         for at in 0..TRACE_CAPACITY + 3 {
-            metrics.completed(at as u64, 3, &step, timing);
+            let selection = SubmittedTiming { retained_ns: 100 + at as u64, ..Default::default() };
+            metrics.completed(at as u64, Fence(at as u64 + 1), 3, &step, timing, selection, -(at as f64));
         }
         let mut samples = VecDeque::with_capacity(TRACE_CAPACITY);
         metrics.drain(&mut samples);
@@ -247,10 +264,66 @@ mod tests {
                 .iter()
                 .all(|s| s.gpu_ns == Some(25) && s.generations[7] == 11 && s.generations[0] == 0)
         );
+        assert!(samples.iter().all(|sample| {
+            sample.fence.0 == sample.at_ns + 1
+                && sample.selection.retained_ns == sample.at_ns + 100
+                && sample.credit_after_ns == -(sample.at_ns as f64)
+        }));
         metrics.stop();
-        metrics.completed(5000, 3, &step, timing);
+        metrics.completed(5000, Fence(5001), 3, &step, timing, SubmittedTiming::default(), 0.0);
         metrics.drain(&mut samples);
         assert!(samples.is_empty());
+    }
+
+    #[test]
+    fn completion_context_survives_trace_activation_and_unrelated_dispatches() {
+        use crate::scheduler::{CostFreshness, TimingOrigin};
+        let metrics = SchedulerMetrics::default();
+        let step = step();
+        let first = SubmittedTiming {
+            retained_ns: 40,
+            observed_at_ns: Some(10),
+            freshness: CostFreshness::Stale,
+            origin: TimingOrigin::Refresh,
+            refresh_episode: Some(1),
+            credit_ns: 5.0,
+            selected_at_ns: 90,
+            commit_ns: 100,
+        };
+        metrics.start();
+        metrics.write(|trace| {
+            trace.dispatch = Some(Dispatch {
+                at_ns: 80, graph: 9, requests: 1, estimate_ns: 999, feedback: false,
+            });
+        });
+        let mut samples = VecDeque::with_capacity(TRACE_CAPACITY);
+        metrics.drain(&mut samples);
+        let timing = ExecutionTiming { wall_ns: 60, ..Default::default() };
+        metrics.completed(160, Fence(1), 3, &step, timing, first, -55.0);
+        let (_, dispatch) = metrics.drain(&mut samples);
+        assert_eq!(dispatch.unwrap().graph, 9);
+        let sample = samples.front().unwrap();
+        assert_eq!((sample.fence, sample.graph, sample.selection.retained_ns), (Fence(1), 3, 40));
+        assert!(matches!(sample.selection.origin, TimingOrigin::Refresh));
+        assert!(matches!(sample.selection.freshness, CostFreshness::Stale));
+        assert_eq!(sample.selection.observed_at_ns, Some(10));
+        assert_eq!((sample.selection.commit_ns, sample.selection.credit_ns), (100, 5.0));
+        assert_eq!((sample.gpu_ns, sample.wall_ns, sample.credit_after_ns), (None, 60, -55.0));
+        metrics.stop();
+        metrics.start();
+        let mut timing = ExecutionTiming { wall_ns: 500, queued: true, ..Default::default() };
+        timing.gpu_ns[0] = Some(20);
+        metrics.completed(700, Fence(2), 9, &step, timing, SubmittedTiming {
+            retained_ns: 18, observed_at_ns: Some(170), freshness: CostFreshness::Fresh,
+            origin: TimingOrigin::Ordinary, credit_ns: -55.0, commit_ns: 200,
+            selected_at_ns: 190,
+            refresh_episode: None,
+        }, -54.0);
+        metrics.drain(&mut samples);
+        assert_eq!(samples.len(), 1);
+        let sample = samples.front().unwrap();
+        assert_eq!((sample.fence, sample.graph, sample.selection.retained_ns), (Fence(2), 9, 18));
+        assert_eq!((sample.gpu_ns, sample.wall_ns, sample.queued), (Some(20), 500, true));
     }
 
     #[test]

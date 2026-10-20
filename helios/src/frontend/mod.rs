@@ -5,6 +5,8 @@ mod deepseek;
 pub mod images;
 mod json;
 
+mod vocabulary;
+
 use std::fs;
 use std::path::PathBuf;
 
@@ -193,6 +195,7 @@ pub struct Frontend {
     template_source: String,
     bos_token_id: Option<u32>,
     effort_levels: std::sync::OnceLock<Vec<String>>,
+    vocabulary_bytes: std::sync::OnceLock<Result<vocabulary::VocabularyBytes>>,
     inline_system_messages: std::sync::OnceLock<bool>,
     defaults: Map<String, Json>,
 }
@@ -459,6 +462,7 @@ impl Frontend {
             prompt_encoder,
             image_placeholder_token_id,
             bos_token_id,
+            vocabulary_bytes: Default::default(),
             effort_levels: Default::default(),
             inline_system_messages: Default::default(),
             tokenizer,
@@ -509,6 +513,15 @@ impl Frontend {
                 "Cannot apply chat template to an empty conversation. Provide at least one message.",
             ))));
         }
+        self.render_jinja(messages, options, false)
+    }
+
+    fn render_jinja(
+        &self,
+        messages: &[Json],
+        options: &Map<String, Json>,
+        boundary: bool,
+    ) -> Result<RenderedPrompt> {
         let mut context = self.defaults.clone();
         context.extend(options.clone());
         let continuation = match context.remove("continue_final_message") {
@@ -577,7 +590,8 @@ impl Frontend {
             .map(|field| self.mark_continuation(&mut messages, &field))
             .transpose()?;
         context.insert("messages".into(), Json::Array(messages));
-        let rendered = self
+        let mut rendered = Vec::new();
+        let template = self
             .environment
             .get_template("chat")
             .map_err(|error| {
@@ -585,17 +599,19 @@ impl Frontend {
                     error.to_string(),
                     error,
                 )))
-            })?
-            .render(context)
-            .map_err(|error| {
+            })?;
+        let result = template.render_captured_to(context, &mut rendered);
+        // A complete request may require later turns that a prefix does not contain.
+        if !boundary || rendered.is_empty() {
+            result.map_err(|error| {
                 Error::frontend(FrontendError::Template(Failure::caused_by(
-                    error
-                        .detail()
-                        .unwrap_or("chat template rendering failed")
-                        .to_owned(),
+                    error.detail().unwrap_or("chat template rendering failed").to_owned(),
                     error,
                 )))
             })?;
+        }
+        let rendered = String::from_utf8(rendered)
+            .map_err(|error| deepseek::invalid(error.to_string()))?;
         let mut segments: Vec<TokenSegment> = if self.ordinary_tokenizer.is_some() {
             serde_json::from_str(&rendered).map_err(|error| {
                 Error::frontend(FrontendError::Template(Failure::caused_by(
@@ -690,6 +706,17 @@ impl Frontend {
         Ok(original)
     }
 
+    #[cfg(feature = "server")]
+    pub(crate) fn prepare_token_bytes(&self) -> Result<()> {
+        self.vocabulary_bytes.get_or_init(|| vocabulary::VocabularyBytes::new(&self.tokenizer))
+            .as_ref().map(|_| ()).map_err(Clone::clone)
+    }
+
+    pub fn token_bytes(&self, token: u32) -> Result<&[u8]> {
+        self.vocabulary_bytes.get_or_init(|| vocabulary::VocabularyBytes::new(&self.tokenizer))
+            .as_ref().map_err(Clone::clone)?.get(token)
+    }
+
     pub fn incremental_decoder(&self, skip_special_tokens: bool) -> IncrementalDecoder<'_> {
         IncrementalDecoder {
             tokenizer: &self.tokenizer,
@@ -735,6 +762,11 @@ impl IncrementalDecoder<'_> {
                 error,
             )))
         })
+    }
+
+    pub(crate) fn pending_text(&self) -> Result<String> {
+        let text = self.tokenizer.decode(&self.ids, self.skip_special_tokens).map_err(|e| e.to_string())?;
+        Ok(text.strip_prefix(&self.prefix).ok_or("decoder changed its emitted prefix")?.to_owned())
     }
 
     pub fn finish(&mut self) -> Result<String> {
@@ -795,6 +827,7 @@ mod tests {
             environment,
             template_source: source,
             bos_token_id: None,
+            vocabulary_bytes: Default::default(),
             effort_levels: Default::default(),
             inline_system_messages: Default::default(),
             defaults: Map::new(),
@@ -905,6 +938,7 @@ mod tests {
                 environment,
                 template_source: source,
                 bos_token_id: None,
+                vocabulary_bytes: Default::default(),
                 effort_levels: Default::default(),
                 inline_system_messages: Default::default(),
                 defaults: Map::new(),
@@ -968,6 +1002,7 @@ mod tests {
             prompt_encoder: PromptEncoder::Jinja,
             image_placeholder_token_id: None,
             bos_token_id: None,
+            vocabulary_bytes: Default::default(),
             effort_levels: Default::default(),
             inline_system_messages: Default::default(),
             ordinary_tokenizer: None,

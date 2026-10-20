@@ -61,12 +61,48 @@ pub(super) fn sampling_defaults(
     sampling
         .validate()
         .map_err(|error| invalid(error.to_string()))?;
-    Ok(serde_json::json!({
+    let mut result = serde_json::json!({
         "seed": sampling.seed, "temperature": sampling.temperature, "top_k": sampling.top_k,
         "top_p": sampling.top_p, "min_p": sampling.min_p,
         "repetition_penalty": sampling.repetition_penalty, "presence_penalty": sampling.presence_penalty,
         "frequency_penalty": sampling.frequency_penalty,
-    }))
+    });
+    if let Some(ranges) = value.ranges {
+        let ranges = sampling_ranges(ranges)?;
+        ranges
+            .validate(&sampling)
+            .map_err(|error| invalid(error.to_string()))?;
+        result["ranges"] =
+            serde_json::to_value(ranges).map_err(|error| invalid(error.to_string()))?;
+    }
+    Ok(result)
+}
+
+fn sampling_ranges(value: wire::SamplingRanges) -> Result<crate::model::SamplingRanges> {
+    use crate::model::{SamplingRange, SamplingRanges};
+    let float = |range: wire::SamplingFloatRange| -> Result<SamplingRange<f32>> {
+        Ok(SamplingRange {
+            min: required(range.min, "sampling range min")?,
+            max: required(range.max, "sampling range max")?,
+        })
+    };
+    Ok(SamplingRanges {
+        temperature: value.temperature.map(float).transpose()?,
+        top_p: value.top_p.map(float).transpose()?,
+        min_p: value.min_p.map(float).transpose()?,
+        repetition_penalty: value.repetition_penalty.map(float).transpose()?,
+        presence_penalty: value.presence_penalty.map(float).transpose()?,
+        frequency_penalty: value.frequency_penalty.map(float).transpose()?,
+        top_k: value
+            .top_k
+            .map(|range| -> Result<SamplingRange<i32>> {
+                Ok(SamplingRange {
+                    min: required(range.min, "sampling range min")?,
+                    max: required(range.max, "sampling range max")?,
+                })
+            })
+            .transpose()?,
+    })
 }
 
 pub(super) fn frontend_settings(value: wire::FrontendSettings) -> Result<serde_json::Value> {
@@ -335,6 +371,7 @@ mod tests {
             repetition_penalty: Some(1.),
             presence_penalty: Some(0.),
             frequency_penalty: Some(0.),
+            ranges: None,
         }
     }
 
@@ -353,6 +390,84 @@ mod tests {
             assert_eq!(sampling.seed, u64::MAX);
             assert_eq!(sampling.top_k, -1);
         }
+    }
+
+    #[test]
+    fn serialized_sampling_without_ranges_preserves_defaults() {
+        // DefaultSamplingParameters fields 1 through 8, without field 9.
+        let bytes = [
+            0x08, 0x00, 0x15, 0x00, 0x00, 0x80, 0x3f, 0x18, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0x01, 0x25, 0x33, 0x33, 0x73, 0x3f, 0x2d, 0x00, 0x00, 0x00, 0x00, 0x35, 0x00,
+            0x00, 0x80, 0x3f, 0x3d, 0x00, 0x00, 0x00, 0x00, 0x45, 0x00, 0x00, 0x00, 0x00,
+        ];
+        let decoded = wire::DefaultSamplingParameters::decode(bytes.as_slice()).unwrap();
+        assert!(decoded.ranges.is_none());
+        assert_eq!(
+            decoded,
+            wire::DefaultSamplingParameters {
+                seed: Some(0),
+                ..defaults()
+            }
+        );
+        let json = sampling_defaults(decoded).unwrap();
+        assert!(json.get("ranges").is_none());
+        assert_eq!(json["seed"], 0);
+        assert_eq!(json["top_k"], -1);
+        assert_eq!(json["temperature"], 1.);
+    }
+
+    #[test]
+    fn sampling_ranges_preserve_explicit_zero_bounds_and_reject_invalid_metadata() {
+        let mut value = defaults();
+        value.ranges = Some(wire::SamplingRanges {
+            temperature: Some(wire::SamplingFloatRange {
+                min: Some(0.5),
+                max: Some(1.5),
+            }),
+            top_k: Some(wire::SamplingIntRange {
+                min: Some(-1),
+                max: Some(100),
+            }),
+            presence_penalty: Some(wire::SamplingFloatRange {
+                min: Some(0.),
+                max: Some(0.),
+            }),
+            ..Default::default()
+        });
+        let decoded =
+            wire::DefaultSamplingParameters::decode(value.encode_to_vec().as_slice()).unwrap();
+        let json = sampling_defaults(decoded).unwrap();
+        assert_eq!(
+            json["ranges"]["presence_penalty"],
+            serde_json::json!({"min":0.,"max":0.})
+        );
+        assert_eq!(
+            json["ranges"]["top_k"],
+            serde_json::json!({"min":-1,"max":100})
+        );
+        for (min, max) in [
+            (None, Some(1.5)),
+            (Some(0.5), None),
+            (Some(0.), Some(1.5)),
+            (Some(1.5), Some(2.)),
+            (Some(2.), Some(0.5)),
+            (Some(f32::NAN), Some(1.5)),
+            (Some(0.5), Some(f32::INFINITY)),
+        ] {
+            value.ranges.as_mut().unwrap().temperature = Some(wire::SamplingFloatRange { min, max });
+            assert!(
+                sampling_defaults(value.clone()).is_err(),
+                "{min:?}..={max:?}"
+            );
+        }
+        value.ranges = Some(wire::SamplingRanges {
+            top_k: Some(wire::SamplingIntRange {
+                min: None,
+                max: Some(100),
+            }),
+            ..Default::default()
+        });
+        assert!(sampling_defaults(value).is_err());
     }
 
     #[test]

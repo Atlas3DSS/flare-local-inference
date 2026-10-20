@@ -539,11 +539,54 @@ fn raw_prompts(value: &Value) -> Result<Vec<RawPrompt>> {
         })
         .collect()
 }
+fn generation_logprobs(protocol: Protocol, body: &Value) -> Result<Option<LogprobOptions>> {
+    let integer = |key: &str| -> Result<usize> {
+        match body.get(key).filter(|v| !v.is_null()) {
+            None => Ok(0),
+            Some(v) => v.as_u64().filter(|n| *n <= crate::execution::MAX_TOP_LOGPROBS as u64).map(|n| n as usize)
+                .ok_or_else(|| format!("{key} must be an integer from 0 through {}", crate::execution::MAX_TOP_LOGPROBS).into()),
+        }
+    };
+    let token_ids = flag(body, "return_tokens_as_token_ids", false)?;
+    let (enabled, top) = match protocol {
+        Protocol::Chat => {
+            let enabled = flag(body, "logprobs", false)?;
+            let top = integer("top_logprobs")?;
+            if top > 0 && !enabled { return Err("top_logprobs requires logprobs: true".into()); }
+            (enabled, top)
+        }
+        Protocol::Completions => {
+            if present(body, "top_logprobs") { return Err("completions use integer logprobs".into()); }
+            let enabled = present(body, "logprobs");
+            let top = integer("logprobs")?;
+            if enabled && flag(body, "echo", false)? {
+                return Err("echo with logprobs requires prompt logprobs, which are not supported".into());
+            }
+            (enabled, top)
+        }
+        Protocol::Responses => {
+            if present(body, "logprobs") { return Err("responses use include and top_logprobs".into()); }
+            let enabled = body.get("include").and_then(Value::as_array).is_some_and(|items|
+                items.iter().any(|v| v == "message.output_text.logprobs"));
+            let top = integer("top_logprobs")?;
+            if top > 0 && !enabled { return Err("top_logprobs requires include: [\"message.output_text.logprobs\"]".into()); }
+            (enabled, top)
+        }
+        Protocol::Messages => {
+            if ["logprobs", "top_logprobs", "return_tokens_as_token_ids"].iter().any(|key| present(body, key)) {
+                return Err(unsupported("/v1/messages does not support logprob fields"));
+            }
+            (false, 0)
+        }
+    };
+    Ok(enabled.then_some(LogprobOptions { top, token_ids }))
+}
+
 pub(crate) fn decode(protocol: Protocol, body: Value, count: bool) -> Result<Decoded> {
     body.as_object().ok_or("request must be a JSON object")?;
     reject(
         &body,
-        &["logprobs", "top_logprobs", "logit_bias", "guided_json"],
+        &["logit_bias", "guided_json"],
     )?;
     if protocol == Protocol::Responses {
         reject(
@@ -568,6 +611,7 @@ pub(crate) fn decode(protocol: Protocol, body: Value, count: bool) -> Result<Dec
     if protocol == Protocol::Completions {
         reject(&body, &["suffix"])?;
     }
+    let logprobs = generation_logprobs(protocol, &body)?;
     let choices = body
         .get("n")
         .filter(|v| !v.is_null())
@@ -593,9 +637,21 @@ pub(crate) fn decode(protocol: Protocol, body: Value, count: bool) -> Result<Dec
         Some(v) if v == "none" || v["type"] == "none" => ToolChoice::None,
         Some(v) if v == "required" => ToolChoice::Required,
         Some(v) if protocol == Protocol::Messages && v["type"] == "any" => ToolChoice::Required,
+        Some(v) if protocol == Protocol::Chat && v["type"] == "function" => {
+            ToolChoice::Named(field(&v["function"], "name")?.into())
+        }
+        Some(v) if protocol == Protocol::Messages && v["type"] == "tool" => {
+            ToolChoice::Named(field(v, "name")?.into())
+        }
+        Some(v)
+            if protocol == Protocol::Responses
+                && (v["type"] == "function" || v["type"] == "custom") =>
+        {
+            ToolChoice::Named(field(v, "name")?.into())
+        }
         _ => {
             return Err(unsupported(
-                "tool_choice supports auto, none, or required (Anthropic any); named tool selection is not implemented",
+                "tool_choice supports auto, none, required (Anthropic any), or a named tool",
             ));
         }
     };
@@ -666,6 +722,7 @@ pub(crate) fn decode(protocol: Protocol, body: Value, count: bool) -> Result<Dec
         Protocol::Responses => Input::Conversation(responses_messages(&body)?),
         Protocol::Completions => Input::Raw(raw_prompts(&body["prompt"])?),
     };
+    options.logprobs = logprobs;
     let request = Request {
         input,
         options,
@@ -675,6 +732,16 @@ pub(crate) fn decode(protocol: Protocol, body: Value, count: bool) -> Result<Dec
         choices,
     };
     request.validate()?;
+    if protocol == Protocol::Responses {
+        if let ToolChoice::Named(name) = &request.tool_choice {
+            let selected = request.tools.iter()
+                .find(|tool| tool.native_name() == *name)
+                .ok_or("selected tool is not declared in tools")?;
+            if selected.custom != (body["tool_choice"]["type"] == "custom") {
+                return Err("tool_choice type must match the selected tool definition".into());
+            }
+        }
+    }
     let observation = ObservationOptions::parse(body.as_object().unwrap())?;
     if protocol != Protocol::Chat && (observation.token_ids || observation.timestamps) {
         return Err(unsupported(
@@ -828,6 +895,70 @@ mod native_prompt_tests {
     }
 
     #[test]
+    fn every_protocol_clamps_sampling_before_native_admission() {
+        use crate::model::{SamplingRange, SamplingRanges};
+        let (frontend, compiler, mut config) = native(PromptEncoder::DeepseekV4);
+        for (protocol, input) in [
+            (Protocol::Completions, json!({"prompt":"hello"})),
+            (
+                Protocol::Chat,
+                json!({"messages":[{"role":"user","content":"hello"}]}),
+            ),
+            (
+                Protocol::Messages,
+                json!({"messages":[{"role":"user","content":"hello"}]}),
+            ),
+            (Protocol::Responses, json!({"input":"hello"})),
+        ] {
+            for bounded in [false, true] {
+                config.sampling_ranges = if bounded {
+                    SamplingRanges {
+                        temperature: Some(SamplingRange { min: 0.5, max: 1.5 }),
+                        top_k: Some(SamplingRange { min: -1, max: 100 }),
+                        ..Default::default()
+                    }
+                } else {
+                    SamplingRanges::default()
+                };
+                for temperature in [0., 1e100] {
+                    let mut body = input.clone();
+                    body.as_object_mut().unwrap().extend(
+                        json!({
+                            "model":config.model_id, "max_tokens":4, "max_output_tokens":4,
+                            "temperature":temperature, "top_k":u64::MAX, "seed":u64::MAX,
+                            "top_p":-1e100, "min_p":1e100, "repetition_penalty":0.,
+                            "presence_penalty":1e100, "frequency_penalty":-1e100,
+                        })
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                    );
+                    let decoded = decode(protocol, body, false).unwrap();
+                    let prepared = crate::server::request::prepare_inference(
+                        &frontend,
+                        None,
+                        &compiler,
+                        &config,
+                        &decoded.request,
+                        0,
+                        false,
+                    )
+                    .unwrap();
+                    let sampling = prepared.prompt.sampling;
+                    let mut expected = config.sampling_defaults.clone();
+                    if bounded {
+                        expected.temperature = if temperature == 0. { 0.5 } else { 1.5 };
+                        expected.top_k = 100;
+                    }
+                    assert_eq!(sampling.values(), expected.values(), "{protocol:?}");
+                    assert_eq!(sampling.top_k, expected.top_k);
+                    assert_eq!(sampling.seed, u64::MAX);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn raw_completion_bypasses_native_conversation_options_and_keeps_token_ids() {
         for encoder in [PromptEncoder::DeepseekV4, PromptEncoder::DeepseekV41] {
             let (frontend, compiler, config) = native(encoder);
@@ -858,7 +989,7 @@ mod native_prompt_tests {
                 assert_eq!(prepared.prompt.tokens, expected);
                 assert_eq!(prepared.prompt.max_new_tokens, 0);
                 assert!(prepared.output.is_none());
-                assert!(prepared.prompt.system_boundary.is_none());
+                assert!(prepared.prompt.message_boundaries.is_empty());
                 assert!(prepared.prompt.grammar.is_none());
             }
         }

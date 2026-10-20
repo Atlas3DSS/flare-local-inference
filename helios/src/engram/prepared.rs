@@ -13,12 +13,18 @@ use std::{
     sync::Arc,
 };
 
-/// A checkpoint file range containing one contiguous plane of table rows.
+/// A checkpoint range containing consecutive complete rows of a table plane.
 #[derive(Clone, Debug)]
-pub struct PlaneSource {
+pub struct SourceSegment {
     pub path: PathBuf,
     pub offset: u64,
     pub nbytes: usize,
+}
+
+/// Ordered checkpoint ranges assembled into one resident plane without conversion.
+#[derive(Clone, Debug)]
+pub struct PlaneSource {
+    pub segments: Vec<SourceSegment>,
     pub row_bytes: usize,
 }
 
@@ -65,20 +71,28 @@ impl PreparedTables {
             let mut planes = Vec::new();
             let mut rows = None;
             for plane in &source.planes {
-                if plane.path.as_os_str().is_empty()
-                    || plane.row_bytes == 0
-                    || plane.nbytes == 0
-                    || plane.nbytes % plane.row_bytes != 0
-                    || plane
-                        .offset
-                        .checked_add(plane.nbytes as u64)
-                        .is_none_or(|end| end > i64::MAX as u64)
-                {
+                if plane.row_bytes == 0 || plane.segments.is_empty() {
                     return Err("invalid embedding table source plane".into());
                 }
-                let count = plane.nbytes / plane.row_bytes;
+                let mut nbytes = 0usize;
+                for segment in &plane.segments {
+                    if segment.path.as_os_str().is_empty()
+                        || segment.nbytes == 0
+                        || segment.nbytes % plane.row_bytes != 0
+                        || segment
+                            .offset
+                            .checked_add(segment.nbytes as u64)
+                            .is_none_or(|end| end > i64::MAX as u64)
+                    {
+                        return Err("invalid embedding table source segment".into());
+                    }
+                    nbytes = nbytes
+                        .checked_add(segment.nbytes)
+                        .ok_or("embedding source plane exceeds host range")?;
+                }
+                let count = nbytes / plane.row_bytes;
                 total_bytes = total_bytes
-                    .checked_add(plane.nbytes)
+                    .checked_add(nbytes)
                     .ok_or("resident embedding catalog exceeds host range")?;
                 if rows
                     .replace(count)
@@ -90,8 +104,8 @@ impl PreparedTables {
                 }
                 planes.push(Plane {
                     file: 0,
-                    offset: plane.offset,
-                    nbytes: plane.nbytes,
+                    offset: 0,
+                    nbytes,
                     row_bytes: plane.row_bytes,
                 });
             }
@@ -116,8 +130,16 @@ impl PreparedTables {
         for (source, table) in sources.iter().zip(&index.tables) {
             let mut planes = Vec::new();
             for (source, plane) in source.planes.iter().zip(table.planes) {
-                let file = reader::open_file(&source.path)?;
-                planes.push(Arc::new(reader::Resident::load(&file, plane)?));
+                let segments = source
+                    .segments
+                    .iter()
+                    .map(|segment| {
+                        let file = File::open(&segment.path)
+                            .map_err(|error| format!("open embedding source segment: {error}"))?;
+                        Ok((file, segment.offset, segment.nbytes))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                planes.push(Arc::new(reader::Resident::load_segments(plane, &segments)?));
             }
             data.push([planes.remove(0), planes.remove(0)]);
         }
@@ -278,22 +300,40 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let first = root.join("weights.bin");
         let second = root.join("scales.bin");
-        let weights: Vec<_> = (0..9000).map(|i| (i * 13) as u8).collect();
+        let weights: Vec<_> = (0..9000).map(|i| (i * 13 + (i / 256) * 17) as u8).collect();
         let scales: Vec<_> = (0..1000).map(|i| (i * 17) as u8).collect();
         std::fs::write(&first, &weights).unwrap();
         std::fs::write(&second, &scales).unwrap();
         let sources = [TableSource {
             planes: [
                 PlaneSource {
-                    path: first,
-                    offset: 37,
-                    nbytes: 8192,
+                    segments: vec![
+                        SourceSegment {
+                            path: first.clone(),
+                            offset: 37 + 4096,
+                            nbytes: 4096,
+                        },
+                        SourceSegment {
+                            path: first,
+                            offset: 37,
+                            nbytes: 4096,
+                        },
+                    ],
                     row_bytes: 256,
                 },
                 PlaneSource {
-                    path: second,
-                    offset: 43,
-                    nbytes: 256,
+                    segments: vec![
+                        SourceSegment {
+                            path: second.clone(),
+                            offset: 43 + 128,
+                            nbytes: 128,
+                        },
+                        SourceSegment {
+                            path: second,
+                            offset: 43,
+                            nbytes: 128,
+                        },
+                    ],
                     row_bytes: 8,
                 },
             ],
@@ -316,12 +356,12 @@ mod tests {
         reader
             .gather(&peer.index.tables[0].planes, &[31, -1, 0], &mut output)
             .unwrap();
-        assert_eq!(&output[..256], &weights[37 + 31 * 256..37 + 32 * 256]);
+        assert_eq!(&output[..256], &weights[37 + 15 * 256..37 + 16 * 256]);
         assert_eq!(&output[256..512], &[0; 256]);
-        assert_eq!(&output[512..768], &weights[37..37 + 256]);
-        assert_eq!(&output[768..776], &scales[43 + 31 * 8..43 + 32 * 8]);
+        assert_eq!(&output[512..768], &weights[37 + 16 * 256..37 + 17 * 256]);
+        assert_eq!(&output[768..776], &scales[43 + 15 * 8..43 + 16 * 8]);
         assert_eq!(&output[776..784], &[0; 8]);
-        assert_eq!(&output[784..], &scales[43..51]);
+        assert_eq!(&output[784..], &scales[43 + 16 * 8..43 + 17 * 8]);
         assert!(
             reader
                 .gather(&peer.index.tables[0].planes, &[32], &mut vec![0; 264])

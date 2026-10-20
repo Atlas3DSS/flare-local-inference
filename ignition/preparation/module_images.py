@@ -176,6 +176,9 @@ class ModuleImages:
         self._pending = {}
         self._functions = {}
         self._kernels = {}
+        # Bindings per (context, module id); entries a rebind made stale are skipped at unload.
+        self._bindings = {}
+        self._binding_lock = threading.Lock()
         self._error = None
 
     def _check(self, name, *args):
@@ -201,10 +204,7 @@ class ModuleImages:
                 return
             module = C.cast(resource.descriptor, C.POINTER(_Module)).contents
             if callback == 7:
-                for bindings in (self._functions, self._kernels):
-                    for handle, image in list(bindings.items()):
-                        if (image.context, image.module_id) == (resource.context, module.id):
-                            bindings.pop(handle)
+                self._drop_module_bindings(resource.context, module.id)
                 return
             if not module.image or not module.size:
                 raise RuntimeError("CUPTI returned a module without its cubin")
@@ -215,6 +215,20 @@ class ModuleImages:
                 pending[-1][1].append(image)
         except BaseException as error:
             self._error = error
+
+    def _bind(self, table, handle, image):
+        with self._binding_lock:
+            table[handle] = image
+            self._bindings.setdefault((image.context, image.module_id), set()).add(handle)
+
+    def _drop_module_bindings(self, context, module_id):
+        key = (context, module_id)
+        with self._binding_lock:
+            for handle in self._bindings.pop(key, ()):
+                for table in (self._functions, self._kernels):
+                    image = table.get(handle)
+                    if image is not None and (image.context, image.module_id) == key:
+                        del table[handle]
 
     def _driver(self, call):
         name = call.name.decode()
@@ -233,13 +247,13 @@ class ModuleImages:
         if len(images) == 1:
             image, = images
             if name.startswith(("cuLaunchKernelEx",)):
-                self._functions[values[1]] = image
+                self._bind(self._functions, values[1], image)
             elif name.startswith(("cuLaunchKernel", "cuLaunchCooperativeKernel")) or name in ("cuFuncLoad", "cuFuncSetAttribute"):
-                self._functions[values[0]] = image
+                self._bind(self._functions, values[0], image)
             elif name == "cuKernelSetAttribute":
-                self._kernels[values[1]] = image
+                self._bind(self._kernels, values[1], image)
             elif name == "cuKernelGetFunction":
-                self._functions[C.cast(values[0], C.POINTER(C.c_void_p))[0]] = image
+                self._bind(self._functions, C.cast(values[0], C.POINTER(C.c_void_p))[0], image)
             elif name == "cuModuleGetFunction":
                 self.modules[values[1]] = image.cubin
             elif name == "cuLibraryGetKernel":
@@ -285,7 +299,7 @@ class ModuleImages:
             for kernel, image in self._kernels.items():
                 handle = C.c_void_p()
                 cuda.call("cuKernelGetFunction", C.byref(handle), C.c_void_p(kernel))
-                self._functions[handle.value] = image
+                self._bind(self._functions, handle.value, image)
             for handle, image in self._functions.items():
                 parent = C.c_void_p()
                 status = cuda.lib.cuFuncGetModule(C.byref(parent), C.c_void_p(handle))

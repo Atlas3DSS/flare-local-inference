@@ -45,6 +45,39 @@ pub struct Hello {
     pub controllers_revision: u64,
     #[serde(default)]
     pub free_bytes: u64,
+    /// The node's installed Flare, used when RUN omits a cached binary name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executable: Option<PathBuf>,
+}
+
+impl Hello {
+    pub fn installed_executable(&self) -> Result<&Path, Failure> {
+        self.executable.as_deref().ok_or_else(|| {
+            "agent does not advertise an installed Flare executable; update it with `flare agent install`, or supply a node-compatible build with --executable PATH"
+                .into()
+        })
+    }
+}
+
+/// A repository download on the node, using a controller-resolved revision and access token.
+#[derive(Serialize, Deserialize)]
+pub struct DownloadRequest {
+    pub source: String,
+    pub options: crate::cli::HubOptions,
+    pub access_token: Option<String>,
+}
+
+fn download(request: DownloadRequest) -> Result<Vec<u8>, Failure> {
+    if request.options.revision.is_none() || request.options.token_file.is_some() {
+        return Err(
+            "DOWNLOAD requires an explicit revision; token-file paths stay on the controller"
+                .into(),
+        );
+    }
+    let path =
+        crate::hub::download_with_token(&request.source, &request.options, 0, request.access_token)
+            .map_err(|e| e.to_string())?;
+    Ok(serde_json::to_vec(&json!({"path": path}))?)
 }
 
 /// Exchange HELLO frames: the initiator sends first. The peer's HELLO must name the key that
@@ -141,7 +174,7 @@ enum Event {
 struct Log {
     lines: VecDeque<String>,
     bytes: usize,
-    exit: Option<i32>,
+    exit: Option<(i32, Instant)>,
     subscribers: Vec<mpsc::Sender<Event>>,
     /// Cache pins held while the rank runs.
     pins: Option<Pinned>,
@@ -181,7 +214,7 @@ impl Group {
 
     fn finish(&self, code: i32) {
         let mut log = self.log.lock().unwrap();
-        log.exit = Some(code);
+        log.exit = Some((code, Instant::now()));
         log.subscribers
             .retain(|s| s.send(Event::Exit(code)).is_ok());
         log.subscribers.clear();
@@ -193,7 +226,16 @@ impl Group {
     }
 
     pub fn exit(&self) -> Option<i32> {
-        self.log.lock().unwrap().exit
+        self.log.lock().unwrap().exit.map(|(code, _)| code)
+    }
+
+    fn retained_at(&self, now: Instant) -> bool {
+        let log = self.log.lock().unwrap();
+        match log.exit {
+            None => true,
+            Some((0, finished)) => now.saturating_duration_since(finished) < SUCCESS_RETENTION,
+            Some(_) => true,
+        }
     }
 
     /// Read the rank's metrics endpoint and keep the document.
@@ -224,7 +266,11 @@ impl Group {
         if log.exit.is_none() {
             log.subscribers.push(sender);
         }
-        (log.lines.iter().cloned().collect(), log.exit, receiver)
+        (
+            log.lines.iter().cloned().collect(),
+            log.exit.map(|(code, _)| code),
+            receiver,
+        )
     }
 }
 
@@ -237,8 +283,27 @@ pub type Verifier =
 
 /// The marker a package cache directory holds once its stored data verified.
 const VERIFIED: &str = ".verified";
-/// Finished groups the agent keeps for STATUS and ATTACH.
+/// Successful runs retained for STATUS and ATTACH; failures require explicit removal.
 const RETAINED_GROUPS: usize = 16;
+const SUCCESS_RETENTION: Duration = Duration::from_secs(5 * 60);
+
+/// Bound successful history by time since exit and count. Preserve running and failed ranks.
+fn prune_groups(groups: &mut Vec<Arc<Group>>, now: Instant) {
+    groups.retain(|group| group.retained_at(now));
+    let mut excess = groups
+        .iter()
+        .filter(|group| group.exit() == Some(0))
+        .count()
+        .saturating_sub(RETAINED_GROUPS);
+    groups.retain(|group| {
+        if excess > 0 && group.exit() == Some(0) {
+            excess -= 1;
+            false
+        } else {
+            true
+        }
+    });
+}
 
 /// Enumerates the host's GPUs.
 pub type Gpus = Box<dyn Fn() -> Result<Vec<Gpu>, Failure> + Send + Sync>;
@@ -259,6 +324,8 @@ pub struct Agent {
     pub key: Key,
     pub cache: PathBuf,
     pub name: String,
+    /// The executable running this agent, also used for serving unless RUN overrides it.
+    executable: PathBuf,
     pins: Pins,
     /// Groups started by this agent, oldest first; finished ones are retained up to a limit.
     groups: Mutex<Vec<Arc<Group>>>,
@@ -298,6 +365,7 @@ impl Agent {
             key,
             cache,
             name: super::hostname(),
+            executable: std::env::current_exe()?,
             pins: Pins::default(),
             groups: Mutex::new(Vec::new()),
             verifier,
@@ -374,6 +442,7 @@ impl Agent {
             public_key: self.key.public().to_hex(),
             controllers_revision: self.dir.controllers()?.map_or(0, |(_, set)| set.revision),
             free_bytes: free_bytes(&self.cache),
+            executable: Some(self.executable.clone()),
         })
     }
 
@@ -398,7 +467,10 @@ impl Agent {
     }
 
     fn groups(&self) -> Vec<Arc<Group>> {
-        self.groups.lock().unwrap().clone()
+        let mut groups = self.groups.lock().unwrap();
+        // The sampler calls this even when no controller is connected or launching work.
+        prune_groups(&mut groups, Instant::now());
+        groups.clone()
     }
 
     /// The group a request names, or the only group when it names none.
@@ -581,6 +653,10 @@ fn session(agent: &Arc<Agent>, stream: TcpStream) -> Result<(), Failure> {
                 let request = json_body(&mut session, length)?;
                 stop(agent, &request)
             }
+            frame::REMOVE => {
+                let request = json_body(&mut session, length)?;
+                remove(agent, &request)
+            }
             frame::STATUS => {
                 let request = json_body(&mut session, length)?;
                 status(agent, &request)
@@ -599,6 +675,10 @@ fn session(agent: &Arc<Agent>, stream: TcpStream) -> Result<(), Failure> {
             frame::STAT => {
                 let request = json_body(&mut session, length)?;
                 stat(&request)
+            }
+            frame::DOWNLOAD => {
+                let request = serde_json::from_value(json_body(&mut session, length)?)?;
+                download(request)
             }
             _ => Err(format!("unknown request {tag}").into()),
         };
@@ -892,23 +972,32 @@ fn stat(request: &Value) -> Result<Vec<u8>, Failure> {
     if !path.is_absolute() {
         return Err("STAT needs an absolute path".into());
     }
-    let size = fs::metadata(path)
-        .map_err(|e| format!("cannot stat {}: {e}", path.display()))?
-        .len();
+    let size = package_file_size(path)?;
     let directory = path.parent().ok_or("path has no directory")?;
     let companions = flare_helios::runtime_package::package_companions(path)
         .map_err(|e| e.to_string())?
         .into_iter()
         .map(|name| {
-            let size = fs::metadata(directory.join(&name))
-                .map_err(|e| format!("cannot stat companion {name}: {e}"))?
-                .len();
+            let size = package_file_size(&directory.join(&name))?;
             Ok(json!({"name": name, "size": size}))
         })
         .collect::<Result<Vec<_>, Failure>>()?;
     Ok(json!({"size": size, "companions": companions})
         .to_string()
         .into_bytes())
+}
+
+fn package_file_size(path: &Path) -> Result<u64, Failure> {
+    let info = fs::metadata(path)
+        .map_err(|e| format!("cannot stat package file {}: {e}", path.display()))?;
+    if !info.is_file() {
+        return Err(format!(
+            "package file must resolve to a regular file: {}",
+            path.display()
+        )
+        .into());
+    }
+    Ok(info.len())
 }
 
 fn run(agent: &Arc<Agent>, request: &Value) -> Result<Arc<Group>, Failure> {
@@ -924,16 +1013,21 @@ fn run(agent: &Arc<Agent>, request: &Value) -> Result<Arc<Group>, Failure> {
     if !grant.current(now()) {
         return Err("the grant has expired".into());
     }
-    let binary_name = field(request, "binary")?;
-    let binary = cache::entry(&agent.cache, "bin", binary_name)?;
-    if !binary.is_file() {
-        return Err(format!("executable {binary_name} is not cached").into());
-    }
+    let mut pins = Pinned::new(&agent.pins);
+    let binary = if request["binary"].is_null() {
+        agent.executable.clone()
+    } else {
+        let binary_name = field(request, "binary")?;
+        let binary = cache::entry(&agent.cache, "bin", binary_name)?;
+        if !binary.is_file() {
+            return Err(format!("executable {binary_name} is not cached").into());
+        }
+        pins.pin(binary.clone());
+        binary
+    };
     let publisher: Publisher = serde_json::from_value(request["publisher"].clone())?;
     publisher.validate().map_err(|e| e.to_string())?;
     let primary = grant.primary();
-    let mut pins = Pinned::new(&agent.pins);
-    pins.pin(binary.clone());
     let package = match &grant.package.source {
         Some(source) if source.public_key == mine.to_hex() => PathBuf::from(&source.path),
         _ => {
@@ -950,11 +1044,6 @@ fn run(agent: &Arc<Agent>, request: &Value) -> Result<Arc<Group>, Failure> {
     if !package.is_file() {
         return Err(format!("package {} is not on this node", package.display()).into());
     }
-    let port = grant
-        .rendezvous
-        .rsplit_once(':')
-        .map(|(_, port)| port)
-        .ok_or("grant rendezvous lacks a port")?;
     let profile = agent
         .cache
         .join("publishers")
@@ -963,6 +1052,11 @@ fn run(agent: &Arc<Agent>, request: &Value) -> Result<Arc<Group>, Failure> {
     let mut command = Command::new(&binary);
     command.arg("run").arg(&package);
     if !grant.single_host {
+        let port = grant
+            .rendezvous
+            .rsplit_once(':')
+            .map(|(_, port)| port)
+            .ok_or("grant rendezvous lacks a port")?;
         command
             .arg("--rank")
             .arg(rank.to_string())
@@ -1052,19 +1146,7 @@ fn run(agent: &Arc<Agent>, request: &Value) -> Result<Arc<Group>, Failure> {
         }),
     });
     groups.push(group.clone());
-    // Keep every running group and the most recent finished ones.
-    let finished = groups.iter().filter(|g| !g.running()).count();
-    if finished > RETAINED_GROUPS {
-        let mut drop = finished - RETAINED_GROUPS;
-        groups.retain(|g| {
-            if drop > 0 && !g.running() {
-                drop -= 1;
-                false
-            } else {
-                true
-            }
-        });
-    }
+    prune_groups(&mut groups, Instant::now());
     drop(groups);
     eprintln!(
         "group {} ({}) rank {rank}: started pid {} on {}",
@@ -1147,6 +1229,20 @@ fn stop(agent: &Agent, request: &Value) -> Result<Vec<u8>, Failure> {
         eprintln!("group {} rank {}: stop requested", group.id, group.rank);
     }
     Ok(json!({"stopped": running}).to_string().into_bytes())
+}
+
+/// Forget completed runs selected by exact launch identifier; never stop a live process.
+fn remove(agent: &Agent, request: &Value) -> Result<Vec<u8>, Failure> {
+    let id = field(request, "group")?;
+    let mut groups = agent.groups.lock().unwrap();
+    if groups.iter().any(|group| group.id == id && group.running()) {
+        return Err(format!("group {id} is running; stop it before removing it").into());
+    }
+    let before = groups.len();
+    groups.retain(|group| group.id != id);
+    Ok(json!({"removed": before - groups.len()})
+        .to_string()
+        .into_bytes())
 }
 
 fn status(agent: &Agent, request: &Value) -> Result<Vec<u8>, Failure> {
@@ -1300,6 +1396,78 @@ pub mod tests {
     use crate::orbit::grant::{ControllerKey, ControllerSet, Member, Package, Source};
     use std::net::TcpListener;
 
+    #[test]
+    fn repository_downloads_require_pairing_and_resolve_on_the_node() {
+        let harness = harness(73);
+        let cache = harness.temp.path().join("hub");
+        let commit = "0123456789012345678901234567890123456789";
+        let snapshot = cache.join("models--owner--model/snapshots").join(commit);
+        fs::create_dir_all(&snapshot).unwrap();
+        let primary = snapshot.join("model.safetensors");
+        fs::write(&primary, crate::hub::tests::fixture(&[])).unwrap();
+        let request = serde_json::to_value(DownloadRequest {
+            source: "owner/model".into(),
+            options: crate::cli::HubOptions {
+                revision: Some(commit.into()),
+                cache_dir: Some(cache),
+                offline: true,
+                ..Default::default()
+            },
+            access_token: None,
+        })
+        .unwrap();
+        let mut unauthorized = connect(&harness, &harness.controller);
+        assert!(unauthorized.request(frame::DOWNLOAD, &request).is_err());
+        let mut session = pair_accept_first(&harness);
+        let reply: Value =
+            serde_json::from_slice(&session.request(frame::DOWNLOAD, &request).unwrap()).unwrap();
+        assert_eq!(reply["path"], primary.to_str().unwrap());
+        let mut invalid = request;
+        invalid["options"]["token_file"] = json!("/node/secret");
+        assert!(session.request(frame::DOWNLOAD, &invalid).is_err());
+    }
+
+    #[test]
+    fn package_stat_rejects_a_nonregular_primary_before_reading_metadata() {
+        let temp = tempfile::tempdir().unwrap();
+        let error = stat(&json!({"path": temp.path()})).unwrap_err().to_string();
+        assert!(error.contains("must resolve to a regular file"), "{error}");
+        assert!(
+            error.contains(&temp.path().display().to_string()),
+            "{error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn package_file_sizes_follow_links_and_reject_invalid_targets() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("data.safetensors");
+        fs::write(&file, b"payload").unwrap();
+        let hardlink = temp.path().join("hardlink.safetensors");
+        fs::hard_link(&file, &hardlink).unwrap();
+        let link = temp.path().join("link.safetensors");
+        symlink("data.safetensors", &link).unwrap();
+        for path in [&file, &hardlink, &link] {
+            assert_eq!(package_file_size(path).unwrap(), 7);
+        }
+        fs::remove_file(&link).unwrap();
+        symlink(temp.path(), &link).unwrap();
+        assert!(
+            package_file_size(&link)
+                .unwrap_err()
+                .to_string()
+                .contains("regular file")
+        );
+        fs::remove_file(&link).unwrap();
+        symlink("missing.safetensors", &link).unwrap();
+        assert!(package_file_size(&link).is_err());
+        fs::remove_file(&link).unwrap();
+        symlink("link.safetensors", &link).unwrap();
+        assert!(package_file_size(&link).is_err());
+    }
+
     pub type Verified = Arc<Mutex<Vec<(PathBuf, Option<usize>)>>>;
 
     /// An agent on a free port in a temporary directory, with its controller's key.
@@ -1319,24 +1487,26 @@ pub mod tests {
         let address = listener.local_addr().unwrap().to_string();
         let verified = Arc::new(Mutex::new(Vec::new()));
         let record = verified.clone();
-        let agent = Arc::new(
-            Agent::with_fakes(
-                dir,
-                temp.path().join("cache"),
-                Box::new(move |primary, rank, publisher| {
-                    if !primary.is_file() {
-                        return Err(format!("{} is not a file", primary.display()).into());
-                    }
-                    if publisher.namespace == "reject" {
-                        return Err("stored-data content verification failed".into());
-                    }
-                    record.lock().unwrap().push((primary.to_owned(), rank));
-                    Ok(())
-                }),
-                Box::new(|| Ok(fake_gpus())),
-            )
-            .unwrap(),
-        );
+        let mut agent = Agent::with_fakes(
+            dir,
+            temp.path().join("cache"),
+            Box::new(move |primary, rank, publisher| {
+                if !primary.is_file() {
+                    return Err(format!("{} is not a file", primary.display()).into());
+                }
+                if publisher.namespace == "reject" {
+                    return Err("stored-data content verification failed".into());
+                }
+                record.lock().unwrap().push((primary.to_owned(), rank));
+                Ok(())
+            }),
+            Box::new(|| Ok(fake_gpus())),
+        )
+        .unwrap();
+        agent.executable = temp.path().join("installed-flare");
+        fs::write(&agent.executable, "#!/bin/sh\necho \"$0\"\necho \"$@\"\n").unwrap();
+        fs::set_permissions(&agent.executable, fs::Permissions::from_mode(0o755)).unwrap();
+        let agent = Arc::new(agent);
         {
             let agent = agent.clone();
             thread::spawn(move || serve_on(listener, agent));
@@ -1366,6 +1536,7 @@ pub mod tests {
             memory_total: 128 << 30,
             memory_free: 100 << 30,
             utilization: Some(7),
+            memory_utilization: Some(63),
             temperature: Some(41),
             clock_mhz: None,
         })
@@ -1380,6 +1551,7 @@ pub mod tests {
             public_key: key.public().to_hex(),
             controllers_revision: 0,
             free_bytes: 0,
+            executable: None,
         }
     }
 
@@ -1478,7 +1650,7 @@ pub mod tests {
         json!({"grant": grant, "rank": rank, "binary": binary, "publisher": publisher()})
     }
 
-    fn collect(session: &mut Session) -> (Vec<String>, i32) {
+    pub fn collect(session: &mut Session) -> (Vec<String>, i32) {
         let mut lines = Vec::new();
         loop {
             match session.read_frame().unwrap() {
@@ -1489,6 +1661,69 @@ pub mod tests {
                 }
                 (tag, body) => panic!("unexpected frame {tag}: {}", String::from_utf8_lossy(&body)),
             }
+        }
+    }
+
+    #[test]
+    fn hello_advertises_the_installed_executable_and_detects_agents_without_it() {
+        let harness = harness(44);
+        let hello = harness.agent.hello().unwrap();
+        assert_eq!(
+            hello.installed_executable().unwrap(),
+            harness.agent.executable
+        );
+        let mut value = serde_json::to_value(&hello).unwrap();
+        value.as_object_mut().unwrap().remove("executable");
+        let without_executable: Hello = serde_json::from_value(value).unwrap();
+        let error = without_executable
+            .installed_executable()
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("flare agent install"), "{error}");
+        assert!(error.contains("--executable PATH"), "{error}");
+    }
+
+    #[test]
+    fn run_defaults_to_the_installed_executable_only_when_no_override_is_named() {
+        for binary in [None, Some(Value::Null)] {
+            let harness = harness(45);
+            let mut session = pair_accept_first(&harness);
+            put(
+                &mut session,
+                "package",
+                "export-13/model.safetensors",
+                b"package bytes",
+                None,
+            );
+            let grant = grant_for(&harness, 0, None);
+            let mut request = run_request(&grant, 0, "missing-executable");
+            let error = session
+                .request(frame::RUN, &request)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("executable missing-executable is not cached"),
+                "{error}"
+            );
+            let mut session = connect(&harness, &harness.controller);
+            request["binary"] = json!(123);
+            assert!(session.request(frame::RUN, &request).is_err());
+            let mut session = connect(&harness, &harness.controller);
+            if let Some(binary) = binary {
+                request["binary"] = binary;
+            } else {
+                request.as_object_mut().unwrap().remove("binary");
+            }
+            session.request(frame::RUN, &request).unwrap();
+            let (lines, exit) = collect(&mut session);
+            assert_eq!(exit, 0);
+            assert!(lines.contains(&harness.agent.executable.to_string_lossy().into_owned()));
+            assert_eq!(
+                fs::read_dir(harness.agent.cache.join("bin"))
+                    .unwrap()
+                    .count(),
+                0
+            );
         }
     }
 
@@ -1949,6 +2184,173 @@ pub mod tests {
                 .iter()
                 .all(|g| g["group"].is_null())
         );
+    }
+
+    fn history_group(id: &str, started: Instant) -> Arc<Group> {
+        Arc::new(Group {
+            id: id.into(),
+            name: "history-test".into(),
+            rank: 0,
+            package: "model.safetensors".into(),
+            gpus: Vec::new(),
+            pid: 0,
+            metrics_url: None,
+            started,
+            log: Mutex::new(Log {
+                lines: VecDeque::new(),
+                bytes: 0,
+                exit: None,
+                subscribers: Vec::new(),
+                pins: None,
+            }),
+            metrics: Mutex::new(None),
+        })
+    }
+
+    #[test]
+    fn history_retention_starts_at_exit_and_preserves_running_groups() {
+        let started = Instant::now();
+        let finished = started + SUCCESS_RETENTION * 2;
+        let success = history_group("success", started);
+        success.push("completed".into());
+        success.log.lock().unwrap().exit = Some((0, finished));
+        let failure = history_group("failure", started);
+        failure.log.lock().unwrap().exit = Some((1, finished));
+        let running = history_group("running", started);
+        let mut groups = vec![success.clone(), failure, running];
+
+        prune_groups(
+            &mut groups,
+            finished + SUCCESS_RETENTION - Duration::from_nanos(1),
+        );
+        assert_eq!(groups.len(), 3);
+        prune_groups(&mut groups, finished + SUCCESS_RETENTION);
+        assert_eq!(
+            groups.iter().map(|g| g.id.as_str()).collect::<Vec<_>>(),
+            ["failure", "running"]
+        );
+        // An attached session owns its group independently of the agent's history.
+        let (lines, exit, _) = success.subscribe();
+        assert_eq!(lines, ["completed"]);
+        assert_eq!(exit, Some(0));
+        prune_groups(&mut groups, finished + Duration::from_secs(365 * 86400));
+        assert_eq!(
+            groups.iter().map(|g| g.id.as_str()).collect::<Vec<_>>(),
+            ["failure", "running"]
+        );
+    }
+
+    #[test]
+    fn completed_groups_are_count_bounded_without_another_launch() {
+        let now = Instant::now();
+        let mut groups = (0..RETAINED_GROUPS + 3)
+            .map(|i| history_group(&format!("group-{i}"), now))
+            .collect::<Vec<_>>();
+        // No count limit applies while all the groups are running.
+        prune_groups(&mut groups, now + SUCCESS_RETENTION);
+        assert_eq!(groups.len(), RETAINED_GROUPS + 3);
+        // The first launch remains active while every later launch finishes.
+        for group in groups.iter().skip(1) {
+            group.finish(0);
+        }
+        prune_groups(&mut groups, Instant::now());
+        assert_eq!(groups.len(), RETAINED_GROUPS + 1);
+        assert_eq!(groups[0].id, "group-0");
+        assert!(groups[0].running());
+        assert_eq!(groups[1].id, "group-3");
+        for i in 0..RETAINED_GROUPS + 3 {
+            let failure = history_group(&format!("failure-{i}"), now);
+            failure.finish(1);
+            groups.push(failure);
+        }
+        prune_groups(&mut groups, Instant::now());
+        assert_eq!(
+            groups
+                .iter()
+                .filter(|group| group.exit() == Some(1))
+                .count(),
+            RETAINED_GROUPS + 3
+        );
+        assert_eq!(
+            groups
+                .iter()
+                .filter(|group| group.exit() == Some(0))
+                .count(),
+            RETAINED_GROUPS
+        );
+    }
+
+    #[test]
+    fn removing_history_requires_a_controller_and_preserves_live_groups() {
+        let harness = harness(28);
+        let now = Instant::now();
+        let failed = history_group("failed", now);
+        failed.push("failure detail".into());
+        failed.finish(7);
+        harness
+            .agent
+            .groups
+            .lock()
+            .unwrap()
+            .extend([failed.clone(), history_group("live", now)]);
+        // An unpaired controller cannot remove history.
+        let mut stranger = connect(&harness, &harness.controller);
+        assert!(
+            stranger
+                .request(frame::REMOVE, &json!({"group": "failed"}))
+                .is_err()
+        );
+        let mut session = pair_accept_first(&harness);
+        assert!(
+            session
+                .request(frame::REMOVE, &json!({"group": "live"}))
+                .is_err()
+        );
+        assert_eq!(harness.agent.groups().len(), 2);
+        let mut session = connect(&harness, &harness.controller);
+        let removed: Value = serde_json::from_slice(
+            &session
+                .request(frame::REMOVE, &json!({"group": "failed"}))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(removed["removed"], 1);
+        assert_eq!(harness.agent.groups()[0].id, "live");
+        assert_eq!(failed.subscribe().0, ["failure detail"]);
+        // Retrying after another controller removed the same record is harmless.
+        let removed: Value = serde_json::from_slice(
+            &session
+                .request(frame::REMOVE, &json!({"group": "failed"}))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(removed["removed"], 0);
+    }
+
+    #[test]
+    fn sampler_and_queries_remove_expired_history() {
+        let harness = harness(27);
+        let now = Instant::now();
+        let expired = history_group("expired", now - SUCCESS_RETENTION * 2);
+        expired.log.lock().unwrap().exit = Some((0, now - SUCCESS_RETENTION));
+        harness.agent.groups.lock().unwrap().push(expired.clone());
+        harness.agent.sample();
+        assert!(harness.agent.groups.lock().unwrap().is_empty());
+
+        harness.agent.groups.lock().unwrap().push(expired.clone());
+        assert!(
+            harness.agent.metrics()["groups"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        harness.agent.groups.lock().unwrap().push(expired.clone());
+        let state: Value =
+            serde_json::from_slice(&status(&harness.agent, &json!({})).unwrap()).unwrap();
+        assert!(state["groups"].as_array().unwrap().is_empty());
+        assert!(state["group"].is_null());
+        harness.agent.groups.lock().unwrap().push(expired);
+        assert!(harness.agent.find_group(Some("expired")).is_err());
     }
 
     #[test]

@@ -1,4 +1,11 @@
-# Flare design principles
+# Working on Flare
+
+Flare is a local inference server for NVIDIA SM120/SM121 GPUs. Ignition, the
+Python package in `ignition/`, prepares models with PyTorch, Transformers, and
+FlashInfer, including b12x. Its `flare_heliopause` extension is built by the
+`heliopause/` crate. The Rust CLI in `flare/` links Helios, the runtime library
+in `helios/`, to serve requests through prepared CUDA graphs. Both Flare and
+Heliopause depend on Helios; Helios has no Python or preparation-tool dependency.
 
 ## Required setup and commit review
 
@@ -12,19 +19,82 @@ in `docs/design-review.md`. A rejected acknowledgment requires reading that
 document and reviewing the staged change before retrying; do not treat the
 rejection as a formatting repair.
 
-Flare is a local inference server for NVIDIA SM120/SM121 GPUs. Ignition, the
-Python package in `ignition/`, prepares models with PyTorch, Transformers, and
-FlashInfer, including b12x. Its `flare_heliopause` extension is built by the
-`heliopause/` crate. The Rust CLI in `flare/` links Helios, the runtime library
-in `helios/`, to serve requests through prepared CUDA graphs. Both Flare and
-Heliopause depend on Helios; Helios has no Python or preparation-tool dependency.
+## Contribution scope and rejection criteria
 
-## Task tracking
+Flare prepares and serves supported model recipes on NVIDIA GPUs through
+FlashInfer/b12x and prepared CUDA graphs. Single-host execution and cross-node
+tensor parallelism are both in scope. Orbit manages the hosts, preparation,
+packages, and rank processes needed for those serving workflows.
 
-Use [docs/TODO.txt](docs/TODO.txt) for miscellaneous follow-up items. Keep entries
-brief and link to detailed design or performance notes when needed. Update or
-remove entries as work is completed. Keep this file focused on durable project
-guidance rather than task lists or progress notes.
+Every contribution must address an explicit maintainer request, a demonstrated
+defect, a measured performance or memory problem, or inaccurate documentation.
+Identify the affected workflow and relevant implementation before editing.
+Hypothetical future consumers, agent-generated suggestions, and lint findings
+alone do not establish a need for a change.
+
+- **Reject unapproved scope expansion.** CPU or non-NVIDIA execution,
+  interchangeable execution backends, training or fine-tuning, multi-model
+  hosting and routing, unrelated service APIs, and general-purpose cluster
+  orchestration require an explicit maintainer decision before implementation.
+  Supported cross-node preparation and serving do not authorize these additions.
+- **Reject architectural violations.** Production Python callbacks, eager
+  serving, runtime compilation or recapture, steady-state GPU allocation,
+  model-specific native policy or state-update algorithms, and executable
+  extension mechanisms in prepared metadata violate the boundaries below.
+  Flags, enums, callbacks, optional paths, and temporary implementations cannot
+  be used to bypass them.
+- **Reject weakened guarantees.** Preserve complete cache and speculative state,
+  inactive-row behavior, asynchronous resource lifetimes, checkpoint precision,
+  model semantics, and model package compatibility. Do not remove validation,
+  suppress errors, silently substitute execution paths, or relax references,
+  workloads, or numerical bounds to obtain passing checks or favorable metrics.
+  Numerical bounds must follow the required arithmetic and measured repeatability.
+- **Reject unsupported abstractions and churn.** Do not add frameworks,
+  extension points, speculative compatibility, fallback layers, or configuration
+  switches without a concrete requirement. Unsolicited formatting, renaming,
+  comment expansion, annotation sweeps, and file rearrangements are not
+  contributions by themselves. Refactoring must directly support the requested
+  behavior or remove a demonstrated source of defects or cost.
+- **Require focused, meaningful validation.** Tests must exercise the affected
+  behavior or contract; source-text checks and mocks that bypass the behavior
+  cannot establish runtime correctness. Do not present scaffolding or partially
+  wired features as supported. Identify missing hardware, inputs, and unrun
+  checks explicitly. Keep each PR focused on one coherent outcome and describe
+  its problem, resulting behavior, validation, and material limitations.
+
+An explicit maintainer request covering the work is sufficient authorization
+for changes within these constraints and their necessary supporting steps.
+A feature request, passing tests, or a performance gain does not waive an
+architectural invariant. Resolve conflicts through an explicit maintainer
+decision on the design before implementing a change to that invariant; a commit
+acknowledgment or routine PR approval is not that decision. Apply these criteria
+to documentation and test changes that would weaken the rules as well as code.
+
+When reviewing a contribution that violates these criteria, identify the
+concrete violation and relevant rule, and recommend rejection. Do not rescue
+it by adding an opt-in, weakening the rule, expanding its scope, or promising
+future cleanup.
+
+## Choose guidance by task
+
+Read the guidance for every task affected by the work before implementing or
+running it. These requirements apply by task, including work outside the named
+source directories. For preparation or model validation, read the relevant model
+and hardware sections of the preparation guide.
+
+| Task | Required guidance |
+|---|---|
+| Build, install dependencies, or launch Flare | [Build and run model checkpoints](#build-and-run-model-checkpoints), [environment setup](docs/model-preparation.md#environment-setup), and the relevant [CLI commands](docs/cli-design.md) |
+| Prepare, export, or serve an existing model | [Model preparation and serving](docs/model-preparation.md); [direct execution](docs/direct-execution.md) when reproducing faults with `--direct` |
+| Add or change a model recipe or execution component | [Model development](docs/model-development.md), [preparation development](docs/preparation-development.md), and the relevant [core design](docs/core-design.md#2-model-preparation) sections |
+| Change tuning, compilation, memory planning, capture, or TP preparation | [Preparation development](docs/preparation-development.md) and [preparation resources](docs/model-preparation.md#preparation-resources) |
+| Change Helios runtime, scheduling, caches, transport, or frontend | [Prepared model contract](helios/model-contract.md), [execution manifest](helios/manifest.md), and the relevant [Helios runtime](helios/README.md) and [core design](docs/core-design.md#3-helios-runtime-and-graph-interface) sections |
+| Change Protobuf metadata or package loading/export | [Runtime package design](docs/runtime-package-design.md), [prepared model contract](helios/model-contract.md), and [package compatibility](#model-package-compatibility) |
+| Diagnose or optimize performance | [GPU performance work](docs/performance-work.md), plus model or preparation development guidance for affected code |
+| Change CLI, API, or configuration behavior | [CLI design](docs/cli-design.md) and the relevant [API](docs/api.md) sections |
+
+For sampling or frontend metadata changes, also read
+[sampling and frontend metadata](docs/model-development.md#sampling-and-frontend-metadata).
 
 ## Build and run model checkpoints
 
@@ -35,21 +105,6 @@ uv sync --locked --extra prepare --extra test
 cargo build --release --manifest-path flare/Cargo.toml
 ```
 
-Keep model-specific launch instructions and hardware setup in
-[model preparation and serving](docs/model-preparation.md). Read its relevant
-model and hardware sections before preparing or validating a model; it also
-covers build dependencies, checkpoint formats, and graph capacities. The
-[CLI design](docs/cli-design.md) defines flags, configuration, signing, and
-package selection.
-
-The preparation dependency pins a Git revision of `local-inference-lab/flashinfer`
-in `pyproject.toml`, with its resolved commit in `uv.lock`. To change it, update
-the revision, run `uv lock --upgrade-package flashinfer-python`, then sync.
-For local development, inspect the sibling checkout and its changes before
-editing it, and install it explicitly with
-`uv pip install --python .venv/bin/python --no-deps -e ../flashinfer`.
-`uv sync --locked --extra prepare --extra test` restores the Git dependency.
-
 After changing `heliopause/` or Helios code used by the extension, rebuild the
 installed extension:
 
@@ -57,34 +112,16 @@ installed extension:
 uv pip install --python .venv/bin/python --no-deps ./heliopause
 ```
 
-Inspect GPU occupancy with `nvidia-smi` before preparation or loading and select
-available GPUs explicitly with `--gpus`. With `CUDA_VISIBLE_DEVICES` set, those
-indices refer to the exposed device list. A package's TP size and GPU architecture
-must match serving. Choose unused export filenames; do not delete packages merely
-to reuse their names.
-
-Scale Ignition preparation with two independent controls:
-
-- `--compile-workers N` sets a positive CPU compiler process budget per host,
-  shared by local preparation ranks and bounded by available RAM and device
-  memory. It applies to b12x kernel compilation and complete-forward compilation,
-  and overrides `[preparation] compile_workers` in the configuration file.
-- `--tuning-gpus LIST` adds local GPUs for benchmarking disjoint b12x candidate
-  subsets. Start the list with `--gpus`, then append complete replicas of that
-  TP group. Corresponding GPUs must match in model and architecture and have
-  enough free memory for the model and preparation storage. Helpers exit after
-  tuning; serving TP size and capture devices stay fixed. Both lists use
-  `CUDA_VISIBLE_DEVICES` ordinals.
-
-For example, `--gpus 0 --tuning-gpus 0-3 --compile-workers 24` prepares a TP1
-package using four tuning GPUs. Omitting these settings preserves automatic
-worker sizing, including DGX Spark's shared-memory limits. Multi-host `--ranks`
-preparation keeps its existing sharding and transport: `--compile-workers`
-applies separately on each host, while `--tuning-gpus` cannot be combined with
-multi-host preparation. See [preparation resources](docs/model-preparation.md#preparation-resources).
+The [preparation guide](docs/model-preparation.md) owns dependency updates,
+local FlashInfer installation, GPU selection, compiler and tuning resources,
+model-specific launch instructions, and hardware setup. The
+[CLI design](docs/cli-design.md) defines flags, configuration, signing, and
+package selection.
 
 For serving-only Rust changes, rebuild Flare and load a compatible package.
-Re-export after changing prepared kernels, capacities, or the package format.
+To exercise changes to prepared kernels, capacities, or the package format,
+export a package containing those changes. Previously exported packages must
+remain usable as required by [package compatibility](#model-package-compatibility).
 `ignition run` finds `flare` on `PATH` before `flare/target/release/flare`; check
 for stale installed executables when testing a local build. Stop Flare with
 Ctrl-C or SIGTERM so native replay drains before CUDA resources are released.
@@ -93,36 +130,7 @@ For development without export, `ignition serve` requires Heliopause's
 `qualification` Cargo feature; follow the
 [development launch instructions](docs/cli-design.md#development-without-package-export).
 
-## Kernel and PyTorch modeling authorship
-
-Kernel and PyTorch modeling changes must not originate from Claude Opus 5.5.
-Do not use Claude Opus 5.5 to design or implement these changes, or incorporate
-its generated changes through another contributor or agent.
-
-## Preserve canonical model implementations where they fit
-
-- Treat Transformers as the canonical source for model structure and semantics.
-  Preserve its forwards where their tensor layouts, state handling, and emitted
-  GPU work fit the serving contract. Avoid independently reproducing model
-  logic that can be reused directly.
-- Inspect the installed model's actual call sites before choosing an extension
-  point. Prefer attention, mask, expert, kernel, and loading interfaces when
-  their contracts fit. Interface availability does not imply that every model
-  uses it or that it controls the entire operation we need to optimize.
-- Replace the smallest coherent module that gives control over the required
-  dataflow. A whole attention module may need replacement to avoid expanding
-  latent KV or constructing dense masks before the attention dispatcher. A
-  whole MoE module may need replacement to overlap shared and routed experts.
-- Use instance-local module replacement or supported construction hooks when
-  sufficient. Avoid global monkey patches and Transformers forks without a
-  concrete need. Do not force b12x through a Transformers integration that adds
-  complexity without improving reuse or execution.
-- Judge reuse by the GPU work it records and the semantics it preserves.
-  Python dispatch during preparation and capture is not per-token overhead
-  during native graph replay. A canonical forward is not inherently too slow,
-  and a rewritten forward is not inherently faster.
-
-## Flexible recipes, reusable components, shared native machinery
+## Architecture and ownership
 
 Helios's shared runtime policy and separation from model computation are
 non-negotiable architectural invariants. Correct output, performance gains,
@@ -146,11 +154,12 @@ architectural boundary before committing the change.
   its storage contract and let shared policy consume that contract.
 - `PreparedContract` is validated Protobuf data, never a runtime policy extension
   point. Declare concrete graph value sources, storage views, dependencies,
-  frontend syntax, and capacities; shared code validates and binds them. Never add per-model boolean flags,
-  including `supports_*`, `can_*`, or default-false opt-ins, to enable or disable
-  runtime behavior. Enum values, callbacks, schema names, and metadata fields
-  must not encode the same model allowlist. Every member must have a meaning
-  independent of model identity, and its consumers must implement shared behavior
+  frontend syntax, and capacities; shared code validates and binds them. Never
+  add per-model boolean flags, including `supports_*`, `can_*`, or default-false
+  opt-ins, to enable or disable runtime behavior. Enum values, callbacks, schema
+  names, and metadata fields must not encode the same model allowlist. Every
+  member must have a meaning independent of model identity, and its consumers
+  must implement shared behavior
   from actual data, geometry, and dependencies. Review both declarations and all
   consumers. Tool/reasoning parsers and image preparation/layout implementations
   use independent typed enum identifiers; those identifiers cannot select
@@ -181,19 +190,17 @@ architectural boundary before committing the change.
   prepared metadata and frontend assets; keep native specialization focused on
   cache storage contracts and graph cache bindings.
 
+## Operators and hardware
+
+- Flare is fully coupled to FlashInfer/b12x by design. It has no backend or
+  device abstractions. Use FlashInfer/b12x and NVIDIA CUDA interfaces directly;
+  do not introduce interchangeable kernel backends or device portability layers.
+- Prefer proven b12x operators and FlashInfer sampling over duplicate kernels.
+  Inspect their supported preparation, tuning, and workspace interfaces before
+  introducing custom implementations.
+
 ## Python prepares; Helios serves
 
-- When replacing internal formats or execution paths, remove superseded loaders,
-  fallback paths, and migration-only tests except those required for model package
-  compatibility. Other backward compatibility requires an explicit requirement.
-- **Preserve model package compatibility.** Every Protocol Buffer change **must**
-  be accompanied by code in Helios that keeps previously exported model packages
-  loadable and usable without re-export. Handle absent fields and Protobuf default
-  values explicitly, preserve the meaning of older metadata, and honor explicit
-  values. Wire-format compatibility alone is insufficient. Include regression
-  tests for older serialized metadata and validate the affected package loading
-  and serving paths. Implement compatibility in shared code across all affected
-  model contracts.
 - Python loads weights, resolves and autotunes kernels, plans storage, warms
   execution paths, and captures supported graph variants before serving starts.
   Ignition exports a runtime package and closes the prepared model. `ignition run`
@@ -212,8 +219,25 @@ architectural boundary before committing the change.
   reproducing model faults without Helios ([direct execution](docs/direct-execution.md)).
   It is never production serving or a fallback, and only its explicit flags
   select it.
+- Treat KV, recurrent state, and other model histories as explicit cache state.
+  Prefix reuse, branching, and speculative rollback must preserve all relevant
+  state, not just token positions and KV pages.
 
-## No environment-variable switches
+## Model package compatibility
+
+- When replacing internal formats or execution paths, remove superseded loaders,
+  fallback paths, and migration-only tests except those required for model package
+  compatibility. Other backward compatibility requires an explicit requirement.
+- **Preserve model package compatibility.** Every Protocol Buffer change **must**
+  be accompanied by code in Helios that keeps previously exported model packages
+  loadable and usable without re-export. Handle absent fields and Protobuf default
+  values explicitly, preserve the meaning of older metadata, and honor explicit
+  values. Wire-format compatibility alone is insufficient. Include regression
+  tests for older serialized metadata and validate the affected package loading
+  and serving paths. Implement compatibility in shared code across all affected
+  model contracts.
+
+## Configuration
 
 - Flare, Helios, recipes, and components never read an environment variable to
   choose behavior. Feature toggles, experiment switches, tuning overrides,
@@ -237,211 +261,35 @@ architectural boundary before committing the change.
   checkpoints, such as `FLARE_RUN_CUDA_TESTS`. A test variable must not change
   what the code under test does.
 
-## Model-card sampling and structured runtime metadata
+## CUDA kernel and model optimization authorship
 
-- Agents adding or changing a recipe must read the model card and manually verify
-  its recommended sampling parameters for the default serving mode. Declare the
-  complete defaults in the Ignition recipe and cite the recommendation at that
-  declaration. Never infer sampling policy from `generation_config.json`,
-  `config.json`, Transformers defaults, or another model. Model-card recommendations
-  take precedence over conflicting config files; unspecified filters are disabled
-  and penalties are neutral. Explicit request sampling parameters override defaults.
-- Ignition validates checkpoint configuration for structural data, including
-  EOS and template tokens, image preprocessing, and vision position geometry.
-  Export only the fields Helios consumes in first-class Protobuf messages.
-  Runtime assets are the tokenizer and chat template; do not package raw generation,
-  tokenizer, processor, or model configuration files. Helios consumes prepared
-  settings without per-model sampling policy or config-file interpretation.
+Claude Opus 5.5 has repeatedly produced defective low-level kernel changes in
+this project. Do not use it to design or implement low-level CUDA kernels or
+changes to existing model fusion and GPU execution optimizations. This includes
+CUDA C++, PTX, CuTe DSL, and Triton kernels, and changes to projection packing,
+fused arithmetic, stream overlap, or scratch aliasing in optimized model paths.
+Do not incorporate its generated changes to these mechanisms through another
+contributor or agent.
 
-## Use FlashInfer and plan memory explicitly
+General PyTorch modeling, recipe integration, checkpoint loading, frontend
+processing, preparation orchestration, CLI/runtime work, tests, and documentation
+are permitted when they do not design or change the restricted mechanisms above.
 
-- Flare is fully coupled to FlashInfer/b12x by design. It has no backend or
-  device abstractions. Use FlashInfer/b12x and NVIDIA CUDA interfaces directly;
-  do not introduce interchangeable kernel backends or device portability layers.
-- Prefer proven b12x operators and FlashInfer sampling over duplicate kernels.
-  Inspect their supported preparation, tuning, and workspace interfaces before
-  introducing custom implementations.
-- Use b12x's autotuning and warmup facilities during preparation. Do not pin
-  kernel plans or tuning choices without a demonstrated requirement.
-- Constructors declare b12x requests through `ignition.preparation.tuning.declare`;
-  they must not compile or prime default plans. Submit all operators across the
-  complete serving shape catalog to one preparation batch, then bind selected
-  plans through `register_finalizer`. Scratch sizing and serving bindings must
-  follow tuning.
-- Show startup work through `ignition.progress.phase`. Weight loading and kernel
-  preparation retain a phase activity bar while their detailed b12x panels are
-  transient and share the phase's Rich console. Use `DirectWeightLoader` for
-  loading progress, including draft-model weights. Only the root TP rank
-  renders progress.
-- Supply caller-owned scratch through the kernel planning interfaces. Reuse
-  storage across sequential work; preserve separate storage for overlapping
-  operations and persistent state. Aliasing must follow actual lifetimes and
-  stream dependencies, including overlap captured inside a single graph.
-- Treat KV, recurrent state, and other model histories as explicit cache state.
-  Prefix reuse, branching, and speculative rollback must preserve all relevant
-  state, not just token positions and KV pages.
-
-## Optimize the serving path
+## Validation and performance
 
 - When a potential correctness, memory, or performance deficiency appears in
   one model, inspect the shared components and equivalent paths in every
   supported recipe before scoping the fix. Track follow-up work across all
   affected models; distinguish confirmed findings from untested paths.
-- Apply the recipe requirements below during implementation. Inspect the
-  model's fusion boundaries, precision, sharding, overlap, and selected kernel
-  plans. Reuse FlashInfer/b12x mechanisms directly.
-- Measure GPU graph replay separately from native scheduling and end-to-end
-  request latency. Compare equivalent shapes and execution configurations when
-  using another server as a performance reference.
-- Attribute gaps to emitted kernels, memory traffic, dependencies, or host work
-  before changing architecture. Preserve correctness when changing layouts,
-  fusion boundaries, scratch reuse, or stream overlap.
+- Validate the affected execution path and capacities. Model and preparation
+  development guidance defines shape, graph-transition, state, and lifetime
+  checks; GPU performance guidance defines measurement requirements.
 - Keep ordinary tests and raw benchmark measurements. Do not create development
   audit reports, receipts, provenance bundles, or hash inventories.
 
-## Recipe performance requirements
+## Task tracking
 
-- **Read quantization from checkpoint metadata.** Use `config.json` declarations
-  to choose supported weight formats. Keep geometry and encoding validation
-  explicit; do not hardcode a checkpoint's per-layer precision assignments.
-  Ordinary NVFP4, CSF NVFP4, and MXFP4 expert storage use the same b12x MoE
-  execution API. Dense weight formats likewise share `blockscaled.mm`; format
-  handling belongs in loading and preparation, not recipe inference branches.
-  Reject fusion of NVFP4 projections except routed MoE w1/w3, whose dedicated
-  loader validates the shared scales. Never silently rescale or requantize
-  weights to make a fusion possible.
-- **Fuse projections sharing an input.** Pack compatible weights once during
-  loading, including their quantization scales and TP slices. Candidates include
-  Q/K/V, MLP gate/up, MLA query/KV low-rank inputs, and recurrent attention's
-  Q/K/V, beta, and forget-gate input projections. Preserve each output's model
-  semantics and calibrated scales. Inspect the full dependency chain rather
-  than reproducing one kernel call per canonical module.
-- **Respect layouts after fusion.** A column slice of a fused output can be
-  contiguous for batch one and strided for multiple rows. Check downstream b12x
-  input, output, stride, and alignment contracts for every graph capacity.
-  Allocate reusable staging storage where needed; do not introduce runtime
-  allocation through an implicit `.contiguous()`.
-- **Overlap independent branches.** Shared experts should be considered for
-  overlap with routing and routed experts; recurrent output-gate projections
-  can overlap independent input projections. Use
-  [ConcurrentSharedExpert](ignition/components/expert_overlap.py) and
-  [ConcurrentProjectionChain](ignition/components/projection_overlap.py) where their
-  contracts fit. Measure the relevant row capacities: branches competing for
-  bandwidth or SM capacity can make overlap slower. Graph node construction
-  order also affects scheduling. `ConcurrentSharedExpert(..., defer_launch=True)`
-  records routed kernels before shared kernels while preserving the fork and
-  join dependencies; measure this ordering in the complete model graph.
-- **Make overlap safe through compilation.** Declare every concurrently live
-  plan with [ScratchArena.register_parallel](ignition/preparation/scratch.py).
-  Sequential work reuses storage; concurrent work gets disjoint storage sized
-  from the tuned plans. Refresh bindings after arena resizing. The fork must
-  follow input production, and the join must precede output consumption or
-  input/scratch reuse. Custom ops must expose reads, writes, aliases, and join
-  dependencies so compilation preserves those lifetimes.
-- **Separate weight storage from arithmetic precision.** Keep BF16 weights in
-  BF16 when the required accumulation/output is FP32; use
-  [UnquantizedProjection](ignition/components/linear.py) for that contract. Do not
-  expand router weights to FP32 merely because routing requires FP32 logits.
-  Preserve genuinely FP32 checkpoint weights and model-required arithmetic.
-- **Let b12x select activation precision and kernels.** Use
-  `QuantizedProjection(..., activation_mode="auto")` where the model's numerical
-  contract permits it. Packed FP4/FP8 weights do not imply quantized activations
-  are fastest at every row count. Keep production autotuning enabled and do not
-  pin tile shapes, split-K, MoE plans, or a GEMM implementation to conceal an
-  integration defect. Check what the selected plan actually executes.
-- **Shard the vocabulary projection under TP.** Use
-  [PreparedVocabularyProjection](ignition/components/vocabulary.py) to project
-  contiguous vocabulary partitions and gather logits before designated-rank
-  sampling. Keep all ranks participating, including resume and other paths
-  that produce logits. Respect the collective's supported geometry and retain
-  its resources through native execution. A large head on one rank can dominate
-  otherwise sharded decode.
-- **Fuse residual and normalization boundaries.** Use b12x fused residual,
-  normalization, activation, and mHC operations when their rounding matches the
-  model contract. Consider adjacent layers as well as operations within a
-  layer; [PreparedMHC](ignition/components/mhc.py) supports fused post/pre mixing.
-  Avoid materializing an intermediate solely because a Python module ends.
-- **Compile complete prepared forwards.** Use
-  [capture_forwards](ignition/preparation/capture.py), which restores compiled
-  forwards before tracing and compiles missing variants with static shapes and
-  autotuning. Workers perform Dynamo tracing, storage lowering, and Inductor
-  compilation from tensor and selected-plan metadata; CUDA resources remain in
-  the owning rank. Preserve native mutations, storage aliases, and stream dependencies;
-  bind process-local kernel handles and caller-owned tensors at startup. Complete
-  b12x preparation, tuning, binding refresh, and compiled warmup before capturing
-  each serving graph. Retain compiled kernel owners until native replay has drained.
-- **Bound preparation cache backing by tuning and capture needs.** Keep virtual
-  serving capacity separate from physical preparation backing. Back only the
-  KV pages touched by tuning and capture, plus the null row, simultaneously live
-  request/verification rows, and disjoint snapshot destinations. Do not physically
-  allocate the planned prefix-cache capacity or fill remaining VRAM with KV during
-  export; Helios sizes serving caches after graph upload. Check every fixture,
-  state-clear operation, and snapshot/restore path against the backed extent.
-  Describe the full virtual shapes with CUDA tensor metadata while compiling. Pass a
-  `materialize` callback to `capture_forwards` to bind a bounded physical working
-  set after compiler workers exit and before warmup and capture. Validate compiled
-  guards against those tensors. Helios sizes the serving cache independently;
-  temporary compiler contexts must not reduce its budget.
-- **Share scratch across the complete graph catalog.** Vision, prefill, decode,
-  speculative, and resume graphs execute serially and should reuse caller-owned
-  activation and private buffer pools. Allocate per-variant views with
-  `GraphBufferPool` cursors; keep simultaneously live values disjoint within a
-  graph, including retained verification state and overlapping expert branches.
-  Use the shared operator arena for kernel workspaces and one CUDA graph pool for
-  compiler-created temporaries. Inspect constructor allocations as well as captured
-  allocations; sharing the CUDA graph pool alone does not share recipe scratch.
-  Constants and request-owned state must retain independent storage.
-  Prime indexed operators with private valid metadata: aliased serving scratch
-  is initialized by the complete graph, not by each operator's constructor.
-  Keep shared buffer-pool layouts identical across TP ranks, including storage
-  reserved for designated-rank sampling, so shared compiled forwards retain the
-  same storage aliases on every rank.
-- **Release preparation temporaries at phase boundaries.** Retire loading,
-  conversion, tuning, and warmup pools when their temporary owners are gone;
-  retain graph pools and captured addresses through export and replay. A live
-  tensor can pin otherwise unused space in a shared allocator segment; retiring
-  a pool cannot release a segment that still holds a weight. Account for
-  simultaneous scratch, cached allocator segments, physical cache backing,
-  and graph-executable/driver allocations. Report allocated and reserved tensor
-  bytes separately from device-free memory. Validate the complete requested graph
-  catalog near capacity; a smaller concurrency does not establish builder fit.
-- **Derive preparation memory policy from hardware.** Shared preparation code
-  detects integrated GPUs and budgets compiler workers and tuning races against
-  available system RAM. Recipes pass byte headroom, not hardware flags. Forward
-  compilation uses memory-bounded parallel workers on both integrated and discrete
-  GPUs; artifact binding starts no additional compiler pool.
-- **Compile tensor-parallel forwards once, sharded across ranks.** Pass the
-  preparation coordinator to `capture_forwards`. Each forward variant compiles
-  once, on a rank that selects it, from that rank's own forward; on one host, a
-  rank without variants left, or without room for a compiler, compiles another
-  rank's variant from that rank's traced forward metadata. Compiler pools are
-  budgeted for their host's ranks. Ranks on one host share its cache directory;
-  ranks on other hosts receive the artifacts they lack. Every rank loads the same
-  artifacts, binds its tensors and native handles, and participates in ordered
-  warmup and local capture. Keep shard offsets and native handles in runtime
-  bindings when they do not change the computation. For distinct rank behavior,
-  select a variant key through `compilation_variant` on each rank. Every
-  selected variant must compile before collective warmup; ranks must not retrace
-  or compile on a binding mismatch.
-- **Capture zero-draft rounds as decode.** Verification width one contains only
-  the pending target token. Use ordinary decode attention and direct cache updates;
-  do not inherit prefill kernels, speculative staging, or draft rollback work
-  merely because the graph belongs to the speculative catalog. Retain the draft
-  context updates and recurrent metadata required to alternate with wider rounds.
-  Compare the complete width-one graph against ordinary decode, attribute any
-  extra cost, and test transitions in both directions with partial/inactive rows
-  and cache-boundary crossings. Apply this check in each recipe's existing
-  preparation and tests.
-- **Prepare the whole serving shape range.** Include batch-one decode, packed
-  decode, partial/inactive rows, and configurable chunked prefill through at
-  least 4096 tokens. Test alternating graph variants with shared scratch and
-  changing cache/recurrent state. Small-batch success does not establish stride,
-  alias, or workspace correctness for prefill.
-- **Measure complete GPU steps.** Include output projection, collectives, and
-  sampling even when a reference engine executes them outside its main graph.
-  For TP, measure the interval spanning all participating ranks. Reuse valid
-  baselines; use kernel traces or component measurements to attribute gaps,
-  then check gains through the actual Helios service. Correctness failures block
-  performance claims. Verify allocation stability and scratch/input lifetime
-  under repeated native replay, including poisoning reusable storage after its
-  last permitted use.
+Use [docs/TODO.txt](docs/TODO.txt) for miscellaneous follow-up items. Keep entries
+brief and link to detailed design or performance notes when needed. Update or
+remove entries as work is completed. Keep this file focused on durable project
+guidance rather than task lists or progress notes.

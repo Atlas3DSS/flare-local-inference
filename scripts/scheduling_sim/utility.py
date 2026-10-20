@@ -93,7 +93,7 @@ class ServicePrice:
 
 @dataclass
 class RequestPrices:
-    tokens: ServicePrice
+    tokens: ServicePrice | None
     deliveries: ServicePrice | None
     weight: float
 
@@ -112,36 +112,56 @@ class UtilityScheduler:
         self.prices: dict[str, RequestPrices] = {}
         self.log_scale = 0.0
         self.ages: dict[str, tuple[float, float, float]] = {}
+        self._references: dict[str, float] = {}
+        self._token_normalizers: set[str] = set()
+        self._delivery_normalizers: set[str] = set()
+        self._mask_unknown_prices = False
 
-    def prepare(self, views: list[View], catalog: tuple[Graph, ...], now_ms: float = 0.0):
+    def prepare(self, views: list[View], catalog: tuple[Graph, ...], now_ms: float = 0.0,
+                *, known_graphs: set[str] | None = None, mask_unknown_prices: bool = False):
         if not isfinite(now_ms) or any(now_ms < v.last_service_ms for v in views):
             raise ValueError("planning time must be finite and follow the last service")
         names = {v.name for v in views}
         self.prices = {name: prices for name, prices in self.prices.items() if name in names}
+        self._references = {name: ref for name, ref in self._references.items() if name in names}
+        self._token_normalizers.clear()
+        self._delivery_normalizers.clear()
+        self._mask_unknown_prices = mask_unknown_prices
         self.ages.clear()
+        measured = catalog if known_graphs is None else tuple(g for g in catalog if g.name in known_graphs)
         decoding = sum(not view.remaining_prefill for view in views)
         reference_ms = min((decoding * graph.duration_ms / min(decoding, graph.decode_capacity)
-                            for graph in catalog if decoding and graph.decode_capacity), default=0.0)
+                            for graph in measured if decoding and graph.decode_capacity), default=0.0)
         for view in views:
             actions = candidates([view], catalog, self.value)
             if not actions:
                 raise ValueError("the prepared catalog cannot advance a live request")
-            token_rate = max((a.lanes[0].prefill + a.lanes[0].expected_output) / a.graph.duration_ms
-                             for a in actions)
-            delivery_rate = max(1 / a.graph.duration_ms for a in actions) if not view.remaining_prefill else 0
+            observed = [a for a in actions if known_graphs is None or a.graph.name in known_graphs]
+            token_rate = max(((a.lanes[0].prefill + a.lanes[0].expected_output) / a.graph.duration_ms
+                              for a in observed), default=0.0)
+            delivery_rate = max((1 / a.graph.duration_ms for a in observed), default=0.0) if not view.remaining_prefill else 0
             if view.name not in self.prices:
-                self.prices[view.name] = RequestPrices(ServicePrice.initial(
-                    self.config.token_fairness * view.weight, token_rate, len(views)), None, view.weight)
+                self.prices[view.name] = RequestPrices(None, None, view.weight)
             prices = self.prices[view.name]
-            prices.tokens.rebase(token_rate)
+            if token_rate:
+                self._token_normalizers.add(view.name)
+                if prices.tokens is None:
+                    prices.tokens = ServicePrice.initial(
+                        self.config.token_fairness * view.weight, token_rate, len(views))
+                prices.tokens.rebase(token_rate)
             if delivery_rate:
+                self._delivery_normalizers.add(view.name)
                 if prices.deliveries is None:
                     prices.deliveries = ServicePrice.initial(
                         self.config.delivery_fairness * view.weight, delivery_rate, 1)
                     prices.deliveries.log_fraction = -log(reference_ms * delivery_rate)
                 prices.deliveries.rebase(delivery_rate)
+                self._references[view.name] = reference_ms
+            reference = self._references.get(view.name)
+            if not view.remaining_prefill and reference is not None and (
+                    delivery_rate or not mask_unknown_prices):
                 self.ages[view.name] = (now_ms - view.last_service_ms,
-                                       reference_ms, view.weight)
+                                       reference, view.weight)
         self.log_scale = max([0.0, log(self.value.decode_value),
                              log(self.config.age_price) if self.config.age_price else float("-inf"),
                              *(price.log_price - log(price.maximum_rate)
@@ -150,9 +170,11 @@ class UtilityScheduler:
 
     def lane_value(self, lane: Lane) -> float:
         prices = self.prices[lane.name]
-        work = (exp(-self.log_scale) * lane.useful_work(self.value)
-                + prices.tokens.value(lane.prefill + lane.expected_output, self.log_scale))
-        if prices.deliveries is not None and lane.expected_output > 0:
+        work = exp(-self.log_scale) * lane.useful_work(self.value)
+        if prices.tokens is not None and (not self._mask_unknown_prices or lane.name in self._token_normalizers):
+            work += prices.tokens.value(lane.prefill + lane.expected_output, self.log_scale)
+        if prices.deliveries is not None and lane.expected_output > 0 and (
+                not self._mask_unknown_prices or lane.name in self._delivery_normalizers):
             work += prices.deliveries.value(1, self.log_scale)
         return work
 
@@ -189,12 +211,13 @@ class UtilityScheduler:
         for name, prices in self.prices.items():
             row = delivered.get(name, {})
             output = row.get("emitted", 0)
-            prices.tokens.observe(duration_ms, row.get("prefill", 0) + output,
-                                  self.config.adaptation_ms,
-                                  history=self.config.rate_history)
-            if prices.deliveries is not None:
+            if prices.tokens is not None and (not self._mask_unknown_prices or name in self._token_normalizers):
+                prices.tokens.observe(duration_ms, row.get("prefill", 0) + output,
+                                      self.config.adaptation_ms,
+                                      history=self.config.rate_history)
+            if prices.deliveries is not None and (not self._mask_unknown_prices or name in self._delivery_normalizers):
                 prices.deliveries.observe(duration_ms, float(output > 0), self.config.adaptation_ms,
                                           history=self.config.rate_history)
-            elif output:
+            elif output and prices.deliveries is None:
                 prices.deliveries = ServicePrice.initial(
                     self.config.delivery_fairness * prices.weight, 1 / duration_ms, 1)

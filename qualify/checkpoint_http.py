@@ -9,6 +9,7 @@ from qualify.server import (
     metric_delta,
     prefill_launches,
     system_prefix_ids,
+    message_prefixes,
     template_input,
 )
 
@@ -67,7 +68,7 @@ def terminal_branch(tokenizer, seed_request, seed_prompt, generated_ids, message
     return request, ids, consumed
 
 
-def counter_checks(delta, *, prompt, reused, chunk_size, snapshots, publications, prompts):
+def counter_checks(delta, *, prompt, reused, chunk_size, snapshots, publications, prompts, message_boundaries=()):
     return {
         "one_completed_request": delta["flare_requests_admitted_total"] == 1
             and delta["flare_requests_completed_total"] == 1
@@ -78,12 +79,12 @@ def counter_checks(delta, *, prompt, reused, chunk_size, snapshots, publications
             and delta['flare_graph_launches_total{kind="restore"}'] == int(reused > 0)
             and delta['flare_graph_launches_total{kind="init"}'] == int(reused == 0),
         "exact_prompt_execution": delta['flare_graph_launches_total{kind="prefill"}']
-            == prefill_launches(prompt, reused, chunk_size)
+            == prefill_launches(prompt, reused, chunk_size, message_boundaries)
             and delta['flare_graph_launches_total{kind="resume"}'] == int(reused == prompt),
         "exact_publication": delta['flare_graph_launches_total{kind="snapshot"}'] == snapshots
             and delta["flare_snapshot_publications_total"] == publications
             and delta["flare_prompt_checkpoints_total"] == prompts
-            and delta["flare_system_checkpoints_total"] == 0,
+            and delta["flare_message_checkpoints_total"] == sum(reused < n < prompt for n in message_boundaries),
         "no_eviction": delta["flare_snapshot_evictions_total"] == 0,
     }
 
@@ -94,6 +95,10 @@ def run_endpoint_cases(run, tokenizer, model_id, nonce, chunk_size, eos_ids):
         raise ValueError("literal fixture token must not be EOS")
 
     def measure(name, request, ids, *, reused, snapshots, publications, prompts=0):
+        boundaries = [len(prefix) for prefix in message_prefixes(tokenizer, request, ids)]
+        messages = sum(n > reused for n in boundaries)
+        snapshots += messages
+        publications += messages
         before = run.metrics(name + "-before")
         response = run.request(name, request)
         choice = run.complete(response, len(ids))
@@ -109,7 +114,7 @@ def run_endpoint_cases(run, tokenizer, model_id, nonce, chunk_size, eos_ids):
                   expected=reused, observed=response["body"].get("reused_prompt_tokens"))
         for check, passed in counter_checks(delta, prompt=len(ids), reused=reused,
                 chunk_size=chunk_size, snapshots=snapshots,
-                publications=publications, prompts=prompts).items():
+                publications=publications, prompts=prompts, message_boundaries=boundaries).items():
             run.check(name + "." + check, passed, delta=delta)
         run.check(name + ".retained_checkpoint_count",
                   after["flare_cached_checkpoints"] - before["flare_cached_checkpoints"] == publications,
@@ -125,7 +130,7 @@ def run_endpoint_cases(run, tokenizer, model_id, nonce, chunk_size, eos_ids):
             raise ValueError(f"{name} requires {snapshots} free snapshots to exclude eviction")
 
     def residues():
-        require_capacity("endpoint-residues", len(PROMPT_LENGTHS))
+        require_capacity("endpoint-residues", 2 * len(PROMPT_LENGTHS))
         seen = []
         for length in PROMPT_LENGTHS:
             name = f"endpoint-{length}"
@@ -142,7 +147,7 @@ def run_endpoint_cases(run, tokenizer, model_id, nonce, chunk_size, eos_ids):
             seen.append(ids)
 
     def terminal():
-        require_capacity("generated-terminal", 4)
+        require_capacity("generated-terminal", 9)
         request, ids = endpoint_request(tokenizer, model_id, nonce, "generated-terminal", 194, max_tokens=2)
         first, generated = measure("terminal-seed", request, ids,
                                    reused=0, snapshots=2, publications=2, prompts=1)
@@ -153,13 +158,17 @@ def run_endpoint_cases(run, tokenizer, model_id, nonce, chunk_size, eos_ids):
                   generated[:-1] == repeated_ids[:-1] and first["message"] == repeated["message"],
                   prompt_tokens=len(ids), consumed_tokens=len(consumed), pending_token_id=generated[-1],
                   consumed_token_ids=consumed)
+        retained = [consumed]
         for suffix in ("A", "B"):
             branch, branch_ids, prefix = terminal_branch(tokenizer, request, ids, generated, first["message"], suffix)
             run.check(f"terminal-branch-{suffix}.actual_consumed_prefix",
                       prefix == consumed and common_prefix(consumed, branch_ids) == len(consumed),
                       consumed_token_ids=consumed, branch_prompt_token_ids=branch_ids)
+            reused = max(len(prefix) for prefix in retained if branch_ids[:len(prefix)] == prefix)
             measure(f"terminal-branch-{suffix}", branch, branch_ids,
-                    reused=len(consumed), snapshots=1, publications=1)
+                    reused=reused, snapshots=1, publications=1)
+            retained.extend(message_prefixes(tokenizer, branch, branch_ids))
+            retained.append(branch_ids)
 
     run.case("prompt_endpoint_residues", residues)
     run.case("generated_terminal_prefix", terminal)

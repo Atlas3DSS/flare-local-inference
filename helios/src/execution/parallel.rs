@@ -220,6 +220,7 @@ impl TensorParallelExecutor {
                     return Err(invalid("rank completion size differs from its ABI"));
                 }
                 peer.completion = Some(FrameCompletion {
+                    logprobs: None,
                     proposal_confidence,
                     fence,
                     graph_index: graph,
@@ -365,6 +366,7 @@ pub unsafe fn serve_rank(
             };
         }
     };
+    executor.copy_logprobs = false;
     let result = (|| -> Result<()> {
         if world < 2 || !(1..world).contains(&rank) {
             return Err(invalid("invalid tensor-parallel peer identity"));

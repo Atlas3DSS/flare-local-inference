@@ -50,13 +50,14 @@ def _server_options(configuration, model, plan) -> dict:
     """Derive native server settings independently of preparation's physical KV backing."""
     recipe, checkpoint = plan.recipe, plan.checkpoint
     return {
-        "model_id": model.model_id, "served_names": [checkpoint.alias],
+        "model_id": model.model_id, "served_names": [recipe.served_model_name],
         "reserve_bytes": plan.reserve_bytes,
         "api_key": configuration.get("server.api_key").value,
         "queue_capacity": 4 * plan.concurrency, "frontend_workers": plan.concurrency,
         "max_body_bytes": plan.max_images * recipe.image_bytes + recipe.context * _BODY_BYTES_PER_TOKEN,
         "context_hint": "context is limited by the checkpoint and available cache capacity",
         "capacity_hint": "--max-concurrency sets the request limit; a lower [memory] reserve leaves more KV pages",
+        **({"decode_weight_bytes": checkpoint.decode_weight_bytes} if checkpoint.decode_weight_bytes > 0 else {}),
     }
 
 
@@ -167,6 +168,15 @@ def run(args) -> int:
 
 
 def export(args) -> int:
+    from ignition.preparation.package_snapshot import export_options
+    from .publishing import snapshot_destination, validate_repository
+    configuration = Configuration.load(args.config)
+    model = resolve_model(configuration, args.model)
+    repository = getattr(args, 'repo_id', None) or model.recipe.export_repository
+    if repository:
+        validate_repository(repository)
+    if args.output is None:
+        args.output = snapshot_destination(configuration, repository or model.recipe.name)
     if args.output.suffix != ".safetensors":
         args.output = args.output.with_name(args.output.name + ".safetensors")
     if args.output.exists():
@@ -175,17 +185,22 @@ def export(args) -> int:
         raise UsageError("--roce-ring requires at least two hosts")
     if args.ranks > 1 and args.tuning_gpus is not None:
         raise UsageError("--tuning-gpus applies to local preparation; multi-host ranks retain their sharding")
-    if args.ranks > 1:
-        return _export_hosts(args, export_path=args.output)
-    return _prepare(args, export_path=args.output)
+    cache = configuration.directory('package_cache')
+    if getattr(args, 'no_weights', False) and not (cache / 'blobs').is_dir():
+        raise UsageError('--no-weights requires an existing blob cache; export or convert a package first')
+    with export_options(cache, no_weights=getattr(args, 'no_weights', False)):
+        if args.ranks > 1:
+            code = _export_hosts(args, export_path=args.output)
+        else:
+            code = _prepare(args, export_path=args.output)
+    print(f'Exported package: {args.output}')
+    if repository:
+        print(f'Hugging Face target: {repository}')
+    return code
 
 
 def _export_hosts(args, *, export_path) -> int:
-    """Prepare rank zero here and one peer rank per other host; every host writes its own rank's file.
-
-    Each peer host runs `ignition join` for this rendezvous. Every rank exports to `export_path` on
-    its own host; `flare run FILE --rendezvous ADDR:PORT` then serves each rank's file on its host.
-    """
+    """Prepare one rank per host and collect a shared package snapshot on rank zero."""
     import uuid
 
     from ignition.progress import phase
@@ -564,5 +579,6 @@ def join(args) -> int:
                               topology=local_topology(gpu), report=progress)
     serve_peer(control, executor, args.rank, args.ranks, hub_cache=hub_cache, progress=progress,
                export_staging=configuration.directory("export_staging"), identity=identity,
+               package_cache=configuration.directory("package_cache"),
                checkpoint_token_file=configuration.get("preparation.checkpoint_token_file").value)
     return 0

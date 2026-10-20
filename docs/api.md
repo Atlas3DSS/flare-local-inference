@@ -26,25 +26,87 @@ is the effective serving context limit in tokens, including prompt and output.
 `root` is the loaded model's identifier, `parent` is null, and `owned_by` remains
 `local`. `created` is the serving instance's discovery initialization time in
 Unix seconds; cards and permission IDs stay stable until the server restarts.
-Permissions advertise sampling and viewing, with unsupported log probabilities,
-fine-tuning, engine creation, and search indices disabled.
+Permissions advertise sampling and viewing. `allow_logprobs` reflects the loaded
+package’s generation logprob outputs; fine-tuning, engine creation, and search
+indices remain disabled.
 
 The additional `flare` object reports prepared and selected serving metadata:
 
 | Field | Meaning |
 | --- | --- |
 | `vocab_size` | Prepared output vocabulary size |
+| `max_top_logprobs` | Packaged alternative-token capacity; 20 for new packages, zero for older packages |
 | `max_concurrency` | Selected maximum active requests |
 | `prefill_chunk_size` | Maximum tokens in a prefill chunk, not the context limit |
 | `default_max_tokens` | Default output-token budget when a request omits it; remaining context still bounds output |
 | `sampling_defaults` | Packaged seed, temperature, filters, and penalties used for omitted request fields |
-| `max_images_per_prompt` | Upper bound from feature storage; actual image sizes and the total visual-token budget bound admission; zero for text-only packages |
-| `max_image_tokens_per_prompt` | Total visual-token budget shared by every image in a request; zero for text-only packages |
+| `sampling_ranges` | Inclusive `{min, max}` bounds for distribution parameters; null fixes a parameter at its packaged default; seed remains request-controlled |
+| `max_images_per_prompt` | Upper bound from feature storage; actual image sizes and the total image-token budget bound admission; zero for text-only packages |
+| `max_image_tokens_per_prompt` | Total image-token budget shared by every image in a request, fixed by the package's prepared feature storage; zero for text-only packages |
+| `max_image_tokens_per_image` | Image tokens one image may cost after the profile's normalization; the smaller of one prepared vision graph and the request budget; zero for text-only packages |
+| `max_image_pixels` | Largest decoded image extent (width times height) accepted before normalization; zero for text-only packages |
+| `max_image_bytes` | Largest encoded image accepted; zero for text-only packages |
 | `input_modalities` | `text`, plus `image` when vision is prepared |
 | `output_modalities` | `text` |
 
 Generation requests always use the loaded model, regardless of the request's
 `model` string. Returned generation objects identify the loaded model.
+
+## Generation log probabilities
+
+Logprobs describe the raw next-token distribution over the complete vocabulary:
+`logit(token) - logsumexp(logits)`, with FP32 accumulation, before temperature,
+penalties, grammar masks, and top-k, top-p, or min-p filtering. Speculative output
+uses the target model's distribution at each committed position. The chosen token
+is always included, even when outside the alternatives. Alternatives are ordered
+by decreasing logprob, with increasing token ID for ties.
+
+Every newly exported package provides up to 20 alternatives. Older packages serve
+unchanged, advertise `allow_logprobs: false` and `flare.max_top_logprobs: 0`, and
+reject logprob requests with HTTP 400: `logprobs are not available in this model
+package`. Re-export to enable the feature.
+
+For Chat Completions, set `logprobs: true` and optionally `top_logprobs: 0..20`.
+A positive `top_logprobs` requires `logprobs: true`; zero alone is accepted and
+requests no logprobs. Buffered responses and streaming choices carry:
+
+```json
+{"logprobs":{"content":[{"token":"OK","logprob":-0.25,"bytes":[79,75],
+  "top_logprobs":[{"token":"OK","logprob":-0.25,"bytes":[79,75]}]}]}}
+```
+
+There is one entry per returned generated token, including reasoning, tool-call,
+and control tokens. Stream chunks may carry entries with an empty text delta,
+particularly when the tokenizer buffers incomplete UTF-8. Concatenate entries in
+stream order. A token's text can span multiple deltas, including a final parser
+flush; each text delta does not require a new logprob entry.
+A terminating EOS or token-ID stop has no entry. An EOS under
+`ignore_eos` keeps its entry. A token partially clipped by a string stop keeps its
+entry and full bytes; tokens entirely beyond the stop have no entries. `bytes`
+contains the token's exact bytes, including partial UTF-8; `token` uses UTF-8
+replacement characters where needed for JSON.
+
+Legacy Completions accepts integer `logprobs: 0..20`. Each choice's `logprobs` has
+parallel `tokens`, `token_logprobs`, `top_logprobs`, and `text_offset` arrays.
+`top_logprobs` contains one token-to-logprob object per generated token.
+`text_offset` counts Unicode characters from the start of the completion, including
+positions inside a decoder span released for several tokens. `echo` with logprobs
+returns HTTP 400; prompt logprobs are not implemented.
+
+Responses accepts `include: ["message.output_text.logprobs"]` with optional
+`top_logprobs: 0..20`. Entries use the Chat token shape and appear in each
+`output_text` part's `logprobs`, and in `response.output_text.delta` events.
+Only tokens whose first text byte belongs to output text receive entries there;
+reasoning, tool calls, and delimiters do not. A token spanning a delimiter and
+answer belongs to the delimiter, even if its suffix contributes answer text.
+Other `include` values retain their existing behavior.
+
+On these three endpoints, `return_tokens_as_token_ids: true` changes chosen and
+alternative token strings to `token_id:<id>`; bytes remain exact. `/v1/messages`
+explicitly rejects logprob fields. Temperature zero remains rejected. Single-token
+continuations work with `max_tokens: 1`, `continue_final_message: true`,
+`add_generation_prompt: false`, `logprobs: true`, and `top_logprobs: 20`, omitting
+temperature to use the model's prepared default.
 
 ## Transport and admission
 
@@ -100,6 +162,7 @@ instantaneous gauges.
 | --- | --- | --- |
 | `prefill_tokens` | Prompt tokens consumed by completed prefill, excluding padding and prefix reuse | `flare_prefill_tokens_total` |
 | `generated_tokens` | Committed generated tokens, including EOS and tokens withheld by text stops | `flare_generated_tokens_total` |
+| `decode_weight_bytes` | Bytes of weights one decode step reads for one request, as the package's recipe declares for its checkpoint; zero when undeclared. Times verification steps per second it is the weight bandwidth the model consumes, shown as WEIGHTS on the dashboards | `flare_decode_weight_bytes` |
 | `draft_steps` | Draft positions run by the learned drafter; zero without one | none |
 | `verify_steps` | Completed speculative or verification graphs | sum of `flare_speculative_rounds_total` |
 | `verification_drafts` | Draft positions verified: verification width minus one per graph | sum of `flare_speculative_rounds_total` × (`width` − 1) |
@@ -151,7 +214,7 @@ its output limit; recognized but incomplete calls at natural completion are erro
 
 DeepSeek reasoning and both DSML tool syntaxes use the pinned official
 `deepseek-recipe` state machine. Helios adapts its actions into the same neutral
-events, validates registered tool names and JSON objects with nonempty, unique
+events, validates nonempty tool names and JSON objects with nonempty, unique
 argument names, and publishes each call when its arguments complete. Closing the
 outer calls block ends parsed output; subsequent generated text is discarded.
 The official parser owns markup recognition, including its tolerance of omitted
@@ -169,13 +232,35 @@ MiMo's compact tags preserve their values verbatim, including indentation and
 newlines.
 
 Supported tools are client-executed JSON functions with `tool_choice` set to
-`"auto"`, `"none"`, or `"required"`. Anthropic's `{"type":"any"}` selects the same
-required mode. Required mode needs at least one declared tool, adds an instruction
-to call a tool to the prompt, and validates that generation produced at least one
+`"auto"`, `"none"`, `"required"`, or a named tool. Anthropic's `{"type":"any"}`
+selects required mode. Named selection uses
+`{"type":"function","function":{"name":"lookup"}}` in Chat Completions,
+`{"type":"tool","name":"lookup"}` in Messages, and
+`{"type":"function","name":"lookup"}` in Responses. Responses custom tools use
+`{"type":"custom","name":"lookup"}`; namespaced tools use `namespace__name`.
+The selected tool must be declared and its type must match.
+
+Named selection presents only the selected tool definition to the model, retaining
+conversation history and adding no instructions or decoding constraints.
+Buffered and streaming responses omit ordinary assistant answer text while
+preserving reasoning and tool arguments. Usage includes all generated tokens,
+including omitted answer text. Every emitted call must target the selected tool,
+and at least one completed call is required. A call to another tool fails before
+that call is emitted. Missing and incomplete calls fail as in required mode.
+
+With tools enabled and `tool_choice: "auto"`, parseable calls to
+undeclared tools are returned with their generated names and arguments in both
+buffered and streaming responses across all three chat APIs. Clients can repair
+or reject these calls and provide feedback in a subsequent turn. Declared schemas
+guide argument conversion where the tool syntax requires it; unknown tools have
+no schema for that conversion. Malformed envelopes, empty names, and invalid
+argument syntax still fail parsing. Required mode needs at least one declared
+tool, adds an instruction to call a tool to the prompt, and validates that
+generation produced at least one
 completed call to a declared tool. Sampling is unchanged; no calls are fabricated
 and no retries are attempted. Missing calls, including output truncated before a
 complete call, produce HTTP 500 for buffered requests or a terminal error event
-for streams. A stream may deliver partial text before that error, but does not
+for streams. A required-mode stream may deliver partial text before that error, but does not
 emit a success terminator. Responses also supports text custom tools by presenting a
 JSON `{ "input": string }` function to the model and restoring the custom call on
 output. Anthropic's `type: "custom"` uses its ordinary `input_schema` contract.
@@ -206,9 +291,23 @@ assistant message.
 Named tool selection and strict function schemas are rejected. Hosted search,
 computer execution, file stores, audio, and remote image downloads are unsupported. Images must be
 base64 PNG, JPEG, or static WebP data. Images are encoded sequentially and share
-the loaded package's visual-token budget; there is no separate four-image limit.
+the loaded package's image-token budget; there is no separate four-image limit.
 Each image must fit a prepared vision graph, and the whole request must fit the
 HTTP body limit and text context. Animated images are unsupported.
+
+Image costs are the token counts that usage reports in
+`prompt_tokens_details.multimodal_tokens.image`: the profile normalizes each
+image to its own grid, then merges a fixed number of encoder patches into one
+token. Admission costs every image before rejecting, so a budget rejection
+(HTTP 400) states the whole request's image tokens against
+`max_image_tokens_per_prompt`, with the patch counts in parentheses, and names
+the first image that crossed the budget with its position, pixel size, and
+tokens. Oversized single images are rejected against
+`max_image_tokens_per_image` or `max_image_pixels` with the observed size.
+Images are not downscaled to fit a budget; a client re-renders at a lower
+resolution. Chat templates add fixed framing tokens around each image that
+count toward `prompt_tokens` but not toward the image budget or
+`multimodal_tokens.image`.
 
 Anthropic histories accept inline system text and preserve text, thinking, tool
 use/results, errors, and image blocks. Message-level control metadata, including
@@ -240,12 +339,41 @@ provider reasoning signatures or encrypted continuation state.
 
 ## Reasoning, sampling, and usage
 
-Prepared model defaults fill omitted sampling fields; explicit request values
-win. Temperature must be positive. Explicit `temperature: 0` (including negative
-zero) returns HTTP 400 with `invalid_request_error` and the message:
-“temperature=0 is unsupported because greedy decoding incorrectly collapses the
-model’s probability distribution, and is not appropriate for most use cases”.
-Omit temperature to use the model default, or provide a positive value. The request is never silently clamped or replaced.
+Prepared model defaults fill omitted sampling fields. Numeric request values for
+`temperature`, `top_p`, `top_k`, `min_p`, `repetition_penalty`, `presence_penalty`,
+and `frequency_penalty` are clamped to the inclusive ranges declared in the
+package. A parameter without a range is fixed at its packaged default, including
+in packages exported without range metadata. Ranges must contain their defaults
+and valid sampler values; temperature bounds are positive. For example,
+`temperature: 0` becomes the declared minimum, or the default if no range exists.
+Malformed types still return HTTP 400; `top_k` must be an integer. `seed` remains
+request-controlled and uses its packaged default when omitted. Sampling defaults
+and ranges come from the model author's recommendations declared in the recipe.
+
+The recipes use these default-mode settings. Parameters without an interval in
+the table are fixed at their defaults. Bounds span the minimum and maximum values
+across each card's task or mode presets, including intermediate values and
+independent combinations. Qwen presence-penalty bounds are an explicit interval
+in both cards. Changing request reasoning mode does not change sampling defaults.
+
+| Recipe | Temperature | Top-p | Top-k | Declared interval | Model-card basis |
+| --- | --- | --- | --- | --- | --- |
+| `qwen38` | 1 | 0.95 | 20 | Temperature [0.7, 1]; top-p [0.8, 0.95]; presence penalty [0, 2] | [Qwen3.8-Flash-Next thinking/instruct presets](https://huggingface.co/Qwen/Qwen3.8-Flash-Next#best-practices) |
+| `qwen38_dense` | 1 | 0.95 | 20 | Temperature [0.7, 1]; top-p [0.8, 0.95]; presence penalty [0, 2] | [Qwen3.8-27B thinking/instruct presets](https://huggingface.co/Qwen/Qwen3.8-27B#best-practices) |
+| `glm53` | 1 | 0.95 | Disabled | Temperature [0.95, 1]; top-p [0.95, 1] | [GLM-5.3-Flash evaluation presets](https://huggingface.co/zai-org/GLM-5.3-Flash#footnotes) |
+| `deepseek4` | 1 | 0.95 | Disabled | None | [DeepSeek-V4-Flash-Vision-Exp agent evaluations](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-Vision-Exp#introduction) |
+| `deepseek41` | 1 | 1 | Disabled | None | [DeepSeek-V4.1-Flash-1017 inference recommendations](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017#minimal-inference) |
+| `mimo_v2` | 1 | 0.95 | Disabled | None | [MiMo-V2.6-Pro-MOPD deployment](https://huggingface.co/XiaomiMiMo/MiMo-V2.6-Pro-MOPD#4-deployment) |
+| `kimi3` | 1 | 1 | Disabled | Top-p [0.95, 1] | [Kimi-K3 single-step/agentic evaluations](https://huggingface.co/moonshotai/Kimi-K3#3-evaluation-results) |
+| `step5` | 1 | 0.95 | Disabled | None | [Step-5-Preview-NVFP4 inference recommendations](https://huggingface.co/stepfun-ai/Step-5-Preview-NVFP4#evaluation-notes) |
+| `nemotron_h` | 1 | 0.95 | Disabled | None | [Nemotron-3.5-Bolt text recommendations](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB#model-summary) |
+
+All recipes default to `min_p=0`, `repetition_penalty=1`, and zero presence and
+frequency penalties. Unspecified filters are disabled and unspecified penalties
+are neutral. Disabled top-k is stored as `-1`; Step 5's recommended `0` has the
+same meaning. Packages exported without ranges continue to fix every distribution
+parameter at their stored defaults, including Qwen presence penalties.
+
 Native extensions such as `top_k`, `min_p`, repetition penalties, token stops,
 `grammar`, and `chat_template_kwargs` remain available. JSON output formats and
 Lark output grammars constrain the final answer while permitting the model's

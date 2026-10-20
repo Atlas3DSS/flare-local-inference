@@ -68,6 +68,8 @@ fn help_exits_successfully_before_accessing_files() {
         vec!["run", "--help"],
         vec!["run", "-h"],
         vec!["help", "run"],
+        vec!["inspect", "--help"],
+        vec!["help", "inspect"],
         vec!["download", "--help"],
         vec!["download", "-h"],
         vec!["help", "download"],
@@ -170,6 +172,7 @@ fn usage_errors_identify_the_problem_before_accessing_files() {
     for (arguments, expected) in [
         (vec![], "Usage: flare"),
         (vec!["run"], "<PACKAGE>"),
+        (vec!["inspect"], "<PACKAGE>"),
         (vec!["rnu"], "unrecognized subcommand"),
         (
             vec!["run", "/nonexistent/model", "--bogus"],

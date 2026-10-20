@@ -123,6 +123,156 @@ fn required_tool_choice_is_shared_and_requires_declared_tools() {
 }
 
 #[test]
+fn named_tool_choices_decode_validate_and_preserve_messages() {
+    let mut requests = vec![];
+    for (protocol, mut body, choice) in [
+        (Protocol::Chat, json!({"messages":[{"role":"user","content":"Hello"}],
+            "tools":[{"type":"function","function":{"name":"lookup"}}]}),
+            json!({"type":"function","function":{"name":"lookup"}})),
+        (Protocol::Messages, json!({"messages":[{"role":"user","content":"Hello"}],
+            "max_tokens":128,"tools":[{"name":"lookup"}]}),
+            json!({"type":"tool","name":"lookup"})),
+        (Protocol::Responses, json!({"input":"Hello",
+            "tools":[{"type":"function","name":"lookup"}]}),
+            json!({"type":"function","name":"lookup"})),
+    ] {
+        body[if protocol == Protocol::Responses { "max_output_tokens" } else { "max_tokens" }] = json!(128);
+        let auto = request(protocol, body.clone());
+        body["tool_choice"] = choice;
+        for count in [false, true] {
+            let named = decode(protocol, body.clone(), count).unwrap().request;
+            assert_eq!(named.tool_choice, ToolChoice::Named("lookup".into()));
+            assert_eq!(auto.input, named.input);
+            assert_eq!(auto.options, named.options);
+            let Input::Conversation(messages) = &named.input else { panic!() };
+            assert_eq!(
+                template_messages(messages, named.tool_choice.clone()).unwrap(),
+                template_messages(messages, ToolChoice::Auto).unwrap(),
+            );
+            requests.push(named);
+        }
+        for name in [json!("missing"), json!(""), json!(null), json!(3)] {
+            let mut invalid = body.clone();
+            if protocol == Protocol::Chat {
+                invalid["tool_choice"]["function"]["name"] = name;
+            } else {
+                invalid["tool_choice"]["name"] = name;
+            }
+            assert!(decode(protocol, invalid, false).is_err());
+        }
+        body["tools"] = json!([]);
+        assert!(decode(protocol, body, false).err().unwrap().to_string().contains("not declared"));
+    }
+    assert!(requests.windows(2).all(|pair| pair[0] == pair[1]));
+    for (kind, tool) in [
+        ("custom", json!({"type":"custom","name":"lookup"})),
+        ("function", json!({"type":"function","name":"lookup"})),
+    ] {
+        let body = json!({"input":"Hello","tools":[tool],
+            "tool_choice":{"type":kind,"name":"lookup"}});
+        assert!(decode(Protocol::Responses, body.clone(), false).is_ok());
+        let mut wrong_kind = body;
+        wrong_kind["tool_choice"]["type"] = json!(if kind == "custom" { "function" } else { "custom" });
+        assert!(decode(Protocol::Responses, wrong_kind, false).is_err());
+    }
+    let named = request(Protocol::Responses, json!({"input":"Hello",
+        "tools":[{"type":"namespace","name":"db","tools":[{"type":"function","name":"lookup"}]}],
+        "tool_choice":{"type":"function","name":"db__lookup"}}));
+    assert_eq!(named.tool_choice, ToolChoice::Named(named.tools[0].native_name()));
+}
+
+#[test]
+fn named_calls_strip_answer_text_and_validate_before_emitting_other_tools() {
+    use crate::server::output::Block;
+    for protocol in [Protocol::Chat, Protocol::Messages, Protocol::Responses] {
+        for chunked in [false, true] {
+            let mut enc = encoder_with_choice(protocol, ToolChoice::Named("lookup".into()));
+            let mut generated = events();
+            generated.insert(0, Event::ContentLogprobs(vec![]));
+            generated.push(Event::Content("Done".into()));
+            let mut frames = enc.start();
+            for chunk in generated.chunks(if chunked { 1 } else { generated.len() }) {
+                frames.extend(enc.apply(0, chunk.to_vec()).unwrap());
+            }
+            frames.extend(enc.finish(0, Termination::Eos, 19, 0, None).unwrap());
+            assert!(enc.outputs[0].blocks.iter().all(|b| !matches!(b, Block::Text(_))));
+            assert!(enc.outputs[0].blocks.iter().any(|b| matches!(b, Block::Reasoning(s) if s == "考え")));
+            assert!(enc.outputs[0].blocks.iter().any(|b| matches!(b,
+                Block::Tool { name, arguments, .. } if name == "lookup" && arguments == "{\"query\":\"café\"}")));
+            for value in frames.iter().map(|f| &f.data).chain(std::iter::once(&enc.response())) {
+                let text = value.to_string();
+                assert!(!text.contains("Answer ✓") && !text.contains("Done"));
+            }
+            match protocol {
+                Protocol::Chat => {
+                    assert!(enc.response()["choices"][0]["message"]["content"].is_null());
+                    assert_eq!(enc.response()["usage"]["completion_tokens"], 19);
+                }
+                Protocol::Messages => assert_eq!(enc.response()["usage"]["output_tokens"], 19),
+                Protocol::Responses => {
+                    assert_eq!(enc.response()["usage"]["output_tokens"], 19);
+                    assert_eq!(enc.response()["tool_choice"], json!({"type":"function","name":"lookup"}));
+                }
+                _ => unreachable!(),
+            }
+        }
+        for other in ["other_declared", "unknown"] {
+            let mut declared = tools().remove(0);
+            declared.name = "other_declared".into();
+            let mut declared_tools = tools();
+            declared_tools.push(declared);
+            let mut enc = Encoder::new(protocol, "test".into(), "model".into(), 1, 1,
+                vec![PromptUsage { tokens: 17, image_tokens: 0 }], declared_tools,
+                ToolChoice::Named("lookup".into()), true, true, json!({}));
+            let error = enc.apply(0, vec![Event::ToolBegin { index: 0, name: other.into(), id: None }]).unwrap_err();
+            assert!(error.to_string().contains("tool_choice selects"));
+            assert!(enc.outputs[0].blocks.is_empty());
+            assert!(!enc.failure(&error).done);
+        }
+        for cause in [Termination::Eos, Termination::UserStop, Termination::OutputLimit] {
+            for generated in [
+                vec![Event::Content("Only prose".into())],
+                events().into_iter().filter(|e| !matches!(e, Event::ToolEnd { .. })).collect(),
+            ] {
+                let mut enc = encoder_with_choice(protocol, ToolChoice::Named("lookup".into()));
+                enc.apply(0, generated).unwrap();
+                let error = enc.finish(0, cause, 19, 0, None).unwrap_err();
+                let failure = enc.failure(&error);
+                assert!(!failure.done);
+                if protocol == Protocol::Responses {
+                    assert_eq!(failure.data["type"], "response.failed");
+                    assert_eq!(failure.data["response"]["tool_choice"], json!({"type":"function","name":"lookup"}));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn named_custom_tool_choice_preserves_input_and_response_metadata() {
+    let mut declared = tools();
+    declared[0].custom = true;
+    let mut enc = Encoder::new(Protocol::Responses, "test".into(), "model".into(), 1, 1,
+        vec![PromptUsage { tokens: 17, image_tokens: 0 }], declared,
+        ToolChoice::Named("lookup".into()), true, true, json!({}));
+    enc.start();
+    let frames = enc.apply(0, vec![
+        Event::Content("Explanation".into()),
+        Event::ToolBegin { index: 0, name: "lookup".into(), id: Some("call_1".into()) },
+        Event::ToolArguments { index: 0, text: "{\"input\":\"exact\\ntext\"}".into() },
+        Event::ToolEnd { index: 0 },
+    ]).unwrap();
+    enc.finish(0, Termination::Eos, 12, 0, None).unwrap();
+    assert!(frames.iter().any(|f| f.data["type"] == "response.custom_tool_call_input.done"
+        && f.data["input"] == "exact\ntext"));
+    let response = enc.response();
+    assert_eq!(response["tool_choice"], json!({"type":"custom","name":"lookup"}));
+    assert_eq!(response["output"].as_array().unwrap().len(), 1);
+    assert_eq!(response["output"][0]["type"], "custom_tool_call");
+    assert_eq!(response["output"][0]["input"], "exact\ntext");
+}
+
+#[test]
 fn required_tool_instruction_preserves_history_and_sampling() {
     for messages in [
         json!([{"role":"user","content":"Hello"}]),
@@ -246,6 +396,203 @@ fn required_tool_choice_accepts_complete_calls_and_rejects_unknown_or_unfinished
 }
 
 #[test]
+fn auto_tool_choice_returns_unknown_calls_across_parsers_and_protocols() {
+    use crate::{
+        model::contract::{ToolParser, ToolParserKind},
+        output::{Input as OutputInput, OutputConfig, OutputPipeline, Piece, tagged},
+    };
+
+    let cases = [
+        (
+            ToolParserKind::QwenCoder,
+            1,
+            "",
+            "<tool_call><function=missing__lookup><parameter=query>\ncafé\n</parameter></function></tool_call>",
+        ),
+        (
+            ToolParserKind::QwenCoder,
+            0,
+            "",
+            "<tool_call><function=missing__lookup><parameter=query>café</parameter></function></tool_call>",
+        ),
+        (
+            ToolParserKind::GlmArgumentTags,
+            0,
+            "",
+            "<tool_call>missing__lookup<arg_key>query</arg_key><arg_value>café</arg_value></tool_call>",
+        ),
+        (
+            ToolParserKind::Dsml,
+            0,
+            "",
+            "<｜DSML｜tool_calls><｜DSML｜invoke name=\"missing__lookup\"><｜DSML｜parameter name=\"query\" string=\"true\">café</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls>",
+        ),
+        (
+            ToolParserKind::Dsml,
+            0,
+            " ",
+            "<｜DSML｜ calls><｜DSML｜ invoke name=\"missing__lookup\"><｜DSML｜ parameter name=\"query\" string=\"true\">café</｜DSML｜ parameter></｜DSML｜ invoke></｜DSML｜ calls>",
+        ),
+        (
+            ToolParserKind::Xtml,
+            0,
+            "",
+            concat!(
+                "<|close|>response<|sep|><|open|>tools<|sep|>",
+                "<|open|>call tool=\"missing__lookup\" index=\"1\"<|sep|>",
+                "<|open|>argument key=\"query\" type=\"string\"<|sep|>café",
+                "<|close|>argument<|sep|><|close|>call<|sep|>",
+                "<|close|>tools<|sep|><|close|>message<|sep|>"
+            ),
+        ),
+    ];
+    let markers = [(1, "<|open|>"), (2, "<|close|>"), (3, "<|sep|>")];
+    for (kind, wrapping_newlines, separator, text) in cases {
+        let mut pieces = Vec::new();
+        let mut rest = text;
+        while let Some((at, id, marker)) = markers
+            .iter()
+            .filter_map(|(id, marker)| rest.find(marker).map(|at| (at, *id, *marker)))
+            .min_by_key(|(at, _, _)| *at)
+        {
+            pieces.push(Piece::Text(rest[..at].into()));
+            pieces.push(Piece::Token(id));
+            pieces.push(Piece::Text(marker.into()));
+            rest = &rest[at + marker.len()..];
+        }
+        pieces.push(Piece::Text(rest.into()));
+        for protocol in [Protocol::Chat, Protocol::Messages, Protocol::Responses] {
+            for split_characters in [false, true] {
+                let mut syntax = crate::model::testing::metadata().frontend;
+                syntax.tools = Some(ToolParser {
+                    kind,
+                    wrapping_newlines,
+                    tag_separator: separator.into(),
+                });
+                let mut parser = OutputPipeline::new(OutputConfig {
+                    syntax,
+                    control_tokens: markers
+                        .iter()
+                        .map(|(id, text)| (*id, (*text).into()))
+                        .collect(),
+                    content: tagged::OutputConfig {
+                        structured: false,
+                        start: tagged::OutputStart::Content,
+                        tools: vec![json!({"type":"function","function":{
+                            "name":"lookup","parameters":{"type":"object","properties":{"query":{"type":"string"}}}
+                        }})],
+                    },
+                });
+                let mut enc = encoder(protocol);
+                let mut frames = enc.start();
+                let mut events = Vec::new();
+                for piece in &pieces {
+                    let inputs: Vec<_> = match piece {
+                        Piece::Logprob(_) => {
+                            unreachable!("tool parser fixture contains only tokens and text")
+                        }
+                        Piece::Token(id) => vec![OutputInput::Token(*id)],
+                        Piece::Text(text) if split_characters => text
+                            .char_indices()
+                            .map(|(at, ch)| OutputInput::Text(&text[at..at + ch.len_utf8()]))
+                            .collect(),
+                        Piece::Text(text) => vec![OutputInput::Text(text)],
+                    };
+                    for input in inputs {
+                        let parsed = parser.push(input).unwrap();
+                        events.extend(parsed.clone());
+                        frames.extend(enc.apply(0, parsed).unwrap());
+                    }
+                }
+                let parsed = parser.finish(Termination::Eos).unwrap();
+                events.extend(parsed.clone());
+                frames.extend(enc.apply(0, parsed).unwrap());
+                frames.extend(enc.finish(0, Termination::Eos, 12, 0, None).unwrap());
+                let response = enc.response();
+                let expected = json!({"query":"café"});
+                match protocol {
+                    Protocol::Chat => {
+                        let call = &response["choices"][0]["message"]["tool_calls"][0];
+                        assert_eq!(call["function"]["name"], "missing__lookup");
+                        assert_eq!(
+                            serde_json::from_str::<Value>(
+                                call["function"]["arguments"].as_str().unwrap()
+                            )
+                            .unwrap(),
+                            expected
+                        );
+                        assert_eq!(response["choices"][0]["finish_reason"], "tool_calls");
+                        assert!(frames.iter().any(|f| f.data["choices"][0]["delta"]["tool_calls"][0]["function"]["name"] == "missing__lookup"));
+                        assert!(frames.last().unwrap().done);
+                    }
+                    Protocol::Messages => {
+                        assert_eq!(response["content"][0]["name"], "missing__lookup");
+                        assert_eq!(response["content"][0]["input"], expected);
+                        assert_eq!(response["stop_reason"], "tool_use");
+                        assert!(
+                            frames
+                                .iter()
+                                .any(|f| f.data["content_block"]["name"] == "missing__lookup")
+                        );
+                        assert_eq!(frames.last().unwrap().data["type"], "message_stop");
+                    }
+                    Protocol::Responses => {
+                        let call = &response["output"][0];
+                        assert_eq!(call["type"], "function_call");
+                        assert_eq!(call["name"], "missing__lookup");
+                        assert!(call.get("namespace").is_none());
+                        assert_eq!(
+                            serde_json::from_str::<Value>(call["arguments"].as_str().unwrap())
+                                .unwrap(),
+                            expected
+                        );
+                        assert_eq!(response["status"], "completed");
+                        assert!(
+                            frames
+                                .iter()
+                                .any(|f| f.data["item"]["name"] == "missing__lookup")
+                        );
+                        assert_eq!(frames.last().unwrap().data["type"], "response.completed");
+                    }
+                    _ => unreachable!(),
+                }
+                let streamed_arguments: String =
+                    frames
+                        .iter()
+                        .filter_map(|frame| {
+                            match protocol {
+                                Protocol::Chat => frame.data["choices"][0]["delta"]["tool_calls"]
+                                    [0]["function"]["arguments"]
+                                    .as_str(),
+                                Protocol::Messages => frame.data["delta"]["partial_json"].as_str(),
+                                Protocol::Responses
+                                    if frame.data["type"]
+                                        == "response.function_call_arguments.delta" =>
+                                {
+                                    frame.data["delta"].as_str()
+                                }
+                                _ => None,
+                            }
+                        })
+                        .collect();
+                assert_eq!(
+                    serde_json::from_str::<Value>(&streamed_arguments).unwrap(),
+                    expected
+                );
+                let mut required = encoder_with_choice(protocol, ToolChoice::Required);
+                assert!(
+                    required
+                        .apply(0, events)
+                        .unwrap_err()
+                        .to_string()
+                        .contains("undeclared tool")
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn parallel_tool_controls_decode_to_the_same_limit() {
     for (protocol, body) in [
         (
@@ -289,9 +636,9 @@ fn parallel_tool_controls_decode_to_the_same_limit() {
 #[test]
 fn disabled_parallel_calls_fail_before_the_second_call_is_emitted() {
     for protocol in [Protocol::Chat, Protocol::Messages, Protocol::Responses] {
-        for choice in [ToolChoice::Auto, ToolChoice::Required] {
+        for choice in [ToolChoice::Auto, ToolChoice::Required, ToolChoice::Named("lookup".into())] {
             for parallel in [false, true] {
-                let mut enc = encoder_with_parallel(protocol, choice, parallel);
+                let mut enc = encoder_with_parallel(protocol, choice.clone(), parallel);
                 enc.start();
                 enc.apply(0, events()).unwrap();
                 let first = enc.outputs[0].blocks.clone();
@@ -334,9 +681,9 @@ fn disabled_parallel_calls_fail_before_the_second_call_is_emitted() {
 #[test]
 fn disabled_parallel_calls_allow_zero_or_one_and_combine_with_required() {
     for protocol in [Protocol::Chat, Protocol::Messages, Protocol::Responses] {
-        for choice in [ToolChoice::Auto, ToolChoice::Required] {
+        for choice in [ToolChoice::Auto, ToolChoice::Required, ToolChoice::Named("lookup".into())] {
             for count in [0, 1] {
-                let mut enc = encoder_with_parallel(protocol, choice, false);
+                let mut enc = encoder_with_parallel(protocol, choice.clone(), false);
                 enc.apply(
                     0,
                     if count == 1 {
@@ -533,7 +880,6 @@ fn unsupported_controls_are_rejected_before_generation() {
     }
     for field in [
         json!({"suffix":"tail"}),
-        json!({"logprobs":0}),
         json!({"best_of":2}),
     ] {
         let mut body = json!({"prompt":"x"});
@@ -1110,4 +1456,31 @@ fn empty_text_messages_preserve_conversation_roles() {
             json!({"role":"assistant","content":""})
         ]
     );
+}
+
+#[test]
+fn generation_logprob_controls_have_endpoint_specific_types_and_limits() {
+    for (protocol, base, accepted, rejected) in [
+        (Protocol::Chat, json!({"messages":[{"role":"user","content":"x"}]}),
+            vec![json!({"logprobs":true,"top_logprobs":20}), json!({"top_logprobs":0})],
+            vec![json!({"top_logprobs":1}), json!({"logprobs":1}), json!({"logprobs":true,"top_logprobs":21})]),
+        (Protocol::Completions, json!({"prompt":"x"}), vec![json!({"logprobs":0}), json!({"logprobs":20})],
+            vec![json!({"logprobs":true}), json!({"logprobs":1,"echo":true}), json!({"logprobs":-1})]),
+        (Protocol::Responses, json!({"input":"x"}),
+            vec![json!({"top_logprobs":20,"include":["message.output_text.logprobs"]}), json!({"include":["unrelated"]})],
+            vec![json!({"top_logprobs":1}), json!({"logprobs":true})]),
+        (Protocol::Messages, json!({"messages":[{"role":"user","content":"x"}],"max_tokens":1}), vec![],
+            vec![json!({"logprobs":false}), json!({"top_logprobs":0}), json!({"return_tokens_as_token_ids":true})]),
+    ] {
+        for (fields, valid) in accepted.into_iter().map(|v| (v,true)).chain(rejected.into_iter().map(|v| (v,false))) {
+            let mut body = base.clone();
+            body.as_object_mut().unwrap().extend(fields.as_object().unwrap().clone());
+            assert_eq!(decode(protocol, body.clone(), false).is_ok(), valid, "{protocol:?}: {body}");
+        }
+    }
+    let body = json!({"messages":[{"role":"assistant","content":"Cletus:"}], "max_tokens":1,
+        "continue_final_message":true,"add_generation_prompt":false,"logprobs":true,"top_logprobs":20});
+    let request = decode(Protocol::Chat, body, false).unwrap().request;
+    assert_eq!(request.options.logprobs.unwrap().top,20);
+    assert!(request.options.sampling.temperature.is_none());
 }

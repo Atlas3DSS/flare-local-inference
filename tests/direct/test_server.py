@@ -9,13 +9,28 @@ DEFAULTS = {"temperature": 1., "top_p": .95, "top_k": -1, "seed": 0, "min_p": 0.
             "presence_penalty": 0., "frequency_penalty": 0.}
 
 
-def test_request_sampling_overrides_the_recipe_defaults():
+def test_request_sampling_clamps_to_defaults_without_ranges_and_preserves_seed():
     sampling = _sampling({"seed": 1101, "top_p": 1}, DEFAULTS)
-    assert (sampling.seed, sampling.temperature, sampling.top_p, sampling.top_k) == (1101, 1., 1., -1)
+    assert (sampling.seed, sampling.temperature, sampling.top_p, sampling.top_k) == (1101, 1., .95, -1)
     assert _sampling({}, DEFAULTS).values() == (1., .95, 0., 1., 0., 0.)
-    for body in ({"temperature": 0}, {"seed": -1}, {"top_p": "high"}, {"seed": 1.5}):
+    assert _sampling({"temperature": 0, "top_k": 500}, DEFAULTS).values() == (1., .95, 0., 1., 0., 0.)
+    for body in ({"temperature": float("inf")}, {"seed": -1}, {"top_p": "high"}, {"seed": 1.5}, {"top_k": 1.5}):
         with pytest.raises(AdmissionError):
             _sampling(body, DEFAULTS)
+
+
+def test_request_sampling_clamps_to_inclusive_model_ranges():
+    bounds = dict(temperature=(.5, 1.5), top_p=(.5, 1.), min_p=(0., .5),
+                  repetition_penalty=(.5, 2.), presence_penalty=(-2., 2.), frequency_penalty=(-1., 1.),
+                  top_k=(-1, 100))
+    defaults = {**DEFAULTS, "ranges": {name: dict(min=low, max=high) for name, (low, high) in bounds.items()}}
+    for side, value in [(0, -10**100), (1, 10**100)]:
+        sampling = _sampling({**dict.fromkeys(bounds, value), "seed": 2**64 - 1}, defaults)
+        assert sampling.seed == 2**64 - 1
+        for name, endpoints in bounds.items():
+            assert getattr(sampling, name) == endpoints[side]
+    assert _sampling({"temperature": .75, "top_k": 5}, defaults).temperature == .75
+    assert _sampling({"temperature": .75, "top_k": 5}, defaults).top_k == 5
 
 
 class Tokenizer:

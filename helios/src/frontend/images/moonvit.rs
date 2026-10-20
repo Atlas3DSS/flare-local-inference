@@ -1,5 +1,8 @@
-use super::{ImageGeometry, ImageLimits, ProcessedImages, RgbImage, check_input_extent, resize};
-use crate::{Error, Failure, FrontendError, Result};
+use super::{
+    ImageGeometry, ImageLimits, ProcessedImages, RgbImage, check_image_patches,
+    check_input_extent, resize,
+};
+use crate::Result;
 
 fn extent(width: usize, height: usize) -> (usize, usize) {
     let area = (width / 14).max(1) as f64 * (height / 14).max(1) as f64;
@@ -18,11 +21,7 @@ pub(super) fn geometry(limits: ImageLimits, width: usize, height: usize) -> Resu
     let (w, h) = extent(width, height);
     let (width, height) = (w.div_ceil(28) * 28, h.div_ceil(28) * 28);
     let patches = width / 14 * (height / 14);
-    if patches > limits.max_patches_per_image {
-        return Err(Error::frontend(FrontendError::Input(Failure::new(
-            "image exceeds prepared MoonViT patch capacity",
-        ))));
-    }
+    check_image_patches(limits, patches)?;
     Ok(ImageGeometry {
         width,
         height,
@@ -156,11 +155,12 @@ pub(super) fn process(limits: ImageLimits, images: &[RgbImage]) -> Result<Proces
         interpolation_weights: vec![],
         cu_seqlens: vec![0],
     };
-    let mut total = 0;
-    for image in images {
-        let geometry = geometry(limits, image.width, image.height)?;
-        total += geometry.patches;
-        limits.check_batch(images.len(), total)?;
+    let geometries: Vec<_> = images
+        .iter()
+        .map(|image| geometry(limits, image.width, image.height))
+        .collect::<Result<_>>()?;
+    limits.check_batch(images.len(), geometries.iter().map(|g| g.patches).sum())?;
+    for (image, geometry) in images.iter().zip(geometries) {
         let (_, pixels) = resized_rgb(limits, image)?;
         let h = geometry.height / 14;
         let w = geometry.width / 14;
@@ -194,7 +194,7 @@ pub(super) fn process(limits: ImageLimits, images: &[RgbImage]) -> Result<Proces
             }
         }
         result.geometry.push(geometry);
-        result.cu_seqlens.push(total as i32);
+        result.cu_seqlens.push(result.position_ids.len() as i32);
     }
     Ok(result)
 }

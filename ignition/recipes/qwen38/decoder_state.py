@@ -295,7 +295,7 @@ class PreparedResume:
     """Sample directly from an exact restored prefix's final hidden vector."""
 
     def __init__(self, inputs, requests, pool, sample_hidden, logits, lm_head_weight,
-                 completion_records, frame_index, submission_sequence, *, session, name,
+                 completion, frame_index, submission_sequence, *, session, name,
                  local_logits=None, vocabulary_runtime=None, coordinator=None, sampling_workspace=None):
         from ignition.components.linear import UnquantizedProjection
         from ignition.components.sampling import PreparedSampling
@@ -317,7 +317,7 @@ class PreparedResume:
             self.projection = PreparedVocabularyProjection(sample_hidden, lm_head_weight, local_logits, logits,
                 runtime=vocabulary_runtime, session=session, coordinator=coordinator, name=name)
         self.sampler = PreparedSampling(logits, requests, inputs.row_slot_ids[:rows],
-            inputs.row_generations[:rows], inputs.live_rows, completion_records, frame_index, submission_sequence,
+            inputs.row_generations[:rows], inputs.live_rows, completion, frame_index, submission_sequence,
             sample_enabled=inputs.sample_enabled[:rows], workspace=sampling_workspace)
         self.sampler.prepare()
         self.sampler.prepare_broadcast(runtime=vocabulary_runtime, session=session,

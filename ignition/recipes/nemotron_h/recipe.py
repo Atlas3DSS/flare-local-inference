@@ -35,6 +35,7 @@ def usage(prepared):
 
 RECIPE = Recipe(
     name="nemotron_h", prepare=prepare, usage=usage,
+    served_model_name="NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB",
     # Text sampling: https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB.
     sampling_defaults=SamplingDefaults(temperature=1., top_p=.95, top_k=-1, min_p=0.,
         repetition_penalty=1., presence_penalty=0., frequency_penalty=0.),

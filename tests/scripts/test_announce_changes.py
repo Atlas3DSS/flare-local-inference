@@ -2,6 +2,7 @@
 import hashlib
 import importlib.util
 import json
+import re
 from pathlib import Path
 import tempfile
 import unittest
@@ -244,6 +245,22 @@ class PrivacyTests(unittest.TestCase):
         payload = http.calls[0][2]['payload']
         self.assertNotIn('SECRET_SOURCE', json.dumps(payload))
         self.assertNotIn('private source', json.dumps(payload))
+    def test_summary_schema_excludes_rejected_opening_verbs(self):
+        changes = [{'sha': B, 'category': 'Maintenance', 'title': 'Maintenance update'}]
+        rejected = 'Applied maintenance updates.'
+        http = Http(self.response(rejected))
+        with self.assertRaisesRegex(a.Error, 'Summary contains disallowed content'):
+            a.Model(http, 'http://model', 'model').summarize(changes)
+        schema = http.calls[0][2]['payload']['response_format']['json_schema']['schema']
+        pattern = schema['properties']['bullets']['items']['properties']['text']['pattern']
+        self.assertIsNone(re.search(pattern, rejected))
+        for opening in a.SUMMARY_OPENINGS:
+            self.assertIsNone(re.fullmatch(pattern, opening + ' '))
+            text = opening + ' maintenance updates.'
+            self.assertRegex(text, pattern)
+            self.assertTrue(a.safe_prose(text))
+        self.assertEqual(a.Model(Http(self.response('Updated maintenance updates.')),
+            'http://model', 'model').summarize(changes), ['Updated maintenance updates.'])
     def test_code_urls_mentions_and_unknown_evidence_are_rejected(self):
         changes = [{'sha': B, 'category': 'Fix', 'title': 'Fix image ordering'}]
         for text in ('return x', 'Use `foo()`', 'Visit https://example.com', '@everyone update', 'Changed source.rs', 'raise RuntimeError', 'while True:',

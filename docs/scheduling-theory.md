@@ -19,11 +19,13 @@ mathematical references. The [ongoing-service experiment](scheduling-utility.md)
 adds proportional-fair rate histories and a decode-age continuation value.
 The [completion-episode oracle](scheduling-oracle.md)
 also compares exact conditional schedules with a continuation-value prototype.
-The models use positive, known graph durations and supplied
+The fixed-cost models use positive, known graph durations and supplied
 conditional acceptance probabilities. Actual output lengths are hidden from
-the dispatcher. It has one graph in flight and publishes output at completion.
-It does not model cache capacity, admission, restore, host prerequisites,
-submission pipelining, timing discovery, or runtime estimation error. Its graph
+the dispatcher. These models have one graph in flight and publish output at
+completion. They exclude cache capacity, admission, restore, host prerequisites,
+and submission pipelining. The fixed-cost experiments exclude timing discovery and
+runtime estimation error; the [timing-learning experiment](#learning-graph-timings)
+models both with hidden execution costs and completion observations. The graph
 timing table is synthetic unless supplied with `--catalog`.
 
 The [native scheduler design](scheduling-runtime-design.md) applies the ongoing
@@ -417,6 +419,407 @@ until the first simulated delivery counts. Prefill contributes no decode-age
 cost until its first output. Busy time means execution-resource use,
 not GPU occupancy or hardware efficiency.
 
+## Learning graph timings
+
+`python -m scripts.scheduling_sim.learning` compares timing estimators and
+exploration policies over the same useful-work and service-price objective.
+It preserves the fixed-cost CLI and its tests. This experiment has one graph in
+flight, with synthetic execution costs. It does not model native prerequisites,
+split proposal/verification ownership, queued submissions, cache storage, or
+tensor-parallel synchronization. Its results do not establish GPU performance
+or explain a particular service trace.
+
+The executor owns physical costs, correlated timing noise, regime changes, and
+request outcomes. A learning policy receives duration-free graph geometry,
+observable request views, and its own completed timing observations. The known-mean
+reference alone receives conditional mean costs at dispatch, including the
+current regime and previously observed noise state; it never receives the next
+random execution outcome. It optimizes the next dispatch, not future exploration:
+a known first-use penalty can keep it from trying a graph whose later executions
+would be faster. Timing, acceptance, and policy sampling use separate
+random streams. Acceptance draws are keyed by request, generated position, and
+draft position; timing draws are keyed by physical graph and execution count.
+Different schedules need not encounter identical stochastic trajectories.
+
+The policy first prepares service prices and rate normalizers from measured
+means. Unknown costs supply no normalizer. Those prices and delivery references
+remain fixed while it evaluates candidate graphs and cohorts. A posterior
+sample is shared by every candidate using the same physical graph. A nomination
+of the mean incumbent's graph executes the incumbent's full cohort and counts
+as ordinary service. Empty graph rows and rejected drafts earn no useful work.
+
+### Retained estimates
+
+Each physical graph keeps lifetime count, arithmetic mean, and variance, with
+separate GPU and host-handoff component statistics. Eight observations form one
+block by default; blocks of 32 are an experimental alternative. Partial blocks
+immediately refine the ordinary dispatch mean. Complete block means refine an
+uncertainty model for the mean cost. Idle time changes neither count nor
+uncertainty, and never converts a measured cost into an unknown cost.
+
+For block means `y`, the normal-inverse-gamma working model has prior
+`kappa0 = 0.25`, `alpha0 = 2`, and `beta0 = m0²`. The frozen prior location `m0`
+is the median measured graph mean in the same prefill/decode/mixed family, then
+the incumbent mean if available, then 1 ms. This fallback is a statistical
+prior, not a measured cost or a fairness normalizer. Ordinary dispatch uses the
+raw observed arithmetic mean by default. The `mean_estimator = "ema"` alternative
+uses a retained exponential mean with sample weight 1/8 for ordinary decisions.
+It preserves lifetime and active arithmetic statistics, posterior updates, and
+change detection. Its operational mean survives idle and regime declarations.
+Posterior intervals describe the active arithmetic regime mean; they are not
+confidence intervals around the exponential mean.
+
+The `partial_blocks` alternative incorporates an unfinished block into the
+uncertainty model. For `r` observations in a block of size `B`, its mean `z`
+contributes weight `w = r/B`. Given the complete-block posterior parameters
+`kappa`, `alpha`, `beta`, and `m`, the weighted posterior is:
+
+```text
+kappa' = kappa + w
+m'     = (kappa*m + w*z) / (kappa + w)
+alpha' = alpha + w/2
+beta'  = beta + kappa*w*(z - m)^2 / (2*(kappa + w)).
+```
+
+Each observation replaces the partial contribution. Completing the block
+promotes that contribution exactly once; overlapping partial means never count
+as independent observations. This is a tempered likelihood with fractional
+block weight. Complete-block detector references, operational means, and
+lifetime history retain their existing semantics. Partial-sample interval
+coverage depends on the timing distribution and prior location. Calibration
+diagnostics include both matched and mismatched priors.
+
+Exploratory mean-cost draws use the marginal
+Student-t distribution conditioned on a positive cost. Its truncated mean need
+not equal its location; with these prior parameters it is `1.8 * m0`.
+
+The cumulative estimator retains all observations in its active mean. The
+regime estimator also retains lifetime statistics, but changes its active
+statistics after observed counterevidence. After at least eight active blocks,
+three consecutive block means must lie outside a frozen central 99% predictive
+interval on the same side and differ from the frozen raw mean by at least 10%.
+The reference freezes before the first suspect block. Confirmation starts the
+active regime from those three blocks without erasing lifetime statistics or
+carrying the previous regime's sample count into the replacement prior.
+
+The detector uses the symmetric NIG predictive interval for another block mean
+as a working test. It is not the exact predictive distribution of a fully
+positive-conditioned latent model. A broad interval can miss an early downward
+shift, and correlated or heavy-tailed observations can invalidate nominal
+coverage. The predictive-noise control samples individual execution variation,
+whose uncertainty remains wider than uncertainty about the mean.
+
+The `log-regime` estimator keeps the same NIG mean-cost posterior and configured
+operational mean, with a separate detector operating on log durations.
+After 64 valid observations in the active regime, it freezes the log mean,
+sample variance, raw arithmetic mean, and lag-one correlation before examining
+a group. Its working correlation is
+`rho = min(0.99, max(0, r) + 2/sqrt(N - 3))`. For a group of
+size `n`, the log-mean difference variance is
+`s² * (F(n)/n + F(N)/N)`, where
+`F(n) = 1 + 2 * sum((1 - k/n) * rho^k, k=1..n-1)`.
+Student-t degrees are the largest power of two not exceeding `N/F(N)`, minus
+one, with a floor of one.
+
+A raw observation outside the central 99.99% working interval with at least
+a 10% arithmetic-mean change can nominate the graph for confirmation.
+Two consecutive groups of four observations must meet those conditions on
+the same side of the same frozen reference. Their combined eight observations
+must also pass a stricter test that spends a lifetime nominal error allowance:
+for reference index `j` and the next power of two `J >= j`, its two-sided
+allowance is `0.0001 / (J * (J + 1))`. The reference counter survives regime
+changes. Confirmation seeds active statistics from those eight observations;
+lifetime statistics retain every observation. The correlation model and its
+nominal error allowances do not guarantee coverage for arbitrary timing noise.
+
+### Foreground exploration allowance
+
+By default, bootstrap is compulsory only when no feasible productive graph has a valid
+measurement. It ranks existing useful value, then existing age/padding ties;
+unknown duration is never a numeric zero denominator. Bootstrap time is recorded
+separately and earns no exploration credit. Native TTL comparisons retain their
+unknown-first selection and unknown padded-prefill exclusion. Discretionary
+exploration can still try an oversized graph: equal useful work does not prove
+that the smaller captured graph is faster.
+
+The `initial_discovery = "native"` alternative gives feasible, genuinely
+unmeasured graphs the native unknown-first priority and padded-prefill filtering.
+It also masks service prices lacking an applicable measured normalizer.
+Executions of never-measured graphs count as bootstrap, including newly feasible
+graphs and retries after invalid timings. They record separate elapsed time and
+earn or spend neither exploration allowance. Measured costs remain available after idle.
+This option varies initial discovery independently of the operational mean and
+subsequent remeasurement policy.
+
+Funded policies start with zero credit. A valid ordinary completion earns
+`alpha / (1 - alpha)` times its elapsed duration, capped at 5 ms by default,
+with `alpha = 0.02`. A probe requires the full cap of credit, then pays its
+entire actual elapsed duration, allowing negative debt. It earns no credit.
+Missing or zero GPU timing does not update the estimate or earn ordinary credit;
+observed host elapsed time still settles an executed probe and updates service
+history. Commit and completion account for each operation once; repeated
+planning reuses its decision and random draws.
+
+For ordinary credited duration `F`, discretionary probe duration `E`, and the
+most recent probe duration `D`, the experiment asserts after every completion:
+
+```text
+E <= alpha / (1 - alpha) * F + D.
+```
+
+This permits one nonpreemptible overrun; the 5 ms credit cap is not a graph
+duration limit or a bound on individual request latency. Idle earns no credit
+and discards positive credit while retaining debt. Consequently, separate busy
+bursts shorter than 245 ms cannot fund a probe at the default settings.
+
+An opportunity requires an alternative physical graph and sufficient credit;
+ungated policies omit the credit condition. The counter advances on commit
+even when exploration nominates the incumbent. Except in the targeted policy,
+every sixteenth opportunity selects the least recently attempted feasible
+alternative. Refresh can be disabled independently, and comparisons of funding
+use equal refresh settings.
+No synthetic work runs while the execution resource is idle.
+
+### Targeted challengers
+
+The `targeted` policy ranks alternative physical graphs by optimistic useful
+value using the configured lower mean-cost quantile. Ordinary dispatch uses the
+configured operational means and the existing service-price objective.
+Prices remain frozen across all candidates in one decision.
+
+A measured challenger must have a higher optimistic score than the ordinary
+incumbent. Its estimated duration may exceed the incumbent by at most
+`probe_extra_ms`, default zero. Its estimated utility loss is expressed as
+incumbent service time:
+
+```text
+loss_ms = max(0, incumbent_score - challenger_mean_score)
+          * challenger_mean_duration / incumbent_gross_value_rate.
+```
+
+The gross value rate includes useful work, service prices, and delivery value
+before the shared decode-age cost. It remains positive even when the net
+utility score is negative. The default `probe_loss_ms` limit is 5 ms.
+The loss calculation uses the cohort that would actually execute. A graph
+without observations still needs an optimistic utility improvement, but its
+statistical prior is not treated as a measured duration for admission.
+
+Periodic remeasurement examines graphs after `refresh_busy_ms`, default 5,000 ms,
+of occupied execution since their last valid observation. Idle time does not
+advance this clock. Due alternatives rotate by their last actual attempt;
+one valid timing completes a periodic check. Invalid timings rotate attempts
+without refreshing observation age. Pending change evidence receives
+confirmation priority. A missing confirmation timing moves that graph into
+the shared attempt queue with due checks until it supplies a valid timing;
+its pending statistical evidence remains intact. These checks can bypass the
+mean-cost admission limits and execute the selected graph's best cohort under
+nominal costs.
+
+By default, due checks take priority over ordinary challengers. Setting
+`audit_every = 4` reserves every fourth contended opportunity for a due check
+and gives the other three to admitted challengers. Healthy pending confirmations
+retain priority. A graph awaiting a valid confirmation after a missing timing
+participates only in the check queue. If only one queue has a candidate, it
+uses the opportunity without advancing the contention counter. The counter
+advances on commit, survives idle, and is unchanged by repeated planning.
+This divides opportunities, not elapsed execution time.
+
+Every challenger, periodic check, and confirmation uses the same earned-credit
+condition and pays its full actual duration. The duration and utility limits
+control estimated discretionary loss; they are not guarantees about the duration
+of an unmeasured graph or the latency of a request. Traces expose each candidate's
+mean and optimistic scores, estimated loss, extra blocking, occupied-time age,
+and pending change evidence, along with the selected reason.
+
+For equal-work alternatives without service prices or age costs, the utility-loss
+formula reduces to `max(0, challenger_mean_duration - incumbent_mean_duration)`.
+A zero extra-duration limit therefore overrides a positive utility-loss allowance.
+With different useful yields, a longer graph can have lower utility loss than its
+extra duration. The two admission limits are independent experiment parameters;
+a nonbinding `probe_extra_ms` isolates selection by utility loss.
+
+### Request service-delay accounting
+
+An optional `probe_harm_ms` limit compares the proposed probe with the ordinary
+incumbent's cohort. For each incumbent lane, a probe supplying the same next
+service incurs estimated delay `max(0, probe_duration - incumbent_duration)`.
+Otherwise its delay is the probe's full duration, representing the probe
+followed by incumbent service. Next service means a decode delivery or at least
+the incumbent's prefill progress. Delays are summed without offsetting one
+request's delay by another request's gain.
+
+The hard limit applies to challengers, periodic checks, and confirmations.
+It exempts a lone live request. Under continuous contention, a stale estimate
+can exclude every attempt to discover that a graph became faster. The cohort
+search considers each feasible count of incumbent decode rows, using the
+highest-value rows within and outside that group. It therefore retains safe
+cohorts that unconstrained useful-value selection would discard.
+
+The `harm_alpha` alternative replaces this hard limit with separate prefill and
+decode balances, each capped at one request-millisecond and initially zero.
+An ordinary completion earns `harm_alpha / (1 - harm_alpha)` times its elapsed
+duration for each lane that commits service, credited to that lane's phase.
+Final prefill belongs to prefill even when it also produces the first token.
+Committed service and elapsed time can earn this allowance without a valid GPU
+timing; the GPU-time allowance still requires valid timing.
+
+A probe requires full balances for every phase represented in the frozen
+incumbent, as well as the configured GPU-time allowance. Completion computes
+the service delays using actual probe duration and committed progress, compared
+with the incumbent's frozen estimated duration. Each affected phase pays its
+sum, allowing debt. A lone request pays its own delay; there is no exemption.
+Probes and bootstrap earn no allowance. Idle clears positive balances and
+retains debt. For each phase, charged delay is bounded by its earned allowance
+plus the charge of the most recent probe exposing that phase. An intervening
+probe serving only the other phase does not replace this overrun term.
+Bootstrap remains outside this bound.
+
+Periodic checks and confirmations choose the cohort with the least predicted
+service delay for that physical graph, using ordinary utility to break ties.
+Challengers retain optimistic useful-value selection. A faster probe can incur
+zero delay charge while still paying its full GPU-time cost.
+
+This accounting measures delay relative to a frozen estimated alternative.
+It is not an observation of counterfactual request latency. Timing errors,
+future arrivals, and later scheduling decisions can change actual latency.
+The hard limit and the earned-delay alternative cannot be enabled together.
+
+### Policies and experiments
+
+The compared policies are known conditional means; a 30-second timing-expiry
+reference with fresh EMA weight 1/8; jittered TTL uniformly between 24 and 36
+seconds; retained EMA; retained arithmetic-mean greedy; uniform epsilon exploration; normalized
+softmax; optimistic lower mean-cost quantiles; Thompson mean sampling;
+predictive execution sampling; and targeted challengers. The exploratory
+policies have funded and ungated variants and cumulative, regime, and
+log-regime estimator alternatives.
+
+The `retained-refresh` policy preserves native unknown-first discovery, service
+prices, useful-value ranking, and exponential timing updates. A measured cost
+remains available after its 30-second lifetime. Fresh observations update its
+exponential mean with weight 1/8; the first valid observation after expiry
+replaces that mean. Expiry alone changes neither the measured value nor its
+availability.
+
+When the foreground allowance reaches its cap, `retained-refresh` remeasures a
+feasible stale physical graph other than the ordinary incumbent. It orders
+alternatives by the later of their last valid completion and last attempted
+dispatch, then by ordinary useful-value ranking. Invalid timings therefore
+rotate attempts without making an estimate fresh. The selected graph uses its
+ordinary best cohort. Its entire actual elapsed duration is charged once,
+including attempts with invalid GPU timing. An ordinary winner refreshes its
+cost through normal service and needs no exploration allowance.
+
+This policy uses the cumulative estimator only for recorded statistics; no
+posterior, change detector, or request-delay ledger affects its decisions.
+With a 5 ms cap, allowances of 0.2% and 0.5% require respectively 2,495 ms and
+995 ms of ordinary service to fund the first stale remeasurement. Idle discards
+positive credit, so repeated shorter bursts can preserve stale estimates
+indefinitely. The aggregate exploration bound permits one graph-duration
+overrun and does not bound individual decode stalls.
+
+Retained EMA and greedy policies bootstrap only while no productive measured
+choice exists. They can leave other graphs unmeasured indefinitely. An expiry
+ablation instead uses the TTL policy with `ttl_ms = 1e12`: it preserves initial
+unknown-first discovery and EMA updates while retaining measurements throughout
+the finite experiment horizons.
+
+Softmax samples physical graphs using their best cohort's utility `Q`:
+
+```text
+p(graph) proportional to exp((Q - Qmax) / (temperature * (Qmax - Qmin))).
+```
+
+Equal utilities give uniform probabilities. The annealing alternative uses
+`temperature / sqrt(1 + opportunities / 100)`. Epsilon nomination is uniform
+over all feasible physical graphs, including the incumbent. The tuning grid
+uses epsilon `0.01/0.05/0.10`, temperature `0.03/0.10/0.30`, optimistic quantile
+`0.01/0.05/0.10`, and untempered Thompson sampling. One-factor sweeps support
+allowances `0.005/0.01/0.02/0.05`, credit caps `1/5/20` ms, refresh periods
+`0/4/16/64`, and block sizes `8/32`.
+
+The scenario catalog distinguishes stationary core workloads, cold/idle
+transients, recovery fixtures, and stress cases before measurements. It includes
+full and tail prefills, 1/4/16 competing decoders, alternative efficiency and
+batch/verification-width rankings, idle intervals of 29/31/120/3600 seconds,
+1,000-observation histories, poisoned first observations, mean-preserving timing
+noise, correlation, rare outliers, changed costs, context/occupancy mismatch,
+expensive unknown graphs, and missing measurements.
+
+```sh
+.venv/bin/python -m scripts.scheduling_sim.learning \
+  --preset screen --screen-grid --workers 12 \
+  --reference ttl \
+  --output /tmp/flare-learning-tuning
+
+.venv/bin/python -m scripts.scheduling_sim.learning \
+  --preset validate --configs /tmp/flare-learning-tuning/nominated.json \
+  --reference ttl \
+  --workers 12 --output /tmp/flare-learning-validation
+```
+
+Screening uses seeds 0 through 15 and nominates at most three nondominated
+configurations. Validation uses frozen configurations and defaults to seeds
+10000 through 10063. An explicit `--seeds START:END` selects another 64-seed
+evaluation range disjoint from the tuning seeds. Freeze configurations before
+examining their evaluation range. The `smoke` preset has explicitly shorter
+windows and cannot qualify a policy. Validation subsets remain diagnostic.
+`--output` writes ordinary
+summary/request/calibration CSVs, configuration inputs, and comparison results.
+`--compress-requests` writes lossless `requests.csv.gz` instead of `requests.csv`.
+`--trace` streams selected graphs, estimated/sampled costs, actual timings,
+decision reasons, useful work, and credit state; tracing uses one worker.
+
+`--comparison-configs` adds fixed controls from a JSON array of `id` and `config`
+objects. Controls do not enter nomination, calibration multiplicity, or winner
+selection. Separate comparisons apply the same throughput and latency bounds
+against the TTL policy and supplied controls, and include their recovery counts.
+`--reference known` is the default primary reference. `--reference ttl` instead
+uses the 30-second timing-expiry reference for nomination, primary throughput
+and latency gates, and accepted-policy ranking. The other reference remains a
+diagnostic comparison. Retained-cost policy evaluations use
+`--reference ttl`; the metric thresholds and recovery requirements are
+identical for both reference modes.
+
+Stationary runs learn for 30 occupied seconds and measure for another 120,
+including each boundary-crossing graph in full. Finite request templates are
+replenished without resetting estimates. After measurement, a bounded drain
+collects completion and latency endpoints; unresolved tails remain censored.
+Busy useful throughput includes probe and bootstrap time. Elapsed throughput
+also includes idle intervals. Prefill's first output contributes TTFT; a
+speculative output burst contributes one decode delivery event.
+
+Every applicable core workload must retain at least 98% of the selected
+reference's useful throughput and have at most 105% of its per-seed p99 TTFT and decode gap, without
+extra unfinished or starved requests. Confidence bounds resample paired whole
+seeds and compare ratios of mean per-seed metrics, not a pooled p99. Selecting
+among `K` frozen configurations uses one-sided confidence `1 - 0.05/K`. Each
+applicable per-seed tail metric requires at least 100 endpoints and no unresolved
+censoring. A favorable aggregate does not rescue a failing workload.
+
+Recovery fixtures have two or four choices and a unique best useful-work rate
+at least 20% above the runner-up. Recovery is the first completion ending a
+10-occupied-second window with at least 95% of ordinary execution time on the
+best graph, sustained at subsequent completion windows. Probe time is charged
+separately; this condition alone does not limit probe stalls. At least 61 of 64
+seeds must recover within 60 occupied seconds. Mature unused-graph drift is also
+reported separately as a stress case. Step-change fixtures switch costs at
+30,000 occupied milliseconds. Mature fixtures seed 1,000 observations per graph
+at the common initial clock. Their recovery times depend on this change phase
+relative to each policy's remeasurement schedule.
+
+Mean intervals are checked at fixed sample counts under the matched block
+likelihood. Nominal 95% coverage must reach 90%, and median interval width after
+1,000 samples must be at most one quarter of its width after 16. A stationary
+regime-reset rate of at most 1% means zero affected seeds out of 64 empirically;
+it does not certify a population rate below 1%. Correlation and other model
+mismatches remain visible as stress results.
+
+Among configurations passing every gate, selection maximizes geometric-mean
+core throughput, then minimizes worst decode-tail ratio and probe expense.
+If none pass, no policy is selected. Heldout failures do not change the gates
+or authorize retuning on heldout seeds.
+
 ## Runtime policy choices
 
 The ongoing policy uses separate intrinsic output value, token fairness,
@@ -436,8 +839,9 @@ into service history and pauses dispatch at feedback dependencies.
 
 Unknown duration cannot be divided into reward as a numerical zero. The native
 contract uses zero to mean indeterminate, requiring an explicit exploration
-choice. Expiration makes a stale estimate eligible for rediscovery; it does not
-prove efficient or fair behavior during exploration. Those effects require
-tests beyond known-cost allocation. Native tests cover zero-cost startup,
-expiry, recovery, and phase transitions; real-device execution is still required
-to measure their throughput and latency cost.
+choice. A measured cost stays available when stale; foreground execution funds
+remeasurement as specified in the [native timing policy](scheduling-runtime-design.md#funded-timing-refresh).
+Those bounds do not establish efficient or fair behavior during exploration.
+Native tests cover zero-cost startup, timing freshness, recovery, and phase
+transitions; real-device execution is still required to measure throughput and
+latency cost.

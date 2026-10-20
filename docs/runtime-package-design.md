@@ -1,9 +1,8 @@
 # Runtime packages: the preparation boundary and native serving
 
-Flare serves a prepared model from a runtime package: a primary `.safetensors` file and
-optional sibling data files holding
-everything a Rust process needs to rebuild the model's CUDA graphs and
-storage without a Python interpreter. Preparation still happens in Python
+Flare serves a prepared model from a runtime package: a metadata-only primary
+`.safetensors` file and immutable sibling payload files holding everything a Rust
+process needs to rebuild the model's CUDA graphs and storage without a Python interpreter. Preparation still happens in Python
 with PyTorch, Transformers, and b12x. Serving requires the NVIDIA driver,
 the package, the Rust `flare` executable, and its system library dependencies
 (including libturbojpeg). Python and preparation tools are not required.
@@ -129,22 +128,21 @@ pool holds only graph-local intermediates and is also cleared, as are unused
 bytes in the preparation allocator. Weight tensors, MTP weights, rotary
 tables, pointer tables, and required initialized metadata retain their contents.
 
-The primary file is a valid safetensors container with two one-dimensional `U8`
-tensors. Its little-endian u64 header length precedes a JSON header padded
-with spaces so the data buffer begins on a 4 KiB boundary. The JSON header is
-limited to 64 KiB and declares `__metadata__: {"format": "flare"}`.
-`flare.payload` covers the resource bytes, including alignment padding, from
-the start of the data buffer. `flare.metadata` immediately follows it and
-contains a serialized `ProtectedIndex` from `helios/proto/runtime_package.proto`.
+The primary file is a valid safetensors container with three one-dimensional
+`U8` tensors and `__metadata__: {"format": "flare-snapshot"}`. Its little-endian
+u64 header length precedes a JSON header padded to a 4 KiB data boundary; the
+header is limited to 64 KiB. `flare.payload` has zero length. `flare.metadata`
+contains the signed `ProtectedIndex`; `flare.layout` follows it and maps signed
+logical byte ranges to immutable payload files. Each metadata tensor is bounded
+at 128 MiB. No model payload bytes reside in the primary.
+
 The envelope uses version 4. Its authenticated `ModelIndex` uses version 4 for
-monolithic packages and version 5 for packages with companion data files.
-Helios accepts both; absent filename and stored-part fields retain their
-primary-file meaning, so format-4 packages load without re-export.
-Unsigned rank staging uses `format: flare-staging` and cannot be loaded by
-Helios. Incompatible packages require re-export.
-These tensors cover the entire data buffer without gaps or overlap. The
-protobuf is the authoritative resource description; safetensors describes
-only the two byte tensors.
+logical monolithic addressing or version 5 for logical companion addressing.
+The snapshot storage mapping does not change signed offsets or encryption
+associated data. Helios also loads `format: flare` packages with physical payloads
+in the primary or numbered companions. Absent filename and stored-part fields
+retain their original meaning. Conversion preserves the signed envelope exactly.
+Unsigned rank staging uses `format: flare-staging` and cannot load in Helios.
 
 `ModelIndex.contract` is a typed `ServingContract`. It declares serving defaults
 and a versioned `ModelContract` containing vocabulary bounds, vision capacities,
@@ -164,17 +162,25 @@ model histories. Shared cache allocation sizes the physical backing independentl
 of model identity. Native code implements no attention state-update computation.
 
 Frontend enums independently select tool/reasoning parsers and image preparation
-and layouts. Marker strings, prefix-boundary rules, feature tokens, and atomic
+and layouts. Marker strings, feature tokens, and atomic
 image spans are data. Enum zero and unknown identifiers are rejected; enum
 numbers are stable and removed values must be reserved. Frontend identifiers
 cannot select scheduler, cache, text-graph packing, or completion policy.
+The serialized `prefix_boundary` field remains readable for package compatibility;
+message checkpoints derive from exact rendered prefixes without role filters.
 
 The index stores complete recipe-declared sampling parameters in
 `DefaultSamplingParameters` and structural frontend settings in
 `FrontendSettings`. Sampling defaults are manually verified against model-card
 recommendations for the default serving mode; checkpoint configuration does not
 select sampling policy. Missing values reject loading rather than inheriting
-another model's settings. Explicit request parameters override these defaults.
+another model's settings. `DefaultSamplingParameters.ranges` contains optional
+inclusive `min` and `max` bounds for temperature, top-p, top-k, min-p, and the
+repetition, presence, and frequency penalties. Each supplied range must contain
+its existing default, and both endpoints must be valid sampler values. Numeric
+request values are clamped to these bounds; omitted ranges fix parameters at
+their defaults. Packages without range fields remain loadable without re-export
+and use this fixed-default policy. Seed remains request-controlled.
 
 `FrontendSettings` contains EOS token IDs, the special-token strings used by the
 chat template, and optional image settings. Qwen image settings contain resize
@@ -185,18 +191,22 @@ checkpoint config files, then exports only these consumed fields. The only front
 payload assets are `tokenizer.json` and the Jinja chat template; raw generation,
 tokenizer, processor, and model configuration files are not included.
 
-In a monolithic package, stored allocations and offloaded embedding tables precede
-graph bodies, cubins, module globals, and frontend assets. In a multi-file package,
-stored allocations and tables occupy companions; the remaining resources and
-metadata stay in the primary. Updating graphs or the index does not shift stored
-data. Payloads remain
-uncompressed, allowing [Hugging Face Xet's content-defined storage](https://huggingface.co/docs/xet/deduplication)
-to deduplicate unchanged byte ranges across package revisions. Upload clients
-may still scan the complete local file to compute its chunks and hashes.
+Payload blobs contain whole resources: stored allocations, embedding planes,
+graph bodies, cubins, module globals, or frontend assets. Blob names are SHA-256
+hashes of the complete safetensors file. Adjacent stored resources are packed up
+to the selected shard limit without crossing rank or logical-file boundaries.
+Executable and supporting resources use separate shards. Whole resources remain
+contiguous; a graph change can reuse unchanged weight shards. Changing any bytes
+in a weight shard gives that entire shard a different identity. Blobs remain
+uncompressed. New exports
+reuse identical stored bytes through hardlinks, and upload clients can deduplicate
+the same named content across revisions. Upload clients may still scan local files.
 
-Every resource span stores a sibling `filename`, a byte `offset` relative to that
-file's `flare.payload`, and its byte length. An empty filename selects the primary.
-A resource occupies exactly one span in one file; it never straddles files.
+Every resource span stores a logical sibling `filename`, a byte `offset` relative
+to that file's logical `flare.payload`, and its byte length. An empty filename
+selects the logical primary. Snapshot layout segments resolve that span to one
+contiguous physical blob range. In a `format: flare` package the logical filename
+is the physical filename.
 Spans cannot extend into `flare.metadata`. The index is
 limited to 128 MiB and contains ordered rank bundles, peer-memory ownership,
 serving configuration, frontend asset spans, allocation descriptions, kernel
@@ -232,38 +242,64 @@ preparation memory.
 
 ### File placement and addressing
 
-`ignition export`, `ignition run`, and `ignition sign` use a 64 GiB soft file-size
-target, configured by `[publishing] shard_size = "64G"` or `--shard-size SIZE`.
-The flag wins; `0` requests one file. The package cache key includes the resolved
-byte count. Packages fitting the target remain monolithic. Otherwise the exporter
-places ordinary persisted allocation payloads and embedding planes in data files.
-Pointer tables and other initialized allocation contents are ordinary stored data
-for this purpose. Cubins, graph records, module globals, frontend assets, and all
-signed metadata remain in the primary. A resource larger than the target occupies
-an oversized file by itself; primary metadata and special resources can also
-exceed the target.
+`ignition export`, `ignition run`, `ignition sign`, and `ignition convert` pack
+published payloads to at most 64 GB (64,000,000,000 bytes), including the
+4096-byte header. The reader retains its 64 GiB limit for existing packages. The
+`[publishing] shard_size` setting or `--shard-size SIZE` can select a smaller limit.
+Zero is invalid. The package cache key includes the resolved byte count. An
+indivisible resource exceeding the limit fails publication; no oversized file is
+published. All model payloads reside outside the primary.
 
-For `example.safetensors`, companions are `example-data-01-of-02.safetensors` and
-`example-data-02-of-02.safetensors`. The two-digit count excludes the primary;
-at most 99 companions are permitted. Each companion contains only a one-dimensional
-`U8` `flare.payload` tensor and `__metadata__: {"format": "flare-data"}`. Headers
-use the same 4 KiB alignment and 64 KiB bound as the primary; the declared tensor
-must cover the exact remaining file length.
+The layout JSON has `version: 1` and a `files` mapping. Each logical filename maps
+to ordered `[length, blob_filename]` segments. An empty blob filename represents
+zero padding. The empty logical filename is required. At most 100 logical files
+and 65,536 segments are allowed. Blob names are 64 lowercase hexadecimal SHA-256
+digits followed by `.safetensors`. Each blob contains only a one-dimensional
+`U8` `flare.payload` tensor and `__metadata__: {"format": "flare-data"}`. Its header
+is exactly 4096 bytes including the length prefix; its payload must exactly match
+the segment length. A repeated blob name must have the same length.
+
+The layout supplies physical addressing, not publisher authority. Signed resource
+bounds, executable ciphertext hashes, and optional stored-data verification apply
+to the reconstructed logical bytes. The native loader pins all selected blobs and
+rejects resources spanning multiple blobs or padding. Hosts need sufficient open
+file descriptors for their selected blobs and runtime resources.
+
+Ignition stores blobs under `paths.package_cache/blobs` and hardlinks them into
+snapshot directories. Existing blobs are checked before reuse; new blobs are
+hashed while written, synchronized, installed without overwriting, and made
+read-only. Snapshot and cache must share a filesystem. Publication installs all
+payload links before atomically publishing the metadata primary. A failed export
+can leave reusable blobs and links, but never a primary naming incomplete payloads.
+
+The converter validates the source publisher's public profile and signatures,
+reads all stored data and authenticated resources, and checks the relocated blob
+bytes before publishing the original envelope with a new layout. It needs no
+private key, checkpoint, or GPU. The source remains intact. `--no-weights` export
+requires all stored-data blobs to exist; preparation, capture, and content reads
+still run. Captured allocations are scanned into sparse 64 KiB nonzero spans;
+cache hits do not write staging weight files.
 
 Companion references are portable ASCII basenames ending in `.safetensors`, with
 an alphanumeric first character and only letters, digits, dots, underscores, and
-hyphens thereafter. Paths, `..`, device names, symlinks, reparse points, and
-nonregular files are rejected. The loader retains the package directory and
-opened files, validates ranges against each file's payload, and caches each
+hyphens thereafter. Paths, `..`, and device names in signed references are
+rejected. A companion directory entry may be a symbolic link to a regular file,
+including a file on another filesystem. The loader follows the link when opening
+the companion, validates the opened file's type, header, length, and payload
+ranges, and retains that file handle. Broken links, link loops, and nonregular
+targets are rejected. Retargeting a link does not replace an already opened
+companion. The operator controls these filesystem links; signed basenames do not
+confine their targets to the package directory. Package files must remain
+immutable while they are being transferred or served.
+
+The loader retains the package directory and opened files and caches each
 payload base and direct-I/O handle. Allocation uploads add the resource offset
 to that base. Embedding readers retain their file handles before serving; block
 coalescing compares both file identity and offset.
 
-File placement precedes encryption, so executable keys and authenticated chunk
-data use final primary offsets. Publication syncs and installs companions first,
-then publishes the primary without overwriting any destination. Failed publication
-removes its own outputs. A forced interruption can leave unreferenced companions;
-choose an unused export basename or remove those only after confirming ownership.
+Logical file placement precedes encryption, so executable keys and authenticated
+chunk data use logical offsets. Physical blob placement can change without
+re-signing or decrypting a resource.
 
 `StoredData.parts` describes the ordered file-qualified ranges of one owner's
 stored data. Its SHA-256 covers their concatenation, including declared alignment
@@ -422,9 +458,11 @@ omitted. A process verifies every rank, except a host serving one rank of a
 multi-host package, which verifies the shared groups and its own rank only, so
 a copy holding only that rank's bytes verifies completely and other ranks'
 bytes or signatures do not affect it. Peer transfer sends ranges separately for
-each file, including its header and signed padding. Agent protocol 3 stores a
-package in a rank-specific directory preserving companion basenames and pins or
-evicts that directory as a unit. A peer needing companions rejects older agents
+each logical file for `format: flare` packages, including headers and signed
+padding. Snapshot transfer sends the complete metadata primary and only the whole
+blobs selected for a rank. Agent protocol 3 stores package files in a rank-specific
+directory. Content-addressed files are hash-verified on arrival and hardlinked
+from the agent blob cache, which survives package-directory eviction. A peer needing companions rejects older agents
 before sending any files; monolithic transfer retains protocol 1/2 compatibility.
 Resource classification follows actual consumers in the signed index. Missing,
 overlapping, unclassified, or incorrectly classified spans fail loading. The

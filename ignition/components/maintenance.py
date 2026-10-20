@@ -89,7 +89,7 @@ class PreparedMaintenance:
     reservation and full-page sharing.
     """
 
-    def __init__(self, mode, requests, transfer, slots, epochs, count, records, frame, sequence, *,
+    def __init__(self, mode, requests, transfer, slots, epochs, count, completion, frame, sequence, *,
                  world_size, capacity=4, admission_buffers=None, buffers=None):
         if mode not in ("init", "restore", "snapshot") or (type(world_size) is not int or world_size < 1) or capacity not in BATCH_CAPACITIES or capacity > requests.capacity:
             raise ValueError("maintenance requires a supported transition, rank count, and row capacity")
@@ -99,6 +99,7 @@ class PreparedMaintenance:
                 (epochs, (self.slots,), torch.int64, "epochs"), (count, (1,), torch.int32, "count"),
                 (frame, (1,), torch.int32, "frame"), (sequence, (1,), torch.int64, "sequence")):
             _check_tensor(value, shape, dtype, device, name)
+        records = completion.records
         fields = _completion_fields(records, device, self.slots)
         self.transfer, self.requests, self.admission = transfer, requests, None
         def zeros(shape, dtype):
@@ -112,7 +113,7 @@ class PreparedMaintenance:
                     (epochs, admission_buffers.admission_generations), (count, admission_buffers.admission_count)):
                 if value.data_ptr() != expected.data_ptr():
                     raise ValueError("maintenance and admission must share packed slot commands")
-            self.admission = PreparedAdmission(requests, admission_buffers, records, frame, sequence, capacity=capacity)
+            self.admission = PreparedAdmission(requests, admission_buffers, completion, frame, sequence, capacity=capacity)
         self.admission_errors = self.admission.errors if self.admission is not None else torch.zeros(self.slots, dtype=torch.int32, device=device)
         c, r = transfer.commands, requests
         self.stage_args = (slots, epochs, count, c.source_slots, c.destination_slots, c.operation, c.num_ops, c.errors,

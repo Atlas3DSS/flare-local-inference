@@ -4,23 +4,49 @@ use super::*;
 use crate::scheduler::cost::PackedShape;
 
 impl RequestScheduler {
-    fn budget_choice(&self, offers: &[(usize, usize)], batch: usize,
+    fn budget_choice(&self, offers: &[(usize, usize)], batch: usize, width: usize,
         values: &[LaneValue; REQUEST_LANES], age_price: f64) -> Option<(PackedShape, ValueRate)> {
-        let width = self.split.as_ref()?.width;
-        let proposal_ns = self.costs.duration(GraphKind::Proposal, batch, width)?;
-        let mut scores = Vec::new();
-        for &(slot, limit) in offers {
-            let request = self.slots[slot].request.as_ref()?;
-            let mut before = 1.0;
-            for position in 0..limit.saturating_sub(1) {
-                let total = self.proposal_forecast_tokens(request, position + 2);
-                scores.push((total - before, position, slot));
-                before = total;
+        self.refresh_budget_choice(offers, batch, width, values, age_price,
+            cost::Key { kind: GraphKind::Proposal, batch, tokens: width, prefill: 0, packed: 0 }, None, None)
+    }
+
+    pub(super) fn refresh_budget_choice(&self, offers: &[(usize, usize)], batch: usize, width: usize,
+        values: &[LaneValue; REQUEST_LANES], age_price: f64, proposal: cost::Key,
+        target: Option<cost::Key>, cache: Option<&mut RefreshBudgetCache>) -> Option<(PackedShape, ValueRate)> {
+        let proposal_ns = self.costs.duration_key(proposal)?;
+        let frontier = || -> Option<Vec<(f64, usize, usize)>> {
+            let mut scores = Vec::new();
+            for &(slot, limit) in offers {
+                let request = self.slots[slot].request.as_ref()?;
+                let mut before = 1.0;
+                let limit = target.map_or(limit, |shape| limit.min(shape.tokens));
+                for position in 0..limit.saturating_sub(1) {
+                    let total = self.proposal_forecast_tokens(request, position + 2);
+                    scores.push((total - before, position, slot));
+                    before = total;
+                }
             }
-        }
-        scores.sort_unstable_by(|a,b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
-        self.costs.packed_shapes().filter(|shape| shape.batch == batch && shape.width >= width
-            && shape.tokens >= offers.len()).map(|shape| {
+            scores.sort_unstable_by(|a,b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+            Some(scores)
+        };
+        let uncached;
+        let scores = if let Some(cache) = cache {
+            // Logical width fixes each row's limit within this immutable decision.
+            let mask = offers.iter().fold(0, |mask, (slot, _)| mask | (1 << slot));
+            let key = (target.map_or(0, |shape| shape.tokens), width, mask);
+            match cache.scores.entry(key) {
+                std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::hash_map::Entry::Vacant(entry) => entry.insert(frontier()?),
+            }
+        } else {
+            uncached = frontier()?;
+            &uncached
+        };
+        self.costs.packed_shapes().filter(|shape| {
+            let matching = target.map_or(shape.batch == batch && shape.width >= width, |target|
+                shape.batch == target.batch && shape.width == target.tokens && shape.tokens == target.packed);
+            matching && shape.batch >= offers.len() && shape.tokens >= offers.len()
+        }).map(|shape| {
             let nanos = horizon(proposal_ns, shape.nanos);
             let mut expected = [0.0; REQUEST_LANES];
             for &(slot, _) in offers { expected[slot] = 1.0; }
@@ -31,6 +57,11 @@ impl RequestScheduler {
     }
 
     pub(super) fn finalize_packed(&mut self, fresh: u64, budget: usize) -> Result<()> {
+        self.finalize_packed_with_width(fresh, budget, None)
+    }
+
+    pub(super) fn finalize_packed_with_width(&mut self, fresh: u64, budget: usize,
+        maximum: Option<usize>) -> Result<()> {
         let mut needs = self.retained_needs();
         let count = fresh.count_ones() as usize;
         if count > budget { return Err("proposal row budget cannot cover its pending inputs".into()); }
@@ -43,7 +74,8 @@ impl RequestScheduler {
             // cannot influence admission of the token on which it depends.
             let best = needs.iter().enumerate().filter_map(|(index,&(slot,width))| {
                 let proposal = self.split.as_ref().unwrap().retained[slot].unwrap();
-                (fresh & (1 << slot) != 0 && width < proposal.limit).then(||
+                (fresh & (1 << slot) != 0 && width < maximum.map_or(proposal.limit,
+                    |maximum| proposal.limit.min(maximum))).then(||
                     (index, survival[slot] * f64::from(proposal.confidence[width-1]), width, slot))
             }).max_by(|a,b| a.1.total_cmp(&b.1).then(b.2.cmp(&a.2)).then(b.3.cmp(&a.3)));
             let Some((index,probability,_,slot)) = best else { break; };
@@ -93,17 +125,19 @@ impl RequestScheduler {
                     rate: ValueRate::new(nanos,value,age), feedback: true });
             }
         }
-        let width = self.split.as_ref().unwrap().width;
-        available.retain(|&slot| self.speculative_tokens(self.slots[slot].request.as_ref().unwrap(),width)>1);
+        let maximum = self.split.as_ref().unwrap().width;
+        available.retain(|&slot| self.speculative_tokens(self.slots[slot].request.as_ref().unwrap(),maximum)>1);
         available.sort_unstable_by(|&a,&b| values[b].output_token.total_cmp(&values[a].output_token).then(a.cmp(&b)));
         for count in 1..=available.len() {
-            let offers: Vec<_> = available[..count].iter().map(|&slot|
-                (slot,self.speculative_tokens(self.slots[slot].request.as_ref().unwrap(),width))).collect();
             let batch = count.next_power_of_two();
-            if let Some((shape,rate)) = self.budget_choice(&offers,batch,values,age) {
-                output.push(Candidate { kind: GraphKind::Proposal, mask: offers.iter().fold(0,|mask,(slot,_)|mask|(1<<slot)),
-                    batch, capacity: width, packed_token_capacity: 0, prefill_capacity: 0, prefill_slot: None,
-                    work: 0, duration_ns: rate.duration_ns, rate, feedback: true, verification_budget: Some(shape.tokens) });
+            for width in 2..=maximum {
+                let offers: Vec<_> = available[..count].iter().map(|&slot|
+                    (slot,self.speculative_tokens(self.slots[slot].request.as_ref().unwrap(),width))).collect();
+                if let Some((shape,rate)) = self.budget_choice(&offers,batch,width,values,age) {
+                    output.push(Candidate { kind: GraphKind::Proposal, mask: offers.iter().fold(0,|mask,(slot,_)|mask|(1<<slot)),
+                        batch, capacity: width, packed_token_capacity: 0, prefill_capacity: 0, prefill_slot: None,
+                        work: 0, duration_ns: rate.duration_ns, rate, feedback: true, verification_budget: Some(shape.tokens) });
+                }
             }
         }
     }

@@ -68,4 +68,6 @@ def cached_package(configuration, model, plan, no_compile, publisher, shard_size
     key = hashlib.sha256((package_key(model, plan, no_compile) + publisher.fingerprint.hex()
                           + publisher.namespace + publisher.official_source + f":shard-size={shard_size}").encode()).hexdigest()
     with FileLock(root / f"{key}.lock"):
-        yield root / f"{key}.safetensors"
+        from ignition.preparation.package_snapshot import export_options
+        with export_options(root):
+            yield root / 'snapshots' / key / 'model.safetensors'

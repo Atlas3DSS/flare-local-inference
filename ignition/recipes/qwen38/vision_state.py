@@ -299,7 +299,7 @@ class PreparedVisionHandoff:
         features: VisionFeatureState,
         requests: DeviceRequestState,
         output: torch.Tensor,
-        completion_records,
+        completion,
         frame_index,
         submission_sequence,
         *,
@@ -345,7 +345,8 @@ class PreparedVisionHandoff:
             inputs.buffers().items(), shapes, strict=True
         ):
             _require(tensor, shape, dtype, device, name)
-        record_fields = _completion_fields(completion_records, device, requests.capacity)
+        records = completion.records
+        record_fields = _completion_fields(records, device, requests.capacity)
         for tensor, shape, dtype, name in (
             (frame_index, (1,), torch.int32, "frame index"),
             (submission_sequence, (1,), torch.int64, "submission sequence"),
@@ -444,7 +445,7 @@ class PreparedVisionHandoff:
                     r.generated_tokens,
                     r.status,
                     r.error_code,
-                    completion_records,
+                    records,
                     frame_index,
                     submission_sequence,
                     r.consumed_tokens.stride(0),

@@ -35,7 +35,7 @@ def usage(prepared):
 
 
 RECIPE = Recipe(
-    name="deepseek41", prepare=prepare, usage=usage,
+    name="deepseek41", served_model_name="DeepSeek-V4.1-Flash", prepare=prepare, usage=usage,
     mla_compute_modes=("auto", "bf16"),
     # Recommended sampling: https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017#minimal-inference.
     sampling_defaults=SamplingDefaults(temperature=1., top_p=1., top_k=-1),

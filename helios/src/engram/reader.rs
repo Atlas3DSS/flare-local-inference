@@ -33,6 +33,16 @@ pub(crate) struct Plane {
     pub row_bytes: usize,
 }
 
+impl Plane {
+    pub(crate) fn resident_bytes(self) -> Result<usize> {
+        ((self.offset % BLOCK as u64) as usize)
+            .checked_add(self.nbytes)
+            .and_then(|n| n.checked_add(BLOCK - 1))
+            .map(|n| (n / BLOCK * BLOCK).max(BLOCK))
+            .ok_or_else(|| "resident embedding allocation exceeds host range".into())
+    }
+}
+
 #[derive(Clone, Copy)]
 struct Fragment {
     file: usize,
@@ -150,16 +160,99 @@ fn seal_resident(file: &File) -> Result<()> {
 
 impl Resident {
     pub(super) fn load(file: &File, plane: Plane) -> Result<Self> {
+        Self::initialize(plane, |address, extent, required| {
+            let skip = (plane.offset % BLOCK as u64) as usize;
+            let offset = plane.offset - skip as u64;
+            std::thread::scope(|scope| -> Result<()> {
+                let mut workers = Vec::new();
+                for reader in 0..LOAD_READERS.min(extent.div_ceil(LOAD_CHUNK)) {
+                    workers.push(
+                        std::thread::Builder::new()
+                            .name(format!("flare-table-loader-{reader}"))
+                            .spawn_scoped(scope, move || -> Result<()> {
+                                for begin in (reader * LOAD_CHUNK..extent)
+                                    .step_by(LOAD_READERS * LOAD_CHUNK)
+                                {
+                                    let nbytes = LOAD_CHUNK.min(extent - begin);
+                                    let source = offset
+                                        .checked_add(begin as u64)
+                                        .ok_or("resident Engram file offset exceeds range")?;
+                                    // SAFETY: Each reader initializes a disjoint aligned allocation range.
+                                    let count = unsafe { crate::os::read_at_raw(file, (address + begin) as *mut u8, nbytes, source) }
+                                        .map_err(|e| format!("resident Engram read at {source}: {e}"))?;
+                                    let needed = nbytes.min(required - begin);
+                                    if count < needed {
+                                        return Err(format!(
+                                            "resident Engram read at {source} returned {count}, requires {needed} bytes"
+                                        ).into());
+                                    }
+                                }
+                                Ok(())
+                            })
+                            .map_err(|e| format!("start resident Engram loader: {e}"))?,
+                    );
+                }
+                for worker in workers {
+                    worker
+                        .join()
+                        .map_err(|_| "resident Engram loader panicked")??;
+                }
+                Ok(())
+            })
+        })
+    }
+
+    #[cfg(unix)]
+    pub(super) fn load_segments(plane: Plane, segments: &[(File, u64, usize)]) -> Result<Self> {
+        if plane.offset != 0 {
+            return Err("assembled embedding planes must start at offset zero".into());
+        }
+        Self::initialize(plane, |address, _, _| {
+            let mut destination = 0usize;
+            for (file, offset, nbytes) in segments {
+                let end = destination
+                    .checked_add(*nbytes)
+                    .filter(|end| *end <= plane.nbytes)
+                    .ok_or("embedding source segments exceed their plane")?;
+                let mut copied = 0;
+                while copied < *nbytes {
+                    let count = (*nbytes - copied).min(LOAD_CHUNK);
+                    // SAFETY: Source segments initialize consecutive, disjoint ranges
+                    // inside the resident allocation before it becomes immutable.
+                    let read = unsafe {
+                        crate::os::read_at_raw(
+                            file,
+                            (address + destination + copied) as *mut u8,
+                            count,
+                            offset + copied as u64,
+                        )
+                    }
+                    .map_err(|error| format!("read embedding source segment: {error}"))?;
+                    if read == 0 {
+                        return Err(
+                            "embedding source segment ended before its declared size".into()
+                        );
+                    }
+                    copied += read;
+                }
+                destination = end;
+            }
+            if destination != plane.nbytes {
+                return Err("embedding source segments do not fill their plane".into());
+            }
+            Ok(())
+        })
+    }
+
+    fn initialize(
+        plane: Plane,
+        fill: impl FnOnce(usize, usize, usize) -> Result<()>,
+    ) -> Result<Self> {
         let skip = (plane.offset % BLOCK as u64) as usize;
         let required = skip
             .checked_add(plane.nbytes)
             .ok_or("resident Engram plane exceeds host range")?;
-        let extent = required
-            .checked_add(BLOCK - 1)
-            .ok_or("resident Engram allocation exceeds host range")?
-            / BLOCK
-            * BLOCK;
-        let extent = extent.max(BLOCK);
+        let extent = plane.resident_bytes()?;
         #[cfg(unix)]
         let backing = {
             let descriptor = unsafe {
@@ -190,43 +283,7 @@ impl Resident {
         let storage = Aligned::new(extent)?;
         #[cfg(windows)]
         let address = storage.0;
-        let offset = plane.offset - skip as u64;
-        std::thread::scope(|scope| -> Result<()> {
-            let mut workers = Vec::new();
-            for reader in 0..LOAD_READERS.min(extent.div_ceil(LOAD_CHUNK)) {
-                workers.push(
-                    std::thread::Builder::new()
-                        .name(format!("flare-table-loader-{reader}"))
-                        .spawn_scoped(scope, move || -> Result<()> {
-                            for begin in (reader * LOAD_CHUNK..extent)
-                                .step_by(LOAD_READERS * LOAD_CHUNK)
-                            {
-                                let nbytes = LOAD_CHUNK.min(extent - begin);
-                                let source = offset
-                                    .checked_add(begin as u64)
-                                    .ok_or("resident Engram file offset exceeds range")?;
-                                // SAFETY: Each reader initializes a disjoint aligned allocation range.
-                                let count = unsafe { crate::os::read_at_raw(file, (address + begin) as *mut u8, nbytes, source) }
-                                    .map_err(|e| format!("resident Engram read at {source}: {e}"))?;
-                                let needed = nbytes.min(required - begin);
-                                if count < needed {
-                                    return Err(format!(
-                                        "resident Engram read at {source} returned {count}, requires {needed} bytes"
-                                    ).into());
-                                }
-                            }
-                            Ok(())
-                        })
-                        .map_err(|e| format!("start resident Engram loader: {e}"))?,
-                );
-            }
-            for worker in workers {
-                worker
-                    .join()
-                    .map_err(|_| "resident Engram loader panicked")??;
-            }
-            Ok(())
-        })?;
+        fill(address, extent, required)?;
         #[cfg(unix)]
         {
             drop(storage);
@@ -250,15 +307,7 @@ impl Resident {
             return Err("resident embedding table must have immutable size and contents".into());
         }
         let skip = (plane.offset % BLOCK as u64) as usize;
-        let required = skip
-            .checked_add(plane.nbytes)
-            .ok_or("resident embedding plane exceeds host range")?;
-        let extent = required
-            .checked_add(BLOCK - 1)
-            .ok_or("resident embedding plane exceeds host range")?
-            / BLOCK
-            * BLOCK;
-        let extent = extent.max(BLOCK);
+        let extent = plane.resident_bytes()?;
         if file
             .metadata()
             .map_err(|e| format!("inspect resident embedding table: {e}"))?
@@ -308,6 +357,7 @@ pub(crate) struct DiskReader {
     files: Vec<Arc<File>>,
     fragments: Vec<Fragment>,
     reads: Vec<Read>,
+    resident_scales: Option<Resident>,
     stats: Arc<Stats>,
 }
 
@@ -368,6 +418,7 @@ impl DiskReader {
             files: files.to_vec(),
             fragments: Vec::new(),
             reads: Vec::new(),
+            resident_scales: None,
             stats,
         })
     }
@@ -383,7 +434,14 @@ impl DiskReader {
         let begin = Instant::now();
         self.fragments.clear();
         let mut base = 0;
-        for plane in planes {
+        for (ordinal, plane) in planes.iter().enumerate() {
+            if ordinal == 1 {
+                if let Some(scales) = &self.resident_scales {
+                    gather_resident(scales, plane.row_bytes, ids, &mut output[base..]);
+                    base += ids.len() * plane.row_bytes;
+                    continue;
+                }
+            }
             for (row, id) in ids.iter().copied().enumerate() {
                 let destination = base + row * plane.row_bytes;
                 if id < 0 {
@@ -656,6 +714,19 @@ enum Data {
     Ram([Arc<Resident>; 2]),
     Cached(Box<CachedReader>),
 }
+
+fn gather_resident(data: &Resident, row_bytes: usize, ids: &[i64], output: &mut [u8]) {
+    let data = data.bytes();
+    for (row, &id) in ids.iter().enumerate() {
+        let target = &mut output[row * row_bytes..(row + 1) * row_bytes];
+        if id < 0 {
+            target.fill(0);
+        } else {
+            let start = id as usize * row_bytes;
+            target.copy_from_slice(&data[start..start + row_bytes]);
+        }
+    }
+}
 pub(crate) struct Reader {
     data: Data,
     stats: Arc<Stats>,
@@ -678,6 +749,7 @@ impl Reader {
             max_rows,
             stats,
             1,
+            false,
         )
     }
     pub fn from_files(
@@ -688,6 +760,7 @@ impl Reader {
         max_rows: usize,
         stats: Arc<Stats>,
         workers: usize,
+        resident_scales: bool,
     ) -> Result<Self> {
         if resident && cache_bytes != 0 {
             return Err("embedding row cache requires disk table storage".into());
@@ -701,7 +774,11 @@ impl Reader {
                 Arc::new(Resident::load(&files[planes[1].file], planes[1])?),
             ])
         } else {
-            let disk = DiskReader::from_files(files, stats.clone(), workers)?;
+            let mut disk = DiskReader::from_files(files, stats.clone(), workers)?;
+            if resident_scales {
+                disk.resident_scales = Some(Resident::load(&files[planes[1].file], planes[1])?);
+                stats.resident_scale_bytes.fetch_add(planes[1].resident_bytes()? as u64, Ordering::Relaxed);
+            }
             if cache_bytes != 0 {
                 Data::Cached(Box::new(CachedReader::new(
                     disk,
@@ -741,17 +818,7 @@ impl Reader {
             Data::Ram(data) => {
                 let mut base = 0;
                 for (plane, data) in planes.iter().zip(data) {
-                    let data = data.bytes();
-                    for (row, id) in ids.iter().copied().enumerate() {
-                        let target = &mut output
-                            [base + row * plane.row_bytes..base + (row + 1) * plane.row_bytes];
-                        if id < 0 {
-                            target.fill(0);
-                        } else {
-                            let start = id as usize * plane.row_bytes;
-                            target.copy_from_slice(&data[start..start + plane.row_bytes]);
-                        }
-                    }
+                    gather_resident(data, plane.row_bytes, ids, &mut output[base..]);
                     base += ids.len() * plane.row_bytes;
                 }
                 Ok(())
@@ -770,6 +837,66 @@ impl Reader {
 mod tests {
     use super::*;
     use std::fs::OpenOptions;
+
+    #[test]
+    fn resident_scales_preserve_bytes_and_cache_hits_without_reading_the_scale_file() {
+        for (weight_row_bytes, scale_row_bytes) in [(256, 8), (80, 10)] {
+            check_resident_scale_rows(weight_row_bytes, scale_row_bytes);
+        }
+    }
+
+    fn check_resident_scale_rows(weight_row_bytes: usize, scale_row_bytes: usize) {
+        let root = std::env::temp_dir().join(format!("helios-engram-scales-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let rows = 4097;
+        let planes = [
+            Plane { file: 0, offset: 4093, nbytes: rows * weight_row_bytes, row_bytes: weight_row_bytes },
+            Plane { file: 1, offset: 4093, nbytes: rows * scale_row_bytes, row_bytes: scale_row_bytes },
+        ];
+        let row_bytes = weight_row_bytes + scale_row_bytes;
+        let data: Vec<Vec<u8>> = planes.iter().map(|plane| {
+            (0..plane.offset as usize + plane.nbytes).map(|i| (i * 19 + i / 257) as u8).collect()
+        }).collect();
+        for cache in [0, 65536] {
+            let mut files = Vec::new();
+            for (i, bytes) in data.iter().enumerate() {
+                let path = root.join(i.to_string());
+                std::fs::write(&path, bytes).unwrap();
+                files.push(Arc::new(open_file(&path).unwrap()));
+            }
+            let stats = Arc::new(Stats::default());
+            let mut reader = Reader::from_files(&files, &planes, false, cache, 8, stats.clone(), 1, true).unwrap();
+            assert_eq!(stats.resident_scale_bytes.load(Ordering::Relaxed), planes[1].resident_bytes().unwrap() as u64);
+            OpenOptions::new().write(true).open(root.join("1")).unwrap().set_len(0).unwrap();
+            for ids in [vec![0, 4096, -1, 0], vec![4096, 0, -1, 0], vec![17, -1, 19]] {
+                let mut expected = Vec::new();
+                for (plane, bytes) in planes.iter().zip(&data) {
+                    for &id in &ids {
+                        if id < 0 {
+                            expected.extend(std::iter::repeat_n(0, plane.row_bytes));
+                        } else {
+                            let start = plane.offset as usize + id as usize * plane.row_bytes;
+                            expected.extend_from_slice(&bytes[start..start + plane.row_bytes]);
+                        }
+                    }
+                }
+                let mut output = vec![0xa5; expected.len()];
+                reader.gather(&planes, &ids, &mut output).unwrap();
+                assert_eq!(output, expected);
+            }
+            assert!(stats.disk_reads.load(Ordering::Relaxed) > 0);
+            if cache > 0 {
+                assert_eq!(stats.hits.load(Ordering::Relaxed), 2);
+                assert_eq!(stats.misses.load(Ordering::Relaxed), 4);
+                let reads = stats.disk_reads.load(Ordering::Relaxed);
+                reader.gather(&planes, &[17, 19], &mut vec![0; row_bytes * 2]).unwrap();
+                assert_eq!(stats.disk_reads.load(Ordering::Relaxed), reads);
+            }
+            assert!(reader.gather(&planes, &[rows as i64], &mut vec![0; row_bytes]).is_err());
+            assert!(reader.gather(&planes, &[-2], &mut vec![0; row_bytes]).is_err());
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[cfg(target_os = "linux")]
     fn unsealed_resident_file() -> File {
@@ -1192,7 +1319,7 @@ mod tests {
         }
         for (resident, cache) in [(false, 0), (false, 65536), (true, 0)] {
             let mut reader =
-                Reader::from_files(&files, &planes, resident, cache, 16, Arc::default(), 1).unwrap();
+                Reader::from_files(&files, &planes, resident, cache, 16, Arc::default(), 1, false).unwrap();
             for _ in 0..3 {
                 let mut output = vec![0xa5; 4 * 90];
                 reader

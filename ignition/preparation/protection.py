@@ -151,7 +151,8 @@ def resource_roles(index):
 
 
 def _read_at(contents, position, length, error):
-    block = os.pread(contents.fileno(), length, position)
+    from .package_snapshot import read_at
+    block = read_at(contents, length, position)
     if len(block) != length:
         raise ValueError(error)
     return block

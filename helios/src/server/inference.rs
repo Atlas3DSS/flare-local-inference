@@ -59,12 +59,12 @@ pub struct ToolGrammar {
     pub syntax: String,
     pub source: String,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Clone, Debug, PartialEq)]
 pub enum ToolChoice {
     Auto,
     None,
     Required,
+    Named(String),
 }
 impl Tool {
     pub fn native_name(&self) -> String {
@@ -79,19 +79,19 @@ pub struct Sampling {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seed: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub temperature: Option<f32>,
+    pub temperature: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub top_p: Option<f32>,
+    pub top_p: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub min_p: Option<f32>,
+    pub min_p: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub top_k: Option<i32>,
+    pub top_k: Option<serde_json::Number>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub repetition_penalty: Option<f32>,
+    pub repetition_penalty: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub presence_penalty: Option<f32>,
+    pub presence_penalty: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub frequency_penalty: Option<f32>,
+    pub frequency_penalty: Option<f64>,
 }
 #[derive(Clone, Debug, PartialEq)]
 pub enum Constraint {
@@ -106,9 +106,16 @@ pub enum Effort {
     Max,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LogprobOptions {
+    pub top: usize,
+    pub token_ids: bool,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Options {
     pub sampling: Sampling,
+    pub logprobs: Option<LogprobOptions>,
     pub effort: Option<Effort>,
     pub output_limit: Option<u64>,
     pub stops: Vec<String>,
@@ -141,6 +148,11 @@ impl Request {
         }
         if self.tool_choice == ToolChoice::Required && self.tools.is_empty() {
             return Err("required tool choice needs at least one tool".into());
+        }
+        if let ToolChoice::Named(name) = &self.tool_choice {
+            if !names.contains(name) {
+                return Err(format!("selected tool {name:?} is not declared in tools").into());
+            }
         }
         Ok(())
     }

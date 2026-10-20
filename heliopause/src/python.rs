@@ -221,6 +221,8 @@ struct ExecutionCompletion {
     #[pyo3(get)]
     records: Vec<Vec<i64>>,
     #[pyo3(get)]
+    logprobs: Option<Vec<Vec<Option<(u32, f32, Vec<(u32, f32)>)>>>>,
+    #[pyo3(get)]
     gpu_ns: [Option<u64>; 16],
     #[pyo3(get)]
     wall_ns: u64,
@@ -310,6 +312,9 @@ impl PreparedGraphExecutor {
                 completion.map(|completion| ExecutionCompletion {
                     fence: completion.fence.0,
                     graph_index: completion.graph_index,
+                    logprobs: completion.logprobs.map(|slots| slots.into_iter().map(|positions|
+                        positions.into_iter().map(|entry| entry.map(|entry|
+                            (entry.token, entry.logprob, entry.top[..entry.top_count].to_vec()))).collect()).collect()),
                     proposal_confidence: completion.proposal_confidence
                         .map(|rows| rows[..completion.records.len()].to_vec()),
                     gpu_ns: completion.timing.gpu_ns,

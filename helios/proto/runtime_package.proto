@@ -94,6 +94,10 @@ message ServingContract {
   string context_hint = 22;
   string capacity_hint = 23;
   uint64 speculative_token_capacity = 24;
+  // Bytes of weights one decode step reads for one request, as the recipe declares for the
+  // checkpoint; absent when the recipe declares none. Multiplied by steps per second it is the
+  // memory bandwidth the model consumes, which integrated GPUs do not measure.
+  optional uint64 decode_weight_bytes = 25;
 }
 message ModelContract {
   uint32 version = 1;
@@ -329,6 +333,25 @@ message DefaultSamplingParameters {
   optional float repetition_penalty = 6;
   optional float presence_penalty = 7;
   optional float frequency_penalty = 8;
+  // Absent parameter ranges fix those parameters at their declared defaults.
+  SamplingRanges ranges = 9;
+}
+message SamplingFloatRange {
+  optional float min = 1;
+  optional float max = 2;
+}
+message SamplingIntRange {
+  optional int32 min = 1;
+  optional int32 max = 2;
+}
+message SamplingRanges {
+  SamplingFloatRange temperature = 1;
+  SamplingIntRange top_k = 2;
+  SamplingFloatRange top_p = 3;
+  SamplingFloatRange min_p = 4;
+  SamplingFloatRange repetition_penalty = 5;
+  SamplingFloatRange presence_penalty = 6;
+  SamplingFloatRange frequency_penalty = 7;
 }
 message FrontendSettings {
   TokenizerSettings tokenizer = 1;

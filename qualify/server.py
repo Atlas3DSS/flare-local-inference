@@ -52,28 +52,44 @@ def template_input(request):
     return messages, options
 
 
-def system_prefix_ids(tokenizer, request, prompt_tokens):
-    """Render Qwen's instruction endpoint through the empty user header."""
+def rendered_prefix_ids(tokenizer, messages, options):
+    from jinja2 import TemplateError
+    from transformers.utils.chat_template_utils import _compile_jinja_template
+
+    template = _compile_jinja_template(tokenizer.get_chat_template())
+    options = {**options, "add_generation_prompt": False, "continue_final_message": False}
+    chunks = []
+    try:
+        for chunk in template.generate(messages=messages, **tokenizer.special_tokens_map, **options):
+            chunks.append(chunk)
+    except TemplateError:
+        pass
+    return tokenizer.encode("".join(chunks), add_special_tokens=False)
+
+
+def message_prefixes(tokenizer, request, prompt_tokens):
     messages, options = template_input(request)
-    leading = []
-    for message in messages:
-        if message.get("role") not in ("system", "developer"):
-            break
-        leading.append(message)
-    leading.append({"role": "user", "content": ""})
-    options.update(add_generation_prompt=False, continue_final_message=True)
-    text = tokenizer.apply_chat_template(leading, tokenize=False, **options)
-    ids = tokenizer.apply_chat_template(leading, tokenize=True, return_dict=False, **options)
-    if (not text.startswith("<|im_start|>system\n") or "<|im_end|>" not in text
-            or not 0 < len(ids) < len(prompt_tokens) or prompt_tokens[:len(ids)] != ids):
-        return []
-    return ids
+    prefixes = {}
+    for count in range(len(messages) + 1):
+        ids = rendered_prefix_ids(tokenizer, messages[:count], options)
+        if 0 < len(ids) < len(prompt_tokens) and prompt_tokens[:len(ids)] == ids:
+            prefixes[len(ids)] = ids
+    return [prefixes[length] for length in sorted(prefixes)]
 
 
-def prefill_launches(prompt_tokens, reused_tokens, chunk_size, system_tokens=0):
+def system_prefix_ids(tokenizer, request, prompt_tokens):
+    """Return the complete leading instruction endpoint for instruction-identity tests."""
+    messages, options = template_input(request)
+    count = next((i for i, message in enumerate(messages)
+        if message.get("role") not in ("system", "developer")), len(messages))
+    ids = rendered_prefix_ids(tokenizer, messages[:count], options)
+    return ids if 0 < len(ids) < len(prompt_tokens) and prompt_tokens[:len(ids)] == ids else []
+
+
+def prefill_launches(prompt_tokens, reused_tokens, chunk_size, message_boundaries=()):
     if not 0 <= reused_tokens <= prompt_tokens or chunk_size <= 0:
         raise ValueError("invalid exact checkpoint prefill geometry")
-    boundaries = ([system_tokens] if reused_tokens < system_tokens < prompt_tokens else []) + [prompt_tokens]
+    boundaries = sorted({n for n in message_boundaries if reused_tokens < n < prompt_tokens}) + [prompt_tokens]
     launches, position = 0, reused_tokens
     for boundary in boundaries:
         launches += (boundary - position + chunk_size - 1) // chunk_size
@@ -130,12 +146,12 @@ def kv_pressure_geometry(memory: dict, metrics: dict, context: int) -> dict:
     holders = pages // reservation
     if not 1 <= holders < totals["slots"]:
         raise ValueError("KV exhaustion cannot be isolated before the slot limit using context-sized reservations")
-    if totals["snapshots"] < 2 * (holders + 1):
+    if totals["snapshots"] < 3 * (holders + 1):
         raise ValueError("snapshot capacity cannot isolate KV exhaustion")
     return {"page_tokens": 64, "pages": pages, "context_tokens": context,
         "pages_per_request": reservation, "holding_requests": holders,
         "unreserved_pages": pages - holders * reservation, "max_active": totals["slots"],
-        "draft_pages_per_request": draft_pages, "snapshots_per_request": 2}
+        "draft_pages_per_request": draft_pages, "snapshots_per_request": 3}
 
 
 class StreamProgress:
@@ -493,8 +509,8 @@ def main() -> int:
     def check_cache(name, delta, request, ids, reused):
         if delta is None:
             return
-        system = len(system_prefix_ids(tokenizer, request, ids))
-        launches = prefill_launches(len(ids), reused, chunk_size, system)
+        boundaries = [len(prefix) for prefix in message_prefixes(tokenizer, request, ids)]
+        launches = prefill_launches(len(ids), reused, chunk_size, boundaries)
         run.check(name + ".exact_cache_admission", delta["flare_cache_hits_total"] == int(reused > 0)
             and delta["flare_cache_misses_total"] == int(reused == 0)
             and delta["flare_cache_reused_tokens_total"] == reused
@@ -638,10 +654,11 @@ def main() -> int:
             delta = metric_delta(before, after)
             check_cache("system-" + name, delta, request, ids, reusable)
             generated = response["body"]["usage"]["completion_tokens"]
+            messages = sum(len(prefix) > reusable for prefix in message_prefixes(tokenizer, request, ids))
             run.check("system-" + name + ".retained_endpoints",
-                delta["flare_system_checkpoints_total"] == int(not expected_reuse)
+                delta["flare_message_checkpoints_total"] == messages
                 and delta["flare_prompt_checkpoints_total"] == 1
-                and delta["flare_snapshot_publications_total"] == int(not expected_reuse) + 1 + int(generated > 1),
+                and delta["flare_snapshot_publications_total"] == messages + 1 + int(generated > 1),
                 system_token_ids=prefix, prompt_tokens=len(ids), generated_tokens=generated, delta=delta)
             run.reclaimed("system-" + name, before, after)
             seen.append(prefix)
@@ -760,6 +777,7 @@ def main() -> int:
             for index, request in enumerate(requests):
                 name = f"image-identity-{index}-{'repeat' if repeated else 'cold'}"
                 response = run.request(name, request)
+                messages = len(message_prefixes(tokenizer, request, prompt_ids(request)))
                 choice = run.complete(response, tokens)
                 after = run.metrics(name + "-after")
                 delta = metric_delta(last, after)
@@ -769,7 +787,7 @@ def main() -> int:
                     and delta['flare_graph_launches_total{kind="restore"}'] == int(repeated)
                     and delta['flare_graph_launches_total{kind="vision"}'] == 1
                     and delta["flare_prompt_checkpoints_total"] == int(not repeated)
-                    and delta["flare_snapshot_publications_total"] == (0 if repeated else 1 + int(response["body"]["usage"]["completion_tokens"] > 1)),
+                    and delta["flare_snapshot_publications_total"] == (0 if repeated else messages + 1 + int(response["body"]["usage"]["completion_tokens"] > 1)),
                     delta=delta, checkpoint_tokens=tokens)
                 if repeated:
                     run.check(name + ".greedy_cache_equivalence",
@@ -860,8 +878,8 @@ def main() -> int:
     def cache_pressure():
         before = run.metrics("pressure-before")
         capacity = resource_totals(before)["snapshots"]
-        if not 1 <= capacity <= 256:
-            raise ValueError(f"snapshot pressure sweep requires 1..256 slots; server exposes {capacity}")
+        if not 2 <= capacity <= 256:
+            raise ValueError(f"snapshot pressure sweep requires 2..256 slots; server exposes {capacity}")
         if resource_totals(before)["pages"] < 2 * capacity + 1:
             raise ValueError("KV capacity cannot isolate snapshot pressure with 128-token prefixes")
         nonce = hashlib.sha256(run.results["started_at"].encode()).hexdigest()[:12]
@@ -878,13 +896,13 @@ def main() -> int:
             after = run.metrics(f"pressure-fill-{index}-after")
             delta = metric_delta(last, after)
             run.check(f"pressure-fill-{index}.unique_publication", delta["flare_cache_misses_total"] == 1
-                and delta["flare_cache_hits_total"] == 0 and delta["flare_snapshot_publications_total"] == 1
-                and delta['flare_graph_launches_total{kind="snapshot"}'] == 1, delta=delta)
+                and delta["flare_cache_hits_total"] == 0 and delta["flare_snapshot_publications_total"] == 2
+                and delta['flare_graph_launches_total{kind="snapshot"}'] == 2, delta=delta)
             last = after
         delta = metric_delta(before, last)
         run.check("snapshot_capacity_is_exercised", last["flare_cached_checkpoints"] == capacity
             and last["flare_free_snapshots"] == 0 and delta["flare_snapshot_evictions_total"] > 0
-            and delta["flare_snapshot_publications_total"] == capacity + 1,
+            and delta["flare_snapshot_publications_total"] == 2 * (capacity + 1),
             capacity=capacity, published_prefixes=len(inputs), delta=delta)
         run.reclaimed("pressure-fill", before, last)
         request, ids = inputs[0]
@@ -894,7 +912,7 @@ def main() -> int:
         run.check("oldest_prefix_was_evicted", delta["flare_cache_misses_total"] == 1
             and delta["flare_cache_hits_total"] == 0 and delta['flare_graph_launches_total{kind="init"}'] == 1
             and delta['flare_graph_launches_total{kind="restore"}'] == 0
-            and delta["flare_snapshot_evictions_total"] == delta["flare_snapshot_publications_total"] == 1, delta=delta)
+            and delta["flare_snapshot_evictions_total"] == delta["flare_snapshot_publications_total"] == 2, delta=delta)
         run.check("evicted_prefix_cold_replay_equivalence", comparable_message(first["message"]) == comparable_message(repeated["message"])
             and first["finish_reason"] == repeated["finish_reason"], expected=first, observed=repeated)
         delta = metric_delta(before, after)
@@ -940,20 +958,24 @@ def main() -> int:
             delta = metric_delta(last, after)
             check_cache(f"conversation-turn-{turn}", delta, request, ids, 0)
             run.check(f"conversation-turn-{turn}.exact_prompt_publication",
-                delta["flare_snapshot_publications_total"] == 1
-                and delta['flare_graph_launches_total{kind="snapshot"}'] == 1
-                and delta["flare_system_checkpoints_total"] == delta["flare_prompt_checkpoints_total"] == 0,
+                delta["flare_snapshot_publications_total"] == 2
+                and delta['flare_graph_launches_total{kind="snapshot"}'] == 2
+                and delta["flare_message_checkpoints_total"] == 1
+                and delta["flare_prompt_checkpoints_total"] == 0,
                 prompt_tokens=len(ids), terminal_checkpoint_tokens=len(ids), delta=delta)
             run.reclaimed(f"conversation-turn-{turn}", before, after)
-            retained_lengths.append(len(ids))
+            retained_lengths.extend([len(prefix) for prefix in message_prefixes(tokenizer, request, ids)] + [len(ids)])
             last = after
         delta = metric_delta(before, last)
-        retained_pages = sum(length // 64 for length in retained_lengths[-capacity:])
+        pairs = capacity // 2
+        retained_pages = sum(length // 64 for length in retained_lengths[-2 * pairs + 1::2])
+        if capacity % 2:
+            retained_pages += retained_lengths[-2 * (pairs + 1)] // 64
         run.check("conversation_exceeds_snapshot_capacity",
             delta["flare_requests_admitted_total"] == turns
             and delta["flare_requests_completed_total"] == turns
             and delta["flare_requests_failed_total"] == delta["flare_requests_cancelled_total"] == 0
-            and delta["flare_snapshot_evictions_total"] >= turns - capacity
+            and delta["flare_snapshot_evictions_total"] >= 2 * turns - capacity
             and last["flare_cached_checkpoints"] == capacity
             and last["flare_cached_kv_pages"] == retained_pages,
             turns=turns, snapshot_capacity=capacity, independent_checkpoint_pages=retained_pages, delta=delta)
@@ -1046,10 +1068,10 @@ def main() -> int:
                     and rejected_state["flare_retiring_request_slots"] == rejected_state["flare_pending_requests"] == 0
                     and rejected_state["flare_free_kv_pages"] == geometry["unreserved_pages"]
                     and rejected_state["flare_cached_kv_pages"] == 0
-                    and rejected_state["flare_cached_checkpoints"] == count
-                    and rejected_state["flare_free_snapshots"] == resource_totals(before)["snapshots"] - 2 * count
+                    and rejected_state["flare_cached_checkpoints"] == 2 * count
+                    and rejected_state["flare_free_snapshots"] == resource_totals(before)["snapshots"] - 3 * count
                     and delta["flare_prompt_checkpoints_total"] == count
-                    and delta["flare_system_checkpoints_total"] == 0
+                    and delta["flare_message_checkpoints_total"] == count
                     and delta["flare_requests_admitted_total"] == count and delta["flare_requests_failed_total"] == 2
                     and delta["flare_requests_completed_total"] == delta["flare_requests_cancelled_total"] == 0
                     and delta["flare_cache_hits_total"] == delta["flare_cache_reused_tokens_total"] == 0,
@@ -1075,8 +1097,8 @@ def main() -> int:
         run.check("kv.all_holders_retired_after_cancellation", delta["flare_requests_admitted_total"] == count
             and delta["flare_requests_cancelled_total"] == count and delta["flare_requests_failed_total"] == 2
             and delta["flare_requests_completed_total"] == 0
-            and delta["flare_snapshot_publications_total"] == delta["flare_prompt_checkpoints_total"] == count
-            and delta["flare_system_checkpoints_total"] == 0, delta=delta)
+            and delta["flare_snapshot_publications_total"] == 2 * count
+            and delta["flare_prompt_checkpoints_total"] == delta["flare_message_checkpoints_total"] == count, delta=delta)
         answer = run.complete(run.request("kv-followup", capital), len(prompt_ids(capital)))
         run.check("kv.healthy_followup_answer", "paris" in answer["message"].get("content", "").casefold(), choice=answer)
         final = run.metrics("kv-followup-after")

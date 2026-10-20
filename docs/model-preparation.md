@@ -3,15 +3,31 @@
 ## Runtime packages
 
 Run commands from the repository root. Ignition prepares a source checkpoint
-into a **runtime package**: a primary `.safetensors` file with two `U8` tensors,
-plus sibling data files when the package exceeds the 64 GiB soft target.
-`flare.payload` holds primary resources; `flare.metadata` holds the bounded
-Protobuf index at the end. `--shard-size SIZE` overrides `[publishing] shard_size`;
-`0` keeps the package monolithic. Companions use the primary basename, such as
-`example-data-01-of-02.safetensors`, and hold whole allocation payloads or
-embedding planes. Encrypted and individually authenticated resources stay primary.
-The protobuf describes independently addressed resources. Tensor-parallel
-packages contain one resource bundle per rank.
+into a **runtime package**: a metadata-only primary `.safetensors` file and
+immutable sibling payload blobs named by their SHA-256 hashes. The primary's
+`flare.metadata` contains the signed Protobuf envelope; `flare.layout` maps its
+logical resources to the blobs. `flare.payload` is empty. Weights, embedding
+tables, graphs, kernels, and frontend assets all reside in payload blobs.
+Adjacent weight resources owned by one rank share shards up to the file-size
+limit. Graphs, kernels, and supporting resources use separate shards so changing
+them does not rewrite unchanged weight shards. Rank ownership and logical file
+boundaries remain separate for selective distribution. Export, conversion, and
+signing use the same grouping rule.
+
+The published payload-file limit is 64 GB (64,000,000,000 bytes), including the
+header. The reader also accepts existing payloads up to 64 GiB. `--shard-size SIZE`
+overrides `[publishing] shard_size` with a smaller positive limit. Resources
+remain contiguous; export rejects a resource that exceeds the limit. Existing
+monolithic and numbered-shard packages remain loadable.
+
+Exports hardlink unchanged blobs from `paths.package_cache`. `ignition export
+--no-weights` requires exact cached stored-data payloads and creates only missing
+execution-resource blobs and metadata. Preparation and weight reads still occur.
+Recipes can declare `export_repository`; without `--output`, exports use a unique
+snapshot directory under that repository's local cache namespace. See
+[package snapshots](cli-design.md#package-snapshots) for conversion and upload.
+
+Tensor-parallel packages contain one resource bundle per rank.
 Final packages use a format-4 signed envelope and encrypted cubins and graph
 records. Ignition creates a per-user development signing key when `[publishing]`
 is absent. `ignition run` passes the exact export key and publisher to Flare for
@@ -76,18 +92,22 @@ GLM TP4 have been exercised end to end; Qwen TP4 still requires model validation
 
 ## Preparation resources
 
-`--compile-workers N` sets the CPU compiler process budget per host. Memory
-limits can reduce it; local preparation ranks share the budget. Set
-`[preparation] compile_workers = N` for a persistent default. Omitting the
-setting retains automatic sizing, including shared-memory limits on DGX Spark.
+`--compile-workers N` sets a positive CPU compiler process budget per host for
+b12x kernel compilation and complete-forward compilation. Available RAM and
+device memory can reduce it; local preparation ranks share the budget. Set
+`[preparation] compile_workers = N` for a persistent default; the CLI flag
+overrides that setting. Omitting both retains automatic sizing, including
+shared-memory limits on DGX Spark.
 
 `--tuning-gpus LIST` adds local GPU replicas for benchmarking b12x candidates.
 The list begins with `--gpus` and continues in complete TP groups: for example,
 `--gpus 0 --tuning-gpus 0-3 --compile-workers 24` prepares a TP1 package with
-four tuning GPUs. Each replica needs memory for its model and preparation
-storage. Helpers release their resources after tuning; serving ranks then
-compile and capture their forwards. Kernel compilation runs in CPU workers,
-independently of the number of tuning GPUs.
+four tuning GPUs. Corresponding GPUs in each replica must match in model and
+architecture and have enough free memory for the model and preparation storage.
+Helpers exit and release their resources after tuning; serving TP size and capture
+devices stay fixed. Serving ranks then compile and capture their forwards.
+Both GPU lists use `CUDA_VISIBLE_DEVICES` ordinals. Kernel compilation runs in
+CPU workers, independently of the number of tuning GPUs.
 
 Multi-host `--ranks` preparation retains its existing sharding and transport;
 `--tuning-gpus` is local-only and cannot be combined with it. An explicit
@@ -219,8 +239,10 @@ with separate proposal and verification graphs, using native conditional
 confidence and measured execution cost for adaptive verification. Image preprocessing
 preserves the checkpoint's row-major patch layout and 1024-token image limit.
 Its 188.8 GiB of Engram tables are stored once in the package, partitioned by
-hash head across TP ranks. Each TP4 rank owns six of the 24 heads and their
-projection input columns. Each rank reads its table rows, computes a partial
+hash head across TP ranks. Heads are assigned round-robin, so each TP4 rank
+owns two bigram, two trigram, and two four-gram heads, with their projection
+input columns. Table rows and projection scales retain checkpoint precision.
+Each rank reads its table rows, computes a partial
 projection, and reduces the result before residual mixing. Multi-host package
 distribution transfers only the table partitions owned by the receiving rank.
 Disk storage reads rows on demand through bounded direct-I/O staging;
@@ -229,6 +251,10 @@ ordinary resident memory. Both modes copy compact rows into each rank's prepared
 buffers and signal captured consumer events. Preparation appends the immutable
 checkpoint slices without materializing the tables. Packages containing shared
 table planes retain their prepared replicated computation and shared row delivery.
+For disk storage, `--embedding-table-resident-scales` retains the original scale
+bytes in RAM and removes scale reads on row-cache misses. DeepSeek V4.1 Flash
+TP4 uses about 1.4 GiB per rank for these scales, in addition to any row-cache
+budget. The loader reserves this memory before sizing KV storage.
 Select four available GPUs explicitly:
 
 ```sh
@@ -272,7 +298,7 @@ native speculative contract; Helios contains no DSpark model implementation.
 DeepSeek V4 Flash uses `local-inference-lab/DeepSeek-V4-Flash-Vision-Exp-lossless-CSF`, including its
 vision encoder and checkpoint-integrated DSpark model. The `deepseek-v4-flash`
 alias prepares five draft tokens by default, with adaptive verification. It
-accepts images within its visual-token budget and has no offloaded embedding tables.
+accepts images within its image-token budget and has no offloaded embedding tables.
 Exports use the native DeepSeek V4 prompt encoder, carry only the tokenizer asset,
 and bind the atomic `<｜deepseek_image｜>` placeholder as token 129264.
 Both native DeepSeek encoders default to thinking enabled and high effort, accept
@@ -575,7 +601,10 @@ check. GPU weights, KV, registered host buffers, resident embedding tables,
 compiler workers, and the OS compete for that memory. Set `[memory] reserve`
 for host activity as well as driver headroom; `reserve = "4G"` leaves four GiB
 outside the model's cache budget. RAM embedding tables load before cache
-sizing. Disk embedding tables use bounded staging without a resident table.
+sizing. Disk embedding tables use bounded staging and can retain their scale
+planes in RAM with `--embedding-table-resident-scales`. The loader accounts for
+resident scales and the optional row cache before sizing KV, for both PLE and
+Engram packages.
 
 Spark's NVML interface does not report VRAM capacity. Ignition identifies an
 integrated device through CUDA and uses Linux `MemAvailable`, capped by CUDA's

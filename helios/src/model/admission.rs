@@ -138,9 +138,9 @@ pub fn validate_prompt(config: &ModelConfig, prompt: &crate::server::Prompt) -> 
         ));
     }
     if prompt.tokens.is_empty()
-        || prompt
-            .system_boundary
-            .is_some_and(|boundary| boundary == 0 || boundary >= prompt.tokens.len())
+        || prompt.message_boundaries.first() == Some(&0)
+        || prompt.message_boundaries.last().is_some_and(|boundary| *boundary >= prompt.tokens.len())
+        || prompt.message_boundaries.windows(2).any(|pair| pair[0] >= pair[1])
         || prompt
             .tokens
             .iter()

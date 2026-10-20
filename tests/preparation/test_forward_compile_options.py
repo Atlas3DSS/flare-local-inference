@@ -169,3 +169,45 @@ def test_prepare_many_passes_snapshot_and_preserves_warmup_scope(caches, monkeyp
     cache.prepare_many({'example': object()}, {'example': ('prefill', 1, 1)}, warmup=warmup)
     assert policies == [dict(cache.options)]
     assert executed == ['enter', 'execute', 'exit']
+
+
+def test_prepare_many_recompiles_a_materialized_forward_that_no_longer_binds(caches, monkeypatch, tmp_path):
+    cache = caches(options=dict(aot._OPTIONS, max_autotune=False))
+    executed, compiled = [], []
+    class Pool:
+        workers = 1
+        def __init__(self, device, *, options, **kwargs):
+            pass
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+        def submit(self, owner, path):
+            result = Future()
+            result.set_result(None)
+            return result
+    class Stale:
+        def __call__(self, owner):
+            raise aot.BindingMismatch('another catalog layout')
+    class Artifact:
+        def __call__(self, owner):
+            executed.append('execute')
+        def save_compiled_function(self, path):
+            Path(path).write_bytes(b'recompiled')
+    def compile(owner, *, options):
+        compiled.append(dict(options))
+        return Artifact()
+    paths = {}
+    def load(cache, owner, path, **kwargs):
+        paths['example'] = path
+        return aot.BoundForward(Stale(), owner, True)
+    monkeypatch.setattr(compile_pool, 'CompilePool', Pool)
+    monkeypatch.setattr(aot, '_guard_code_cache', lambda path: nullcontext())
+    monkeypatch.setattr(aot.ForwardCache, '_load', load)
+    monkeypatch.setattr(aot, 'aot_forward', compile)
+    monkeypatch.setattr(aot.ForwardCache, '_path', lambda cache, owner, *, name, signature: tmp_path / f'{name}.bin')
+    result = cache.prepare_many({'example': object()}, {'example': ('prefill', 1, 1)}, materialize=lambda: None)
+    assert compiled == [dict(cache.options)]
+    assert executed == ['execute']
+    assert result['example'].cache_hit is False
+    assert (tmp_path / 'example.bin').read_bytes() == b'recompiled'

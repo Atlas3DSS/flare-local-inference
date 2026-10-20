@@ -122,7 +122,9 @@ fn prepare(
     let mut conditioning = Vec::new();
     let mut image_index = 0;
     let mut feature_offset = 0;
-    for token in &rendered.token_ids {
+    let mut token_expansions = Vec::new();
+    for (source_index, token) in rendered.token_ids.iter().enumerate() {
+        let before = tokens.len();
         if *token != placeholder {
             tokens.push(*token);
             data.vision_token_indices.push(-1);
@@ -153,9 +155,11 @@ fn prepare(
         });
         feature_offset += geometry.tokens;
         image_index += 1;
+        token_expansions.push((source_index, tokens.len() - before - 1));
     }
     Ok(PreparedInput {
         tokens,
+        token_expansions,
         data,
         conditioning,
         images: processed,

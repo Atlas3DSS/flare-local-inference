@@ -3,7 +3,7 @@
 from types import MappingProxyType
 
 from ignition.preparation.qwen38 import ARCHITECTURE, MODEL_ID, REVISION
-from ignition.recipes.declaration import Checkpoint, RankCosts, RankUsage, Recipe, SamplingDefaults, Speculation
+from ignition.recipes.declaration import Checkpoint, RankCosts, RankUsage, Recipe, SamplingDefaults, SamplingRange, Speculation
 
 # Twelve target sparse-attention layers each store one page; learned drafts add the draft layer's.
 _TARGET_PAGE_LAYERS = 12
@@ -56,9 +56,12 @@ def usage(prepared):
 
 
 RECIPE = Recipe(
-    name="qwen38", prepare=prepare, usage=usage,
-    # Default thinking mode: https://huggingface.co/Qwen/Qwen3.8-Flash-Next#best-practices.
-    sampling_defaults=SamplingDefaults(temperature=1., top_p=.95, top_k=20),
+    name="qwen38", served_model_name="Qwen3.8-Flash-Next", prepare=prepare, usage=usage,
+    export_repository="local-inference-lab/Qwen3.8-Flash-Next-FLARE",
+    # Thinking defaults; bounds span thinking/instruct presets: https://huggingface.co/Qwen/Qwen3.8-Flash-Next#best-practices.
+    sampling_defaults=SamplingDefaults(temperature=1., top_p=.95, top_k=20,
+        ranges={"temperature": SamplingRange(.7, 1.), "top_p": SamplingRange(.8, .95),
+                "presence_penalty": SamplingRange(0., 2.)}),
     checkpoints=(Checkpoint(
         alias="qwen3.8-flash", repository=MODEL_ID, revision=REVISION, architecture=ARCHITECTURE,
         stored_bytes=102_329_644_144,

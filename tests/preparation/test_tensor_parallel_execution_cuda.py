@@ -7,6 +7,8 @@ from datetime import timedelta
 
 import pytest
 import torch
+
+from tests.components.completion_support import completion_outputs
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
@@ -72,7 +74,7 @@ def _rank(rank, world, rendezvous, sockets, fields, compilation):
         records = torch.zeros((2, 4, fields), dtype=torch.int64, device=device)
         frame = torch.zeros(1, dtype=torch.int32, device=device)
         sequence = torch.zeros(1, dtype=torch.int64, device=device)
-        init = PreparedAdmission(requests, admission, records, frame, sequence, capacity=1)
+        init = PreparedAdmission(requests, admission, completion_outputs(records), frame, sequence, capacity=1)
         init.prepare()
         operations, owners = {"init": init}, [init]
         signatures = {"init": GraphSignature("init", 1, 1, tuple(admission.__dataclass_fields__))}
@@ -85,7 +87,7 @@ def _rank(rank, world, rendezvous, sockets, fields, compilation):
                 agreement = PreparedAllReduce(batch.validation_input, batch.validation_sum,
                     runtime=runtime, coordinator=coordinator, session=session, name=f"{mode}.validation")
                 arguments = (requests, inputs.row_slot_ids[:1], inputs.row_generations[:1],
-                             inputs.live_rows, records, frame, sequence)
+                             inputs.live_rows, completion_outputs(records), frame, sequence)
                 if rank == 0:
                     logits = torch.full((1, requests.vocab_size), -torch.inf, device=device, dtype=torch.bfloat16)
                     logits[0, 11:14] = 0

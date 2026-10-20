@@ -98,37 +98,6 @@ def test_finds_the_interface_holding_an_address():
         host_ranks.interface_of("203.0.113.7")
 
 
-def test_peer_rank_file_streams_over_its_control_connection_into_the_package(tmp_path):
-    import socket
-    import threading
-
-    from ignition.preparation import runtime_package_pb2 as proto
-    from ignition.preparation.host_ranks import _Received
-    from ignition.preparation.package_file import extend_cluster, publish, read_index
-
-    files = []
-    for rank, data in enumerate((b"rank-zero" * 300, b"rank-one" * 700)):
-        source = tmp_path / f"source-{rank}"
-        source.write_bytes(data)
-        description = proto.ModelIndex(version=4, ranks=[proto.BundleIndex()])
-        description.ranks[0].resources["storage.bin"].CopyFrom(proto.Span(offset=0, nbytes=len(data)))
-        files.append(tmp_path / f"rank-{rank}.safetensors")
-        publish(files[-1], description, [(0, source, 0, len(data))])
-    receiver, sender = socket.socketpair()
-    size = files[1].stat().st_size
-    thread = threading.Thread(target=lambda: sender.sendfile(files[1].open("rb")))
-    thread.start()
-    stream = _Received(receiver, size)
-    extend_cluster(files[0], [stream], (2, "export-b"))
-    thread.join()
-    assert stream.remaining == 0 and stream.read(8) == b""
-    index, start = read_index(files[0])
-    span = index.ranks[1].resources["storage.bin"]
-    with files[0].open("rb") as package:
-        package.seek(start + span.offset)
-        assert package.read(span.nbytes) == b"rank-one" * 700
-
-
 def test_multi_host_preparation_requires_a_hub_checkpoint(tmp_path):
     from types import SimpleNamespace
 
@@ -147,3 +116,119 @@ def test_local_checkpoint_source_must_match_its_declared_directory(tmp_path):
     with pytest.raises(ValueError, match="declared source"):
         owner.prepare(tmp_path / "source", None, None,
                       checkpoint=SimpleNamespace(repository=str(tmp_path / "other"), revision="path-id"))
+
+
+def test_export_manifest_transfers_only_absent_files(tmp_path, monkeypatch):
+    import socket
+    from pathlib import Path
+    from ignition.preparation.package_file import write_sources, read_sources
+    from ignition.preparation.package_snapshot import BlobStore, ExportOptions
+    from ignition.preparation.runtime_package_pb2 import ModelIndex, BundleIndex, Span
+
+    peer = BlobStore(tmp_path / 'peer-cache')
+    name = peer.put(8, lambda: [b'weights!'])
+    weights = peer.root / name
+    code = tmp_path / 'code.bin'
+    code.write_bytes(b'kernel')
+    index = ModelIndex(version=4, ranks=[BundleIndex(resources={
+        'weights': Span(offset=0, nbytes=8), 'kernel': Span(offset=4096, nbytes=6)})])
+    manifest = tmp_path / 'rank.json'
+    write_sources(manifest, index, [(0, weights, 4096, 8), (4096, code, 0, 6)])
+    settings = ExportOptions(tmp_path / 'coordinator')
+    requests = []
+    send = host_ranks.send_object
+
+    def observe(sock, message):
+        if isinstance(message, list):
+            requests.append(message)
+        send(sock, message)
+
+    monkeypatch.setattr(host_ranks, 'send_object', observe)
+    for iteration in range(2):
+        directory = tmp_path / f'received-{iteration}'
+        directory.mkdir()
+        failures = []
+        receiver, sender = socket.socketpair()
+        receiver.settimeout(5)
+        sender.settimeout(5)
+        def transmit():
+            try:
+                host_ranks.send_export_sources(sender, manifest, {})
+            except Exception as error:
+                failures.append(error)
+        thread = threading.Thread(target=transmit)
+        thread.start()
+        try:
+            description = host_ranks.receive_object(receiver)['sources']
+            host_ranks.receive_export_sources(receiver, description, directory / 'rank.json',
+                ExportOptions(settings.cache, no_weights=iteration == 1))
+            _, locate = read_sources(directory / 'rank.json')
+            location, offset, count = locate(index.ranks[0].resources['weights'])[0]
+            assert Path(location).read_bytes()[offset:offset + count] == b'weights!'
+        finally:
+            thread.join(5)
+            receiver.close()
+            sender.close()
+        assert not failures and not thread.is_alive()
+    assert requests[0] == [str(weights), str(code)]
+    assert requests[1] == [str(code)]
+
+
+def test_cluster_export_combines_received_manifests_into_signed_snapshot(tmp_path, monkeypatch):
+    import socket
+    from types import SimpleNamespace
+    from helios.tests.signing import publisher
+    from ignition.preparation import runtime_package, memory_inventory
+    from ignition.preparation.package_file import write_sources, read_index, PackageFiles
+    from ignition.preparation.package_snapshot import BlobStore, read_at
+    from ignition.preparation.runtime_package_pb2 import ModelIndex, BundleIndex, Span
+
+    def sources(rank, path):
+        store = BlobStore(tmp_path / f'cache-{rank}')
+        contents = f'weights-{rank}'.encode()
+        blob = store.put(len(contents), lambda: [contents])
+        code = path.parent / f'code-{rank}.bin'
+        code.write_bytes(b'kernel')
+        bundle = BundleIndex(resources={'weights': Span(nbytes=len(contents)), 'kernel': Span(offset=4096, nbytes=6)})
+        bundle.allocations.add(name='weights', file='weights')
+        bundle.modules.add(name='kernel', file='kernel')
+        bundle.roce.world, bundle.roce.rank = 2, rank
+        write_sources(path, ModelIndex(version=4, ranks=[bundle]),
+                      [(0, store.root / blob, 4096, len(contents)), (4096, code, 0, 6)])
+        return SimpleNamespace(memory_inventory={})
+
+    monkeypatch.setattr(runtime_package, 'export_model', lambda model, images, storage, path, **kwargs: sources(0, path))
+    monkeypatch.setattr(memory_inventory, 'print_inventory', lambda *args, **kwargs: None)
+    peer_path = tmp_path / 'peer.json'
+    sources(1, peer_path)
+    receiver, sender = socket.socketpair()
+    receiver.settimeout(5)
+    sender.settimeout(5)
+    errors = []
+    def peer():
+        try:
+            assert host_ranks.receive_object(sender) == ('export', {})
+            host_ranks.send_export_sources(sender, peer_path, {})
+        except Exception as error:
+            errors.append(error)
+    thread = threading.Thread(target=peer)
+    thread.start()
+    group = host_ranks.HostRankGroup.__new__(host_ranks.HostRankGroup)
+    group._started = group._closed = False
+    group.model = None
+    group.rendezvous = SimpleNamespace(world=2, peers={1: SimpleNamespace(control=receiver)})
+    output = tmp_path / 'model.safetensors'
+    try:
+        group.export(output, options={}, export_id='snapshot-cluster', images=None, storage=None, publisher=publisher())
+    finally:
+        thread.join(5)
+        receiver.close()
+        sender.close()
+    assert not errors and not thread.is_alive()
+    index, start = read_index(output)
+    assert index.cluster.world == 2 and index.cluster.export_id == 'snapshot-cluster'
+    with output.open('rb') as primary, PackageFiles(output, primary, start, 0) as files:
+        for rank in range(2):
+            span = index.ranks[rank].resources['weights']
+            source, base, _ = files.get(span.filename)
+            assert read_at(source, span.nbytes, base + span.offset) == f'weights-{rank}'.encode()

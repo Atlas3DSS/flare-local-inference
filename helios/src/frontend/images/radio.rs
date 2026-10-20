@@ -1,4 +1,4 @@
-use super::{ImageGeometry, ImageLimits, ProcessedImages, RgbImage, check_input_extent, resize};
+use super::{ImageGeometry, ImageLimits, ProcessedImages, RgbImage, check_image_patches, check_input_extent, resize};
 use crate::Result;
 
 const MIN_PATCHES: usize = 1024;
@@ -36,7 +36,8 @@ pub(super) fn geometry(limits: ImageLimits, width: usize, height: usize) -> Resu
         };
     }
     let patches = h * w;
-    if patches > limits.max_patches_per_image || patches > MAX_PATCHES {
+    check_image_patches(limits, patches)?;
+    if patches > MAX_PATCHES {
         return Err("image exceeds prepared RADIO patch capacity".into());
     }
     Ok(ImageGeometry {
@@ -65,11 +66,12 @@ pub(super) fn process(limits: ImageLimits, images: &[RgbImage]) -> Result<Proces
         interpolation_weights: vec![],
         cu_seqlens: vec![0],
     };
-    let mut total = 0;
-    for image in images {
-        let geometry = geometry(limits, image.width, image.height)?;
-        total += geometry.patches;
-        limits.check_batch(images.len(), total)?;
+    let geometries: Vec<_> = images
+        .iter()
+        .map(|image| geometry(limits, image.width, image.height))
+        .collect::<Result<_>>()?;
+    limits.check_batch(images.len(), geometries.iter().map(|g| g.patches).sum())?;
+    for (image, geometry) in images.iter().zip(geometries) {
         let pixels = resize::float_bicubic(image, geometry.width, geometry.height);
         let (h, w) = (geometry.height / 16, geometry.width / 16);
         // RADIO interpolates to a square and crops its top-left rectangle.
@@ -103,7 +105,7 @@ pub(super) fn process(limits: ImageLimits, images: &[RgbImage]) -> Result<Proces
             }
         }
         result.geometry.push(geometry);
-        result.cu_seqlens.push(total as i32);
+        result.cu_seqlens.push(result.position_ids.len() as i32);
     }
     Ok(result)
 }

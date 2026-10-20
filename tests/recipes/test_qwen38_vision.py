@@ -9,6 +9,8 @@ from pathlib import Path
 import pytest
 import torch
 
+from tests.components.completion_support import completion_outputs
+
 from ignition.preparation import inspect_qwen38_checkpoint
 from ignition.preparation.graphs import PreparedGraphBundle
 from ignition.preparation.scratch import GraphBufferPool
@@ -197,7 +199,7 @@ def test_vision_generation_compiles_in_worker_and_replays_after_poisoning(manife
     records = torch.zeros((2, 1, 8), dtype=torch.int64, device=device)
     frame = torch.zeros(1, dtype=torch.int32, device=device)
     sequence = torch.ones(1, dtype=torch.int64, device=device)
-    handoff = PreparedVisionHandoff(inputs, features, requests, scratch.output, records, frame, sequence,
+    handoff = PreparedVisionHandoff(inputs, features, requests, scratch.output, completion_outputs(records), frame, sequence,
                                    pixels=scratch.patches, buffers=cursor)
     handoff.prepare()
     with PreparationSession(device=device, autotune=False, compile_workers=0) as session:

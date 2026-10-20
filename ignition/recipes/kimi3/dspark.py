@@ -338,7 +338,7 @@ class SpeculativePreparation:
     so each request keeps one committed recurrent row.
     """
 
-    def __init__(self, weights, pool, requests, inputs, scratch, *, records, frame, sequence, session, workspace,
+    def __init__(self, weights, pool, requests, inputs, scratch, *, completion, frame, sequence, session, workspace,
                  collectives, decoder_buffers, draft_tokens, context_runtime, page_tokens, draft_argmax=None):
         from ignition.components.kda_speculation import KDARecords
         from .decoder import PreparedDecoder
@@ -346,7 +346,7 @@ class SpeculativePreparation:
         self.page_tokens = page_tokens
         self.weights, self.tables, self.pool = weights, None, pool
         self.requests, self.inputs, self.scratch = requests, inputs, scratch
-        self.records, self.frame, self.sequence = records, frame, sequence
+        self.completion, self.frame, self.sequence = completion, frame, sequence
         self.session, self.workspace = session, workspace
         coordinator = collectives["coordinator"]
         self.collectives = dict(runtime=collectives["runtime"], vocabulary_runtime=collectives["vocabulary_runtime"],

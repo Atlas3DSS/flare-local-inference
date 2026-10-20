@@ -24,9 +24,11 @@ enum Channel {
 }
 
 pub struct XtmlOutput {
+    received: usize,
+    spans: Vec<Option<std::ops::Range<usize>>>,
     channel: Channel,
     buffer: String,
-    tools: Vec<Value>,
+    tools_enabled: bool,
     calls: usize,
     control_tokens: Vec<(u32, String)>,
     pending_controls: VecDeque<String>,
@@ -36,13 +38,15 @@ pub struct XtmlOutput {
 impl XtmlOutput {
     pub fn new(config: OutputConfig, control_tokens: Vec<(u32, String)>) -> Self {
         Self {
+            received: 0,
+            spans: vec![],
             channel: if config.start == crate::output::tagged::OutputStart::Reasoning {
                 Channel::Reasoning
             } else {
                 Channel::Response
             },
             buffer: String::new(),
-            tools: config.tools,
+            tools_enabled: !config.tools.is_empty(),
             calls: 0,
             control_tokens,
             pending_controls: VecDeque::new(),
@@ -50,7 +54,14 @@ impl XtmlOutput {
         }
     }
 
+    pub fn content_spans(&self) -> Vec<Option<std::ops::Range<usize>>> {
+        self.spans.clone()
+    }
+    pub fn consumed_bytes(&self) -> usize {
+        self.received - if matches!(self.channel, Channel::Response) { unescape(&self.buffer).len() } else { 0 }
+    }
     pub fn push(&mut self, input: Input<'_>) -> Result<Vec<Event>> {
+        self.spans.clear();
         let text = match input {
             Input::Token(token) => {
                 if let Some((_, marker)) = self.control_tokens.iter().find(|(id, _)| *id == token) {
@@ -82,6 +93,7 @@ impl XtmlOutput {
     }
 
     fn push_encoded(&mut self, text: &str) -> Result<Vec<Event>> {
+        self.received += unescape(text).len();
         self.buffer.push_str(text);
         let mut events = Vec::new();
         loop {
@@ -96,8 +108,10 @@ impl XtmlOutput {
                     let boundary = self.buffer.find(close);
                     let visible = boundary
                         .unwrap_or_else(|| self.buffer.len() - partial(&self.buffer, close));
+                    let start = self.consumed_bytes();
                     let text: String = self.buffer.drain(..visible).collect();
                     if !text.is_empty() {
+                        if !reasoning { self.spans.push(Some(start..start + unescape(&text).len())); }
                         events.push(if reasoning {
                             Event::Reasoning(unescape(&text))
                         } else {
@@ -149,7 +163,10 @@ impl XtmlOutput {
                         break;
                     };
                     let body: String = self.buffer.drain(..end + CALL_CLOSE.len()).collect();
-                    let (name, arguments, index) = parse_call(&body, &self.tools)?;
+                    if !self.tools_enabled {
+                        return Err("tool calling is disabled without declared tools".into());
+                    }
+                    let (name, arguments, index) = parse_call(&body)?;
                     if index != self.calls + 1 {
                         return Err(
                             "XTML tool call indices must be consecutive and start at one".into(),
@@ -185,6 +202,7 @@ impl XtmlOutput {
     }
 
     pub fn finish(&mut self, cause: Termination) -> Result<Vec<Event>> {
+        self.spans.clear();
         if matches!(cause, Termination::Cancelled | Termination::ExecutionError) {
             self.buffer.clear();
             self.pending_text.clear();
@@ -200,9 +218,11 @@ impl XtmlOutput {
             self.buffer.clear();
             return Ok(Vec::new());
         }
+        self.received += self.pending_text.len();
         self.buffer
             .push_str(&escape(&std::mem::take(&mut self.pending_text)));
         self.pending_controls.clear();
+        let start = self.consumed_bytes();
         let text = unescape(&std::mem::take(&mut self.buffer));
         if text.is_empty() || matches!(self.channel, Channel::Closed) {
             Ok(Vec::new())
@@ -210,7 +230,7 @@ impl XtmlOutput {
             Ok(vec![if matches!(self.channel, Channel::Reasoning) {
                 Event::Reasoning(text)
             } else {
-                Event::Content(text)
+                { self.spans.push(Some(start..start + text.len())); Event::Content(text) }
             }])
         }
     }
@@ -265,18 +285,13 @@ fn attributes<'a>(text: &'a str, tag: &str) -> Result<(Map<String, Value>, &'a s
     Ok((attributes, rest))
 }
 
-fn parse_call(body: &str, tools: &[Value]) -> Result<(String, String, usize)> {
+fn parse_call(body: &str) -> Result<(String, String, usize)> {
     let (attrs, rest) = attributes(body, "call")?;
     let name = attrs
         .get("tool")
         .and_then(Value::as_str)
-        .ok_or("XTML call requires a tool name")?;
-    if !tools
-        .iter()
-        .any(|tool| tool["function"]["name"].as_str() == Some(name))
-    {
-        return Err(format!("model called unregistered tool {name:?}").into());
-    }
+        .filter(|name| !name.is_empty())
+        .ok_or("XTML call requires a nonempty tool name")?;
     let index = attrs
         .get("index")
         .and_then(Value::as_str)
@@ -484,7 +499,6 @@ mod tests {
 
     #[test]
     fn argument_types_and_tool_names_are_validated() {
-        let tools = vec![json!({"function":{"name":"lookup"}})];
         let call = |kind: &str, value: &str| {
             format!(
                 "<|open|>call tool=\"lookup\" index=\"1\"<|sep|><|open|>argument key=\"x\" type=\"{kind}\"<|sep|>{value}<|close|>argument<|sep|>{CALL_CLOSE}"
@@ -497,14 +511,35 @@ mod tests {
             ("null", "0"),
             ("unknown", "1"),
         ] {
-            assert!(parse_call(&call(kind, value), &tools).is_err());
+            assert!(parse_call(&call(kind, value)).is_err());
         }
-        assert!(parse_call(&call("number", "3"), &[]).is_err());
+        assert!(parse_call(&call("number", "3").replace("lookup", "")).is_err());
         assert_eq!(
-            parse_call(&call("string", "&quot;literal\""), &tools)
-                .unwrap()
-                .1,
+            parse_call(&call("string", "&quot;literal\"")).unwrap().1,
             "{\"x\":\"&quot;literal\\\"\"}"
+        );
+    }
+
+    #[test]
+    fn complete_calls_require_tool_parsing_to_be_enabled() {
+        let mut parser = XtmlOutput::new(
+            OutputConfig {
+                structured: false,
+                start: crate::output::tagged::OutputStart::Content,
+                tools: vec![],
+            },
+            vec![],
+        );
+        assert!(
+            parser
+                .push_encoded(concat!(
+                    "<|close|>response<|sep|><|open|>tools<|sep|>",
+                    "<|open|>call tool=\"lookup\" index=\"1\"<|sep|>",
+                    "<|close|>call<|sep|><|close|>tools<|sep|>"
+                ))
+                .unwrap_err()
+                .to_string()
+                .contains("tool calling is disabled")
         );
     }
 

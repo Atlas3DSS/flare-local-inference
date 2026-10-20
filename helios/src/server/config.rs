@@ -72,19 +72,31 @@ impl Bootstrap {
                 error,
             ))
         })?;
-        let sampling_defaults: crate::model::SamplingParameters = serde_json::from_value(
-            object
-                .get("sampling_defaults")
-                .ok_or("prepared sampling defaults are required")?
-                .clone(),
+        let mut sampling = object
+            .get("sampling_defaults")
+            .and_then(Value::as_object)
+            .ok_or("prepared sampling defaults are required")?
+            .clone();
+        let sampling_ranges: crate::model::SamplingRanges = serde_json::from_value(
+            sampling
+                .remove("ranges")
+                .unwrap_or_else(|| serde_json::json!({})),
         )
         .map_err(|error| {
             crate::ExecutionError::Manifest(crate::Failure::caused_by(
-                "invalid prepared sampling defaults",
+                "invalid prepared sampling ranges",
                 error,
             ))
         })?;
-        sampling_defaults.validate()?;
+        let sampling_defaults: crate::model::SamplingParameters =
+            serde_json::from_value(Value::Object(sampling)).map_err(|error| {
+                crate::ExecutionError::Manifest(crate::Failure::caused_by(
+                    "invalid prepared sampling defaults",
+                    error,
+                ))
+            })?;
+        sampling_ranges.validate(&sampling_defaults)?;
+
         if identity.len() != 64 || !identity.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err("model identity must be 64 hexadecimal characters".into());
         }
@@ -113,6 +125,7 @@ impl Bootstrap {
         let prepared_sequence_tokens = usize::try_from(integer("max_sequence_tokens", None)?)
             .map_err(|_| "prepared context extent overflow")?;
         let mut model = ModelConfig {
+            max_top_logprobs: manifest.max_top_logprobs()?,
             prepared_sequence_tokens,
             contract,
             model_id: text("model_id")?.into(),
@@ -147,7 +160,9 @@ impl Bootstrap {
             },
             eos_token_ids: frontend_settings.eos_token_ids.clone(),
             sampling_defaults,
+            sampling_ranges,
             speculative_token_capacity: usize::try_from(integer("speculative_token_capacity", Some(0))?).map_err(|_| "speculative token capacity exceeds usize")?,
+            decode_weight_bytes: integer("decode_weight_bytes", Some(0))?,
             speculative_fixed_width: object
                 .get("speculative_fixed_width")
                 .filter(|v| !v.is_null())
@@ -253,6 +268,7 @@ impl Bootstrap {
             defaults,
             &frontend_settings,
         )?;
+        if model.max_top_logprobs != 0 { frontend.prepare_token_bytes()?; }
         if frontend_settings
             .image
             .as_ref()
@@ -351,7 +367,7 @@ impl Bootstrap {
     }
 }
 
-fn image_limits(vision: &crate::model::VisionCapabilities) -> Result<ImageLimits> {
+pub(crate) fn image_limits(vision: &crate::model::VisionCapabilities) -> Result<ImageLimits> {
     let max_total_patches = vision
         .features_per_request
         .checked_mul(vision.patches_per_feature)
@@ -366,6 +382,7 @@ fn image_limits(vision: &crate::model::VisionCapabilities) -> Result<ImageLimits
         max_images: vision.image_count_capacity(),
         max_patches_per_image,
         max_total_patches,
+        patches_per_feature: vision.patches_per_feature,
         ..ImageLimits::default()
     })
 }
@@ -395,6 +412,9 @@ mod tests {
             assert_eq!(limits.max_images, features);
             assert_eq!(limits.max_total_patches, total);
             assert_eq!(limits.max_patches_per_image, graph_patches.min(total));
+            assert_eq!(limits.patches_per_feature, merge);
+            assert_eq!(limits.max_image_tokens_per_prompt(), features);
+            assert_eq!(limits.max_image_tokens_per_image(), graph_patches.min(total) / merge);
             let processor = ImageProcessor::load(ImageSettings::Moonvit {}, limits).unwrap();
             let geometry = processor.geometry(3584, 3584);
             if graph_patches == 65536 {
@@ -514,6 +534,43 @@ mod tests {
         legacy["assets"]["chat_template"] = template_asset.clone();
         let loaded = Bootstrap::load(&legacy.to_string(), &manifest).unwrap();
         assert_eq!(loaded.frontend.prompt_encoder(), PromptEncoder::Jinja);
+        assert_eq!(
+            loaded.model.sampling_ranges,
+            crate::model::SamplingRanges::default()
+        );
+        let request = json!({"temperature":0,"top_k":999,"seed":123});
+        let prepare = |loaded: &Bootstrap| {
+            super::super::request::sampling_parameters(
+                request.as_object().unwrap(),
+                &loaded.model.sampling_defaults,
+                &loaded.model.sampling_ranges,
+            )
+            .unwrap()
+        };
+        let sampling = prepare(&loaded);
+        assert_eq!(sampling.temperature, model.sampling_defaults.temperature);
+        assert_eq!(sampling.top_k, model.sampling_defaults.top_k);
+        assert_eq!(sampling.seed, 123);
+        let mut bounded = legacy.clone();
+        bounded["sampling_defaults"]["ranges"] = json!({
+            "temperature":{"min":0.5,"max":1.5}, "top_k":{"min":-1,"max":100},
+        });
+        let loaded = Bootstrap::load(&bounded.to_string(), &manifest).unwrap();
+        let sampling = prepare(&loaded);
+        assert_eq!(sampling.temperature, 0.5);
+        assert_eq!(sampling.top_k, 100);
+        assert_eq!(sampling.seed, 123);
+        bounded["sampling_defaults"]["ranges"]["temperature"]["min"] = json!(2.);
+        assert!(Bootstrap::load(&bounded.to_string(), &manifest).is_err());
+        bounded["sampling_defaults"]["ranges"]["temperature"]["min"] = json!(0.5);
+        bounded["sampling_defaults"]["ranges"]["top_k"]["max"] = json!(model.contract.vocabulary + 1);
+        assert!(
+            Bootstrap::load(&bounded.to_string(), &manifest)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("top_k range")
+        );
         for assets in [
             json!({"chat_template":template_asset}),
             json!({"tokenizer":tokenizer_asset,"chat_template":template_asset,"extra":tokenizer_asset}),

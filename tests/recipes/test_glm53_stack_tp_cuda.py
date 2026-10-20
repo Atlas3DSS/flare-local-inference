@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 import torch
+
+from tests.components.completion_support import completion_outputs
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
@@ -128,14 +130,14 @@ def _rank(rank, world, rendezvous, snapshot, capacity, generate=False, sockets=(
                 forwards[mode] = decoders[mode]
                 if generate:
                     batch = PreparedBatch(inputs, requests, metadata[mode], mode=mode, shard=shard, pages=64)
-                    forwards[mode] = PreparedGeneration(decoders[mode], batch, records, frame, sequence,
+                    forwards[mode] = PreparedGeneration(decoders[mode], batch, completion_outputs(records), frame, sequence,
                         pool=pool, runtime=runtime, coordinator=coordinator, session=session, name=f"{mode}.generation")
             if checkpoint:
-                forwards["resume"] = PreparedResume(weights, requests, pool, inputs, records, frame, sequence,
+                forwards["resume"] = PreparedResume(weights, requests, pool, inputs, completion_outputs(records), frame, sequence,
                     rows=1, runtime=runtime, vocabulary_runtime=vocabulary_runtime,
                     coordinator=coordinator, session=session, name="resume")
                 for mode in ("init", "restore", "snapshot"):
-                    forwards[mode] = PreparedMaintenance(mode, requests, pool, commands, inputs, records, frame, sequence,
+                    forwards[mode] = PreparedMaintenance(mode, requests, pool, commands, inputs, completion_outputs(records), frame, sequence,
                         runtime=runtime, coordinator=coordinator, session=session, name=mode, admission_buffers=admission)
                 graphs.update({mode: torch.cuda.CUDAGraph() for mode in ("resume", "init", "restore", "snapshot")})
             progress("autotuning complete text forwards")

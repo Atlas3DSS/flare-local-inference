@@ -1,155 +1,193 @@
-# Multi-host serving with the Flare agent
+# Multi-host serving with Orbit
 
-Flare serves one model across two or four DGX Sparks using tensor parallelism.
-Each host runs a process, called a rank, that executes its share of the model.
-Rank zero coordinates the ranks and serves the HTTP API. The other hosts run
-peer ranks.
+Flare can serve one prepared model across several DGX Sparks. Each host runs
+one tensor-parallel rank; rank zero serves the HTTP API and coordinates its
+peers. The package fixes the rank count and GPU architecture.
 
-Every host of a serving group runs the Flare agent, a user service that pairs
-with the operator's controller machine, caches the Flare executable and package
-data, starts the host's rank, supervises it, and streams its output. The
-operator starts and stops groups with `flare orbit` commands from any machine
-with the Flare executable; that machine is not a rank. [Orbit](orbit.md)
-specifies the agent protocol, pairing, grants, and process ownership.
+Orbit starts and manages those ranks. Every serving host runs `flare agent`,
+including rank zero's host. A controller runs `flare orbit` to pair hosts,
+select GPUs, distribute package data, and manage groups. It needs no model GPU
+and can have a different CPU architecture from the nodes. Orbit commands are
+implemented in Unix builds; Windows builds reject them.
 
-Model preparation runs through `ignition export` on rank zero and `ignition join`
-on each peer. Ignition loads weights, tunes kernels, captures graphs, and writes
-a signed package on rank zero. These preparation processes run directly on the
-hosts and do not use the agent. Once a package exists, serving uses the Rust
-Flare executable and its prepared graphs without Python.
+This guide covers setup and operation. The [Orbit reference](orbit.md) defines
+placement, persistent groups, caching, and the protocol. To create a package,
+use [Ignition preparation](#prepare-the-package); serving an existing package
+needs only Flare, the driver, and the package.
 
 ## Requirements
 
-- Two or four DGX Sparks, one GPU per host, with the same OS image and NVIDIA
-  driver. GLM-5.3 Flash, Qwen3.8 Flash, and DeepSeek V4.1 Flash 1017 support
-  this preparation path. Qwen TP4 requires full-model validation; see [model preparation](model-preparation.md).
-- The same Flare, Ignition, and FlashInfer sources on every preparation host.
-  Preparation rejects peers whose source identities differ. Follow the
-  [build instructions](../AGENTS.md#build-and-run-model-checkpoints) on each host.
-- A source checkpoint in rank zero's Hugging Face hub cache, configured with
-  `[paths] hub_cache`, or an absolute local checkpoint directory supplied as `MODEL`.
-  Only rank zero retains the complete source checkpoint.
-- Active RoCE ports with IPv4 RoCEv2 GIDs on every host. The ranks exchange
-  tensors through RoCEnante, b12x's RoCE collectives, whose kernels are captured
-  in the model graphs. This transport uses the Sparks' ConnectX-7 ports.
-- Enough disk for the checkpoint, temporary exports, and serving package, as
-  described below. Also budget Spark's shared CPU/GPU memory according to the
-  [DGX Spark preparation guidance](model-preparation.md#dgx-spark).
+- A multi-host package matching the serving GPUs and number of ranks. A
+  single-host TP4 package needs four GPUs in one host; Orbit cannot turn it
+  into a package for four separate Sparks.
+- Compatible Linux, NVIDIA drivers, and Flare serving builds on the nodes.
+  Each executable must support the package's graph contract and RoCE proxy ABI.
+  [Debian packages](debian.md) provide the native CLI and agent; Ignition and
+  the CUDA toolkit are needed only for preparation.
+- Active RoCEv2 ports with IPv4 GIDs and reachable peer endpoints. Model
+  collectives use RoCEnante over the Sparks' ConnectX-7 ports.
+- Free GPU memory and disk space on each selected node. Spark shares host and
+  GPU memory; see [DGX Spark preparation](model-preparation.md#dgx-spark).
 
 ### Network connections
 
 | Connection | Destination | Port |
 | --- | --- | --- |
-| Ignition preparation rendezvous | Rank zero | Selected by `--rendezvous`; examples use TCP 29630 |
-| Ignition preparation coordination | Participating hosts | Additional dynamically allocated TCPStore and Gloo ports |
-| Flare agent control and file transfer | Every host, from the controller and from other hosts | TCP 29900 by default |
-| Flare serving rendezvous | Rank zero | TCP 29800 |
-| HTTP API | Rank zero | TCP 8000 in these examples |
+| Agent control and package transfer | Every agent, reachable from the controller and source/peer nodes | TCP 29900 by default |
+| Serving rendezvous | Rank zero, reachable from every peer | TCP 29800 for Orbit launches |
+| HTTP API | Rank zero, reachable from clients | TCP 8000 in this guide |
+| Ignition preparation rendezvous | Preparation rank zero | The selected port; examples use TCP 29630 |
+| Ignition preparation coordination | Preparation hosts | Additional dynamically allocated TCPStore and Gloo ports |
 
-Preparation and serving also require a working RoCE fabric between the ranks.
-Each host discovers its active RDMA devices at startup. The ranks select up to
-two rails per peer on a switch or supported point-to-point topology; the package
-does not pin the fabric used during preparation. On Spark, cabled port 0 commonly
-appears as `rocep1s0f0` and `roceP2p1s0f0`.
+Agent transfers use encrypted TCP to the addresses recorded at pairing.
+Model collectives use RDMA over separately discovered RoCE devices. Pair using
+hostnames or addresses that route over the intended transfer network; selecting
+RoCE rails does not change the agent's TCP route. Flare does not configure
+interfaces, addresses, switches, or firewalls.
 
-Agent file transfers use ordinary TCP to the addresses recorded in the orbit
-file at pairing. Choose hostnames or addresses that route over the intended
-transfer network. The RoCE device selection for model collectives does not
-select that TCP route.
-
-### Checkpoint and package storage
-
-A source checkpoint supplies weights to Ignition. A prepared package contains
-the weights, graphs, and other resources that Flare loads for serving.
-
-| Artifact | Rank zero | Each peer |
-| --- | --- | --- |
-| Source checkpoint | Retained in its hub cache or local checkpoint directory | Receives metadata and headers, then requests the byte ranges its weight loader needs |
-| Temporary export | Stages all ranks before publication | Stages its own rank under `[paths] export_staging`, then sends it to rank zero |
-| Signed serving package | Retains the complete package, including companion files | The agent caches its rank's resources and required shared data, fetched from rank zero's host and digested once on arrival |
-| Serving executable | The agent caches and runs the executable sent by the controller | The agent caches and runs the executable sent by the controller |
-
-On rank zero, allow roughly twice the final package size for staging and
-publication, in addition to checkpoint storage. On a preparation peer, allow
-roughly twice its own exported rank size while that export is assembled.
-Temporary exports are removed after use.
-
-The agent stores packages under `~/.cache/flare/packages` and executables under
-`~/.cache/flare/bin`, in the account running the service. After a successful
-transfer, the agent removes entries of the same kind that no running group and
-no open connection uses. This cleanup does not remove source checkpoints from
-the hub cache or packages outside the cache.
+The serving ranks select up to two rails per peer from active devices. The
+package does not pin the physical fabric used during preparation. For direct
+cabling and neighbor forwarding, see [experimental rings](#experimental-rings).
 
 ## One-time setup: the Flare agent
 
-Every host of a group runs the agent service. The agent holds a node key and a
-list of authorized controllers; a controller holds its own key and a orbit file
-listing the nodes it paired with and named clusters in rank order. Anyone
-holding an authorized controller key can run code as the service user on every
-node, so keep `~/.config/flare/orbit/controller.key` private.
+### Install on every serving host
 
-### Install the agent on each host
-
-From the repository root after building Flare:
+Run as the account that owns the model files. With the Debian package:
 
 ```sh
-./flare/target/release/flare agent install
+/usr/bin/flare agent install
 ```
 
-This copies the executable to `~/.local/lib/flare-agent/flare`, writes and
-enables the `flare-agent` user service listening on `0.0.0.0:29900`, enables
-lingering so the service runs without a login session, creates the node key,
-and prints the node's name, fingerprint, and a one-time join code valid for 24
-hours. `--listen IP:PORT` changes the listening address; `--join-code CODE`
-installs a code of your own so one code covers several hosts;
-`--accept-first` admits the first controller that connects without a code, for
-a network you already trust. `journalctl --user -u flare-agent` shows the
-agent's log.
+With a source build, use `./flare/target/release/flare agent install` instead.
+The installer copies that executable to `~/.local/lib/flare-agent/flare`,
+enables and restarts the `flare-agent` systemd user service, and requests login
+lingering. It prints the node name, fingerprint, and a one-time pairing code
+valid for 24 hours. Check the service with:
 
-To update an agent, stop the group it serves, run `flare agent install` again
-with the new executable, and pair again only if the node was reset. Restarting
-the service stops any rank it runs.
+```sh
+systemctl --user status flare-agent
+journalctl --user -u flare-agent
+```
+
+`--listen IP:PORT` changes the default `0.0.0.0:29900` listener. For a trusted
+network, `flare agent install --accept-first` allows the first controller to
+pair without a code. It does not reset existing pairings.
 
 ### Pair from the controller
 
-On the machine that will control the orbit, pair with each host using the code
-its installation printed:
+Default installations generate a different code on each host. Pair each host
+with the code it printed; substitute the actual codes in this example:
 
 ```sh
-flare orbit pair maxwell hertz faraday ampere --code ABCD-EFGH-IJKL-MNOP-QRST-UVWX-YZ23-4567
+flare orbit pair maxwell --code CODE_FROM_MAXWELL
+flare orbit pair hertz --code CODE_FROM_HERTZ
 ```
 
-Pairing creates the controller key on first use, proves the join code to each
-node inside the encrypted session, records each node's name, fingerprint,
-public key, and address in `~/.config/flare/orbit.toml`, and installs the
-controller as the node's authorized controller. Compare the fingerprints it
-prints with what each host printed at installation. Hosts installed with
+For four hosts, pair `faraday` and `ampere` in the same way. A single
+`flare orbit pair maxwell hertz ... --code CODE` works only when every host was
+installed with the same explicit `--join-code CODE`. Hosts installed with
 `--accept-first` pair without `--code`.
 
-Then name a cluster in the orbit file, listing nodes in rank order:
+Compare the reported fingerprints with those printed on the hosts. Pairing
+records node addresses and public keys in `~/.config/flare/orbit.toml` and
+creates the controller's private key at
+`~/.config/flare/orbit/controller.key`. An authorized controller can run code
+as the agent account; keep its private key private.
+
+### Define a cluster
+
+Add a named list to the controller's orbit file, using the names pairing
+recorded. This example uses two Sparks:
 
 ```toml
 [cluster.sparks]
-nodes = ["maxwell", "hertz", "faraday", "ampere"]
+nodes = ["maxwell", "hertz"]
 ```
 
-The first node is rank zero. With `--roce-ring`, the order is also the ring.
-`flare orbit status --cluster sparks` shows every node's free disk, controller
-revision, and running group. An orbit with one cluster needs no `--cluster`.
+For a TP4 package, list four suitable nodes in the intended rank order.
+A cluster is a candidate list: when it has exactly one node per rank, its first
+node is rank zero. Longer lists can skip nodes that cannot serve a rank.
+Always inspect the printed placement.
 
-To let another machine control the same orbit, run
-`flare orbit controllers add NAME PUBLIC_KEY` with the other controller's
-public key (the hex in its own orbit file); `flare orbit controllers remove KEY`
-revokes it. `flare agent reset` on a host forgets its controllers so it can be
-paired again.
+```sh
+flare orbit status --cluster sparks
+```
+
+`status`, `ls`, `packages`, `dashboard`, `attach`, and `stop` default to the only
+configured cluster. `run` instead considers all paired nodes unless `--cluster`,
+`--nodes`, or a saved group's node list constrains placement.
+
+To authorize another controller, use `flare orbit controllers add NAME PUBLIC_KEY`
+from an authorized controller. Supply its hex public key, not its private key
+or a key filename. See [controller-set management](orbit.md#controller-set).
+
+## Package sources
+
+Orbit accepts a Hugging Face repository `ORG/NAME[@REVISION]`, a local primary
+path, or `NODE:/absolute/path`, where NODE is a paired node's name. Repository
+packages download on a candidate node, keeping the full package off the
+controller. A source node reads its package in place; other hosts receive
+their required data through the agents.
+
+For a package published on Hugging Face, launch from its repository:
+
+```sh
+flare orbit run local-inference-lab/Qwen3.8-Flash-Next-FLARE --revision gb10
+```
+
+If the revision contains several primary files, select the multi-host package
+with `--filename FILE`. `gb10` selects the Spark hardware revision even from
+a controller without a GPU. Without an explicit revision, Orbit infers one
+from available candidate GPUs and refuses ambiguous mixed hardware.
+`--offline` and `--cache-dir` apply to the downloading node; `--token-file`
+is read on the controller and its token travels through the encrypted session.
+To download on a particular source host before launching, run `flare download`
+there and pass its returned primary path as `NODE:/absolute/path`.
+
+Downloads reuse the Hugging Face cache. Keep the primary and its companion
+filenames and symlink targets intact. To inspect the package's rank count and
+hardware contract on the source host, run `flare inspect PRIMARY --plain`.
+
+### Checkpoint and package storage
+
+| Artifact | Preparation rank zero / source host | Peer host |
+| --- | --- | --- |
+| Source checkpoint | Complete checkpoint in its hub cache or local directory | Requests only the source ranges its loader needs during preparation |
+| Export data | Collects rank manifests and requests payload files absent from its cache | Prepares and retains its rank's payload blobs locally |
+| Serving package | Complete package on serving rank zero; an external source may also retain a complete copy | Required rank payloads and shared data |
+| Serving executable | Installed agent binary by default | Installed agent binary by default |
+
+Exports put metadata in the primary and all payloads in subsequent files bounded
+by the `64G` shard limit. Identical payloads share storage through hardlinks.
+Snapshot exports and legacy sparse packages have different allocation patterns;
+see [package caching](orbit.md#package-caching).
+
+Budget the checkpoint, previously retained blobs, missing payloads from a new
+export, and temporary staging. Deduplication reduces repeated writes but does
+not eliminate preparation memory or all disk reads. `--no-weights` requires
+matching cached payloads. Output and package cache must be on the same filesystem
+for hardlinks; if `/data` is a separate mount, configure `[paths] package_cache`
+on that filesystem before using the export example below. See
+[package storage](cli-design.md#package-snapshots).
 
 ## Prepare the package
 
-The following example prepares GLM-5.3 Flash across two Sparks. Rank zero uses
-`10.200.0.12` on the cluster network, and `hertz` is rank one. Run preparation
-commands from the repository root on each host.
+Skip this section when serving a prepared package. Preparation uses Ignition
+processes started directly on each host. The Flare agent does not run Ignition.
+Use matching Flare, Ignition, and locked FlashInfer sources on every preparation
+host; source-identity mismatches are rejected. Recipe-supported rank counts and
+model options are listed in [model preparation](model-preparation.md).
 
-On rank zero, select an unused output filename and start export:
+Provision the same preparation token on every host before starting. Set
+`[preparation] checkpoint_token_file` in `~/.config/flare/config.toml`, or use
+its default `~/.config/flare/agent.token`. The file needs identical contents of
+at least 32 random bytes and mode `600` on each host. This token is separate
+from Orbit identities. Checkpoint transfers are authenticated, but their bytes
+are not encrypted.
+
+The example prepares GLM-5.3 Flash on two Sparks. Run from each checkout root.
+On `maxwell`, whose preparation address is `10.200.0.12`, select an unused output:
 
 ```sh
 .venv/bin/ignition export glm-5.3-flash --ranks 2 \
@@ -157,156 +195,161 @@ On rank zero, select an unused output filename and start export:
   --output /data/flare-runtime/glm53-spark-tp2.safetensors --verbose
 ```
 
-On `hertz`, join the same rendezvous:
+On `hertz`:
 
 ```sh
 .venv/bin/ignition join 10.200.0.12:29630 --rank 1 --ranks 2
 ```
 
-For four hosts, use `--ranks 4` everywhere and run one join process per peer,
-with distinct ranks 1, 2, and 3.
+For four hosts, use `--ranks 4` and start peer ranks 1, 2, and 3. Rank zero
+admits each peer once, serves checkpoint metadata and selected byte ranges,
+and coordinates preparation. Peers do not create full checkpoint shards.
+Keep checkpoint source files unchanged during loading.
 
-Rank zero admits each peer once and plans from all participating GPUs. Each peer
-receives authenticated metadata and safetensors headers in a private temporary
-directory, then requests the byte ranges its weight loader needs. Strided column
-reads transfer selected row bytes without the intervening columns. Peers do not
-create full safetensor shards or sparse checkpoint placeholders. Compressed
-scale planes retain their exact encoding and existing selection rules.
+Each rank loads its weights and prepares its graphs. Forward compilation is
+shared across ranks, and compiled artifacts go to the ranks that need them.
+Peers send export manifests; rank zero requests missing payload files,
+assembles the package, signs it, and encrypts executable resources. Temporary
+staging is removed after use; reusable cached blobs remain.
 
-Preparation uses `[preparation] checkpoint_token_file`, defaulting to
-`~/.config/flare/agent.token`, for mutual authentication and sequenced HMAC frames.
-Provision this shared preparation token separately from the orbit's node and
-controller keys. Install identical contents of at least 32 random bytes on every
-preparation host, with file permissions `600`. Checkpoint paths,
-contents, and byte counts are authenticated; checkpoint bytes are not encrypted.
-Source files must remain unchanged while loading. File-backed auxiliary tables
-remain source spans on rank zero for publication; peers receive their headers
-during preparation. Each rank loads its weights and prepares its graphs.
-Forward compilation is divided across ranks, and compiled artifacts are shared
-with ranks that need them.
-
-Each peer exports its rank to a temporary file and streams that file to rank
-zero. Rank zero assembles all ranks, signs the package, encrypts its executable
-resources, and removes staging files. The completed package records its rank
-count and export identity. Keep its primary file and any companion files
-together with their original names.
-
-For GLM-5.3 Flash, context parallelism shards each attention page across ranks,
-increasing total KV capacity compared with replicating complete pages. Use
-`--no-context-parallel` during export to replicate pages instead. Use
-`--no-stream-overlap` during export to serialize concurrent branches when
-diagnosing scheduling-dependent faults. These flags change the prepared graphs.
+GLM-5.3 Flash supports `--no-context-parallel` to replicate attention pages and
+`--no-stream-overlap` to serialize concurrent branches. These are preparation
+choices that change the captured graphs. Use the recipe-specific guidance for
+other models.
 
 ## Serve
 
-From the controller, start the package on the cluster:
+From the controller:
 
 ```sh
 flare orbit run maxwell:/data/flare-runtime/glm53-spark-tp2.safetensors \
-  --cluster sparks --gpus 0 --host 0.0.0.0 --port 8000
+  --cluster sparks --name glm53 --gpus 0 --host 0.0.0.0 --port 8000
 ```
 
-`NODE:PATH` names a package on a node's disk, normally rank zero's host where
-preparation wrote it. A plain path names a package on the controller, which is
-then sent to rank zero's host. The cluster's node count must match the
-package's prepared rank count. Without `--cluster`, the controller places the
-ranks on free GPUs of the right kind anywhere in the orbit, preferring nodes
-whose caches already hold their rank; `--nodes` names candidates in rank
-order, `--name` names the group for `attach`, `stop` and `ls`, and
-`--dry-run` prints the placement without starting anything. A `[[group]]` in
-the orbit file supplies the package, serving options and constraints for a
-name, so `flare orbit run --name ds41` is a complete command; see
-[orbit](orbit.md#desired-state).
+`--dry-run` prints placement without starting ranks or saving a persistent group.
+It still reads the package metadata, verifies its signatures, and queries nodes.
+The package fixes the rank count; the candidate list needs enough eligible nodes.
+`--nodes maxwell,hertz` supplies an ordered list directly.
 
-The controller verifies the package's signed index and obtains publisher
-acceptance at its own terminal, then passes the accepted publisher profile and
-signing-key approval to each agent. An agent digests bytes it fetched from
-another host against the signed index before running them and remembers the
-result with its cached copy, so a repeated launch of the same package skips
-that step. Each rank independently verifies the package's signatures for its
-rank; `--verify-weights` makes every rank digest its stored data at load.
+Each rank uses its node's installed agent executable. `--executable PATH`
+uploads a controller-local override that must run on all selected nodes. Saved
+groups retain an explicit override. A controller with a different CPU
+architecture needs no node binary for the default path, provided the agents
+advertise support for it.
 
-Startup then proceeds as follows:
+The controller verifies the signed index and obtains publisher acceptance.
+Rank zero receives a complete package if it does not already hold the source;
+peers fetch only their required data. Fetched data is verified and cached.
+Every serving rank checks its signatures; `--verify-weights` also digests stored
+data during loading.
 
-1. The controller connects to every node's agent, checks that no group is
-   running and that disk suffices, and sends the Flare executable to nodes that
-   lack it.
-2. Rank zero's node holds the complete package. Each peer fetches the signed
-   index, its own rank's resources, and the shared tables it needs from rank
-   zero's host, in parallel, over the hosts' own network.
-3. The controller signs a grant naming the group, the package, every member in
-   rank order, the rendezvous address, and the serving options, and asks each
-   agent to run its rank. Agents accept a grant only from their authorized
-   controllers.
-4. All ranks join the serving rendezvous, agree on capacity, and load their
-   assigned resources.
-5. The ranks exchange RoCE connection records and connect the transport. Rank
-   zero serves HTTP once the rank group is ready, and the controller prints
-   the address.
+Rank zero listens for peers on TCP 29800 at the address it routes toward the
+first peer. Ranks agree on the package and capacities, load their resources,
+and connect RoCE. The HTTP API runs on rank zero's host, not on the controller.
+The example binds all interfaces on Maxwell:
 
-The serving rendezvous listens on rank zero's port 29800 at the address rank
-zero's host uses to reach the first peer; every peer must be able to reach that
-address.
+```sh
+curl -fsS http://maxwell:8000/health
+```
 
-Peer package files preserve the source files' logical lengths, with unwritten
-regions represented as sparse holes. Only transferred ranges occupy disk on a
-filesystem supporting sparse files. Use `du` to inspect allocated space;
-`ls -l` reports logical file lengths. A multi-file package's primary and
-companions stay together in one cache directory. Later starts reuse cached
-files whose cache names and sizes match, avoiding another transfer.
+A printed URL or successful `--detach` means rank processes started; wait for
+a successful health response before sending inference requests. The default
+HTTP bind is `127.0.0.1` on rank zero, so remote clients need an appropriate
+`--host` value.
 
-Every rank's output appears on the controller's terminal with a `[rank R name]`
-prefix. Ctrl-C stops the group: rank zero receives SIGTERM first and drains
-native work, then peers still running after thirty seconds are stopped.
-`--detach` returns once every rank has started; `flare orbit attach` shows a
-running group's output, `flare orbit stop` stops it, and `flare orbit
-dashboard` shows the live metrics dashboard for every group and GPU on the
-cluster. A controller that
-disconnects, sleeps, or crashes does not stop the group; agents keep the last
-64 KiB of each rank's output for a later attach. An agent does not restart a
-failed rank; start the group again after resolving the failure.
+## Manage groups
+
+Use names or exact launch IDs from `ls` to select runs:
+
+```sh
+flare orbit ls --cluster sparks
+flare orbit dashboard --cluster sparks
+flare orbit attach glm53 --cluster sparks
+flare orbit stop glm53 --cluster sparks
+```
+
+Ctrl-C during attached `orbit run` stops that group. Ctrl-C during `orbit attach`
+only detaches. A disconnected controller leaves ranks running. `stop` signals
+rank zero first so it can drain collectives, then stops peers still running
+30 seconds after rank zero exits. Omitting the group from `stop` selects every
+running group in the chosen cluster.
+
+Ordinary launches are ephemeral. Agents retain successful run history for five
+minutes after exit, capped at sixteen successful records per agent. Failures
+remain until removal or agent restart. Logs and metrics are held in memory;
+restart loses them. Each agent retains about 64 KiB of output per rank.
+
+To save a configuration for later manual restart:
+
+```sh
+flare orbit run maxwell:/data/flare-runtime/glm53-spark-tp2.safetensors \
+  --cluster sparks --name glm53 --persistent --detach \
+  --gpus 0 --host 0.0.0.0 --port 8000
+flare orbit stop glm53 --cluster sparks
+flare orbit run --name glm53 --detach
+```
+
+Stop any existing `glm53` run before creating the saved group. Persistent
+means the controller retains the launch definition; it does not automatically
+restart ranks after failure or reboot. `flare orbit rm glm53` removes a stopped
+saved group and its retained history. Removing an exact launch ID keeps the
+saved definition. Neither operation deletes model data. See
+[persistent and ephemeral groups](orbit.md#persistent-and-ephemeral-groups).
+
+## Update agents
+
+Stop groups before replacing their agents. Update Flare on each host, then run
+`/usr/bin/flare agent install` for a Debian installation, or the equivalent
+command from the selected source build. This updates the executable used for
+both the agent and default serving, and restarts the service. Preserve a custom
+listener by passing `--listen IP:PORT` again. Existing node keys, authorized
+controllers, and caches remain; re-pairing is unnecessary unless the node was
+reset.
+
+APT upgrades alone do not replace the agent's private executable copy or restart
+its service. The systemd service may restart a failed agent, but agents do not
+restore the rank processes it previously supervised. After updating all nodes,
+check `orbit status` and restart saved groups explicitly.
 
 ### Start ranks manually
 
-Manual startup requires the compatible executable and package files to be
-available on every host, with publisher trust configured on each. Start rank
-zero with `--rank 0 --rendezvous 0.0.0.0:29800`. Start each peer with its
-assigned `--rank` and rank zero's reachable address:
+Manual startup requires the executable, each rank's package data, and publisher
+trust on each host. Start rank zero with `--rank 0 --rendezvous 0.0.0.0:29800`.
+Start a peer with its rank and rank zero's reachable address:
 
 ```sh
-./flare/target/release/flare run /data/flare-runtime/glm53-spark-tp2.safetensors \
+flare run /data/flare-runtime/glm53-spark-tp2.safetensors \
   --rank 1 --rendezvous 10.200.0.12:29800 --gpus 0
 ```
 
-Use identical serving options on every rank. Manual startup leaves file
-distribution and process management to the operator.
+Use matching serving options on every rank. Processes started this way are not
+Orbit groups; file distribution and process management belong to the operator.
 
 ## Failures
 
 | Error or symptom | Check |
 | --- | --- |
-| `cannot reach flare agent` | The service is running on the host; the address in the orbit file, route, and firewall allow the controller and the other hosts to connect. |
-| `is not an authorized controller of this node` | The node was paired with a different controller key; pair it, or add this controller with `flare orbit controllers add` from a controller it knows. |
-| `join code proof rejected` or `this node requires its join code` | The code matches what `flare agent install` printed and has not expired or been used. |
-| `peer speaks agent protocol N` | Every node and the controller run the same Flare build; run `flare agent install` with the matching executable. |
-| `group ... is running on this node` | Stop the running group with `flare orbit stop` before starting another. |
-| `checkpoint peer authentication failed` | All preparation hosts use the same private checkpoint token. |
-| `checkpoint source changed after admission` | Checkpoint source files remain unchanged throughout preparation. |
-| `rank zero refused rank R` | Every serving rank uses the same package export and world size. |
-| `tensor-parallel rank identity or graph I/O schema differs` | All ranks use matching serving options and compatible executables. |
-| `package RoCE kernels use proxy ABI ...` | The package's FlashInfer RoCEnante ABI matches the one vendored by the Flare executable; rebuild Flare or re-export as needed. |
-| Missing IPv4 GID, rail link error, transport setup failure, or queue-pair connection failure | RoCE ports are active, have IPv4 addresses, and provide the required connectivity between hosts. |
+| Agent unreachable | Service state, recorded address, route, and TCP listener; both controllers and peers must reach the agent. |
+| Unauthorized controller | Use an already authorized controller to add the key, or pair an unpaired node. |
+| Join code rejected | Use that host's code before expiry and before its first successful use. |
+| Agent protocol mismatch | Update controller and agents to compatible protocol versions. |
+| Agent does not advertise an installed executable | Update the agent with `flare agent install`, or supply a node-compatible `--executable PATH`. |
+| No eligible GPU or GPU held by a group | Inspect `orbit status`; stop the owning group or select other candidates. |
+| `cannot access package` | Check the local primary or `NODE:/absolute/path`; repository inputs use `ORG/NAME[@REVISION]`. |
+| `/health` unavailable after `--detach` | Follow startup logs; check rank-zero bind address, port, and model-loading progress. |
+| Preparation authentication failed | Identical private checkpoint-token contents on every preparation host. |
+| Checkpoint source changed | Keep source checkpoint files unchanged through loading. |
+| Rank identity or graph I/O schema differs | Matching export, prepared world size, serving options, and compatible executables. |
+| Package RoCE proxy ABI mismatch | Align preparation and serving dependencies; re-export when the executable cannot load that ABI. |
+| Missing GID or rail/queue-pair error | Active ports, IPv4 RoCEv2 GIDs, reachable endpoints, and the intended rank order. |
 
-A collective timeout poisons the rank group's transport and shuts it down.
-The failed frame is not published. Check the rank-prefixed output on the
-controller and the agents' journals before restarting the group.
+Inspect rank output and `journalctl --user -u flare-agent` before restarting a
+failed group. A collective failure invalidates the serving run; the agent does
+not retry it automatically.
 
 ## Experimental rings
 
-`--roce-ring` connects neighbors in rank order and uses native CPU relays for
-other destinations. The transport supports 2 through 16 ranks, subject to each
-model recipe's supported tensor-parallel sizes. Four-Spark transport checks
-pass; physical ring cabling and full-model ring serving remain unqualified.
-
-See [RoCE ring transport](roce-ring.md) for topology, commands, validation, and
-failure handling.
+`--roce-ring` connects neighbors in selected rank order and uses native CPU relays
+for other destinations. Transport supports 2 through 16 ranks, subject to each
+recipe's supported sizes. Four-Spark transport checks pass; physical ring cabling
+and full-model ring serving remain unqualified. See [RoCE ring transport](roce-ring.md).

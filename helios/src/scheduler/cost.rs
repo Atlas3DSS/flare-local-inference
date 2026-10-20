@@ -1,4 +1,4 @@
-//! Expiring duration estimates; zero denotes an indeterminate graph cost.
+//! Retained duration estimates; zero denotes an unmeasured graph cost.
 
 use super::ScheduledStep;
 use crate::{
@@ -17,12 +17,19 @@ pub(super) fn observed_duration_ns(timing: ExecutionTiming) -> Option<u64> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Key {
-    kind: GraphKind,
-    batch: usize,
-    tokens: usize,
-    prefill: usize,
-    packed: usize,
+pub(super) struct Key {
+    pub kind: GraphKind,
+    pub batch: usize,
+    pub tokens: usize,
+    pub prefill: usize,
+    pub packed: usize,
+}
+
+impl Key {
+    pub fn from_step(step: &ScheduledStep) -> Self {
+        Self { kind: step.kind, batch: step.batch_capacity, tokens: step.token_capacity,
+            prefill: step.prefill_capacity(), packed: step.packed_token_capacity }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -37,6 +44,7 @@ struct Estimate {
     nanos: u64,
     handoff_ns: u64,
     observed_at_ns: u64,
+    last_attempt_ns: u64,
 }
 
 impl Estimate {
@@ -87,6 +95,7 @@ impl ActionCosts {
                     nanos: 0,
                     handoff_ns: 0,
                     observed_at_ns: 0,
+                    last_attempt_ns: 0,
                 },
             ));
         }
@@ -113,9 +122,7 @@ impl ActionCosts {
     pub fn packed_shapes(&self) -> impl Iterator<Item = PackedShape> + '_ {
         self.entries.iter().filter(|(key, _)| key.kind == GraphKind::Verification && key.packed != 0)
             .map(|(key, estimate)| PackedShape { batch: key.batch, width: key.tokens, tokens: key.packed,
-                nanos: if estimate.fresh(self.now_ns, self.ttl_ns) {
-                    estimate.nanos.saturating_add(estimate.handoff_ns)
-                } else { 0 } })
+                nanos: estimate.nanos.saturating_add(estimate.handoff_ns) })
     }
 
     pub fn shape_duration(
@@ -136,13 +143,36 @@ impl ActionCosts {
             prefill,
             packed,
         })
-        .map(|estimate| {
-            if estimate.fresh(self.now_ns, self.ttl_ns) {
-                estimate.nanos.saturating_add(estimate.handoff_ns)
-            } else {
-                0
-            }
-        })
+        .map(|estimate| estimate.nanos.saturating_add(estimate.handoff_ns))
+    }
+
+    pub fn duration_key(&self, key: Key) -> Option<u64> {
+        self.entry(key).map(|estimate| estimate.nanos.saturating_add(estimate.handoff_ns))
+    }
+
+    pub fn is_fresh(&self, key: Key) -> bool {
+        self.entry(key).is_some_and(|estimate| estimate.fresh(self.now_ns, self.ttl_ns))
+    }
+
+    pub fn stale_keys(&self) -> impl Iterator<Item = Key> + '_ {
+        self.entries.iter().filter(|(_, estimate)| estimate.nanos != 0
+            && !estimate.fresh(self.now_ns, self.ttl_ns)).map(|(key, _)| *key)
+    }
+
+    pub fn refresh_order(&self, key: Key) -> u64 {
+        self.entry(key).map_or(0, |estimate| estimate.observed_at_ns.max(estimate.last_attempt_ns))
+    }
+
+    pub fn record_attempt(&mut self, key: Key) {
+        if let Some((_, estimate)) = self.entries.iter_mut().find(|(shape, _)| *shape == key) {
+            estimate.last_attempt_ns = self.now_ns;
+        }
+    }
+
+    pub fn observation(&self, key: Key) -> Option<(u64, Option<u64>, bool)> {
+        self.entry(key).map(|estimate| (estimate.nanos.saturating_add(estimate.handoff_ns),
+            (estimate.nanos != 0).then_some(estimate.observed_at_ns),
+            estimate.fresh(self.now_ns, self.ttl_ns)))
     }
 
     fn entry(&self, key: Key) -> Option<&Estimate> {

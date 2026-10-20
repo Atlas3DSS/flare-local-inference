@@ -185,7 +185,7 @@ impl SchedulerView {
     ) {
         let catalog = metrics.catalog.get().map_or(&[][..], Vec::as_slice);
         let rows = Layout::vertical([
-            Constraint::Length(2),
+            Constraint::Length(3),
             Constraint::Percentage(42),
             Constraint::Min(4),
             Constraint::Length(2),
@@ -222,6 +222,7 @@ impl SchedulerView {
                     self.now_ns.saturating_sub(self.detail.at_ns) as f64 / 1e9
                 )),
                 Line::from(last_line).style(Style::default().fg(MUTED)),
+                Line::from(self.completion_line(catalog)).style(Style::default().fg(MUTED)),
             ]),
             rows[0],
         );
@@ -236,6 +237,39 @@ impl SchedulerView {
             Line::from(format!(" ↑ ↓ requests   P prefill  D decode  S speculative  I/R/U/C/V setup   dropped {dropped}{}",
                 if truncated { " · history truncated" } else { "" })),
         ]).style(Style::default().fg(MUTED)), rows[3]);
+    }
+
+    fn completion_line(&self, catalog: &[GraphLabel]) -> String {
+        use crate::scheduler::{CostFreshness, TimingOrigin};
+        let Some(sample) = self.samples.back() else {
+            return " Waiting for graph completion timings".to_owned();
+        };
+        let name = catalog.get(sample.graph).map_or("?", |graph| graph.name.as_str());
+        let status = match sample.selection.freshness {
+            CostFreshness::Unknown => "unknown",
+            CostFreshness::Fresh => "fresh",
+            CostFreshness::Stale => "stale",
+        };
+        let origin = match sample.selection.origin {
+            TimingOrigin::Ordinary => "service".to_owned(),
+            TimingOrigin::Discovery => "discovery".to_owned(),
+            TimingOrigin::Refresh => sample.selection.refresh_episode
+                .map_or_else(|| "refresh".to_owned(), |id| format!("refresh #{id}")),
+        };
+        let estimate = if sample.selection.retained_ns == 0 {
+            "?".to_owned()
+        } else {
+            format!("{:.2}", ms(sample.selection.retained_ns))
+        };
+        let gpu = sample.gpu_ns.map_or_else(|| "?".to_owned(), |ns| format!("{:.2}", ms(ns)));
+        let age = sample.selection.observed_at_ns.map_or_else(|| "?".to_owned(), |at| {
+            format!("{:.1}s", sample.selection.selected_at_ns.saturating_sub(at) as f64 / 1e9)
+        });
+        format!(
+            " Done #{} {name} · {origin}/{status} · est {estimate} GPU {gpu} wall {:.2} ms{} · age {age} · credit {:.2}→{:.2} ms",
+            sample.fence.0, ms(sample.wall_ns), if sample.queued { " queued" } else { "" },
+            sample.selection.credit_ns / 1e6, sample.credit_after_ns / 1e6,
+        )
     }
 
     fn render_graphs(&self, frame: &mut Frame, area: Rect, catalog: &[GraphLabel]) {
@@ -430,6 +464,8 @@ fn shape(graph: &GraphLabel) -> String {
             "{name} b{} p{} w{}",
             graph.batch, graph.prefill, graph.tokens
         )
+    } else if graph.packed != 0 {
+        format!("{name} b{} w{} rows{}", graph.batch, graph.tokens, graph.packed)
     } else if graph.kind == GraphKind::Speculative {
         format!(
             "{name} b{} d{}",
@@ -484,6 +520,7 @@ mod tests {
                 batch: 1,
                 tokens: 1024,
                 prefill: 0,
+                packed: 0,
             },
             GraphLabel {
                 name: "speculative_4_6".into(),
@@ -491,6 +528,7 @@ mod tests {
                 batch: 4,
                 tokens: 6,
                 prefill: 0,
+                packed: 0,
             },
             GraphLabel {
                 name: "snapshot_1".into(),
@@ -498,6 +536,7 @@ mod tests {
                 batch: 1,
                 tokens: 1,
                 prefill: 0,
+                packed: 0,
             },
         ]
     }
@@ -507,8 +546,13 @@ mod tests {
         generations[0] = generation;
         GraphSample {
             at_ns,
+            fence: crate::cache::Fence(at_ns),
             graph,
             gpu_ns,
+            wall_ns: gpu_ns.unwrap_or(0),
+            queued: false,
+            selection: Default::default(),
+            credit_after_ns: 0.0,
             generations,
         }
     }

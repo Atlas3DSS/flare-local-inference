@@ -306,7 +306,24 @@ impl NativeModel {
             let span = asset
                 .payload
                 .ok_or_else(|| invalid("frontend asset lacks a payload"))?;
-            let value = serde_json::json!({ "path": root, "offset": archive.start + span.offset,
+            let (source, offset) = archive.source(&span)?;
+            #[cfg(unix)]
+            let asset_path = {
+                use std::os::fd::AsRawFd;
+                std::path::PathBuf::from(format!("/proc/self/fd/{}", source.file.as_raw_fd()))
+            };
+            #[cfg(windows)]
+            let asset_path = {
+                let name = archive.source_name(&span)?;
+                if name.is_empty() {
+                    root.to_owned()
+                } else {
+                    root.parent()
+                        .unwrap_or(std::path::Path::new("."))
+                        .join(name)
+                }
+            };
+            let value = serde_json::json!({ "path": asset_path, "offset": offset,
                 "nbytes": span.nbytes, "sha256": asset.sha256 });
             if assets.insert(asset.name, value).is_some() {
                 return Err(invalid("duplicate frontend asset"));
@@ -344,20 +361,19 @@ impl NativeModel {
                 "embedding row cache requires an embedding table catalog",
             ));
         }
-        let embedding_host_bytes =
-            if options.embedding_table_storage == Some(crate::engram::Storage::Ram) {
-                engram
-                    .iter()
-                    .flat_map(|(index, _)| &index.tables)
-                    .flat_map(|table| &table.planes)
-                    .try_fold(0u64, |bytes, plane| {
-                        bytes.checked_add(plane.nbytes as u64).ok_or_else(|| {
-                            invalid("resident embedding tables exceed the memory budget")
-                        })
-                    })?
-            } else {
-                options.embedding_table_cache_bytes
-            };
+        if options.embedding_table_resident_scales && engram.is_empty() {
+            return Err(invalid("resident embedding scales require an embedding table catalog"));
+        }
+        let ram = options.embedding_table_storage == Some(crate::engram::Storage::Ram);
+        let resident_bytes = engram.iter().flat_map(|(index, _)| &index.tables)
+            .flat_map(|table| table.planes.iter().enumerate())
+            .filter(|(ordinal, _)| ram || (options.embedding_table_resident_scales && *ordinal == 1))
+            .try_fold(0u64, |bytes, (_, plane)| {
+                bytes.checked_add(plane.resident_bytes()? as u64)
+                    .ok_or_else(|| invalid("resident embedding tables exceed the memory budget"))
+            })?;
+        let embedding_host_bytes = resident_bytes.checked_add(options.embedding_table_cache_bytes)
+            .ok_or_else(|| invalid("embedding tables and row cache exceed the memory budget"))?;
         let prepared: crate::model::PreparedContract =
             serde_json::from_value(server_config["model_contract"].clone())
                 .map_err(|error| invalid(format!("invalid prepared contract: {error}")))?;
@@ -490,14 +506,20 @@ impl NativeModel {
         // Windows direct reads can stall while any buffered handle remains open.
         // Keep every shard's write/delete exclusion through unbuffered guards;
         // the buffered startup readers close when loading returns.
-        let package_files = archive.files.values().map(|payload| {
-            #[cfg(windows)]
-            let file = std::sync::Arc::new(crate::os::direct_read_guard(&payload.file)
-                .map_err(|error| invalid(format!("retain read-only package: {error}")))?);
-            #[cfg(unix)]
-            let file = payload.file.clone();
-            Ok(file)
-        }).collect::<Result<Vec<_>>>()?;
+        let package_files = archive
+            .files
+            .values()
+            .map(|payload| {
+                #[cfg(windows)]
+                let file = std::sync::Arc::new(
+                    crate::os::direct_read_guard(&payload.file)
+                        .map_err(|error| invalid(format!("retain read-only package: {error}")))?,
+                );
+                #[cfg(unix)]
+                let file = payload.file.clone();
+                Ok(file)
+            })
+            .collect::<Result<Vec<_>>>()?;
         let mut model = Self {
             _package_files: package_files,
             ranks: Vec::new(),
@@ -640,6 +662,7 @@ impl NativeModel {
                         storage,
                         group_budget,
                         options.embedding_workers(),
+                        options.embedding_table_resident_scales,
                     )?;
                     for (delivery_rank, local) in ranks.into_iter().enumerate() {
                         bindings.push((local, shared.clone(), delivery_rank));
@@ -651,6 +674,7 @@ impl NativeModel {
                     .map(|(_, shared, rank)| (shared, rank))
                     .collect();
                 let label = match storage {
+                    crate::engram::Storage::Disk if options.embedding_table_resident_scales => "disk weights, RAM scales",
                     crate::engram::Storage::Disk => "disk",
                     crate::engram::Storage::Ram => "RAM",
                 };

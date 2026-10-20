@@ -334,6 +334,7 @@ pub(super) async fn generate(
         observation.include_usage,
         decoded.metadata,
     );
+    encoder.set_logprobs(decoded.request.options.logprobs, state.frontend.clone(), decoded.stream);
     encoder.set_tool_grammars(tool_grammars);
     encoder.set_continuous_usage(continuous_usage);
     let streaming = decoded.stream;
@@ -347,11 +348,10 @@ pub(super) async fn generate(
         let mut decoders: Vec<_> = configs
             .into_iter()
             .map(|config| {
-                output::Decoder::<crate::output::OutputPipeline>::new(
-                    &state.frontend,
-                    &state.model.config().eos_token_ids,
-                    config,
-                )
+                let mut decoder = output::Decoder::<crate::output::OutputPipeline>::new(
+                    &state.frontend, &state.model.config().eos_token_ids, config);
+                if decoded.request.options.logprobs.is_some() { decoder.track_logprobs(&state.frontend, protocol == Protocol::Responses); }
+                decoder
             })
             .collect();
         let mut raw_tokens = Vec::new();
@@ -415,6 +415,9 @@ pub(super) async fn generate(
             })
             .await;
             let result = match event {
+                GenerationEvent::LogprobToken(value) => decoders[index]
+                    .push_logprob(value)
+                    .and_then(|events| encoder.apply(index, events)),
                 GenerationEvent::Token(token) => decoders[index]
                     .push(token)
                     .and_then(|events| encoder.apply(index, events)),

@@ -1,6 +1,9 @@
 //! Adaptive local crops followed by a global view for the Step perception encoder.
 
-use super::{ImageGeometry, ImageLimits, ProcessedImages, RgbImage, check_input_extent, resize};
+use super::{
+    ImageGeometry, ImageLimits, ProcessedImages, RgbImage, check_image_patches,
+    check_input_extent, resize,
+};
 use crate::Result;
 
 pub(super) const MAX_VIEWS: usize = (65536 - 52 * 52) / (36 * 36) + 1;
@@ -68,7 +71,8 @@ pub(super) fn geometry(limits: ImageLimits, width: usize, height: usize) -> Resu
     }
     let views = p.nx * p.ny;
     let patches = views * 36 * 36 + 52 * 52;
-    if patches > limits.max_patches_per_image || views + 1 > MAX_VIEWS {
+    check_image_patches(limits, patches)?;
+    if views + 1 > MAX_VIEWS {
         return Err("image exceeds prepared Step crop capacity".into());
     }
     Ok(ImageGeometry {

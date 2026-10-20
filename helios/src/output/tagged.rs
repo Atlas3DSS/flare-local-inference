@@ -194,6 +194,8 @@ enum Mode {
 }
 
 pub struct TaggedOutput<D: ToolDialect> {
+    received: usize,
+    spans: Vec<Option<std::ops::Range<usize>>>,
     reasoning_enabled: bool,
     mode: Mode,
     structured: bool,
@@ -223,6 +225,8 @@ impl<D: ToolDialect> ModelOutput for TaggedOutput<D> {
         let tools = !config.tools.is_empty();
         let definitions: Arc<[Value]> = config.tools.into();
         Self {
+            received: 0,
+            spans: vec![],
             reasoning_enabled: true,
             mode: match config.start {
                 OutputStart::Content => Mode::Content,
@@ -262,7 +266,15 @@ impl<D: ToolDialect> ModelOutput for TaggedOutput<D> {
             tool_body_start: config.start == OutputStart::ToolBody,
         })
     }
+    fn content_spans(&self) -> Vec<Option<std::ops::Range<usize>>> {
+        self.spans.clone()
+    }
+    fn consumed_bytes(&self) -> usize {
+        // Nested reasoning/tool buffers cannot become content, even before their close marker.
+        self.received - self.buffer.len()
+    }
     fn push(&mut self, input: Input<'_>) -> Result<Vec<Event>> {
+        self.spans.clear();
         if let Input::Token(_) = input {
             return match self.mode {
                 Mode::Reasoning => self.reasoning.push(input).map(|p| p.events),
@@ -273,6 +285,7 @@ impl<D: ToolDialect> ModelOutput for TaggedOutput<D> {
         let Input::Text(text) = input else {
             unreachable!()
         };
+        self.received += text.len();
         self.buffer.push_str(text);
         let mut output = Vec::new();
         loop {
@@ -289,8 +302,10 @@ impl<D: ToolDialect> ModelOutput for TaggedOutput<D> {
             }
             match self.mode {
                 Mode::Verbatim => {
+                    let start = self.received - self.buffer.len();
                     let text = std::mem::take(&mut self.buffer);
                     if !text.is_empty() {
+                        self.spans.push(Some(start..start + text.len()));
                         output.push(Event::Content(text));
                     }
                     return Ok(output);
@@ -366,9 +381,11 @@ impl<D: ToolDialect> ModelOutput for TaggedOutput<D> {
                             .iter()
                             .any(|marker| self.buffer.find(marker).is_some_and(|start| start < at));
                             if !earlier {
+                                let start = self.received - self.buffer.len();
                                 let prefix: String = self.buffer.drain(..at).collect();
                                 self.buffer.drain(.."</think>".len());
                                 if !prefix.is_empty() {
+                                    self.spans.push(Some(start..start + prefix.len()));
                                     output.push(Event::Content(prefix));
                                 }
                                 continue;
@@ -408,6 +425,8 @@ impl<D: ToolDialect> ModelOutput for TaggedOutput<D> {
                             prefix
                         };
                         if !prefix.is_empty() {
+                            let start = self.received - self.buffer.len();
+                            self.spans.push(Some(start..start + prefix.len()));
                             output.push(Event::Content(prefix.to_owned()));
                         }
                         self.buffer.drain(
@@ -456,8 +475,10 @@ impl<D: ToolDialect> ModelOutput for TaggedOutput<D> {
                         {
                             hold = hold.max(partial_marker(&self.buffer, &[open, D::CLOSE]));
                         }
+                        let start = self.received - self.buffer.len();
                         let text: String = self.buffer.drain(..self.buffer.len() - hold).collect();
                         if !text.is_empty() {
+                            self.spans.push(Some(start..start + text.len()));
                             output.push(Event::Content(text));
                         }
                         return Ok(output);
@@ -480,8 +501,10 @@ impl<D: ToolDialect> ModelOutput for TaggedOutput<D> {
             Mode::Reasoning => output.extend(self.reasoning.finish(cause)?),
             Mode::Tool => output.extend(self.tool.as_mut().unwrap().finish(cause)?),
             _ => {
+                let start = self.received - self.buffer.len();
                 let text = std::mem::take(&mut self.buffer);
                 if !text.is_empty() {
+                    self.spans.push(Some(start..start + text.len()));
                     output.push(Event::Content(text));
                 }
             }

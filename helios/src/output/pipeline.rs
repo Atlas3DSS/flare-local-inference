@@ -156,6 +156,12 @@ impl ModelOutput for OutputPipeline {
     fn grammar_envelope(config: &Self::Config) -> Option<crate::grammar::OutputEnvelope> {
         OutputPipeline::grammar_envelope(config)
     }
+    fn content_spans(&self) -> Vec<Option<std::ops::Range<usize>>> {
+        dispatch!(self, parser => parser.content_spans())
+    }
+    fn consumed_bytes(&self) -> usize {
+        dispatch!(self, parser => parser.consumed_bytes())
+    }
     fn push(&mut self, input: Input<'_>) -> Result<Vec<Event>> {
         OutputPipeline::push(self, input)
     }

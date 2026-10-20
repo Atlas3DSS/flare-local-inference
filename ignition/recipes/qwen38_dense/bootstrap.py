@@ -8,6 +8,8 @@ from pathlib import Path
 
 import torch
 
+from ignition.components.completion import CompletionOutputs
+
 from ignition.components.capacity import batch_capacities, prefill_capacities, request_capacity
 from ignition.components.paged_batch import BatchInputs, Metadata, PreparedBatch
 from ignition.components.paged_generation import PreparedGeneration
@@ -91,7 +93,7 @@ def prepare(snapshot, config, *, progress=None, package_storage):
         commands = StateCommands.allocate(device, capacity=slots)
         frame = torch.zeros(1, dtype=torch.int32, device=device)
         sequence = torch.zeros(1, dtype=torch.int64, device=device)
-        records = torch.zeros((2, slots, 8), dtype=torch.int64, device=device)
+        completion = CompletionOutputs.allocate((2, slots, 8), device=device)
         coordinator = None
         identity = hashlib.sha256(json.dumps({
             "config": weights.config.text, "headers": [s.header_sha256 for s in manifest.shards],
@@ -113,7 +115,7 @@ def prepare(snapshot, config, *, progress=None, package_storage):
             state_pool=pool.backing, memory_capacity=pool.memory_capacity,
             request_pending_token=requests.pending_token,
             sampling_grammar_mask=requests.grammar_mask, frame_index=frame,
-            submission_sequence=sequence, completion_records=records)
+            submission_sequence=sequence, **completion.buffers())
     forwards, signatures, metadata = {}, {}, {}
     prefill_sizes, batch_sizes = prefill_capacities(config.prefill_chunk_size), batch_capacities(config.max_active)
     with phase(progress, "Construct graph catalog", total=len(prefill_sizes) + 5 * len(batch_sizes)) as stage:
@@ -131,20 +133,20 @@ def prepare(snapshot, config, *, progress=None, package_storage):
                 decoder = PreparedDecoder(weights, scratch, m, pool, mode=mode,
                     vocabulary_runtime=None, coordinator=coordinator, session=session, name=name, workspace=arena)
                 batch = PreparedBatch(inputs, requests, m, mode=mode, shard=weights.shard, pool=pool)
-                forward = PreparedGeneration(decoder, batch, records, frame, sequence, runtime=None,
+                forward = PreparedGeneration(decoder, batch, completion, frame, sequence, runtime=None,
                     coordinator=coordinator, session=session, name=name + ".generation", workspace=arena)
                 add(name, forward, mode, rows, capacity if mode == "prefill" else 1,
                     (*inputs.buffers(), "sampling_grammar_mask"))
         row_inputs = ("request_state_rows", "row_slot_ids", "row_generations", "live_rows")
         for capacity in reversed(batch_sizes):
             name = f"resume{capacity}"
-            forward = PreparedResume(weights, requests, pool, inputs, records, frame, sequence,
+            forward = PreparedResume(weights, requests, pool, inputs, completion, frame, sequence,
                 rows=capacity, runtime=None, vocabulary_runtime=None, coordinator=coordinator,
                 session=session, name=name, activation_mode="auto")
             add(name, forward, "resume", capacity, 1, (*row_inputs, "sampling_grammar_mask"))
             for mode in ("init", "restore", "snapshot"):
                 name = f"{mode}{capacity}"
-                forward = PreparedMaintenance(mode, requests, pool, commands, inputs, records, frame, sequence,
+                forward = PreparedMaintenance(mode, requests, pool, commands, inputs, completion, frame, sequence,
                     runtime=None, coordinator=coordinator, session=session, name=name, capacity=capacity,
                     admission_buffers=admission, draft_state=False)
                 fields = row_inputs if mode == "snapshot" else ("request_state_rows", *admission.__dataclass_fields__)
@@ -182,11 +184,11 @@ def prepare(snapshot, config, *, progress=None, package_storage):
         preparation_state_rows=int(pool.memory_capacity[0].item()),
         preparation_state_bytes=int(pool.memory_capacity[0].item()) * layout.row_bytes,
         pages=pages, page_bytes=page_bytes(weights.config), page_tokens=PAGE_TOKENS,
-        kv_bytes=pages * page_bytes(weights.config), operator_scratch_bytes=arena.nbytes, graphs=len(graphs),
+        kv_bytes=pages * page_bytes(weights.config), completion_output_bytes=completion.nbytes, operator_scratch_bytes=arena.nbytes, graphs=len(graphs),
         prefill_capacities=prefill_sizes, free_device_bytes=free, total_device_bytes=total,
         headroom_bytes=config.headroom_bytes, tuning=tuning, compiled_decoder=config.compile_decoder)
     return PreparedModel(device=config.device, graphs=graphs, buffers=buffers, signatures=signatures,
         max_active=config.max_active, session=session, server_config=server_config, memory_report=memory,
-        export_zero_ranges=storage_ranges([prefill_storage, decode_storage, arena.tensor, metadata]),
+        export_zero_ranges=(*storage_ranges([prefill_storage, decode_storage, arena.tensor, metadata]), *completion.zero_ranges()),
         resources=(weights, pool, requests, inputs, admission, commands, arena, forwards, prefill_storage,
                    decode_storage, metadata, compiled, stream, graph_pool, session, coordinator))

@@ -112,20 +112,33 @@ Re-signing verifies the development signatures and every executable and supporti
 resource, decrypts executable resources, and encrypts them under the production
 identity with a fresh package ID. Weight bytes and prepared execution contracts
 are preserved. Stored-data hashes are checked against the development signatures
-while copying, before the primary file is published. `--shard-size SIZE` overrides
-`[publishing] shard_size` (default `64G`); `0` produces one file. Re-signing can
-repack either layout, preserving whole resources and verifying the original
-signed parts and padding against the bytes copied. All metadata, encrypted
-resources, and supporting assets remain in the primary. Invalid packages fail without
-publishing an output; existing destinations are never overwritten.
+while resolving payloads, before the metadata-only primary is published.
+`--shard-size SIZE` overrides `[publishing] shard_size` (default `64G`), a hard
+payload-file limit of at most 64 GiB. Re-signing accepts monolithic, numbered-shard,
+and snapshot sources and emits a snapshot with content-addressed payload blobs.
+The signed logical resources remain whole. Adjacent executable and supporting
+resources for one rank share bounded payload blobs; different ranks retain
+separate blobs for selective distribution. Weight resources keep independent
+blob identities so graph changes do not duplicate weights. Stored-data blobs
+already in the package cache are hardlinked; executable blobs change with the
+signing identity. An unchanged snapshot weight already linked into the cache
+is hashed once for source verification and blob identity, without redundant
+cache or destination-link reads.
+Invalid packages fail without publishing a primary, and existing destinations
+are never overwritten.
 
 No checkpoint reload, compilation, graph capture, or GPU access is required.
-The operation reads and copies the entire package, so allow space for another
-package plus temporary executable resources. Temporary plaintext executable files
-reside in a private directory beside the destination and are removed when the
-command exits normally or raises an error. A forced kill can leave that directory
-or unreferenced companion files or an incomplete hidden output file; remove those after confirming no signing
-process is using them. The source package remains intact.
+The operation reads all source payloads to verify them and reports GiB read and
+reused during stored-data verification. Large packages still require a complete
+weight read. Promoting a monolithic or numbered-shard package also writes weight
+blobs that are absent from the cache. Signing needs disk space for
+uncached blobs plus temporary executable resources. Temporary plaintext executable
+files reside in a private directory beside the destination and are removed when
+the command exits normally or raises an error. A forced kill can leave that
+directory; remove it only after confirming no signing process is using it.
+Cached blobs and payload links can remain after failed publication and are reusable.
+The source package remains intact. See [package snapshots](cli-design.md#package-snapshots)
+for conversion that preserves an existing signature without a private key.
 
 Rebuild Flare after changing embedded public profiles. A separately built or
 installed executable retains the profiles it was built with.

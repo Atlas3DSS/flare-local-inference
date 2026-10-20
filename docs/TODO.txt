@@ -1,6 +1,14 @@
+[ ] Exercise per-message checkpoint restore and prefill graph selection through
+    Qwen, GLM, DeepSeek, MiMo, Step, and Nemotron services. See
+    core-design.md#exact-endpoint-capture and scheduling-runtime-design.md.
+
+[ ] Investigate Step 5 seeded request repeatability: repeated completions with
+    seed 119 and unchanged sampling defaults produce different text using
+    step5-tp4-mtp3-c16-fp8kv-signed.safetensors, including prompt-cache hits.
+
 [ ] Orbit: mDNS discovery, the fabric check with a ring-order proposal,
     preparation through agents (PREPARE, `flare orbit prepare`), and
-    reconciliation (`flare orbit apply`). See orbit.md#unimplemented-parts.
+    reconciliation (`flare orbit apply`). See orbit-proposals.md.
 
 [ ] Restore preparation/serving RoCE proxy parity once FlashInfer main includes
     the sequence-limit guard and protocol verification additions.
@@ -55,3 +63,9 @@
 
 [ ] Port Python runtime-package export's positional I/O to Windows;
     tests/preparation/test_runtime_package.py has two existing os.pread failures.
+
+[ ] Qualify retained graph costs and funded remeasurement in live Helios:
+    idle/resume, concurrent decode latency, cost-change recovery, and split
+    proposal/verification transitions. Use per-fence scheduler traces and request
+    latency measurements; measure GPU replay, queueing, and host planning separately.
+    See scheduling-runtime-design.md#funded-timing-refresh.

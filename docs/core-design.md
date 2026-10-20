@@ -89,7 +89,8 @@ vLLM's device, backend, model, and distributed-execution breadth creates a
 large compatibility matrix. Changes to cache layouts, compilation, offload,
 and scheduling must coexist across those combinations. Flare limits that
 obligation to selected model recipes, FlashInfer/b12x, NVIDIA SM120/SM121,
-and one host. It can use one prepared-execution contract throughout the
+and supported single-host and cross-node tensor-parallel configurations.
+It can use one prepared-execution contract throughout the
 runtime because backend portability and general vLLM feature parity are
 outside its scope.
 
@@ -223,12 +224,12 @@ available byte and unit of bandwidth, with predictable response times.
 
 [vLLM's broad model, hardware, and distributed-serving support](https://docs.vllm.ai/en/latest/design/arch_overview/)
 is valuable and expensive to reproduce. Flare chooses NVIDIA SM120/SM121,
-FlashInfer/b12x, selected model recipes, one host, and interactive local
-workloads. It does not aim for vLLM's feature matrix. Cross-node execution,
-interchangeable backends, and general fleet orchestration would enlarge the
-compatibility and validation burden without advancing that target. The fork's
-RoCE integration, for example, remains useful to deployments outside Flare's
-single-host scope; owning a component does not require adopting every use of it.
+FlashInfer/b12x, selected model recipes, and interactive workloads on one host
+or supported cross-node tensor-parallel groups. [Multi-host serving](multi-host.md)
+uses prepared RoCEnante collectives; [Orbit](orbit.md) manages the hosts,
+preparation, packages, and rank processes needed for those deployments.
+Interchangeable backends and general-purpose cluster orchestration remain
+outside that serving scope. Flare does not aim for vLLM's feature matrix.
 
 Within this scope, the priorities are concrete. A tool result should append
 to an existing conversation without recomputing its history. Branches should
@@ -350,10 +351,12 @@ same boundary; violations must be resolved before committing.
   request values override defaults. Runtime metadata contains typed sampling,
   EOS, tokenizer, and image settings, with no raw configuration-file assets.
 
-Local serving includes cancellation, streaming, tool-call presentation,
-structured output, prefix reuse, and speculative decoding. Cross-node
-parallelism, disaggregated prefill, adapters, pooling models, and device
-portability are outside this design.
+Serving includes cancellation, streaming, tool-call presentation, structured
+output, prefix reuse, and speculative decoding on one host or supported
+cross-node tensor-parallel groups. Rank coordination and transport preserve
+the same prepared-graph execution and shared runtime policy boundaries.
+Disaggregated prefill, adapters, pooling models, and device portability are
+outside this design.
 
 ## 1. Target and execution contract
 
@@ -426,7 +429,7 @@ For Qwen at concurrency four:
 | Context limit | 262,144 tokens |
 | Main KV / GDN recurrence | BF16 / FP32 |
 | PLE delivery | Compact GPU rows supplied by Helios from disk or RAM |
-| Checkpoint endpoints | Rendered instruction, final prompt, and terminal consumed prefix |
+| Checkpoint endpoints | Rendered message endpoints, final prompt, and terminal consumed prefix |
 | MTP draft limit | Five drafts plus the pending input |
 | Speculative scheduling | One round in flight |
 | Vision | Prepared image capacities; video validation remains separate |
@@ -1053,7 +1056,7 @@ channel closing without a terminal event reports an error.
 
 The native model thread uses a private `Worker` for admission, completion,
 publication, retirement, planning, and submission. Every completion is validated
-before scheduler mutation. Exact instruction and prompt checkpoints become
+before scheduler mutation. Exact message and prompt checkpoints become
 visible atomically in scheduler completion; stopped requests retire before another
 completion is processed. Submission reserves scheduler ownership before model
 input packing and graph enqueue. The executor remains outside the worker's
@@ -1128,7 +1131,7 @@ Prepare these operations:
 - **Prefill:** metadata preparation, embedding, model forward, cache writes,
   state updates, and optional final-token sampling. Prompt penalty counts are
   initialized once at admission. The scheduler clips a chunk at a required
-  instruction or prompt endpoint. GDN writes its final live recurrent state at
+  message or prompt endpoint. GDN writes its final live recurrent state at
   that exact length; internal aligned checkpoint export is disabled.
 - **Decode:** gather pending token from device request state, forward, sample,
   update request state including the penalty histogram and PLE n-gram history,
@@ -1240,7 +1243,10 @@ against the model card for the default serving mode. `generation_config.json`
 and `config.json` do not select sampling policy. Unspecified filters are disabled
 and penalties are neutral. Complete defaults are stored in the package's
 `DefaultSamplingParameters` protobuf message; missing or invalid defaults reject
-loading. Explicit request parameters take precedence. Qwen's default thinking-mode
+loading. Optional inclusive ranges in that message bound request distribution
+parameters; values outside those ranges clamp to the nearest endpoint. An absent
+range fixes the parameter at its declared default, including for packages without
+range metadata. Seed remains request-controlled. Qwen's default thinking-mode
 recommendation is temperature 1.0, top-k 20, and top-p 0.95.
 
 ### Scheduling and output
@@ -1269,10 +1275,10 @@ trimming must not mutate cached model history.
 
 ## 4. Prefix checkpoints and complete model state
 
-### Immutable instruction, prompt, and terminal cache
+### Immutable message, prompt, and terminal cache
 
 The cache retains immutable, content-addressed checkpoints at the rendered
-instruction boundary, final prompt boundary, and terminal consumed boundary.
+endpoints of complete messages, final prompt boundary, and terminal consumed boundary.
 Equal endpoints share one checkpoint. Parent-linked complete-page chains,
 ancestor pinning, and eviction preserve ownership across active branches.
 
@@ -1345,17 +1351,21 @@ Only consumed history can define a checkpoint.
 
 ### Exact endpoint capture
 
-The model-owned Qwen boundary helper renders leading system/developer instructions
-with an empty user continuation, then requires the resulting token IDs to be an
-exact prefix of the admitted prompt. Tools and reasoning defaults can synthesize
-instructions without an explicit system-role message. Shared template framing is
-part of the endpoint; a user header alone is not an instruction checkpoint. The
-boundary is not rounded to a token group or KV page.
+The shared frontend renders each message prefix without a generation header or
+assistant continuation. It accepts every nonempty rendered token sequence that
+is a strict prefix of the complete prompt, irrespective of message roles. A
+prefix may contain a template-generated preamble or end after any system,
+developer, user, assistant, or tool message. Templates can reject an incomplete
+conversation after emitting a complete prefix; only emitted tokens matching the
+validated full prompt are eligible. Context-dependent rendering that changes
+previous tokens cannot create a checkpoint for that prefix. Equal endpoints are
+deduplicated. Image placeholder expansion shifts endpoints to their positions in
+the prepared token stream; no endpoint may split an atomic image span.
 
-Admission reserves destinations for all distinct required instruction, prompt,
-and terminal roles before model work. Completed cache hits satisfy already-covered
-roles. Resource pressure triggers normal cache eviction or admission rejection;
-it cannot silently omit a required checkpoint.
+Endpoints are not rounded to token groups or KV pages. The scheduler obtains a
+snapshot destination when it reaches an endpoint, using normal cache eviction.
+If all snapshot slots are pinned, inference continues without publishing that
+checkpoint. The number of messages does not enlarge the prepared snapshot pool.
 
 At each required prefill endpoint, the scheduler drains submitted work, snapshots
 the exact live state, and publishes only after the copy fence completes. The
@@ -1367,8 +1377,8 @@ internal GDN checkpoint exports, or boundary-label fields participate in this pa
 
 The scheduler and prefix cache use the model's declared physical token capacity
 per page. Qwen uses 64 tokens, GLM uses 256, and DeepSeek uses 128. Prefix identity uses fixed 64-token
-hash blocks independently of physical storage. CPU lifecycle tests cover both
-page geometries, exact system/prompt/terminal checkpoints, and branching restores
+hash blocks independently of physical storage. CPU lifecycle tests cover multiple
+page geometries, exact message/prompt/terminal checkpoints, and branching restores
 with private partial pages.
 
 Complete target pages are immutable and shared. When `S % page_tokens != 0`, snapshot
@@ -1514,8 +1524,12 @@ and speculative grammar advancement apply to the complete composed grammar.
 `tool_choice=required` adds a prompt
 instruction and validates that the model produced a completed call to a declared
 tool. Generation uses ordinary sampling; an unsatisfied requirement fails the
-response. `tool_choice=none` removes tools from the template. Named tool selection
-and strict function schemas are unsupported. See [the API contracts](api.md) for
+response. Named tool selection filters the available definitions to the selected
+tool without adding instructions or decoding constraints. Output validation
+requires a completed call to that tool and rejects other tool names; presentation
+omits ordinary answer text while preserving reasoning and tool arguments.
+`tool_choice=none` removes tools from the template. Strict function schemas are
+unsupported. See [the API contracts](api.md) for
 protocol mappings and streamed errors.
 
 Bounded top-k sampling and compact recurrent commit require separate component
