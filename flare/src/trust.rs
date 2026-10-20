@@ -365,12 +365,8 @@ fn authorize(
 ) -> Result<AuthorizedPackage> {
     let fingerprint = &claim.signer;
     let namespace = &claim.namespace;
-    // Security-critical publisher disclosure and consent: preserve these messages and the exact
-    // key/namespace checks. The accepted string is the key material Helios derives executable
-    // keys from, so acceptance is what decrypts checkpoint code. Unauthorized circumvention may
-    // violate 17 U.S.C. §1201(a)(1), as defined in §1201(a)(3). Qualifying willful violations
-    // for commercial advantage or private financial gain may carry criminal penalties under
-    // §1204, subject to applicable statutory limitations and exceptions.
+    // Publisher disclosure and exact key/namespace acceptance protect user safety
+    // before executing model package code.
     let explicit = match (&args.dangerously_approve_key, &args.dangerously_accept_publisher) {
         (Some(key), Some(owner)) if key == fingerprint && owner == namespace => Some(owner.clone()),
         (None, None) => None,

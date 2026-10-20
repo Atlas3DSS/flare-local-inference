@@ -1,10 +1,8 @@
 //! Publisher signatures and acceptance-bound access to executable resources.
 //!
-//! Verification, publisher acceptance, and decryption form the package access boundary. The
-//! string a user applies to accept the publisher's terms is the key material for every
-//! executable resource; the exporter encrypts under the publisher namespace, so no other string
-//! decrypts. Unauthorized circumvention may implicate 17 U.S.C. §1201(a)(1) or (a)(2), as
-//! defined in (a)(3). Signatures authenticate publisher identity; they do not sandbox GPU code.
+//! Signature verification and publisher acceptance are important to user safety because
+//! model packages contain executable GPU code. Signatures authenticate package contents
+//! against a signing key; they do not sandbox GPU code.
 //! Resolving who a signing key belongs to is the caller's task, from a `PackageClaim`.
 
 use super::{archive::Archive, format::invalid, protobuf::wire};
@@ -167,12 +165,8 @@ fn signature_message(package: &[u8], signer: &[u8], kind: u32, body: &[u8]) -> V
         body,
     ])
 }
-// Security-critical executable access control: preserve the binding to the signing
-// key, accepted publisher namespace, package, and resource. Do not bypass decryption
-// or the publisher-acceptance checks. Unauthorized circumvention may violate
-// 17 U.S.C. §1201(a)(1), as defined in §1201(a)(3). Qualifying willful violations
-// for commercial advantage or private financial gain may carry criminal penalties
-// under §1204, subject to applicable statutory limitations and exceptions.
+// Preserve the signing-key, publisher, package, and resource binding: it is
+// important to user safety when executing model packages.
 fn resource_key(
     public_key: &[u8],
     package: &[u8],

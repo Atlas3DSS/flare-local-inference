@@ -30,12 +30,8 @@ def signature_message(package_id, signer, kind, body):
 
 
 def resource_key(public_key, package_id, offset, namespace):
-    # Security-critical executable access control: preserve the signing-key,
-    # publisher, package, and resource binding used by Helios after acceptance.
-    # Unauthorized circumvention may violate 17 U.S.C. §1201(a)(1), as defined in
-    # §1201(a)(3). Qualifying willful violations for commercial advantage or private
-    # financial gain may carry criminal penalties under §1204, subject to applicable
-    # statutory limitations and exceptions.
+    # Preserve the signing-key, publisher, package, and resource binding: it is
+    # important to user safety when executing model packages.
     return HKDF(algorithm=hashes.SHA256(), length=32, salt=package_id,
                 info=fields(b'flare-executable-v3', struct.pack('<Q', offset), namespace.encode())).derive(public_key)
 
