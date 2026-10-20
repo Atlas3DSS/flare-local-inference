@@ -702,8 +702,16 @@ impl RequestScheduler {
         let mut count = 0;
         for slot in bits(mask) {
             let r = self.slots[slot].request.as_ref().unwrap();
-            if kind == GraphKind::Prefill && self.prefill_work(r, capacity) == 0 {
-                continue;
+            if kind == GraphKind::Prefill {
+                let work = self.prefill_work(r, capacity);
+                // Explore larger graphs only when they can consume additional tokens.
+                if work == 0
+                    || (duration_ns == 0 && self.prefill_catalog.iter()
+                        .take_while(|&&smaller| smaller < capacity)
+                        .any(|&smaller| self.prefill_work(r, smaller) == work))
+                {
+                    continue;
+                }
             }
             if kind == GraphKind::Vision && capacity < r.vision_patches[0] {
                 continue;
@@ -871,6 +879,12 @@ impl RequestScheduler {
                 };
                 match self.request_kind(r) {
                     Some(GraphKind::Prefill) if self.prefill_work(r, prefill) > 0 => {
+                        if duration_ns == 0 && self.mixed_catalog.iter().any(|&(b, w, smaller)| {
+                            b == batch && w == width && smaller < prefill
+                                && self.prefill_work(r, smaller) == self.prefill_work(r, prefill)
+                        }) {
+                            continue;
+                        }
                         let value = self.lane_value(
                             r,
                             GraphKind::Prefill,
@@ -893,6 +907,13 @@ impl RequestScheduler {
                 }
             }
             for prompt in std::iter::once(None).chain(prompt.map(Some)) {
+                if prompt.is_none() && duration_ns == 0
+                    && self.mixed_catalog.iter().any(|&(b, w, smaller)| {
+                        b == batch && w == width && smaller < prefill
+                    })
+                {
+                    continue;
+                }
                 let mut mask = best_cohort::<REQUEST_LANES>(
                     &decoders[..count],
                     batch - usize::from(prompt.is_some()),

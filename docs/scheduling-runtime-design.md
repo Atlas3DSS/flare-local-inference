@@ -235,6 +235,10 @@ queueing, input staging, polling, and publication delays do not replace GPU time
 Missing or zero intervals neither change a cost nor refresh its expiry. Expired
 costs are also excluded from service-rate normalization.
 
+Prefill exploration excludes a larger unmeasured graph when a smaller prepared
+capacity consumes the same tokens up to the next message or prompt endpoint.
+Measured graphs remain eligible according to their observed costs.
+
 An indeterminate candidate wins over a determinate candidate, then competes by
 expected useful value. Equal values prefer shorter known time, less recently
 used requests, and smaller physical padding. Unknown graphs require an empty

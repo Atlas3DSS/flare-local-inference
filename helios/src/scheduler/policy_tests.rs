@@ -311,6 +311,23 @@ fn atomic_prefill_respects_spans_without_a_duration_cap() {
 }
 
 #[test]
+fn short_prefill_does_not_explore_padding_after_the_smallest_shape_is_measured() {
+    let mut s = cold_engine(1, false);
+    s.prefill_graphs(&[64, 128, 512]).unwrap();
+    let h = add(&mut s, 1, 130, 32);
+    s.request_mut(h).unwrap().message_boundaries = vec![17, 82];
+    assert_eq!(measured_step(&mut s, MS / 10, 0).kind, GraphKind::Init);
+    let first = measured_step(&mut s, MS, 0);
+    assert_eq!((first.token_capacity, first.lanes[0].tokens), (64, 17));
+    assert_eq!(measured_step(&mut s, MS / 10, 0).kind, GraphKind::Snapshot);
+    let second = measured_step(&mut s, 2 * MS, 0);
+    assert_eq!((second.token_capacity, second.lanes[0].tokens), (128, 65));
+    assert_eq!(measured_step(&mut s, MS / 10, 0).kind, GraphKind::Snapshot);
+    let tail = s.plan().unwrap();
+    assert_eq!((tail.token_capacity, tail.lanes[0].tokens), (64, 48));
+}
+
+#[test]
 fn indeterminate_and_equal_costs_naturally_choose_full_useful_prefill() {
     for known in [false, true] {
         let mut s = cold_engine(1, false);
@@ -1629,6 +1646,23 @@ fn initialize(s: &mut RequestScheduler, handle: RequestHandle) {
     let fence = Fence(s.submitted.0 + 1);
     s.commit(&plan, fence).unwrap();
     complete(s, &plan, fence, 0, true);
+}
+
+#[test]
+fn mixed_prefill_exploration_requires_additional_useful_tokens() {
+    for prompt_tokens in [0, 17, 512] {
+        let mut s = mixed_engine(2, false, &[(2, 1, 64, MS), (2, 1, 512, 0)]);
+        throughput_only(&mut s);
+        let decoder = add(&mut s, 1, 64, 1024);
+        ready(&mut s, &[decoder]);
+        if prompt_tokens > 0 {
+            let prompt = add(&mut s, 2, prompt_tokens, 128);
+            initialize(&mut s, prompt);
+        }
+        let plan = s.plan().unwrap();
+        assert_eq!(plan.kind, GraphKind::Mixed);
+        assert_eq!(plan.prefill_capacity(), if prompt_tokens > 64 { 512 } else { 64 });
+    }
 }
 
 #[test]
