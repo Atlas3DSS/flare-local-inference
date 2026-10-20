@@ -186,7 +186,7 @@ impl Fixture {
                     tokens,
                     message_boundaries: vec![],
                     data,
-                    images: None,
+                    conditioned_inputs: vec![],
                     conditioning: vec![],
                     sampling: SamplingParameters::default(),
                     max_new_tokens: limit,
@@ -219,7 +219,10 @@ impl Fixture {
 
 #[test]
 fn image_admission_queues_excess_images_and_admits_text() {
-    use crate::frontend::images::{ImageGeometry, ProcessedImages};
+    use crate::frontend::images::{
+        ImageDescription, ImageGeometry, ImageInput, ImageLimits, ImageProcessor, ImageSettings,
+        ImageSource, PreparedImageInput, RgbImage,
+    };
     let mut fixture = Fixture::new();
     fixture.config.contract.vision = crate::model::VisionCapabilities {
         feature_slots: 1,
@@ -235,20 +238,31 @@ fn image_admission_queues_excess_images_and_admits_text() {
     let mut worker = fixture.worker(receiver);
     let image = || {
         let (mut incoming, generation) = fixture.incoming(vec![0, 1], 1);
-        incoming.prompt.images = Some(ProcessedImages {
-            pixel_values: vec![],
-            geometry: vec![ImageGeometry {
-                height: 32,
-                width: 32,
-                grid_thw: [1, 16, 16],
-                patches: 256,
-                tokens: 64,
-            }],
-            position_ids: vec![],
-            interpolation_indices: vec![],
-            interpolation_weights: vec![],
-            cu_seqlens: vec![0, 256],
-        });
+        let geometry = ImageGeometry {
+            height: 32,
+            width: 32,
+            grid_thw: [1, 16, 16],
+            patches: 256,
+            tokens: 64,
+        };
+        incoming.prompt.conditioned_inputs = vec![PreparedImageInput::new(
+            ImageInput {
+                description: ImageDescription {
+                    identity: [7; 32],
+                    width: 32,
+                    height: 32,
+                    geometry,
+                },
+                source: ImageSource::Decoded(Arc::new(
+                    RgbImage::new(32, 32, vec![0; 32 * 32 * 3]).unwrap(),
+                )),
+            },
+            0..2,
+            0..64,
+            Arc::new(
+                ImageProcessor::load(ImageSettings::Moonvit {}, ImageLimits::default()).unwrap(),
+            ),
+        )];
         (incoming, generation)
     };
     let (first, first_generation) = image();
@@ -266,7 +280,7 @@ fn image_admission_queues_excess_images_and_admits_text() {
             .active
             .iter()
             .flatten()
-            .any(|r| r.incoming.prompt.images.is_none())
+            .any(|r| r.incoming.prompt.conditioned_inputs.is_empty())
     );
     assert!(!worker.scheduler.has_available_image_slot());
     first_generation.cancelled.store(true, Ordering::Release);
@@ -1323,8 +1337,8 @@ fn failed_restores_readmit_the_request_without_the_host_store() {
                 });
             assert!(worker.service_store().unwrap());
             assert!(worker.active[0].is_none());
-            assert_eq!(worker.pending.len(), 1);
-            assert!(!worker.pending[0].host_lookup);
+            assert_eq!(worker.parked.len(), 1);
+            assert!(!worker.parked[0].0.host_lookup);
             assert_eq!(worker.admit().unwrap(), ControlFlow::Continue(true));
         }
         let handle = worker.active[0].as_ref().unwrap().request;
@@ -1376,6 +1390,7 @@ fn group_runtime(
             shutdown: Mutex::new(None),
             finished: Arc::new((Mutex::new(false), Condvar::new())),
             metrics: fixture.metrics.clone(),
+            input_store: None,
         },
         receiver,
     )
@@ -1569,7 +1584,7 @@ fn text_preemption_restores_or_recomputes_every_attention_contract() {
 }
 
 #[test]
-fn text_admission_waits_for_pages_and_conditioned_requests_reserve_their_limit() {
+fn text_and_conditioned_admission_reserve_prompt_and_initial_output_pages() {
     let mut fixture = Fixture::new();
     fixture.config.prepared_sequence_tokens = 2048;
     fixture.config.limits.max_sequence_tokens = 2048;
@@ -1599,19 +1614,14 @@ fn text_admission_waits_for_pages_and_conditioned_requests_reserve_their_limit()
     sender.send(vec![conditioned]).unwrap();
     let mut worker = fixture.worker(receiver);
     assert_eq!(worker.admit().unwrap(), ControlFlow::Continue(true));
-    assert!(worker.active.iter().all(Option::is_none));
-    assert!(matches!(
-        generation.events.try_recv().unwrap(),
-        GenerationEvent::AdmissionRejected(Error::Admission(AdmissionError::Context(_)))
-    ));
-    assert!(matches!(
-        generation.admission.try_recv().unwrap(),
-        Err(Error::Admission(AdmissionError::Context(_)))
-    ));
+    assert_eq!(worker.active.iter().flatten().count(), 1);
+    assert_eq!(worker.scheduler.free_page_count(), 2);
+    assert!(generation.events.try_recv().is_err());
+    assert!(generation.admission.try_recv().unwrap().is_ok());
 }
 
 #[test]
-fn full_reservations_wait_for_capacity_without_blocking_smaller_requests() {
+fn prompt_reservations_wait_for_capacity_without_blocking_smaller_requests() {
     for page_tokens in [64, 128, 256] {
         let mut fixture = Fixture::new();
         fixture.config.contract.cache.page_tokens = page_tokens;
@@ -1621,7 +1631,7 @@ fn full_reservations_wait_for_capacity_without_blocking_smaller_requests() {
         let (sender, receiver) = mpsc::channel();
         let (first, mut first_generation) = fixture.incoming(vec![0; 60], 1024);
         let (mut waiting, mut waiting_generation) =
-            fixture.incoming(vec![1; 60], (page_tokens * 3 - 60) as u32);
+            fixture.incoming(vec![1; page_tokens * 2 - 1], (page_tokens * 2) as u32);
         waiting.prompt.conditioning.push(ConditioningEvent {
             position: 0,
             identity: [3; 32],
@@ -1701,6 +1711,7 @@ fn http_state(
         })),
         finished: Arc::new((Mutex::new(true), Condvar::new())),
         metrics: fixture.metrics,
+        input_store: None,
     });
     Arc::new(HttpState {
         model,
@@ -1902,4 +1913,281 @@ async fn metrics_route_serves_prometheus_or_json_without_the_api_key() {
     assert_eq!(get("/health", None).await.unwrap().0, 200);
     assert_eq!(get("/v1/models", None).await.unwrap().0, 401);
     server.abort();
+}
+
+fn described_image(
+    span: std::ops::Range<usize>,
+    features: std::ops::Range<usize>,
+) -> crate::frontend::images::PreparedImageInput {
+    use crate::frontend::images::{
+        ImageDescription, ImageEncoding, ImageGeometry, ImageInput, ImageLimits, ImageProcessor,
+        ImageSettings, PreparedImageInput,
+    };
+    let geometry = ImageGeometry {
+        height: 112,
+        width: 112,
+        grid_thw: [1, 8, 8],
+        patches: 64,
+        tokens: 16,
+    };
+    let processor = Arc::new(
+        ImageProcessor::load(ImageSettings::Moonvit {}, ImageLimits::default()).unwrap(),
+    );
+    PreparedImageInput::new(
+        ImageInput {
+            description: ImageDescription {
+                identity: [span.start as u8; 32],
+                width: 112,
+                height: 112,
+                geometry,
+            },
+            source: processor.encoded_source(
+                ImageEncoding::Png,
+                Arc::from(&b"invalid PNG must stay unprocessed on a prefix hit"[..]),
+                None,
+            ),
+        },
+        span,
+        features,
+        processor,
+    )
+}
+
+#[test]
+fn host_prefix_selects_whole_required_images_and_compacts_feature_indices() {
+    for (consumed, expected) in [(18, 2), (26, 1), (55, 1), (56, 0), (100, 0)] {
+        let mut fixture = Fixture::new();
+        fixture.config.contract.vision = crate::model::VisionCapabilities {
+            feature_slots: 1,
+            features_per_request: 64,
+            max_images: 4,
+            patches_per_feature: 4,
+            patch_capacities: vec![256],
+        };
+        fixture.config.contract.frontend =
+            serde_json::from_str::<crate::model::contract::PreparedContract>(include_str!(
+                "../../../tests/support/contracts/qwen38.json"
+            ))
+            .unwrap()
+            .frontend;
+        let (sender, receiver) = mpsc::channel();
+        let (mut incoming, _generation) = fixture.incoming(vec![0; 100], 4);
+        incoming.prompt.conditioned_inputs = vec![
+            described_image(10..26, 0..16),
+            described_image(40..56, 16..32),
+        ];
+        let canonical = incoming.prompt.data.vision_token_indices.clone();
+        let mut history = crate::cache::PrefixHistory::new(fixture.config.identity);
+        history.append(&incoming.prompt.tokens, &[]).unwrap();
+        sender.send(vec![incoming]).unwrap();
+        let mut worker = fixture.worker(receiver);
+        if expected == 0 {
+            let occupied = worker
+                .scheduler
+                .admit(RequestSpec {
+                    prompt: vec![1; 2],
+                    message_boundaries: vec![],
+                    conditioning: vec![],
+                    max_new_tokens: 1,
+                    grammar_constrained: false,
+                    host_stops: false,
+                    growable_output: true,
+                })
+                .unwrap();
+            worker.scheduler.set_vision_images(occupied, &[64]).unwrap();
+            assert!(!worker.scheduler.has_available_image_slot());
+        }
+        worker.attach_store(Some(Box::new(FakeStore::new(Some(host_hit(
+            &history, consumed,
+        ))))));
+        assert_eq!(worker.admit().unwrap(), ControlFlow::Continue(true));
+        let active = worker.active.iter().flatten().next().unwrap();
+        let live = worker.scheduler.request(active.request).unwrap();
+        assert_eq!(live.consumed_tokens, consumed);
+        assert_eq!(active.selected_images.len(), expected);
+        assert_eq!(live.image_slot.is_some(), expected != 0);
+        assert_eq!(active.incoming.prompt.data.vision_token_indices, canonical);
+        if expected == 1 {
+            assert_eq!(active.selected_images[0].feature_range, 16..32);
+            assert_eq!(live.feature_index(16).unwrap(), 0);
+            assert_eq!(live.feature_index(31).unwrap(), 15);
+        }
+        if expected == 0 {
+            assert!(active.prepared_image.is_none());
+            assert!(worker.image_preparation.is_none());
+        }
+    }
+}
+
+#[test]
+fn failed_host_restore_replans_all_images_from_the_shallower_prefix() {
+    let mut fixture = Fixture::new();
+    fixture.config.contract.vision = crate::model::VisionCapabilities {
+        feature_slots: 1,
+        features_per_request: 64,
+        max_images: 4,
+        patches_per_feature: 4,
+        patch_capacities: vec![256],
+    };
+    fixture.config.contract.frontend =
+        serde_json::from_str::<crate::model::contract::PreparedContract>(include_str!(
+            "../../../tests/support/contracts/qwen38.json"
+        ))
+        .unwrap()
+        .frontend;
+    let (sender, receiver) = mpsc::channel();
+    let (mut incoming, _generation) = fixture.incoming(vec![0; 100], 4);
+    incoming.prompt.conditioned_inputs = vec![
+        described_image(10..26, 0..16),
+        described_image(40..56, 16..32),
+    ];
+    let mut history = crate::cache::PrefixHistory::new(fixture.config.identity);
+    history.append(&incoming.prompt.tokens, &[]).unwrap();
+    sender.send(vec![incoming]).unwrap();
+    let mut worker = fixture.worker(receiver);
+    worker.attach_store(Some(Box::new(FakeStore::new(Some(host_hit(
+        &history, 100,
+    ))))));
+    let _ = worker.admit().unwrap();
+    assert_eq!(worker.active[0].as_ref().unwrap().selected_images.len(), 0);
+    worker.active[0].as_mut().unwrap().carried = Carried {
+        prompt_tokens: Some(90),
+        reused_prompt_tokens: Some(56),
+        generated_tokens: 7,
+        seed: Some(99),
+    };
+    worker.active[0].as_mut().unwrap().last_token = Some(2);
+    let (_, ticket) = fake_store(&mut worker).fetched.pop().unwrap();
+    fake_store(&mut worker)
+        .events
+        .push_back(crate::offload::StoreEvent::Fetched {
+            key: ticket.key,
+            result: Err("restore transfer failed".into()),
+        });
+    worker.service_store().unwrap();
+    let _ = worker.admit().unwrap();
+    let active = worker.active.iter().flatten().next().unwrap();
+    assert_eq!(
+        worker
+            .scheduler
+            .request(active.request)
+            .unwrap()
+            .consumed_tokens,
+        0
+    );
+    assert_eq!(active.selected_images.len(), 2);
+    assert_eq!(active.next_image, 0);
+    assert!(active.incoming.readmitted);
+    assert!(!active.incoming.host_lookup);
+    assert_eq!(active.carried.prompt_tokens, Some(90));
+    assert_eq!(active.carried.reused_prompt_tokens, Some(56));
+    assert_eq!(active.carried.generated_tokens, 7);
+    assert_eq!(active.carried.seed, Some(99));
+    assert_eq!(active.last_token, Some(2));
+}
+
+#[test]
+fn image_materialization_failure_retires_only_its_request() {
+    let mut fixture = Fixture::new();
+    fixture.config.contract.vision = crate::model::VisionCapabilities {
+        feature_slots: 1,
+        features_per_request: 64,
+        max_images: 4,
+        patches_per_feature: 4,
+        patch_capacities: vec![256],
+    };
+    fixture.config.contract.frontend =
+        serde_json::from_str::<crate::model::contract::PreparedContract>(include_str!(
+            "../../../tests/support/contracts/qwen38.json"
+        ))
+        .unwrap()
+        .frontend;
+    let (sender, receiver) = mpsc::channel();
+    let (mut image, mut image_generation) = fixture.incoming(vec![0; 30], 4);
+    image.prompt.conditioned_inputs = vec![described_image(10..26, 0..16)];
+    let (text, _text_generation) = fixture.incoming(vec![1; 30], 4);
+    sender.send(vec![image, text]).unwrap();
+    let mut worker = fixture.worker(receiver);
+    worker.image_preparation = Some(ImagePreparation::new(None));
+    let _ = worker.admit().unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while worker.active.iter().flatten().count() != 1 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "image preparation did not return its failure"
+        );
+        let _ = worker.admit().unwrap();
+        std::thread::yield_now();
+    }
+    let text = worker.active.iter().flatten().next().unwrap();
+    assert!(text.incoming.prompt.conditioned_inputs.is_empty());
+    assert!(worker.scheduler.has_available_image_slot());
+    assert!(matches!(
+        image_generation.events.try_recv().unwrap(),
+        GenerationEvent::Error(_)
+    ));
+    assert_eq!(worker.metrics.failed.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn prepared_image_window_stays_global_until_pack_or_cancellation() {
+    use crate::frontend::images::{
+        ImageInput, ImageLimits, ImageProcessor, ImageSettings, ImageSource, PreparedImageInput,
+        RgbImage,
+    };
+    let mut fixture = Fixture::new();
+    fixture.config.contract.vision = crate::model::VisionCapabilities {
+        feature_slots: 2,
+        features_per_request: 64,
+        max_images: 4,
+        patches_per_feature: 4,
+        patch_capacities: vec![256],
+    };
+    fixture.config.contract.frontend = serde_json::from_str::<crate::model::PreparedContract>(
+        include_str!("../../../tests/support/contracts/qwen38.json"),
+    )
+    .unwrap()
+    .frontend;
+    let processor = Arc::new(
+        ImageProcessor::load(ImageSettings::Moonvit {}, ImageLimits::default()).unwrap(),
+    );
+    let pixels = Arc::new(RgbImage::new(112, 112, vec![42; 112 * 112 * 3]).unwrap());
+    let descriptor = PreparedImageInput::new(
+        ImageInput {
+            description: processor.describe_image(&pixels).unwrap(),
+            source: ImageSource::Decoded(pixels),
+        },
+        10..26,
+        0..16,
+        processor.clone(),
+    );
+    let (sender, receiver) = mpsc::channel();
+    let (mut first, first_generation) = fixture.incoming(vec![0; 30], 4);
+    first.prompt.conditioned_inputs = vec![descriptor.clone()];
+    let (mut second, _second_generation) = fixture.incoming(vec![1; 30], 4);
+    second.prompt.conditioned_inputs = vec![descriptor];
+    sender.send(vec![first, second]).unwrap();
+    let mut worker = fixture.worker(receiver);
+    worker.image_preparation = Some(ImagePreparation::new(None));
+    let _ = worker.admit().unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while worker.active[0].as_ref().unwrap().prepared_image.is_none() {
+        assert!(std::time::Instant::now() < deadline);
+        let _ = worker.admit().unwrap();
+        std::thread::yield_now();
+    }
+    for _ in 0..10 {
+        let _ = worker.admit().unwrap();
+    }
+    assert_eq!(processor.preparation_counts().prepared_images, 1);
+    assert!(worker.active[1].as_ref().unwrap().prepared_image.is_none());
+    first_generation.cancelled.store(true, Ordering::Release);
+    while worker.active[1].as_ref().unwrap().prepared_image.is_none() {
+        assert!(std::time::Instant::now() < deadline);
+        let _ = worker.admit().unwrap();
+        std::thread::yield_now();
+    }
+    assert!(worker.active[0].is_none());
+    assert_eq!(processor.preparation_counts().prepared_images, 2);
+    assert_eq!(worker.preparing_image, Some(worker.active[1].as_ref().unwrap().request));
 }

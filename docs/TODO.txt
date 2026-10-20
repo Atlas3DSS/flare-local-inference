@@ -2,6 +2,14 @@
     Qwen, GLM, DeepSeek, MiMo, Step, and Nemotron services. See
     core-design.md#exact-endpoint-capture and scheduling-runtime-design.md.
 
+[ ] Validate conditioned-input prefix skipping and CPU record reuse through
+    non-Qwen packages and tensor-parallel services, including image-request
+    preemption, cancellation, and shallower restore. See prefix-cache-offload.md.
+
+[ ] Make test_cache_memory.py's reservation workload force checkpoint backing
+    reclamation under growable admission. Large output limits alone do not
+    reserve their full page extent; the resident-prompts case exercises pressure.
+
 [ ] Investigate Step 5 seeded request repeatability: repeated completions with
     seed 119 and unchanged sampling defaults produce different text using
     step5-tp4-mtp3-c16-fp8kv-signed.safetensors, including prompt-cache hits.

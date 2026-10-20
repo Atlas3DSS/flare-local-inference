@@ -174,6 +174,9 @@ pub(super) fn process(limits: ImageLimits, images: &[RgbImage]) -> Result<Proces
         interpolation_weights: vec![],
         cu_seqlens: vec![0],
     };
+    let patches = result.geometry.iter().map(|g| g.patches).sum();
+    let sequences = 1 + result.geometry.iter().map(|g| (g.grid_thw[1] * g.grid_thw[2]) as usize + 1).sum::<usize>();
+    result.reserve_outputs(patches, 588, true, images.len(), sequences)?;
     for image in images {
         let p = plan(image.width, image.height);
         let padded = padded(image, &p)?;

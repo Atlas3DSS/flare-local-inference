@@ -9,6 +9,9 @@ pub(crate) mod layouts;
 mod mimo;
 mod moonvit;
 mod orientation;
+mod conditioned;
+mod record;
+pub use conditioned::{ImageDescription, ImageEncoding, ImageInput, ImageSource, PreparedImageInput};
 pub(crate) mod packing;
 mod patches;
 mod qwen;
@@ -70,6 +73,11 @@ impl ImageLimits {
         patches.div_ceil(self.patches_per_feature.max(1))
     }
 
+    pub fn source_retention_bytes(&self) -> Result<u64> {
+        (self.max_input_pixels as u64).checked_mul(8)
+            .ok_or_else(|| "decoded image source capacity overflows".into())
+    }
+
     pub fn max_image_tokens_per_prompt(&self) -> usize {
         self.max_total_patches / self.patches_per_feature.max(1)
     }
@@ -117,6 +125,7 @@ impl ImageLimits {
     }
 }
 
+#[derive(Clone, Debug)]
 pub struct RgbImage {
     width: usize,
     height: usize,
@@ -158,7 +167,7 @@ impl RgbImage {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ImageGeometry {
     pub height: usize,
     pub width: usize,
@@ -168,6 +177,7 @@ pub struct ImageGeometry {
 }
 
 /// CPU metadata in the packed patch order consumed by the vision graph.
+#[derive(Clone, Debug, Default)]
 pub struct ProcessedImages {
     pub pixel_values: Vec<f32>,
     pub geometry: Vec<ImageGeometry>,
@@ -175,6 +185,22 @@ pub struct ProcessedImages {
     pub interpolation_indices: Vec<[i64; 4]>,
     pub interpolation_weights: Vec<[f32; 4]>,
     pub cu_seqlens: Vec<i32>,
+}
+
+impl ProcessedImages {
+    fn reserve_outputs(&mut self, patches: usize, pixel_width: usize, interpolation: bool,
+        images: usize, sequences: usize) -> Result<()> {
+        let pixels = patches.checked_mul(pixel_width).ok_or("image pixel tensor extent overflows")?;
+        self.pixel_values.reserve_exact(pixels.saturating_sub(self.pixel_values.len()));
+        self.position_ids.reserve_exact(patches.saturating_sub(self.position_ids.len()));
+        self.geometry.reserve_exact(images.saturating_sub(self.geometry.len()));
+        self.cu_seqlens.reserve_exact(sequences.saturating_sub(self.cu_seqlens.len()));
+        if interpolation {
+            self.interpolation_indices.reserve_exact(patches.saturating_sub(self.interpolation_indices.len()));
+            self.interpolation_weights.reserve_exact(patches.saturating_sub(self.interpolation_weights.len()));
+        }
+        Ok(())
+    }
 }
 
 pub struct ImagePrompt {
@@ -186,9 +212,27 @@ pub struct ImagePrompt {
     pub rope_delta: i64,
 }
 
+#[derive(Default)]
+struct PreparationCounters {
+    decoded: std::sync::atomic::AtomicU64,
+    prepared: std::sync::atomic::AtomicU64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ImagePreparationCounts {
+    pub decoded_images: u64,
+    pub prepared_images: u64,
+    pub decoded_source_capacity: u64,
+    pub decoded_source_bytes: u64,
+}
+
+#[derive(Clone)]
 pub struct ImageProcessor {
     limits: ImageLimits,
     profile: Profile,
+    identity_domain: [u8; 32],
+    counts: std::sync::Arc<PreparationCounters>,
+    decoded_budget: std::sync::Arc<conditioned::DecodedBudget>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -245,6 +289,7 @@ pub struct MimoImageSettings {
     pub image_std: [f32; 3],
 }
 
+#[derive(Clone)]
 enum Profile {
     Qwen(qwen::QwenProcessor),
     MiMo(patches::PatchProcessor),
@@ -272,6 +317,9 @@ impl ImageProcessor {
                 "image limits must be positive and total patches must fit int32",
             ))));
         }
+        let decoded_budget = std::sync::Arc::new(conditioned::DecodedBudget::new(limits.source_retention_bytes()?));
+        use sha2::{Digest, Sha256};
+        let identity_domain = Sha256::digest(serde_json::to_vec(&settings).map_err(|e| e.to_string())?).into();
         let profile = match settings {
             ImageSettings::Deepseek4 {} => Profile::DeepSeek4,
             ImageSettings::DeepseekRowMajor(settings) => {
@@ -286,7 +334,54 @@ impl ImageProcessor {
                 Profile::Qwen(qwen::QwenProcessor::load(&settings, limits)?)
             }
         };
-        Ok(Self { limits, profile })
+        Ok(Self { limits, profile, identity_domain, counts: Default::default(), decoded_budget })
+    }
+
+    /// Identity of the decoded representation consumed by this preparation profile.
+    pub fn semantic_identity(&self, image: &RgbImage) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        let mut hash = Sha256::new();
+        hash.update(b"flare-conditioned-image-v2\0");
+        hash.update(self.identity_domain);
+        hash.update((image.width as u64).to_le_bytes());
+        hash.update((image.height as u64).to_le_bytes());
+        hash.update(&image.pixels);
+        if matches!(self.profile, Profile::Moonvit) {
+            hash.update([u8::from(image.nearest_resize)]);
+            for channel in [&image.alpha, &image.cmyk] {
+                hash.update([u8::from(channel.is_some())]);
+                if let Some(channel) = channel {
+                    hash.update((channel.len() as u64).to_le_bytes());
+                    hash.update(channel);
+                }
+            }
+        }
+        hash.finalize().into()
+    }
+
+    /// Encoded source lookup is separate from semantic prefix identity.
+    pub fn source_identity(&self, encoding: ImageEncoding, bytes: &[u8]) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        let mut hash = Sha256::new();
+        hash.update(b"flare-encoded-image-v1\0");
+        hash.update([match encoding { ImageEncoding::Png => 0, ImageEncoding::Jpeg => 1, ImageEncoding::Webp => 2 }]);
+        hash.update(self.identity_domain);
+        hash.update(bytes);
+        hash.finalize().into()
+    }
+
+    pub fn process_one(&self, image: &RgbImage) -> Result<ProcessedImages> {
+        let images = self.process(std::slice::from_ref(image))?;
+        self.counts.prepared.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(images)
+    }
+
+    pub fn preparation_counts(&self) -> ImagePreparationCounts {
+        use std::sync::atomic::Ordering::Relaxed;
+        ImagePreparationCounts { decoded_images: self.counts.decoded.load(Relaxed),
+            prepared_images: self.counts.prepared.load(Relaxed),
+            decoded_source_capacity: self.decoded_budget.capacity,
+            decoded_source_bytes: self.decoded_budget.used.load(Relaxed) }
     }
 
     fn check_input_extent(&self, width: usize, height: usize) -> Result<()> {

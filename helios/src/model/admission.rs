@@ -22,7 +22,7 @@ impl PromptMetadataMut<'_> {
             || self
                 .vision_token_indices
                 .as_ref()
-                .is_some_and(|v| v.len() != before || v.iter().any(|index| *index != -1))
+                .is_some_and(|v| v.len() != before)
         {
             return Err("text continuation metadata does not match its token history".into());
         }
@@ -149,9 +149,28 @@ pub fn validate_prompt(config: &ModelConfig, prompt: &crate::server::Prompt) -> 
         || prompt.max_new_tokens == 0
         || prompt.max_new_tokens > i32::MAX as u32
         || (!config.contract.vision.enabled()
-            && (prompt.images.is_some() || !prompt.conditioning.is_empty()))
+            && (!prompt.conditioned_inputs.is_empty() || !prompt.conditioning.is_empty()))
     {
         return Err("prompt, output limit, or inputs violate the prepared model contract".into());
     }
     crate::model::validate_prompt_data(config, &prompt.tokens, &prompt.data)
+}
+
+#[cfg(all(test, feature = "server"))]
+mod continuation_tests {
+    use super::*;
+
+    #[test]
+    fn appended_text_preserves_image_indices_and_multiaxis_positions() {
+        let mut positions = vec![[0; 3], [1, 4, 2], [2, 4, 3]];
+        let mut indices = vec![-1, 128, 129];
+        PromptMetadataMut {
+            positions: Some(&mut positions),
+            vision_token_indices: Some(&mut indices),
+        }
+        .extend_text(3, 5)
+        .unwrap();
+        assert_eq!(indices, [-1, 128, 129, -1, -1]);
+        assert_eq!(positions, [[0; 3], [1, 4, 2], [2, 4, 3], [5; 3], [6; 3]]);
+    }
 }

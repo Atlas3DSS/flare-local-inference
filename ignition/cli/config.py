@@ -199,7 +199,7 @@ class Configuration:
             f'# reserve = "{self.get("memory.reserve").value}"'
             "                   # GPU memory left untouched for processes that start later",
             "", "[prefix_cache]",
-            '# memory = "16G"                 # host RAM retaining prefix checkpoints; 0 disables the memory tier',
+            '# memory = "16G"                 # host RAM for checkpoints and prepared inputs; 0 disables retention',
             '# disk_limit = "200G"            # record files kept under paths.prefix_cache; 0 disables the disk tier',
             '# disk_transport = "staged"      # staged, or direct for GPUDirect Storage',
             "", "[paths]",
@@ -207,7 +207,7 @@ class Configuration:
             f'# kernel_cache = "{self.get("paths.kernel_cache").value}"',
             f'# package_cache = "{self.get("paths.package_cache").value}"',
             '# export_staging = ""            # rank files an export assembles from; empty: beside the package',
-            '# prefix_cache = "~/.cache/flare/prefix-cache"   # prefix checkpoint records; empty: no disk tier',
+            '# prefix_cache = "~/.cache/flare/prefix-cache"   # checkpoint and input records; empty: no disk tier',
             '# cuda = "/opt/cuda"              # used only when the toolkit is not found in installed packages',
         ]
         self.path.parent.mkdir(parents=True, exist_ok=True)

@@ -163,6 +163,8 @@ struct BoundaryCapture {
 
 pub struct LiveRequest {
     pub image_slot: Option<usize>,
+    conditioned_features: Option<Vec<std::ops::Range<usize>>>,
+    conditioned_inputs_ready: bool,
     epoch: u64,
     acceptance: speculation::AcceptanceProfile,
     accounting: RequestAccounting,
@@ -205,6 +207,24 @@ pub struct LiveRequest {
 }
 
 impl LiveRequest {
+    pub(crate) fn feature_index(&self, canonical: i32) -> Result<i64> {
+        if canonical < 0 {
+            return Ok(i64::from(canonical));
+        }
+        let Some(ranges) = &self.conditioned_features else {
+            return Ok(i64::from(canonical));
+        };
+        let mut destination = 0usize;
+        for range in ranges {
+            if range.contains(&(canonical as usize)) {
+                return i64::try_from(destination + canonical as usize - range.start)
+                    .map_err(|_| "image feature index exceeds integer range".into());
+            }
+            destination += range.len();
+        }
+        Err("prefill references an image feature omitted from execution".into())
+    }
+
     pub fn accounting(&self) -> &RequestAccounting {
         &self.accounting
     }
@@ -1314,6 +1334,8 @@ impl RequestScheduler {
         self.slots[slot].generation = generation;
         self.slots[slot].request = Some(LiveRequest {
             image_slot: None,
+            conditioned_features: None,
+            conditioned_inputs_ready: true,
             epoch: 0,
             acceptance: speculation::AcceptanceProfile::default(),
             accounting: self.accounting(),
@@ -1538,6 +1560,35 @@ impl RequestScheduler {
             return Err("invalid atomic prefill spans or prefix boundary".into());
         }
         request.prefill_spans.extend_from_slice(spans);
+        Ok(())
+    }
+
+    pub(crate) fn conditioned_inputs_ready(
+        &mut self,
+        handle: RequestHandle,
+        ready: bool,
+    ) -> Result<()> {
+        let request = self.request_mut(handle)?;
+        request.conditioned_inputs_ready = ready;
+        request.epoch += 1;
+        Ok(())
+    }
+
+    /// Maps immutable prompt feature indices into the compact execution arena.
+    pub(crate) fn set_conditioned_features(
+        &mut self,
+        handle: RequestHandle,
+        ranges: &[std::ops::Range<usize>],
+    ) -> Result<()> {
+        let request = self.request_mut(handle)?;
+        if request.last_use != Fence(0)
+            || request.conditioned_features.is_some()
+            || ranges.iter().any(|range| range.is_empty())
+            || ranges.windows(2).any(|pair| pair[0].end > pair[1].start)
+        {
+            return Err("invalid conditioned feature execution ranges".into());
+        }
+        request.conditioned_features = Some(ranges.to_vec());
         Ok(())
     }
 

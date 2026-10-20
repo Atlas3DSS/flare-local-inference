@@ -184,7 +184,9 @@ impl RequestScheduler {
     }
 
     pub(super) fn eligible(&self, request: &LiveRequest) -> bool {
-        if self.request_kind(request).is_none() {
+        if self.request_kind(request).is_none()
+            || (request.phase == RequestPhase::Vision && !request.conditioned_inputs_ready)
+        {
             return false;
         }
         if request.pending > 0

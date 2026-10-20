@@ -1152,7 +1152,7 @@ fn state_transfer_and_resume_upload_fixture() {
 
 #[cfg(feature = "images")]
 #[test]
-fn vision_upload_fixture_retains_second_image_feature_offset() {
+fn vision_upload_selects_source_image_independently_of_destination_feature_offset() {
     use crate::frontend::images::{ImageGeometry, ProcessedImages};
     let mut config = config();
     config.contract =
@@ -1173,7 +1173,7 @@ fn vision_upload_fixture_retains_second_image_feature_offset() {
         interpolation_weights: vec![[0.25; 4]; 8],
         cu_seqlens: vec![0, 4, 8],
     };
-    for image in 0..2 {
+    for (image, destination) in [(0, 0), (1, 1), (1, 0)] {
         let staging = crate::frontend::images::packing::prepare(
             &config,
             crate::scheduler::RequestHandle {
@@ -1182,6 +1182,7 @@ fn vision_upload_fixture_retains_second_image_feature_offset() {
             },
             &images,
             image,
+            destination,
         )
         .unwrap();
         let uploads = staging.uploads();
@@ -1191,7 +1192,18 @@ fn vision_upload_fixture_retains_second_image_feature_offset() {
                 .find(|u| u.buffer == "vision_feature_offset")
                 .unwrap()
                 .bytes,
-            (image as i32).to_le_bytes()
+            (destination as i32).to_le_bytes()
+        );
+        let pixels = uploads
+            .iter()
+            .find(|u| u.buffer == "vision_pixel_values")
+            .unwrap();
+        assert_eq!(
+            pixels.bytes,
+            images.pixel_values[image * 4 * 1536..(image + 1) * 4 * 1536]
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect::<Vec<_>>()
         );
     }
 }
@@ -1492,4 +1504,85 @@ fn grammar_mask_packing_preserves_bits_row_layout_and_transitions() {
             }
         }
     }
+}
+
+#[test]
+fn prefill_compacts_execution_feature_indices_and_preserves_admission_metadata() {
+    let config = config();
+    let mut scheduler = RequestScheduler::new(
+        config.identity,
+        config.limits,
+        scheduler_capabilities(&config),
+    )
+    .unwrap();
+    scheduler
+        .measured_graph_durations(&manifest(&config).graphs)
+        .unwrap();
+    let handle = scheduler
+        .admit(RequestSpec {
+            prompt: vec![7; 4],
+            message_boundaries: vec![],
+            conditioning: vec![],
+            max_new_tokens: 1,
+            grammar_constrained: false,
+            host_stops: false,
+            growable_output: true,
+        })
+        .unwrap();
+    scheduler
+        .set_conditioned_features(handle, &[128..192])
+        .unwrap();
+    let canonical = vec![-1, 128, 129, -1];
+    let mut admissions = std::array::from_fn::<_, 4, _>(|_| None);
+    admissions[handle.slot as usize] = Some(Admission {
+        handle,
+        sampling: SamplingParameters::default(),
+        max_new_tokens: 1,
+        prompt: vec![7; 4],
+        data: PromptData {
+            positions: vec![[0; 3]; 4],
+            vision_token_indices: canonical.clone(),
+            ..Default::default()
+        },
+        grammar_mask: None,
+        ignore_eos: false,
+    });
+    let init = scheduler.plan().unwrap();
+    scheduler.commit(&init, Fence(1)).unwrap();
+    let mut records = [CompletionRecord::default(); 4];
+    records[handle.slot as usize] = CompletionRecord {
+        generation: handle.generation as i64,
+        submission_sequence: 1,
+        status: 1,
+        token_id: -1,
+        ..Default::default()
+    };
+    scheduler
+        .complete(Fence(1), &records, Default::default())
+        .unwrap();
+    let prefill = scheduler.plan().unwrap();
+    assert_eq!(prefill.kind, GraphKind::Prefill);
+    scheduler.commit(&prefill, Fence(2)).unwrap();
+    let mut inputs = Inputs::new(&config, &manifest(&config)).unwrap();
+    crate::model::pack_inputs(&mut inputs, &config, &scheduler, &prefill, &admissions).unwrap();
+    let uploads = inputs.uploads();
+    let indices = uploads
+        .iter()
+        .find(|upload| upload.buffer == "vision_token_indices")
+        .unwrap();
+    assert_eq!(
+        indices.bytes,
+        [-1i32, 0, 1, -1]
+            .into_iter()
+            .flat_map(i32::to_le_bytes)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        admissions[handle.slot as usize]
+            .as_ref()
+            .unwrap()
+            .data
+            .vision_token_indices,
+        canonical
+    );
 }

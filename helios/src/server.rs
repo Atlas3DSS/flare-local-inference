@@ -414,12 +414,25 @@ async fn metrics(State(state): State<Arc<HttpState>>, uri: Uri, headers: HeaderM
         Ok(format) => format,
         Err(message) => return error(StatusCode::BAD_REQUEST, message),
     };
+    let input_metrics = metrics::input_metrics(
+        state.model.input_store().map(|store| store.stats()).unwrap_or_default(),
+        state.images.as_ref().map(|processor| processor.preparation_counts()).unwrap_or_default(),
+    );
     if format == metrics::Format::Json {
         let learned_drafter = state.model.config().has_learned_drafts();
         let snapshot = state.model.metrics().snapshot(learned_drafter);
-        return ([(header::VARY, "accept")], Json(snapshot.json(learned_drafter))).into_response();
+        let mut value = snapshot.json(learned_drafter);
+        if let Some(object) = value.as_object_mut() {
+            for (name, _, _, count) in input_metrics {
+                object.insert(name.into(), count.into());
+            }
+        }
+        return ([(header::VARY, "accept")], Json(value)).into_response();
     }
     let mut text = state.model.metrics().render();
+    for (name, kind, help, value) in input_metrics {
+        metrics::metric(&mut text, name, kind, help, value);
+    }
     for (name, help, value) in [
         (
             "http_inflight_requests",

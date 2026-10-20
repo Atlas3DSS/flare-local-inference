@@ -4,7 +4,7 @@ use crate::{
     cache::ConditioningEvent,
     frontend::{
         Frontend, RenderedPrompt,
-        images::{ImageProcessor, RgbImage},
+        images::{ImageProcessor, ImageDescription},
     },
     model::PreparedInput,
 };
@@ -55,14 +55,14 @@ fn image_block(
 
 pub(crate) fn prepare_input(
     vocabulary: usize, frontend: &Frontend, processor: Option<&ImageProcessor>,
-    rendered: &RenderedPrompt, images: Vec<RgbImage>,
+    rendered: &RenderedPrompt, images: &[ImageDescription],
 ) -> Result<PreparedInput> {
     prepare(vocabulary, frontend, processor, rendered, images, image_block)
 }
 
 pub(crate) fn prepare_row_major_input(
     vocabulary: usize, frontend: &Frontend, processor: Option<&ImageProcessor>,
-    rendered: &RenderedPrompt, images: Vec<RgbImage>,
+    rendered: &RenderedPrompt, images: &[ImageDescription],
 ) -> Result<PreparedInput> {
     prepare(vocabulary, frontend, processor, rendered, images, row_major_block)
 }
@@ -92,7 +92,7 @@ fn prepare(
     frontend: &Frontend,
     processor: Option<&ImageProcessor>,
     rendered: &RenderedPrompt,
-    images: Vec<RgbImage>,
+    images: &[ImageDescription],
     block: fn(usize, usize, usize, usize, usize) -> (Vec<u32>, Vec<i32>, usize),
 ) -> Result<PreparedInput> {
     let placeholder = frontend.image_placeholder_token_id()?;
@@ -114,7 +114,7 @@ fn prepare(
         Some(
             processor
                 .ok_or("image processing is unavailable")?
-                .process(&images)?,
+                .describe_inputs(images)?,
         )
     };
     let mut tokens = Vec::new();
@@ -143,15 +143,9 @@ fn prepare(
         data.spans.push(start + padding..start + block.len());
         tokens.extend(block);
         data.vision_token_indices.extend(indices);
-        use sha2::{Digest, Sha256};
-        let mut hash = Sha256::new();
-        hash.update(b"flare-rgb-image-v1\0");
-        hash.update((source.width() as u64).to_le_bytes());
-        hash.update((source.height() as u64).to_le_bytes());
-        hash.update(source.pixels());
         conditioning.push(ConditioningEvent {
             position: start as u64,
-            identity: hash.finalize().into(),
+            identity: source.identity,
         });
         feature_offset += geometry.tokens;
         image_index += 1;
@@ -162,6 +156,6 @@ fn prepare(
         token_expansions,
         data,
         conditioning,
-        images: processed,
+        conditioned_inputs: vec![],
     })
 }

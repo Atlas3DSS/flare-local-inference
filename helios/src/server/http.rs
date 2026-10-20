@@ -220,7 +220,7 @@ pub(super) async fn generate(
         let mut prepared = Vec::with_capacity(size);
         for index in 0..size {
             prepared.push(
-                request::prepare_inference(
+                request::prepare_inference_cached(
                     &prepare_state.frontend,
                     prepare_state.images.as_deref(),
                     &prepare_state.grammar,
@@ -228,6 +228,7 @@ pub(super) async fn generate(
                     &decoded.request,
                     index,
                     count,
+                    prepare_state.model.input_store(),
                 )
                 .map_err(|e| {
                     rejection_details(
@@ -256,9 +257,8 @@ pub(super) async fn generate(
         .step_by(decoded.request.choices)
         .map(|p| PromptUsage {
             tokens: p.prompt.tokens.len(),
-            image_tokens: p.prompt.images.as_ref().map_or(0, |images| {
-                images.geometry.iter().map(|geometry| geometry.tokens).sum()
-            }),
+            image_tokens: p.prompt.conditioned_inputs.iter()
+                .map(|input| input.geometry.tokens).sum(),
         })
         .collect();
     let observation = decoded.observation;

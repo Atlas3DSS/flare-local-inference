@@ -1440,15 +1440,31 @@ Padding must never address another request's writable state.
 
 ### Multimodal identity
 
-Extend the chained prefix digest with conditioning identities at the point where
+The chained prefix digest includes conditioning identities at the point where
 those inputs enter the token stream.
 
-Include image content identity, relevant processor settings, grid/position
-information, and model/recipe identity. Appending another image must not alter
-the digest of an earlier unchanged prefix.
+Image identity includes the complete decoded representation consumed by its
+preprocessing profile and the profile's settings. The prefix also identifies
+the model and token layout. Appending another image preserves the digest of an
+earlier unchanged prefix. Encoded-source keys are separate: they include the
+declared encoding and source bytes and accelerate description lookup.
 
 A sequence of image-placeholder token IDs alone is insufficient to identify
 model state.
+
+Canonical positions, token dependencies, and feature indices describe the whole
+prompt. Admission derives a separate execution plan from the consumed endpoint
+of the selected GPU or host checkpoint. Only inputs whose dependency spans
+extend beyond that endpoint require preprocessing and vision replay. Selected
+features occupy contiguous storage beginning at zero; input packing maps the
+canonical indices into that storage without changing prompt identity.
+
+CPU descriptions and prepared tensors use the host retention tiers beside
+complete model checkpoints. Their eviction is independent: a checkpoint needs
+no original image tensors to resume after an image span, and prepared tensors
+can be reused when the surrounding text changes. Requests retain reconstructible
+sources through preemption and restore failure, so readmission can select work
+against a shallower prefix.
 
 ### Memory significance
 

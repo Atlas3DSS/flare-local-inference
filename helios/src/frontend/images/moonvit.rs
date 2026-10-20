@@ -160,6 +160,8 @@ pub(super) fn process(limits: ImageLimits, images: &[RgbImage]) -> Result<Proces
         .map(|image| geometry(limits, image.width, image.height))
         .collect::<Result<_>>()?;
     limits.check_batch(images.len(), geometries.iter().map(|g| g.patches).sum())?;
+    result.reserve_outputs(geometries.iter().map(|g| g.patches).sum(), 588, true,
+        images.len(), images.len() + 1)?;
     for (image, geometry) in images.iter().zip(geometries) {
         let (_, pixels) = resized_rgb(limits, image)?;
         let h = geometry.height / 14;

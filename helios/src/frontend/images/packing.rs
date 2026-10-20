@@ -67,20 +67,21 @@ pub(crate) fn prepare(
     handle: RequestHandle,
     images: &ProcessedImages,
     image: usize,
+    destination_feature_offset: usize,
 ) -> Result<UploadBatch> {
-    match config
-        .contract
-        .frontend
-        .image_layout
-        .ok_or("image layout is not prepared")?
-    {
-        ImageLayoutKind::Qwen => qwen(config, handle, images, image),
-        ImageLayoutKind::Mimo => mimo(config, handle, images, image),
-        ImageLayoutKind::Deepseek | ImageLayoutKind::DeepseekRowMajor => deepseek(config, handle, images, image),
-        ImageLayoutKind::Moonvit | ImageLayoutKind::Radio => {
-            spatial_merge(config, handle, images, image)
-        }
-        ImageLayoutKind::Step => step(config, handle, images, image),
+    let geometry = images.geometry.get(image).ok_or("missing scheduled image")?;
+    if destination_feature_offset.checked_add(geometry.tokens)
+        .is_none_or(|end| end > config.contract.vision.features_per_request) {
+        return Err("invalid destination vision feature extent".into());
+    }
+    i32::try_from(destination_feature_offset).map_err(|_| "vision feature offset exceeds int32")?;
+    match config.contract.frontend.image_layout
+        .ok_or("image layout is not prepared")? {
+        ImageLayoutKind::Qwen => qwen(config, handle, images, image, destination_feature_offset),
+        ImageLayoutKind::Mimo => mimo(config, handle, images, image, destination_feature_offset),
+        ImageLayoutKind::Deepseek | ImageLayoutKind::DeepseekRowMajor => deepseek(config, handle, images, image, destination_feature_offset),
+        ImageLayoutKind::Moonvit | ImageLayoutKind::Radio => spatial_merge(config, handle, images, image, destination_feature_offset),
+        ImageLayoutKind::Step => step(config, handle, images, image, destination_feature_offset),
     }
 }
 
@@ -89,6 +90,7 @@ fn qwen(
     handle: RequestHandle,
     images: &ProcessedImages,
     image: usize,
+    destination_feature_offset: usize,
 ) -> Result<UploadBatch> {
     let pixel_width = if matches!(
         config.contract.frontend.image_layout,
@@ -178,7 +180,7 @@ fn qwen(
     staging.i32(
         "vision_feature_offset",
         0,
-        [(start / config.contract.vision.patches_per_feature) as i32],
+        [destination_feature_offset as i32],
     );
     Ok(staging)
 }
@@ -188,6 +190,7 @@ fn mimo(
     handle: RequestHandle,
     images: &ProcessedImages,
     image: usize,
+    destination_feature_offset: usize,
 ) -> Result<UploadBatch> {
     let mut staging = UploadBatch::default();
     let geometry = images
@@ -241,7 +244,7 @@ fn mimo(
     staging.i32("vision_cu_seqlens", 0, [0, geometry.patches as i32]);
     staging.i32("vision_num_patches", 0, [geometry.patches as i32]);
     staging.i32("vision_num_features", 0, [geometry.tokens as i32]);
-    staging.i32("vision_feature_offset", 0, [(start / 4) as i32]);
+    staging.i32("vision_feature_offset", 0, [destination_feature_offset as i32]);
     Ok(staging)
 }
 fn column_permutation(height: usize, width: usize) -> (Vec<i32>, Vec<i32>) {
@@ -260,6 +263,7 @@ fn deepseek(
     handle: RequestHandle,
     images: &ProcessedImages,
     image: usize,
+    destination_feature_offset: usize,
 ) -> Result<UploadBatch> {
     let mut staging = UploadBatch::default();
     let geometry = images
@@ -326,7 +330,7 @@ fn deepseek(
     staging.i32("vision_cu_seqlens", 0, [0, actual as i32]);
     staging.i32("vision_num_patches", 0, [actual as i32]);
     staging.i32("vision_num_features", 0, [geometry.tokens as i32]);
-    staging.i32("vision_feature_offset", 0, [(start / 9) as i32]);
+    staging.i32("vision_feature_offset", 0, [destination_feature_offset as i32]);
     Ok(staging)
 }
 
@@ -335,6 +339,7 @@ fn spatial_merge(
     handle: RequestHandle,
     images: &ProcessedImages,
     image: usize,
+    destination_feature_offset: usize,
 ) -> Result<UploadBatch> {
     let geometry = images
         .geometry
@@ -359,7 +364,7 @@ fn spatial_merge(
     {
         return Err("invalid spatial merge vision grid".into());
     }
-    let mut staging = qwen(config, handle, images, image)?;
+    let mut staging = qwen(config, handle, images, image, destination_feature_offset)?;
     let mut indices = Vec::with_capacity(geometry.patches);
     for y in (0..h).step_by(2) {
         for x in (0..w).step_by(2) {
@@ -401,6 +406,7 @@ fn step(
     handle: RequestHandle,
     images: &ProcessedImages,
     image: usize,
+    destination_feature_offset: usize,
 ) -> Result<UploadBatch> {
     let geometry = images
         .geometry
@@ -419,7 +425,7 @@ fn step(
     {
         return Err("invalid Step image geometry".into());
     }
-    let mut staging = qwen(config, handle, images, image)?;
+    let mut staging = qwen(config, handle, images, image, destination_feature_offset)?;
     let mut cu = vec![0];
     let (mut first, mut second) = (vec![], vec![]);
     let mut base = 0;

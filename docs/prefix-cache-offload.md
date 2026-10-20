@@ -1,11 +1,12 @@
 # Tiered prefix cache offload
 
 Helios keeps immutable prefix checkpoints in GPU memory and evicts them under
-pressure. The host prefix store adds memory retention, disk retention,
-and a composite of both. Disk records move through bounded registered host
-staging. GPUDirect Storage support is deferred.
+pressure. Host retention stores complete model checkpoints and reusable CPU
+input records in memory, on disk, or in both tiers. Checkpoint disk transfers
+use bounded registered host staging; CPU input records use a separate bounded
+ordinary-memory window. GPUDirect Storage support is deferred.
 
-Every tier stores the same checkpoint: immutable page chains and a complete
+Every checkpoint tier stores immutable page chains and a complete
 endpoint row across all ranks. Recipes define the bytes needed to resume;
 storage moves those bytes without interpreting the model. A completed restore
 publishes an ordinary GPU checkpoint, so branching, continuation, and retirement
@@ -548,7 +549,11 @@ Offload limits interference through bounded work and explicit ownership:
 
 - Memory size: `[prefix_cache] memory` in `config.toml` and
   `--prefix-cache-memory SIZE` on `flare run` set it; zero selects no memory
-  store, and a nonzero size below the package's minimum fails startup. Until
+  retention, and a nonzero size below the package's checkpoint minimum fails startup.
+  Packages with image inputs reserve an ordinary-memory share of
+  `min(memory / 8, memory - checkpoint_minimum)`, rounded down to 4 KiB.
+  The remaining budget backs registered checkpoint slabs. Text-only packages
+  devote the entire budget to checkpoint slabs. Until
   step 13 enables derived defaults, an unset size selects no memory store.
   The derived default is zero on an integrated-memory device, detected
   through `CU_DEVICE_ATTRIBUTE_INTEGRATED` on the selected devices, and
@@ -568,6 +573,8 @@ Offload limits interference through bounded work and explicit ownership:
 - Disk limit: one tenth of the free space on the directory's filesystem at
   startup. `[prefix_cache] disk_limit` and `--prefix-cache-disk-limit SIZE`
   override; zero selects no disk store and does not create its directory.
+  Checkpoint and CPU input records share this limit and the model's locked
+  record directory.
 - Disk transport: staged. `[prefix_cache] disk_transport` and
   `--prefix-cache-disk-transport` accept `staged` and `direct`; `direct` fails
   startup until the direct transport exists, and afterwards when the cuFile
@@ -618,6 +625,65 @@ Offload limits interference through bounded work and explicit ownership:
 - Steady-state serving allocates no device memory, no pinned memory, and no
   threads for offload; slabs, descriptor arrays, rings, events, and cuFile
   registrations are created at startup.
+
+### 2.13 Reusable CPU inputs
+
+Source-description records map an encoded input key to its semantic identity
+and geometry. Prepared-input records map that semantic identity to serialized
+CPU tensors. Image source keys include encoding, encoded bytes, and preparation
+settings. Semantic identities cover the decoded representation consumed by the
+profile, including alpha, CMYK planes, and resize mode where relevant. The
+versioned identity domain prevents reuse across incompatible preprocessing
+semantics.
+
+The frontend describes every input and validates the complete request budget
+before admission. It does not resize images or build patch tensors. Admission
+selects inputs whose complete token dependencies extend past the reused
+checkpoint. A bounded CPU worker materializes only those inputs, using retained
+tensors when available. Vision scheduling waits for its inputs while unrelated
+requests remain runnable. Selected features are packed contiguously from zero;
+canonical prompt positions and feature indices remain unchanged.
+
+CPU records use ordinary host memory. Active leases remain charged until their
+last owner releases them. A bounded serialized-record window covers queued
+writes and disk-read leases, including disk-only configurations. Its capacity
+comes from the largest prepared graph's image input buffers and codec overhead.
+The disk input index has a fixed 4,096-record bound and a 1 MiB host allowance.
+The loader accounts for these allocations before sizing GPU caches.
+
+CPU preparation holds at most one image tensor result across queued work,
+completion delivery, and packing. Cold decoded sources use a separate shared
+one-use allowance of `max_image_pixels * 8` bytes, charged by their actual
+buffer capacities. Sources exceeding the remaining allowance retain their
+encoded bytes and decode again only if vision computation needs them.
+Packing, prefix coverage, cancellation, and request destruction release the
+corresponding owners. Both transient allowances are accounted for even when
+host retention is disabled.
+
+Versioned `.input` files store bounded lengths and checksums independently of
+the unchanged `.ckpt` checkpoint format. Writes replace records atomically.
+Description lookups read metadata without loading tensor payloads. Failed or
+invalid records are cache misses; the request's original source reconstructs
+the required input. Concurrent lookups share disk work, and bounded source
+locks prevent repeated decoding of a retained source during concurrent
+frontend preparation.
+
+Startup fails if scanning or cleanup cannot establish the owned files' disk
+usage. If a failed write leaves a temporary file that cannot be removed, its
+reservation remains charged and input disk writes stop until restart.
+
+Both record kinds share disk reservations. Pressure can reclaim either
+unpinned checkpoint leaves through the model worker or CPU input files through
+the input worker. Checkpoint ancestry, transfer pins, and GPU fences retain
+their existing meaning. Evicting a CPU input never invalidates an otherwise
+complete checkpoint; evicting a checkpoint never invalidates prepared CPU
+tensors. Preemption and failed restores retain original sources and derive a
+fresh execution plan from the prefix actually restored.
+
+With host retention disabled, fully covered inputs still skip tensor
+preparation and vision replay. Source decoding remains necessary to establish
+semantic identity. Existing packages use these paths without re-export, and
+prepared capacity limits remain unchanged.
 
 ## 3. Implementation sequence
 

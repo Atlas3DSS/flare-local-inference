@@ -17,6 +17,24 @@ pub fn prepare_input(
     rendered: &RenderedPrompt,
     images: Vec<RgbImage>,
 ) -> Result<PreparedInput> {
+    let images = if images.is_empty() { vec![] } else {
+        let processor = processor.ok_or("image processing is unavailable")?;
+        images.into_iter().map(|image| Ok(crate::frontend::images::ImageInput {
+            description: processor.describe_image(&image)?,
+            source: crate::frontend::images::ImageSource::Decoded(std::sync::Arc::new(image)),
+        })).collect::<Result<Vec<_>>>()?
+    };
+    prepare_image_inputs(config, frontend, processor, rendered, images)
+}
+
+pub fn prepare_image_inputs(
+    config: &ModelConfig,
+    frontend: &Frontend,
+    processor: Option<&ImageProcessor>,
+    rendered: &RenderedPrompt,
+    inputs: Vec<crate::frontend::images::ImageInput>,
+) -> Result<PreparedInput> {
+    let images = inputs.iter().map(|i| i.description.clone()).collect::<Vec<_>>();
     if rendered
         .token_ids
         .iter()
@@ -24,21 +42,21 @@ pub fn prepare_input(
     {
         return Err("prompt contains an input token outside the prepared frontend contract".into());
     }
-    let prepared = match config.contract.frontend.image_layout {
+    let mut prepared = match config.contract.frontend.image_layout {
         Some(ImageLayoutKind::Qwen) => crate::frontend::images::layouts::qwen::prepare_input(
-            frontend, processor, rendered, images,
+            frontend, processor, rendered, &images,
         )?,
         Some(ImageLayoutKind::Moonvit) => crate::frontend::images::layouts::moonvit::prepare_input(
-            frontend, processor, rendered, images,
+            frontend, processor, rendered, &images,
         )?,
         Some(ImageLayoutKind::Radio) => crate::frontend::images::layouts::radio::prepare_input(
-            frontend, processor, rendered, images,
+            frontend, processor, rendered, &images,
         )?,
         Some(ImageLayoutKind::Step) => crate::frontend::images::layouts::step::prepare_input(
-            frontend, processor, rendered, images,
+            frontend, processor, rendered, &images,
         )?,
         Some(ImageLayoutKind::Mimo) => crate::frontend::images::layouts::mimo::prepare_input(
-            frontend, processor, rendered, images,
+            frontend, processor, rendered, &images,
         )?,
         Some(ImageLayoutKind::DeepseekRowMajor) => {
             crate::frontend::images::layouts::deepseek::prepare_row_major_input(
@@ -46,7 +64,7 @@ pub fn prepare_input(
                 frontend,
                 processor,
                 rendered,
-                images,
+                &images,
             )?
         }
         Some(ImageLayoutKind::Deepseek) => {
@@ -55,7 +73,7 @@ pub fn prepare_input(
                 frontend,
                 processor,
                 rendered,
-                images,
+                &images,
             )?
         }
         None => {
@@ -76,10 +94,29 @@ pub fn prepare_input(
                     ..Default::default()
                 },
                 conditioning: vec![],
-                images: None,
+                conditioned_inputs: vec![],
             }
         }
     };
+    if prepared.token_expansions.len() != inputs.len() {
+        return Err("image expansions do not match input descriptions".into());
+    }
+    if !images.is_empty() {
+        let processor = std::sync::Arc::new(processor.ok_or("image processing is unavailable")?.clone());
+        let geometry = images.iter().map(|i| i.geometry).collect::<Vec<_>>();
+        let mut feature_offset = 0;
+        let mut expansion_offset = 0;
+        for ((input, geometry), (original, additional)) in inputs.into_iter().zip(&geometry)
+            .zip(&prepared.token_expansions) {
+            let start = original + expansion_offset;
+            prepared.conditioned_inputs.push(crate::frontend::images::PreparedImageInput::new(
+                input, start..start + additional + 1,
+                feature_offset..feature_offset + geometry.tokens, processor.clone(),
+            ));
+            feature_offset += geometry.tokens;
+            expansion_offset += additional;
+        }
+    }
     super::validate_prompt_data(config, &prepared.tokens, &prepared.data)?;
     Ok(prepared)
 }

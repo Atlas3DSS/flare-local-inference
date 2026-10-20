@@ -837,9 +837,11 @@ depends on native confidence or measured acceptance and execution cost. Reducing
 load time retains draft weights; freeing those weights requires preparation
 with `--no-mtp`.
 
-Host prefix retention is specified separately in the proposed
-[prefix-cache offload design](prefix-cache-offload.md). Its host-memory and
-disk settings require the implementation and measurements defined there.
+Host checkpoint and prepared-input retention share the memory and disk settings
+in the [host retention design](prefix-cache-offload.md). Both tiers remain
+disabled unless configured. The memory setting includes registered checkpoint
+slabs and ordinary retained CPU inputs; bounded transfer, preprocessing, and
+decoded-source windows are accounted for separately at startup.
 
 ## 4. Derived settings
 

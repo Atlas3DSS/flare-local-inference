@@ -3121,3 +3121,42 @@ fn image_slots_are_independent_and_retire_after_the_last_gpu_use() {
         assert!(scheduler.has_available_image_slot());
     }
 }
+
+#[test]
+fn conditioned_feature_ranges_compact_without_changing_canonical_indices() {
+    let mut scheduler = scheduler(1, 8, 2);
+    let handle = scheduler.admit(spec(65, 2)).unwrap();
+    scheduler
+        .set_conditioned_features(handle, &[128..192, 256..320])
+        .unwrap();
+    let request = scheduler.request(handle).unwrap();
+    assert_eq!(request.feature_index(-1).unwrap(), -1);
+    assert_eq!(request.feature_index(128).unwrap(), 0);
+    assert_eq!(request.feature_index(191).unwrap(), 63);
+    assert_eq!(request.feature_index(256).unwrap(), 64);
+    assert_eq!(request.feature_index(319).unwrap(), 127);
+    assert!(request.feature_index(127).is_err());
+    assert!(request.feature_index(192).is_err());
+    assert!(
+        scheduler
+            .set_conditioned_features(handle, &[0..64])
+            .is_err()
+    );
+}
+
+#[test]
+fn image_preparation_wait_does_not_block_unrelated_prefill() {
+    let mut scheduler = scheduler(2, 16, 4);
+    let image = scheduler.admit(spec(65, 2)).unwrap();
+    scheduler.set_vision_images(image, &[256]).unwrap();
+    scheduler.conditioned_inputs_ready(image, false).unwrap();
+    let text = scheduler.admit(spec(66, 2)).unwrap();
+    init(&mut scheduler, 1);
+    let step = scheduler.plan().unwrap();
+    assert_eq!(step.kind, GraphKind::Prefill);
+    assert!(step.lanes.iter().all(|lane| lane.request == text));
+    scheduler.cancel(text).unwrap();
+    assert!(scheduler.plan().is_none());
+    scheduler.conditioned_inputs_ready(image, true).unwrap();
+    assert_eq!(scheduler.plan().unwrap().kind, GraphKind::Vision);
+}

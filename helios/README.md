@@ -468,12 +468,13 @@ IDs are monotonic within one cache and are not reused after eviction. Resource
 IDs are zero-based logical ordinals within the prepared page/snapshot capacities;
 the prepared graph contract maps them to backing storage and padding sentinels.
 
-## Qwen4Exp image preparation
+## Native image preparation
 
-The `images` feature adds `frontend::images::ImageProcessor` and the `png`
-decoder; it also enables `frontend`. Bootstrap supplies absolute paths and
-expected SHA256 values for `preprocessor_config.json` and `config.json`.
-The processor accepts the checkpoint's RGB8, bicubic-antialias profile with
+The `images` feature adds `frontend::images::ImageProcessor` and PNG, JPEG,
+and static WebP decoding; it also enables `frontend`. Typed package metadata
+selects the preparation profile and token layout independently. Profiles cover
+Qwen, MiMo, DeepSeek, DeepSeek row-major, Moonvit, Step, and RADIO inputs.
+The Qwen processor uses an RGB8, bicubic-antialias profile with
 16×16 patches, temporal duplication by two, spatial merge by two, a 48×48
 learned position table, and fused normalization `(pixel - 127.5) / 127.5`.
 
@@ -486,17 +487,27 @@ chat text, expands each image placeholder, tokenizes the result, and returns
 modality IDs and four unpadded position rows `[text,T,H,W]` plus the mRoPE delta.
 The model scheduler can transpose the last three rows into `[tokens,3]`.
 
-Admission limits apply before processing. Defaults admit at most four images,
-16,384 patches per image and per request, 64 million input pixels per image,
-and 32 MiB per encoded image. Exceeding a processed patch limit rejects the
-image without changing the checkpoint's resize settings. Request workers must
-bound concurrent preprocessing separately from these per-request limits.
+Prompt construction describes each image without building its tensors. The
+description includes geometry, semantic identity, token dependency span, and
+canonical feature range. Admission validates every image against the package's
+per-image and whole-request capacities. The number of images is bounded by
+feature storage, encoded-body size, and context; feature-slot concurrency is a
+separate limit on requests needing vision computation.
 
-`RgbImage` accepts already oriented RGB8 pixels. `decode_png` supports lossless
-RGB, RGBA, grayscale, gray-alpha and palette PNG; RGB conversion drops alpha
-without blending. Animated PNG, 16-bit PNG and EXIF metadata are rejected.
-JPEG, WebP, video, remote URL fetching and EXIF orientation are not implemented.
-No Python image-processing callback or approximate decoder fallback exists.
+After prefix lookup, only images whose dependency spans extend past the
+consumed endpoint require tensors or vision graphs. A fixed CPU worker prepares
+those inputs. Host retention can reuse source descriptions and prepared
+tensors through the configured memory and disk tiers. Selected image features
+are packed contiguously from zero without changing canonical prompt positions
+or indices. Preemption and failed restores retain encoded sources and replan
+from the restored endpoint. See [host retention](../docs/prefix-cache-offload.md).
+
+`RgbImage` holds the decoded representation required by its profile, including
+alpha and CMYK data where preprocessing consumes them. Semantic identities
+include these channels and resize mode as applicable. Encoded-source keys
+include the declared media type, source bytes, and processor settings.
+Animation, video, and remote URL fetching are unsupported. Decoding and
+preprocessing execute in Rust.
 
 The resize coefficient generator and integer convolution follow PyTorch
 [`UpSampleKernel.cpp`](https://github.com/pytorch/pytorch/blob/cf30153c4c131c8164ee7798e5022d810682e2cb/aten/src/ATen/native/cpu/UpSampleKernel.cpp)

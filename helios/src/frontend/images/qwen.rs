@@ -2,6 +2,7 @@
 
 use super::*;
 
+#[derive(Clone)]
 pub(super) struct QwenProcessor {
     pub(super) patches: patches::PatchProcessor,
     pub(super) position_side: usize,
@@ -38,10 +39,10 @@ impl QwenProcessor {
         let mut start = 0;
         result
             .interpolation_indices
-            .reserve(result.position_ids.len());
+            .reserve_exact(result.position_ids.len());
         result
             .interpolation_weights
-            .reserve(result.position_ids.len());
+            .reserve_exact(result.position_ids.len());
         for geometry in &result.geometry {
             let grid_h = geometry.height / PATCH;
             let grid_w = geometry.width / PATCH;
