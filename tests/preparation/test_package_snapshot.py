@@ -387,9 +387,81 @@ def test_rank_packing_preserves_interleaved_ownership_and_shard_limit():
                                                (2, 0), (4, 0), (4, 0), (2, None)])]
     groups = list(_resource_groups(roles, 12288))
     assert [[(kind, rank) for kind, rank, _ in group] for group in groups] == [
-        [(2, 0), (3, 0)], [(2, 1)], [(3, 0), (2, 0)], [(4, 0)], [(4, 0)], [(2, None)]]
+        [(2, 0), (3, 0)], [(2, 1)], [(3, 0), (2, 0)], [(4, 0), (4, 0)], [(2, None)]]
     assert all(group[-1][2].offset + group[-1][2].nbytes - group[0][2].offset + 4096 <= 12288
                for group in groups)
+
+
+def test_packing_caps_published_files_without_rejecting_legacy_layouts():
+    from ignition.preparation.package_snapshot import _resource_groups, validate_layout
+    from ignition.preparation import runtime_package_pb2 as proto
+
+    size = 32_000_000_000
+    roles = [(4, 0, proto.Span(offset=i * size, nbytes=size)) for i in range(2)]
+    assert len(list(_resource_groups(roles, 64 << 30))) == 2
+    validate_layout({'version': 1, 'files': {'': [[(64 << 30) - 4096, 'a' * 64 + '.safetensors']]}})
+
+
+def test_packed_weights_preserve_padding_signatures_and_cache_reuse(native, tmp_path):
+    from ignition.preparation import runtime_package_pb2 as proto
+    from ignition.preparation.package_file import publish, align
+    from ignition.preparation.resign import resign
+
+    cache = tmp_path / 'cache'
+    signer = fixtures.development_publisher()
+
+    def export(directory, graph):
+        directory.mkdir()
+        index = proto.ModelIndex(version=4, ranks=[proto.BundleIndex(), proto.BundleIndex()])
+        index.cluster.world, index.cluster.export_id = 2, 'packed-weights'
+        payload, cursor = [], 0
+        for owner, rank in enumerate(index.ranks):
+            for i in range(4):
+                name = f'weight-{i}'
+                data = directory / f'{owner}-{name}'
+                data.write_bytes(bytes([owner + i + 1]) * (101 + i))
+                rank.allocations.add(name=name, file=name)
+                rank.resources[name].CopyFrom(proto.Span(offset=cursor, nbytes=data.stat().st_size))
+                payload.append((cursor, data, 0, data.stat().st_size))
+                cursor = align(cursor + data.stat().st_size)
+            data = directory / f'graph-{owner}'
+            data.write_bytes(graph)
+            rank.graphs.add(name='decode', resource='graph')
+            rank.resources['graph'].CopyFrom(proto.Span(offset=cursor, nbytes=len(graph)))
+            payload.append((cursor, data, 0, len(graph)))
+            cursor = align(cursor + len(graph))
+        path = directory / 'model.safetensors'
+        publish(path, index, payload, publisher=signer, shard_size=16384)
+        return path
+
+    with export_options(cache):
+        source = export(tmp_path / 'first', b'graph')
+    with source.open('rb') as stream:
+        original_layout = read_container(stream)[3]
+    # Four allocations per rank fill two bounded shards, rather than four files.
+    weights = {name for logical, parts in original_layout['files'].items() if logical
+               for _, name in parts if name}
+    assert len(weights) == 4
+    assert all((source.parent / name).stat().st_size <= 16384 for name in weights)
+    development = fixtures.profiles(tmp_path / 'development.json', signer)
+    result = fixtures.read(native, source, namespace='local-development', weights=True, profile=development)
+    assert result.returncode == 0, result.stderr
+
+    with export_options(cache, no_weights=True):
+        repeated = export(tmp_path / 'second', b'changed graph')
+    for name in weights:
+        assert os.path.samefile(source.parent / name, repeated.parent / name)
+    signed = tmp_path / 'signed' / 'model.safetensors'
+    with export_options(cache):
+        resign(source, signed, publisher=publisher(),
+               development_profile=fixtures.development_profile(signer), shard_size=16384)
+    assert_native(native, signed)
+
+    repacked = tmp_path / 'repacked' / 'model.safetensors'
+    convert(signed, repacked, profiles=[profile()], cache=cache, shard_size=65536)
+    with signed.open('rb') as before, repacked.open('rb') as after:
+        assert read_container(before)[2] == read_container(after)[2]
+    assert_native(native, repacked)
 
 
 def test_signing_large_resource_catalog_stays_within_snapshot_segment_budget(native, tmp_path):

@@ -600,13 +600,17 @@ With the default package cache, the layout is:
 Each payload filename hashes the complete file. Snapshot payloads are read-only
 hardlinks to `blobs/`, so identical bytes occupy disk space once. Every primary
 contains only the signed model envelope and the storage layout. All model payloads,
-including graphs and kernels, follow in separate files no larger than 64 GiB.
+including graphs and kernels, follow in separate files no larger than 64 GB
+(64,000,000,000 bytes). Size suffixes are binary; packing also applies this
+publication cap when the configured limit is `64G`.
 `--output FILE` selects another primary location on the cache's filesystem;
 a different filesystem requires a package cache on that filesystem. Configure
 `paths.package_cache` accordingly.
 
-`--no-weights` requires every stored allocation and embedding plane to match an
-existing cached blob. A missing or changed payload fails export before publishing
+Weight resources are packed into shards by rank and logical file, separately
+from executable and supporting resources. `--no-weights` requires both the
+captured allocations and the resulting stored-data shards to be cached.
+A missing or changed payload fails export before publishing
 the primary. This includes initialized persistent buffers as well as weights.
 The flag avoids temporary allocation files and duplicate weight writes. It still
 loads and prepares the checkpoint and reads captured storage to establish exact

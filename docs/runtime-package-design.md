@@ -193,8 +193,12 @@ tokenizer, processor, and model configuration files are not included.
 
 Payload blobs contain whole resources: stored allocations, embedding planes,
 graph bodies, cubins, module globals, or frontend assets. Blob names are SHA-256
-hashes of the complete safetensors file. Resource boundaries provide stable
-reuse when unrelated resources change. Blobs remain uncompressed. New exports
+hashes of the complete safetensors file. Adjacent stored resources are packed up
+to the selected shard limit without crossing rank or logical-file boundaries.
+Executable and supporting resources use separate shards. Whole resources remain
+contiguous; a graph change can reuse unchanged weight shards. Changing any bytes
+in a weight shard gives that entire shard a different identity. Blobs remain
+uncompressed. New exports
 reuse identical stored bytes through hardlinks, and upload clients can deduplicate
 the same named content across revisions. Upload clients may still scan local files.
 
@@ -238,8 +242,9 @@ preparation memory.
 
 ### File placement and addressing
 
-`ignition export`, `ignition run`, `ignition sign`, and `ignition convert` enforce
-a 64 GiB payload-file maximum, including the 4096-byte header. The
+`ignition export`, `ignition run`, `ignition sign`, and `ignition convert` pack
+published payloads to at most 64 GB (64,000,000,000 bytes), including the
+4096-byte header. The reader retains its 64 GiB limit for existing packages. The
 `[publishing] shard_size` setting or `--shard-size SIZE` can select a smaller limit.
 Zero is invalid. The package cache key includes the resolved byte count. An
 indivisible resource exceeding the limit fails publication; no oversized file is

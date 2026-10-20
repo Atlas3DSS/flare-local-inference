@@ -22,6 +22,7 @@ from .package_file import (ALIGNMENT, DEFAULT_SHARD_SIZE, MAX_HEADER_BYTES, MAX_
                            _byte_tensor, _unique_fields, align, container_header)
 
 MAX_BLOBS = 65536
+MAX_PUBLISHED_BLOB_BYTES = 64_000_000_000
 BLOCK = 8 << 20
 _OPTIONS = ContextVar('package_snapshot_options', default=None)
 
@@ -329,13 +330,14 @@ def write_primary(path, envelope, layout):
 
 
 def _resource_groups(roles, shard_size):
-    """Pack adjacent code and support within one rank; retain independent weights."""
+    """Pack adjacent resources by rank, keeping stored data separate from code."""
+    shard_size = min(shard_size, MAX_PUBLISHED_BLOB_BYTES)
     group = []
     for role in roles:
         kind, owner, span = role
         if span.nbytes > shard_size - ALIGNMENT:
             raise ValueError('package resource exceeds the payload shard limit')
-        if (group and (kind == 4 or group[-1][0] == 4 or owner != group[-1][1]
+        if (group and ((kind == 4) != (group[-1][0] == 4) or owner != group[-1][1]
                        or span.filename != group[0][2].filename
                        or span.offset + span.nbytes - group[0][2].offset > shard_size - ALIGNMENT)):
             yield group
@@ -399,6 +401,8 @@ def publish_snapshot(path, index, protection, *, shard_size=DEFAULT_SHARD_SIZE, 
                 for destination, source, offset, length in selected:
                     while position < destination:
                         count = min(BLOCK, destination - position)
+                        if first and part is not None:
+                            _absorb_zeros(protection.hashes[owner], count)
                         yield bytes(count)
                         position += count
                     with _open_source(source) as contents:
@@ -554,7 +558,7 @@ def convert(source, destination, *, profiles, cache=None, shard_size=DEFAULT_SHA
                                 min(BLOCK, count - offset), span.offset + pos + offset))
                         if digest.digest() != expected:
                             raise ValueError('relocated publisher resource verification failed')
-                # Packed code blobs also carry unsigned alignment gaps. Preserve
+                # Packed blobs also carry alignment gaps. Preserve
                 # their zero-padding invariant if the source changed during copy.
                 for group in groups:
                     for previous, following in zip(group, group[1:]):
