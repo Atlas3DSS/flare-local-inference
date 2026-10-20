@@ -52,12 +52,17 @@ fn disk_cached_and_resident_tables_feed_native_b12x_graphs() {
     let root = std::path::PathBuf::from(std::env::var_os("FLARE_ENGRAM_TEST_PACKAGE").unwrap());
     let table_rank: usize = std::env::var("FLARE_ENGRAM_TEST_RANK")
         .map(|rank| rank.parse().unwrap()).unwrap_or(0);
-    for (storage, cache_bytes, fail_read) in [
-        (Storage::Disk, 0, false),
-        (Storage::Ram, 0, false),
-        (Storage::Disk, 1 << 20, false),
-        (Storage::Disk, 0, true),
-        (Storage::Disk, 1 << 20, true),
+    let reference_rows: Vec<usize> =
+        serde_json::from_slice(&std::fs::read(root.join("reference_rows.json")).unwrap()).unwrap();
+    for (storage, cache_bytes, fail_read, resident_scales) in [
+        (Storage::Disk, 0, false, false),
+        (Storage::Ram, 0, false, false),
+        (Storage::Disk, 1 << 20, false, false),
+        (Storage::Disk, 0, true, false),
+        (Storage::Disk, 1 << 20, true, false),
+        (Storage::Disk, 0, false, true),
+        (Storage::Disk, 1 << 20, false, true),
+        (Storage::Disk, 1 << 20, true, true),
     ] {
         let AuthorizedPackage { archive, mut index } =
             test_support::authorize(root.join("package"));
@@ -66,6 +71,7 @@ fn disk_cached_and_resident_tables_feed_native_b12x_graphs() {
         archive.validate(&package).unwrap();
         let catalog = index.engram.unwrap();
         let layout = &catalog.tables[0];
+        assert_eq!(reference_rows.len(), layout.rows as usize);
         let (first_row, rows, world) = if layout.shards.is_empty() {
             (0, layout.rows, 1)
         } else {
@@ -129,6 +135,7 @@ fn disk_cached_and_resident_tables_feed_native_b12x_graphs() {
             storage,
             cache_bytes,
             1,
+            resident_scales,
         )
         .unwrap();
         assert!(shared.cache_bytes() <= cache_bytes);
@@ -236,7 +243,8 @@ fn disk_cached_and_resident_tables_feed_native_b12x_graphs() {
                     let value = if *id < 0 {
                         0.0
                     } else {
-                        (((first_row as usize + *id as usize) * 256 + column) % 15) as f32 - 7.0
+                        let source_row = reference_rows[first_row as usize + *id as usize];
+                        ((source_row * 256 + column) % 15) as f32 - 7.0
                     };
                     let expected = (value.to_bits() >> 16) as u16;
                     let offset = (row * 256 + column) * 2;

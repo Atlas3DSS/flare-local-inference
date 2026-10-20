@@ -62,6 +62,25 @@ def test_snapshot_primary_is_metadata_only_and_native_reads_payloads(native, tmp
     assert_native(native, path)
 
 
+def test_snapshot_companion_links_support_native_loading_and_conversion(native, tmp_path):
+    path, _ = fixtures.fixture(tmp_path)
+    with path.open('rb') as source:
+        layout = read_container(source)[3]
+    storage = tmp_path / 'payload-storage'
+    storage.mkdir()
+    names = {name for parts in layout['files'].values() for _, name in parts if name}
+    assert names
+    for name in names:
+        companion = path.parent / name
+        target = storage / name
+        companion.rename(target)
+        companion.symlink_to(target)
+    assert_native(native, path)
+    destination = tmp_path / 'converted' / 'model.safetensors'
+    convert(path, destination, profiles=[profile()], cache=tmp_path / 'converted-cache')
+    assert_native(native, destination)
+
+
 @pytest.mark.parametrize('sharded', [False, True])
 def test_converter_preserves_original_signature_and_reuses_blobs(native, tmp_path, monkeypatch, sharded):
     def publish(*args, **kwargs):

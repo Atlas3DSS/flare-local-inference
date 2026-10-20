@@ -229,8 +229,10 @@ with separate proposal and verification graphs, using native conditional
 confidence and measured execution cost for adaptive verification. Image preprocessing
 preserves the checkpoint's row-major patch layout and 1024-token image limit.
 Its 188.8 GiB of Engram tables are stored once in the package, partitioned by
-hash head across TP ranks. Each TP4 rank owns six of the 24 heads and their
-projection input columns. Each rank reads its table rows, computes a partial
+hash head across TP ranks. Heads are assigned round-robin, so each TP4 rank
+owns two bigram, two trigram, and two four-gram heads, with their projection
+input columns. Table rows and projection scales retain checkpoint precision.
+Each rank reads its table rows, computes a partial
 projection, and reduces the result before residual mixing. Multi-host package
 distribution transfers only the table partitions owned by the receiving rank.
 Disk storage reads rows on demand through bounded direct-I/O staging;
@@ -239,6 +241,10 @@ ordinary resident memory. Both modes copy compact rows into each rank's prepared
 buffers and signal captured consumer events. Preparation appends the immutable
 checkpoint slices without materializing the tables. Packages containing shared
 table planes retain their prepared replicated computation and shared row delivery.
+For disk storage, `--embedding-table-resident-scales` retains the original scale
+bytes in RAM and removes scale reads on row-cache misses. DeepSeek V4.1 Flash
+TP4 uses about 1.4 GiB per rank for these scales, in addition to any row-cache
+budget. The loader reserves this memory before sizing KV storage.
 Select four available GPUs explicitly:
 
 ```sh
@@ -585,7 +591,10 @@ check. GPU weights, KV, registered host buffers, resident embedding tables,
 compiler workers, and the OS compete for that memory. Set `[memory] reserve`
 for host activity as well as driver headroom; `reserve = "4G"` leaves four GiB
 outside the model's cache budget. RAM embedding tables load before cache
-sizing. Disk embedding tables use bounded staging without a resident table.
+sizing. Disk embedding tables use bounded staging and can retain their scale
+planes in RAM with `--embedding-table-resident-scales`. The loader accounts for
+resident scales and the optional row cache before sizing KV, for both PLE and
+Engram packages.
 
 Spark's NVML interface does not report VRAM capacity. Ignition identifies an
 integrated device through CUDA and uses Linux `MemAvailable`, capped by CUDA's

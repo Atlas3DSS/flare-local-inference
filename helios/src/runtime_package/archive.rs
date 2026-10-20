@@ -513,7 +513,7 @@ impl Archive {
                     libc::openat(
                         directory.as_raw_fd(),
                         name.as_ptr(),
-                        libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+                        libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NONBLOCK,
                     )
                 };
                 if fd < 0 {
@@ -527,26 +527,13 @@ impl Archive {
             };
             #[cfg(windows)]
             let companion = {
-                use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
-                use windows_sys::Win32::Storage::FileSystem::{
-                    FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
-                };
-                let file = std::fs::OpenOptions::new()
+                use std::os::windows::fs::OpenOptionsExt;
+                use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+                std::fs::OpenOptions::new()
                     .read(true)
                     .share_mode(FILE_SHARE_READ)
-                    .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
                     .open(parent.join(&name))
-                    .map_err(|e| e.to_string())?;
-                if file
-                    .metadata()
                     .map_err(|e| e.to_string())?
-                    .file_attributes()
-                    & FILE_ATTRIBUTE_REPARSE_POINT
-                    != 0
-                {
-                    return Err(invalid("package companion cannot be a reparse point"));
-                }
-                file
             };
             let companion = PayloadFile::companion(companion)?;
             if let Some(layout) = &layout {

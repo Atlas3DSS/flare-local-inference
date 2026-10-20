@@ -892,23 +892,32 @@ fn stat(request: &Value) -> Result<Vec<u8>, Failure> {
     if !path.is_absolute() {
         return Err("STAT needs an absolute path".into());
     }
-    let size = fs::metadata(path)
-        .map_err(|e| format!("cannot stat {}: {e}", path.display()))?
-        .len();
+    let size = package_file_size(path)?;
     let directory = path.parent().ok_or("path has no directory")?;
     let companions = flare_helios::runtime_package::package_companions(path)
         .map_err(|e| e.to_string())?
         .into_iter()
         .map(|name| {
-            let size = fs::metadata(directory.join(&name))
-                .map_err(|e| format!("cannot stat companion {name}: {e}"))?
-                .len();
+            let size = package_file_size(&directory.join(&name))?;
             Ok(json!({"name": name, "size": size}))
         })
         .collect::<Result<Vec<_>, Failure>>()?;
     Ok(json!({"size": size, "companions": companions})
         .to_string()
         .into_bytes())
+}
+
+fn package_file_size(path: &Path) -> Result<u64, Failure> {
+    let info = fs::metadata(path)
+        .map_err(|e| format!("cannot stat package file {}: {e}", path.display()))?;
+    if !info.is_file() {
+        return Err(format!(
+            "package file must resolve to a regular file: {}",
+            path.display()
+        )
+        .into());
+    }
+    Ok(info.len())
 }
 
 fn run(agent: &Arc<Agent>, request: &Value) -> Result<Arc<Group>, Failure> {
@@ -1299,6 +1308,47 @@ pub mod tests {
     use super::*;
     use crate::orbit::grant::{ControllerKey, ControllerSet, Member, Package, Source};
     use std::net::TcpListener;
+
+    #[test]
+    fn package_stat_rejects_a_nonregular_primary_before_reading_metadata() {
+        let temp = tempfile::tempdir().unwrap();
+        let error = stat(&json!({"path": temp.path()})).unwrap_err().to_string();
+        assert!(error.contains("must resolve to a regular file"), "{error}");
+        assert!(
+            error.contains(&temp.path().display().to_string()),
+            "{error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn package_file_sizes_follow_links_and_reject_invalid_targets() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("data.safetensors");
+        fs::write(&file, b"payload").unwrap();
+        let hardlink = temp.path().join("hardlink.safetensors");
+        fs::hard_link(&file, &hardlink).unwrap();
+        let link = temp.path().join("link.safetensors");
+        symlink("data.safetensors", &link).unwrap();
+        for path in [&file, &hardlink, &link] {
+            assert_eq!(package_file_size(path).unwrap(), 7);
+        }
+        fs::remove_file(&link).unwrap();
+        symlink(temp.path(), &link).unwrap();
+        assert!(
+            package_file_size(&link)
+                .unwrap_err()
+                .to_string()
+                .contains("regular file")
+        );
+        fs::remove_file(&link).unwrap();
+        symlink("missing.safetensors", &link).unwrap();
+        assert!(package_file_size(&link).is_err());
+        fs::remove_file(&link).unwrap();
+        symlink("link.safetensors", &link).unwrap();
+        assert!(package_file_size(&link).is_err());
+    }
 
     pub type Verified = Arc<Mutex<Vec<(PathBuf, Option<usize>)>>>;
 

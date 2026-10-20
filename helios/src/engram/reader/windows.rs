@@ -255,6 +255,7 @@ mod tests {
                     ids.len(),
                     stats.clone(),
                     workers,
+                    false,
                 )
                 .unwrap();
                 drop(file);
@@ -351,7 +352,7 @@ mod tests {
                 .collect();
             let stats = Arc::new(Stats::default());
             let mut reader =
-                Reader::from_files(&files, &planes, false, 0, ids.len(), stats.clone(), workers)
+                Reader::from_files(&files, &planes, false, 0, ids.len(), stats.clone(), workers, false)
                     .unwrap();
             drop(files);
             let check = |reader: &mut Reader, ids: &[i64]| {

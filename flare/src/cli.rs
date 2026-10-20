@@ -521,6 +521,10 @@ pub struct ServingOptions {
     #[arg(long, value_name = "SIZE", value_parser = parse_size, default_value = "0", help_heading = "Serving options")]
     pub embedding_table_cache_size: u64,
 
+    /// Retain embedding scales in host RAM while weights remain on disk; adds to the row-cache budget.
+    #[arg(long, help_heading = "Serving options")]
+    pub embedding_table_resident_scales: bool,
+
     /// Disk workers per embedding table; shares a fixed I/O budget [default: 4 on Windows, 1 elsewhere].
     #[arg(long, value_name = "N", help_heading = "Advanced serving options",
         value_parser = PossibleValuesParser::new(["1", "2", "4", "8"]).map(|value| value.parse::<usize>().unwrap()))]
@@ -669,6 +673,9 @@ impl ServingOptions {
                 self.embedding_table_cache_size.to_string(),
             ]);
         }
+        if self.embedding_table_resident_scales {
+            options.push("--embedding-table-resident-scales".into());
+        }
         options
     }
 
@@ -678,6 +685,7 @@ impl ServingOptions {
             memory_limit: self.memory_limit,
             embedding_table_storage: self.embedding_table_storage,
             embedding_table_cache_bytes: self.embedding_table_cache_size,
+            embedding_table_resident_scales: self.embedding_table_resident_scales,
             embedding_table_workers: self.embedding_table_workers,
             max_concurrency: self.max_concurrency.map(NonZeroUsize::get),
             mtp_draft_tokens: self.mtp_draft_tokens,
@@ -1012,6 +1020,16 @@ mod tests {
             args.rank_options(),
             ["--embedding-table-cache-size", "1073741824"]
         );
+    }
+
+    #[test]
+    fn resident_embedding_scales_are_forwarded_to_every_rank() {
+        let args = run(&["flare", "run", "model.safetensors", "--embedding-table-resident-scales",
+                         "--embedding-table-cache-size", "1G"]);
+        assert!(args.load_options().embedding_table_resident_scales);
+        assert_eq!(args.load_options().embedding_table_cache_bytes, 1 << 30);
+        assert!(args.rank_options().contains(&"--embedding-table-resident-scales".to_owned()));
+        assert!(!run(&["flare", "run", "model.safetensors"]).load_options().embedding_table_resident_scales);
     }
 
     #[test]

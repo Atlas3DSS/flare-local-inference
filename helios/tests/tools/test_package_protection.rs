@@ -3,6 +3,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().collect();
     let path = args.get(1).ok_or("expected package path")?;
     let namespace = args.get(2).ok_or("expected accepted namespace")?;
+    #[cfg(unix)]
+    if namespace == "retarget-companion" {
+        use flare_helios::runtime_package::{VerifiedPackage, test_support};
+        let path = std::path::Path::new(path);
+        let package = VerifiedPackage::open(path, &[test_support::publisher()], None)?;
+        let companion = path.with_file_name(args.get(3).ok_or("expected companion name")?);
+        std::fs::remove_file(&companion)?;
+        std::os::unix::fs::symlink(args.get(4).ok_or("expected replacement target")?, companion)?;
+        package.verify_stored_data()?;
+        return Ok(());
+    }
     if namespace == "ranges" {
         use flare_helios::runtime_package::{rank_ranges, test_support};
         let package = test_support::authorize(path);

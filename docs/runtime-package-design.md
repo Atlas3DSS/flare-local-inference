@@ -269,9 +269,17 @@ cache hits do not write staging weight files.
 
 Companion references are portable ASCII basenames ending in `.safetensors`, with
 an alphanumeric first character and only letters, digits, dots, underscores, and
-hyphens thereafter. Paths, `..`, device names, symlinks, reparse points, and
-nonregular files are rejected. The loader retains the package directory and
-opened files, validates ranges against each file's payload, and caches each
+hyphens thereafter. Paths, `..`, and device names in signed references are
+rejected. A companion directory entry may be a symbolic link to a regular file,
+including a file on another filesystem. The loader follows the link when opening
+the companion, validates the opened file's type, header, length, and payload
+ranges, and retains that file handle. Broken links, link loops, and nonregular
+targets are rejected. Retargeting a link does not replace an already opened
+companion. The operator controls these filesystem links; signed basenames do not
+confine their targets to the package directory. Package files must remain
+immutable while they are being transferred or served.
+
+The loader retains the package directory and opened files and caches each
 payload base and direct-I/O handle. Allocation uploads add the resource offset
 to that base. Embedding readers retain their file handles before serving; block
 coalescing compares both file identity and offset.

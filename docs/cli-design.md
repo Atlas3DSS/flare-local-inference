@@ -389,6 +389,7 @@ Help exits with status 0; usage errors go to stderr with status 2. Its options a
 | `--mtp-max-verification-token-budget N` | Retain all captured packed verification capacities at or below a total-row ceiling | All captured capacities |
 | `--embedding-table-storage disk\|ram` | PLE and Engram table storage; both modes deliver compact GPU rows | `disk` |
 | `--embedding-table-cache-size SIZE` | Per-host budget for cached disk-backed PLE/Engram rows, including the index, usage counters and miss workspace; accepts sizes such as `1G` or `2GiB` | `0` (disabled) |
+| `--embedding-table-resident-scales` | Keep original embedding scale bytes in host RAM while weights remain on disk; adds to the row-cache budget | Disabled |
 
 `--embedding-table-workers 1|2|4|8` controls Windows disk-reader workers.
 Workers share 128 I/O slots and 8 MiB of direct-read staging per embedding table.
@@ -404,6 +405,18 @@ tables and local tensor-parallel ranks. The loader commits cache memory before
 sizing KV and continuation pools, so the cache uses part of the integrated GPU's
 existing memory budget. The cache remains fixed in size while serving and warms
 from requests each time the server starts.
+
+`--embedding-table-resident-scales` loads the original scale plane into immutable
+host RAM before KV sizing. It applies to every table in the package's embedding
+catalog, including Qwen PLE and DeepSeek Engram. The loader uses the declared
+weight and scale row sizes; it does not select behavior by model identity.
+Weight rows remain on disk, and a row-cache miss reads
+only the weight plane. The resident scale allocation is additional to
+`--embedding-table-cache-size` and is included in the integrated GPU memory
+budget. This option works with existing packages and requires disk table storage;
+RAM table storage already retains both planes. The metric
+`flare_engram_resident_scale_bytes` reports the scale allocation separately from
+the row cache.
 
 `--served-model-name` changes the name advertised by `/v1/models` and accepted
 for requests. It replaces the package aliases; the canonical model ID remains
@@ -522,8 +535,10 @@ The native client uses Hugging Face's `refs`, `snapshots`, and `blobs` cache
 layout. It loads regular snapshot files directly. Multi-file snapshots containing
 symlinks, including those created by Python's Hub client, use regular hardlinks in
 the cache's `flare-packages` directory. These links share the cached file's bytes
-and allow the loader to reject symlink companions. Filesystems without hardlink
-support report an error instead of copying payloads.
+and preserve companion paths when the primary path is canonicalized. Filesystems
+without hardlink support report an error instead of copying payloads. Local
+package companions may also be symbolic links to regular files on other storage
+devices; the loader validates and retains the opened targets.
 
 When a file is absent from a snapshot, Flare checks its Hub ETag and size against
 the repository's blob cache. An existing blob is hardlinked into the snapshot

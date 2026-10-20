@@ -300,8 +300,8 @@ fn cached(cache: &Cache, repo: &Repo, requested: Option<&str>) -> Result<PathBuf
     package_view(cache, repo, &commit, &filename, &companions)
 }
 
-/// Load regular snapshot entries directly. Symlink snapshots need a hardlink view
-/// so the runtime can reject symlink companions without duplicating model bytes.
+/// Load regular snapshot entries directly. A hardlink view of symlink snapshots
+/// preserves companion paths when the primary is canonicalized, without copying bytes.
 fn package_view(
     cache: &Cache,
     repo: &Repo,

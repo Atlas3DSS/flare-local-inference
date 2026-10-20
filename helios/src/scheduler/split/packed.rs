@@ -4,9 +4,8 @@ use super::*;
 use crate::scheduler::cost::PackedShape;
 
 impl RequestScheduler {
-    fn budget_choice(&self, offers: &[(usize, usize)], batch: usize,
+    fn budget_choice(&self, offers: &[(usize, usize)], batch: usize, width: usize,
         values: &[LaneValue; REQUEST_LANES], age_price: f64) -> Option<(PackedShape, ValueRate)> {
-        let width = self.split.as_ref()?.width;
         let proposal_ns = self.costs.duration(GraphKind::Proposal, batch, width)?;
         let mut scores = Vec::new();
         for &(slot, limit) in offers {
@@ -93,17 +92,19 @@ impl RequestScheduler {
                     rate: ValueRate::new(nanos,value,age), feedback: true });
             }
         }
-        let width = self.split.as_ref().unwrap().width;
-        available.retain(|&slot| self.speculative_tokens(self.slots[slot].request.as_ref().unwrap(),width)>1);
+        let maximum = self.split.as_ref().unwrap().width;
+        available.retain(|&slot| self.speculative_tokens(self.slots[slot].request.as_ref().unwrap(),maximum)>1);
         available.sort_unstable_by(|&a,&b| values[b].output_token.total_cmp(&values[a].output_token).then(a.cmp(&b)));
         for count in 1..=available.len() {
-            let offers: Vec<_> = available[..count].iter().map(|&slot|
-                (slot,self.speculative_tokens(self.slots[slot].request.as_ref().unwrap(),width))).collect();
             let batch = count.next_power_of_two();
-            if let Some((shape,rate)) = self.budget_choice(&offers,batch,values,age) {
-                output.push(Candidate { kind: GraphKind::Proposal, mask: offers.iter().fold(0,|mask,(slot,_)|mask|(1<<slot)),
-                    batch, capacity: width, packed_token_capacity: 0, prefill_capacity: 0, prefill_slot: None,
-                    work: 0, duration_ns: rate.duration_ns, rate, feedback: true, verification_budget: Some(shape.tokens) });
+            for width in 2..=maximum {
+                let offers: Vec<_> = available[..count].iter().map(|&slot|
+                    (slot,self.speculative_tokens(self.slots[slot].request.as_ref().unwrap(),width))).collect();
+                if let Some((shape,rate)) = self.budget_choice(&offers,batch,width,values,age) {
+                    output.push(Candidate { kind: GraphKind::Proposal, mask: offers.iter().fold(0,|mask,(slot,_)|mask|(1<<slot)),
+                        batch, capacity: width, packed_token_capacity: 0, prefill_capacity: 0, prefill_slot: None,
+                        work: 0, duration_ns: rate.duration_ns, rate, feedback: true, verification_budget: Some(shape.tokens) });
+                }
             }
         }
     }

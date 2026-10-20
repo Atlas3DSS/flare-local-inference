@@ -470,8 +470,8 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         "weights_bytes": weights.allocated_bytes, "mapped_host_bytes": 0,
         "expert_scale_compression": config.expert_scale_compression,
         "mla_compute_mode": config.mla_compute_mode,
-        "offloaded_bytes": sum((last - first) * 264 for ordinal in range(len(tables.sources))
-                               for first, last in (tables.partition_rows(ordinal, shard.rank),)),
+        "offloaded_bytes": sum(tables.partition(ordinal, shard.rank).rows * 264
+                               for ordinal in range(len(tables.sources))),
         "continuation_bytes": pool.backing.nbytes, "state_rows": state_rows,
         "preparation_state_rows": int(pool.memory_capacity[0].item()),
         "preparation_state_bytes": int(pool.memory_capacity[0].item()) * layout.row_bytes,

@@ -149,8 +149,8 @@ class DeepSeekWeightLoader(BlockFP8WeightLoader):
             "attn_norm.weight", "ffn_norm.weight")}
         engram = None
         if not draft and layer in text["engram_layer_ids"]:
-            engram = {"projection": self.load_linear(prefix + ".engram.wkv",
-                                                     columns=shard.partition(6144, alignment=256)),
+            engram = {"projection": self.load_linear_columns(prefix + ".engram.wkv",
+                ((head * 256, (head + 1) * 256) for head in range(shard.rank, 24, shard.world_size))),
                 "weight": self.load_tensor(prefix + ".engram.q_weight").float()
                           * self.load_tensor(prefix + ".engram.k_weight").float()}
         return LayerWeights(result, routed, residual, engram)

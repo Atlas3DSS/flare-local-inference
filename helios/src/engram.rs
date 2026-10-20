@@ -10,7 +10,7 @@ use crate::{
     execution::{ExecutionManifest, GraphKind, Upload},
 };
 #[cfg(unix)]
-pub use prepared::{PlaneSource, PreparedTables, TableSource};
+pub use prepared::{PlaneSource, PreparedTables, SourceSegment, TableSource};
 pub(crate) use reader::Plane;
 use std::{
     fmt::Write,
@@ -32,6 +32,7 @@ pub(crate) struct Stats {
     resident_rows: AtomicU64,
     capacity_rows: AtomicU64,
     cache_bytes: AtomicU64,
+    resident_scale_bytes: AtomicU64,
     disk_reads: AtomicU64,
     disk_bytes: AtomicU64,
     disk_plan_ns: AtomicU64,
@@ -90,6 +91,12 @@ impl Stats {
                 "gauge",
                 "Allocated embedding row payload, usage counters, index and bounded miss workspace bytes.",
                 &self.cache_bytes,
+            ),
+            (
+                "resident_scale_bytes",
+                "gauge",
+                "Resident scale-plane allocation bytes for disk-backed embedding tables, separate from the row cache.",
+                &self.resident_scale_bytes,
             ),
             (
                 "disk_reads_total",
@@ -261,6 +268,7 @@ impl Shared {
         storage: Storage,
         cache_bytes: u64,
         workers: usize,
+        resident_scales: bool,
     ) -> Result<Arc<Self>> {
         if storage == Storage::Ram && cache_bytes != 0 {
             return Err("embedding row cache requires disk table storage".into());
@@ -291,6 +299,7 @@ impl Shared {
                     rows,
                     stats.clone(),
                     workers,
+                    resident_scales,
                 )
             })
             .collect::<Result<Vec<_>>>()?;

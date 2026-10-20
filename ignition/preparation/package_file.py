@@ -82,7 +82,7 @@ def container_header(length, index_size=0, format='flare-data'):
 
 
 class PackageFiles:
-    """Retain regular companion files opened relative to one pinned directory."""
+    """Resolve companion links once and retain their validated regular-file handles."""
 
     def __init__(self, path, primary, base, length):
         from .package_snapshot import read_container, LogicalFile
@@ -108,7 +108,7 @@ class PackageFiles:
         validate_filename(filename)
         if len(self.files) > (65536 if self.layout is not None else 99):
             raise ValueError('package references too many data files')
-        fd = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=self.directory)
+        fd = os.open(filename, os.O_RDONLY | os.O_NONBLOCK, dir_fd=self.directory)
         source = os.fdopen(fd, 'rb')
         try:
             info = os.fstat(fd)

@@ -312,6 +312,10 @@ sequenceDiagram
    sparse mirror. The controller verifies the index and obtains
    publisher acceptance as `flare run` does, and computes each rank's byte
    ranges from the index with `runtime_package::rank_ranges`.
+   Source files may be symbolic links to regular files, including files on
+   another filesystem. STAT rejects missing or nonregular targets before the
+   controller mirrors metadata or starts package transfers. Keep the source
+   files and links unchanged until transfer and serving have finished.
 2. The controller connects to every node in the cluster, agrees on protocol
    versions, and checks STATUS for a free GPU and sufficient disk. Rank zero's
    STATUS, asked `toward` the first peer's address, returns the address rank

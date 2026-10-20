@@ -52,7 +52,7 @@ def _select_fake(query, scales, weights, cache, pages, lengths, active, output, 
 class PreparedMXFP4Indexer:
     def __init__(self, query, weights, cache, pages, lengths, active, output, *, page_size,
                  session, name, workspace, candidates=None, counts=None, candidates_out=None, counts_out=None,
-                 buffers=None):
+                 buffers=None, mode="decode"):
         self.query, self.cache, self.output = query, cache, output
         # Each call quantizes the query into these before selecting, so a graph's `buffers` may hold them.
         packed, scales = (*query.shape[:-1], 64), (*query.shape[:-1], 4)
@@ -63,7 +63,7 @@ class PreparedMXFP4Indexer:
             self.packed = buffers.zeros(packed, torch.uint8)
             self.scales = buffers.full(scales, 127, torch.uint8)
         caps = dsa.Caps(device=query.device, num_q_heads=query.shape[1], max_q_rows=query.shape[0],
-            max_page_table_width=pages.shape[1], topk=512, page_size=page_size, cache_format="mxfp4",
+            max_page_table_width=pages.shape[1], topk=512, page_size=page_size, cache_format="mxfp4", mode=mode,
             max_candidates=0 if candidates is None else candidates.shape[1],
             candidate_topk_blocks=0 if candidates_out is None else candidates_out.shape[1] // 8)
         self.plan = dsa.plan(caps)

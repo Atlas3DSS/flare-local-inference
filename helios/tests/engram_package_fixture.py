@@ -3,6 +3,7 @@
 from pathlib import Path
 from signing import publisher
 from fixture_frontend import server_config
+import json
 import sys
 
 import torch
@@ -73,8 +74,12 @@ def prepare(root, shard_size=64 << 30, table_world=1):
             # Session cleanup unloads compiled kernels; retain it until export has read the graph.
             try:
                 tables = Tables(geometry, tuple(range(32)), {1: tuple(sources)}, {1: inputs}, {1: mailbox}, sequence,
-                    TensorParallelShard(0, table_world), {1: torch.tensor((0, rows), device=device)},
+                    TensorParallelShard(0, table_world), {},
                     torch.arange(6144, device=device))
+                reference_rows = [row for rank in range(table_world)
+                                  for first, last in tables.partition(0, rank).source_rows
+                                  for row in range(first, last)]
+                (root / 'reference_rows.json').write_text(json.dumps(reference_rows))
                 buffers = dict(tables.buffers(), output=output, transfer_source=transfer_source, frame_index=frame,
                                submission_sequence=sequence, completion_records=records)
                 prepared = PreparedExecution(device=0, graphs={'decode': graph}, buffers=buffers,

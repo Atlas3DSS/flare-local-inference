@@ -361,20 +361,19 @@ impl NativeModel {
                 "embedding row cache requires an embedding table catalog",
             ));
         }
-        let embedding_host_bytes =
-            if options.embedding_table_storage == Some(crate::engram::Storage::Ram) {
-                engram
-                    .iter()
-                    .flat_map(|(index, _)| &index.tables)
-                    .flat_map(|table| &table.planes)
-                    .try_fold(0u64, |bytes, plane| {
-                        bytes.checked_add(plane.nbytes as u64).ok_or_else(|| {
-                            invalid("resident embedding tables exceed the memory budget")
-                        })
-                    })?
-            } else {
-                options.embedding_table_cache_bytes
-            };
+        if options.embedding_table_resident_scales && engram.is_empty() {
+            return Err(invalid("resident embedding scales require an embedding table catalog"));
+        }
+        let ram = options.embedding_table_storage == Some(crate::engram::Storage::Ram);
+        let resident_bytes = engram.iter().flat_map(|(index, _)| &index.tables)
+            .flat_map(|table| table.planes.iter().enumerate())
+            .filter(|(ordinal, _)| ram || (options.embedding_table_resident_scales && *ordinal == 1))
+            .try_fold(0u64, |bytes, (_, plane)| {
+                bytes.checked_add(plane.resident_bytes()? as u64)
+                    .ok_or_else(|| invalid("resident embedding tables exceed the memory budget"))
+            })?;
+        let embedding_host_bytes = resident_bytes.checked_add(options.embedding_table_cache_bytes)
+            .ok_or_else(|| invalid("embedding tables and row cache exceed the memory budget"))?;
         let prepared: crate::model::PreparedContract =
             serde_json::from_value(server_config["model_contract"].clone())
                 .map_err(|error| invalid(format!("invalid prepared contract: {error}")))?;
@@ -663,6 +662,7 @@ impl NativeModel {
                         storage,
                         group_budget,
                         options.embedding_workers(),
+                        options.embedding_table_resident_scales,
                     )?;
                     for (delivery_rank, local) in ranks.into_iter().enumerate() {
                         bindings.push((local, shared.clone(), delivery_rank));
@@ -674,6 +674,7 @@ impl NativeModel {
                     .map(|(_, shared, rank)| (shared, rank))
                     .collect();
                 let label = match storage {
+                    crate::engram::Storage::Disk if options.embedding_table_resident_scales => "disk weights, RAM scales",
                     crate::engram::Storage::Disk => "disk",
                     crate::engram::Storage::Ram => "RAM",
                 };

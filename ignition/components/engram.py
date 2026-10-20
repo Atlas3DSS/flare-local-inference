@@ -78,7 +78,7 @@ class PreparedEngramRequests:
     """Hash packed token rows on the GPU and release their mapped delivery mailbox."""
 
     def __init__(self, inputs, token_ids, starts, history, counts, mailbox, sequence, *,
-                 layer, token_map, geometry, session, name, row_bounds=None):
+                 layer, token_map, geometry, session, name, row_mapping=None):
         tokens, rows = token_ids.numel(), history.shape[0]
         device = token_ids.device
         self.mask = torch.ones(tokens, dtype=torch.bool, device=device)
@@ -87,10 +87,10 @@ class PreparedEngramRequests:
         self.requests = torch.empty(tokens, dtype=torch.int32, device=device)
         self.hashes = inputs.hashes[:tokens]
         self.mailbox, self.sequence = mailbox, sequence
-        if row_bounds is not None and (row_bounds.shape != (2,) or row_bounds.dtype != torch.int64
-                                       or row_bounds.device != device):
-            raise ValueError("embedding row bounds must be two int64 values on the hash device")
-        self.row_bounds = row_bounds
+        if row_mapping is not None and (row_mapping.shape != (self.hashes.shape[1], 3)
+                or row_mapping.dtype != torch.int64 or row_mapping.device != device):
+            raise ValueError("embedding row mapping must have int64 source bounds and a destination per head")
+        self.row_mapping = row_mapping
         self.args = (token_ids, self.mask, starts, self.slots, history, counts[1:], counts[:1],
                      self.hashes, self.compressed, self.requests, tokens)
         self.plan = engram.plan(engram.Caps(device=device, max_tokens=tokens, max_seqs=rows,
@@ -103,8 +103,9 @@ class PreparedEngramRequests:
 
     def __call__(self):
         hash_op(self.plan.handle, *self.args)
-        if self.row_bounds is not None:
-            start, end = self.row_bounds[0], self.row_bounds[1]
-            self.hashes.copy_(torch.where((self.hashes >= start) & (self.hashes < end),
-                                         self.hashes - start, -1))
+        if self.row_mapping is not None:
+            # Preserve canonical hash geometry; remap only the storage rows of owned heads.
+            start, end, destination = self.row_mapping.unbind(1)
+            valid = (destination >= 0) & (self.hashes >= start) & (self.hashes < end)
+            self.hashes.copy_(torch.where(valid, self.hashes - start + destination, -1))
         publish_requests(self.hashes, self.mailbox, self.sequence)

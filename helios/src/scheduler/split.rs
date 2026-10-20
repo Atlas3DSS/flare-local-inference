@@ -476,6 +476,67 @@ mod tests {
     use super::*;
 
     #[test]
+    fn packed_budgets_select_proposal_depth_and_preserve_short_prefix_limits() {
+        for active in [1, 3, 8] {
+            let mut s = engine(8);
+            s.configure_policy(PolicyConfig::throughput()).unwrap();
+            let mut graphs = super::super::tests::duration_graphs(8);
+            graphs.retain(|g| g.kind != GraphKind::Speculative);
+            for batch in [1, 2, 4, 8] {
+                for (kind, width, budget) in [(GraphKind::Speculative, 1, 0)].into_iter()
+                    .chain((2..=8).map(|width| (GraphKind::Proposal, width, 0)))
+                    .chain((1..=8).map(|width| (GraphKind::Verification, 8, batch * width)))
+                {
+                    graphs.push(GraphDescriptor { name: format!("{kind:?}-{batch}-{width}-{budget}"), kind,
+                        sampling_mode: SamplingMode::General, handle: 1, batch_capacity: batch, token_capacity: width,
+                        packed_token_capacity: budget, prefill_capacity: 0, estimated_duration_ns: 1, input_bindings: vec![] });
+                }
+            }
+            s.graph_durations(&graphs).unwrap();
+            for graph in &graphs {
+                let duration = match graph.kind {
+                    GraphKind::Proposal => (graph.token_capacity as u64 - 1) * 500_000,
+                    GraphKind::Verification => 8_000_000 + graph.packed_token_capacity as u64 * 375_000,
+                    _ => 11_000_000,
+                };
+                s.costs.set_measured(&ScheduledStep { kind: graph.kind, batch_capacity: graph.batch_capacity,
+                    token_capacity: graph.token_capacity, packed_token_capacity: graph.packed_token_capacity,
+                    mixed: None, lanes: vec![], requires_feedback: true }, duration);
+            }
+            let handles: Vec<_> = (0..active).map(|_| ready(&mut s)).collect();
+            for (confidence, width) in [([0.99; 7], 8), ([0.9, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01], 2)] {
+                s.split.as_mut().unwrap().population = survival(&confidence);
+                let plan = s.plan().unwrap();
+                assert_eq!(plan.kind, GraphKind::Proposal);
+                assert_eq!(plan.token_capacity, width);
+                assert_eq!(plan.lanes.len(), active);
+                assert!(plan.lanes.iter().all(|lane| lane.tokens == width));
+            }
+            let plan = s.plan().unwrap();
+            s.commit(&plan, Fence(1)).unwrap();
+            let mut records = vec![CompletionRecord::default(); s.limits.request_capacity()];
+            for &handle in &handles {
+                records[handle.slot as usize] = CompletionRecord { generation: handle.generation as i64,
+                    submission_sequence: 1, consumed_tokens: 65, generated_tokens: 1, token_id: -1,
+                    status: 1, vector: Some(TokenVector::default()), ..Default::default() };
+            }
+            let mut confidence = vec![[f32::NAN; 7]; plan.batch_capacity];
+            for row in confidence.iter_mut().take(active) { row[0] = 0.9; }
+            s.complete_proposal(Fence(1), &records, Default::default(), &confidence).unwrap();
+            for handle in handles {
+                let proposal = s.retained_proposal(s.request(handle).unwrap()).unwrap();
+                assert_eq!((proposal.width, proposal.limit), (2, 2));
+                assert!(s.split.as_ref().unwrap().forecast[handle.slot as usize].unwrap().prefixes.iter().all(|p| p.is_finite()));
+            }
+            let verify = s.plan().unwrap();
+            assert_eq!(verify.kind, GraphKind::Verification);
+            assert_eq!(verify.token_capacity, 8);
+            assert!(verify.lanes.iter().all(|lane| lane.tokens == 2));
+            s.commit(&verify, Fence(2)).unwrap();
+        }
+    }
+
+    #[test]
     fn packed_budget_survives_cost_updates_before_commit_and_redistributes_across_requests() {
         let mut s = engine(8);
         s.configure_policy(PolicyConfig::throughput()).unwrap();
