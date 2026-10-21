@@ -219,7 +219,7 @@ impl Encoder {
     }
     pub fn start(&mut self) -> Vec<Frame> {
         match self.protocol {
-            Protocol::Chat => vec![self.chunk(0, json!({"role":"assistant"}), Value::Null)],
+            Protocol::Chat => vec![self.chunk(0, json!({"role":"assistant","content":""}), Value::Null)],
             Protocol::Completions => vec![],
             Protocol::Messages => {
                 let mut message = self.response();

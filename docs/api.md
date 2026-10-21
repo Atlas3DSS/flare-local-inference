@@ -169,6 +169,17 @@ encodings. Both encoded and decoded bodies are bounded by `max_body_bytes`
 frontend worker pool. Invalid requests receive protocol-specific JSON errors;
 failures after streaming begins produce protocol-specific terminal error events.
 
+Streaming requests return HTTP 200 and SSE headers after frontend validation and
+bounded enqueue, without waiting for GPU admission or prefill. Admission failures
+after enqueue are terminal SSE errors under HTTP 200; buffered requests retain
+the corresponding HTTP error status. Chat Completions emits its initial
+`{"role":"assistant","content":""}` delta only after the first generated token
+is available, including tokens hidden by stop matching or text decoding. Chunked
+prefill and cache restoration produce no chat data chunks before that token.
+A failure before the first token produces an error without a role chunk or
+`[DONE]`. SSE keepalive comments may precede generation during waits longer than
+15 seconds.
+
 Each completion batch reserves one admission slot per generated choice. Every
 child is prepared and validated before the group is submitted to the native
 worker. An oversized group is rejected; temporary admission exhaustion returns
