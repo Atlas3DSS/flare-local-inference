@@ -134,6 +134,27 @@ def test_quantization_config_requires_supported_schema():
         quantized_layers({"quantization_config": {"quant_method": "compressed-tensors"}})
 
 
+@pytest.mark.parametrize("entry,expected", [
+    ({"quant_algo": "MXFP8", "weight_block_size": [1, 32]}, "mxfp8"),
+    ({"quant_algo": "MXFP8", "group_size": 32, "weight_block_size": [1, 32]}, "mxfp8"),
+    ({"quant_algo": "FP8_PB_WO", "weight_block_size": [128, 128]}, "block_fp8"),
+])
+def test_modelopt_matrix_block_declarations(entry, expected):
+    assert projection_group_format({"a": entry, "b": entry}, ("a", "b")) == expected
+
+
+@pytest.mark.parametrize("entry", [
+    {"quant_algo": "MXFP8", "weight_block_size": [128, 32]},
+    {"quant_algo": "MXFP8", "group_size": 16, "weight_block_size": [1, 32]},
+    {"quant_algo": "MXFP8", "group_size": 32, "weight_block_size": [1, 16]},
+    {"quant_algo": "FP8_PB_WO", "weight_block_size": [32, 32]},
+    {"quant_algo": "FP8_PB_WO", "weight_block_size": [128, 128], "weight_scale_encoding": "csf"},
+])
+def test_modelopt_conflicting_block_declarations_are_rejected(entry):
+    with pytest.raises(ValueError, match="quantization"):
+        linear_format({"projection": entry}, "projection")
+
+
 @pytest.mark.parametrize("algo,group,encoding,expected", [
     ("NVFP4", 16, None, ("nvfp4", "a4")),
     ("NVFP4", 16, "csf_32x2_v1", ("nvfp4_csf", "a4")),

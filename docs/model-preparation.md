@@ -228,6 +228,13 @@ one, two, or four GPUs, including TP1 on DGX Station. Its logical context is
 1,048,576 tokens; the default 4096-token prefill chunk controls graph execution
 size independently of that context.
 
+Projection formats follow the checkpoint's ModelOpt declarations. The target
+decoder uses MXFP8 for KDA Q/K/V, dense MLPs, and the vocabulary head;
+block-FP8 with FP32 scales for MLA projections and shared experts; and BF16 for
+recurrent gates, indexer projections, and MLA key/value absorption. Compatible
+projections are fused within each precision group. Normalization retains BF16
+or FP32 checkpoint weights. Learned drafts use the target MXFP8 vocabulary head.
+
 Image preparation includes the checkpoint's replicated vision tower and native
 image processor. The tower merges four patches into each image feature, with
 captured capacities from 64 through 32,768 patches. Each feature slot holds an

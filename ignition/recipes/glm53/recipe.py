@@ -70,9 +70,9 @@ RECIPE = Recipe(
     checkpoints=(Checkpoint(
         alias="glm-5.3-flash", repository="nvidia/GLM-5.3-Flash-FP4-Local",
         revision="76348ddb2be2e35e39ecfc00e75dc07703f4f3d5", architecture="Glm5NextForConditionalGeneration",
-        stored_bytes=178_175_535_810,
+        stored_bytes=177_421_592_008,
         # Language model, draft layer, output head, and replicated vision tower.
-        device_bytes=178_175_535_810,
+        device_bytes=177_421_592_008,
         # Decoder layer 45, the MTP module.
         draft_bytes=4_301_658_112),),
     context=1048576, page_tokens=256, concurrency=4, max_concurrency=64, prefill_chunk=4096,
