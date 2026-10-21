@@ -69,13 +69,15 @@ pub enum GenerationEvent {
 pub struct Generation {
     pub events: async_mpsc::Receiver<GenerationEvent>,
     admission: oneshot::Receiver<Result<()>>,
+    /// Completes before stop matching or decoding can hide the first token.
+    first_token: oneshot::Receiver<Result<()>>,
     cancelled: Arc<AtomicBool>,
     failure: Arc<Mutex<Option<Error>>>,
     pub(super) enqueue_ns: Option<u64>,
 }
 
-/// A grouped response can start when one choice is admitted. Waiting for every
-/// choice would leave admitted choices' bounded output queues undrained.
+/// A buffered group waits for one admission. Waiting for every choice would
+/// leave admitted choices' bounded output queues undrained.
 pub(super) async fn await_admission(generations: &mut [Generation]) -> Result<()> {
     use std::{future::Future, pin::Pin, task::Poll};
     std::future::poll_fn(|cx| {
@@ -106,6 +108,12 @@ pub(super) async fn await_admission(generations: &mut [Generation]) -> Result<()
 }
 
 impl Generation {
+    pub(super) async fn wait_for_first_token(&mut self) -> Result<()> {
+        (&mut self.first_token)
+            .await
+            .unwrap_or_else(|_| Err(self.failure()))
+    }
+
     pub fn failure(&self) -> Error {
         self.failure
             .lock()
@@ -132,6 +140,7 @@ struct Incoming {
     prompt: Prompt,
     events: async_mpsc::Sender<GenerationEvent>,
     admission: Mutex<Option<oneshot::Sender<Result<()>>>>,
+    first_token: std::cell::Cell<Option<oneshot::Sender<Result<()>>>>,
     cancelled: Arc<AtomicBool>,
     failure: Arc<Mutex<Option<Error>>>,
     metrics: Arc<super::metrics::Metrics>,
@@ -174,6 +183,9 @@ impl Incoming {
         }
         *failure = Some(error.clone());
         self.notify_admission(Err(error.clone()));
+        if let Some(sender) = self.first_token.take() {
+            let _ = sender.send(Err(error.clone()));
+        }
         self.metrics.failed.fetch_add(1, Ordering::Relaxed);
         let _ = self.events.try_send(event(error));
     }
@@ -181,6 +193,9 @@ impl Incoming {
         self.emit(GenerationEvent::Token(token));
     }
     fn observe_token(&self, token: u32) {
+        if let Some(sender) = self.first_token.take() {
+            let _ = sender.send(Ok(()));
+        }
         if let Some(timestamps) = self.observation {
             let timestamp_ns = timestamps.then(super::observation::monotonic_ns);
             self.emit(GenerationEvent::ObservedToken {
@@ -667,6 +682,7 @@ impl ModelRuntime {
                 .map_err(|error| error.admission_context(AdmissionError::Invalid))?;
             let (events, receiver) = async_mpsc::channel(self.event_capacity);
             let (admission, admitted) = oneshot::channel();
+            let (first_token, first_token_ready) = oneshot::channel();
             let cancelled = Arc::new(AtomicBool::new(false));
             let failure = Arc::new(Mutex::new(None));
             let incoming = Incoming {
@@ -678,6 +694,7 @@ impl ModelRuntime {
                 prompt,
                 events,
                 admission: Mutex::new(Some(admission)),
+                first_token: std::cell::Cell::new(Some(first_token)),
                 cancelled: cancelled.clone(),
                 failure: failure.clone(),
                 metrics: self.metrics.clone(),
@@ -693,6 +710,7 @@ impl ModelRuntime {
             generations.push(Generation {
                 events: receiver,
                 admission: admitted,
+                first_token: first_token_ready,
                 cancelled,
                 failure,
                 enqueue_ns,
@@ -2384,6 +2402,7 @@ mod tests {
     fn stream(capacity: usize) -> (Incoming, Generation) {
         let (events, receiver) = async_mpsc::channel(capacity);
         let (admission, admitted) = oneshot::channel();
+        let (first_token, first_token_ready) = oneshot::channel();
         let cancelled = Arc::new(AtomicBool::new(false));
         let failure = Arc::new(Mutex::new(None));
         let incoming = Incoming {
@@ -2411,6 +2430,7 @@ mod tests {
             },
             events,
             admission: Mutex::new(Some(admission)),
+            first_token: std::cell::Cell::new(Some(first_token)),
             cancelled: cancelled.clone(),
             failure: failure.clone(),
             metrics: Arc::new(super::super::metrics::Metrics::default()),
@@ -2426,6 +2446,7 @@ mod tests {
             Generation {
                 events: receiver,
                 admission: admitted,
+                first_token: first_token_ready,
                 cancelled,
                 failure,
                 enqueue_ns: None,
