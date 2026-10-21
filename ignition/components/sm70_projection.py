@@ -224,10 +224,17 @@ class _Projection:
         acquire = input_factory(source, output, storage=getattr(session, "benchmark_storage", None))
 
         def benchmark(state):
+            from b12x.preparation._measurement import capture_benchmark_call
+
             operands, scratch = acquire(), storage(state.required_workspace)
-            return PreparedCall(run=lambda: state.run(operands.source, values, scales, gain, input_scale,
+            call = PreparedCall(run=lambda: state.run(operands.source, values, scales, gain, input_scale,
                 operands.output, scratch, bias), produce=operands.produce, output=operands.output,
                 owners=(operands, scratch, self.weight))
+            # ATen's bounded temporaries may request memory while a candidate is
+            # timed. CUDA allocation can synchronize, which deadlocks behind the
+            # tuning stream gate. Serving replays a captured graph; measure that
+            # same allocation-free operation while keeping live input producers.
+            return capture_benchmark_call(call)
 
         declare(session, (self.plan.request(name=name, prepare_call=prepare, benchmark_call=benchmark),))
         register_finalizer(session, lambda: setattr(self, "workspace", storage()), workspace=workspace)

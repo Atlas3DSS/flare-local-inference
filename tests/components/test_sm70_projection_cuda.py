@@ -44,6 +44,28 @@ def _weight(kind, n, k):
 
 
 @pytest.mark.parametrize("kind", ["nvfp4", "tensor_fp8"])
+@torch.no_grad()
+def test_recorded_tuning_measures_captured_projection(kind):
+    from ignition.preparation.tuning import RecordedPreparationSession
+
+    _require_v100()
+    weight, matrix, gain, input_scale = _weight(kind, 384, 160)
+    source = torch.full((17, 160), .25, device="cuda")
+    output = torch.empty((17, 384), device="cuda")
+    with RecordedPreparationSession(device=source.device, checkpoint="sm70-packed",
+            workload_schema="sm70-packed", numerical_policy="fp32") as session:
+        constructor = sm70.PackedProjection if kind == "nvfp4" else sm70.TensorFP8Projection
+        operation = constructor(source, weight, output, session=session, name="tuned")
+        assert operation.plan.selection is None
+        session.tune()
+        operation(source)
+        reference = source.cpu()
+        if kind == "tensor_fp8":
+            reference = (reference / input_scale).clamp(-448, 448).to(torch.float8_e4m3fn).float()
+        torch.testing.assert_close(output.cpu(), (reference @ matrix.T) * gain, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("kind", ["nvfp4", "tensor_fp8"])
 @pytest.mark.parametrize("rows", [1, 17, 129])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
 @torch.no_grad()
