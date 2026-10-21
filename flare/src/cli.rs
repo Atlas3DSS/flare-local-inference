@@ -270,6 +270,7 @@ impl OrbitPush {
             api_key_file: None,
             scheduler_policy: "balanced".into(),
             mtp_pipeline: false,
+            unclamped_sampling: false,
             serving: self.serving.clone(),
         }
     }
@@ -415,6 +416,7 @@ impl OrbitRun {
                 .clone()
                 .unwrap_or_else(|| "balanced".into()),
             mtp_pipeline: false,
+            unclamped_sampling: false,
             serving: self.serving.clone(),
         }
     }
@@ -489,6 +491,11 @@ pub struct Run {
     /// execution; one local rank, device MTP proposals, no grammar or custom stops.
     #[arg(long, help_heading = "Speculation options")]
     pub mtp_pipeline: bool,
+
+    /// Validation only: accept request sampling values outside the package's model-author
+    /// ranges, e.g. top_k 1 for greedy token-for-token comparisons. Not for serving.
+    #[arg(long, help_heading = "Serving options")]
+    pub unclamped_sampling: bool,
 
     #[command(flatten)]
     pub serving: ServingOptions,

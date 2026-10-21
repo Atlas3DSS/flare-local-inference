@@ -176,6 +176,22 @@ pub struct SamplingRanges {
 }
 
 impl SamplingRanges {
+    /// Every value `SamplingParameters::validate` accepts. Validation runs use it to request
+    /// exact comparisons such as top_k 1; serving bounds requests by the model-author ranges.
+    pub fn unclamped() -> Self {
+        let any = SamplingRange { min: -f32::MAX, max: f32::MAX };
+        let positive = SamplingRange { min: f32::MIN_POSITIVE, max: f32::MAX };
+        Self {
+            temperature: Some(positive),
+            top_k: Some(SamplingRange { min: -1, max: i32::MAX }),
+            top_p: Some(SamplingRange { min: f32::MIN_POSITIVE, max: 1.0 }),
+            min_p: Some(SamplingRange { min: 0.0, max: 1.0 }),
+            repetition_penalty: Some(positive),
+            presence_penalty: Some(any),
+            frequency_penalty: Some(any),
+        }
+    }
+
     pub fn validate(&self, defaults: &SamplingParameters) -> Result<()> {
         defaults.validate()?;
         let mut min = defaults.clone();

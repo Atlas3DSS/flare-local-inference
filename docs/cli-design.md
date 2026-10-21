@@ -411,6 +411,7 @@ Help exits with status 0; usage errors go to stderr with status 2. Its options a
 | `--mtp-draft-tokens N` | Reduce the maximum draft count; zero selects ordinary execution without draft generation, absorption, or draft-state maintenance | Package default |
 | `--mtp-adaptive-verification` / `--no-mtp-adaptive-verification` | Adaptive or fixed selection among captured widths | Package default |
 | `--mtp-pipeline` | Queue an unconstrained speculative round behind the running one (single local rank, device MTP proposals) | One round in flight |
+| `--unclamped-sampling` | Validation only: accept request sampling values outside the model-author ranges, e.g. `top_k` 1 for greedy comparisons | Model-author ranges |
 | `--mtp-verification-token-budget N` | Select one exact captured packed verification capacity per batch | All captured capacities |
 | `--mtp-max-verification-token-budget N` | Retain all captured packed verification capacities at or below a total-row ceiling | All captured capacities |
 | `--embedding-table-storage disk\|ram` | PLE and Engram table storage; both modes deliver compact GPU rows | `disk` |

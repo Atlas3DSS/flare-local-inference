@@ -190,6 +190,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     config["bind"] = bind.to_string().into();
     config["scheduler_policy"] = args.scheduler_policy.into();
     config["pipelined_speculation"] = args.mtp_pipeline.into();
+    config["unclamped_sampling"] = args.unclamped_sampling.into();
     if let Some(name) = args.served_model_name {
         config["served_names"] = serde_json::json!([name]);
     }

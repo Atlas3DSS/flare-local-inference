@@ -96,6 +96,13 @@ impl Bootstrap {
                 ))
             })?;
         sampling_ranges.validate(&sampling_defaults)?;
+        // Validation only: requests may leave the model-author ranges, e.g. top_k 1 for
+        // greedy token-for-token comparisons. Serving keeps the prepared ranges.
+        let sampling_ranges = match object.get("unclamped_sampling") {
+            None | Some(Value::Bool(false)) => sampling_ranges,
+            Some(Value::Bool(true)) => crate::model::SamplingRanges::unclamped(),
+            Some(_) => return Err("unclamped_sampling must be a boolean".into()),
+        };
 
         if identity.len() != 64 || !identity.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err("model identity must be 64 hexadecimal characters".into());
