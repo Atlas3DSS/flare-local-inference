@@ -221,6 +221,20 @@ The graph publishes GPU-produced lookup IDs before layer
 0 and waits for row delivery at the layer-1 consumer. Disk and RAM delivery
 use the same prepared model graphs; the flag selects table storage only.
 
+## GLM 5.3 Flash
+
+The `glm-5.3-flash` recipe uses `nvidia/GLM-5.3-Flash-FP4-Local` and supports
+one, two, or four GPUs, including TP1 on DGX Station. Its logical context is
+1,048,576 tokens; the default 4096-token prefill chunk controls graph execution
+size independently of that context.
+
+Image preparation includes the checkpoint's replicated vision tower and native
+image processor. The tower merges four patches into each image feature, with
+captured capacities from 64 through 32,768 patches. Each feature slot holds an
+8192-feature window; the shared scheduler reuses that window as image prompts
+advance. `--image-concurrency` defaults to the smaller of four and text
+concurrency. `--language-model-only` omits image weights and graphs.
+
 ## DeepSeek V4.1 Flash
 
 The `deepseek-v4.1-flash` alias selects `deepseek-ai/DeepSeek-V4.1-Flash-1017`

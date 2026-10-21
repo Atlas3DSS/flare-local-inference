@@ -150,6 +150,7 @@ pub(super) fn frontend_settings(value: wire::FrontendSettings) -> Result<serde_j
                 Profile::Moonvit(_) => serde_json::json!({"moonvit": {}}),
                 Profile::Step(_) => serde_json::json!({"step": {}}),
                 Profile::Radio(_) => serde_json::json!({"radio": {}}),
+                Profile::Glm(_) => serde_json::json!({"glm": {}}),
             })
         })
         .transpose()?;
@@ -585,6 +586,24 @@ mod tests {
                     assert!(processor.geometry(701, 503).unwrap().tokens <= 384);
                 }
             }
+        }
+    }
+
+    #[test]
+    fn serialized_glm_profile_selects_only_image_preparation() {
+        // Field 8 adds the GLM profile without changing any preceding profile tag.
+        let bytes = &[0x0a, 0x00, 0x12, 0x02, 0x42, 0x00, 0x1a, 0x01, 0x01][..];
+        let decoded = wire::FrontendSettings::decode(bytes).unwrap();
+        let json = frontend_settings(decoded).unwrap();
+        assert_eq!(json["image"], serde_json::json!({"glm": {}}));
+        assert_eq!(json["prompt_encoder"], 0);
+        #[cfg(feature = "server")]
+        {
+            let frontend: crate::frontend::FrontendSettings = serde_json::from_value(json).unwrap();
+            let settings = frontend.image.unwrap();
+            assert_eq!(settings.preparation_kind(), crate::model::contract::ImagePreparationKind::Glm);
+            let processor = crate::frontend::images::ImageProcessor::load(settings, Default::default()).unwrap();
+            assert_eq!(processor.geometry(112, 112).unwrap().tokens, 16);
         }
     }
 

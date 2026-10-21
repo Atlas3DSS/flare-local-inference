@@ -276,6 +276,7 @@ fn vision_json(
             Profile::Moonvit(_) => json!({"profile": "moonvit"}),
             Profile::Step(_) => json!({"profile": "step"}),
             Profile::Radio(_) => json!({"profile": "radio"}),
+            Profile::Glm(_) => json!({"profile": "glm"}),
         }
     });
     json!({

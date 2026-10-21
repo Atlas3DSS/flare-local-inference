@@ -82,6 +82,17 @@ def test_image_metadata_is_a_tight_consumed_contract():
             image_settings(changed, model, "qwen")
 
 
+def test_glm_image_profile_validates_checkpoint_structure():
+    fixture = json.loads((Path(__file__).parents[1] / "frontend/glm53_images.json").read_text())
+    processor, model = fixture["processor"], fixture["model"]
+    model["model_type"] = "glm5_next"
+    assert image_settings(processor, model, "glm") == {"glm": {}}
+    for key, value in (("patch_size", 16), ("max_image_tokens", 4096), ("do_rescale", False)):
+        changed = {**processor, "image_processor": {**processor["image_processor"], key: value}}
+        with pytest.raises(ValueError, match="unsupported GLM"):
+            image_settings(changed, model, "glm")
+
+
 def server():
     return dict(model_id="fixture", served_names=["fixture-alias"], reserve_bytes=1 << 30,
         queue_capacity=16, frontend_workers=4, max_body_bytes=32 << 20,

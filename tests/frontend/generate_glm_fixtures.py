@@ -1,11 +1,14 @@
 """Render GLM request cases with the checkpoint's canonical Transformers template."""
 
 import argparse
+import base64
+import io
 import copy
 import json
 from pathlib import Path
 
-from transformers import AutoTokenizer
+from transformers import AutoProcessor, AutoTokenizer
+from PIL import Image
 from transformers.utils.chat_template_utils import _compile_jinja_template
 
 
@@ -77,7 +80,25 @@ def generate(snapshot):
         {"continue_final_message": "reasoning_content"})
     add("empty_assistant_continuation", [system, user, {"role": "assistant", "content": "", "reasoning_content": ""}],
         {"continue_final_message": True})
-    return {"cases": cases}
+    processor = AutoProcessor.from_pretrained(snapshot, local_files_only=True)
+    image_cases = []
+    for count in (1, 2):
+        images = [Image.new("RGB", (112 + 28 * i, 84), (31 * i, 100, 210)) for i in range(count)]
+        content = [{"type": "text", "text": "Describe the images."}]
+        canonical = [{"type": "text", "text": "Describe the images."}]
+        for image in images:
+            encoded = io.BytesIO()
+            image.save(encoded, format="PNG")
+            content.append({"type": "image_url", "image_url": {"url":
+                "data:image/png;base64," + base64.b64encode(encoded.getvalue()).decode()}})
+            canonical.append({"type": "image"})
+        messages = [system, {"role": "user", "content": canonical}]
+        rendered = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        reference = processor(text=rendered, images=images, return_tensors="pt")
+        image_cases.append({"body": {"model": "glm53", "messages": [system, {"role": "user", "content": content}]},
+            "token_ids": reference.input_ids[0].tolist(),
+            "grid_thw": reference.image_grid_thw.tolist()})
+    return {"cases": cases, "image_cases": image_cases}
 
 
 if __name__ == "__main__":

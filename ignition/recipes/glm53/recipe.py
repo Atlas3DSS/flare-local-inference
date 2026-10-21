@@ -12,7 +12,7 @@ _TARGET_PAGE_LAYERS = 11
 # Rough estimate of what a rank holds beyond stored weights, state rows, and
 # pages: operator scratch, graphs, collectives, and the CUDA context. It serves
 # every rank count and speculation setting.
-_GRAPH_BYTES = 4864 << 20
+_GRAPH_BYTES = 6656 << 20
 
 
 def _costs(state_row_bytes, graph_bytes, *, ranks, speculating):
@@ -40,6 +40,7 @@ def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress, retain_
         compile_workers=plan.compile_workers, tuning_replica=plan.tuning_replica,
         devices=tuple(range(plan.world_size)) if ranks is None else (0,) * plan.world_size,
         hosts=None if ranks is None else ranks.hosts, compile_decoder=compile_forwards, retain_graphs=retain_graphs,
+        image_concurrency=plan.image_concurrency, language_model_only=plan.language_model_only,
         max_active=plan.concurrency, roce_ring=plan.roce_ring, context_parallel=plan.context_parallel, stream_overlap=plan.stream_overlap,
         context=plan.recipe.context, prefill_chunk_size=plan.prefill_chunk, minimum_pages=plan.minimum_pages,
         snapshot_budget_bytes=plan.snapshots * plan.costs.state_row_bytes,
@@ -70,14 +71,14 @@ RECIPE = Recipe(
         alias="glm-5.3-flash", repository="nvidia/GLM-5.3-Flash-FP4-Local",
         revision="76348ddb2be2e35e39ecfc00e75dc07703f4f3d5", architecture="Glm5NextForConditionalGeneration",
         stored_bytes=178_175_535_810,
-        # Language model, draft layer, and output head; the vision tower is not loaded.
-        device_bytes=177_784_906_130,
+        # Language model, draft layer, output head, and replicated vision tower.
+        device_bytes=178_175_535_810,
         # Decoder layer 45, the MTP module.
         draft_bytes=4_301_658_112),),
     context=1048576, page_tokens=256, concurrency=4, max_concurrency=64, prefill_chunk=4096,
     speculation=Speculation(draft_tokens=5), max_draft_tokens=7, verification_rows=0,
     # Shared experts, KDA gate projections, and decode query chains run on an auxiliary stream.
-    stream_overlap=True,
+    stream_overlap=True, max_images=4, image_bytes=32 << 20, language_model_only=True,
     ranks=MappingProxyType({
         # One rank holds every head: twice TP2's recurrent rows less the replicated part.
         1: _costs(161_123_584, _GRAPH_BYTES, ranks=1, speculating=True),

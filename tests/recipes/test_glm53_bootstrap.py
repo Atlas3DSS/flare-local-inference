@@ -13,6 +13,9 @@ def test_default_catalog_covers_4096_prefill_and_four_requests():
     assert PreparationConfig(prefill_chunk_size=3072).prefill_capacities[-2:] == (2560, 3072)
     assert PreparationConfig(max_active=1, pages=64).batch_capacities == (1,)
     assert PreparationConfig(max_active=3).batch_capacities == (4, 2, 1)
+    assert PreparationConfig(max_active=1).image_concurrency == 1
+    assert PreparationConfig(max_active=32).image_concurrency == 4
+    assert PreparationConfig(max_active=32, image_concurrency=2).image_concurrency == 2
 
 
 @pytest.mark.parametrize("values", [

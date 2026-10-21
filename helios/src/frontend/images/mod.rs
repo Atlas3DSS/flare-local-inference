@@ -7,6 +7,7 @@ mod deepseek_row_major;
 #[cfg(feature = "server")]
 pub(crate) mod layouts;
 mod mimo;
+mod glm;
 mod moonvit;
 mod orientation;
 mod conditioned;
@@ -245,6 +246,7 @@ pub enum ImageSettings {
     Moonvit {},
     Step {},
     Radio {},
+    Glm {},
 }
 
 impl ImageSettings {
@@ -258,6 +260,7 @@ impl ImageSettings {
             Self::Moonvit {} => ImagePreparationKind::Moonvit,
             Self::Step {} => ImagePreparationKind::Step,
             Self::Radio {} => ImagePreparationKind::Radio,
+            Self::Glm {} => ImagePreparationKind::Glm,
         }
     }
 }
@@ -298,6 +301,7 @@ enum Profile {
     Moonvit,
     Step,
     Radio,
+    Glm,
 }
 
 impl ImageProcessor {
@@ -329,6 +333,7 @@ impl ImageProcessor {
             ImageSettings::Moonvit {} => Profile::Moonvit,
             ImageSettings::Step {} => Profile::Step,
             ImageSettings::Radio {} => Profile::Radio,
+            ImageSettings::Glm {} => Profile::Glm,
             ImageSettings::Mimo(settings) => Profile::MiMo(mimo::load(&settings, limits)?),
             ImageSettings::Qwen(settings) => {
                 Profile::Qwen(qwen::QwenProcessor::load(&settings, limits)?)
@@ -636,6 +641,7 @@ impl ImageProcessor {
             Profile::Moonvit => moonvit::geometry(self.limits, width, height),
             Profile::Step => step::geometry(self.limits, width, height),
             Profile::Radio => radio::geometry(self.limits, width, height),
+            Profile::Glm => glm::geometry(self.limits, width, height),
         }
     }
     pub fn resized_rgb(&self, image: &RgbImage) -> Result<(ImageGeometry, Vec<u8>)> {
@@ -647,6 +653,7 @@ impl ImageProcessor {
             Profile::Moonvit => moonvit::resized_rgb(self.limits, image),
             Profile::Step => step::resized_rgb(self.limits, image),
             Profile::Radio => Err("RADIO resizing produces float32 pixels; use process".into()),
+            Profile::Glm => glm::resized_rgb(self.limits, image),
         }
     }
     pub fn process(&self, images: &[RgbImage]) -> Result<ProcessedImages> {
@@ -663,6 +670,7 @@ impl ImageProcessor {
             Profile::Moonvit => moonvit::process(self.limits, images),
             Profile::Step => step::process(self.limits, images),
             Profile::Radio => radio::process(self.limits, images),
+            Profile::Glm => glm::process(self.limits, images),
         }
     }
     pub fn expand_prompt(
@@ -678,6 +686,7 @@ impl ImageProcessor {
             Profile::Moonvit => Err("MoonViT image expansion requires its model contract".into()),
             Profile::Step => Err("Step image expansion requires its model contract".into()),
             Profile::Radio => Err("RADIO image expansion requires its model contract".into()),
+            Profile::Glm => Err("GLM image expansion requires its prepared layout".into()),
         }
     }
 }

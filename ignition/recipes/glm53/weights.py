@@ -51,7 +51,7 @@ class ModelWeights:
     Embeddings and normalization are replicated. Vocabulary weights partition
     their output rows. Routed layers either share one scale-expansion workspace
     and execute serially, or hold their CSF block scales expanded once at load.
-    Vision weights are outside this text stack.
+    Vision weights are replicated when image graphs are prepared.
     """
 
     tree: torch.nn.Module
@@ -60,10 +60,11 @@ class ModelWeights:
     expert_scale_scratch: tuple[torch.Tensor, torch.Tensor] | None
     allocated_bytes: int
     mtp: MTPWeights | None = None
+    vision: object | None = None
 
     @classmethod
     def load(cls, manifest, device, *, shard, progress=None, mtp=False, expert_activation="a4",
-             expand_expert_scales=False):
+             expand_expert_scales=False, language_model_only=False):
         import torch
 
         from .model import create_model_tree
@@ -97,8 +98,16 @@ class ModelWeights:
                 from ignition.components.vocabulary import nvfp4_draft_head
 
                 draft = replace(draft, draft_head=nvfp4_draft_head(tree.lm_head.weight))
+        vision = None
+        if not language_model_only:
+            from .vision import VisionWeights
+
+            with DirectWeightLoader(manifest, device, prefixes=("model.visual.",),
+                                    progress=progress if shard.rank == 0 else None,
+                                    progress_label="Load vision weights") as loader:
+                vision = VisionWeights.load(tree.model.visual, loader)
         torch.cuda.synchronize(device)
-        return cls(tree, shard, tuple(layers), scales, torch.cuda.memory_allocated(device) - before, draft)
+        return cls(tree, shard, tuple(layers), scales, torch.cuda.memory_allocated(device) - before, draft, vision)
 
 
 class GlmWeightLoader(DirectWeightLoader):

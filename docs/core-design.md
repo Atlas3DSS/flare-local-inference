@@ -352,7 +352,7 @@ Recipes declare the data consumed by the shared native contract:
 | Recipe | Contract declaration | State and execution |
 |---|---|---|
 | [Qwen3.8 Flash](../ignition/recipes/qwen38/recipe.py) | [Prepared data](../ignition/recipes/qwen38/contract.py) | GDN recurrence, QSA sparse attention, PLE, vision, and learned or copied proposals |
-| [GLM 5.3 Flash](../ignition/recipes/glm53/recipe.py) | [Prepared data](../ignition/recipes/glm53/contract.py) | KDA recurrence, indexed MLA, mHC, and learned MTP |
+| [GLM 5.3 Flash](../ignition/recipes/glm53/recipe.py) | [Prepared data](../ignition/recipes/glm53/contract.py) | KDA recurrence, indexed MLA, mHC, vision, and learned MTP |
 | [DeepSeek V4.1 Flash](../ignition/recipes/deepseek41/recipe.py) | [Prepared data](../ignition/recipes/deepseek41/contract.py) | Compressed latent attention, sliding windows, Engram tables, and DSpark proposal composition |
 | [DeepSeek V4 Flash](../ignition/recipes/deepseek4/recipe.py) | [Prepared data](../ignition/recipes/deepseek4/contract.py) | Compressed latent attention, sliding windows, vision, and DSpark proposals |
 | [MiMo V2.6 Pro](../ignition/recipes/mimo_v2/recipe.py) | [Prepared data](../ignition/recipes/mimo_v2/contract.py) | Paged KV, sliding windows, vision, and DFlash proposals |
@@ -546,6 +546,14 @@ fused post/pre mixing, dense or routed experts, and a second all-reduce.
 BF16 router weights produce FP32 logits. Routing uses sigmoid scores,
 correction-biased top-eight selection, and weights scaled by 2.5. The
 vocabulary projection runs on every rank, including resume sampling.
+
+GLM's vision tower is replicated across ranks. Native image preparation matches
+the checkpoint processor's aligned resize, black padding, normalization, and
+grouped 14-pixel patches. Captured vision graphs merge four patches into each
+4096-element feature and publish generation-scoped embeddings through the shared
+image feature arena. Text prefill validates and injects those features before
+the decoder layers. Vision and prefill reuse activation storage because their
+graphs execute serially; index and router constants retain separate storage.
 
 Each GLM continuation row retains KDA recurrence and convolution history,
 unfinished C4 index groups, partial latent/index pages, consumed count, and

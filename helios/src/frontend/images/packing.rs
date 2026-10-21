@@ -22,6 +22,7 @@ pub(crate) fn tensor_layout(
             "vision_pixel_values",
         ) => (Float32, patches * 588),
         (ImageLayoutKind::Radio, "vision_pixel_values") => (Float32, patches * 768),
+        (ImageLayoutKind::Glm, "vision_pixel_values") => (Float32, patches * 1176),
         (_, "vision_position_ids") => (Int64, patches * 2),
         (ImageLayoutKind::Step, "vision_cu_seqlens") => (Int32, super::step::MAX_VIEWS + 1),
         (_, "vision_cu_seqlens") => (Int32, 2),
@@ -77,7 +78,7 @@ pub(crate) fn prepare(
     i32::try_from(destination_feature_offset).map_err(|_| "vision feature offset exceeds int32")?;
     match config.contract.frontend.image_layout
         .ok_or("image layout is not prepared")? {
-        ImageLayoutKind::Qwen => qwen(config, handle, images, image, destination_feature_offset),
+        ImageLayoutKind::Qwen | ImageLayoutKind::Glm => qwen(config, handle, images, image, destination_feature_offset),
         ImageLayoutKind::Mimo => mimo(config, handle, images, image, destination_feature_offset),
         ImageLayoutKind::Deepseek | ImageLayoutKind::DeepseekRowMajor => deepseek(config, handle, images, image, destination_feature_offset),
         ImageLayoutKind::Moonvit | ImageLayoutKind::Radio => spatial_merge(config, handle, images, image, destination_feature_offset),
@@ -99,6 +100,8 @@ fn qwen(
         588
     } else if config.contract.frontend.image_layout == Some(ImageLayoutKind::Radio) {
         768
+    } else if config.contract.frontend.image_layout == Some(ImageLayoutKind::Glm) {
+        1176
     } else {
         1536
     };
@@ -139,29 +142,31 @@ fn qwen(
             .copied()
             .flat_map(f32::to_le_bytes),
     );
-    staging.i64(
-        "vision_interpolation_indices",
-        0,
-        images
-            .interpolation_indices
-            .get(start..end)
-            .ok_or("truncated vision interpolation indices")?
-            .iter()
-            .flatten()
-            .copied(),
-    );
-    staging.put(
-        "vision_interpolation_weights",
-        0,
-        images
-            .interpolation_weights
-            .get(start..end)
-            .ok_or("truncated vision interpolation weights")?
-            .iter()
-            .flatten()
-            .copied()
-            .flat_map(f32::to_le_bytes),
-    );
+    if config.contract.frontend.image_layout != Some(ImageLayoutKind::Glm) {
+        staging.i64(
+            "vision_interpolation_indices",
+            0,
+            images
+                .interpolation_indices
+                .get(start..end)
+                .ok_or("truncated vision interpolation indices")?
+                .iter()
+                .flatten()
+                .copied(),
+        );
+        staging.put(
+            "vision_interpolation_weights",
+            0,
+            images
+                .interpolation_weights
+                .get(start..end)
+                .ok_or("truncated vision interpolation weights")?
+                .iter()
+                .flatten()
+                .copied()
+                .flat_map(f32::to_le_bytes),
+        );
+    }
     staging.i64(
         "vision_position_ids",
         0,
