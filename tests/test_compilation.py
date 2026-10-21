@@ -198,6 +198,59 @@ def test_compiled_bf16_gate_rounding(rows):
 
 @pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1", reason="explicit CUDA assignment required")
 @torch.no_grad()
+def test_bf16_add_out_preserves_pooled_aliases_under_native_replay():
+    from ignition.preparation.graphs import PreparedGraphBundle
+
+    storage = torch.empty((4, 4096, 5120), dtype=torch.bfloat16, device="cuda")
+    routed, shared, partial, consumed = storage.unbind(0)
+    graphs, owners = {}, []
+    capacities = (1, 2, 4, 8, 16, 24, 32, 40, 48, 64, 128, 4096)
+    for rows in capacities:
+        def forward(rows=rows):
+            torch.add(routed[:rows], shared[:rows], out=partial[:rows])
+            consumed[:rows].copy_(partial[:rows])
+            routed[:rows].zero_()
+
+        compiled = compile_forward(forward)
+        compiled()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            compiled()
+        graphs[str(rows)] = graph
+        owners.append(compiled)
+    bundle = PreparedGraphBundle(device=0, graphs=graphs, buffers={"storage": storage},
+                                 resources=(storage, owners))
+    worker = bundle.start_worker()
+    try:
+        for rows in (*capacities, *reversed(capacities)):
+            storage.fill_(float("nan"))
+            routed[:rows].normal_()
+            shared[:rows].normal_()
+            shared[:rows, ::2].copy_(-routed[:rows, ::2])
+            expected = (routed[:rows].float() + shared[:rows].float()).bfloat16()
+            shared_before = shared[:rows].clone()
+            torch.cuda.synchronize()
+            before = torch.cuda.memory_stats()
+            ticket = worker.submit(bundle.graph_indices[str(rows)])
+            result = worker.poll(timeout_ms=120000)
+            assert result is not None and result.ticket == ticket and result.error is None
+            after = torch.cuda.memory_stats()
+            for key in ("allocation.all.allocated", "allocation.all.freed",
+                        "segment.all.allocated", "segment.all.freed"):
+                assert before[key] == after[key]
+            assert torch.equal(partial[:rows], expected)
+            assert torch.equal(consumed[:rows], expected)
+            assert torch.equal(shared[:rows], shared_before)
+            assert routed[:rows].count_nonzero().item() == 0
+            assert storage[:, rows:].isnan().all()
+    finally:
+        worker.close()
+        for graph in graphs.values():
+            graph.reset()
+
+
+@pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1", reason="explicit CUDA assignment required")
+@torch.no_grad()
 def test_fp32_sigmoid_preserves_bf16_gate_rounding():
     gate = torch.tensor([[-0.0296630859375]], dtype=torch.bfloat16, device="cuda")
     normalized = torch.tensor([[-0.23046875]], dtype=torch.bfloat16, device="cuda")

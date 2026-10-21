@@ -50,6 +50,10 @@
     clamp from amax and retain explicit copy kernels. Measure complete GPU steps
     before changing shared storage lowering.
 
+[ ] Measure direct expert-sum output writes in DeepSeek V4 and Qwen3.8 MoE;
+    pooled add-then-copy expressions can retain an extra device copy. Check
+    Step 5 separately because its expert sum uses FP32 intermediates.
+
 [ ] Validate pooled vision and speculative scratch in complete exported packages
     across Qwen, GLM, DeepSeek V4, MiMo, Step, and Nemotron. Measure
     fixed memory and KV capacity with full catalogs and tensor parallelism;

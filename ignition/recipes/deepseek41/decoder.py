@@ -203,7 +203,7 @@ class PreparedLayer:
             self.shared(s.ffn_hc.normalized)
         else:
             self.concurrent_shared.finish(s.ffn_hc.normalized, s.routed)
-        s.mlp_partial.copy_(s.routed + s.shared.output)
+        torch.add(s.routed, s.shared.output, out=s.mlp_partial)
         self.mlp_reduce(s.mlp_partial)
         if self.post is not None:
             self.post(s.mlp_output, s.ffn_hc.residual, s.ffn_hc.post, s.ffn_hc.comb)
