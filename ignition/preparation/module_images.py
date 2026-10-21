@@ -7,13 +7,26 @@ import struct
 import threading
 
 
+_FUNCTION_QUERIES = {
+    "cuFuncGetAttribute": 2,
+    "cuOccupancyMaxActiveBlocksPerMultiprocessor": 1,
+    "cuOccupancyMaxActiveBlocksPerMultiprocessorWithFlags": 1,
+    "cuOccupancyMaxPotentialBlockSize": 2,
+    "cuOccupancyMaxPotentialBlockSizeWithFlags": 2,
+    "cuOccupancyAvailableDynamicSMemPerBlock": 1,
+    "cuOccupancyMaxPotentialClusterSize": 1,
+    "cuOccupancyMaxActiveClusters": 1,
+}
+_KERNEL_QUERIES = {"cuKernelGetAttribute": 2}
+
+
 _MATERIALIZERS = {
     "cuModuleLoad", "cuModuleLoadData", "cuModuleLoadDataEx", "cuModuleLoadFatBinary",
     "cuModuleGetFunction", "cuLibraryLoadData", "cuLibraryLoadFromFile", "cuLibraryGetModule",
     "cuLibraryGetKernel", "cuKernelGetFunction", "cuKernelSetAttribute", "cuFuncSetAttribute",
     "cuFuncLoad", "cuLaunchKernel", "cuLaunchKernel_ptsz", "cuLaunchKernelEx", "cuLaunchKernelEx_ptsz",
     "cuLaunchCooperativeKernel", "cuLaunchCooperativeKernel_ptsz",
-}
+} | _FUNCTION_QUERIES.keys() | _KERNEL_QUERIES.keys()
 
 
 class _Resource(C.Structure):
@@ -241,9 +254,18 @@ class ModuleImages:
             entered, images = pending.pop()
             if entered != name:
                 raise RuntimeError("unbalanced CUDA driver callbacks")
-        if call.site != 1 or call.result[0] != 0:
+        if call.site != 1:
             return
         values = C.cast(call.params, C.POINTER(C.c_uint64))
+        # Occupancy probes can load a function before rejecting their launch
+        # configuration. The input handle still identifies the loaded image.
+        if len(images) == 1:
+            if name in _FUNCTION_QUERIES:
+                self._bind(self._functions, values[_FUNCTION_QUERIES[name]], images[0])
+            elif name in _KERNEL_QUERIES:
+                self._bind(self._kernels, values[_KERNEL_QUERIES[name]], images[0])
+        if call.result[0] != 0:
+            return
         if len(images) == 1:
             image, = images
             if name.startswith(("cuLaunchKernelEx",)):
@@ -334,6 +356,7 @@ class ModuleImages:
             for callback in (2, 6, 7):
                 self._check("cuptiEnableCallback", C.c_uint(1), self._subscriber, C.c_int(3), C.c_uint(callback))
             for callback in (18, 19, 20, 22, 23, 678, 679, 680, 681, 682, 683, 687, 742,
+                             85, 686, 374, 384, 451, 452, 543, 675, 676,
                              307, 442, 477, 478, 481, 652, 653, 243, 245, 38, 39, 271, 294,
                              301, 302, 379, 551, 552, 598, 599, 600, 601, 611, 612):
                 self._check("cuptiEnableCallback", C.c_uint(1), self._subscriber, C.c_int(1), C.c_uint(callback))

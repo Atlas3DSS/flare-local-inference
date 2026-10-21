@@ -1,4 +1,4 @@
-"""Module unloading drops exactly the unloaded module's function and kernel bindings."""
+"""Lazy module loads bind queried functions and discard bindings at module unload."""
 
 import ctypes as C
 import threading
@@ -33,6 +33,36 @@ def unload(recorder, context, module_id):
     module = module_images._Module(module_id, 0, None)
     resource = module_images._Resource(C.c_void_p(context), None, C.cast(C.pointer(module), C.c_void_p))
     recorder._record(None, 3, 7, C.pointer(resource))
+
+
+@pytest.mark.parametrize("name,index,kernel", [
+    ("cuFuncGetAttribute", 2, False),
+    ("cuKernelGetAttribute", 2, True),
+    ("cuOccupancyMaxActiveBlocksPerMultiprocessor", 1, False),
+    ("cuOccupancyMaxActiveBlocksPerMultiprocessorWithFlags", 1, False),
+    ("cuOccupancyMaxPotentialBlockSize", 2, False),
+    ("cuOccupancyMaxPotentialBlockSizeWithFlags", 2, False),
+    ("cuOccupancyAvailableDynamicSMemPerBlock", 1, False),
+    ("cuOccupancyMaxPotentialClusterSize", 1, False),
+    ("cuOccupancyMaxActiveClusters", 1, False),
+])
+@pytest.mark.parametrize("status", [0, 1])
+def test_query_binds_module_even_when_launch_configuration_is_rejected(recorder, name, index, kernel, status):
+    image = C.create_string_buffer(b"queried cubin")
+    module = module_images._Module(7, len(image.value), C.cast(image, C.c_void_p))
+    resource = module_images._Resource(C.c_void_p(0x1000), None, C.cast(C.pointer(module), C.c_void_p))
+    recorder._record(None, 1, 0, C.pointer(module_images._Call(site=0, name=name.encode())))
+    recorder._record(None, 3, 6, C.pointer(resource))
+    values = (C.c_uint64 * (index + 1))()
+    values[index] = 0x1234
+    result = C.c_int(status)
+    recorder._record(None, 1, 0, C.pointer(module_images._Call(
+        site=1, name=name.encode(), params=C.cast(values, C.c_void_p), result=C.pointer(result))))
+    assert recorder._error is None
+    bindings = recorder._kernels if kernel else recorder._functions
+    assert bindings[0x1234].cubin == b"queried cubin"
+    unload(recorder, 0x1000, 7)
+    assert 0x1234 not in bindings
 
 
 def test_unload_drops_only_the_unloaded_module(recorder):
