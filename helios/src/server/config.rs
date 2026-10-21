@@ -96,6 +96,13 @@ impl Bootstrap {
                 ))
             })?;
         sampling_ranges.validate(&sampling_defaults)?;
+        // Validation only: requests may leave the model-author ranges, e.g. top_k 1 for
+        // greedy token-for-token comparisons. Serving keeps the prepared ranges.
+        let unclamped_sampling = match object.get("unclamped_sampling") {
+            None => false,
+            Some(Value::Bool(value)) => *value,
+            Some(_) => return Err("unclamped_sampling must be a boolean".into()),
+        };
 
         if identity.len() != 64 || !identity.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err("model identity must be 64 hexadecimal characters".into());
@@ -214,6 +221,9 @@ impl Bootstrap {
             .contract
             .graphs
             .retain(|g| manifest.graphs.iter().any(|m| m.name == g.graph));
+        if unclamped_sampling {
+            model.sampling_ranges = crate::model::SamplingRanges::unclamped(model.contract.vocabulary);
+        }
         model.fit_context();
         crate::model::catalog::validate(&model, manifest)?;
         let assets = object
@@ -305,11 +315,19 @@ impl Bootstrap {
             Some(_) => return Err("served_names must be an array".into()),
         };
         let server = ServerConfig {
-            scheduling_policy: match object.get("scheduler_policy") {
-                None => crate::scheduler::PolicyConfig::default(),
-                Some(Value::String(value)) if value == "balanced" => crate::scheduler::PolicyConfig::default(),
-                Some(Value::String(value)) if value == "throughput" => crate::scheduler::PolicyConfig::throughput(),
-                Some(_) => return Err("scheduler_policy must be balanced or throughput".into()),
+            scheduling_policy: crate::scheduler::PolicyConfig {
+                pipelined_speculation: match object.get("pipelined_speculation") {
+                    None => false,
+                    Some(Value::Bool(value)) => *value,
+                    Some(_) => return Err("pipelined_speculation must be a boolean".into()),
+                },
+                ..match object.get("scheduler_policy") {
+                    None => crate::scheduler::PolicyConfig::default(),
+                    Some(Value::String(value)) if value == "balanced" => crate::scheduler::PolicyConfig::default(),
+                    Some(Value::String(value)) if value == "throughput" => crate::scheduler::PolicyConfig::throughput(),
+                    Some(Value::String(value)) if value == "agent" => crate::scheduler::PolicyConfig::agent(),
+                    Some(_) => return Err("scheduler_policy must be balanced, throughput or agent".into()),
+                }
             },
             api_key: Some(optional_text("api_key")?).filter(|key| !key.is_empty()),
             served_names,
@@ -571,6 +589,24 @@ mod tests {
                 .to_string()
                 .contains("top_k range")
         );
+        // A validation server with unclamped sampling still passes catalog validation and
+        // keeps a requested top_k of one.
+        let mut unclamped = bounded.clone();
+        unclamped["sampling_defaults"]["ranges"]["top_k"]["max"] = json!(100);
+        unclamped["unclamped_sampling"] = json!(true);
+        let loaded = Bootstrap::load(&unclamped.to_string(), &manifest).unwrap();
+        assert_eq!(
+            loaded.model.sampling_ranges.top_k.unwrap().max,
+            model.contract.vocabulary as i32
+        );
+        let greedy = json!({"top_k": 1});
+        let greedy = super::super::request::sampling_parameters(
+            greedy.as_object().unwrap(),
+            &loaded.model.sampling_defaults,
+            &loaded.model.sampling_ranges,
+        )
+        .unwrap();
+        assert_eq!(greedy.top_k, 1);
         for assets in [
             json!({"chat_template":template_asset}),
             json!({"tokenizer":tokenizer_asset,"chat_template":template_asset,"extra":tokenizer_asset}),

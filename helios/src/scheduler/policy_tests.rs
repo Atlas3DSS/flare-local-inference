@@ -71,8 +71,19 @@ fn completion_records(
     fence: Fence,
     accepted: usize,
 ) -> Vec<CompletionRecord> {
+    lane_completion_records(s, plan, fence, &vec![accepted; plan.lanes.len()])
+}
+
+/// Completion records with each row's accepted draft count.
+fn lane_completion_records(
+    s: &RequestScheduler,
+    plan: &ScheduledPlan,
+    fence: Fence,
+    accepted_by_row: &[usize],
+) -> Vec<CompletionRecord> {
     let mut records = vec![CompletionRecord::default(); s.limits.request_capacity()];
     for (row, lane) in plan.lanes.iter().enumerate() {
+        let accepted = accepted_by_row[row];
         let kind = plan.lane_kind(row);
         let Ok(r) = s.request(lane.request) else {
             continue;
@@ -1139,7 +1150,9 @@ fn efficient_thirty_millisecond_speculation_beats_seventeen_millisecond_rounds()
     let h = add(&mut s, 1, 64, 2048);
     ready(&mut s, &[h]);
     for _ in 0..128 {
-        s.request_mut(h).unwrap().acceptance.observe(7, 7, true, 0);
+        let r = s.request_mut(h).unwrap();
+        let generated = r.generated_tokens;
+        r.acceptance.observe(7, 7, true, 0, generated);
     }
     let plan = s.plan().unwrap();
     assert_eq!(
@@ -1147,7 +1160,9 @@ fn efficient_thirty_millisecond_speculation_beats_seventeen_millisecond_rounds()
         (GraphKind::Speculative, 8, 30 * MS)
     );
     for _ in 0..256 {
-        s.request_mut(h).unwrap().acceptance.observe(7, 0, true, 0);
+        let r = s.request_mut(h).unwrap();
+        let generated = r.generated_tokens;
+        r.acceptance.observe(7, 0, true, 0, generated);
     }
     assert!(s.plan().unwrap().token_capacity < 8);
 }
@@ -1174,8 +1189,9 @@ fn speculative_cohorts_are_selected_by_expected_lane_value() {
         r.scheduled_consumed = 64;
         r.generated_tokens = 1;
         for _ in 0..128 {
+            let generated = r.generated_tokens;
             r.acceptance
-                .observe(7, if index >= 6 { 7 } else { 0 }, true, 0);
+                .observe(7, if index >= 6 { 7 } else { 0 }, true, 0, generated);
         }
     }
     for batch in [1, 2, 4, 8] {
@@ -1226,10 +1242,9 @@ fn long_prefill_and_low_acceptance_decode_both_make_progress() {
     let decode = add(&mut s, 1, 64, 4096);
     ready(&mut s, &[decode]);
     for _ in 0..128 {
-        s.request_mut(decode)
-            .unwrap()
-            .acceptance
-            .observe(7, 0, true, 0);
+        let r = s.request_mut(decode).unwrap();
+        let generated = r.generated_tokens;
+        r.acceptance.observe(7, 0, true, 0, generated);
     }
     let prefill = add(&mut s, 2, 32768, 128);
     let mut last = s.now_ns;
@@ -1305,7 +1320,8 @@ fn decode_waiting_selects_a_smaller_prefill_at_the_efficiency_knee() {
         r.generated_tokens = 1;
         r.accounting.last_output_ns = Some(now);
         for _ in 0..128 {
-            r.acceptance.observe(7, 7, true, 0);
+            let generated = r.generated_tokens;
+            r.acceptance.observe(7, 7, true, 0, generated);
         }
     }
     let smaller = s.plan().unwrap();
@@ -1356,10 +1372,9 @@ fn five_and_sixteen_streams_receive_repeated_output_service() {
         if known_acceptance {
             for &h in &handles {
                 for _ in 0..128 {
-                    s.request_mut(h)
-                        .unwrap()
-                        .acceptance
-                        .observe(7, accepted, true, 0);
+                    let r = s.request_mut(h).unwrap();
+                    let generated = r.generated_tokens;
+                    r.acceptance.observe(7, accepted, true, 0, generated);
                 }
             }
         }
@@ -1445,7 +1460,9 @@ fn snapshot_enabling_a_shared_decode_batch_competes_by_the_complete_sequence_cos
     let handles: Vec<_> = (1..=16).map(|id| add(&mut s, id, 64, 4096)).collect();
     for &h in &handles {
         for _ in 0..128 {
-            s.request_mut(h).unwrap().acceptance.observe(7, 7, true, 0);
+            let r = s.request_mut(h).unwrap();
+            let generated = r.generated_tokens;
+            r.acceptance.observe(7, 7, true, 0, generated);
         }
     }
     for _ in 0..200 {
@@ -1554,7 +1571,7 @@ fn prerequisite_cohort_accounts_for_ready_batch_mates() {
             s.request_mut(handle)
                 .unwrap()
                 .acceptance
-                .observe(7, 7, true, 0);
+                .observe(7, 7, true, 0, 0);
         }
     }
     let decode = add(&mut s, 15, 64, 4096);
@@ -1588,6 +1605,14 @@ fn invalid_utility_configuration_is_rejected_before_admission() {
     for policy in [
         PolicyConfig {
             output_token_value: f64::INFINITY,
+            ..Default::default()
+        },
+        PolicyConfig {
+            prefill_token_value: 0.0,
+            ..Default::default()
+        },
+        PolicyConfig {
+            prefill_token_value: f64::NAN,
             ..Default::default()
         },
         PolicyConfig {
@@ -2486,4 +2511,217 @@ fn cancelling_all_inflight_proposal_owners_keeps_the_charge_and_releases_reused_
     assert!(s.complete_proposal(fence, &records, gpu_time(8 * MS), &[[1.0; 7]; 2]).is_err());
     assert_eq!(s.refresh_credit_ns(), -3_000_000.0);
     assert!(!matches!(s.plan().unwrap().origin, PlanOrigin::RefreshContinuation(_)));
+}
+
+/// Three decoders are live when a fresh 2,048-token prompt arrives (one agent's tool output).
+/// Returns the plans executed before the prompt's first prefill chunk and the first decode
+/// batch after its prefill completes.
+fn waiting_prompt_trace(policy: PolicyConfig) -> (usize, usize) {
+    let mut s = engine(4, false);
+    s.configure_policy(policy).unwrap();
+    let decoders: Vec<_> = (1..=3).map(|id| add(&mut s, id, 65, 4000)).collect();
+    // Under the default policy the short prompts themselves wait behind the first decoder, so
+    // setup allows far more steps than `ready`.
+    for _ in 0..20_000 {
+        if decoders.iter().all(|h| s.request(*h).unwrap().phase == RequestPhase::Decode) {
+            break;
+        }
+        step(&mut s, 0);
+    }
+    assert!(decoders.iter().all(|h| s.request(*h).unwrap().phase == RequestPhase::Decode));
+    let fresh = add(&mut s, 9, 2048, 32);
+    let mut first = None;
+    for n in 0..20_000 {
+        let plan = step(&mut s, 0);
+        if first.is_none()
+            && plan.kind == GraphKind::Prefill
+            && plan.lanes.iter().any(|l| l.request == fresh)
+        {
+            first = Some(n);
+        }
+        if s.request(fresh).unwrap().phase == RequestPhase::Decode {
+            break;
+        }
+    }
+    let first = first.expect("the fresh prompt never started prefill");
+    for _ in 0..8 {
+        let plan = step(&mut s, 0);
+        if plan.kind == GraphKind::Decode {
+            return (first, plan.lanes.len());
+        }
+    }
+    panic!("no decode followed the fresh prompt's prefill");
+}
+
+#[test]
+fn agent_policy_serves_a_waiting_prompt_before_decoders_drain() {
+    let (balanced_wait, _) = waiting_prompt_trace(PolicyConfig::default());
+    let (agent_wait, agent_batch) = waiting_prompt_trace(PolicyConfig::agent());
+    assert!(
+        agent_wait < balanced_wait,
+        "agent {agent_wait} plans vs balanced {balanced_wait} before the prompt starts"
+    );
+    assert!(agent_wait <= 4, "agent policy waited {agent_wait} plans");
+    assert_eq!(agent_batch, 4, "all four requests decode together after the prompt");
+}
+
+#[test]
+fn default_policies_value_prompt_tokens_at_one_unit() {
+    assert_eq!(PolicyConfig::default().prefill_token_value, 1.0);
+    assert_eq!(PolicyConfig::throughput().prefill_token_value, 1.0);
+    let agent = PolicyConfig::agent();
+    assert_eq!(agent.prefill_token_value, agent.output_token_value);
+    assert!(engine(1, false).configure_policy(agent).is_ok());
+}
+
+/// Three decoders are live and one decode is already in flight (pipelined serving) when a
+/// one-chunk prompt arrives; its Init and its only chunk both need completion feedback.
+/// Returns the plan offered while the decode is in flight, the first plan after it completes, and
+/// the plans needed until the prompt reaches decode.
+fn pipelined_prompt_trace(policy: PolicyConfig) -> (Option<GraphKind>, Option<(GraphKind, bool)>, usize) {
+    let mut s = engine(4, false);
+    s.configure_policy(policy).unwrap();
+    let decoders: Vec<_> = (1..=3).map(|id| add(&mut s, id, 65, 4000)).collect();
+    for _ in 0..20_000 {
+        if decoders.iter().all(|h| s.request(*h).unwrap().phase == RequestPhase::Decode) {
+            break;
+        }
+        step(&mut s, 0);
+    }
+    let inflight = s.plan().unwrap();
+    assert_eq!(inflight.kind, GraphKind::Decode);
+    let fence = Fence(s.submitted.0 + 1);
+    s.commit(&inflight, fence).unwrap();
+    let fresh = add(&mut s, 9, 300, 32);
+    let behind = s.plan().map(|p| p.kind);
+    s.advance_to(s.now_ns + inflight.estimated_duration_ns()).unwrap();
+    complete_timed(&mut s, &inflight, fence, 0, true, gpu_time(inflight.estimated_duration_ns()));
+    let after = s
+        .plan()
+        .map(|p| (p.kind, p.lanes.iter().any(|l| l.request == fresh)));
+    let mut plans = 0;
+    while s.request(fresh).unwrap().phase != RequestPhase::Decode {
+        step(&mut s, 0);
+        plans += 1;
+        assert!(plans < 20_000, "the prompt never reached decode");
+    }
+    (behind, after, plans)
+}
+
+#[test]
+fn a_new_request_drains_pipelined_decode_under_the_agent_policy() {
+    let (behind, after, agent_plans) = pipelined_prompt_trace(PolicyConfig::agent());
+    let (_, _, balanced_plans) = pipelined_prompt_trace(PolicyConfig::default());
+    assert_eq!(behind, None, "nothing is queued behind the in-flight decode");
+    let (kind, starts_fresh) = after.unwrap();
+    assert!(starts_fresh && matches!(kind, GraphKind::Init | GraphKind::Prefill), "{kind:?}");
+    assert!(agent_plans <= 4, "agent policy needed {agent_plans} plans to finish the prompt");
+    assert!(agent_plans < balanced_plans, "agent {agent_plans} vs balanced {balanced_plans}");
+}
+
+#[test]
+fn the_balanced_policy_keeps_pipelining_decode_ahead_of_a_one_chunk_prompt() {
+    let (behind, _, _) = pipelined_prompt_trace(PolicyConfig::default());
+    assert_eq!(behind, Some(GraphKind::Decode));
+}
+
+/// Agent-like speculative serving at long context with the batch-1/2/4 round costs and draft
+/// acceptance (depth 1 85.6 %, depth 2 70 %, depth 3 53 %) measured by the 34k-token V100
+/// agentbench run. Every turn is a new 180-token request without request-local history.
+/// Returns tokens per GPU second of speculative rounds and their [batch][width] counts.
+fn long_context_agents(policy: PolicyConfig, fixed: Option<usize>, rounds: usize) -> (f64, [[u64; 4]; 3]) {
+    let mut s = interactive_engine(4, false);
+    s.enable_speculation(&[1, 2, 3, 4]).unwrap();
+    s.fixed_speculative_width(fixed).unwrap();
+    s.configure_policy(policy).unwrap();
+    let costs = [[65.5, 74.0, 93.0, 109.6], [65.8, 91.0, 113.9, 122.8], [69.5, 103.6, 130.1, 159.5]];
+    for (index, batch) in [1, 2, 4].into_iter().enumerate() {
+        for width in 1..=4 {
+            set_cost(&mut s, GraphKind::Speculative, batch, width, (costs[index][width - 1] * 1e6) as u64);
+        }
+    }
+    let conditional = [0.856, 0.818, 0.757];
+    let mut state = 0x9e37_79b9_7f4a_7c15u64;
+    let mut uniform = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        (state >> 11) as f64 / (1u64 << 53) as f64
+    };
+    for id in 1..=4 {
+        add(&mut s, id, 64, 180);
+    }
+    let mut next_id = 5;
+    let (mut tokens, mut gpu_ns, mut counted) = (0u64, 0u64, 0);
+    let mut widths = [[0u64; 4]; 3];
+    while counted < rounds {
+        let plan = s.plan().expect("agents must make progress");
+        let fence = Fence(s.submitted.0 + 1);
+        s.commit(&plan, fence).unwrap();
+        let duration = plan.estimated_duration_ns();
+        let accepted: Vec<usize> = plan
+            .lanes
+            .iter()
+            .enumerate()
+            .map(|(row, lane)| {
+                let mut count = 0;
+                while plan.lane_kind(row) == GraphKind::Speculative
+                    && count + 1 < lane.tokens
+                    && uniform() < conditional[count]
+                {
+                    count += 1;
+                }
+                count
+            })
+            .collect();
+        let records = lane_completion_records(&s, &plan, fence, &accepted);
+        s.advance_to(s.now_ns + duration).unwrap();
+        let output = s.complete(fence, &records, gpu_time(duration)).unwrap();
+        for token in &output {
+            s.published_output(token.request, fence).unwrap();
+        }
+        if plan.kind == GraphKind::Speculative {
+            counted += 1;
+            tokens += output.len() as u64;
+            gpu_ns += duration;
+            widths[plan.batch_capacity.ilog2() as usize][plan.token_capacity - 1] += 1;
+        }
+        let finished: Vec<_> = s
+            .slots
+            .iter()
+            .filter_map(|slot| slot.request.as_ref())
+            .filter(|r| r.phase == RequestPhase::Finishing && r.pending == 0)
+            .map(|r| r.handle)
+            .collect();
+        for handle in finished {
+            s.finish(handle).unwrap();
+            add(&mut s, next_id, 64, 180);
+            next_id += 1;
+        }
+    }
+    (tokens as f64 / (gpu_ns as f64 / 1e9), widths)
+}
+
+#[test]
+fn adaptive_width_tracks_long_context_costs_for_fresh_agent_turns() {
+    let rounds = 1500;
+    let fixed: Vec<f64> = (1..=4)
+        .map(|w| long_context_agents(PolicyConfig::default(), Some(w), rounds).0)
+        .collect();
+    let best = fixed.iter().copied().fold(0.0, f64::max);
+    let mut short = Vec::new();
+    // Balanced serving also prices output cadence, which favors shorter rounds; it must
+    // still leave width one (74 % of the best width before population priors).
+    for (name, policy, floor) in [
+        ("balanced", PolicyConfig::default(), 0.8),
+        ("throughput", PolicyConfig::throughput(), 0.9),
+        ("agent", PolicyConfig::agent(), 0.9),
+    ] {
+        let (rate, widths) = long_context_agents(policy, None, rounds);
+        println!("{name}: {rate:.1} tok/GPU-s (best fixed {best:.1}; fixed widths {fixed:.1?}); widths by batch 1/2/4: {widths:?}");
+        if rate < floor * best {
+            short.push(format!("{name} {rate:.1} < {floor} x {best:.1}"));
+        }
+    }
+    assert!(short.is_empty(), "adaptive width tokens per GPU second: {short:?}");
 }

@@ -534,6 +534,10 @@ pub struct RequestScheduler {
     prefill_catalog: Vec<usize>,
     mixed_catalog: Vec<(usize, usize, usize)>,
     proposal_source: speculation::ProposalSource,
+    /// Conditional acceptance over every request, the prior of each request's estimate.
+    acceptance_population: speculation::AcceptancePopulation,
+    /// Terminal checkpoints of preempted requests kept for their readmission, oldest first.
+    readmission_pins: Vec<CheckpointId>,
     split: Option<split::SplitSpeculation>,
     costs: cost::ActionCosts,
     refresh: refresh::RefreshState,
@@ -605,6 +609,8 @@ impl RequestScheduler {
             prefill_catalog: prefill_capacities(limits.prefill_chunk_size).collect(),
             mixed_catalog: Vec::new(),
             proposal_source: speculation::ProposalSource::Mtp,
+            acceptance_population: Default::default(),
+            readmission_pins: Vec::new(),
             split: None,
             costs: cost::ActionCosts::default(),
             refresh: refresh::RefreshState::default(),
@@ -1029,8 +1035,52 @@ impl RequestScheduler {
 
     /// Grows each decoding growable reservation a page beyond its next rounds, evicting
     /// unpinned prefix pages when the free list is short. If a request still cannot run,
-    /// the newest growable decoder without work in flight is preempted.
+    /// the oldest readmission checkpoint becomes evictable before the newest growable
+    /// decoder without work in flight is preempted.
     fn refill_reservations(&mut self) -> Result<()> {
+        while self.refill_growable()? {
+            // A preempted request still taking its terminal checkpoint frees its pages when it
+            // retires; preempting another request now would only cascade.
+            if self.slots.iter().filter_map(|slot| slot.request.as_ref()).any(|r| r.preempted) {
+                return Ok(());
+            }
+            if self.readmission_pins.is_empty() {
+                return self.preempt_newest();
+            }
+            let id = self.readmission_pins.remove(0);
+            self.cache.unpin(id)?;
+        }
+        Ok(())
+    }
+
+    /// Keeps a preempted request's terminal checkpoint out of eviction until its readmission
+    /// restores it, so readmission never prefills the generated history again; page pressure
+    /// from running requests releases it first (see `refill_reservations`). `retire` pins
+    /// the checkpoint a preempted request publishes.
+    fn pin_readmission(&mut self, id: CheckpointId) -> bool {
+        let pinned = self.cache.pin(id).is_ok();
+        if pinned {
+            self.readmission_pins.push(id);
+        }
+        pinned
+    }
+
+    /// Whether a readmission checkpoint is still pinned.
+    pub fn holds_readmission(&self, id: CheckpointId) -> bool {
+        self.readmission_pins.contains(&id)
+    }
+
+    /// Releases a readmission pin that page pressure has not already released.
+    pub fn release_readmission(&mut self, id: CheckpointId) -> Result<()> {
+        if let Some(index) = self.readmission_pins.iter().position(|pin| *pin == id) {
+            self.readmission_pins.remove(index);
+            self.cache.unpin(id)?;
+        }
+        Ok(())
+    }
+
+    /// One reservation pass; true when a running request still cannot continue.
+    fn refill_growable(&mut self) -> Result<bool> {
         let ahead = self.decode_horizon() + self.capabilities.page_tokens as u64;
         let mut starved = false;
         for slot in 0..self.slots.len() {
@@ -1082,10 +1132,7 @@ impl RequestScheduler {
                 self.finish_early(handle, false)?;
             }
         }
-        if starved {
-            self.preempt_newest()?;
-        }
-        Ok(())
+        Ok(starved)
     }
 
     /// Finishes the newest growable decoder without work in flight through its terminal
@@ -1899,11 +1946,19 @@ impl RequestScheduler {
         }
         self.refresh.validate_completion(step.origin, timing)?;
         let submission = self.submissions.remove(&fence).unwrap();
+        // Tokens that work still in flight may consume beyond this completion, per request.
+        let mut ahead = [0u64; REQUEST_LANES];
+        for later in self.submissions.values() {
+            for lane in later.lanes.iter().filter(|lane| submission.lanes.iter().any(|l| l.request == lane.request)) {
+                ahead[lane.request.slot as usize] += lane.tokens as u64;
+            }
+        }
         self.refresh.complete(submission.origin, timing);
         self.observe_execution(&submission.step, timing);
         let step = submission.step;
         let now_ns = self.now_ns;
         let mut useful_tokens = [0u64; REQUEST_LANES];
+        let mut acceptance_samples = Vec::new();
         let mut generated = Vec::new();
         let mut boundaries = Vec::new();
         let mut captures = Vec::new();
@@ -1959,12 +2014,14 @@ impl RequestScheduler {
                 // ABI3 may count padded proposals in the physical capture. Only
                 // the lane's logical draft extent supplies acceptance observations.
                 let offered = (vector.offered_drafts as usize).min(lane.tokens.saturating_sub(1));
-                request.acceptance.observe(
+                let sample = (
                     offered,
                     (vector.accepted_drafts as usize).min(offered),
                     vector.emitted_count > vector.accepted_drafts,
                     vector.copy_offered_mask as u8,
                 );
+                request.acceptance.observe(sample.0, sample.1, sample.2, sample.3, request.generated_tokens);
+                acceptance_samples.push(sample);
             }
             if record.status == 3 {
                 request.error_code = Some(record.error_code);
@@ -2042,7 +2099,16 @@ impl RequestScheduler {
             }
             if request.pending == 0 {
                 request.scheduled_consumed = request.consumed_tokens;
+            } else {
+                // Later work was planned from this step's widest advance; a speculative round
+                // that accepted fewer tokens lowers the bound so positions do not drift upward.
+                request.scheduled_consumed = request
+                    .scheduled_consumed
+                    .min(request.consumed_tokens + ahead[lane.request.slot as usize]);
             }
+        }
+        for (offered, accepted, rejected, copy_mask) in acceptance_samples {
+            self.acceptance_population.observe(offered, accepted, rejected, copy_mask);
         }
         self.advance_retirement(fence)?;
         for handle in boundaries {
@@ -2246,6 +2312,13 @@ impl RequestScheduler {
         }
         if let Some(prefix) = request.prefix {
             self.cache.unpin(prefix)?;
+        }
+        // A preempted request is readmitted from this checkpoint; pin it before the refill
+        // below can evict it for the decoders that caused the preemption.
+        if request.preempted {
+            if let Some(PublishResult::Created { id, ready: true }) = result {
+                self.pin_readmission(id);
+            }
         }
         self.slots[handle.slot as usize].retiring = true;
         request.private_pages.extend(request.reserved_pages);

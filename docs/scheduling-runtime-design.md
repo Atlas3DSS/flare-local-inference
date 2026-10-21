@@ -56,7 +56,13 @@ draws again.
 
 For conditional acceptance estimates `p_i`, expected output at width `W` is
 `1 + p_1 + p_1*p_2 + ... + product(p_1..p_(W-1))`. Combined graphs search all
-loaded widths using request-local historical acceptance. A producer supplying
+loaded widths using request-local historical acceptance weighed against a
+model-local population estimate (a prior worth two observations; each
+observation of any request contributes one sixty-fourth once saturated), so a
+new request starts from earlier requests' acceptance instead of 0.5. A depth a
+request has not observed for 32 output tokens is priced at the bound of its
+shallower prefix, so a width that was never offered, including every draft
+after a run of width-one rounds, becomes worth probing. A producer supplying
 native confidence forecasts proposal work by averaging each observed prefix's
 survival probability. It multiplies conditional probabilities before averaging,
 preserving their correlation within a draft block. Every observation contributes
@@ -365,6 +371,7 @@ Defaults specify these preferences:
 | Field | Default | Meaning |
 |---|---:|---|
 | `output_token_value` | 64 | Prompt-value units per output token |
+| `prefill_token_value` | 1 | Prompt-value units per consumed prompt token |
 | `token_fairness` | 16 | Token-rate log-utility coefficient, value/ms |
 | `delivery_fairness` | 4 | Delivery-rate log-utility coefficient, value/ms |
 | `decode_age_price` | 0.1 | Linear output-age cost coefficient, value/ms² |
@@ -379,7 +386,11 @@ which uses these coefficients. `--scheduler-policy throughput` retains token
 fairness and output-token value while setting delivery fairness and decode-age
 price to zero. It favors token throughput and can select longer output bursts.
 It changes scheduling preferences without changing captured capacities or
-sampling policy.
+sampling policy. `--scheduler-policy agent` keeps the balanced coefficients and
+sets `prefill_token_value` equal to `output_token_value`, so a waiting prompt
+outranks the remaining decode of other requests; without mixed graphs the
+decoders pause for that prompt's prefill chunks rather than the prompt waiting
+for them to finish.
 
 ## Mixed execution contract
 

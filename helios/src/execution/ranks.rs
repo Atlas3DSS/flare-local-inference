@@ -85,6 +85,21 @@ impl RankExecutor {
         }
     }
 
+    /// Lets speculative rounds queue behind an in-flight frame. Coordinated rank
+    /// groups keep the speculative submission barrier.
+    #[cfg(feature = "server")]
+    pub(crate) fn pipeline_speculation(&mut self) -> Result<()> {
+        match self {
+            Self::Local(executor) => {
+                executor.pipelined_speculation = true;
+                Ok(())
+            }
+            Self::Parallel(_) | Self::Threaded(_) => {
+                Err("pipelined speculation requires a single local rank".into())
+            }
+        }
+    }
+
     #[cfg(feature = "server")]
     pub(crate) fn next_fence(&self) -> Result<Fence> {
         match self {

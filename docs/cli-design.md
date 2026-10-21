@@ -149,7 +149,9 @@ The package records prepared concurrency, the available prefill and speculation
 graphs, and maximum virtual extents for cache storage. `--max-concurrency N`
 and `--mtp-draft-tokens N` select supported reductions at load time;
 `--mtp-adaptive-verification` and `--no-mtp-adaptive-verification` select the
-verification policy. Omitted flags use package defaults. Only selected graphs
+verification policy; serving defaults to fixed-width rounds at the maximum loaded
+width so that sampled outputs do not depend on batch composition. Other omitted
+flags use package defaults. Only selected graphs
 and required kernels load. Continuation rows and KV pages receive physical
 storage according to those selections and available GPU memory.
 
@@ -369,6 +371,17 @@ throughput with output cadence. For throughput-oriented serving, use
 `flare run model.safetensors --gpus 0,1,2,3 --scheduler-policy throughput`.
 This preference retains token-service fairness and can produce longer gaps
 between larger output bursts. It uses the package's existing graphs.
+`--scheduler-policy agent` values a consumed prompt token like an output token.
+Coding agents block on each prompt (tool output) before generating again, so a
+waiting prompt is served before other requests drain their decoding instead of
+after; the decoders pause for that prefill and then decode together with it.
+Agents read whole turns, so `agent` does not price output cadence: like
+`throughput`, it picks the speculative width with the most tokens per GPU second.
+`--mtp-pipeline` keeps a second speculative round queued behind the running one.
+Captured graphs own positions, pending tokens and acceptance, so the queued round
+needs no host feedback, and submitting its graph overlaps the running round.
+Rounds of requests with grammars or custom stops keep one round in flight, and
+the queued round's width is chosen before the running round's acceptance is known.
 
 `flare run PACKAGE` loads an exported file without the Ignition configuration
 reader. `PACKAGE` can also be a Hugging Face repository ID with an optional
@@ -398,7 +411,9 @@ Help exits with status 0; usage errors go to stderr with status 2. Its options a
 | `--kv-cache-limit concurrency\|context\|memory` | Bound shared KV history by prepared context times selected concurrency, one prepared context, or available memory | `memory` |
 | `--memory-limit LIMIT` | Per-GPU occupied size (`30G`), free-memory reserve (`-30G`), or fraction of total memory (`0.8`) | Package serving reserve |
 | `--mtp-draft-tokens N` | Reduce the maximum draft count; zero selects ordinary execution without draft generation, absorption, or draft-state maintenance | Package default |
-| `--mtp-adaptive-verification` / `--no-mtp-adaptive-verification` | Adaptive or fixed selection among captured widths | Package default |
+| `--mtp-adaptive-verification` / `--no-mtp-adaptive-verification` | Adaptive or fixed selection among captured widths; adaptive rounds depend on batch composition, so sampled outputs then differ between concurrent and solo requests | Fixed (maximum loaded width) |
+| `--mtp-pipeline` | Queue an unconstrained speculative round behind the running one (single local rank, device MTP proposals) | One round in flight |
+| `--unclamped-sampling` | Validation only: accept request sampling values outside the model-author ranges, e.g. `top_k` 1 for greedy comparisons | Model-author ranges |
 | `--mtp-verification-token-budget N` | Select one exact captured packed verification capacity per batch | All captured capacities |
 | `--mtp-max-verification-token-budget N` | Retain all captured packed verification capacities at or below a total-row ceiling | All captured capacities |
 | `--embedding-table-storage disk\|ram` | PLE and Engram table storage; both modes deliver compact GPU rows | `disk` |

@@ -1334,6 +1334,111 @@ fn speculative_rounds_wait_for_feedback_and_use_actual_counts() {
     assert_eq!(s.request(h).unwrap().tokens().last(), Some(&12));
 }
 #[test]
+fn pipelined_speculative_rounds_queue_without_feedback_and_rebound_positions() {
+    let (mut s, h) = speculative_scheduler(65, 32);
+    s.policy.pipelined_speculation = true;
+    let first = s.plan().unwrap();
+    assert_eq!((first.kind, first.token_capacity), (GraphKind::Speculative, 8));
+    assert!(!first.requires_feedback);
+    s.commit(&first, Fence(4)).unwrap();
+    // The next round is planned from the running round's widest advance.
+    let second = s.plan().unwrap();
+    assert_eq!(second.lanes[0].start_position, 73);
+    s.commit(&second, Fence(5)).unwrap();
+    assert!(s.plan().is_none());
+    s.complete(
+        Fence(4),
+        &vector_records(h, 4, 67, 3, &[10, 11], 8, 1),
+        Default::default(),
+    )
+    .unwrap();
+    // Two accepted tokens bound the queued round's endpoint by 67 + 8, not 73 + 8.
+    assert_eq!(s.request(h).unwrap().scheduled_consumed, 75);
+    let third = s.plan().unwrap();
+    assert_eq!(third.lanes[0].start_position, 75);
+    s.commit(&third, Fence(6)).unwrap();
+    s.complete(
+        Fence(5),
+        &vector_records(h, 5, 70, 6, &[12, 13, 14], 8, 1),
+        Default::default(),
+    )
+    .unwrap();
+    assert_eq!(s.request(h).unwrap().scheduled_consumed, 78);
+    s.complete(
+        Fence(6),
+        &vector_records(h, 6, 71, 7, &[15], 8, 1),
+        Default::default(),
+    )
+    .unwrap();
+    let request = s.request(h).unwrap();
+    assert_eq!((request.consumed_tokens, request.scheduled_consumed), (71, 71));
+    assert_eq!(request.tokens()[65..], [900, 10, 11, 12, 13, 14, 15]);
+}
+#[test]
+fn a_round_queued_behind_a_finishing_round_retires_without_tokens() {
+    let (mut s, h) = speculative_scheduler(65, 32);
+    s.policy.pipelined_speculation = true;
+    let first = s.plan().unwrap();
+    s.commit(&first, Fence(4)).unwrap();
+    let second = s.plan().unwrap();
+    s.commit(&second, Fence(5)).unwrap();
+    // End of sequence inside the running round finishes the request on the device.
+    let out = s
+        .complete(
+            Fence(4),
+            &vector_records(h, 4, 67, 3, &[10, 11], 8, 2),
+            Default::default(),
+        )
+        .unwrap();
+    assert!(out.last().unwrap().finished);
+    // The terminal snapshot waits for the queued round, which the device masks.
+    assert!(s.plan().is_none());
+    let out = s
+        .complete(
+            Fence(5),
+            &vector_records(h, 5, 67, 3, &[], 8, 2),
+            Default::default(),
+        )
+        .unwrap();
+    assert!(out.is_empty());
+    assert_eq!(s.request(h).unwrap().scheduled_consumed, 67);
+    assert_eq!(s.plan().unwrap().kind, GraphKind::Snapshot);
+}
+#[test]
+fn a_queued_round_that_the_output_limit_could_clip_waits_for_feedback() {
+    let (mut s, h) = speculative_scheduler(65, 12);
+    s.policy.pipelined_speculation = true;
+    let first = s.plan().unwrap();
+    assert_eq!(first.lanes[0].tokens, 8);
+    assert!(!first.requires_feedback);
+    s.commit(&first, Fence(4)).unwrap();
+    // Eleven outputs remain: a round of eight behind eight in flight could be clipped.
+    assert!(s.plan().is_none());
+    s.complete(
+        Fence(4),
+        &vector_records(h, 4, 67, 3, &[10, 11], 8, 1),
+        Default::default(),
+    )
+    .unwrap();
+    let second = s.plan().unwrap();
+    assert_eq!((second.lanes[0].tokens, second.requires_feedback), (8, false));
+    s.commit(&second, Fence(5)).unwrap();
+    assert!(s.plan().is_none());
+}
+#[test]
+fn pipelined_speculation_keeps_one_round_for_grammars_and_host_stops() {
+    for grammar in [false, true] {
+        let (mut s, h) = speculative_scheduler(65, 32);
+        s.policy.pipelined_speculation = true;
+        s.request_mut(h).unwrap().grammar_constrained = grammar;
+        s.request_mut(h).unwrap().host_stops = !grammar;
+        let step = s.plan().unwrap();
+        assert!(step.requires_feedback);
+        s.commit(&step, Fence(4)).unwrap();
+        assert!(s.plan().is_none());
+    }
+}
+#[test]
 fn speculative_output_limit_masks_rows_without_queueing_terminal_work() {
     let (mut s, h) = speculative_scheduler(60, 2);
     let first = s.plan().unwrap();
@@ -1585,13 +1690,13 @@ fn acceptance_keeps_request_source_and_censored_depths_separate() {
     };
     let mut a = AcceptanceProfile::default();
     let b = AcceptanceProfile::default();
-    a.observe(5, 2, false, 0b10);
+    a.observe(5, 2, false, 0b10, 0);
     assert!(a.probability(Mtp, 0).unwrap() > 0.5);
     assert!(a.probability(Copy, 1).unwrap() > 0.5);
     assert_eq!(a.probability(Copy, 0), Some(0.5));
     assert_eq!(a.probability(Mtp, 1), Some(0.5));
     assert_eq!(a.probability(Mtp, 2), Some(0.5));
-    a.observe(5, 2, true, 0b110);
+    a.observe(5, 2, true, 0b110, 0);
     assert!(a.probability(Copy, 2).unwrap() < 0.5);
     assert_eq!(a.probability(Mtp, 2), Some(0.5));
     assert_eq!(a.probability(Copy, 3), Some(0.5));
@@ -3048,6 +3153,67 @@ fn starved_growable_request_preempts_the_newest_and_resumes_from_its_checkpoint(
     let request = scheduler.request(resumed).unwrap();
     assert_eq!(request.phase, RequestPhase::Restore);
     assert_eq!(request.prefix(), Some(checkpoint));
+}
+
+#[test]
+fn a_starved_decoder_releases_a_readmission_pin_before_another_preemption() {
+    let mut scheduler = scheduler(2, 6, 4);
+    let older = scheduler.admit(growable(60, 400)).unwrap();
+    let newer = scheduler.admit(growable(60, 400)).unwrap();
+    let mut fence = 1;
+    while !scheduler.request(newer).unwrap().preempted() {
+        sample_round(&mut scheduler, fence);
+        fence += 1;
+        assert!(fence < 1000, "no request ran out of pages");
+    }
+    freeze(&mut scheduler, newer, fence);
+    fence += 1;
+    // Publishing pins the parked request's checkpoint...
+    let checkpoint = scheduler.finish(newer).unwrap().unwrap();
+    while scheduler.holds_readmission(checkpoint) {
+        let request = scheduler.request(older).unwrap();
+        assert!(
+            !request.preempted() && request.phase == RequestPhase::Decode,
+            "older {:?} preempted {} consumed {} free pages {} preemptions {}",
+            request.phase, request.preempted(), request.consumed_tokens,
+            scheduler.free_page_count(), scheduler.stats().preemptions
+        );
+        sample_round(&mut scheduler, fence);
+        fence += 1;
+        assert!(fence < 3000, "the running decoder never needed the pinned pages");
+    }
+    // ...until the running decoder needs its pages: the pin yields, nothing else is preempted.
+    assert!(!scheduler.request(older).unwrap().preempted());
+    assert_eq!(scheduler.stats().preemptions, 1);
+}
+
+#[test]
+fn a_parked_request_keeps_its_checkpoint_pinned_until_readmission() {
+    let mut scheduler = scheduler(2, 6, 4);
+    let older = scheduler.admit(growable(60, 400)).unwrap();
+    let newer = scheduler.admit(growable(60, 400)).unwrap();
+    let mut fence = 1;
+    while !scheduler.request(newer).unwrap().preempted() {
+        sample_round(&mut scheduler, fence);
+        fence += 1;
+        assert!(fence < 1000, "no request ran out of pages");
+    }
+    let tokens = scheduler.request(newer).unwrap().tokens().to_vec();
+    let remaining = 400 - scheduler.request(newer).unwrap().generated_tokens;
+    scheduler.cancel(older).unwrap();
+    freeze(&mut scheduler, newer, fence);
+    let checkpoint = scheduler.finish(newer).unwrap().unwrap();
+    assert!(scheduler.holds_readmission(checkpoint));
+    // An unrelated admission may evict everything else but not the pinned checkpoint.
+    if let Ok(other) = scheduler.admit(spec(64 * 5, 1)) {
+        scheduler.cancel(other).unwrap();
+    }
+    let resumed = scheduler
+        .admit(RequestSpec { prompt: tokens, growable_output: true, ..spec(1, remaining) })
+        .unwrap();
+    assert_eq!(scheduler.request(resumed).unwrap().prefix(), Some(checkpoint));
+    scheduler.release_readmission(checkpoint).unwrap();
+    assert!(!scheduler.holds_readmission(checkpoint));
 }
 
 #[test]

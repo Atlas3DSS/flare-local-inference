@@ -691,6 +691,24 @@ mod tests {
     }
 
     #[test]
+    fn unclamped_ranges_keep_greedy_requests_that_package_ranges_clamp() {
+        let defaults = SamplingParameters { top_k: 20, top_p: 0.95, ..Default::default() };
+        let package = SamplingRanges {
+            temperature: Some(SamplingRange { min: 0.7, max: 1. }),
+            top_p: Some(SamplingRange { min: 0.8, max: 0.95 }),
+            ..Default::default()
+        };
+        let body = serde_json::json!({"top_k": 1, "temperature": 0.01, "top_p": 1.0});
+        let body = body.as_object().unwrap();
+        let clamped = sampling_parameters(body, &defaults, &package).unwrap();
+        assert_eq!((clamped.top_k, clamped.temperature, clamped.top_p), (20, 0.7, 0.95));
+        let unclamped = SamplingRanges::unclamped(1024);
+        unclamped.validate(&defaults).unwrap();
+        let exact = sampling_parameters(body, &defaults, &unclamped).unwrap();
+        assert_eq!((exact.top_k, exact.temperature, exact.top_p), (1, 0.01, 1.0));
+    }
+
+    #[test]
     fn sampling_clamps_at_inclusive_model_bounds_before_validation_and_narrowing() {
         let defaults = SamplingParameters::default();
         let ranges = SamplingRanges {

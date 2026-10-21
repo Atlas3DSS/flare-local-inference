@@ -269,6 +269,8 @@ impl OrbitPush {
             rank: None,
             api_key_file: None,
             scheduler_policy: "balanced".into(),
+            mtp_pipeline: false,
+            unclamped_sampling: false,
             serving: self.serving.clone(),
         }
     }
@@ -344,9 +346,9 @@ pub struct OrbitRun {
     #[arg(long, value_name = "ALIAS", value_parser = served_model_name, help_heading = "Serving options")]
     pub served_model_name: Option<String>,
 
-    /// Favor throughput or output cadence [default: saved group or balanced].
+    /// Favor throughput, output cadence, or agents' prompt latency [default: saved group or balanced].
     #[arg(long, value_name = "MODE",
-        value_parser = ["balanced", "throughput"], help_heading = "Serving options")]
+        value_parser = ["balanced", "throughput", "agent"], help_heading = "Serving options")]
     pub scheduler_policy: Option<String>,
 
     /// File on rank zero's node containing the serving API key; omit to disable authentication.
@@ -413,6 +415,8 @@ impl OrbitRun {
                 .scheduler_policy
                 .clone()
                 .unwrap_or_else(|| "balanced".into()),
+            mtp_pipeline: false,
+            unclamped_sampling: false,
             serving: self.serving.clone(),
         }
     }
@@ -477,10 +481,21 @@ pub struct Run {
     #[arg(long, value_name = "PATH", help_heading = "Serving options")]
     pub api_key_file: Option<PathBuf>,
 
-    /// Favor token throughput or balance it with output cadence; both retain token-service fairness.
+    /// Favor token throughput, balance it with output cadence, or value agents' prompts closer to output;
+    /// all retain token-service fairness.
     #[arg(long, value_name = "MODE", default_value = "balanced",
-        value_parser = ["balanced", "throughput"], help_heading = "Serving options")]
+        value_parser = ["balanced", "throughput", "agent"], help_heading = "Serving options")]
     pub scheduler_policy: String,
+
+    /// Queue the next speculative round behind the running one so graph submission overlaps
+    /// execution; one local rank, device MTP proposals, no grammar or custom stops.
+    #[arg(long, help_heading = "Speculation options")]
+    pub mtp_pipeline: bool,
+
+    /// Validation only: accept request sampling values outside the package's model-author
+    /// ranges, e.g. top_k 1 for greedy token-for-token comparisons. Not for serving.
+    #[arg(long, help_heading = "Serving options")]
+    pub unclamped_sampling: bool,
 
     #[command(flatten)]
     pub serving: ServingOptions,
@@ -590,7 +605,9 @@ pub struct ServingOptions {
     )]
     pub mtp_max_verification_token_budget: Option<NonZeroUsize>,
 
-    /// Adapt verification width to acceptance estimates and execution cost [default: package setting].
+    /// Adapt verification width to acceptance estimates and execution cost [default: fixed width].
+    /// Adaptive rounds depend on batch composition, so sampled outputs then differ between
+    /// concurrent and solo requests.
     #[arg(
         long,
         overrides_with = "no_mtp_adaptive_verification",
@@ -598,7 +615,7 @@ pub struct ServingOptions {
     )]
     pub mtp_adaptive_verification: bool,
 
-    /// Use the maximum width where captured, otherwise width one [default: package setting].
+    /// Use the maximum width where captured, otherwise width one [default].
     #[arg(
         long,
         overrides_with = "mtp_adaptive_verification",
