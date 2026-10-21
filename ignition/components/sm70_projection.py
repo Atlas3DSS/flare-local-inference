@@ -146,6 +146,19 @@ def _expand_nvfp4(program, values, scales, output, start, stop, query):
     program[(triton.cdiv((stop - start) * query.in_features, 256), 1, 1)](values, scales, output, start)
 
 
+def _hgemm(inputs, weight, result):
+    # These flags affect cuBLAS dispatch, while spawned complete-forward
+    # compilers guard their own process state. Scope them to the opaque call.
+    matmul = torch.backends.cuda.matmul
+    previous = (matmul.allow_fp16_reduced_precision_reduction, matmul.allow_fp16_accumulation)
+    try:
+        matmul.allow_fp16_reduced_precision_reduction = False
+        matmul.allow_fp16_accumulation = False
+        torch.mm(inputs, weight.T, out_dtype=torch.float32, out=result)
+    finally:
+        matmul.allow_fp16_reduced_precision_reduction, matmul.allow_fp16_accumulation = previous
+
+
 def _project(query, tactic, expansion, source, values, scales, gain, input_scale, output, workspace, bias):
     """All temporary allocations are bounded by a tile and captured before serving."""
     tile = tactic[1]
@@ -167,7 +180,7 @@ def _project(query, tactic, expansion, source, values, scales, gain, input_scale
         if tactic[0] == "hgemm":
             # CUDA_R_16F operands, CUDA_R_32F C, CUBLAS_COMPUTE_32F.
             # Warmup owns cuBLAS's per-stream workspace through capture/export.
-            torch.mm(inputs, weight.T, out_dtype=torch.float32, out=result)
+            _hgemm(inputs, weight, result)
         else:
             torch.mm(inputs, weight.T, out=result)
         if gain is not None:
@@ -399,9 +412,6 @@ class _Projection:
             return tuple(jobs)
 
         def materialize(tactic):
-            if tactic[0] == "hgemm":
-                torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
-                torch.backends.cuda.matmul.allow_fp16_accumulation = False
             expansion, gemv = None, None
             programs = []
             if query.kind == "nvfp4":

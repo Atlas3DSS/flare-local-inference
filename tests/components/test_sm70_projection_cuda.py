@@ -536,3 +536,29 @@ def test_hgemm_never_stores_half_result_or_accumulates_in_half():
         operation = sm70.TensorFP8Projection(source, weight, output, session=session, name="hgemm-range")
         operation(source)
         torch.testing.assert_close(output, torch.full_like(output, 20971520.), rtol=0, atol=0)
+
+
+@torch.no_grad()
+def test_hgemm_preserves_compiler_process_math_flags():
+    from b12x.preparation import PreparationSession
+    from ignition.preparation.compilation import compile_forward
+
+    _require_v100()
+    matmul = torch.backends.cuda.matmul
+    previous = matmul.allow_fp16_reduced_precision_reduction, matmul.allow_fp16_accumulation
+    try:
+        matmul.allow_fp16_reduced_precision_reduction = True
+        matmul.allow_fp16_accumulation = True
+        weight, matrix, gain, scale = _weight("tensor_fp8", 384, 160)
+        source = torch.full((17, 160), .25, device="cuda")
+        output = torch.empty((17, 384), device="cuda")
+        with PreparationSession(device=source.device, autotune=False, compile_workers=0) as session:
+            operation = sm70.TensorFP8Projection(source, weight, output, session=session, name="hgemm-flags")
+            assert matmul.allow_fp16_reduced_precision_reduction and matmul.allow_fp16_accumulation
+            compiled = compile_forward(lambda: operation(source))
+            compiled()
+            assert matmul.allow_fp16_reduced_precision_reduction and matmul.allow_fp16_accumulation
+            calibrated = (source.cpu() / scale).clamp(-448, 448).to(torch.float8_e4m3fn).float()
+            torch.testing.assert_close(output.cpu(), (calibrated @ matrix.T) * gain, rtol=0, atol=0)
+    finally:
+        matmul.allow_fp16_reduced_precision_reduction, matmul.allow_fp16_accumulation = previous
