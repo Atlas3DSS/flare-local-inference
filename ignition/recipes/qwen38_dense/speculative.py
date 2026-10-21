@@ -315,7 +315,7 @@ class PreparedRound:
                     & (o.inputs.row_generations[:b] == o.requests.generation[safe]))
         matches = (flat[:, None] == flat[None, :]) & resident.repeat_interleave(w)[None, :]
         bad |= (matches.sum(1).view(b, w) > 1).any(1)
-        bad_slots = ((self.slot_ids[:, None] == slots[None, :]) & bad[None, :]).any(1)
+        bad_slots = ((self.slot_ids[:, None] == slots[None, :]) & (bad & resident)[None, :]).any(1)
         self.validator.validation_input[0, :o.requests.capacity].add_(bad_slots)
         self.validator.begin(self.validator.validation_input)
         self.active.copy_(self.validator.token_state.active.bool()
