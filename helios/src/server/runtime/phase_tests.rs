@@ -1429,11 +1429,24 @@ fn grouped_submission_validates_all_children_before_enqueue_and_releases_capacit
     assert_eq!(runtime.capacity.available_permits(), 4);
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum Pressure {
+    /// Readmit as soon as the other request retires.
+    None,
+    /// Another admission needs the pages first; the pinned checkpoint must survive it.
+    Pinned,
+    /// The readmission pin is released first, so the admission evicts the checkpoint.
+    Released,
+}
+
 fn exercise_text_preemption(
     metadata: crate::model::PreparedContract,
     data: impl Fn(usize) -> crate::model::PromptData,
-    evict_checkpoint: bool,
+    pressure: Pressure,
+    greedy: bool,
+    mismatch: bool,
 ) {
+    let evict_checkpoint = pressure == Pressure::Released;
     let mut fixture = Fixture::new();
     fixture.config.contract = metadata;
     fixture.config.prepared_sequence_tokens = 4096;
@@ -1443,8 +1456,12 @@ fn exercise_text_preemption(
     let page_tokens = crate::model::scheduler_capabilities(&fixture.config).page_tokens;
     let budget = (page_tokens * 4) as u32;
     let (sender, receiver) = mpsc::channel();
-    let (first, mut first_generation) = fixture.incoming_for(vec![0; 60], budget, data(60));
-    let (second, mut second_generation) = fixture.incoming_for(vec![2; 60], budget, data(60));
+    let (mut first, mut first_generation) = fixture.incoming_for(vec![0; 60], budget, data(60));
+    let (mut second, mut second_generation) = fixture.incoming_for(vec![2; 60], budget, data(60));
+    if greedy {
+        first.prompt.sampling.top_k = 1;
+        second.prompt.sampling.top_k = 1;
+    }
     sender.send(vec![first, second]).unwrap();
     let mut worker = fixture.worker_for(receiver);
     assert_eq!(worker.admit().unwrap(), ControlFlow::Continue(true));
@@ -1491,6 +1508,10 @@ fn exercise_text_preemption(
         incoming.prompt.max_new_tokens + parked.carried.generated_tokens,
         budget
     );
+    // The terminal checkpoint is pinned; a greedy history excludes the pending token,
+    // which readmission re-derives and checks.
+    assert!(parked.pinned.is_some());
+    assert_eq!(parked.replay, greedy.then_some(1));
     crate::model::validate_prompt_data(
         &fixture.config,
         &incoming.prompt.tokens,
@@ -1505,32 +1526,41 @@ fn exercise_text_preemption(
         assert_eq!(indices, &vec![-1; history_len]);
     }
     worker.retire(&[older]).unwrap();
-    if evict_checkpoint {
-        let pressure = worker
-            .scheduler
-            .admit(RequestSpec {
-                prompt: vec![3; page_tokens * 5],
-                max_new_tokens: 1,
-                growable_output: false,
-                message_boundaries: vec![],
-                conditioning: vec![],
-                grammar_constrained: false,
-                host_stops: false,
-            })
-            .unwrap();
-        worker.scheduler.cancel(pressure).unwrap();
+    let pressure_spec = || RequestSpec {
+        prompt: vec![3; page_tokens * 5],
+        max_new_tokens: 1,
+        growable_output: false,
+        message_boundaries: vec![],
+        conditioning: vec![],
+        grammar_constrained: false,
+        host_stops: false,
+    };
+    if pressure == Pressure::Released {
+        let (incoming, parked) = worker.parked.front_mut().unwrap();
+        parked.release_pin(incoming, &mut worker.scheduler).unwrap();
+        assert!(parked.pinned.is_none());
+    }
+    let history_len = worker.parked.front().unwrap().0.prompt.tokens.len();
+    if pressure != Pressure::None {
+        // Eviction may take every unpinned page but not the pinned checkpoint.
+        if let Ok(admitted) = worker.scheduler.admit(pressure_spec()) {
+            worker.scheduler.cancel(admitted).unwrap();
+        }
     }
     assert_eq!(worker.admit().unwrap(), ControlFlow::Continue(true));
     assert!(worker.parked.is_empty());
-    let resumed = worker.active.iter().flatten().next().unwrap().request;
+    let mut resumed = worker.active.iter().flatten().next().unwrap().request;
     let live = worker.scheduler.request(resumed).unwrap();
     if evict_checkpoint {
         assert!(live.consumed_tokens < history_len as u64 - 1);
     } else {
         assert_eq!(live.phase, RequestPhase::Restore);
-        assert_eq!(live.consumed_tokens, history_len as u64 - 1);
+        // A greedy readmission restores its whole prompt and resumes from the checkpoint.
+        assert_eq!(live.consumed_tokens, history_len as u64 - u64::from(!greedy));
     }
+    let delivered = worker.active[resumed.slot as usize].as_ref().unwrap().last_token;
     let mut recomputed = false;
+    let mut mismatched = false;
     for _ in 0..history_len / 64 + 8 {
         sequence += 1;
         let step = worker.plan(0).unwrap().0.unwrap();
@@ -1538,18 +1568,43 @@ fn exercise_text_preemption(
             && step.lanes[0].start_position < history_len as u64 - 1;
         worker.reserve_and_pack(&step, Fence(sequence)).unwrap();
         let sample = match step.kind {
+            // An exact logit tie broken by the continuation's random stream.
+            GraphKind::Resume if mismatch && !mismatched => Some(2),
             GraphKind::Decode | GraphKind::Resume => Some(1),
             GraphKind::Prefill => {
                 let lane = &step.lanes[0];
-                (lane.start_position as usize + lane.tokens == history_len).then_some(1)
+                let live = worker.scheduler.request(lane.request).unwrap();
+                (lane.start_position as usize + lane.tokens == live.prompt_tokens).then_some(1)
             }
             _ => None,
         };
         let frame = completion(&worker, &step, sequence, sample);
         worker.complete(step.kind, frame).unwrap();
         worker.publish().unwrap();
-        if worker.scheduler.request(resumed).unwrap().generated_tokens > 0 {
+        if mismatch && !mismatched && step.kind == GraphKind::Resume {
+            // The other token is never delivered: the request is parked again with its
+            // delivered pending token back in the prompt, which readmission prefills.
+            mismatched = true;
+            let (incoming, parked) = worker.parked.front().unwrap();
+            assert_eq!(incoming.prompt.tokens.len(), history_len + 1);
+            assert!(parked.pinned.is_none() && parked.replay.is_none());
+            assert_eq!(worker.admit().unwrap(), ControlFlow::Continue(true));
+            resumed = worker.active.iter().flatten().next().unwrap().request;
+            continue;
+        }
+        let replaying = worker.active[resumed.slot as usize]
+            .as_ref()
+            .is_some_and(|active| active.replay.is_some());
+        if worker.scheduler.request(resumed).unwrap().generated_tokens
+            > u32::from(greedy && !evict_checkpoint && !mismatch)
+            && !replaying
+        {
+            assert!(!mismatch || mismatched);
             assert_eq!(recomputed, evict_checkpoint);
+            if greedy && !evict_checkpoint && !mismatch {
+                // The re-derived pending token was checked and swallowed, not delivered again.
+                assert_eq!(delivered, Some(1));
+            }
             assert!(
                 worker.active[resumed.slot as usize]
                     .as_ref()
@@ -1565,20 +1620,41 @@ fn exercise_text_preemption(
 }
 
 #[test]
+fn a_greedy_readmission_that_re_derives_another_token_prefills_the_delivered_one() {
+    let mut metadata = crate::model::testing::metadata();
+    metadata.cache.page_tokens = 64;
+    exercise_text_preemption(
+        metadata,
+        |n| PromptData {
+            positions: (0..n).map(|p| [p as i64; 3]).collect(),
+            vision_token_indices: vec![-1; n],
+            ..Default::default()
+        },
+        Pressure::None,
+        true,
+        true,
+    );
+}
+
+#[test]
 fn text_preemption_restores_or_recomputes_every_attention_contract() {
     for page_tokens in [64, 128, 256] {
-        for evict in [false, true] {
+        for evict in [Pressure::None, Pressure::Pinned, Pressure::Released] {
             let mut metadata = crate::model::testing::metadata();
             metadata.cache.page_tokens = page_tokens;
-            exercise_text_preemption(
-                metadata,
-                |n| PromptData {
-                    positions: (0..n).map(|p| [p as i64; 3]).collect(),
-                    vision_token_indices: vec![-1; n],
-                    ..Default::default()
-                },
-                evict,
-            );
+            for greedy in [false, true] {
+                exercise_text_preemption(
+                    metadata.clone(),
+                    |n| PromptData {
+                        positions: (0..n).map(|p| [p as i64; 3]).collect(),
+                        vision_token_indices: vec![-1; n],
+                        ..Default::default()
+                    },
+                    evict,
+                    greedy,
+                    false,
+                );
+            }
         }
     }
 }

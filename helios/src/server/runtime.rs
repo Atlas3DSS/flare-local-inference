@@ -209,6 +209,9 @@ struct Active<'a> {
     text_stops: Option<super::stops::TextStops<'a>>,
     carried: Carried,
     held_logprobs: VecDeque<Option<crate::execution::TokenLogprobs>>,
+    /// A delivered pending token this admission re-derives by resume sampling before
+    /// generating; it is checked, not emitted again.
+    replay: Option<u32>,
 }
 
 /// What earlier admissions of a preempted request already reported.
@@ -240,6 +243,33 @@ struct Parked<'a> {
     text_stops: Option<super::stops::TextStops<'a>>,
     carried: Carried,
     held_logprobs: VecDeque<Option<crate::execution::TokenLogprobs>>,
+    /// The preempted request's terminal checkpoint, which the scheduler keeps from eviction
+    /// until readmission unless running requests need its pages.
+    pinned: Option<crate::cache::CheckpointId>,
+    /// The pending token excluded from a greedy readmission's prompt (see `Active::replay`).
+    replay: Option<u32>,
+}
+
+impl Parked<'_> {
+    /// Releases the readmission pin so that eviction can reclaim the checkpoint.
+    fn release_pin(&mut self, incoming: &mut Incoming, scheduler: &mut RequestScheduler) -> Result<()> {
+        if let Some(id) = self.pinned.take() {
+            scheduler.release_readmission(id)?;
+        }
+        incoming.blocked = None;
+        Ok(())
+    }
+}
+
+/// Appends a replayed pending token back to a readmission's prompt, as for any preempted
+/// request that will prefill it.
+fn restore_pending_token(incoming: &mut Incoming, carried: &mut Carried, token: u32) -> Result<()> {
+    let length = incoming.prompt.tokens.len();
+    crate::model::prompt_metadata(&mut incoming.prompt.data).extend_text(length, length + 1)?;
+    incoming.prompt.tokens.push(token);
+    incoming.prompt.max_new_tokens -= 1;
+    carried.generated_tokens += 1;
+    Ok(())
 }
 
 impl Active<'_> {
@@ -1039,14 +1069,19 @@ impl<'a> Worker<'a> {
                 }
             }
         }
-        self.parked.retain(|(incoming, _)| {
+        let mut released = Vec::new();
+        self.parked.retain(|(incoming, parked)| {
             let cancelled = incoming.cancelled.load(Ordering::Acquire);
             if cancelled {
                 self.metrics.cancelled.fetch_add(1, Ordering::Relaxed);
+                released.extend(parked.pinned);
                 progress = true;
             }
             !cancelled
         });
+        for id in released {
+            self.scheduler.release_readmission(id)?;
+        }
         for slot in 0..self.active.len() {
             if self.active[slot]
                 .as_ref()
@@ -1095,6 +1130,7 @@ impl<'a> Worker<'a> {
                 incoming.reject_admission("logprobs are not available in this model package".into());
                 continue;
             }
+            let mut parked = parked;
             let spec = RequestSpec {
                 message_boundaries: incoming.prompt.message_boundaries.clone(),
                 prompt: incoming.prompt.tokens.clone(),
@@ -1114,13 +1150,29 @@ impl<'a> Worker<'a> {
                 self.scheduler.admit(spec)
             };
             let handle = match admission {
-                Ok(handle) => handle,
+                Ok(handle) => {
+                    // The admission pinned the prefix it restores; the readmission pin is done.
+                    if let Some(id) = parked.as_mut().and_then(|parked| parked.pinned.take()) {
+                        self.scheduler.release_readmission(id)?;
+                    }
+                    handle
+                }
                 // Pages are short: wait for running requests to finish or yield theirs.
                 Err(Error::Admission(AdmissionError::Capacity(_))) => {
                     incoming.blocked = Some(resources);
                     match parked {
                         Some(parked) => self.parked.insert(position, (incoming, parked)),
                         None => self.pending.insert(position, incoming),
+                    }
+                    // With nothing running, only pinned readmission checkpoints can free pages:
+                    // release them so eviction can proceed, and prefill those histories instead.
+                    if self.active.iter().all(Option::is_none)
+                        && self.parked.iter().any(|(_, parked)| parked.pinned.is_some())
+                    {
+                        for (incoming, parked) in self.parked.iter_mut() {
+                            parked.release_pin(incoming, &mut self.scheduler)?;
+                        }
+                        progress = true;
                     }
                     continue;
                 }
@@ -1210,6 +1262,8 @@ impl<'a> Worker<'a> {
                     last_token: None,
                     carried: Carried::default(),
                     held_logprobs: VecDeque::new(),
+                    pinned: None,
+                    replay: None,
                 },
             };
             if !incoming.readmitted {
@@ -1227,6 +1281,7 @@ impl<'a> Worker<'a> {
                 prepared_image: None,
                 carried: parked.carried,
                 held_logprobs: parked.held_logprobs,
+                replay: parked.replay,
             });
             progress = true;
         }
@@ -1379,6 +1434,7 @@ impl<'a> Worker<'a> {
             );
         }
         let mut stopped = Vec::new();
+        let mut replay_mismatches = Vec::new();
         let mut positions = [0usize; crate::execution::REQUEST_LANES];
         for token in generated {
             let slot = token.request.slot as usize;
@@ -1391,6 +1447,16 @@ impl<'a> Worker<'a> {
                 .as_mut()
                 .filter(|a| a.request == token.request)
             {
+                if let Some(expected) = request.replay.take() {
+                    // A greedy readmission first re-derives the pending token it delivered
+                    // before preemption. A different token (an exact logit tie broken by the
+                    // new random stream) readmits it again with that token prefilled.
+                    if token.token != expected {
+                        replay_mismatches.push((token.request, expected));
+                        stopped.push(token.request);
+                    }
+                    continue;
+                }
                 request.incoming.observe_token(token.token);
                 request.last_token = Some(token.token);
                 if let Some(grammar) = &mut request.incoming.prompt.grammar {
@@ -1475,6 +1541,29 @@ impl<'a> Worker<'a> {
                     stopped.push(token.request);
                 }
             }
+        }
+        stopped.retain(|handle| replay_mismatches.iter().all(|(other, _)| other != handle));
+        for (handle, expected) in replay_mismatches {
+            let slot = handle.slot as usize;
+            let Some(active) = self.active[slot].take_if(|active| active.request == handle) else {
+                continue;
+            };
+            self.admissions[slot] = None;
+            self.scheduler.cancel(handle)?;
+            let (mut incoming, mut carried) = (active.incoming, active.carried);
+            restore_pending_token(&mut incoming, &mut carried, expected)?;
+            self.parked.push_front((
+                incoming,
+                Parked {
+                    last_token: active.last_token,
+                    stops: active.stops,
+                    text_stops: active.text_stops,
+                    carried,
+                    held_logprobs: active.held_logprobs,
+                    pinned: None,
+                    replay: None,
+                },
+            ));
         }
         self.retire(&stopped)?;
         Ok(())
@@ -1619,14 +1708,26 @@ impl<'a> Worker<'a> {
             live.prompt_tokens,
             live.reused_prompt_tokens(),
         );
-        self.scheduler.finish(handle)?;
+        let (prefix, consumed) = (live.prefix(), live.consumed_tokens as usize);
+        let checkpoint = self.scheduler.finish(handle)?;
+        // The scheduler keeps a newly published terminal checkpoint for the readmission.
+        let pinned = checkpoint
+            .filter(|id| Some(*id) != prefix)
+            .filter(|id| self.scheduler.holds_readmission(*id));
         let active = self.active[slot].take().unwrap();
         self.admissions[slot] = None;
         let mut incoming = active.incoming;
+        // A greedy request re-derives its pending token instead of prefilling it: from the
+        // checkpoint's saved hidden vector when the checkpoint survives (full-prompt hit,
+        // resume sampling), so its next verification round consumes the token exactly as an
+        // uninterrupted request would. The re-derived token is checked against the delivered one.
+        let replay = (incoming.prompt.sampling.top_k == 1 && consumed + 1 == tokens.len())
+            .then(|| tokens[consumed]);
+        let history = if replay.is_some() { consumed } else { tokens.len() };
         crate::model::prompt_metadata(&mut incoming.prompt.data)
-            .extend_text(incoming.prompt.tokens.len(), tokens.len())?;
-        incoming.prompt.tokens = tokens;
-        incoming.prompt.max_new_tokens -= generated;
+            .extend_text(incoming.prompt.tokens.len(), history)?;
+        incoming.prompt.tokens = tokens[..history].to_vec();
+        incoming.prompt.max_new_tokens -= generated - u32::from(replay.is_some());
         incoming.readmitted = true;
         let seed = active.carried.seed.unwrap_or(incoming.prompt.sampling.seed);
         let generated_tokens = active.carried.generated_tokens + generated;
@@ -1639,9 +1740,11 @@ impl<'a> Worker<'a> {
             carried: Carried {
                 prompt_tokens: Some(active.carried.prompt_tokens.unwrap_or(prompt_tokens)),
                 reused_prompt_tokens: Some(active.carried.reused_prompt_tokens.unwrap_or(reused)),
-                generated_tokens,
+                generated_tokens: generated_tokens - u32::from(replay.is_some()),
                 seed: Some(seed),
             },
+            pinned,
+            replay,
         };
         self.parked.push_back((incoming, parked));
         Ok(true)
@@ -1887,6 +1990,8 @@ impl<'a> Worker<'a> {
                 text_stops: active.text_stops,
                 carried: active.carried,
                 held_logprobs: active.held_logprobs,
+                pinned: None,
+                replay: active.replay,
             },
         ));
     }
@@ -2615,6 +2720,7 @@ mod tests {
             text_stops: None,
             held_logprobs: VecDeque::new(),
             carried: Carried::default(),
+            replay: None,
         };
         let mut active: [Option<Active<'_>>; 4] = std::array::from_fn(|_| None);
         active[failed.slot as usize] = Some(make_active(failed, incoming));
@@ -2804,6 +2910,7 @@ mod tests {
                 super::super::stops::TextStops::new(&frontend, vec!["END".into()]).unwrap(),
             ),
             carried: Carried::default(),
+            replay: None,
         };
         request.incoming.observe_token(0);
         assert!(!request.emit_output(0, &[248046], None).unwrap());

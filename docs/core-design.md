@@ -470,7 +470,15 @@ first; admission waits while pages are short. When a running request still canno
 continue, the newest eligible decoder publishes its terminal checkpoint when
 backing allows and is readmitted with its history and remaining output budget.
 The checkpoint restores all declared continuation state; eviction can instead
-require recomputing the history. Shared handling extends text-position and
+require recomputing the history, and recomputing generated tokens with prefill
+graphs changes their state bits. The checkpoint is therefore pinned until
+readmission; only a running decoder that still lacks pages makes it evictable,
+before any other request is preempted, and no request is preempted while an
+earlier victim is still taking its checkpoint. A greedy (top-k 1) readmission
+leaves its delivered pending token out of the prompt and re-derives it (resume
+sampling on a full-prompt hit), so verification consumes it as in uninterrupted
+serving; a different re-derived token readmits the request with that token
+prefilled. Shared handling extends text-position and
 image-index metadata for generated tokens before readmission.
 
 The output stream, stop and grammar state, and penalty counts continue. Random

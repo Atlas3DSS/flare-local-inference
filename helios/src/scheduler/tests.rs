@@ -3156,6 +3156,67 @@ fn starved_growable_request_preempts_the_newest_and_resumes_from_its_checkpoint(
 }
 
 #[test]
+fn a_starved_decoder_releases_a_readmission_pin_before_another_preemption() {
+    let mut scheduler = scheduler(2, 6, 4);
+    let older = scheduler.admit(growable(60, 400)).unwrap();
+    let newer = scheduler.admit(growable(60, 400)).unwrap();
+    let mut fence = 1;
+    while !scheduler.request(newer).unwrap().preempted() {
+        sample_round(&mut scheduler, fence);
+        fence += 1;
+        assert!(fence < 1000, "no request ran out of pages");
+    }
+    freeze(&mut scheduler, newer, fence);
+    fence += 1;
+    // Publishing pins the parked request's checkpoint...
+    let checkpoint = scheduler.finish(newer).unwrap().unwrap();
+    while scheduler.holds_readmission(checkpoint) {
+        let request = scheduler.request(older).unwrap();
+        assert!(
+            !request.preempted() && request.phase == RequestPhase::Decode,
+            "older {:?} preempted {} consumed {} free pages {} preemptions {}",
+            request.phase, request.preempted(), request.consumed_tokens,
+            scheduler.free_page_count(), scheduler.stats().preemptions
+        );
+        sample_round(&mut scheduler, fence);
+        fence += 1;
+        assert!(fence < 3000, "the running decoder never needed the pinned pages");
+    }
+    // ...until the running decoder needs its pages: the pin yields, nothing else is preempted.
+    assert!(!scheduler.request(older).unwrap().preempted());
+    assert_eq!(scheduler.stats().preemptions, 1);
+}
+
+#[test]
+fn a_parked_request_keeps_its_checkpoint_pinned_until_readmission() {
+    let mut scheduler = scheduler(2, 6, 4);
+    let older = scheduler.admit(growable(60, 400)).unwrap();
+    let newer = scheduler.admit(growable(60, 400)).unwrap();
+    let mut fence = 1;
+    while !scheduler.request(newer).unwrap().preempted() {
+        sample_round(&mut scheduler, fence);
+        fence += 1;
+        assert!(fence < 1000, "no request ran out of pages");
+    }
+    let tokens = scheduler.request(newer).unwrap().tokens().to_vec();
+    let remaining = 400 - scheduler.request(newer).unwrap().generated_tokens;
+    scheduler.cancel(older).unwrap();
+    freeze(&mut scheduler, newer, fence);
+    let checkpoint = scheduler.finish(newer).unwrap().unwrap();
+    assert!(scheduler.holds_readmission(checkpoint));
+    // An unrelated admission may evict everything else but not the pinned checkpoint.
+    if let Ok(other) = scheduler.admit(spec(64 * 5, 1)) {
+        scheduler.cancel(other).unwrap();
+    }
+    let resumed = scheduler
+        .admit(RequestSpec { prompt: tokens, growable_output: true, ..spec(1, remaining) })
+        .unwrap();
+    assert_eq!(scheduler.request(resumed).unwrap().prefix(), Some(checkpoint));
+    scheduler.release_readmission(checkpoint).unwrap();
+    assert!(!scheduler.holds_readmission(checkpoint));
+}
+
+#[test]
 fn growable_request_longer_than_the_pool_finishes_instead_of_yielding() {
     let mut scheduler = scheduler(1, 4, 4);
     let handle = scheduler.admit(growable(60, 400)).unwrap();
