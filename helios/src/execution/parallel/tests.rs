@@ -1,4 +1,5 @@
 use std::io::Write;
+use std::time::Duration;
 
 use super::*;
 use crate::execution::{CompletionRecord, Dtype};
@@ -97,6 +98,80 @@ fn packet_bounds_and_peer_errors_are_reported() {
             .to_string()
             .contains("rank fence differs")
     );
+}
+
+#[cfg(unix)]
+fn assert_blocking(channel: &Channel) {
+    use std::os::fd::AsRawFd;
+    let fd = match &channel.stream {
+        RankStream::Unix(stream) => stream.as_raw_fd(),
+        RankStream::Tcp(stream) => stream.as_raw_fd(),
+    };
+    // SAFETY: F_GETFL reads flags from the live socket without retaining its descriptor.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    assert!(flags >= 0);
+    assert_eq!(flags & libc::O_NONBLOCK, 0);
+}
+
+#[test]
+fn handoff_receives_ready_commit_prepare_and_drain_on_both_transports() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (server, _) = listener.accept().unwrap();
+    for (sender, receiver) in [crate::execution::rank_stream::test_pair().unwrap(),
+                               (client.into(), server.into())] {
+        let mut sender = Channel::new(sender).unwrap();
+        let mut receiver = Channel::new(receiver).unwrap();
+        for tag in [READY, COMMIT, PREPARE, DRAIN] {
+            sender.send(tag, &[tag]).unwrap();
+            assert_eq!(receiver.handoff(tag, HANDOFF_SPIN).unwrap(), vec![tag]);
+            #[cfg(unix)]
+            assert_blocking(&receiver);
+        }
+    }
+}
+
+#[test]
+fn spin_timeout_preserves_fragment_for_blocking_handoff_and_idle_wait() {
+    let (mut sender, receiver) = crate::execution::rank_stream::test_pair().unwrap();
+    let mut receiver = Channel::new(receiver).unwrap();
+    sender.write_all(&[PREPARE, 3, 0]).unwrap();
+    let started = Instant::now();
+    assert!(receiver.spin(HANDOFF_SPIN).unwrap().is_none());
+    assert!(started.elapsed() >= HANDOFF_SPIN);
+    #[cfg(unix)]
+    assert_blocking(&receiver);
+    let writer = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(10));
+        sender.write_all(&[0, 0, 10, 11, 12]).unwrap();
+        let mut sender = Channel::new(sender).unwrap();
+        sender.send(DRAIN, &[]).unwrap();
+    });
+    assert_eq!(receiver.handoff(PREPARE, Duration::ZERO).unwrap(), vec![10, 11, 12]);
+    assert_eq!(receiver.wait(true).unwrap(), (DRAIN, vec![]));
+    #[cfg(unix)]
+    assert_blocking(&receiver);
+    writer.join().unwrap();
+}
+
+#[test]
+fn handoff_reports_wrong_tags_peer_errors_and_disconnects() {
+    for tag in [COMMIT, FAILED] {
+        let (sender, receiver) = crate::execution::rank_stream::test_pair().unwrap();
+        let mut sender = Channel::new(sender).unwrap();
+        let mut receiver = Channel::new(receiver).unwrap();
+        sender.send(tag, b"rank failed").unwrap();
+        let error = receiver.handoff(READY, HANDOFF_SPIN).unwrap_err().to_string();
+        assert!(error.contains(if tag == FAILED { "rank failed" } else { "received 4" }), "{error}");
+        #[cfg(unix)]
+        assert_blocking(&receiver);
+    }
+    let (sender, receiver) = crate::execution::rank_stream::test_pair().unwrap();
+    let mut receiver = Channel::new(receiver).unwrap();
+    drop(sender);
+    assert!(receiver.handoff(READY, HANDOFF_SPIN).unwrap_err().to_string().contains("disconnected"));
+    #[cfg(unix)]
+    assert_blocking(&receiver);
 }
 
 #[test]

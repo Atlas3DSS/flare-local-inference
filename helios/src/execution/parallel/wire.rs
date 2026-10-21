@@ -109,6 +109,29 @@ impl Channel {
         message?.ok_or_else(|| invalid("tensor-parallel control deadline expired"))
     }
 
+    /// Poll without blocking for up to `limit` before a caller's blocking wait.
+    pub fn spin(&mut self, limit: std::time::Duration) -> Result<Option<(u8, Vec<u8>)>> {
+        self.nonblocking(true)?;
+        let started = std::time::Instant::now();
+        let result = loop {
+            match self.poll() {
+                Ok(None) if started.elapsed() < limit => std::hint::spin_loop(),
+                other => break other,
+            }
+        };
+        self.nonblocking(false)?;
+        result
+    }
+
+    /// Receive `expected`, polling briefly before blocking.
+    pub fn handoff(&mut self, expected: u8, limit: std::time::Duration) -> Result<Vec<u8>> {
+        match self.spin(limit)? {
+            Some((tag, data)) if tag == expected => Ok(data),
+            Some((tag, _)) => Err(invalid(format!("expected rank message {expected}, received {tag}"))),
+            None => self.receive(expected),
+        }
+    }
+
     pub fn receive(&mut self, expected: u8) -> Result<Vec<u8>> {
         let (tag, data) = self.wait(false)?;
         if tag != expected {

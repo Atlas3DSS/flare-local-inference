@@ -10,6 +10,9 @@ use super::{ExecutionManifest, FrameCompletion, GraphExecutor, RankStream, Uploa
 use crate::{Error, Result, Shutdown, cache::Fence};
 use wire::*;
 
+// Rank exchanges within a step are brief; poll that long before blocking, as threaded ranks do.
+const HANDOFF_SPIN: std::time::Duration = std::time::Duration::from_micros(500);
+
 struct Peer {
     channel: Channel,
     completion: Option<FrameCompletion>,
@@ -151,7 +154,7 @@ impl TensorParallelExecutor {
             peer.channel.send(PREPARE, &payload)?;
         }
         for peer in &mut self.peers {
-            if !peer.channel.receive(READY)?.is_empty() {
+            if !peer.channel.handoff(READY, HANDOFF_SPIN)?.is_empty() {
                 return Err(invalid("unexpected rank readiness payload"));
             }
         }
@@ -383,7 +386,10 @@ pub unsafe fn serve_rank(
                 return Err(invalid("unexpected coordinator readiness payload"));
             }
             loop {
-                let (tag, bytes) = channel.wait(true)?;
+                let (tag, bytes) = match channel.spin(HANDOFF_SPIN)? {
+                    Some(message) => message,
+                    None => channel.wait(true)?,
+                };
                 if tag == DRAIN && bytes.is_empty() {
                     let shutdown = executor.close();
                     if !shutdown.drained {
@@ -422,7 +428,7 @@ pub unsafe fn serve_rank(
                     return Err(invalid("rank submission sequence or capacity differs"));
                 }
                 channel.send(READY, &[])?;
-                if !channel.receive(COMMIT)?.is_empty() {
+                if !channel.handoff(COMMIT, HANDOFF_SPIN)?.is_empty() {
                     return Err(invalid("unexpected rank commit payload"));
                 }
                 if executor.submit(graph, &uploads, grammar)? != Some(fence) {
@@ -442,7 +448,7 @@ pub unsafe fn serve_rank(
                     if started.elapsed() > TIMEOUT {
                         return Err(invalid("rank graph completion deadline expired"));
                     }
-                    std::thread::sleep(std::time::Duration::from_micros(50));
+                    std::thread::yield_now();
                 };
                 channel.nonblocking(false)?;
                 channel.send(COMPLETE, &completion(&completed))?;
