@@ -170,13 +170,15 @@ class FullAttention(torch.nn.Module):
 
 class PreparedDecoder:
     def __init__(self, weights, scratch, metadata, pool, *, mode, vocabulary_runtime,
-                 coordinator, session, name, workspace):
+                 coordinator, session, name, workspace, delta=None, feedback_output=None):
         self.weights, self.scratch, self.metadata, self.pool = weights, scratch, metadata, pool
         from ignition.components.sm70_projection import is_sm70
         self.sm70 = is_sm70(scratch.activations.device)
         self.embedding = PreparedEmbedding(weights.tree.embed_tokens.weight, metadata.token_ids,
             scratch.activations, num_rows=metadata.live_counts[:1], session=session, name=name + ".embedding")
-        self.delta = DeltaMetadata.allocate(metadata.starts.numel(), scratch.activations.device)
+        self.delta = delta or DeltaMetadata.allocate(metadata.starts.numel(), scratch.activations.device)
+        self.external_delta = delta is not None
+        self.feedback_output = feedback_output
         config, source = weights.config, scratch.activations
         attention_buffers = {}
         mlp_buffers = {field: torch.zeros((source.shape[0], width), dtype=source.dtype, device=source.device)
@@ -217,14 +219,15 @@ class PreparedDecoder:
     def __call__(self):
         m, d = self.metadata, self.delta
         active = m.lengths > 0
-        d.query_start_loc.copy_(m.query_start_loc)
-        d.convolution_slots.copy_(torch.where(active, m.state_rows, -1))
-        d.fresh.copy_(m.starts == 0)
-        d.state_indices[:, 0].copy_(m.state_rows)
-        d.initial_state_indices.copy_(torch.where(m.starts > 0, m.state_rows, 0))
-        d.final_state_indices.copy_(m.state_rows)
-        d.num_tokens.copy_(m.live_counts[:1])
-        d.num_seqs.copy_(m.live_counts[1:])
+        if not self.external_delta:
+            d.query_start_loc.copy_(m.query_start_loc)
+            d.convolution_slots.copy_(torch.where(active, m.state_rows, -1))
+            d.fresh.copy_(m.starts == 0)
+            d.state_indices[:, 0].copy_(m.state_rows)
+            d.initial_state_indices.copy_(torch.where(m.starts > 0, m.state_rows, 0))
+            d.final_state_indices.copy_(m.state_rows)
+            d.num_tokens.copy_(m.live_counts[:1])
+            d.num_seqs.copy_(m.live_counts[1:])
         frequency = m.positions.float()[:, None] * self.inverse_frequency[None, :]
         embedding = torch.cat((frequency, frequency), dim=-1)
         dtype = self.scratch.activations.dtype
@@ -235,6 +238,8 @@ class PreparedDecoder:
             hidden = layer(hidden, position_embeddings=position_embeddings)
         selected = hidden[m.sample_indices]
         norm = self.weights.tree.norm
+        if self.feedback_output is not None:
+            self.feedback_output.copy_(rms_norm(hidden, norm.weight, norm.eps) if self.sm70 else norm(hidden))
         self.scratch.hidden.copy_(rms_norm(selected, norm.weight, norm.eps) if self.sm70 else norm(selected))
         self.head(self.scratch.hidden)
         if self.sm70:
