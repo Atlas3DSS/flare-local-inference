@@ -1,4 +1,4 @@
-"""SM70 projections with packed checkpoint weights and bounded FP32 cuBLAS operands.
+"""SM70 packed projections with fused small-row GEMV and bounded FP32 cuBLAS tiles.
 
 V100 cannot multiply BF16 or FP8 operands. Conversion to FP32 preserves every
 BF16/FP16 value, including BF16 values outside FP16's range. NVFP4 uses the
@@ -10,7 +10,7 @@ packed; serialized projections reuse caller-owned expansion scratch.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import torch
 import triton
@@ -48,28 +48,38 @@ class ProjectionQuery:
     out_features: int
     global_scale_kind: str = "none"
     weight_dtype: str = "uint8"
+    input_dtype: str = "float32"
+    output_dtype: str = "float32"
+    has_bias: bool = False
 
 
 def _tiles(query):
-    return tuple(dict.fromkeys(min(query.out_features, width) for width in (256, 1024)))
+    if query.kind != "dense" and query.rows <= 4:
+        return tuple(("gemv", bn, bk) for bn, bk in
+                     ((4, 512), (2, 256), (2, 512), (4, 256), (8, 256), (8, 512)))
+    return tuple(("fp32", width) for width in
+                 dict.fromkeys(min(query.out_features, width) for width in (256, 1024)))
 
 
 CONTRACT = native_contract(component_id=COMPONENT, query_type=ProjectionQuery, tactics=_tiles,
-                           semantic_version=2)
+                           semantic_version=3)
 
 
-def _scratch_shapes(query, tile):
+def _scratch_shapes(query, tactic):
+    if tactic[0] == "gemv":
+        return ((query.rows, query.in_features),) if query.kind == "tensor_fp8" else ((1, 1),)
+    tile = tactic[1]
     return ((query.rows, query.in_features), (tile, query.in_features), (query.rows, tile))
 
 
-def workspace_bytes(query, tile):
+def workspace_bytes(query, tactic):
     return sum((rows * columns * 4 + 255) // 256 * 256
-               for rows, columns in _scratch_shapes(query, tile))
+               for rows, columns in _scratch_shapes(query, tactic))
 
 
-def _scratch_views(query, tile, workspace):
+def _scratch_views(query, tactic, workspace):
     views, offset = [], 0
-    for rows, columns in _scratch_shapes(query, tile):
+    for rows, columns in _scratch_shapes(query, tactic):
         size = rows * columns * 4
         views.append(workspace[offset:offset + size].view(torch.float32).view(rows, columns))
         offset += (size + 255) // 256 * 256
@@ -132,7 +142,7 @@ def _expand_nvfp4(program, values, scales, output, start, stop, query):
 
 def _project(query, tile, expansion, source, values, scales, gain, input_scale, output, workspace, bias):
     """All temporary allocations are bounded by a tile and captured before serving."""
-    inputs, expanded, product = _scratch_views(query, tile, workspace)
+    inputs, expanded, product = _scratch_views(query, ("fp32", tile), workspace)
     if query.kind == "tensor_fp8":
         inputs.copy_((source.float() / input_scale).clamp(-448, 448).to(torch.float8_e4m3fn))
     else:
@@ -163,17 +173,151 @@ def _project(query, tile, expansion, source, values, scales, gain, input_scale, 
     return output
 
 
+@triton.jit
+def _e2m1_to_float(code):
+    magnitude = code & 7
+    value = tl.where(magnitude < 4, magnitude.to(tl.float32) * 0.5,
+                     tl.where(magnitude == 4, 2., tl.where(magnitude == 5, 3.,
+                              tl.where(magnitude == 6, 4., 6.))))
+    return (value.to(tl.uint32, bitcast=True) | ((code & 8) << 28)).to(tl.float32, bitcast=True)
+
+
+@triton.jit
+def _load_float(pointer, offsets, mask, BF16: tl.constexpr):
+    value = tl.load(pointer + offsets, mask, other=0)
+    if BF16:
+        return (value.to(tl.uint32) << 16).to(tl.float32, bitcast=True)
+    return value.to(tl.float32)
+
+
+@triton.jit
+def _bf16_bits(value):
+    bits = value.to(tl.uint32, bitcast=True)
+    rounded = (bits + 0x7fff + ((bits >> 16) & 1)) >> 16
+    return tl.where((bits & 0x7fffffff) > 0x7f800000,
+                    (bits >> 16) | 0x40, rounded).to(tl.uint16)
+
+
+@triton.jit
+def _output_round(value, DTYPE: tl.constexpr):
+    if DTYPE == "bfloat16":
+        return (_bf16_bits(value).to(tl.uint32) << 16).to(tl.float32, bitcast=True)
+    elif DTYPE == "float16":
+        return value.to(tl.float16).to(tl.float32)
+    return value
+
+
+@triton.jit(do_not_specialize=["x_row_stride", "y_row_stride"])
+def _gemv_kernel(X, Values, Scales, Gain, Bias, Y, x_row_stride, y_row_stride,
+                 M: tl.constexpr, N: tl.constexpr, K: tl.constexpr, PADDED_K: tl.constexpr,
+                 KIND: tl.constexpr, GAIN_KIND: tl.constexpr, INPUT_DTYPE: tl.constexpr,
+                 OUTPUT_DTYPE: tl.constexpr, HAS_BIAS: tl.constexpr,
+                 BN: tl.constexpr, BK: tl.constexpr):
+    # Each packed byte, scale, and FP8 weight is fetched once per CTA slice,
+    # then reused across all prepared rows. No inter-CTA reduction or atomics.
+    n = (tl.program_id(0) * BN + tl.arange(0, BN)).to(tl.int64)
+    pair = tl.arange(0, BK // 2).to(tl.int64)
+    rows = tl.arange(0, triton.next_power_of_2(M)).to(tl.int64)
+    acc = tl.full((triton.next_power_of_2(M), BN), 0., tl.float32)
+    for start in range(tl.cdiv(K, BK)):
+        k = start * BK + 2 * pair
+        if KIND == "nvfp4":
+            packed = tl.load(Values + n[:, None] * (PADDED_K // 2) + k[None, :] // 2,
+                             (n[:, None] < N) & (k[None, :] < K), 0).to(tl.uint32)
+            group = start * (BK // 16) + tl.arange(0, BK // 16).to(tl.int64)
+            offset = ((n[:, None] // 128 * tl.cdiv(PADDED_K // 16, 4) + group[None, :] // 4) * 512
+                      + n[:, None] % 32 * 16 + n[:, None] // 32 % 4 * 4 + group[None, :] % 4)
+            scale = _e4m3_to_float(tl.load(Scales + offset,
+                                  (n[:, None] < N) & (group[None, :] * 16 < K), 0))
+            lo = (_e2m1_to_float(packed & 15).reshape(BN, BK // 16, 8) *
+                  scale[:, :, None]).reshape(BN, BK // 2)
+            hi = (_e2m1_to_float(packed >> 4).reshape(BN, BK // 16, 8) *
+                  scale[:, :, None]).reshape(BN, BK // 2)
+        else:
+            lo = _e4m3_to_float(tl.load(Values + n[:, None] * PADDED_K + k[None, :],
+                                (n[:, None] < N) & (k[None, :] < K), 0))
+            hi = _e4m3_to_float(tl.load(Values + n[:, None] * PADDED_K + k[None, :] + 1,
+                                (n[:, None] < N) & (k[None, :] + 1 < K), 0))
+        xlo = _load_float(X, rows[:, None] * x_row_stride + k[None, :],
+                         (rows[:, None] < M) & (k[None, :] < K), INPUT_DTYPE == "bfloat16")
+        xhi = _load_float(X, rows[:, None] * x_row_stride + k[None, :] + 1,
+                         (rows[:, None] < M) & (k[None, :] + 1 < K), INPUT_DTYPE == "bfloat16")
+        products = xlo[:, None, :] * lo[None, :, :] + xhi[:, None, :] * hi[None, :, :]
+        acc = acc + tl.sum(products, 2)
+    gain = tl.load(Gain)
+    if GAIN_KIND == "reciprocal":
+        acc = tl.div_rn(acc, gain)
+    else:
+        acc = acc * gain
+    acc = _output_round(acc, OUTPUT_DTYPE)
+    if HAS_BIAS:
+        bias = _load_float(Bias, n, n < N, OUTPUT_DTYPE == "bfloat16")
+        acc = _output_round(acc + bias[None, :], OUTPUT_DTYPE)
+    if OUTPUT_DTYPE == "bfloat16":
+        result = _bf16_bits(acc)
+    else:
+        result = acc
+    tl.store(Y + rows[:, None] * y_row_stride + n[None, :], result,
+             (rows[:, None] < M) & (n[None, :] < N))
+
+
+def _gemv_options(query, tactic):
+    return dict(M=query.rows, N=query.out_features, K=query.in_features,
+                PADDED_K=query.padded_in_features, KIND=query.kind,
+                GAIN_KIND=query.global_scale_kind,
+                INPUT_DTYPE="float32" if query.kind == "tensor_fp8" else query.input_dtype,
+                OUTPUT_DTYPE=query.output_dtype, HAS_BIAS=query.has_bias,
+                BN=tactic[1], BK=tactic[2], num_warps=4, enable_fp_fusion=False)
+
+
+@program_cache(scope="preparation")
+def compile_gemv(payload, tactic, ordinal):
+    query = ProjectionQuery(**dict(payload))
+    input_dtype = torch.float32 if query.kind == "tensor_fp8" else getattr(torch, query.input_dtype)
+    if input_dtype == torch.bfloat16:
+        input_dtype = torch.uint16
+    output_dtype = torch.uint16 if query.output_dtype == "bfloat16" else getattr(torch, query.output_dtype)
+    source = torch.empty((query.rows, query.in_features), dtype=input_dtype, device="meta")
+    values = torch.empty((query.out_features, query.padded_in_features), dtype=torch.uint8, device="meta")
+    scales = torch.empty((1,), dtype=torch.uint8, device="meta") if query.kind == "nvfp4" else None
+    gain = torch.empty((1,), dtype=torch.float32, device="meta")
+    bias = torch.empty((query.out_features,), dtype=output_dtype, device="meta") if query.has_bias else None
+    output = torch.empty((query.rows, query.out_features), dtype=output_dtype, device="meta")
+    with torch.cuda.device(ordinal), compile_only_launches():
+        return launch_triton(_gemv_kernel, (triton.cdiv(query.out_features, tactic[1]), 1, 1),
+                             source, values, scales, gain, bias, output,
+                             query.in_features, query.out_features, **_gemv_options(query, tactic))
+
+
 @dataclass(frozen=True)
 class PreparedProjection:
     query: ProjectionQuery
-    tile: int
+    tactic: tuple
     expansion: object = None
+    gemv: object = None
+
+    @property
+    def tile(self):
+        return min(self.query.out_features, 1024) if self.tactic[0] == "gemv" else self.tactic[1]
 
     @property
     def required_workspace(self):
-        return workspace_bytes(self.query, self.tile)
+        return workspace_bytes(self.query, self.tactic)
 
     def run(self, source, values, scales, gain, input_scale, output, workspace, bias=None):
+        if self.tactic[0] == "gemv":
+            if self.query.kind == "tensor_fp8":
+                inputs, = _scratch_views(self.query, self.tactic, workspace)
+                inputs.copy_((source.float() / input_scale).clamp(-448, 448).to(torch.float8_e4m3fn))
+                source = inputs
+            if source.dtype == torch.bfloat16:
+                source = source.view(torch.uint16)
+            if bias is not None and bias.dtype == torch.bfloat16:
+                bias = bias.view(torch.uint16)
+            destination = output.view(torch.uint16) if output.dtype == torch.bfloat16 else output
+            self.gemv[(triton.cdiv(self.query.out_features, self.tactic[1]), 1, 1)](
+                source, values, scales, gain, bias, destination, source.stride(0), output.stride(0))
+            return output
         return _project(self.query, self.tile, self.expansion, source, values, scales, gain, input_scale,
                         output, workspace, bias)
 
@@ -214,6 +358,8 @@ def _check_operands(source, values, output, bias, k, n):
 class _Projection:
     def _initialize(self, query, source, values, output, *, scales=None, gain=None, input_scale=None,
                     bias=None, session, name, workspace):
+        query = replace(query, input_dtype=str(source.dtype).removeprefix("torch."),
+                        output_dtype=str(output.dtype).removeprefix("torch."), has_bias=bias is not None)
         _check_operands(source, values, output, bias, query.in_features, query.out_features)
         for tensor in (scales, gain, input_scale):
             if tensor is not None and tensor.device != source.device:
@@ -229,18 +375,30 @@ class _Projection:
         self.gain, self.input_scale, self.bias = gain, input_scale, bias
         payload = CONTRACT.encode_query(query)
 
-        def compile_jobs(tile, device):
-            if query.kind != "nvfp4":
-                return ()
-            return (CompileJob.create("ignition.components.sm70_projection:compile_expansion",
-                                      payload, tile, device.ordinal),)
+        def compile_jobs(tactic, device):
+            jobs = []
+            if query.kind == "nvfp4":
+                tile = min(query.out_features, 1024) if tactic[0] == "gemv" else tactic[1]
+                jobs.append(CompileJob.create("ignition.components.sm70_projection:compile_expansion",
+                                              payload, tile, device.ordinal))
+            if tactic[0] == "gemv":
+                jobs.append(CompileJob.create("ignition.components.sm70_projection:compile_gemv",
+                                              payload, tactic, device.ordinal))
+            return tuple(jobs)
 
-        def materialize(tile):
-            if query.kind != "nvfp4":
-                return PreparedProjection(query, tile)
-            program = compile_expansion(payload, tile, source.device.index)
-            load_programs(program)
-            return attach_programs(PreparedProjection(query, tile, program), program)
+        def materialize(tactic):
+            expansion, gemv = None, None
+            programs = []
+            if query.kind == "nvfp4":
+                tile = min(query.out_features, 1024) if tactic[0] == "gemv" else tactic[1]
+                expansion = compile_expansion(payload, tile, source.device.index)
+                programs.append(expansion)
+            if tactic[0] == "gemv":
+                gemv = compile_gemv(payload, tactic, source.device.index)
+                programs.append(gemv)
+            for program in programs:
+                load_programs(program)
+            return attach_programs(PreparedProjection(query, tactic, expansion, gemv), *programs)
 
         # Without an external arena, keep one owned arena across preparation calls.
         arena = ScratchArena(source.device) if workspace is None else workspace
