@@ -335,6 +335,7 @@ fn completion(
         logprobs: None,
         prompt_logprobs: None,
         proposal_confidence: None,
+        speculative_survival: None,
         fence: Fence(sequence),
         graph_index: 0,
         timing: Default::default(),
@@ -877,6 +878,7 @@ fn speculative_dashboard_counts_live_rounds_and_batched_forward_passes() {
                         logprobs: None,
                         prompt_logprobs: None,
                         proposal_confidence: None,
+                        speculative_survival: None,
                         records: invalid,
                         ..frame
                     }
@@ -891,8 +893,8 @@ fn speculative_dashboard_counts_live_rounds_and_batched_forward_passes() {
             .unwrap()
             .acceptance();
         let source = fixture.config.speculative_proposal_source;
-        assert!(profile.probability(source, 0).unwrap() > 0.5);
-        assert!(profile.probability(source, 2).unwrap() < 0.5);
+        assert!(profile.prefix_probability(source, 0).unwrap() > 0.5);
+        assert!(profile.prefix_probability(source, 2).unwrap() < 0.125);
         assert_eq!(worker.scheduler.estimated_duration_ns(&step), Some(1063));
         let metrics = fixture.metrics.snapshot(!copy);
         assert_eq!((metrics.prefill_tokens, metrics.generated_tokens), (13, 4));

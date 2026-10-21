@@ -1339,11 +1339,13 @@ impl<'a> Worker<'a> {
         } else if kind == GraphKind::PackedSpeculative {
             let confidence = completion.proposal_confidence.as_ref()
                 .ok_or("packed combined completion lacks confidence")?;
-            self.scheduler.complete_packed_round(completion.fence, &completion.records,
-                completion.timing, &confidence[..measured_step.batch_capacity])?
+            self.scheduler.complete_packed_round_with_survival(completion.fence, &completion.records,
+                completion.timing, &confidence[..measured_step.batch_capacity],
+                completion.speculative_survival.as_ref().map(|rows| rows.as_slice()))?
         } else {
             self.scheduler
-                .complete(completion.fence, &completion.records, completion.timing)?
+                .complete_with_survival(completion.fence, &completion.records, completion.timing,
+                    completion.speculative_survival.as_ref().map(|rows| rows.as_slice()))?
         };
         self.metrics
             .progress(prefill, generated.len(), accepted, draft_rounds);
@@ -1358,7 +1360,9 @@ impl<'a> Worker<'a> {
             &measured_step,
             completion.timing,
             selection,
-            self.scheduler.refresh_credit_ns(),
+            if matches!(selection.origin, crate::scheduler::TimingOrigin::Acceptance) {
+                self.scheduler.acceptance_credit_ns()
+            } else { self.scheduler.refresh_credit_ns() },
         );
         if kind == GraphKind::Proposal {
             self.metrics.proposal_completed(measured_step.batch_capacity, measured_step.token_capacity,

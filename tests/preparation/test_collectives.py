@@ -38,9 +38,10 @@ def test_result_broadcast_channel_uses_captured_payloads(
     batch = max(catalog.batch_capacities)
     assert batch < catalog.request_capacity
     proposals = PreparedDraftDistribution.broadcast_layout(batch)
-    acceptance = SpeculativeAcceptance.storage_layout(batch, 6)
+    acceptance = SpeculativeAcceptance.broadcast_layout(batch, 6)
     actual = SpeculativeAcceptance.allocate(batch, 6, "meta")
-    assert acceptance == {name: (tuple(tensor.shape), tensor.dtype) for name, tensor in vars(actual).items()}
+    assert acceptance == {name: (tuple(tensor.shape), tensor.dtype) for name, tensor in vars(actual).items()
+                          if name != "survival"}
     assert packed_broadcast_layout(proposals.values()) == (offsets, payload_bytes)
     calls = []
     group, device, ipc, result = object(), object(), object(), object()
@@ -53,7 +54,7 @@ def test_result_broadcast_channel_uses_captured_payloads(
     for rows in catalog.batch_capacities:
         assert packed_broadcast_layout(PreparedDraftDistribution.broadcast_layout(rows).values())[1] <= transport_bytes
         for width in range(1, 7):
-            fields = SpeculativeAcceptance.storage_layout(rows, width)
+            fields = SpeculativeAcceptance.broadcast_layout(rows, width)
             assert packed_broadcast_layout(fields.values())[1] <= transport_bytes
     assert proposals["valid"] == ((batch, 1), torch.bool)
 

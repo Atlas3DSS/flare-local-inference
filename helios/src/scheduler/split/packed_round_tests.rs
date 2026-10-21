@@ -141,7 +141,7 @@ fn packed_combined_commits_once_with_frozen_reservations_and_terminal_forecasts(
         assert_eq!((r.generated_tokens, r.consumed_tokens, r.scheduled_consumed, r.pending), (2, 66, 66, 0));
         let forecast = s.split.as_ref().unwrap().forecast[h.slot as usize].unwrap();
         assert_eq!(forecast.request, *h);
-        assert_eq!(forecast.observed_at[0], if *h == handles[0] { 0 } else { 1 });
+        assert_eq!(forecast.prefixes[0].weight_at(1), if *h == handles[0] { 2.0 } else { 3.0 });
     }
     assert!(s.complete_packed_round(Fence(1), &records, Default::default(), &[[0.8; 7]; 4]).is_err());
 }
@@ -221,8 +221,7 @@ fn matched_c32_planner(gpu: bool) -> RequestScheduler {
         r.accounting.last_progress_ns = 10_000_000 - index as u64 * 10_000;
         r.accounting.service.tokens = Some(utility::ServicePrice::initial(0.06 + (index % 3) as f64 * 0.01));
         let confidence = std::array::from_fn(|position| 0.5 + ((index * 17 + position * 7) % 40) as f32 / 100.0);
-        s.split.as_mut().unwrap().forecast[h.slot as usize] = Some(Forecast { request: h,
-            prefixes: survival(&confidence), observed_at: std::array::from_fn(|position| 97 - (position % 3) as u32 * 16) });
+        s.split.as_mut().unwrap().forecast[h.slot as usize] = Some(Forecast::new(h, survival(&confidence), 97));
     }
     s
 }
@@ -265,14 +264,12 @@ fn packed_cohort_selection_prices_long_prefixes_and_includes_width_one_rows() {
     let handles: Vec<_> = (0..3).map(|_| ready(&mut s)).collect();
     for (&h, remaining) in handles.iter().zip([2, 6, 6]) {
         s.request_mut(h).unwrap().max_new_tokens = 1 + remaining;
-        s.split.as_mut().unwrap().forecast[h.slot as usize] = Some(Forecast {
-            request: h, prefixes: [1.; 7], observed_at: [1; 7],
-        });
+        s.split.as_mut().unwrap().forecast[h.slot as usize] = Some(Forecast::new(h, [1.; 7], 1));
     }
     let mut values = [LaneValue::default(); REQUEST_LANES];
     for &h in &handles { values[h.slot as usize].output_token = 1.; }
     let mut candidates = Vec::new();
-    s.packed_round_candidates(&mut candidates, &values, 0.);
+    s.packed_round_candidates(&mut candidates, &values, 0., false);
     let best = candidates.iter().filter(|c| c.batch == 2 && c.draft_tokens == 5
         && c.packed_token_capacity == 12).max_by(|a,b| a.rate.compare(b.rate)).unwrap();
     assert_eq!(best.mask, (1 << handles[1].slot) | (1 << handles[2].slot));
@@ -281,7 +278,7 @@ fn packed_cohort_selection_prices_long_prefixes_and_includes_width_one_rows() {
     s.request_mut(h).unwrap().host_stops = true;
     values[h.slot as usize].output_token = 100.;
     candidates.clear();
-    s.packed_round_candidates(&mut candidates, &values, 0.);
+    s.packed_round_candidates(&mut candidates, &values, 0., false);
     let best = candidates.iter().filter(|c| c.batch == 2 && c.draft_tokens == 5
         && c.packed_token_capacity == 12).max_by(|a,b| a.rate.compare(b.rate)).unwrap();
     assert_ne!(best.mask & (1 << h.slot), 0);
@@ -292,7 +289,7 @@ fn packed_cohort_selection_prices_long_prefixes_and_includes_width_one_rows() {
     values[h.slot as usize].age_ms = 100.;
     values[h.slot as usize].reference_delivery_ms = 10.;
     candidates.clear();
-    s.packed_round_candidates(&mut candidates, &values, 0.);
+    s.packed_round_candidates(&mut candidates, &values, 0., false);
     let best = candidates.iter().filter(|c| c.batch == 2 && c.draft_tokens == 5
         && c.packed_token_capacity == 12).max_by(|a,b| a.rate.compare(b.rate)).unwrap();
     assert_ne!(best.mask & (1 << h.slot), 0, "aged width-one rows retain delivery utility");
@@ -306,7 +303,7 @@ fn packed_candidates_keep_full_cost_with_padding_and_respect_retained_ownership(
     s.request_mut(handles[1]).unwrap().max_new_tokens = 2;
     let (values, age, _) = s.lane_values(0);
     let mut candidates = Vec::new();
-    s.packed_round_candidates(&mut candidates, &values, age);
+    s.packed_round_candidates(&mut candidates, &values, age, false);
     assert!(candidates.iter().all(|c| c.mask == 1 << handles[1].slot));
     let padded = candidates.iter().find(|c| c.batch == 4 && c.draft_tokens == 7
         && c.packed_token_capacity == 32).unwrap();
@@ -347,9 +344,7 @@ fn packed_planning_latency_at_concurrency() {
             for index in 0..active {
                 let h = ready(&mut s);
                 s.request_mut(h).unwrap().max_new_tokens = 1 + (index % 8 + 1) as u32;
-                s.split.as_mut().unwrap().forecast[h.slot as usize] = Some(Forecast {
-                    request: h, prefixes: survival(&[0.5 + (index % 5) as f32 * 0.1; 7]), observed_at: [1; 7],
-                });
+                s.split.as_mut().unwrap().forecast[h.slot as usize] = Some(Forecast::new(h, survival(&[0.5 + (index % 5) as f32 * 0.1; 7]), 1));
             }
             std::hint::black_box(s.plan());
             let start = std::time::Instant::now();
@@ -460,9 +455,7 @@ fn packed_planning_latency_c8_p32() {
         for index in 0..8 {
             let h = ready(&mut s);
             s.request_mut(h).unwrap().max_new_tokens = 1 + (index % 6 + 1) as u32;
-            s.split.as_mut().unwrap().forecast[h.slot as usize] = Some(Forecast {
-                request: h, prefixes: survival(&[0.5 + (index % 5) as f32 * 0.1; 7]), observed_at: [1; 7],
-            });
+            s.split.as_mut().unwrap().forecast[h.slot as usize] = Some(Forecast::new(h, survival(&[0.5 + (index % 5) as f32 * 0.1; 7]), 1));
         }
         std::hint::black_box(s.plan());
         let start = std::time::Instant::now();
@@ -482,4 +475,107 @@ fn packed_duration_envelopes_require_a_captured_batch_capacity() {
         assert_eq!(split.costs.duration(GraphKind::Verification, batch, 2), None);
         assert_eq!(packed.costs.packed_round_duration(batch, 2), None);
     }
+}
+
+#[test]
+fn packed_survival_is_optional_and_invalid_last_lane_feedback_is_atomic() {
+    for present in [false, true] {
+        let mut s = combined_engine(4);
+        let handles: Vec<_> = (0..4).map(|_| ready(&mut s)).collect();
+        let mut plan = combined_plan(&s, &handles, &[1, 2, 3, 4], 8);
+        plan.origin = PlanOrigin::AcceptanceStart;
+        s.refresh.acceptance_credit_ns = refresh::CREDIT_CAP_NS;
+        let timing = crate::execution::ExecutionTiming { gpu_ns: [Some(20_000_000); 16], ..Default::default() };
+        s.commit(&plan, Fence(1)).unwrap();
+        let records = combined_records(&s, &plan, &[0, 1, 2, 1]);
+        let mut rows = [[-1.; 7]; 4];
+        rows[handles[1].slot as usize][0] = 0.75;
+        rows[handles[2].slot as usize][..2].copy_from_slice(&[0.75, 0.5]);
+        rows[handles[3].slot as usize][0] = 0.25;
+        let before: Vec<_> = handles.iter().map(|h| {
+            let r = s.request(*h).unwrap();
+            (r.generated_tokens, r.consumed_tokens, r.scheduled_consumed, r.pending,
+                r.private_pages.clone(), r.reserved_pages.clone(), r.acceptance.rounds())
+        }).collect();
+        let credit = (s.refresh.credit_ns, s.refresh.acceptance_credit_ns);
+        for bad in [[0.25, 0.1, -1., -1., -1., -1., -1.],
+            [f32::NAN, -1., -1., -1., -1., -1., -1.], [-1.; 7]] {
+            let mut invalid = rows;
+            invalid[handles[3].slot as usize] = bad;
+            assert!(s.complete_packed_round_with_survival(Fence(1), &records,
+                timing, &[[0.8; 7]; 4], Some(&invalid)).is_err());
+            assert!(s.submissions.contains_key(&Fence(1)));
+            assert_eq!((s.refresh.credit_ns, s.refresh.acceptance_credit_ns), credit);
+            assert!(s.split.as_ref().unwrap().forecast.iter().all(Option::is_none));
+            for (h, expected) in handles.iter().zip(&before) {
+                let r = s.request(*h).unwrap();
+                assert_eq!(&(r.generated_tokens, r.consumed_tokens, r.scheduled_consumed, r.pending,
+                    r.private_pages.clone(), r.reserved_pages.clone(), r.acceptance.rounds()), expected);
+            }
+        }
+        assert!(s.complete_with_survival(Fence(1), &records, timing, Some(&rows)).is_err());
+        let generated = s.complete_packed_round_with_survival(Fence(1), &records,
+            timing, &[[0.8; 7]; 4], present.then_some(rows.as_slice())).unwrap();
+        assert_eq!(generated.len(), 4);
+        assert_eq!(s.refresh.acceptance_credit_ns, -15_000_000.);
+        assert!(s.refresh.episode().is_none());
+        let r = s.request(handles[3]).unwrap();
+        assert_eq!(r.acceptance.rounds(), 1);
+        let probability = r.acceptance.prefix_probability(speculation::ProposalSource::Mtp, 0).unwrap();
+        assert!((probability - if present { 1.25 / 3. } else { 1. / 3. }).abs() < 0.002);
+        let forecast = s.split.as_ref().unwrap().forecast[handles[3].slot as usize].unwrap();
+        assert!((0.59..0.62).contains(&forecast.prefixes[0].mean()),
+            "proposal confidence remains separate from target acceptance");
+        assert_eq!(s.request(handles[0]).unwrap().acceptance.rounds(), 0);
+    }
+}
+
+#[test]
+fn packed_only_funded_learning_uses_draft_extent_and_debits_one_complete_graph() {
+    let mut s = combined_engine(2);
+    let mut graphs = combined_graphs(2);
+    graphs.retain(|g| g.kind != GraphKind::PackedSpeculative
+        || (g.batch_capacity == 2 && g.draft_tokens == 2 && g.packed_token_capacity == 4));
+    assert!(!graphs.iter().any(|g| g.kind == GraphKind::Proposal));
+    s.graph_durations(&graphs).unwrap();
+    for graph in &graphs {
+        s.costs.set_measured(&ScheduledStep { draft_tokens: graph.draft_tokens, kind: graph.kind,
+            batch_capacity: graph.batch_capacity, token_capacity: graph.token_capacity,
+            packed_token_capacity: graph.packed_token_capacity, mixed: None, lanes: vec![],
+            requires_feedback: true }, if graph.kind == GraphKind::PackedSpeculative { 16_000_000 } else { 10_000_000 });
+    }
+    let handles: Vec<_> = (0..2).map(|_| ready(&mut s)).collect();
+    for &h in &handles {
+        let request = s.request_mut(h).unwrap();
+        request.generated_tokens = 129;
+        request.max_new_tokens = 400;
+        s.split.as_mut().unwrap().forecast[h.slot as usize] = Some(Forecast::new(h, [0.; 7], 1));
+    }
+    assert_eq!(s.plan().unwrap().kind, GraphKind::Speculative);
+    s.refresh.acceptance_credit_ns = refresh::CREDIT_CAP_NS;
+    let plan = s.plan().unwrap();
+    assert_eq!(plan.origin, PlanOrigin::AcceptanceStart);
+    assert_eq!((plan.kind, plan.batch_capacity, plan.draft_tokens, plan.token_capacity,
+        plan.packed_token_capacity), (GraphKind::PackedSpeculative, 2, 2, 8, 4));
+    assert!(plan.lanes.iter().all(|lane| lane.tokens == 3));
+    let key = cost::Key::from_step(&plan);
+    assert_eq!((key.drafts, key.tokens, key.packed), (2, 8, 4));
+    s.commit(&plan, Fence(1)).unwrap();
+    let records = combined_records(&s, &plan, &[1, 1]);
+    let timing = crate::execution::ExecutionTiming { gpu_ns: [Some(20_000_000); 16], ..Default::default() };
+    s.complete_packed_round(Fence(1), &records, timing, &[[0.9; 7]; 2]).unwrap();
+    assert_eq!(s.refresh.acceptance_credit_ns, -15_000_000.);
+    assert!(s.refresh.episode().is_none());
+    assert!(s.split.as_ref().unwrap().retained.iter().all(Option::is_none));
+    for &h in &handles {
+        let forecast = s.split.as_ref().unwrap().forecast[h.slot as usize].unwrap();
+        assert_eq!(forecast.prefixes[2].mean(), 0., "D=2 cannot observe a W=8 suffix");
+        assert_eq!(forecast.prefixes[2].weight_at(129), 1.);
+        assert!((forecast.prefixes[0].mean() - 0.45).abs() < 1e-6);
+    }
+    let mut fixed = combined_engine(2);
+    fixed.fixed_speculative_width(Some(3)).unwrap();
+    ready(&mut fixed);
+    fixed.refresh.acceptance_credit_ns = refresh::CREDIT_CAP_NS;
+    assert_ne!(fixed.plan().unwrap().origin, PlanOrigin::AcceptanceStart);
 }

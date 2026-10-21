@@ -178,7 +178,7 @@ def _collective_runtimes(config, group, device, *, coordinator, package_storage,
         from ignition.components.speculation import SpeculativeAcceptance
 
         batch = max(config.batch_capacities)
-        layouts = (SpeculativeAcceptance.storage_layout(batch, max(config.speculative_widths)),)
+        layouts = (SpeculativeAcceptance.broadcast_layout(batch, max(config.speculative_widths)),)
         if config.draft_tokens:
             layouts += (PreparedDraftDistribution.broadcast_layout(batch),)
     if coordinator.spans_hosts:

@@ -219,6 +219,7 @@ impl TensorParallelExecutor {
                 }
                 let timing = wire::timing(&mut reader)?;
                 let proposal_confidence = wire::proposal_confidence(&mut reader)?;
+                let speculative_survival = wire::speculative_survival(&mut reader)?;
                 if reader.0.len() != self.local.manifest().completion_bytes() {
                     return Err(invalid("rank completion size differs from its ABI"));
                 }
@@ -226,6 +227,7 @@ impl TensorParallelExecutor {
                     logprobs: None,
                     prompt_logprobs: None,
                     proposal_confidence,
+                    speculative_survival,
                     fence,
                     graph_index: graph,
                     timing,
@@ -333,6 +335,18 @@ pub(super) fn agree(root: &FrameCompletion, peer: &FrameCompletion) -> Result<()
             }
         }
         _ => return Err(invalid("tensor-parallel proposal confidence presence differs")),
+    }
+    match (&root.speculative_survival, &peer.speculative_survival) {
+        (None, None) => {}
+        (Some(root_values), Some(peer_values)) => {
+            super::validate_speculative_survival(root_values, &root.records)?;
+            super::validate_speculative_survival(peer_values, &peer.records)?;
+            if root_values.iter().flatten().zip(peer_values.iter().flatten())
+                .any(|(a, b)| (*a == -1.0) != (*b == -1.0)) {
+                return Err(invalid("tensor-parallel speculative survival observation extents differ"));
+            }
+        }
+        _ => return Err(invalid("tensor-parallel speculative survival presence differs")),
     }
     for (lane, (a, b)) in root.records.iter().zip(peer.records.iter()).enumerate() {
         if a.generation != b.generation

@@ -1586,24 +1586,20 @@ fn loaded_catalog_cannot_change_under_a_plan() {
 }
 
 #[test]
-fn acceptance_keeps_request_source_and_censored_depths_separate() {
-    use speculation::{
-        AcceptanceProfile,
-        ProposalSource::{Copy, Mtp},
-    };
+fn acceptance_keeps_request_program_and_censored_prefixes_separate() {
+    use speculation::{AcceptanceProfile, ProposalSource::{Copy, Mtp}};
     let mut a = AcceptanceProfile::default();
     let b = AcceptanceProfile::default();
-    a.observe(5, 2, false, 0b10);
-    assert!(a.probability(Mtp, 0).unwrap() > 0.5);
-    assert!(a.probability(Copy, 1).unwrap() > 0.5);
-    assert_eq!(a.probability(Copy, 0), Some(0.5));
-    assert_eq!(a.probability(Mtp, 1), Some(0.5));
-    assert_eq!(a.probability(Mtp, 2), Some(0.5));
-    a.observe(5, 2, true, 0b110);
-    assert!(a.probability(Copy, 2).unwrap() < 0.5);
-    assert_eq!(a.probability(Mtp, 2), Some(0.5));
-    assert_eq!(a.probability(Copy, 3), Some(0.5));
-    assert_eq!(b.probability(Mtp, 0), Some(0.5));
+    a.observe(Mtp, 2, 5, 2, false, None);
+    assert!(a.prefix_probability(Mtp, 0).unwrap() > 0.5);
+    assert!(a.prefix_probability(Mtp, 1).unwrap() > 0.25);
+    assert_eq!(a.prefix_probability(Copy, 0), Some(0.5));
+    assert_eq!(a.prefix_probability(Mtp, 2), Some(0.125));
+    a.observe(Copy, 2, 5, 2, true, None);
+    assert!(a.prefix_probability(Copy, 2).unwrap() < 0.125);
+    assert_eq!(a.prefix_probability(Mtp, 2), Some(0.125));
+    assert!(a.prefix_probability(Copy, 3).unwrap() < 0.0625);
+    assert_eq!(b.prefix_probability(Mtp, 0), Some(0.5));
     assert_eq!(b.expected_tokens(Mtp, 0), 0.0);
     assert_eq!(b.expected_tokens(Mtp, 3), 1.75);
 }
@@ -1636,10 +1632,10 @@ fn physically_offered_padding_is_not_an_acceptance_observation() {
         let profile = s.request(h).unwrap().acceptance();
         if remaining == 1 {
             assert_eq!(profile.rounds(), 0);
-            assert_eq!(profile.probability(Mtp, 0), Some(0.5));
+            assert_eq!(profile.prefix_probability(Mtp, 0), Some(0.5));
         } else {
-            assert!(profile.probability(Mtp, 0).unwrap() > 0.5);
-            assert_eq!(profile.probability(Mtp, 1), Some(0.5));
+            assert!(profile.prefix_probability(Mtp, 0).unwrap() > 0.5);
+            assert_eq!(profile.prefix_probability(Mtp, 1), Some(0.25));
         }
     }
 }
@@ -1662,11 +1658,11 @@ fn completion_learns_only_proven_acceptance_and_is_transactional() {
         let profile = s.request(h).unwrap().acceptance();
         assert_eq!(profile.rounds(), 1);
         if accepted == 1 {
-            assert!(profile.probability(Mtp, 0).unwrap() > 0.5);
-            assert_eq!(profile.probability(Mtp, 1), Some(0.5));
+            assert!(profile.prefix_probability(Mtp, 0).unwrap() > 0.5);
+            assert_eq!(profile.prefix_probability(Mtp, 1), Some(0.25));
         } else {
-            assert!(profile.probability(Mtp, 0).unwrap() < 0.5);
-            assert_eq!(profile.probability(Mtp, 1), Some(0.5));
+            assert!(profile.prefix_probability(Mtp, 0).unwrap() < 0.5);
+            assert!(profile.prefix_probability(Mtp, 1).unwrap() < 0.25);
         }
     }
 }

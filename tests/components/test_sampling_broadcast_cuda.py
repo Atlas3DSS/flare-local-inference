@@ -30,7 +30,8 @@ class SamplingRound:
 
     def results(self):
         return (self.ids, self.probabilities, self.valid, self.sampled, self.offset, self.seed,
-                self.verify.seed_bits, self.verify.offset, *vars(self.verify.output).values(),
+                self.verify.seed_bits, self.verify.offset,
+                *(value for name, value in vars(self.verify.output).items() if name != 'survival'),
                 self.verify.rng.generation, self.verify.rng.target_offset,
                 self.verify.state.seed.view(torch.int64), self.verify.state.rng_counter.view(torch.int64))
 
@@ -56,7 +57,7 @@ def _rank(rank, world, rendezvous, result_channel=False):
     runtime = create_all_gather_runtime(dist.group.WORLD, device, max_rows=64,
                                         columns=world * 64 if world <= 4 else 163840)
     result_runtime = (create_result_broadcast_runtime(dist.group.WORLD, device,
-        layouts=(PreparedDraftDistribution.broadcast_layout(8), SpeculativeAcceptance.storage_layout(8, 6)))
+        layouts=(PreparedDraftDistribution.broadcast_layout(8), SpeculativeAcceptance.broadcast_layout(8, 6)))
         if result_channel else None)
     if result_channel:
         assert result_runtime.max_batch_size == 13
@@ -147,6 +148,15 @@ def _rank(rank, world, rendezvous, result_channel=False):
                 assert allocations == torch.cuda.memory_stats()["allocation.all.allocated"]
                 for actual, expected in zip(owners[index].results(), references[index], strict=True):
                     assert torch.equal(actual.cpu(), expected)
+                verify = owners[index].verify
+                if verify.drafts.shape[1]:
+                    indices = verify.safe_ids.long().unsqueeze(-1)
+                    draft = verify.safe_draft_probs.gather(-1, indices).squeeze(-1)
+                    target = verify.safe_target_probs[:, :-1].gather(-1, indices).squeeze(-1)
+                    expected = torch.where(draft > 0, (target / draft).clamp(max=1.), (target > 0).float()).cumprod(-1)
+                    actual = verify.output.survival[:, :verify.drafts.shape[1]]
+                    observed = actual >= 0
+                    torch.testing.assert_close(actual[observed], expected[observed])
             worker.close()
             worker = None
     finally:

@@ -281,6 +281,12 @@ pub(super) fn completion(value: &FrameCompletion) -> Vec<u8> {
             bytes.extend_from_slice(&value.to_le_bytes());
         }
     }
+    number(&mut bytes, usize::from(value.speculative_survival.is_some()));
+    if let Some(rows) = &value.speculative_survival {
+        for value in rows.iter().flatten() {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+    }
     for record in value.records.iter() {
         for field in record.fields() {
             bytes.extend_from_slice(&field.to_le_bytes());
@@ -300,6 +306,20 @@ pub(super) fn proposal_confidence(reader: &mut Reader<'_>) -> Result<Option<[[f3
             Ok(Some(rows))
         }
         _ => Err(invalid("invalid proposal confidence presence")),
+    }
+}
+
+pub(super) fn speculative_survival(reader: &mut Reader<'_>) -> Result<Option<[[f32; 7]; 64]>> {
+    match reader.number()? {
+        0 => Ok(None),
+        1 => {
+            let mut rows = [[-1.0; 7]; 64];
+            for value in rows.iter_mut().flatten() {
+                *value = f32::from_le_bytes(reader.bytes(4)?.try_into().unwrap());
+            }
+            Ok(Some(rows))
+        }
+        _ => Err(invalid("invalid speculative survival presence")),
     }
 }
 

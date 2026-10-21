@@ -253,6 +253,8 @@ impl SchedulerView {
         let origin = match sample.selection.origin {
             TimingOrigin::Ordinary => "service".to_owned(),
             TimingOrigin::Discovery => "discovery".to_owned(),
+            TimingOrigin::Acceptance => sample.selection.refresh_episode
+                .map_or_else(|| "acceptance".to_owned(), |id| format!("acceptance #{id}")),
             TimingOrigin::Refresh => sample.selection.refresh_episode
                 .map_or_else(|| "refresh".to_owned(), |id| format!("refresh #{id}")),
         };

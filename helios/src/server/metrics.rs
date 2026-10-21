@@ -484,6 +484,15 @@ impl Metrics {
 
     pub fn render(&self) -> String {
         let mut text = String::with_capacity(4096);
+        for (name, help, counts) in [
+            ("execution_nanoseconds_total", "Raw execution time by scheduler selection reason, including readiness stalls and isolated host handoff.", &self.scheduler_trace.execution_ns),
+            ("executions_total", "Completed physical executions by scheduler selection reason; split proposal and verification each count once.", &self.scheduler_trace.executions),
+        ] {
+            let _ = writeln!(text, "# HELP flare_scheduler_{name} {help}\n# TYPE flare_scheduler_{name} counter");
+            for (reason, count) in ["ordinary", "discovery", "timing_refresh", "acceptance_learning"].into_iter().zip(counts) {
+                let _ = writeln!(text, "flare_scheduler_{name}{{reason=\"{reason}\"}} {}", count.load(Ordering::Relaxed));
+            }
+        }
         for (name, help, count) in [
             ("replay_gpu_nanoseconds_total", "Sum of maximum rank-local CUDA durations of completed graphs, including readiness waits.", &self.replay_gpu_ns),
             ("replay_readiness_wait_nanoseconds_total", "Exposed embedding readiness delay measured across ranks; includes RAM and disk delivery.", &self.replay_readiness_wait_ns),

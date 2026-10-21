@@ -6,7 +6,7 @@ use crate::{
     execution::{ExecutionTiming, GraphDescriptor, GraphKind},
 };
 
-pub(super) fn observed_duration_ns(timing: ExecutionTiming) -> Option<u64> {
+pub(crate) fn observed_duration_ns(timing: ExecutionTiming) -> Option<u64> {
     timing
         .gpu_ns
         .into_iter()

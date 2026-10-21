@@ -55,6 +55,14 @@ class FunctionalVerificationReference(PreparedStochasticVerification):
         out.valid.copy_(valid)
         out.rng_increment.copy_(torch.where(valid, self.draw_reservation, 0))
         out.token_ids.masked_fill_(~valid[:, None], -1)
+        out.survival.fill_(-1.)
+        prefix = torch.ones_like(self.offset, dtype=torch.float32)
+        for depth in range(self.drafts.shape[1]):
+            index = self.safe_ids[:, depth:depth + 1].long()
+            q = self.safe_draft_probs[:, depth].gather(1, index).squeeze(1)
+            p = self.safe_target_probs[:, depth].gather(1, index).squeeze(1)
+            prefix = prefix * torch.where(q > 0, torch.minimum(p / q, torch.ones_like(p)), (p > 0).float())
+            out.survival[:, depth].copy_(torch.where(valid, prefix, -1.))
         if self.broadcast is not None:
             self.broadcast()
         return out

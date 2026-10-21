@@ -272,8 +272,9 @@ def test_captured_packed_round_matches_split_oracle_state_rng_and_poison(depth, 
         graph.reset()
 
 
+@pytest.mark.parametrize("survival", [False, True])
 @torch.no_grad()
-def test_native_packed_signature_prefix_upload_and_terminal_feedback():
+def test_native_packed_signature_prefix_upload_and_terminal_feedback(survival):
     import struct
     import time
     from ignition.preparation.execution import GraphSignature, PreparedExecution
@@ -301,6 +302,8 @@ def test_native_packed_signature_prefix_upload_and_terminal_feedback():
         f.inputs.query_lengths.fill_(-111)
         f.target.probabilities.fill_(torch.nan)
         f.owner.completion.records.fill_(-91)
+        f.owner.completion.speculative_survival.fill_(-91.)
+        f.logits[:, :, 101].fill_(8. - float(limits[0]))
 
     def snapshot():
         return [tensor.cpu().clone() for tensor in (*vars(f.state).values(), *vars(f.rng).values(),
@@ -313,7 +316,8 @@ def test_native_packed_signature_prefix_upload_and_terminal_feedback():
         restore(limits)
         operation()
         torch.cuda.synchronize()
-        expected.append((snapshot(), f.owner.completion.records[0].cpu().clone()))
+        expected.append((snapshot(), f.owner.completion.records[0].cpu().clone(),
+                         f.owner.completion.speculative_survival[0].cpu().clone()))
     restore(variants[0])
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
@@ -323,15 +327,18 @@ def test_native_packed_signature_prefix_upload_and_terminal_feedback():
             speculation_enabled=True, packed_token_capacity=12, draft_tokens=3)},
         buffers=dict(frame_index=f.owner.frame, submission_sequence=f.owner.sequence,
             completion_records=f.owner.completion.records, speculative_prefix_limits=f.prefix_limits,
-            proposal_confidence=f.operation.confidence), resources=(f, operation))
+            proposal_confidence=f.operation.confidence,
+            **({"completion_speculative_survival": f.owner.completion.speculative_survival} if survival else {})),
+        resources=(f, operation))
     manifest = model.manifest()
     assert "query_lengths" not in {entry["buffer_name"] for entry in manifest["graphs"][0]["input_bindings"]}
     executor = model.start_executor()
     try:
         with pytest.raises(RuntimeError, match="not bound"):
             executor.submit(0, [("query_lengths", 0, bytes(16))])
-        for limits, (expected_state, expected_records) in zip(variants, expected, strict=True):
-            restore([0] * 4)
+        for limits, (expected_state, expected_records, expected_survival) in zip(variants, expected, strict=True):
+            restore(limits)
+            f.prefix_limits.zero_()
             torch.cuda.synchronize()
             allocated = torch.cuda.memory_stats()["allocation.all.allocated"]
             fence = executor.submit(0, [("speculative_prefix_limits", 0, struct.pack("4i", *limits))])
@@ -352,6 +359,13 @@ def test_native_packed_signature_prefix_upload_and_terminal_feedback():
             actual_records[:, 1] = expected_records[:, 1]
             assert torch.equal(actual_records, expected_records)
             assert completion.proposal_confidence == [[.75] * 3 + [0.] * 4] * 4
+            if survival:
+                assert torch.equal(torch.tensor(completion.speculative_survival), expected_survival)
+                for record, row in zip(completion.records, completion.speculative_survival, strict=True):
+                    observed = record[9] if record[8] > record[10] else record[10]
+                    assert all((value >= 0) == (depth < observed) for depth, value in enumerate(row))
+            else:
+                assert completion.speculative_survival is None
             assert f.prefix_limits.tolist() == list(limits)
             assert executor.outstanding == 0
     finally:
@@ -507,7 +521,8 @@ def _tp_rank(rank, rendezvous, sockets):
                     packed_token_capacity=12, draft_tokens=3)},
                 buffers=dict(frame_index=f.owner.frame, submission_sequence=f.owner.sequence,
                     completion_records=f.owner.completion.records, speculative_prefix_limits=f.prefix_limits,
-                    proposal_confidence=f.operation.confidence, confidence_failure=failure, live_rows=f.inputs.live_rows),
+                    proposal_confidence=f.operation.confidence, confidence_failure=failure, live_rows=f.inputs.live_rows,
+                    completion_speculative_survival=f.owner.completion.speculative_survival),
                 resources=(f, native_forward, initial_state, initial_rng, session, runtime, broadcast, stream))
             torch.cuda.synchronize()
             dist.barrier()
@@ -530,8 +545,10 @@ def _tp_rank(rank, rendezvous, sockets):
                     assert completion.fence == fence
                     assert completion.proposal_confidence == ([[.25] * 3 + [0.] * 4] * live
                                                                + [[0.] * 7] * (4 - live))
+                    assert completion.speculative_survival is not None
                     if case == "rank2_nan":
                         assert all(row[5:7] == [3, 256] for row in completion.records)
+                        assert completion.speculative_survival == [[-1.] * 7] * 4
                     else:
                         admitted, _ = allocate([[.25] * 3] * 4, [3, 0, 2, 1],
                             [row < live for row in range(4)], [True] * 4, [1, 4, 4, 4], 12, 4)
@@ -541,6 +558,7 @@ def _tp_rank(rank, rendezvous, sockets):
                         assert [record[8] for record in completion.records] == by_slot
                         if case == "partial":
                             assert all(completion.records[slot] == f.commit.idle_record.tolist() for slot in (1, 2))
+                            assert all(completion.speculative_survival[slot] == [-1.] * 7 for slot in (1, 2))
                 executor.close()
                 assert executor.drained
                 executor = None

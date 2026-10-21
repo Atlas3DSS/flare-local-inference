@@ -422,6 +422,12 @@ impl ExecutionManifest {
         }
         let logprobs = self.max_top_logprobs()? != 0;
         self.prompt_logprob_capacity()?;
+        if let Some(buffer) = self.buffers.iter().find(|buffer| buffer.name == "completion_speculative_survival") {
+            if self.abi_version != SPECULATIVE_ABI_VERSION || buffer.dtype != Dtype::Float32
+                || buffer.shape != [2, self.request_capacity(), MAX_OUTPUT_TOKENS - 1] {
+                return Err("completion_speculative_survival requires ABI3 and two float32 frames of seven prefixes per request slot".into());
+            }
+        }
         if let Some(buffer) = self.buffers.iter().find(|buffer| buffer.name == "readiness_timestamps") {
             if buffer.dtype != Dtype::Int64 || buffer.shape.len() != 2 || buffer.shape[0] != 2
                 || buffer.shape[1] == 0 || buffer.shape[1] % 3 != 0
@@ -507,7 +513,8 @@ impl ExecutionManifest {
             let mut bound = HashSet::new();
             for binding in &graph.input_bindings {
                 if !bound.insert(binding.buffer_name.as_str())
-                    || ["completion_records", "completion_logprobs", "prompt_logprobs", "readiness_timestamps"].contains(&binding.buffer_name.as_str())
+                    || ["completion_records", "completion_logprobs", "prompt_logprobs", "readiness_timestamps",
+                        "completion_speculative_survival"].contains(&binding.buffer_name.as_str())
                 {
                     return Err(Error::execution(
                         ExecutionError::Manifest,

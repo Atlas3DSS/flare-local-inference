@@ -17,11 +17,9 @@ impl RequestScheduler {
             let slot = request.slot as usize;
             let observation = survival(&confidence);
             let mut forecast = split.forecast[slot].filter(|f| f.request == request)
-                .unwrap_or(Forecast { request, prefixes: split.population, observed_at: [0; 7] });
-            let previous = forecast.estimate(&split.population, generated);
+                .unwrap_or_else(|| Forecast::new(request, split.population, generated));
             for i in 0..limit.saturating_sub(1) {
-                forecast.prefixes[i] = previous[i] + FORECAST_WEIGHT * (observation[i] - previous[i]);
-                forecast.observed_at[i] = generated;
+                forecast.prefixes[i].observe(f64::from(observation[i]), generated);
                 split.population[i] += POPULATION_WEIGHT * (observation[i] - split.population[i]);
             }
             split.forecast[slot] = Some(forecast);
@@ -29,7 +27,7 @@ impl RequestScheduler {
     }
 
     pub(super) fn packed_round_candidates(&self, output: &mut Vec<Candidate>,
-        values: &[LaneValue; REQUEST_LANES], age: f64) {
+        values: &[LaneValue; REQUEST_LANES], age: f64, optimistic: bool) {
         let available: Vec<_> = self.slots.iter().enumerate().filter_map(|(slot, entry)| {
             let request = entry.request.as_ref()?;
             (request.phase == RequestPhase::Decode && self.eligible(request)
@@ -37,14 +35,14 @@ impl RequestScheduler {
         }).collect();
         let mut forecasts = HashMap::new();
         for shape in self.costs.packed_round_shapes() {
-            let scores = forecasts.entry(shape.drafts).or_insert_with(|| {
+            let scores = forecasts.entry((shape.drafts, shape.width)).or_insert_with(|| {
                 let mut scores = Vec::new();
                 for &slot in &available {
                     let request = self.slots[slot].request.as_ref().unwrap();
-                    let limit = self.speculative_tokens(request, shape.drafts + 1);
+                    let limit = self.speculative_tokens(request, (shape.drafts + 1).min(shape.width));
                     let mut before = 1.0;
                     for position in 0..limit.saturating_sub(1) {
-                        let total = self.proposal_forecast_tokens(request, position + 2);
+                        let total = self.proposal_forecast_tokens(request, position + 2, optimistic);
                         scores.push((total - before, position, slot));
                         before = total;
                     }

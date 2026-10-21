@@ -1,10 +1,13 @@
 //! Bounded live-request resources and scheduling with CUDA-fenced retirement.
 
 mod cost;
+mod learning;
 mod policy;
 mod refresh;
 mod service;
 mod utility;
+#[cfg(feature = "server")]
+pub(crate) use cost::observed_duration_ns;
 pub use policy::{PolicyConfig, RequestAccounting};
 use refresh::PlanOrigin;
 pub mod speculation;
@@ -447,6 +450,7 @@ pub enum TimingOrigin {
     Discovery,
     Ordinary,
     Refresh,
+    Acceptance,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -922,6 +926,10 @@ impl RequestScheduler {
             .ok_or_else(|| "unknown scheduled submission".into())
     }
 
+    pub fn acceptance_credit_ns(&self) -> f64 {
+        self.refresh.acceptance_credit_ns
+    }
+
     pub fn refresh_credit_ns(&self) -> f64 {
         self.refresh.credit_ns
     }
@@ -936,7 +944,7 @@ impl RequestScheduler {
 
     pub fn plan_requires_feedback(&self, plan: &ScheduledPlan) -> bool {
         plan.requires_feedback || !self.costs.is_fresh(cost::Key::from_step(plan))
-            || matches!(plan.origin, PlanOrigin::RefreshStart(_) | PlanOrigin::RefreshContinuation(_))
+            || plan.origin.is_probe()
     }
 
     fn selected_cost(&self, key: cost::Key) -> SelectedCost {
@@ -1960,13 +1968,18 @@ impl RequestScheduler {
                 .is_some_and(|proposal| episode.owns(lane.request, proposal.consumed, proposal.fence))));
         let origin = match plan.origin {
             PlanOrigin::Ordinary | PlanOrigin::Discovery if owned =>
-                PlanOrigin::RefreshContinuation(self.refresh.episode().unwrap().id),
-            PlanOrigin::RefreshContinuation(_) if !owned =>
+                self.refresh.episode().unwrap().continuation(),
+            PlanOrigin::RefreshContinuation(_) | PlanOrigin::AcceptanceContinuation(_) if !owned =>
                 return Err("refresh verification must consume an owned proposal".into()),
             PlanOrigin::Ordinary if observed_at_ns.is_none() => PlanOrigin::Discovery,
             origin => origin,
         };
         self.refresh.validate(origin)?;
+        if origin == PlanOrigin::AcceptanceStart
+            && (self.speculative_fixed_width.is_some() || step.token_capacity <= 1
+                || !matches!(step.kind, GraphKind::Speculative | GraphKind::Proposal | GraphKind::PackedSpeculative | GraphKind::Mixed)) {
+            return Err("acceptance learning requires an adaptive speculative choice".into());
+        }
         if let PlanOrigin::RefreshStart(target) = origin {
             if self.costs.duration_key(target).is_none_or(|duration| duration == 0) || self.costs.is_fresh(target) {
                 return Err("refresh target must have a stale measured cost".into());
@@ -2007,6 +2020,7 @@ impl RequestScheduler {
             needed.push((lane.request, pages, through));
         }
         let participants = self.service_participants();
+        let proposal_decision = (step.kind == GraphKind::Proposal).then(|| self.proposal_decision());
         let submitted_timing = SubmittedTiming {
             retained_ns: plan.selected_cost.retained_ns,
             observed_at_ns: plan.selected_cost.observed_at_ns,
@@ -2014,13 +2028,14 @@ impl RequestScheduler {
             origin: match origin {
                 PlanOrigin::Ordinary => TimingOrigin::Ordinary,
                 PlanOrigin::Discovery => TimingOrigin::Discovery,
+                PlanOrigin::AcceptanceStart | PlanOrigin::AcceptanceContinuation(_) => TimingOrigin::Acceptance,
                 _ => TimingOrigin::Refresh,
             },
-            credit_ns: self.refresh.credit_ns, commit_ns: self.now_ns,
+            credit_ns: if origin.is_acceptance() { self.refresh.acceptance_credit_ns } else { self.refresh.credit_ns }, commit_ns: self.now_ns,
             selected_at_ns: plan.selected_cost.selected_at_ns,
             refresh_episode: match origin {
-                PlanOrigin::RefreshStart(_) => Some(fence.0),
-                PlanOrigin::RefreshContinuation(id) => Some(id),
+                PlanOrigin::RefreshStart(_) | PlanOrigin::AcceptanceStart => Some(fence.0),
+                PlanOrigin::RefreshContinuation(id) | PlanOrigin::AcceptanceContinuation(id) => Some(id),
                 _ => None,
             },
         };
@@ -2042,6 +2057,9 @@ impl RequestScheduler {
         self.costs.record_attempt(key);
         if let PlanOrigin::RefreshStart(target) = origin {
             self.costs.record_attempt(target);
+        }
+        if let Some(decision) = proposal_decision {
+            self.split.as_mut().unwrap().pending_decision = Some((fence, decision));
         }
         if let Some(tokens) = plan.verification_budget {
             self.split.as_mut().unwrap().pending_budget = Some((fence, tokens));
@@ -2075,10 +2093,20 @@ impl RequestScheduler {
         records: &[CompletionRecord],
         timing: crate::execution::ExecutionTiming,
     ) -> Result<Vec<GeneratedToken>> {
+        self.complete_with_survival(fence, records, timing, None)
+    }
+
+    pub fn complete_with_survival(
+        &mut self,
+        fence: Fence,
+        records: &[CompletionRecord],
+        timing: crate::execution::ExecutionTiming,
+        survival: Option<&[[f32; 7]]>,
+    ) -> Result<Vec<GeneratedToken>> {
         if self.submissions.get(&fence).is_some_and(|s| s.kind == GraphKind::PackedSpeculative) {
             return Err("packed combined completion requires its terminal confidence sidecar".into());
         }
-        self.complete_inner(fence, records, timing)
+        self.complete_inner(fence, records, timing, survival)
     }
 
     pub fn complete_packed_round(
@@ -2088,6 +2116,17 @@ impl RequestScheduler {
         timing: crate::execution::ExecutionTiming,
         confidence: &[[f32; 7]],
     ) -> Result<Vec<GeneratedToken>> {
+        self.complete_packed_round_with_survival(fence, records, timing, confidence, None)
+    }
+
+    pub fn complete_packed_round_with_survival(
+        &mut self,
+        fence: Fence,
+        records: &[CompletionRecord],
+        timing: crate::execution::ExecutionTiming,
+        confidence: &[[f32; 7]],
+        survival: Option<&[[f32; 7]]>,
+    ) -> Result<Vec<GeneratedToken>> {
         let step = self.submissions.get(&fence)
             .ok_or("packed combined completion has no submission")?.step.clone();
         if step.kind != GraphKind::PackedSpeculative || confidence.len() < step.batch_capacity
@@ -2095,7 +2134,7 @@ impl RequestScheduler {
                 .iter().any(|p| !p.is_finite() || !(0.0..=1.0).contains(p))) {
             return Err("invalid packed combined confidence sidecar".into());
         }
-        let generated = self.complete_inner(fence, records, timing)?;
+        let generated = self.complete_inner(fence, records, timing, survival)?;
         self.observe_packed_forecasts(&step, records, confidence);
         Ok(generated)
     }
@@ -2105,9 +2144,13 @@ impl RequestScheduler {
         fence: Fence,
         records: &[CompletionRecord],
         timing: crate::execution::ExecutionTiming,
+        survival: Option<&[[f32; 7]]>,
     ) -> Result<Vec<GeneratedToken>> {
         if records.len() < self.limits.request_capacity() || records.len() > REQUEST_LANES {
             return Err("completion does not cover the prepared request capacity".into());
+        }
+        if let Some(survival) = survival {
+            crate::execution::validate_speculative_survival(survival, records)?;
         }
         if self.submissions.first_key_value().map(|(next, _)| *next) != Some(fence) {
             return Err("completion fence must match the oldest submitted step".into());
@@ -2175,6 +2218,18 @@ impl RequestScheduler {
                 continue;
             }
             let record = records[lane.request.slot as usize];
+            if let Some(survival) = survival {
+                let observed = if matches!(kind, GraphKind::Speculative | GraphKind::Verification | GraphKind::PackedSpeculative) && record.status != 3 {
+                    let vector = record.vector.ok_or("speculative survival requires a completion vector")?;
+                    let offered = (vector.offered_drafts as usize).min(lane.tokens.saturating_sub(1));
+                    if vector.emitted_count > vector.accepted_drafts { offered }
+                    else { (vector.accepted_drafts as usize).min(offered) }
+                } else { 0 };
+                if survival[lane.request.slot as usize].iter().enumerate()
+                    .any(|(depth, p)| (*p != -1.0) != (depth < observed)) {
+                    return Err("speculative survival does not match the observed logical prefix".into());
+                }
+            }
             let emitted = record.generated_tokens - request.generated_tokens as i64;
             let width = if matches!(kind, GraphKind::Speculative | GraphKind::Verification | GraphKind::PackedSpeculative) {
                 step.token_capacity as i64
@@ -2232,6 +2287,7 @@ impl RequestScheduler {
         self.observe_execution(&submission.step, timing);
         let step = submission.step;
         let now_ns = self.now_ns;
+        let proposal_source = self.proposal_source;
         let mut useful_tokens = [0u64; REQUEST_LANES];
         let mut generated = Vec::new();
         let mut boundaries = Vec::new();
@@ -2291,10 +2347,12 @@ impl RequestScheduler {
                 // the lane's logical draft extent supplies acceptance observations.
                 let offered = (vector.offered_drafts as usize).min(lane.tokens.saturating_sub(1));
                 request.acceptance.observe(
+                    proposal_source,
+                    record.generated_tokens as u32,
                     offered,
                     (vector.accepted_drafts as usize).min(offered),
                     vector.emitted_count > vector.accepted_drafts,
-                    vector.copy_offered_mask as u8,
+                    survival.map(|rows| &rows[lane.request.slot as usize]),
                 );
             }
             if record.status == 3 {
@@ -2560,6 +2618,10 @@ impl RequestScheduler {
             self.cancel(handle)?;
         }
         self.submissions.clear();
+        if let Some(split) = &mut self.split {
+            split.pending_decision = None;
+            split.pending_budget = None;
+        }
         self.refresh.abort();
         self.advance_retirement(self.submitted)
     }

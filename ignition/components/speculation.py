@@ -76,6 +76,7 @@ class SpeculativeAcceptance:
     offered_drafts: torch.Tensor
     valid: torch.Tensor
     rng_increment: torch.Tensor
+    survival: torch.Tensor
 
     @classmethod
     def storage_layout(cls, batch, width):
@@ -83,11 +84,15 @@ class SpeculativeAcceptance:
         return dict(token_ids=((batch, width), torch.int64),
                     proposed_count=((batch,), torch.int32), accepted_drafts=((batch,), torch.int32),
                     offered_drafts=((batch,), torch.int32), valid=((batch,), torch.bool),
-                    rng_increment=((batch,), torch.int64))
+                    rng_increment=((batch,), torch.int64), survival=((batch, 7), torch.float32))
+
+    @classmethod
+    def broadcast_layout(cls, batch, width):
+        return {name: layout for name, layout in cls.storage_layout(batch, width).items() if name != "survival"}
 
     @classmethod
     def allocate(cls, batch, width, device):
-        return cls(**{name: torch.full(shape, -1 if name == "token_ids" else 0, dtype=dtype, device=device)
+        return cls(**{name: torch.full(shape, -1 if name in ("token_ids", "survival") else 0, dtype=dtype, device=device)
                       for name, (shape, dtype) in cls.storage_layout(batch, width).items()})
 
     def validate(self, batch, width, device):
@@ -357,7 +362,8 @@ class PreparedStochasticVerification:
     def prepare_broadcast(self, **kwargs):
         from .collectives import PreparedBroadcast
 
-        self.broadcast = PreparedBroadcast(tuple(vars(self.output).values()), **kwargs)
+        self.broadcast = PreparedBroadcast(tuple(value for name, value in vars(self.output).items()
+                                                 if name != "survival"), **kwargs)
 
     def prepare(self):
         if self.target_probs.device.type != "cuda":
@@ -420,6 +426,17 @@ class PreparedStochasticVerification:
         out.proposed_count.copy_(torch.where(valid, accepted + 1, 0))
         out.rng_increment.copy_(torch.where(valid, self.draw_reservation, 0))
         out.token_ids.masked_fill_(~valid[:, None], -1)
+        if self.drafts.shape[1]:
+            indices = self.safe_ids.long().unsqueeze(-1)
+            draft = self.safe_draft_probs.gather(-1, indices).squeeze(-1)
+            target = self.safe_target_probs[:, :-1].gather(-1, indices).squeeze(-1)
+            ratio = torch.where(draft > 0, (target / draft).clamp(max=1.), (target > 0).float())
+            # Serial products preserve monotonicity despite FP32 rounding at unit ratios.
+            prefixes = [ratio[:, 0]]
+            for depth in range(1, self.drafts.shape[1]):
+                prefixes.append(prefixes[-1] * ratio[:, depth])
+            out.survival.fill_(-1.)
+            out.survival[:, :self.drafts.shape[1]].copy_(torch.where(valid[:, None], torch.stack(prefixes, -1), -1.))
         if self.broadcast is not None:
             self.broadcast()
         return out
@@ -485,6 +502,9 @@ class PreparedSpeculativeCommit:
         # One extra entry receives the rows that own no slot.
         self.owners = zeros((requests.capacity + 1,))
         self._records = zeros((requests.capacity, 24))
+        self.survival = completion.speculative_survival
+        self._survival = zeros((requests.capacity, 7), torch.float32) if self.survival is not None and width > 1 else None
+        self.survival_columns = torch.arange(7, device=device)
         self.idle_record = torch.zeros(24, dtype=torch.int64, device=device)
         self.idle_record[[4, 12, *range(16, 24)]] = -1
         if draft_context_lag is None:
@@ -589,6 +609,14 @@ class PreparedSpeculativeCommit:
         self.owners.scatter_(0, torch.where(leader, safe, state.capacity), self.rows)
         owner = self.owners[:state.capacity]
         owned, source = owner >= 0, owner.clamp_min(0)
+        if self._survival is not None:
+            logical = torch.minimum(offered, (remaining - 1).clamp_min(0))
+            if self.token_limits is not None:
+                logical = torch.minimum(logical, (self.token_limits[row] - 1).clamp_min(0))
+            extent = torch.minimum(logical, torch.where(emitted > emitted_drafts, logical, emitted_drafts))
+            observed = owned[:, None] & live[source, None] & (self.survival_columns < extent[source, None])
+            self._survival.copy_(torch.where(observed, acceptance.survival[row][source], -1.))
+            self.survival.index_copy_(0, self.frame.long(), self._survival.unsqueeze(0))
 
         def updated(tensor, values):
             mask = owned.view(-1, *([1] * (tensor.dim() - 1)))
