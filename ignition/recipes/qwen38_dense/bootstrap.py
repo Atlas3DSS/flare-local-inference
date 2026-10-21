@@ -53,6 +53,7 @@ class PreparationConfig:
     mtp: bool = False
     speculative_widths: tuple[int, ...] = (1, 2, 3, 4)
     speculative_fixed_width: int | None = None
+    preparation_pages: int | None = None
 
     def __post_init__(self):
         request_capacity(self.max_active)
@@ -62,6 +63,8 @@ class PreparationConfig:
             raise ValueError("Qwen dense prefill chunk must be 128-aligned and fit the context")
         if self.snapshot_budget_bytes <= 0 or self.headroom_bytes < 0:
             raise ValueError("snapshot budget must be positive and headroom nonnegative")
+        if self.preparation_pages is not None and (type(self.preparation_pages) is not int or self.preparation_pages < 1):
+            raise ValueError("preparation pages must be a positive integer")
         if (not self.speculative_widths or self.speculative_widths[0] != 1
                 or tuple(sorted(set(self.speculative_widths))) != self.speculative_widths
                 or any(type(w) is not int or not 1 <= w <= 4 for w in self.speculative_widths)):
@@ -106,6 +109,7 @@ def prepare(snapshot, config, *, progress=None, package_storage):
     execution_rows = slots * (config.draft_tokens + 1)
     state_rows = execution_rows + snapshots
     pages = config.prefill_chunk_size // PAGE_TOKENS + 2 * slots
+    pages = max(pages, config.preparation_pages or 0)
     total_memory = torch.cuda.mem_get_info(device)[1]
     with phase(progress, "Allocate model state"):
         pool = ContinuationPool.for_model(weights.config, state_rows + 1, pages, device,
