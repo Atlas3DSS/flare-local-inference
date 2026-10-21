@@ -43,15 +43,16 @@ def _weight(kind, n, k):
     return TensorFP8Weight(packed, input_scale.cuda()), values.float(), gain, input_scale
 
 
-@pytest.mark.parametrize("kind", ["nvfp4", "tensor_fp8"])
+@pytest.mark.parametrize("kind,n,k", [("nvfp4", 384, 160), ("tensor_fp8", 384, 160),
+                                    ("nvfp4", 248320, 16)])
 @torch.no_grad()
-def test_recorded_tuning_measures_captured_projection(kind):
+def test_recorded_tuning_measures_captured_projection(kind, n, k):
     from ignition.preparation.tuning import RecordedPreparationSession
 
     _require_v100()
-    weight, matrix, gain, input_scale = _weight(kind, 384, 160)
-    source = torch.full((17, 160), .25, device="cuda")
-    output = torch.empty((17, 384), device="cuda")
+    weight, matrix, gain, input_scale = _weight(kind, n, k)
+    source = torch.full((17, k), .25, device="cuda")
+    output = torch.empty((17, n), device="cuda")
     with RecordedPreparationSession(device=source.device, checkpoint="sm70-packed",
             workload_schema="sm70-packed", numerical_policy="fp32") as session:
         constructor = sm70.PackedProjection if kind == "nvfp4" else sm70.TensorFP8Projection
@@ -131,20 +132,21 @@ def test_dense_preserves_bfloat_range_and_bias(source_dtype, output_dtype):
         assert torch.isfinite(output).all()
 
 
-@pytest.mark.parametrize("kind", ["tensor_fp8", "dense"])
+@pytest.mark.parametrize("kind", ["nvfp4", "tensor_fp8", "dense"])
 @torch.no_grad()
 def test_fullgraph_float32_buffers_preserve_opaque_weight_arithmetic(kind):
     from b12x.preparation import PreparationSession
     from ignition.preparation.compilation import compile_forward
 
     _require_v100()
-    weight, matrix, gain, scale = _weight("tensor_fp8", 384, 160)
+    weight, matrix, gain, scale = _weight("nvfp4" if kind == "nvfp4" else "tensor_fp8", 384, 160)
     if kind == "dense":
         weight, gain = matrix.bfloat16().cuda(), torch.tensor(1.)
     source = torch.full((17, 160), .25, dtype=torch.float32, device="cuda")
     output = torch.empty((17, 384), dtype=torch.float32, device="cuda")
     with PreparationSession(device=source.device, autotune=False, compile_workers=0) as session:
-        constructor = TensorFP8Projection if kind == "tensor_fp8" else UnquantizedProjection
+        constructor = {"nvfp4": sm70.PackedProjection, "tensor_fp8": TensorFP8Projection,
+                       "dense": UnquantizedProjection}[kind]
         operation = constructor(source, weight, output, session=session, name="compiled-weight")
         compiled = compile_forward(lambda: operation(source))
         compiled()
@@ -162,6 +164,53 @@ def test_fullgraph_float32_buffers_preserve_opaque_weight_arithmetic(kind):
             if kind == "tensor_fp8":
                 calibrated = (calibrated / scale).clamp(-448, 448).to(torch.float8_e4m3fn).float()
             torch.testing.assert_close(output.cpu(), (calibrated @ matrix.T) * gain, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("k", [144, 528])
+@torch.no_grad()
+def test_fused_nvfp4_expansion_exact_bits_and_swizzled_padding(k):
+    from b12x._lib.intrinsics.reference import swizzle_block_scale
+    from b12x.preparation import PreparationSession
+    from b12x.preparation.types import require_prepared
+
+    _require_v100()
+    n = 384
+    weight, _, _, _ = _weight("nvfp4", n, k)
+    padded_k = weight.padded_in_features
+    # Every finite E4M3 code, including both signs of zero and subnormals.
+    finite = torch.tensor([i for i in range(256) if i & 127 != 127], dtype=torch.uint8)
+    indices = torch.arange(n * padded_k // 16).remainder(finite.numel())
+    scale_values = finite[indices].reshape(n, padded_k // 16).view(torch.float8_e4m3fn)
+    scales = swizzle_block_scale(scale_values.cuda()).view(torch.uint8).reshape(-1)
+    packed = weight.values.cpu()
+    codes = torch.stack((packed & 15, packed >> 4), dim=-1).reshape(n, padded_k)
+    table = torch.tensor([0., .5, 1., 1.5, 2., 3., 4., 6., -0., -.5, -1., -1.5, -2., -3., -4., -6.])
+    expected = table[codes.long()][:, :k] * scale_values.float().repeat_interleave(16, dim=1)[:, :k]
+    source = torch.ones((1, k), device="cuda")
+    output = torch.empty((1, n), device="cuda")
+    expanded = torch.empty((n, k), device="cuda")
+    with PreparationSession(device=source.device, autotune=False, compile_workers=0) as session:
+        operation = sm70.PackedProjection(source, weight, output, session=session, name="expansion-bits")
+        state = require_prepared(operation.plan, sm70.COMPONENT, source.device)
+
+        def expand():
+            for start in range(0, n, state.tile):
+                stop = min(n, start + state.tile)
+                sm70._expand_nvfp4(state.expansion, weight.values, scales, expanded[start:stop],
+                                  start, stop, state.query)
+
+        expand()
+        torch.cuda.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            expand()
+        expanded.fill_(float("nan"))
+        allocations = torch.cuda.memory_stats()["allocation.all.allocated"]
+        graph.replay()
+        torch.cuda.synchronize()
+        assert torch.cuda.memory_stats()["allocation.all.allocated"] == allocations
+        torch.testing.assert_close(expanded.cpu().view(torch.int32), expected.contiguous().view(torch.int32),
+                                   rtol=0, atol=0)
 
 
 @torch.no_grad()

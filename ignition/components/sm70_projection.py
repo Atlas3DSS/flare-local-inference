@@ -13,6 +13,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import torch
+import triton
+import triton.language as tl
+from b12x._lib.compile_plan import attach_programs, compile_only_launches, launch_triton, load_programs
+from b12x._lib.compile_pool import CompileJob
+from b12x._lib.program_cache import program_cache
 from b12x.preparation import MemoryRequirements, PersistentMemory, Plan, PreparedCall
 from b12x.preparation.types import plan_from_handle, require_prepared
 
@@ -49,7 +54,8 @@ def _tiles(query):
     return tuple(dict.fromkeys(min(query.out_features, width) for width in (256, 1024)))
 
 
-CONTRACT = native_contract(component_id=COMPONENT, query_type=ProjectionQuery, tactics=_tiles)
+CONTRACT = native_contract(component_id=COMPONENT, query_type=ProjectionQuery, tactics=_tiles,
+                           semantic_version=2)
 
 
 def _scratch_shapes(query, tile):
@@ -70,26 +76,61 @@ def _scratch_views(query, tile, workspace):
     return views
 
 
-def _expand_nvfp4(values, scales, output, start, stop, query):
-    """Expand logical K using b12x's F8_128x4 scale storage; ignore padded K."""
-    k = query.in_features
-    packed = values[start:stop, :k // 2]
-    code = torch.stack((packed & 15, packed >> 4), dim=-1).reshape(stop - start, k)
+@triton.jit
+def _e4m3_to_float(bits):
+    """Decode storage bits without Volta-incompatible FP8 instructions."""
+    bits = bits.to(tl.uint32)
+    exponent, mantissa = (bits >> 3) & 15, bits & 7
+    normal = (((exponent + 120) << 23) | (mantissa << 20)).to(tl.float32, bitcast=True)
+    magnitude = tl.where(exponent == 0, mantissa.to(tl.float32) * (1.0 / 512.0), normal)
+    magnitude = tl.where((exponent == 15) & (mantissa == 7), float("nan"), magnitude)
+    signed = magnitude.to(tl.uint32, bitcast=True) | ((bits & 128) << 24)
+    return signed.to(tl.float32, bitcast=True)
+
+
+@triton.jit(do_not_specialize=["start"])
+def _expand_nvfp4_kernel(Values, Scales, Output, start, K: tl.constexpr,
+                         PADDED_K: tl.constexpr, N: tl.constexpr, BLOCK: tl.constexpr):
+    """One flat launch expands a tile using b12x's F8_128x4 scale storage."""
+    index = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    row, column = start + index // K, index % K
+    valid = row < N
+    packed = tl.load(Values + row * (PADDED_K // 2) + column // 2, valid, 0).to(tl.uint32)
+    code = (packed >> ((column % 2) * 4)) & 15
     magnitude = code & 7
-    decoded = torch.where(magnitude < 4, magnitude.float() * .5,
-        torch.where(magnitude == 4, 2., torch.where(magnitude == 5, 3.,
-                                                  torch.where(magnitude == 6, 4., 6.))))
-    decoded = torch.where(code >= 8, -decoded, decoded)
-    row = torch.arange(start, stop, device=values.device)[:, None]
-    group = torch.arange(k // 16, device=values.device)[None, :]
-    groups = query.padded_in_features // 16
-    offset = ((row // 128 * ((groups + 3) // 4) + group // 4) * 512
+    decoded = tl.where(magnitude < 4, magnitude.to(tl.float32) * 0.5,
+                       tl.where(magnitude == 4, 2.0, tl.where(magnitude == 5, 3.0,
+                                tl.where(magnitude == 6, 4.0, 6.0))))
+    decoded = (decoded.to(tl.uint32, bitcast=True) | ((code & 8) << 28)).to(tl.float32, bitcast=True)
+    group = column // 16
+    offset = ((row // 128 * ((PADDED_K // 16 + 3) // 4) + group // 4) * 512
               + row % 32 * 16 + row // 32 % 4 * 4 + group % 4)
-    block_scale = scales[offset].view(torch.float8_e4m3fn).float()
-    output.copy_((decoded.view(stop - start, k // 16, 16) * block_scale[:, :, None]).view_as(output))
+    scale = _e4m3_to_float(tl.load(Scales + offset, valid, 0))
+    tl.store(Output + index, decoded * scale, valid)
 
 
-def _project(query, tile, source, values, scales, gain, input_scale, output, workspace, bias):
+def _expansion_options(query):
+    return dict(K=query.in_features, PADDED_K=query.padded_in_features,
+                N=query.out_features, BLOCK=256, num_warps=4, enable_fp_fusion=False)
+
+
+@program_cache(scope="preparation")
+def compile_expansion(payload, tile, ordinal):
+    query = ProjectionQuery(**dict(payload))
+    values = torch.empty((query.out_features, query.padded_in_features // 2), dtype=torch.uint8, device="meta")
+    scale_size = triton.cdiv(query.out_features, 128) * triton.cdiv(query.padded_in_features // 16, 4) * 512
+    scales = torch.empty((scale_size,), dtype=torch.uint8, device="meta")
+    output = torch.empty((tile, query.in_features), dtype=torch.float32, device="meta")
+    with torch.cuda.device(ordinal), compile_only_launches():
+        return launch_triton(_expand_nvfp4_kernel, (triton.cdiv(tile * query.in_features, 256), 1, 1),
+                             values, scales, output, 0, **_expansion_options(query))
+
+
+def _expand_nvfp4(program, values, scales, output, start, stop, query):
+    program[(triton.cdiv((stop - start) * query.in_features, 256), 1, 1)](values, scales, output, start)
+
+
+def _project(query, tile, expansion, source, values, scales, gain, input_scale, output, workspace, bias):
     """All temporary allocations are bounded by a tile and captured before serving."""
     inputs, expanded, product = _scratch_views(query, tile, workspace)
     if query.kind == "tensor_fp8":
@@ -101,7 +142,7 @@ def _project(query, tile, source, values, scales, gain, input_scale, output, wor
         width = stop - start
         weight, result = expanded[:width], product[:, :width]
         if query.kind == "nvfp4":
-            _expand_nvfp4(values, scales, weight, start, stop, query)
+            _expand_nvfp4(expansion, values, scales, weight, start, stop, query)
         elif query.kind == "tensor_fp8":
             weight.copy_(values[start:stop, :query.in_features].view(torch.float8_e4m3fn))
         else:
@@ -126,13 +167,14 @@ def _project(query, tile, source, values, scales, gain, input_scale, output, wor
 class PreparedProjection:
     query: ProjectionQuery
     tile: int
+    expansion: object = None
 
     @property
     def required_workspace(self):
         return workspace_bytes(self.query, self.tile)
 
     def run(self, source, values, scales, gain, input_scale, output, workspace, bias=None):
-        return _project(self.query, self.tile, source, values, scales, gain, input_scale,
+        return _project(self.query, self.tile, self.expansion, source, values, scales, gain, input_scale,
                         output, workspace, bias)
 
 
@@ -185,6 +227,21 @@ class _Projection:
                 record_numeric_tensor(tensor)
         self.output, self.values, self.scales = output, values, scales
         self.gain, self.input_scale, self.bias = gain, input_scale, bias
+        payload = CONTRACT.encode_query(query)
+
+        def compile_jobs(tile, device):
+            if query.kind != "nvfp4":
+                return ()
+            return (CompileJob.create("ignition.components.sm70_projection:compile_expansion",
+                                      payload, tile, device.ordinal),)
+
+        def materialize(tile):
+            if query.kind != "nvfp4":
+                return PreparedProjection(query, tile)
+            program = compile_expansion(payload, tile, source.device.index)
+            load_programs(program)
+            return attach_programs(PreparedProjection(query, tile, program), program)
+
         # Without an external arena, keep one owned arena across preparation calls.
         arena = ScratchArena(source.device) if workspace is None else workspace
         if workspace is None:
@@ -196,14 +253,14 @@ class _Projection:
                     (COMPONENT, current_plan()), needed, arena.nbytes),))
 
             self.plan = Plan(contract=CONTRACT, query=query,
-                _compile_jobs=lambda config, device: (),
+                _compile_jobs=lambda config, device: compile_jobs(config.tactic, device),
                 _memory_requirements=memory,
-                _materialize=lambda selection, device: PreparedProjection(query, selection.config.tactic),
+                _materialize=lambda selection, device: materialize(selection.config.tactic),
                 _device=source.device)
         else:
             self.plan = native_plan(contract=CONTRACT, query=query, device=source.device,
                 scratch_bytes=lambda tile: workspace_bytes(query, tile),
-                materialize=lambda tile: PreparedProjection(query, tile))
+                materialize=materialize, compile_jobs=compile_jobs)
 
         def storage(nbytes=None):
             if nbytes is None:
@@ -234,7 +291,13 @@ class _Projection:
             # timed. CUDA allocation can synchronize, which deadlocks behind the
             # tuning stream gate. Serving replays a captured graph; measure that
             # same allocation-free operation while keeping live input producers.
-            return capture_benchmark_call(call)
+            captured = capture_benchmark_call(call)
+            # The first launch may upload a large graph's executable buffers.
+            # Complete that work before b12x holds the timing stream gate.
+            captured.produce()
+            captured.invoke()
+            torch.cuda.current_stream(source.device).synchronize()
+            return captured
 
         declare(session, (self.plan.request(name=name, prepare_call=prepare, benchmark_call=benchmark),))
         register_finalizer(session, lambda: setattr(self, "workspace", storage()), workspace=workspace)
