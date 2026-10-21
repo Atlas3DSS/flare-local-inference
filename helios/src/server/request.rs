@@ -702,7 +702,7 @@ mod tests {
         let body = body.as_object().unwrap();
         let clamped = sampling_parameters(body, &defaults, &package).unwrap();
         assert_eq!((clamped.top_k, clamped.temperature, clamped.top_p), (20, 0.7, 0.95));
-        let unclamped = SamplingRanges::unclamped();
+        let unclamped = SamplingRanges::unclamped(1024);
         unclamped.validate(&defaults).unwrap();
         let exact = sampling_parameters(body, &defaults, &unclamped).unwrap();
         assert_eq!((exact.top_k, exact.temperature, exact.top_p), (1, 0.01, 1.0));
