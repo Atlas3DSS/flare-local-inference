@@ -69,6 +69,15 @@ class _Vocabulary(_Projection):
         super().__init__(source, weight, output)
 
 
+class _RMSNorm:
+    def __init__(self, source, weight, output, epsilon, **kwargs):
+        self.weight, self.output, self.epsilon = weight, output, epsilon
+
+    def __call__(self, source):
+        self.output.copy_(_norm(source, self.weight, self.epsilon).float())
+        return self.output
+
+
 class _Writer:
     def __init__(self, key, value, key_cache, value_cache, slots, **kwargs):
         self.args = key, value, key_cache, value_cache, slots
@@ -111,7 +120,7 @@ def cpu_primitives(monkeypatch):
     monkeypatch.setattr(torch.cuda, "_lazy_init", lambda: pytest.fail("CPU test initialized CUDA"))
     for name, replacement in (("UnquantizedProjection", _Projection), ("PreparedEmbedding", _Embedding),
                               ("PreparedVocabularyProjection", _Vocabulary), ("PreparedWriter", _Writer),
-                              ("PreparedAttention", _Attention)):
+                              ("PreparedAttention", _Attention), ("PreparedRMSNorm", _RMSNorm)):
         monkeypatch.setattr(mtp, name, replacement)
 
 
@@ -188,6 +197,18 @@ def test_exact_checkpoint_geometry_and_reject_incomplete_or_quantized_head():
         validate_checkpoint(manifest, config)
     with pytest.raises(ValueError, match="one layer"):
         tensor_shapes(replace(config, text={**config.text, "mtp_num_hidden_layers": 2}))
+
+
+def test_quantized_draft_uses_weight_only_activation_policy(monkeypatch):
+    calls = []
+    def projection(source, weight, output, **options):
+        calls.append(options)
+        return output
+    monkeypatch.setattr(mtp, "QuantizedProjection", projection)
+    output = torch.empty(1, 32)
+    assert mtp._projection(torch.zeros_like(output), object(), output,
+                           session=None, name="draft", row_invariant=True) is output
+    assert calls == [dict(session=None, name="draft", row_invariant=True, activation_mode="a16")]
 
 
 @torch.no_grad()

@@ -23,7 +23,7 @@ class ModelWeights:
     draft: object = None
 
     @classmethod
-    def load(cls, manifest, device, *, progress=None):
+    def load(cls, manifest, device, *, progress=None, row_invariant=False, package_storage=None):
         from transformers import Qwen3_5TextConfig, Qwen3_5TextModel
 
         config = ModelConfig.load(manifest.snapshot)
@@ -32,12 +32,14 @@ class ModelWeights:
         tree = canonical_tree(Qwen3_5TextModel, Qwen3_5TextConfig.from_dict(config.text))
         projections = {}
         before = torch.cuda.memory_allocated(device)
+        if row_invariant:
+            from ignition.components.sm70_projection_tc import load_weight
         with DirectWeightLoader(manifest, device, prefixes=(TEXT_PREFIX + ".", "lm_head."),
                                 progress=progress) as loader:
             for name, parameter in tree.named_parameters():
                 prefix = TEXT_PREFIX + "." + name.removesuffix(".weight")
                 if name.endswith(".weight") and prefix in config.quantization:
-                    weight = loader.load_linear(prefix)
+                    weight = load_weight(loader, prefix, storage=package_storage) if row_invariant else loader.load_linear(prefix)
                     packed = weight.packed if isinstance(weight, TensorFP8Weight) else weight
                     if (packed.out_features, packed.in_features) != tuple(parameter.shape):
                         raise ValueError(f"{prefix}: checkpoint projection shape differs from the model")
@@ -54,7 +56,7 @@ class ModelWeights:
                         tree.get_submodule(parent.rpartition(".")[0]).norm_weight_bf16 = tensor.dtype == torch.bfloat16
                     tensor = tensor.float()
                 setattr(tree.get_submodule(parent), field, torch.nn.Parameter(tensor, requires_grad=False))
-            head = loader.load_linear("lm_head")
+            head = load_weight(loader, "lm_head", storage=package_storage) if row_invariant else loader.load_linear("lm_head")
             if (head.out_features, head.in_features) != (config.vocabulary, config.hidden):
                 raise ValueError("Qwen vocabulary projection shape differs from the model")
         for index, layer in enumerate(tree.layers):

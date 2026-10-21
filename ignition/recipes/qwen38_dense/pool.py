@@ -25,8 +25,8 @@ def page_bytes(config, *, element_bytes=1, mtp=False):
 
 
 def continuation_layout(config, *, dtype=torch.bfloat16, element_bytes=1, draft_tokens=0):
-    if type(draft_tokens) is not int or not 0 <= draft_tokens <= 3:
-        raise ValueError("dense MTP supports zero through three draft tokens")
+    if type(draft_tokens) is not int or not 0 <= draft_tokens <= 4:
+        raise ValueError("dense MTP supports zero through four draft tokens")
     regions = []
     for index, kind in enumerate(config.layers):
         if kind == "linear_attention":

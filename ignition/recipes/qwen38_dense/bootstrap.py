@@ -67,8 +67,8 @@ class PreparationConfig:
             raise ValueError("preparation pages must be a positive integer")
         if (not self.speculative_widths or self.speculative_widths[0] != 1
                 or tuple(sorted(set(self.speculative_widths))) != self.speculative_widths
-                or any(type(w) is not int or not 1 <= w <= 4 for w in self.speculative_widths)):
-            raise ValueError("dense MTP widths must increase from one through at most four")
+                or any(type(w) is not int or not 1 <= w <= 5 for w in self.speculative_widths)):
+            raise ValueError("dense MTP widths must increase from one through at most five")
         if self.speculative_fixed_width is not None and self.speculative_fixed_width not in self.speculative_widths:
             raise ValueError("fixed verification width must belong to the prepared catalog")
         if self.mtp and (self.max_active > 4 or self.speculative_widths[-1] < 2):
@@ -90,13 +90,18 @@ def prepare(snapshot, config, *, progress=None, package_storage):
         manifest = inspect_indexed_checkpoint(snapshot)
     transient = contextlib.ExitStack()
     transient.enter_context(package_storage.transient())
-    weights = ModelWeights.load(manifest, device, progress=progress)
+    weights = ModelWeights.load(manifest, device, progress=progress, row_invariant=config.mtp, package_storage=package_storage)
     mtp_weights = None
     if config.mtp:
         from .mtp_weights import MTPWeights
         mtp_weights = MTPWeights.load(manifest, device, config=weights.config,
-            embedding_weight=weights.tree.embed_tokens.weight, lm_head_weight=weights.head, progress=progress)
+            embedding_weight=weights.tree.embed_tokens.weight, lm_head_weight=weights.head, progress=progress, package_storage=package_storage)
     release_unused()
+    if config.mtp:
+        # Repacking leaves large dead checkpoint/inverse buffers in the private
+        # pool. End that allocation scope before backing recurrent/KV state.
+        transient.close()
+        transient.enter_context(package_storage.transient())
     from ignition.components.sm70_projection import is_sm70
     dtype, element_bytes = (torch.float32, 2) if is_sm70(device) else (torch.bfloat16, 1)
     layout = continuation_layout(weights.config, dtype=dtype, element_bytes=element_bytes,
@@ -112,7 +117,8 @@ def prepare(snapshot, config, *, progress=None, package_storage):
     pages = max(pages, config.preparation_pages or 0)
     total_memory = torch.cuda.mem_get_info(device)[1]
     with phase(progress, "Allocate model state"):
-        pool = ContinuationPool.for_model(weights.config, state_rows + 1, pages, device,
+        pool = ContinuationPool.for_model(weights.config, state_rows + 1,
+            min(pages, config.prefill_chunk_size // PAGE_TOKENS + 2 * slots) if config.compile_decoder else pages, device,
             draft_tokens=config.draft_tokens,
             storage=package_storage, maximum_pages=total_memory // bytes_per_page,
             maximum_rows=total_memory // layout.row_bytes,
@@ -219,11 +225,31 @@ def prepare(snapshot, config, *, progress=None, package_storage):
     with phase(progress, "Prepare and tune kernels") as stage, transient:
         tuning = session.tune(show_progress=progress is not None, console=stage.console)
     stream, graph_pool = torch.cuda.Stream(device=device), package_storage.graph_pool.id
-    graphs, compiled = capture_forwards(forwards, signatures, session=session, device=device,
-        stream=stream, pool=graph_pool, collective=None, coordinator=coordinator,
-        compile_decoder=config.compile_decoder, progress=progress, cache_root=config.kernel_cache,
-        retain_graphs=config.retain_graphs, materialize=pool.clear_for_preparation, warmup_storage=package_storage,
-        compile_kinds=("prefill", "decode", "resume", "speculative"))
+    # Workers serialize and consume metadata only. Cache state is cleared before
+    # warmup, so its physical memory can hold compiler contexts in the meantime.
+    released_state = []
+    if config.compile_decoder:
+        torch.cuda.synchronize(device)
+        for region in package_storage.dynamic_regions:
+            if region.group in ("STATE_ROWS", "KV_PAGES"):
+                released_state.append((region, region.nbytes))
+                region.release_backing()
+
+    def materialize():
+        for region, size in released_state:
+            region.grow(max(region.nbytes, size))
+        package_storage.grow("KV_PAGES", pages)
+        pool.memory_capacity[1] = pages
+        pool.clear_for_preparation()
+
+    try:
+        graphs, compiled = capture_forwards(forwards, signatures, session=session, device=device,
+            stream=stream, pool=graph_pool, collective=None, coordinator=coordinator,
+            compile_decoder=config.compile_decoder, progress=progress, cache_root=config.kernel_cache,
+            retain_graphs=config.retain_graphs, materialize=materialize, warmup_storage=package_storage,
+            compile_kinds=("prefill", "decode", "resume", "speculative"))
+    finally:
+        materialize()
     session.freeze()
     pool.clear_for_preparation()
     torch.cuda.synchronize(device)

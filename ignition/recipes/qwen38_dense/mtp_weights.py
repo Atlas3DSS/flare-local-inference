@@ -1,4 +1,4 @@
-"""The dense checkpoint's fifteen BF16 MTP tensors and shared vocabulary."""
+"""Dense NextN BF16 weights or the checkpoint NVFP4 draft overlay."""
 
 from dataclasses import dataclass
 from math import prod
@@ -39,29 +39,43 @@ def tensor_shapes(config):
 
 def validate_checkpoint(manifest, config):
     """Reject an incompatible/partial drafter before transferring any weights."""
-    expected = {"mtp." + name: shape for name, shape in tensor_shapes(config).items()}
+    expected = {}
+    quantization = config.quantization
+    for suffix, shape in tensor_shapes(config).items():
+        name = "mtp." + suffix
+        prefix = name.removesuffix(".weight")
+        if prefix in quantization:
+            if quantization[prefix]["quant_algo"] != "NVFP4" or len(shape) != 2:
+                raise ValueError(f"{prefix}: MTP overlay requires NVFP4 matrices")
+            n, k = shape
+            expected.update({name: ((n, k // 2), "U8", n * k // 2),
+                prefix + ".weight_scale": ((n, k // 16), "F8_E4M3", n * k // 16),
+                prefix + ".weight_scale_2": ((), "F32", 4),
+                prefix + ".input_scale": ((), "F32", 4)})
+        else:
+            expected[name] = (shape, "BF16", 2 * prod(shape))
     actual = {name for name in manifest.tensors if name.startswith("mtp.")}
     if actual != expected.keys():
         missing, extra = sorted(expected.keys() - actual), sorted(actual - expected.keys())
         raise ValueError(f"dense MTP checkpoint tensor mismatch: missing={missing}, extra={extra}")
-    for name, shape in expected.items():
+    for name, (shape, dtype, size) in expected.items():
         entry = manifest.tensors[name]
-        if tuple(entry.shape) != shape or entry.dtype != "BF16" or entry.nbytes != 2 * prod(shape):
-            raise ValueError(f"{name}: dense MTP requires BF16 {shape}")
+        if tuple(entry.shape) != shape or entry.dtype != dtype or entry.nbytes != size:
+            raise ValueError(f"{name}: dense MTP requires {dtype} {shape}")
     return sum(manifest.tensors[name].nbytes for name in expected)
 
 
 @dataclass(frozen=True)
 class MTPWeights:
     config: ModelConfig
-    tensors: dict[str, torch.Tensor]
+    tensors: dict[str, object]
     embedding: torch.Tensor
     lm_head: object
     stored_bytes: int
     allocated_bytes: int
 
     @classmethod
-    def load(cls, manifest, device, *, embedding_weight, lm_head_weight, config=None, progress=None):
+    def load(cls, manifest, device, *, embedding_weight, lm_head_weight, config=None, progress=None, package_storage=None):
         config = ModelConfig.load(manifest.snapshot) if config is None else config
         stored = validate_checkpoint(manifest, config)
         device = torch.device(device)
@@ -88,6 +102,11 @@ class MTPWeights:
                 # Keep matrices in their checkpoint BF16 storage. Only the tiny
                 # RMSNorm vectors enter SM70's FP32 arithmetic graph directly.
                 dtype = torch.float32 if "norm" in name else None
-                tensors[name] = loader.load_tensor("mtp." + name, dtype=dtype)
+                prefix = "mtp." + name.removesuffix(".weight")
+                if prefix in config.quantization:
+                    from ignition.components.sm70_projection_tc import load_weight
+                    tensors[name] = load_weight(loader, prefix, storage=package_storage)
+                else:
+                    tensors[name] = loader.load_tensor("mtp." + name, dtype=dtype)
         return cls(config, tensors, embedding_weight, lm_head_weight, stored,
                    torch.cuda.memory_allocated(device) - before)

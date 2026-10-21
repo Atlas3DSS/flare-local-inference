@@ -41,7 +41,7 @@ RECIPE = Recipe(
         stored_bytes=21_921_428_072, device_bytes=20_999_967_880, expansion_bytes=307_923_968,
         draft_bytes=849_398_784),),
     context=262144, page_tokens=128, concurrency=4, max_concurrency=4, prefill_chunk=4096,
-    speculation=Speculation(draft_tokens=3), max_draft_tokens=3,
+    speculation=Speculation(draft_tokens=3), max_draft_tokens=4,
     ranks=MappingProxyType({1: RankCosts(172_249_344, 8_912_896, 4 << 30, draft_page_bytes=524_288)}),
     plain_ranks=MappingProxyType({1: RankCosts(165_302_528, 8_388_608, 4 << 30)}),
 )

@@ -1,4 +1,4 @@
-"""Prepared dense NextN feedback and one BF16 decoder using existing SM70 ops."""
+"""Prepared dense NextN with row-invariant BF16 or NVFP4 SM70 projections."""
 
 from dataclasses import dataclass
 
@@ -6,12 +6,20 @@ import torch
 import torch.nn.functional as F
 
 from ignition.components.embedding import PreparedEmbedding
-from ignition.components.linear import UnquantizedProjection
+from ignition.components.linear import QuantizedProjection, UnquantizedProjection
 from ignition.components.sm70_attention import PreparedAttention, PreparedWriter
-from ignition.components.sm70_precision import apply_rotary, rms_norm, round_bf16
+from ignition.components.sm70_precision import apply_rotary, round_bf16
+from ignition.components.sm70_norm import PreparedRMSNorm
 from ignition.components.vocabulary import PreparedVocabularyProjection
 
 from .config import PAGE_TOKENS
+
+
+def _projection(source, weight, output, **options):
+    constructor = UnquantizedProjection if isinstance(weight, torch.Tensor) else QuantizedProjection
+    if constructor is QuantizedProjection:
+        options["activation_mode"] = "a16"
+    return constructor(source, weight, output, **options)
 
 
 @dataclass(frozen=True)
@@ -62,14 +70,19 @@ class PreparedMTPFeedback:
 
     def __init__(self, weights, scratch, target_hidden, workspace, *, session, name):
         self.weights, self.scratch, self.target_hidden = weights, scratch, target_hidden
-        self.projection = UnquantizedProjection(scratch.feedback, weights.tensors["fc.weight"],
-            scratch.residual, workspace=workspace, session=session, name=name + ".fc")
+        epsilon = weights.config.text["rms_norm_eps"]
+        self.norms = tuple(PreparedRMSNorm(value, weights.tensors[field + ".weight"],
+            torch.empty_like(value), epsilon, session=session, name=name + "." + field)
+            for value, field in ((scratch.embedding, "pre_fc_norm_embedding"),
+                                 (target_hidden, "pre_fc_norm_hidden")))
+        self.projection = _projection(scratch.feedback, weights.tensors["fc.weight"],
+            scratch.residual, workspace=workspace, session=session, name=name + ".fc", row_invariant=True)
 
     def __call__(self):
         s, w = self.scratch, self.weights.tensors
         epsilon, hidden = self.weights.config.text["rms_norm_eps"], self.weights.config.hidden
-        s.feedback[:, :hidden].copy_(rms_norm(s.embedding, w["pre_fc_norm_embedding.weight"], epsilon))
-        s.feedback[:, hidden:].copy_(rms_norm(self.target_hidden, w["pre_fc_norm_hidden.weight"], epsilon))
+        s.feedback[:, :hidden].copy_(self.norms[0](s.embedding))
+        s.feedback[:, hidden:].copy_(self.norms[1](self.target_hidden))
         s.residual.copy_(round_bf16(self.projection(s.feedback)))
         return s.residual
 
@@ -97,22 +110,27 @@ class MTPAttention:
         self.slots = torch.full((tokens,), -1, dtype=torch.int64, device=source.device)
         prefix = "layers.0.self_attn."
         self.projections = {
-            field: UnquantizedProjection(source, weights.tensors[prefix + field + ".weight"], output,
-                session=session, name=name + "." + field, workspace=workspace)
+            field: _projection(source, weights.tensors[prefix + field + ".weight"], output,
+                session=session, name=name + "." + field, workspace=workspace, row_invariant=True)
             for field, output in (("k_proj", self.k), ("v_proj", self.value.view(tokens, -1)))
         }
+        self.key_norm = PreparedRMSNorm(self.k.view_as(self.key), weights.tensors[prefix + "k_norm.weight"],
+            self.key, text["rms_norm_eps"], session=session, name=name + ".k_norm")
         self.writer = PreparedWriter(self.key, self.value, key_cache, value_cache, self.slots,
                                      session=session, name=name + ".write")
         if cache_only:
             return
         self.qg = zeros(2 * self.heads * self.dim)
         self.query = zeros(self.heads * self.dim).view(tokens, self.heads, self.dim)
+        self.query_norm = PreparedRMSNorm(self.qg.view(tokens, self.heads, 2 * self.dim)[..., :self.dim],
+            weights.tensors[prefix + "q_norm.weight"], self.query, text["rms_norm_eps"],
+            session=session, name=name + ".q_norm")
         self.attended, self.output = zeros(self.heads * self.dim), zeros(weights.config.hidden)
         self.lengths = torch.zeros_like(metadata.lengths)
         for field, inputs, output in (("q_proj", source, self.qg),
                                       ("o_proj", self.attended, self.output)):
-            self.projections[field] = UnquantizedProjection(inputs, weights.tensors[prefix + field + ".weight"],
-                output, session=session, name=name + "." + field, workspace=workspace)
+            self.projections[field] = _projection(inputs, weights.tensors[prefix + field + ".weight"],
+                output, session=session, name=name + "." + field, workspace=workspace, row_invariant=True)
         self.attention = PreparedAttention(self.query, key_cache, value_cache, metadata.page_table,
             self.lengths, metadata.query_start_loc, self.attended.view_as(self.query), session=session,
             name=name + ".attention")
@@ -122,13 +140,13 @@ class MTPAttention:
         epsilon = self.weights.config.text["rms_norm_eps"]
         self.k.copy_(round_bf16(self.projections["k_proj"](source)))
         self.value.copy_(round_bf16(self.projections["v_proj"](source)).view_as(self.value))
-        key = rms_norm(self.k.view_as(self.key), w["layers.0.self_attn.k_norm.weight"], epsilon)
+        key = self.key_norm(self.k.view_as(self.key))
         if self.cache_only:
             _, key = apply_rotary(key, key, *position_embeddings)
         else:
             self.qg.copy_(round_bf16(self.projections["q_proj"](source)))
             query, gate = self.qg.view(-1, self.heads, 2 * self.dim).chunk(2, dim=-1)
-            query = rms_norm(query, w["layers.0.self_attn.q_norm.weight"], epsilon)
+            query = self.query_norm(query)
             query, key = apply_rotary(query, key, *position_embeddings)
             self.query.copy_(query)
         self.key.copy_(key)
@@ -194,8 +212,15 @@ class PreparedMTP:
         dim = int(weights.config.text["head_dim"] * rotary["partial_rotary_factor"])
         self.inverse_frequency = 1.0 / (rotary["rope_theta"] ** (
             torch.arange(0, dim, 2, device=device, dtype=torch.float32) / dim))
+        epsilon = weights.config.text["rms_norm_eps"]
+        self.input_norm = PreparedRMSNorm(scratch.residual, weights.tensors["layers.0.input_layernorm.weight"],
+            torch.empty_like(scratch.residual), epsilon, session=session, name=name + ".input_norm")
         if cache_only:
             return
+        self.post_norm = PreparedRMSNorm(scratch.residual, weights.tensors["layers.0.post_attention_layernorm.weight"],
+            torch.empty_like(scratch.residual), epsilon, session=session, name=name + ".post_norm")
+        self.final_norm = PreparedRMSNorm(scratch.residual, weights.tensors["norm.weight"], scratch.hidden,
+            epsilon, session=session, name=name + ".final_norm")
         self.mlp = {}
         intermediate = weights.config.text["intermediate_size"]
         self.product = torch.zeros((tokens, intermediate), dtype=torch.float32, device=device)
@@ -203,11 +228,11 @@ class PreparedMTP:
                                       ("up_proj", scratch.residual, intermediate),
                                       ("down_proj", self.product, hidden)):
             output = torch.zeros((tokens, width), dtype=torch.float32, device=device)
-            self.mlp[field] = UnquantizedProjection(source, weights.tensors["layers.0.mlp." + field + ".weight"],
-                output, session=session, name=name + ".mlp." + field, workspace=workspace)
+            self.mlp[field] = _projection(source, weights.tensors["layers.0.mlp." + field + ".weight"],
+                output, session=session, name=name + ".mlp." + field, workspace=workspace, row_invariant=True)
         self.head = PreparedVocabularyProjection(scratch.selected_hidden, weights.lm_head, scratch.logits,
             scratch.logits, runtime=vocabulary_runtime, coordinator=coordinator, session=session,
-            name=name + ".head", activation_mode="auto", workspace=workspace)
+            name=name + ".head", activation_mode="auto", workspace=workspace, row_invariant=True)
 
     def __call__(self):
         s, w = self.scratch, self.weights.tensors
@@ -220,17 +245,17 @@ class PreparedMTP:
         angles = torch.cat((frequency, frequency), dim=-1)
         position_embeddings = (round_bf16(angles.cos()), round_bf16(angles.sin()))
         epsilon = self.weights.config.text["rms_norm_eps"]
-        source = rms_norm(s.residual, w["layers.0.input_layernorm.weight"], epsilon)
+        source = self.input_norm(s.residual)
         attention = self.attention(source, position_embeddings)
         if self.cache_only:
             return None
         s.residual.copy_(round_bf16(s.residual + attention))
-        source = rms_norm(s.residual, w["layers.0.post_attention_layernorm.weight"], epsilon)
+        source = self.post_norm(s.residual)
         gate, up = (round_bf16(self.mlp[field](source)) for field in ("gate_proj", "up_proj"))
         self.product.copy_(round_bf16(round_bf16(F.silu(gate)) * up))
         s.residual.copy_(round_bf16(s.residual + round_bf16(self.mlp["down_proj"](self.product))))
         s.residual.masked_fill_(~active[:, None], 0)
-        s.hidden.copy_(rms_norm(s.residual, w["norm.weight"], epsilon))
+        self.final_norm(s.residual)
         torch.index_select(s.hidden, 0, self.output_indices, out=s.selected_hidden)
         self.head(s.selected_hidden)
         s.logits.copy_(round_bf16(s.logits))

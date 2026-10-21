@@ -53,9 +53,15 @@ class ProjectionQuery:
     output_dtype: str = "float32"
     has_bias: bool = False
     row_invariant: bool = False
+    repacked: bool = False
+    gain_value: float = 1.0
+    input_scale_value: float = 1.0
 
 
 def _tiles(query):
+    if query.repacked:
+        from .sm70_projection_tc import tactic
+        return (tactic(query),)
     # Exact speculative commits require the same reduction for a row in every
     # verification bucket. Shape-dependent GEMV/GEMM tuning is not equivalent
     # at BF16 midpoints, even when both dots satisfy their error bounds.
@@ -73,7 +79,7 @@ def _tiles(query):
 
 
 CONTRACT = native_contract(component_id=COMPONENT, query_type=ProjectionQuery, tactics=_tiles,
-                           semantic_version=5)
+                           semantic_version=7)
 
 
 def _scratch_shapes(query, tactic):
@@ -84,6 +90,9 @@ def _scratch_shapes(query, tactic):
 
 
 def workspace_bytes(query, tactic):
+    if tactic[0] == "row_tc":
+        from .sm70_projection_tc import workspace_bytes as tc_workspace_bytes
+        return tc_workspace_bytes(query, tactic)
     return sum((rows * columns * (2 if tactic[0] == "hgemm" and index < 2 else 4) + 255) // 256 * 256
                for index, (rows, columns) in enumerate(_scratch_shapes(query, tactic)))
 
@@ -344,6 +353,9 @@ class PreparedProjection:
         return workspace_bytes(self.query, self.tactic)
 
     def run(self, source, values, scales, gain, input_scale, output, workspace, bias=None):
+        if self.tactic[0] == "row_tc":
+            from .sm70_projection_tc import run
+            return run(self.query, self.tactic, source, values, scales, output, workspace, bias)
         if self.tactic[0] in ("gemv", "row_gemv"):
             if self.query.kind == "tensor_fp8":
                 inputs, = _scratch_views(self.query, self.tactic, workspace)
@@ -408,6 +420,11 @@ class _Projection:
             if scalar is not None and (scalar.dtype != torch.float32 or scalar.numel() != 1
                     or not bool((torch.isfinite(scalar) & (scalar > 0)).all())):
                 raise ValueError("SM70 projection scales must be positive finite FP32 scalars")
+        if query.repacked:
+            if source.dtype != torch.float32 or output.dtype != torch.float32:
+                raise ValueError("reviewed SM70 tensor-core preparation requires FP32 physical input/output")
+            query = replace(query, gain_value=1.0 if gain is None else float(gain),
+                            input_scale_value=1.0 if input_scale is None else float(input_scale))
         for tensor in (values, scales, gain, input_scale, bias):
             if tensor is not None:
                 record_numeric_tensor(tensor)
@@ -416,6 +433,8 @@ class _Projection:
         payload = CONTRACT.encode_query(query)
 
         def compile_jobs(tactic, device):
+            if tactic[0] == "row_tc":
+                return ()  # Native sm_70 library was built before checkpoint repacking.
             jobs = []
             if query.kind == "nvfp4":
                 tile = min(query.out_features, 1024) if tactic[0] in ("gemv", "row_gemv") else tactic[1]
@@ -427,6 +446,10 @@ class _Projection:
             return tuple(jobs)
 
         def materialize(tactic):
+            if tactic[0] == "row_tc":
+                from .sm70_projection_tc import library
+                library()  # Retained native modules; no compilation during capture/replay.
+                return PreparedProjection(query, tactic)
             expansion, gemv = None, None
             programs = []
             if query.kind == "nvfp4":
@@ -525,9 +548,11 @@ class PackedProjection(_Projection):
                 or weight.values.shape != (n, weight.padded_in_features // 2)):
             raise ValueError("NVFP4 projection has invalid packed dimensions")
         self.weight, self.activation_mode = weight, "a16"
-        scales = scale_storage(weight.scale_mma, n, weight.padded_in_features, 16)
+        from .sm70_projection_tc import RepackedNVFP4
+        repacked = isinstance(weight, RepackedNVFP4)
+        scales = weight.scale_mma if repacked else scale_storage(weight.scale_mma, n, weight.padded_in_features, 16)
         query = ProjectionQuery("nvfp4", source.shape[0], k, weight.padded_in_features, n,
-                                weight.global_scale_kind, row_invariant=row_invariant)
+                                weight.global_scale_kind, row_invariant=row_invariant, repacked=repacked)
         self._initialize(query, source, weight.values, output, scales=scales, gain=weight.global_scale,
                          bias=bias, session=session, name=name, workspace=workspace)
 
@@ -548,8 +573,10 @@ class TensorFP8Projection(_Projection):
         if not bool((packed.block_scale.float() == 1).all()):
             raise ValueError("tensor-FP8 block scales must retain their packed unit values")
         self.weight = weight
+        from .sm70_projection_tc import RepackedFP8
         query = ProjectionQuery("tensor_fp8", source.shape[0], packed.in_features,
-                                packed.padded_in_features, packed.out_features, "multiplier", row_invariant=row_invariant)
+                                packed.padded_in_features, packed.out_features, "multiplier", row_invariant=row_invariant,
+                                repacked=isinstance(packed, RepackedFP8))
         # SM70 Inductor cannot type FP8 operands even for an opaque call: its
         # functionalization pattern pass skips such nodes. The checkpoint's
         # bits cross the boundary as bytes; only the implementation views E4M3.

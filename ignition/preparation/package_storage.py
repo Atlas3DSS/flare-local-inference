@@ -434,6 +434,19 @@ class DeviceRegion:
         self.mappings = []
         self.grow(nbytes)
 
+    def release_backing(self):
+        """Discard contents, retaining the reserved address for later zeroed growth.
+
+        The caller must synchronize GPU users and restore backing before any
+        tensor access. Dense preparation uses this only for idle cache state
+        while compiler workers consume metadata.
+        """
+        while self.mappings:
+            address, size = self.mappings[-1]
+            self.cuda.call("cuMemUnmap", C.c_uint64(address), C.c_size_t(size))
+            self.mappings.pop()
+            self.nbytes -= size
+
     def grow(self, nbytes):
         if nbytes < self.nbytes:
             raise ValueError("preparation storage cannot shrink")
