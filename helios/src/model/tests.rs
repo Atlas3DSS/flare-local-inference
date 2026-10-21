@@ -1490,7 +1490,16 @@ fn grammar_mask_packing_preserves_bits_row_layout_and_transitions() {
         for kind in [GraphKind::Proposal, GraphKind::Verification] {
             step.kind = kind;
             let mut inputs = Inputs::new(&config, &manifest).unwrap();
-            for round in 0..4 {
+            // Graph inputs persist between submissions; uploads only change what they cover.
+            let mut actual = vec![0xa5; 8 * words * 4];
+            let mut expected =
+                vec![if indexing == SubmissionRow { 0 } else { 0xa5 }; actual.len()];
+            for round in 0..6 {
+                if indexing == SubmissionRow {
+                    // Submission rows are repacked in full with every step.
+                    actual.fill(0xa5);
+                    expected.fill(0);
+                }
                 for (slot, admission) in admissions.iter_mut().enumerate() {
                     admission.as_mut().unwrap().grammar_mask = match (round, slot) {
                         (0, 1) | (1, 6) => Some(
@@ -1505,18 +1514,21 @@ fn grammar_mask_packing_preserves_bits_row_layout_and_transitions() {
                     };
                 }
                 pack_inputs(&mut inputs, &config, &scheduler, &step, &admissions).unwrap();
-                let mut actual = vec![0xa5; 8 * words * 4];
+                let mut uploaded = 0;
                 for upload in inputs
                     .uploads()
                     .into_iter()
                     .filter(|u| u.buffer == "sampling_grammar_mask")
                 {
                     assert!(!upload.bytes.is_empty());
+                    uploaded += upload.bytes.len();
                     actual[upload.offset..upload.offset + upload.bytes.len()]
                         .copy_from_slice(upload.bytes);
                 }
-                let mut expected =
-                    vec![if indexing == SubmissionRow { 0 } else { 0xa5 }; actual.len()];
+                if round == 5 && indexing != SubmissionRow {
+                    // A repeated unconstrained submission leaves the resident masks in place.
+                    assert_eq!(uploaded, 0, "{indexing:?} {kind:?} round {round}");
+                }
                 for (row, lane) in step.lanes.iter().enumerate() {
                     let slot = lane.request.slot as usize;
                     let destination = if indexing == RequestRow { slot } else { row };
@@ -1535,6 +1547,96 @@ fn grammar_mask_packing_preserves_bits_row_layout_and_transitions() {
             }
         }
     }
+}
+
+#[test]
+fn grammar_mask_cache_survives_alternating_graph_indexing() {
+    for indexing in [InputIndexing::RequestRow, InputIndexing::ActiveRow] {
+        let (mut config, manifest, scheduler, mut admissions, mut step) = grammar_packing_fixture();
+        for graph in &mut config.contract.graphs {
+            for binding in &mut graph.inputs {
+                if binding.buffer == "sampling_grammar_mask" {
+                    binding.indexing = if graph.kind == GraphOperation::Verification {
+                        InputIndexing::SubmissionRow
+                    } else { indexing };
+                }
+            }
+        }
+        step.lanes = [6, 1, 3].map(|slot| step.lanes[slot].clone()).into();
+        let words = config.contract.vocabulary.div_ceil(32);
+        let mut actual = vec![0xa5; 8 * words * 4];
+        let mut inputs = Inputs::new(&config, &manifest).unwrap();
+        for kind in [GraphKind::Proposal, GraphKind::Verification, GraphKind::Proposal] {
+            step.kind = kind;
+            for admission in admissions.iter_mut().flatten() {
+                admission.grammar_mask = (kind == GraphKind::Verification).then(|| vec![0; words]);
+            }
+            pack_inputs(&mut inputs, &config, &scheduler, &step, &admissions).unwrap();
+            for upload in inputs.uploads().into_iter().filter(|u| u.buffer == "sampling_grammar_mask") {
+                actual[upload.offset..upload.offset + upload.bytes.len()].copy_from_slice(upload.bytes);
+            }
+            if kind == GraphKind::Proposal {
+                for (row, lane) in step.lanes.iter().enumerate() {
+                    let destination = if indexing == InputIndexing::RequestRow { lane.request.slot as usize } else { row };
+                    assert!(actual[destination * words * 4..(destination + 1) * words * 4].iter().all(|&b| b == 0xff),
+                        "{indexing:?}: graph alternation must restore unconstrained mask bytes");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn grammar_mask_cache_invalidates_other_bindings_and_graph_writes() {
+    for mode in ["missing-input", "offset-input", "state-write"] {
+        let (mut config, manifest, scheduler, admissions, mut step) = grammar_packing_fixture();
+        let words = config.contract.vocabulary.div_ceil(32);
+        let graph = config.contract.graphs.iter_mut().find(|g| g.kind == GraphOperation::Verification).unwrap();
+        if mode == "missing-input" {
+            graph.inputs.retain(|b| b.buffer != "sampling_grammar_mask");
+        } else if mode == "offset-input" {
+            graph.inputs.iter_mut().find(|b| b.buffer == "sampling_grammar_mask").unwrap().value_offset = 1;
+        } else {
+            graph.state.push(StateAccess {
+                view: StateView { buffer: "sampling_grammar_mask".into(), offset: 0, stride: words * 4, nbytes: words * 4 },
+                access: StateAccessKind::Write,
+            });
+        }
+        step.lanes = vec![step.lanes[1].clone()];
+        let mut inputs = Inputs::new(&config, &manifest).unwrap();
+        let mut actual = vec![0xa5; 8 * words * 4];
+        for kind in [GraphKind::Proposal, GraphKind::Verification, GraphKind::Verification, GraphKind::Proposal] {
+            step.kind = kind;
+            pack_inputs(&mut inputs, &config, &scheduler, &step, &admissions).unwrap();
+            for upload in inputs.uploads().into_iter().filter(|u| u.buffer == "sampling_grammar_mask") {
+                actual[upload.offset..upload.offset + upload.bytes.len()].copy_from_slice(upload.bytes);
+            }
+            if kind == GraphKind::Proposal || mode == "state-write" {
+                assert!(actual[words * 4..2 * words * 4].iter().all(|&b| b == 0xff), "{mode}: missing unconstrained upload");
+            }
+            if kind == GraphKind::Verification {
+                // Model execution may overwrite a destination not preserved by
+                // its semantic input contract; reproduce that device write.
+                actual.fill(0);
+            }
+        }
+    }
+}
+
+#[test]
+fn grammar_mask_cache_discards_unsubmitted_rows_after_pack_error() {
+    let (config, manifest, scheduler, mut admissions, mut step) = grammar_packing_fixture();
+    let words = config.contract.vocabulary.div_ceil(32);
+    step.lanes = [0, 7].map(|slot| step.lanes[slot].clone()).into();
+    let mut inputs = Inputs::new(&config, &manifest).unwrap();
+    admissions[7].as_mut().unwrap().grammar_mask = Some(vec![0; words + 1]);
+    assert!(pack_inputs(&mut inputs, &config, &scheduler, &step, &admissions).is_err());
+    admissions[7].as_mut().unwrap().grammar_mask = None;
+    pack_inputs(&mut inputs, &config, &scheduler, &step, &admissions).unwrap();
+    let uploaded: usize = inputs.uploads().iter().filter(|u| u.buffer == "sampling_grammar_mask").map(|u| u.bytes.len()).sum();
+    assert_eq!(uploaded, 2 * words * 4, "the failed pack uploaded neither row");
+    pack_inputs(&mut inputs, &config, &scheduler, &step, &admissions).unwrap();
+    assert!(!inputs.uploads().iter().any(|u| u.buffer == "sampling_grammar_mask"));
 }
 
 #[test]
