@@ -11,6 +11,7 @@ pub const MAX_TOP_LOGPROBS: usize = 20;
 // Each token/logprob pair occupies two int32 words, starting with the chosen token.
 pub const LOGPROB_PAIR_FIELDS: usize = 2;
 pub const LOGPROB_FIELDS: usize = LOGPROB_PAIR_FIELDS * (1 + MAX_TOP_LOGPROBS);
+pub const PROMPT_FIELDS: usize = 3 + 2 * MAX_TOP_LOGPROBS;
 pub const RECORD_FIELDS: usize = 8;
 pub const BATCH_CAPACITIES: [usize; 7] = [1, 2, 4, 8, 16, 32, 64];
 
@@ -63,6 +64,7 @@ pub enum GraphKind {
     Restore,
     Snapshot,
     Prefill,
+    ScoredPrefill,
     Decode,
     Speculative,
     /// Retained draft preparation; consumes no target history.
@@ -75,10 +77,15 @@ pub enum GraphKind {
 }
 
 impl GraphKind {
+    pub fn is_prefill(self) -> bool {
+        matches!(self, Self::Prefill | Self::ScoredPrefill)
+    }
+
     pub fn samples(self) -> bool {
         matches!(
             self,
             Self::Prefill
+                | Self::ScoredPrefill
                 | Self::Decode
                 | Self::Speculative
                 | Self::Verification
@@ -115,6 +122,7 @@ impl TryFrom<&str> for GraphKind {
             "restore" => Ok(Self::Restore),
             "snapshot" => Ok(Self::Snapshot),
             "prefill" => Ok(Self::Prefill),
+            "scored_prefill" => Ok(Self::ScoredPrefill),
             "decode" => Ok(Self::Decode),
             "speculative" => Ok(Self::Speculative),
             "proposal" => Ok(Self::Proposal),
@@ -271,6 +279,26 @@ impl ExecutionManifest {
         }
     }
 
+    pub fn prompt_logprob_capacity(&self) -> Result<usize> {
+        let targets = self.buffers.iter().find(|b| b.name == "prompt_target_tokens");
+        let output = self.buffers.iter().find(|b| b.name == "prompt_logprobs");
+        let scored = || self.graphs.iter().filter(|g| g.kind == GraphKind::ScoredPrefill);
+        match (targets, output, scored().next().is_none()) {
+            (None, None, true) => Ok(0),
+            (Some(targets), Some(output), false) => {
+                let capacity = targets.shape.first().copied().unwrap_or(0);
+                if capacity == 0 || targets.shape != [capacity] || targets.dtype != Dtype::Int32
+                    || output.shape != [2, capacity, PROMPT_FIELDS] || output.dtype != Dtype::Int32
+                    || scored().any(|g| g.token_capacity > capacity)
+                    || self.max_top_logprobs()? != MAX_TOP_LOGPROBS {
+                    return Err("invalid prompt logprob buffer layout".into());
+                }
+                Ok(capacity)
+            }
+            _ => Err("prompt logprobs require scored graphs, targets, and output storage together".into()),
+        }
+    }
+
     pub fn buffer(&self, name: &str) -> Result<&BufferDescriptor> {
         self.buffers
             .iter()
@@ -387,6 +415,7 @@ impl ExecutionManifest {
             }
         }
         let logprobs = self.max_top_logprobs()? != 0;
+        self.prompt_logprob_capacity()?;
         let mut names = HashSet::new();
         let mut host_spans = HashMap::<&str, (usize, usize)>::new();
         for graph in &self.graphs {
@@ -435,7 +464,7 @@ impl ExecutionManifest {
                         && graph.batch_capacity <= self.request_capacity()
                         && (1..=8).contains(&graph.token_capacity)
                 }
-                GraphKind::Prefill => {
+                GraphKind::Prefill | GraphKind::ScoredPrefill => {
                     graph.batch_capacity == 1
                         && ([1, 16].contains(&graph.token_capacity)
                             || (graph.token_capacity >= 64
@@ -457,7 +486,7 @@ impl ExecutionManifest {
             let mut bound = HashSet::new();
             for binding in &graph.input_bindings {
                 if !bound.insert(binding.buffer_name.as_str())
-                    || ["completion_records", "completion_logprobs"].contains(&binding.buffer_name.as_str())
+                    || ["completion_records", "completion_logprobs", "prompt_logprobs"].contains(&binding.buffer_name.as_str())
                 {
                     return Err(Error::execution(
                         ExecutionError::Manifest,
@@ -489,6 +518,9 @@ impl ExecutionManifest {
                         ));
                     }
                 }
+            }
+            if bound.contains("prompt_target_tokens") != (graph.kind == GraphKind::ScoredPrefill) {
+                return Err("only scored prefill graphs bind prompt targets".into());
             }
             if logprobs && graph.kind.samples() && !bound.contains("logprob_requested") {
                 return Err(Error::execution(

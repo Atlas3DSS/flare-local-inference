@@ -13,7 +13,8 @@ def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress, retain_
     speculation = plan.speculation
     drafting = {} if speculation is None else {
         "speculative_widths": speculation.widths, "speculative_token_capacity": plan.speculative_token_capacity, "speculative_fixed_width": speculation.fixed_width}
-    config = PreparationConfig(compile_workers=plan.compile_workers, tuning_replica=plan.tuning_replica,
+    config = PreparationConfig(prompt_logprobs=plan.prompt_logprobs,
+        compile_workers=plan.compile_workers, tuning_replica=plan.tuning_replica,
         devices=tuple(range(plan.world_size)), compile_decoder=compile_forwards,
         retain_graphs=retain_graphs, max_active=plan.concurrency, image_concurrency=plan.image_concurrency, context=plan.context,
         prefill_chunk_size=plan.prefill_chunk,

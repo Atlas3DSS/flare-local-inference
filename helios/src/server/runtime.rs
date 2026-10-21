@@ -35,6 +35,7 @@ pub struct Prompt {
     /// Generate through end-of-sequence tokens until the output limit, as vLLM's `ignore_eos`.
     pub ignore_eos: bool,
     pub logprobs: bool,
+    pub prompt_logprobs: bool,
 }
 
 impl Prompt {
@@ -48,6 +49,7 @@ pub enum GenerationEvent {
     Token(u32),
     LogprobToken(crate::execution::TokenLogprobs),
     Protocol(Vec<crate::output::Piece>),
+    PromptLogprobs { start: usize, tokens: Vec<u32>, values: Vec<Option<crate::execution::PromptLogprobs>> },
     ObservedToken {
         token: u32,
         timestamp_ns: Option<u64>,
@@ -138,10 +140,17 @@ struct Incoming {
     host_lookup: bool,
     /// Admitted once already, so the admission counter is not advanced again.
     readmitted: bool,
+    prompt_score_end: usize,
+    prompt_scored: usize,
     /// Retry capacity admission only after the scheduler's resources change.
     blocked: Option<(crate::cache::Fence, usize, usize, usize)>,
 }
 impl Incoming {
+    fn prompt_score_range(&self, start: usize, tokens: usize) -> std::ops::Range<usize> {
+        let first = (if start == 0 { 0 } else { start + 1 }).max(self.prompt_scored);
+        first..(start + tokens + 1).min(self.prompt_score_end)
+    }
+
     fn notify_admission(&self, result: Result<()>) {
         if let Some(sender) = self
             .admission
@@ -413,6 +422,8 @@ impl ModelRuntime {
                         )
                     })
                     .and_then(|()| {
+                        scheduler.scored_prefill_graphs(&executor.manifest().graphs.iter()
+                            .filter(|g| g.kind == GraphKind::ScoredPrefill).map(|g| g.token_capacity).collect::<Vec<_>>())?;
                         scheduler.prefill_graphs(
                             &executor
                                 .manifest()
@@ -662,6 +673,8 @@ impl ModelRuntime {
                 _capacity: Some(capacity.clone()),
                 arrival_ns: super::observation::monotonic_ns(),
                 publications: Default::default(),
+                prompt_score_end: if prompt.prompt_logprobs { prompt.tokens.len() } else { 0 },
+                prompt_scored: 0,
                 prompt,
                 events,
                 admission: Mutex::new(Some(admission)),
@@ -1083,12 +1096,13 @@ impl<'a> Worker<'a> {
                 max_new_tokens: incoming.prompt.max_new_tokens,
                 grammar_constrained: incoming.prompt.grammar.is_some(),
                 host_stops: incoming.prompt.has_host_stops(),
+                prompt_logprobs: incoming.prompt_scored < incoming.prompt_score_end,
                 growable_output: true,
             };
             self.scheduler
                 .advance_to(super::observation::monotonic_ns())?;
             let admission = if let Some(store) =
-                self.store.as_mut().filter(|_| incoming.host_lookup)
+                self.store.as_mut().filter(|_| incoming.host_lookup && !spec.prompt_logprobs)
             {
                 admit_with_host_store(&mut self.scheduler, store.as_mut(), spec, self.prefill_rate)
             } else {
@@ -1279,6 +1293,7 @@ impl<'a> Worker<'a> {
         if matches!(
             kind,
             GraphKind::Prefill
+                | GraphKind::ScoredPrefill
                 | GraphKind::Speculative
                 | GraphKind::Verification
                 | GraphKind::Mixed
@@ -1293,7 +1308,7 @@ impl<'a> Worker<'a> {
                 if !matches!(record.status, 1 | 2) {
                     continue;
                 }
-                if kind == GraphKind::Prefill {
+                if kind.is_prefill() {
                     prefill += (record.consumed_tokens.max(0) as u64)
                         .saturating_sub(live.consumed_tokens)
                         .min(lane.tokens as u64);
@@ -1358,6 +1373,38 @@ impl<'a> Worker<'a> {
                 nanos,
                 &completion.records,
             );
+        }
+        if kind == GraphKind::ScoredPrefill {
+            let lane = &measured_step.lanes[0];
+            let slot = lane.request.slot as usize;
+            if completion.records[slot].status != 3
+                && let Some(request) = self.active[slot].as_mut().filter(|r| r.request == lane.request)
+            {
+                let prompt = &request.incoming.prompt;
+                let range = request.incoming.prompt_score_range(lane.start_position as usize, lane.tokens);
+                let (first, end) = (range.start, range.end);
+                let payload = completion.prompt_logprobs.as_ref().ok_or("scored prefill lacks results")?;
+                let values = (first..end).map(|position| {
+                    if position == 0 || prompt.data.is_image_position(position) {
+                        return Ok(None);
+                    }
+                    let value = payload.get(position - lane.start_position as usize - 1)
+                        .and_then(Option::as_ref).ok_or("scored prefill omitted a prompt token")?;
+                    if value.value.token != prompt.tokens[position] || value.rank as usize > self.config.contract.vocabulary
+                        || value.value.top[..value.value.top_count].iter().any(|(t, _)| *t as usize >= self.config.contract.vocabulary) {
+                        return Err(crate::Error::from("scored prefill returned an invalid token or rank"));
+                    }
+                    Ok(Some(value.clone()))
+                }).collect::<Result<Vec<_>>>()?;
+                if first < end {
+                    request.incoming.prompt_scored = end;
+                    if request.incoming.events.try_send(GenerationEvent::PromptLogprobs {
+                        start: first, tokens: prompt.tokens[first..end].to_vec(), values,
+                    }).is_err() {
+                        request.incoming.cancelled.store(true, Ordering::Release);
+                    }
+                }
+            }
         }
         let mut stopped = Vec::new();
         let mut positions = [0usize; crate::execution::REQUEST_LANES];
@@ -1779,7 +1826,7 @@ impl<'a> Worker<'a> {
             .lanes
             .iter()
             .enumerate()
-            .any(|(row, _)| step.lane_kind(row) == GraphKind::Prefill)
+            .any(|(row, _)| step.lane_kind(row).is_prefill())
             && self.store.is_some()
         {
             if self.prefill_started.len() >= 8 {
@@ -1791,7 +1838,7 @@ impl<'a> Worker<'a> {
                 step.lanes
                     .iter()
                     .enumerate()
-                    .filter(|(row, _)| step.lane_kind(*row) == GraphKind::Prefill)
+                    .filter(|(row, _)| step.lane_kind(*row).is_prefill())
                     .map(|(_, lane)| lane.tokens as u64)
                     .sum(),
             ));
@@ -2093,6 +2140,7 @@ mod tests {
                 },
                 grammar_mask: None,
                 ignore_eos: false,
+                prompt_logprobs: false,
             })
         });
         let lane = |slot: usize| ScheduledLane {
@@ -2199,7 +2247,7 @@ mod tests {
             scheduler
                 .complete(fence, &records, Default::default())
                 .unwrap();
-            if step.kind == GraphKind::Prefill {
+            if step.kind.is_prefill() {
                 let capture = scheduler.phase_plan(GraphKind::Snapshot, None);
                 assert_eq!(capture.kind, GraphKind::Snapshot);
                 let copy_fence = Fence(fence.0 + 1);
@@ -2263,6 +2311,7 @@ mod tests {
             max_new_tokens: 20,
             grammar_constrained,
             host_stops: false,
+            prompt_logprobs: false,
             growable_output: false,
         };
         let constrained = scheduler.admit(spec(7, true)).unwrap();
@@ -2341,6 +2390,7 @@ mod tests {
                 stop_sequences: vec![],
                 stop_strings: vec![],
                 logprobs: false,
+                prompt_logprobs: false,
                 ignore_eos: false,
                 grammar: None,
             },
@@ -2352,6 +2402,8 @@ mod tests {
             observation: None,
             host_lookup: true,
             readmitted: false,
+            prompt_score_end: 0,
+            prompt_scored: 0,
             blocked: None,
         };
         (
@@ -2364,6 +2416,19 @@ mod tests {
                 enqueue_ns: None,
             },
         )
+    }
+
+    #[test]
+    fn readmission_omits_published_scores_and_preserves_the_original_prompt_end() {
+        let (mut incoming, _generation) = stream(2);
+        incoming.prompt_score_end = 8193;
+        assert_eq!(incoming.prompt_score_range(0, 4096), 0..4097);
+        incoming.prompt_scored = 4097;
+        incoming.readmitted = true;
+        assert!(incoming.prompt_score_range(0, 4096).is_empty());
+        assert_eq!(incoming.prompt_score_range(4096, 4096), 4097..8193);
+        incoming.prompt_scored = 8193;
+        assert!(incoming.prompt_score_range(8192, 4096).is_empty());
     }
 
     #[test]
@@ -2481,6 +2546,7 @@ mod tests {
             max_new_tokens: 10,
             grammar_constrained,
             host_stops: false,
+            prompt_logprobs: false,
             growable_output: false,
         }
     }
@@ -2633,6 +2699,7 @@ mod tests {
                 },
                 grammar_mask: None,
                 ignore_eos: false,
+                prompt_logprobs: false,
             });
         }
         let mut stopped = Vec::new();
@@ -2991,6 +3058,7 @@ mod tests {
             max_new_tokens: 10,
             grammar_constrained: false,
             host_stops: false,
+            prompt_logprobs: false,
             growable_output: false,
         };
         let active = scheduler.admit(spec()).unwrap();
@@ -3031,3 +3099,6 @@ mod tests {
 #[cfg(test)]
 #[path = "runtime/phase_tests.rs"]
 mod phase_tests;
+
+#[cfg(all(test, feature = "runtime-package"))]
+mod prompt_tests;

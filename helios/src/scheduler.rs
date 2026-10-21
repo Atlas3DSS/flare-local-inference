@@ -128,6 +128,7 @@ pub struct RequestSpec {
     pub max_new_tokens: u32,
     pub grammar_constrained: bool,
     pub host_stops: bool,
+    pub prompt_logprobs: bool,
     /// Reserve pages for the prompt and one page of output, then grow them while the
     /// request decodes. When pages run out the scheduler may preempt such a request:
     /// it finishes through its terminal checkpoint and the runtime readmits its history.
@@ -199,6 +200,7 @@ pub struct LiveRequest {
     pub grammar_constrained: bool,
     pub error_code: Option<i64>,
     host_stops: bool,
+    prompt_logprobs: bool,
     execution_limit: u64,
     history: PrefixHistory,
     tokens: Vec<u32>,
@@ -228,6 +230,10 @@ pub struct LiveRequest {
 }
 
 impl LiveRequest {
+    fn prefill_kind(&self) -> GraphKind {
+        if self.prompt_logprobs { GraphKind::ScoredPrefill } else { GraphKind::Prefill }
+    }
+
     pub(crate) fn feature_index(&self, canonical: i32) -> Result<i64> {
         if canonical < 0 {
             return Ok(i64::from(canonical));
@@ -588,6 +594,7 @@ pub struct RequestScheduler {
     speculative_fixed_width: Option<usize>,
     speculative_catalog: [Vec<usize>; 7],
     prefill_catalog: Vec<usize>,
+    scored_prefill_catalog: Vec<usize>,
     mixed_catalog: Vec<(usize, usize, usize)>,
     proposal_source: speculation::ProposalSource,
     split: Option<split::SplitSpeculation>,
@@ -659,6 +666,7 @@ impl RequestScheduler {
             speculative_fixed_width: None,
             speculative_catalog: Default::default(),
             prefill_catalog: prefill_capacities(limits.prefill_chunk_size).collect(),
+            scored_prefill_catalog: Vec::new(),
             mixed_catalog: Vec::new(),
             proposal_source: speculation::ProposalSource::Mtp,
             split: None,
@@ -703,6 +711,21 @@ impl RequestScheduler {
             );
         }
         self.prefill_catalog = catalog;
+        Ok(())
+    }
+
+    pub fn scored_prefill_graphs(&mut self, capacities: &[usize]) -> Result<()> {
+        if self.submitted != Fence(0) || self.slots.iter().any(|s| s.request.is_some()) {
+            return Err("scored prefill graphs must be selected before admission".into());
+        }
+        let mut catalog = capacities.to_vec();
+        catalog.sort_unstable();
+        if !catalog.is_empty() && (catalog.last() != Some(&self.limits.prefill_chunk_size)
+            || catalog.iter().any(|n| *n == 0 || !n.is_multiple_of(64))
+            || catalog.windows(2).any(|p| p[0] == p[1])) {
+            return Err("scored prefill capacities must cover the chunk size".into());
+        }
+        self.scored_prefill_catalog = catalog;
         Ok(())
     }
 
@@ -1200,7 +1223,7 @@ impl RequestScheduler {
             || spec.message_boundaries.first() == Some(&0)
             || spec.message_boundaries.last().is_some_and(|n| *n > spec.prompt.len())
             || spec.message_boundaries.windows(2).any(|pair| pair[0] >= pair[1])
-            || spec.max_new_tokens == 0
+            || (spec.max_new_tokens == 0 && !spec.prompt_logprobs)
             || spec
                 .prompt
                 .len()
@@ -1215,7 +1238,13 @@ impl RequestScheduler {
         self.free_slot()?;
         let mut history = PrefixHistory::new(self.identity);
         history.append(&spec.prompt, &spec.conditioning)?;
-        let lookup = self.cache.lookup(&history)?;
+        if spec.prompt_logprobs && self.scored_prefill_catalog.is_empty() {
+            return Err(crate::Error::admission(crate::AdmissionError::Invalid,
+                "prompt logprobs are not available in this model package"));
+        }
+        let lookup = if spec.prompt_logprobs {
+            Lookup { checkpoint: None, consumed_tokens: 0, pages: Vec::new(), snapshot: None }
+        } else { self.cache.lookup(&history)? };
         Ok(AdmissionPlan { history, lookup })
     }
 
@@ -1408,6 +1437,7 @@ impl RequestScheduler {
             prompt_tokens: spec.prompt.len(),
             grammar_constrained: spec.grammar_constrained,
             host_stops: spec.host_stops,
+            prompt_logprobs: spec.prompt_logprobs,
             execution_limit: execution_limit as u64,
             error_code: None,
             copy_proposal: None,
@@ -1436,7 +1466,7 @@ impl RequestScheduler {
             admission_order: self.admissions,
         });
         self.admissions += 1;
-        self.stats.cache_lookups += 1;
+        self.stats.cache_lookups += u64::from(!spec.prompt_logprobs);
         self.stats.cache_hits += u64::from(hit);
         self.stats.reused_tokens += reused;
         Ok(Admitted { handle, ticket })
@@ -2184,7 +2214,8 @@ impl RequestScheduler {
             }
             let record = records[lane.request.slot as usize];
             let finished =
-                record.status >= 2 || record.generated_tokens == request.max_new_tokens as i64;
+                record.status == 3 || ((record.status >= 2 || record.generated_tokens == request.max_new_tokens as i64)
+                    && record.consumed_tokens >= request.prompt_tokens as i64);
             if matches!(kind, GraphKind::Speculative | GraphKind::Verification)
                 && record.status != 3
             {
@@ -2202,7 +2233,7 @@ impl RequestScheduler {
             if record.status == 3 {
                 request.error_code = Some(record.error_code);
             }
-            let prefill = if kind == GraphKind::Prefill {
+            let prefill = if kind.is_prefill() {
                 record.consumed_tokens as u64 - request.consumed_tokens
             } else {
                 0
@@ -2241,7 +2272,7 @@ impl RequestScheduler {
             } else {
                 RequestPhase::Decode
             };
-            if kind == GraphKind::Prefill && request.error_code.is_none() {
+            if kind.is_prefill() && request.error_code.is_none() {
                 let endpoint = request.consumed_tokens;
                 if !finished
                     && request.conditioned_windows.len() > 1

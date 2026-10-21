@@ -274,6 +274,13 @@ pub struct PromptData {
     pub spans: Vec<std::ops::Range<usize>>,
 }
 
+impl PromptData {
+    pub fn is_image_position(&self, position: usize) -> bool {
+        self.vision_token_indices.get(position).is_some_and(|index| *index >= 0)
+            || self.spans.iter().any(|span| span.contains(&position))
+    }
+}
+
 #[cfg(feature = "server")]
 pub struct PreparedInput {
     pub tokens: Vec<u32>,

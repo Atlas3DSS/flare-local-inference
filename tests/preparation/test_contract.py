@@ -125,3 +125,35 @@ def test_dense_qwen_preserves_device_decode_and_page_storage_in_typed_contract()
         assert buffers[region.storage.buffer] is tensor
         assert region.storage.buffer == f"cache.{name}"
         assert region.storage.stride == region.storage.nbytes == 128 * 4 * 256 * 2
+
+
+def test_prompt_scoring_is_an_additive_catalog_and_serialization_contract():
+    from ignition.components.prompt_logprobs import prefill_graph_count, prefill_modes, scored_prefill_capacities
+    from ignition.components.capacity import prefill_capacities
+
+    prefills = prefill_capacities(4096)
+    ordinary = prefill_modes(prefills, (1, 2, 4), None)
+    assert ordinary == [('prefill', 'prefill', tuple(reversed(prefills))), ('decode', 'decode', (1, 2, 4))]
+    scored = prefill_modes(prefills, (1, 2, 4), True)
+    assert [part for part in scored if part[0] != 'scored_prefill'] == ordinary
+    assert prefill_graph_count(prefills, None) == len(prefills)
+    assert prefill_graph_count(prefills, True) == len(prefills) + 4
+    assert scored_prefill_capacities(4096) == (128, 512, 2048, 4096)
+    assert scored_prefill_capacities(64) == (64,)
+    storage = c.state_view('state_pool', 32)
+    def encode(kinds):
+        signatures = {kind: GraphSignature(kind, 1, 128 if 'prefill' in kind else 1, tuple(c.text_inputs(kind)))
+                      for kind in kinds}
+        graphs = c.graph_contracts(signatures, {kind: c.text_inputs(kind) for kind in kinds},
+                                   continuation=storage, pending=None)
+        return [ParseDict(graph, p.GraphContract()) for graph in graphs]
+    before = encode(['prefill', 'decode'])
+    after = encode(['prefill', 'scored_prefill', 'decode'])
+    assert [g.SerializeToString() for g in before] == [g.SerializeToString() for g in after if g.kind != p.SCORED_PREFILL]
+    target = next(b for b in after[1].inputs if b.source == p.PROMPT_TARGET_TOKEN)
+    assert target.indexing == p.PACKED_TOKEN and target.padding == -1
+    assert all(b.source != p.PROMPT_TARGET_TOKEN for g in before for b in g.inputs)
+    # Metadata exported before the new enum values retains its operation and inputs.
+    old_prefill = p.GraphContract.FromString(before[0].SerializeToString())
+    assert old_prefill.kind == p.PREFILL
+    assert not any(b.source == p.PROMPT_TARGET_TOKEN for b in old_prefill.inputs)

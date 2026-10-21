@@ -36,6 +36,8 @@ def package_key(model, plan, no_compile):
               "cache_states": plan.cache_states, "reserve_bytes": plan.reserve_bytes,
               "gpus": [(gpu.name, gpu.total_bytes) for gpu in plan.gpus],
               "speculation": None if plan.speculation is None else asdict(plan.speculation)}
+    if plan.prompt_logprobs:
+        inputs["prompt_logprobs"] = True
     if plan.mla_compute_mode != "auto":
         inputs["mla_compute_mode"] = plan.mla_compute_mode
     inputs["libraries"] = {name: metadata.version(name) for name in

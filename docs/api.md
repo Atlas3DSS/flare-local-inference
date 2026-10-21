@@ -91,8 +91,9 @@ Legacy Completions accepts integer `logprobs: 0..20`. Each choice's `logprobs` h
 parallel `tokens`, `token_logprobs`, `top_logprobs`, and `text_offset` arrays.
 `top_logprobs` contains one token-to-logprob object per generated token.
 `text_offset` counts Unicode characters from the start of the completion, including
-positions inside a decoder span released for several tokens. `echo` with logprobs
-returns HTTP 400; prompt logprobs are not implemented.
+positions inside a decoder span released for several tokens. `echo: true` also
+returns prompt entries when the package was exported with
+`--prompt-logprobs`; see below.
 
 Responses accepts `include: ["message.output_text.logprobs"]` with optional
 `top_logprobs: 0..20`. Entries use the Chat token shape and appear in each
@@ -108,6 +109,48 @@ explicitly rejects logprob fields. Temperature zero remains rejected. Single-tok
 continuations work with `max_tokens: 1`, `continue_final_message: true`,
 `add_generation_prompt: false`, `logprobs: true`, and `top_logprobs: 20`, omitting
 temperature to use the model's prepared default.
+
+### Prompt log probabilities
+
+Export with `ignition export … --prompt-logprobs` to capture scored prefill graphs.
+The flag defaults off. Packages without those graphs return HTTP 400 for prompt
+logprob requests and continue serving other requests unchanged.
+
+Completions and Chat Completions accept integer `prompt_logprobs: 0..20`, independently
+of generation logprob options. Streaming with this field is rejected, including
+zero. Completions place the result at `choices[i].prompt_logprobs`; chat places it
+at the response's top-level `prompt_logprobs`. The result is a list aligned with
+prompt token positions (the rendered prompt for chat). Its first entry and image
+positions are `null`. Each other entry maps token IDs to the actual token and up
+to the requested number of alternatives. `decoded_token` remains decoded text
+when `return_tokens_as_token_ids` changes the legacy token strings:
+
+```json
+[null, {"42":{"logprob":-0.25,"rank":1,"decoded_token":" answer"},
+        "17":{"logprob":-2.5,"rank":2,"decoded_token":" question"}}]
+```
+
+Values describe the raw distribution before sampling transforms, as generation
+logprobs do. Every rank is one plus the number of vocabulary entries with a
+strictly greater reported logprob. Equal values share a rank. Alternatives use
+decreasing logprob and increasing token ID to break ties. Non-finite logprobs are represented
+as `-9999.0`. The actual token is always included, even outside the alternatives.
+
+For Completions, `echo: true` with integer `logprobs: 0..20` requests prompt scoring
+and prepends prompt entries to the legacy `logprobs` arrays. Position zero and
+image positions have null `token_logprobs` and `top_logprobs`. Prompt `text_offset`
+counts characters in the preceding decoded token strings; generated offsets start
+after the echoed text. Streaming echo emits one logprob frame per completed
+prompt chunk, before generated entries. Buffered completions also include
+`choices[i].prompt_logprobs`. An explicit `prompt_logprobs` value overrides the
+inferred count for that field; `logprobs` controls the legacy arrays.
+
+For Completions, `max_tokens: 0` with prompt scoring submits the prompt and
+returns zero generated tokens with `finish_reason: "length"`. Chat Completions
+requires a positive output limit, including for prompt scores, as vLLM does.
+Prompt and generation logprobs can share a request. Scoring starts from an uncached
+prompt and may publish prefix checkpoints for other requests. Responses and Messages reject
+`prompt_logprobs`.
 
 ## Transport and admission
 

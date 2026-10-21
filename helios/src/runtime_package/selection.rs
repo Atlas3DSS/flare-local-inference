@@ -230,7 +230,7 @@ impl LoadOptions {
                                 graph.token_capacity == 1
                             }
                     }
-                    crate::execution::GraphKind::Prefill | crate::execution::GraphKind::Vision => {
+                    crate::execution::GraphKind::Prefill | crate::execution::GraphKind::ScoredPrefill | crate::execution::GraphKind::Vision => {
                         graph.batch_capacity == 1 && graph.token_capacity > 0
                     }
                     _ => {

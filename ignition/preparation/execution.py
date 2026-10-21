@@ -24,8 +24,15 @@ class GraphSignature:
     packed_token_capacity: int = 0
 
     def __post_init__(self):
-        if self.kind not in ("init", "restore", "snapshot", "prefill", "decode", "resume", "vision", "speculative", "mixed", "proposal", "verification"):
+        if self.kind not in ("init", "restore", "snapshot", "prefill", "scored_prefill", "decode", "resume",
+                             "vision", "speculative", "mixed", "proposal", "verification"):
             raise ValueError("unknown prepared graph operation")
+        if self.kind == "scored_prefill" and (self.batch_capacity != 1
+                or self.token_capacity < 64 or self.token_capacity % 64
+                or "prompt_target_tokens" not in self.inputs):
+            raise ValueError("scored prefill requires aligned prompt rows and next-token targets")
+        if "prompt_logprobs" in self.inputs:
+            raise ValueError("prompt logprob outputs cannot be uploaded")
         if self.sampling_mode != "general":
             raise ValueError("graphs use the general stochastic sampling path")
         if self.speculation_enabled is not None and type(self.speculation_enabled) is not bool:

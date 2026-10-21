@@ -174,6 +174,7 @@ class Plan:
     # stream overlap; otherwise every branch runs serially on the main stream.
     stream_overlap: bool = True
     mixed_prefill: bool = False
+    prompt_logprobs: bool = False
     expert_scale_compression: str | None = None
     mla_compute_mode: str = "auto"
     roce_ring: bool = False
@@ -287,6 +288,7 @@ class Plan:
             "prefill_chunk": self.prefill_chunk, "roce_ring": self.roce_ring, "context_parallel": self.context_parallel,
             "stream_overlap": self.stream_overlap,
             "mixed_prefill": self.mixed_prefill,
+            "prompt_logprobs": self.prompt_logprobs,
             "expert_scale_compression": self.expert_scale_compression,
             "mla_compute_mode": self.mla_compute_mode,
             "compile_workers": self.compile_workers,
@@ -316,7 +318,8 @@ class Plan:
 def fit(recipe: Recipe, checkpoint: Checkpoint, gpus: tuple[Gpu, ...], *, concurrency: int, reserve_bytes: int,
         speculation: Speculation | None, prefill_chunk: int | None = None,
         context_parallel: bool = True, stream_overlap: bool = True, cache_states: int | None = None,
-        mixed_prefill: bool = False, expert_scale_compression: str | None = None, roce_ring: bool = False,
+        mixed_prefill: bool = False, prompt_logprobs: bool = False,
+        expert_scale_compression: str | None = None, roce_ring: bool = False,
         image_concurrency: int | None = None, online_mxfp8: bool = False,
         language_model_only: bool = False, mla_compute_mode: str = "auto") -> Plan:
     """Size pages and the prefix cache to the supply; the result may not fit.
@@ -335,7 +338,7 @@ def fit(recipe: Recipe, checkpoint: Checkpoint, gpus: tuple[Gpu, ...], *, concur
                 speculation, 0, 0, 0, reserve_bytes,
                 recipe.weights_bytes(checkpoint, len(gpus), speculation, expert_scale_compression), costs.graph_bytes,
                 context_parallel=context_parallel and costs.page_tokens is not None,
-                stream_overlap=stream_overlap and recipe.stream_overlap, mixed_prefill=mixed_prefill,
+                stream_overlap=stream_overlap and recipe.stream_overlap, mixed_prefill=mixed_prefill, prompt_logprobs=prompt_logprobs,
                 expert_scale_compression=expert_scale_compression, roce_ring=roce_ring,
                 mla_compute_mode=mla_compute_mode,
                 # Language-only plans prepare no vision encoder, so no image feature slots.
@@ -377,7 +380,7 @@ def _shortfall(plan: Plan, options: list[str], scope: str) -> CapacityError:
 def plan(recipe: Recipe, checkpoint: Checkpoint, gpus: tuple[Gpu, ...], *, selected: tuple[int, ...] | None,
          concurrency: int, reserve_bytes: int, speculation: Speculation | None,
          prefill_chunk: int | None = None, context_parallel: bool = True, stream_overlap: bool = True,
-         cache_states: int | None = None, mixed_prefill: bool = False,
+         cache_states: int | None = None, mixed_prefill: bool = False, prompt_logprobs: bool = False,
          expert_scale_compression: str | None = None, roce_ring: bool = False,
          image_concurrency: int | None = None, online_mxfp8: bool = False,
          language_model_only: bool = False, mla_compute_mode: str = "auto") -> Plan:
@@ -429,7 +432,8 @@ def plan(recipe: Recipe, checkpoint: Checkpoint, gpus: tuple[Gpu, ...], *, selec
     def fitted(group, *, concurrency=concurrency, reserve_bytes=reserve_bytes, speculation=speculation):
         return fit(recipe, checkpoint, group, concurrency=concurrency, reserve_bytes=reserve_bytes,
                    speculation=speculation, prefill_chunk=chunk, context_parallel=context_parallel,
-                   stream_overlap=stream_overlap, cache_states=cache_states, mixed_prefill=mixed_prefill,
+                   stream_overlap=stream_overlap, cache_states=cache_states,
+                   mixed_prefill=mixed_prefill, prompt_logprobs=prompt_logprobs,
                    expert_scale_compression=expert_scale_compression, roce_ring=roce_ring,
                    image_concurrency=None if image_concurrency is None else min(image_concurrency, concurrency),
                    online_mxfp8=online_mxfp8, language_model_only=language_model_only,

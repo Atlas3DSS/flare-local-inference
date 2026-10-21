@@ -353,6 +353,7 @@ class PreparedDecoder:
         session,
         name,
         workspace,
+        scoring=None,
     ):
         self.weights, self.scratch, self.metadata, self.pool = weights, scratch, metadata, pool
         self.mode, self.vision = mode, vision
@@ -416,6 +417,14 @@ class PreparedDecoder:
             session=session,
             name=name + ".norm",
         )
+        self.scoring = None if scoring is None else scoring.prepare(scratch.embedding, weights.head,
+            vocabulary=129280, session=session, coordinator=coordinator, name=name + ".prompt", copy_source=True)
+        self.score_collapse = None if self.scoring is None else PreparedMHCHead(scratch.residual,
+            weights.head_mix, self.scoring.source, rms_eps=weights.config.text["rms_norm_eps"],
+            hc_eps=weights.config.text["hc_eps"], session=session, name=name + ".prompt_collapse")
+        self.score_norm = None if self.scoring is None else PreparedRMSNorm(self.scoring.source,
+            weights.norm, self.scoring.source, eps=weights.config.text["rms_norm_eps"], session=session,
+            name=name + ".prompt_norm")
         self.head = PreparedVocabularyProjection(
             scratch.hidden,
             weights.head,
@@ -443,6 +452,9 @@ class PreparedDecoder:
                 self.feedback(s.residual, column * 4096)
         s.head_residual.copy_(s.residual[m.sample_indices])
         self.norm(self.collapse(s.head_residual))
+        if self.scoring is not None:
+            self.score_norm(self.score_collapse(s.residual))
+            self.scoring()
         self.head(s.hidden)
         return s.hidden
 

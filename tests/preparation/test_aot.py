@@ -261,8 +261,7 @@ def test_compile_before_materializing_storage(tmp_path, monkeypatch):
     from ignition.preparation.deferred import deferred_mode, deferred_tensor
     from ignition.preparation.execution import GraphSignature
 
-    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
-    cache = ForwardCache(namespace={"model": "deferred-buffer"}, device="cuda:0")
+    cache = ForwardCache(namespace={"model": "deferred-buffer"}, device="cuda:0", root=tmp_path)
     pools = []
     shutdown = CompilePool.__exit__
     load = torch.compiler.load_compiled_function
@@ -429,8 +428,7 @@ def test_forward_cache_restores_without_tracing_and_rebuilds_changed_guards(tmp_
     from ignition.preparation.execution import GraphSignature
     from torch._dynamo.guards import PyExprCSEPass
 
-    monkeypatch.setenv('XDG_CACHE_HOME', str(tmp_path))
-    cache = ForwardCache(namespace={'model': 'buffer'}, device='cuda:0')
+    cache = ForwardCache(namespace={'model': 'buffer'}, device='cuda:0', root=tmp_path)
     signature = GraphSignature('decode', 1, 1)
     from types import SimpleNamespace
 
@@ -477,12 +475,11 @@ class BranchForward:
 
 
 @torch.no_grad()
-def test_forward_cache_rebuilds_forwards_whose_branch_composition_changed(tmp_path, monkeypatch):
+def test_forward_cache_rebuilds_forwards_whose_branch_composition_changed(tmp_path):
     from ignition.components.projection_overlap import ConcurrentProjectionChain
     from ignition.preparation.execution import GraphSignature
 
-    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
-    cache = ForwardCache(namespace={"model": "branches"}, device="cuda:0")
+    cache = ForwardCache(namespace={"model": "branches"}, device="cuda:0", root=tmp_path)
     signature = GraphSignature("decode", 1, 1)
     hits = []
     # Serial and overlapped preparations share a cache path; guards keep either from restoring the other.
@@ -500,14 +497,13 @@ def test_parallel_forward_preparation_captures_and_restores_without_workers(tmp_
     from ignition.preparation.compile_pool import CompilePool
     from ignition.preparation.execution import GraphSignature
 
-    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
     functions = {f"decode{index}": BufferForward(handle) for index, handle in enumerate((0, 73, 127), 1)}
     functions["decode2"].negate = True
     functions["decode1"].source = torch.nn.Parameter(functions["decode1"].source, requires_grad=False)
     signatures = {name: GraphSignature("decode", index, 1) for index, name in enumerate(functions, 1)}
     session = SimpleNamespace(capture=nullcontext, namespace=SimpleNamespace(to_dict=lambda: {"model": "parallel-buffer"}))
     options = dict(session=session, device=torch.device("cuda:0"), stream=torch.cuda.Stream(),
-                   pool=torch.cuda.graph_pool_handle())
+                   pool=torch.cuda.graph_pool_handle(), cache_root=tmp_path)
     def forbidden(*args, **kwargs):
         raise AssertionError("parent must not trace or lower prepared forwards")
 
@@ -591,3 +587,63 @@ def test_explicit_worker_budget_compiles_and_replays_a_catalog(tmp_path, monkeyp
             assert torch.cuda.memory_stats()['allocation.all.allocated'] == allocated
             torch.testing.assert_close(forward.output, forward.source.sin() * forward.source)
         graph.reset()
+
+
+@torch.no_grad()
+@pytest.mark.parametrize("deferred", [False, True])
+def test_restore_checks_storage_before_gpu_work(tmp_path, deferred):
+    from ignition.preparation.execution import GraphSignature
+
+    cache = ForwardCache(namespace={"model": "alias-restore"}, device="cuda:0", root=tmp_path)
+    signature = GraphSignature("decode", 1, 1)
+    cache.prepare(BufferForward(0), name="decode", signature=signature)
+    fresh = BufferForward(23)
+    fresh.output.fill_(float("nan"))
+    restored, path = cache._restore(fresh, name="decode", signature=signature, deferred=deferred)
+    assert restored is not None
+    assert torch.isnan(fresh.output).all()
+    fresh.part = torch.empty_like(fresh.storage).view(torch.float32)[16:48]
+    restored, rejected_path = cache._restore(fresh, name="decode", signature=signature, deferred=deferred)
+    assert restored is None
+    assert rejected_path == path
+    assert torch.isnan(fresh.output).all()
+    rebuilt = cache.prepare(fresh, name="decode", signature=signature)
+    assert not rebuilt.cache_hit
+    torch.testing.assert_close(fresh.output, fresh.source + 23.25)
+
+
+@torch.no_grad()
+@pytest.mark.parametrize("coordinated", [False, True])
+def test_catalog_recompiles_changed_aliases_before_warmup(tmp_path, monkeypatch, coordinated):
+    import torch.distributed as dist
+    from ignition.preparation.collectives import CollectivePreparation
+    from ignition.preparation.compile_pool import CompilePool
+    from ignition.preparation.execution import GraphSignature
+
+    submitted = []
+    submit = CompilePool.submit
+    def record(pool, forward, path):
+        submitted.append(path)
+        return submit(pool, forward, path)
+    monkeypatch.setattr(CompilePool, "submit", record)
+    dist.init_process_group("gloo", init_method="file://" + str(tmp_path / "rank"), rank=0, world_size=1)
+    try:
+        coordinator = CollectivePreparation(dist.group.WORLD)
+        cache = ForwardCache(namespace={"model": "catalog-aliases"}, device="cuda:0", root=tmp_path,
+                             compile_workers=1)
+        signatures = {"decode": GraphSignature("decode", 1, 1)}
+        hits, compilations = [], []
+        for separate in [False, False, True, True, False]:
+            forward = BufferForward(23)
+            if separate:
+                forward.part = torch.empty_like(forward.storage).view(torch.float32)[16:48]
+            compiled = cache.prepare_many({"decode": forward}, signatures,
+                coordinator=coordinator if coordinated else None, materialize=lambda: None)
+            hits.append(compiled["decode"].cache_hit)
+            compilations.append(len(submitted))
+            torch.testing.assert_close(forward.output, forward.source + 23.25)
+        assert compilations == [1, 1, 2, 2, 3]
+        if coordinated:
+            assert hits == [False, True, False, True, False]
+    finally:
+        dist.destroy_process_group()

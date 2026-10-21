@@ -95,7 +95,7 @@ def canonical_norm(norm_type, weight, eps):
 
 class PreparedDecoder:
     def __init__(self, weights, environment, scratch, metadata, pool, *, mode, runtime,
-                 vocabulary_runtime, coordinator, session, name, workspace):
+                 vocabulary_runtime, coordinator, session, name, workspace, scoring=None):
         layer_type, norm_type = environment.canonical
         self.weights, self.scratch, self.metadata, self.pool = weights, scratch, metadata, pool
         self.vision = environment.vision if mode == "prefill" else None
@@ -120,6 +120,9 @@ class PreparedDecoder:
         self.target_layers = () if weights.draft is None else weights.config.draft.target_layers
         self.auxiliary = torch.zeros((scratch.embedding.shape[0], len(self.target_layers) * c["hidden_size"]),
                                      dtype=torch.bfloat16, device=scratch.embedding.device)
+        self.scoring = None if scoring is None else scoring.prepare(scratch.embedding, weights.head,
+            vocabulary=weights.config.text["vocab_size"], session=session, coordinator=coordinator,
+            name=name + ".prompt", copy_source=True)
         self.head = PreparedVocabularyProjection(scratch.hidden, weights.head, scratch.local_logits, scratch.logits,
             runtime=vocabulary_runtime, coordinator=coordinator, session=session, name=name + ".head")
 
@@ -132,7 +135,12 @@ class PreparedDecoder:
             if index in self.target_layers:
                 column = self.target_layers.index(index) * hidden.shape[-1]
                 self.auxiliary[:, column:column + hidden.shape[-1]].copy_(hidden)
-        self.scratch.hidden.copy_(self.norm(hidden[self.metadata.sample_indices]))
+        if self.scoring is not None:
+            self.scoring.source.copy_(self.norm(hidden))
+            self.scoring()
+            self.scratch.hidden.copy_(self.scoring.source[self.metadata.sample_indices])
+        else:
+            self.scratch.hidden.copy_(self.norm(hidden[self.metadata.sample_indices]))
         self.head(self.scratch.hidden)
 
     def commit(self, counts):

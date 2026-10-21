@@ -116,6 +116,7 @@ pub struct LogprobOptions {
 pub struct Options {
     pub sampling: Sampling,
     pub logprobs: Option<LogprobOptions>,
+    pub prompt_logprobs: Option<usize>,
     pub effort: Option<Effort>,
     pub output_limit: Option<u64>,
     pub stops: Vec<String>,

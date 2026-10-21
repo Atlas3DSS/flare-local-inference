@@ -149,3 +149,72 @@ require both buffers, their exact dtypes and frame/slot geometry, and 1<=K<=20.
 Sampling graphs must bind the flag vector. Malformed declarations fail loading.
 All newly prepared recipes allocate the complete bundle; enabling the feature on
 an old package requires a new export.
+
+## Prompt scoring
+
+`scored_prefill` consumes the ordinary causal prefill inputs plus
+`prompt_target_tokens: int32[C]`. Target row `j` is the prompt token at position
+`chunk_start+j+1`, or -1 at the prompt end and inside image spans. The operation
+advances exactly the same cache and continuation storage as prefill, preserves
+draft context, and may sample the final chunk's next token through the existing
+completion contract. A zero output budget performs prefill only.
+
+`--prompt-logprobs` defaults off, allocating no scoring storage or graphs.
+When enabled, scored capacities grow by four from 128 through the configured chunk
+limit. Ordinary graph catalogs and inputs retain their shapes and order.
+
+One optional packed output, `prompt_logprobs: int32[2,C,43]`, uses the ordinary
+submission frame index. Each row contains actual token ID, raw FP32 logprob bits,
+actual rank, then twenty (token ID, FP32 logprob bits) alternatives. Invalid target
+rows write ID -1, NaN, rank zero and alternative IDs -1. Only the producing frame
+and graph capacity are written. Native readback uses the producing event and
+preallocated pinned frame storage, and retires it only after decoding. Rank zero
+copies each scored chunk; no full prompt is retained on the GPU. The server emits
+prompt chunks in order before the same frame's generated tokens. Position zero
+and image positions become null entries.
+
+The shared component projects at most 64 hidden rows at a time with the same
+checkpoint head and b12x preparation mechanisms as generation. The only logit
+matrix is `[64, local_vocabulary]`; each row block reuses pooled reduction storage.
+Each vocabulary tile computes FP32 maximum and exponential mass. A compact
+bit-preserving exchange combines per-shard statistics and finds the actual token's
+value. Tiles count strictly greater reported values and select the best twenty
+by the generation ordering, including subtraction-induced ties. A second compact
+exchange merges shard candidates and adds one to the summed counts. Each exchange
+carries 64 int32 words (256 bytes) per row per rank; it never transports vocabulary
+matrices. Reductions and collectives are prepared before capture.
+
+Every recipe uses this component with its own final normalization. DeepSeek V4.1
+ordinary prefill uses the [technical report's](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/blob/main/DeepSeek_V41_Tech_Report.pdf)
+bounded SWA replay (§3.2.2) for chunks over 128 rows. Scoring runs all layers on all
+rows, with full-row candidate storage. A long prompt's last-row score can differ
+from the first generated token's logprob: measured mean +0.29 nats, up to about 1.1 nats.
+Uncached prefill also varies between runs: b12x routed-expert reduction order
+changes layer-0 results by one BF16 ULP, amplified by subsequent expert routing.
+Accuracy comparisons must use fresh-run spread, rather than exact repeatability.
+
+On four RTX PRO 6000 GPUs, TP4 at concurrency 32, flag-on/off ABBA serving
+measurements found ordinary prefill and unrequested decode unchanged within noise.
+KV capacity fell 5.4%, from 21,714,176 to 20,539,648 tokens (Qwen TP1: 0.9%).
+The packages add about 1.0 GB of fixed device allocations per rank, including
+about 408 MiB of graph scratch, 185 MiB of other tensors and additional capture
+storage; eight scored graphs add about 51,000 nodes. Scored-prefill service
+throughput was about 0.50× ordinary at K=0 and 0.37× at K=20 (Qwen estimate:
+0.77×). Both counts execute the same top-20 GPU reduction; the K-dependent cost
+includes CPU formatting and response bytes. These measurements include legacy
+echo formatting for non-echo requests.
+
+Helios selects the operation from the request and prepared catalog, independently
+of model identity. Scored requests bypass GPU and host prefix lookup, but use the
+shared reservation, snapshot and publication machinery. They cannot enter the
+prompt role of a mixed graph. Readmission preserves the original prompt end and
+published score position, finishes any remaining scores, and suppresses duplicates.
+Requests without scoring never select this operation.
+
+Protobuf declares operation 12 and value source 39 without new message fields.
+Absent prompt buffers and graphs mean no scoring; partial or malformed layouts
+fail validation. Old packages retain their operations, default values, loading
+and serving behavior.
+
+Wire formats follow vLLM's [completion serving](https://github.com/vllm-project/vllm/blob/main/vllm/entrypoints/openai/completion/serving.py),
+and [chat serving](https://github.com/vllm-project/vllm/blob/main/vllm/entrypoints/openai/chat_completion/serving.py).

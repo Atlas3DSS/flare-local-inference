@@ -66,7 +66,7 @@ pub fn pack_inputs(
         let live = scheduler.request(lane.request)?;
         if step.kind == GraphKind::Mixed
             && live.phase
-                != if step.lane_kind(row) == GraphKind::Prefill {
+                != if step.lane_kind(row).is_prefill() {
                     crate::scheduler::RequestPhase::Prefill
                 } else {
                     crate::scheduler::RequestPhase::Decode
@@ -79,7 +79,7 @@ pub fn pack_inputs(
         frame.lengths[row] =
             i32::try_from(lane.tokens).map_err(|_| "model row exceeds token capacity")?;
         frame.samples[row] = i32::from(
-            step.lane_kind(row) != GraphKind::Prefill
+            !step.lane_kind(row).is_prefill()
                 || lane.start_position.checked_add(lane.tokens as u64)
                     == Some(live.prompt_tokens as u64),
         );

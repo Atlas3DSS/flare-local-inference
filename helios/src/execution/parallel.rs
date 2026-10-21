@@ -221,6 +221,7 @@ impl TensorParallelExecutor {
                 }
                 peer.completion = Some(FrameCompletion {
                     logprobs: None,
+                    prompt_logprobs: None,
                     proposal_confidence,
                     fence,
                     graph_index: graph,

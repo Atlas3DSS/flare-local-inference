@@ -7,6 +7,19 @@ use crate::{
     scheduler::{RequestScheduler, RequestSpec, SchedulerLimits},
 };
 
+#[test]
+fn prompt_scoring_recognizes_features_without_protected_image_spans() {
+    let data = PromptData { positions: vec![], vision_token_indices: vec![-1, 0, 1, -1, -1, -1],
+        spans: vec![4..5] };
+    assert!(!data.is_image_position(0));
+    assert!(data.is_image_position(1));
+    assert!(data.is_image_position(2));
+    assert!(!data.is_image_position(3));
+    assert!(data.is_image_position(4));
+    assert!(!data.is_image_position(5));
+    assert!(!data.is_image_position(6));
+}
+
 pub(super) fn config() -> ModelConfig {
     ModelConfig {
         max_top_logprobs: 0,
@@ -55,6 +68,7 @@ fn admission_histogram_seed_and_partial_page_uploads_preserve_native_semantics()
             max_new_tokens: 4,
             grammar_constrained: false,
             host_stops: false,
+            prompt_logprobs: false,
             growable_output: false,
         })
         .unwrap();
@@ -75,6 +89,7 @@ fn admission_histogram_seed_and_partial_page_uploads_preserve_native_semantics()
         },
         grammar_mask: None,
         ignore_eos: false,
+        prompt_logprobs: false,
     });
     admissions[0].as_ref().unwrap().validate(&config).unwrap();
     let mut inputs = Inputs::new(&config, &manifest(&config)).unwrap();
@@ -200,6 +215,7 @@ fn large_prefill_uploads_preserve_token_position_and_image_indices_without_tail_
             max_new_tokens: 4,
             grammar_constrained: false,
             host_stops: false,
+            prompt_logprobs: false,
             growable_output: false,
         })
         .unwrap();
@@ -219,6 +235,7 @@ fn large_prefill_uploads_preserve_token_position_and_image_indices_without_tail_
         prompt,
         grammar_mask: None,
         ignore_eos: false,
+        prompt_logprobs: false,
     });
     let step = scheduler.plan().unwrap();
     scheduler.commit(&step, Fence(1)).unwrap();
@@ -504,6 +521,7 @@ fn packing_follows_value_bindings_after_buffers_and_model_are_renamed() {
             max_new_tokens: 4,
             grammar_constrained: true,
             host_stops: false,
+            prompt_logprobs: false,
             growable_output: false,
         })
         .unwrap();
@@ -522,6 +540,7 @@ fn packing_follows_value_bindings_after_buffers_and_model_are_renamed() {
         },
         grammar_mask: Some(vec![i32::MIN; config.contract.vocabulary.div_ceil(32)]),
         ignore_eos: false,
+        prompt_logprobs: false,
     });
     let step = scheduler.plan().unwrap();
     scheduler.commit(&step, Fence(1)).unwrap();
@@ -639,6 +658,7 @@ fn copy_staging_uses_physical_slots_stochastic_defaults_and_bonus_mask() {
                     max_new_tokens: 16,
                     grammar_constrained: slot == 2,
                     host_stops: false,
+                    prompt_logprobs: false,
                     growable_output: false,
                 })
                 .unwrap()
@@ -678,6 +698,7 @@ fn copy_staging_uses_physical_slots_stochastic_defaults_and_bonus_mask() {
         },
         grammar_mask: Some(vec![1; words]),
         ignore_eos: false,
+        prompt_logprobs: false,
     });
     let mut inputs = Inputs::new(&config, &manifest(&config)).unwrap();
     let step = scheduler.plan().unwrap();
@@ -862,6 +883,7 @@ fn mixed_native_uploads_pack_prompt_after_the_decode_extent_and_sample_only_elig
                     max_new_tokens: 16,
                     grammar_constrained: false,
                     host_stops: false,
+                    prompt_logprobs: false,
                     growable_output: false,
                 })
                 .unwrap();
@@ -877,6 +899,7 @@ fn mixed_native_uploads_pack_prompt_after_the_decode_extent_and_sample_only_elig
                 },
                 grammar_mask: None,
                 ignore_eos: false,
+                prompt_logprobs: false,
             });
             h
         };
@@ -1067,6 +1090,7 @@ fn state_transfer_and_resume_upload_fixture() {
                 max_new_tokens: 2,
                 grammar_constrained: false,
                 host_stops: false,
+                prompt_logprobs: false,
                 growable_output: false,
             })
             .unwrap();
@@ -1083,6 +1107,7 @@ fn state_transfer_and_resume_upload_fixture() {
             },
             grammar_mask: None,
             ignore_eos: false,
+            prompt_logprobs: false,
         });
         for (offset, kind, consumed, generated, token, status) in if cycle == 0 {
             vec![
@@ -1415,6 +1440,7 @@ fn grammar_packing_fixture() -> (
                 max_new_tokens: 512,
                 grammar_constrained: false,
                 host_stops: false,
+                prompt_logprobs: false,
                 growable_output: false,
             })
             .unwrap();
@@ -1426,6 +1452,7 @@ fn grammar_packing_fixture() -> (
             data: PromptData::default(),
             grammar_mask: None,
             ignore_eos: false,
+            prompt_logprobs: false,
         }));
         lanes.push(crate::scheduler::ScheduledLane {
             request: handle,
@@ -1534,6 +1561,7 @@ fn prefill_compacts_execution_feature_indices_and_preserves_admission_metadata()
             max_new_tokens: 1,
             grammar_constrained: false,
             host_stops: false,
+            prompt_logprobs: false,
             growable_output: true,
         })
         .unwrap();
@@ -1554,6 +1582,7 @@ fn prefill_compacts_execution_feature_indices_and_preserves_admission_metadata()
         },
         grammar_mask: None,
         ignore_eos: false,
+        prompt_logprobs: false,
     });
     let init = scheduler.plan().unwrap();
     scheduler.commit(&init, Fence(1)).unwrap();

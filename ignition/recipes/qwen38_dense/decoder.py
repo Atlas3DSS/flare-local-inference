@@ -115,7 +115,7 @@ class FullAttention(torch.nn.Module):
 
 class PreparedDecoder:
     def __init__(self, weights, scratch, metadata, pool, *, mode, vocabulary_runtime,
-                 coordinator, session, name, workspace):
+                 coordinator, session, name, workspace, scoring=None):
         self.weights, self.scratch, self.metadata, self.pool = weights, scratch, metadata, pool
         self.embedding = PreparedEmbedding(weights.tree.embed_tokens.weight, metadata.token_ids,
             scratch.activations, num_rows=metadata.live_counts[:1], session=session, name=name + ".embedding")
@@ -153,6 +153,9 @@ class PreparedDecoder:
         dim = int(config.text["head_dim"] * rotary["partial_rotary_factor"])
         self.inverse_frequency = 1.0 / (rotary["rope_theta"] ** (
             torch.arange(0, dim, 2, device=source.device, dtype=torch.float32) / dim))
+        self.scoring = None if scoring is None else scoring.prepare(scratch.activations, weights.head,
+            vocabulary=weights.config.text["vocab_size"], session=session, coordinator=coordinator,
+            name=name + ".prompt", copy_source=True)
         self.head = PreparedVocabularyProjection(scratch.hidden, weights.head, scratch.logits, scratch.logits,
             runtime=vocabulary_runtime, coordinator=coordinator, session=session, name=name + ".head", activation_mode="auto")
 
@@ -173,5 +176,10 @@ class PreparedDecoder:
         hidden = self.embedding()
         for layer in self.layers:
             hidden = layer(hidden, position_embeddings=position_embeddings)
-        self.scratch.hidden.copy_(self.weights.tree.norm(hidden[m.sample_indices]))
+        if self.scoring is not None:
+            self.scoring.source.copy_(self.weights.tree.norm(hidden))
+            self.scoring()
+            self.scratch.hidden.copy_(self.scoring.source[self.metadata.sample_indices])
+        else:
+            self.scratch.hidden.copy_(self.weights.tree.norm(hidden[m.sample_indices]))
         self.head(self.scratch.hidden)

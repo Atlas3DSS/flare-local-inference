@@ -50,7 +50,7 @@ contract_enum!(ValueSource {
     EosTokenIds = 26, EosCount = 27, PromptHistogram = 28, GrammarMask = 29,
     GrammarEnabled = 30, CopyTokenIds = 31, CopyTokenCount = 32,
     CopyConsumedTokens = 33, CopyGeneration = 34, CopyGrammarMask = 35,
-    CopyGrammarCount = 36, ImageTensor = 37, ImageFeatureSlot = 38,
+    CopyGrammarCount = 36, ImageTensor = 37, ImageFeatureSlot = 38, PromptTargetToken = 39,
 });
 contract_enum!(InputIndexing { Scalar = 1, SubmissionRow = 2, RequestRow = 3, PackedToken = 4, ActiveRow = 5 });
 contract_enum!(StateAccessKind { Read = 1, Write = 2, ReadWrite = 3 });
@@ -58,7 +58,7 @@ contract_enum!(ToolParserKind { QwenCoder = 1, GlmArgumentTags = 2, Dsml = 3, Xt
 contract_enum!(ReasoningParserKind { ThinkTags = 1, XtmlThink = 2 });
 contract_enum!(ImagePreparationKind { Qwen = 1, Mimo = 2, Deepseek = 3, Moonvit = 4, Step = 5, Radio = 6, DeepseekRowMajor = 7 });
 contract_enum!(ImageLayoutKind { Qwen = 1, Mimo = 2, Deepseek = 3, Moonvit = 4, Step = 5, Radio = 6, DeepseekRowMajor = 7 });
-contract_enum!(GraphOperation { Init = 1, Restore = 2, Snapshot = 3, Prefill = 4, Decode = 5, Resume = 6, Vision = 7, Speculative = 8, Mixed = 9, Proposal = 10, Verification = 11 });
+contract_enum!(GraphOperation { Init = 1, Restore = 2, Snapshot = 3, Prefill = 4, Decode = 5, Resume = 6, Vision = 7, Speculative = 8, Mixed = 9, Proposal = 10, Verification = 11, ScoredPrefill = 12 });
 
 impl TryFrom<GraphKind> for GraphOperation {
     type Error = crate::Error;
@@ -69,6 +69,7 @@ impl TryFrom<GraphKind> for GraphOperation {
             GraphKind::Restore => Self::Restore,
             GraphKind::Snapshot => Self::Snapshot,
             GraphKind::Prefill => Self::Prefill,
+            GraphKind::ScoredPrefill => Self::ScoredPrefill,
             GraphKind::Decode => Self::Decode,
             GraphKind::Resume => Self::Resume,
             GraphKind::Vision => Self::Vision,
@@ -405,6 +406,13 @@ impl PreparedContract {
             let graph = self.graph(&descriptor.name)?;
             if graph.kind != descriptor.kind.try_into()? {
                 return Err("semantic graph operation differs from its execution catalog".into());
+            }
+            let targets: Vec<_> = graph.inputs.iter().filter(|b| b.source == ValueSource::PromptTargetToken).collect();
+            if (descriptor.kind == GraphKind::ScoredPrefill && (targets.len() != 1
+                || targets[0].indexing != InputIndexing::PackedToken || targets[0].value_offset != 0
+                || targets[0].padding != -1 || targets[0].buffer != "prompt_target_tokens"))
+                || (descriptor.kind != GraphKind::ScoredPrefill && !targets.is_empty()) {
+                return Err("prompt targets belong only to scored prefill graphs".into());
             }
             let mut destinations = std::collections::HashSet::new();
             for input in &graph.inputs {

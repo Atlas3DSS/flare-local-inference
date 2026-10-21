@@ -193,6 +193,7 @@ impl Fixture {
                     stop_sequences: vec![],
                     stop_strings: vec![],
                     logprobs: false,
+                    prompt_logprobs: false,
                     ignore_eos: false,
                     grammar: None,
                 },
@@ -204,6 +205,8 @@ impl Fixture {
                 observation: Some(false),
                 host_lookup: true,
                 readmitted: false,
+                prompt_score_end: 0,
+                prompt_scored: 0,
                 blocked: None,
             },
             Generation {
@@ -330,6 +333,7 @@ fn completion(
     }
     FrameCompletion {
         logprobs: None,
+        prompt_logprobs: None,
         proposal_confidence: None,
         fence: Fence(sequence),
         graph_index: 0,
@@ -871,6 +875,7 @@ fn speculative_dashboard_counts_live_rounds_and_batched_forward_passes() {
                     GraphKind::Speculative,
                     FrameCompletion {
                         logprobs: None,
+                        prompt_logprobs: None,
                         proposal_confidence: None,
                         records: invalid,
                         ..frame
@@ -1516,6 +1521,7 @@ fn exercise_text_preemption(
                 conditioning: vec![],
                 grammar_constrained: false,
                 host_stops: false,
+                prompt_logprobs: false,
             })
             .unwrap();
         worker.scheduler.cancel(pressure).unwrap();
@@ -1991,6 +1997,7 @@ fn host_prefix_selects_whole_required_images_and_compacts_feature_indices() {
                     max_new_tokens: 1,
                     grammar_constrained: false,
                     host_stops: false,
+                    prompt_logprobs: false,
                     growable_output: true,
                 })
                 .unwrap();
@@ -2413,4 +2420,19 @@ fn worker_restores_conditioned_windows_with_fresh_generation_and_unchanged_sampl
     assert_eq!(processor.preparation_counts().prepared_images, 3);
     assert_eq!(fixture.metrics.admitted.load(Ordering::Relaxed), 1);
     assert_eq!(fixture.metrics.snapshot(false).prefill_tokens, 100);
+}
+
+#[test]
+fn zero_output_budget_requires_prompt_scoring_at_both_admission_checks() {
+    let fixture = Fixture::new();
+    let (mut incoming, _generation) = fixture.incoming(vec![0, 1], 0);
+    let config = &fixture.config;
+    incoming.prompt.max_new_tokens = 0;
+    assert!(crate::model::admission::validate_prompt(config, &incoming.prompt).is_err());
+    incoming.prompt.prompt_logprobs = true;
+    crate::model::admission::validate_prompt(config, &incoming.prompt).unwrap();
+    let mut admission = crate::model::Admission::from_prompt(config, RequestHandle { slot: 0, generation: 1 },
+        &incoming.prompt, false).unwrap();
+    admission.prompt_logprobs = false;
+    assert!(admission.validate(config).is_err());
 }

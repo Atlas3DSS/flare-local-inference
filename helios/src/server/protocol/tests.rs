@@ -1464,8 +1464,8 @@ fn generation_logprob_controls_have_endpoint_specific_types_and_limits() {
         (Protocol::Chat, json!({"messages":[{"role":"user","content":"x"}]}),
             vec![json!({"logprobs":true,"top_logprobs":20}), json!({"top_logprobs":0})],
             vec![json!({"top_logprobs":1}), json!({"logprobs":1}), json!({"logprobs":true,"top_logprobs":21})]),
-        (Protocol::Completions, json!({"prompt":"x"}), vec![json!({"logprobs":0}), json!({"logprobs":20})],
-            vec![json!({"logprobs":true}), json!({"logprobs":1,"echo":true}), json!({"logprobs":-1})]),
+        (Protocol::Completions, json!({"prompt":"x"}), vec![json!({"logprobs":0}), json!({"logprobs":20}), json!({"logprobs":1,"echo":true})],
+            vec![json!({"logprobs":true}), json!({"logprobs":-1})]),
         (Protocol::Responses, json!({"input":"x"}),
             vec![json!({"top_logprobs":20,"include":["message.output_text.logprobs"]}), json!({"include":["unrelated"]})],
             vec![json!({"top_logprobs":1}), json!({"logprobs":true})]),
@@ -1483,4 +1483,30 @@ fn generation_logprob_controls_have_endpoint_specific_types_and_limits() {
     let request = decode(Protocol::Chat, body, false).unwrap().request;
     assert_eq!(request.options.logprobs.unwrap().top,20);
     assert!(request.options.sampling.temperature.is_none());
+}
+
+#[test]
+fn prompt_logprob_request_types_limits_streaming_and_endpoint_placement() {
+    for protocol in [Protocol::Completions, Protocol::Chat] {
+        let base = if protocol == Protocol::Completions { json!({"prompt":"x"}) }
+            else { json!({"messages":[{"role":"user","content":"x"}]}) };
+        for top in [0, 1, 20] {
+            let mut body = base.clone(); body["prompt_logprobs"] = json!(top);
+            let decoded = super::decode::decode(protocol, body.clone(), false).unwrap();
+            assert_eq!(decoded.request.options.prompt_logprobs, Some(top));
+            body["stream"] = json!(true);
+            assert!(super::decode::decode(protocol, body, false).is_err());
+        }
+        for bad in [json!(-1), json!(21), json!(true), json!(1.5), json!("1")] {
+            let mut body = base.clone(); body["prompt_logprobs"] = bad;
+            assert!(super::decode::decode(protocol, body, false).is_err());
+        }
+    }
+    for protocol in [Protocol::Messages, Protocol::Responses] {
+        assert!(super::decode::decode(protocol, json!({"prompt_logprobs":0}), false).is_err());
+    }
+    let decoded = super::decode::decode(Protocol::Completions,
+        json!({"prompt":[1,2],"echo":true,"logprobs":2,"max_tokens":0,"stream":true}), false).unwrap();
+    assert_eq!(decoded.request.options.prompt_logprobs, Some(2));
+    assert_eq!(decoded.request.options.logprobs.unwrap().top, 2);
 }

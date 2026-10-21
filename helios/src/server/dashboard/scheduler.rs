@@ -447,6 +447,7 @@ fn ms(ns: u64) -> f64 {
 
 fn shape(graph: &GraphLabel) -> String {
     let name = match graph.kind {
+        GraphKind::ScoredPrefill => "scored prefill",
         GraphKind::Prefill => "prefill",
         GraphKind::Decode => "decode",
         GraphKind::Speculative => "speculative",
@@ -479,7 +480,7 @@ fn shape(graph: &GraphLabel) -> String {
 
 fn kind_style(kind: GraphKind) -> (&'static str, Color) {
     match kind {
-        GraphKind::Prefill => ("P", CYAN),
+        GraphKind::Prefill | GraphKind::ScoredPrefill => ("P", CYAN),
         GraphKind::Decode => ("D", GREEN),
         GraphKind::Speculative => ("S", PURPLE),
         GraphKind::Proposal => ("Q", PURPLE),

@@ -12,6 +12,9 @@ from types import SimpleNamespace
 import torch
 
 from ignition.components.completion import CompletionOutputs
+from ignition.components.prompt_logprobs import (
+    PreparedScoredPrefill, PromptScoring, prefill_modes,
+)
 
 from ignition.components.capacity import (
     batch_capacities,
@@ -68,6 +71,7 @@ from .weights import ModelWeights
 
 @dataclass(frozen=True)
 class PreparationConfig:
+    prompt_logprobs: bool = False
     image_concurrency: int | None = None
     compile_workers: int | None = None
     tuning_replica: TuningReplica | None = None
@@ -208,11 +212,16 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                 offset=torch.zeros(slots, dtype=torch.int64, device=device),
                 generation=torch.zeros(slots, dtype=torch.int64, device=device),
                 sampling_scratch=None)
+    scoring = PromptScoring.allocate(config, device, buffers, frame=frame, group=group,
+        ipc=package_storage.peer_storage, runtime=collective, coordinator=coordinator)
     forwards, signatures, metadata = {}, {}, {}
     prefills, batches = prefill_capacities(config.prefill_chunk_size), batch_capacities(config.max_active)
     modes = (True, False) if config.mtp else (False,)
     with phase(progress, "Construct graph catalog"):
         def add(name, forward, kind, rows, tokens, fields, enabled=None):
+            if kind == "scored_prefill":
+                forward = PreparedScoredPrefill(forward, requests, inputs)
+                fields = (*fields, "prompt_target_tokens")
             forwards[name] = forward
             signatures[name] = GraphSignature(kind, rows, tokens, tuple(fields), speculation_enabled=enabled)
 
@@ -220,15 +229,16 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         for enabled in modes:
             suffix = "-no-mtp" if config.mtp and not enabled else ""
             mode_weights = weights if enabled else replace(weights, draft=None)
-            for mode, sizes in (("prefill", reversed(prefills)), ("decode", () if enabled else reversed(batches))):
+            for kind, mode, sizes in prefill_modes(prefills, () if enabled else reversed(batches), scoring):
                 for capacity in sizes:
                     rows = 1 if mode == "prefill" else capacity
-                    name = f"{mode}{capacity}" + (suffix if mode == "prefill" else "")
+                    name = f"{kind}{capacity}" + (suffix if mode == "prefill" else "")
                     private = private_buffers.cursor()
                     m = metadata[name] = Metadata.allocate(capacity, rows, blocks, device, buffers=private)
                     scratch = (prefill_storage if mode == "prefill" else decode_storage).rows(capacity, rows)
                     execution_collectives = dict(collectives, runtime=prefill_collective if mode == "prefill" else collective)
-                    decoder = PreparedDecoder(mode_weights, scratch, m, pool, mode=mode, vision=vision_state,
+                    decoder = PreparedDecoder(mode_weights, scratch, m, pool, mode=mode,
+                        scoring=scoring if kind == "scored_prefill" else None, vision=vision_state,
                         session=session, name=name, workspace=arena, overlap=config.stream_overlap, buffers=private, **execution_collectives)
                     batch = PreparedBatch(inputs, requests, m, mode=mode, shard=shard, pool=pool,
                         validate_prefill=vision_state.validate_prefill if mode == "prefill" else None, buffers=private)
@@ -236,7 +246,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                     forward = PreparedGeneration(decoder, batch, completion, frame, sequence, runtime=collective,
                         coordinator=coordinator, session=session, name=name + ".generation", workspace=arena,
                         context_factory=context if enabled else None, buffers=private)
-                    add(name, forward, mode, rows, capacity if mode == "prefill" else 1,
+                    add(name, forward, kind, rows, capacity if mode == "prefill" else 1,
                         (*forward_inputs, *(vision_prefill.buffers() if mode == "prefill" else ())), enabled)
         if speculation is not None:
             for batch, width in shapes:
@@ -285,7 +295,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         graphs, compiled = capture_forwards(catalog, signatures, session=session, device=device, stream=stream,
             pool=graph_pool, collective=collective, coordinator=coordinator, compile_decoder=config.compile_decoder,
             progress=progress, cache_root=config.kernel_cache, retain_graphs=config.retain_graphs, materialize=materialize,
-            warmup_storage=package_storage, compile_kinds=("prefill", "decode", "resume", "speculative", "vision"))
+            warmup_storage=package_storage, compile_kinds=("prefill", "scored_prefill", "decode", "resume", "speculative", "vision"))
     finally:
         scratch_pool.materialize()
     session.freeze()
@@ -323,12 +333,16 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         "headroom_bytes": config.headroom_bytes, "tuning": tuning, "compiled_decoder": config.compile_decoder,
         "speculative_shapes": shapes,
         "speculative_token_capacity": server_config.get("speculative_token_capacity", 0)}
+    if scoring is not None:
+        memory.update(scoring.memory_report())
     channels = (collective, prefill_collective, vision_collective, vocabulary_collective, embedding_collective)
     disposable = [prefill_storage, decode_storage, vision_storage, arena.tensor, metadata, vision_state.arena,
                   weights.scale_scratch, graph_buffers.chunks, private_buffers.chunks]
     if speculation is not None:
         disposable.append(speculation.sampling_scratch)
     for forward in forwards.values():
+        if isinstance(forward, PreparedScoredPrefill):
+            forward = forward.forward
         if hasattr(forward, "scratch_tensors"):
             disposable.append(forward.scratch_tensors())
         if hasattr(forward, "completion") and hasattr(forward.completion, "scratch_tensors"):
@@ -341,8 +355,9 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
             disposable.extend((forward.errors, forward.encoder.scratch_tensors()))
     return PreparedModel(rebuild_weights={"weights": weights}, device=config.devices[rank], graphs=graphs, buffers=buffers, signatures=signatures,
         max_active=config.max_active, session=session, server_config=server_config, memory_report=memory,
-        export_zero_ranges=(*storage_ranges(disposable), *completion.zero_ranges()),
-        resources=(weights, pool, requests, inputs, admission, commands, arena, forwards, prefill_storage,
+        export_zero_ranges=(*(() if scoring is None else scoring.zero_ranges()),
+                           *storage_ranges(disposable), *completion.zero_ranges()),
+        resources=(scoring, weights, pool, requests, inputs, admission, commands, arena, forwards, prefill_storage,
                    decode_storage, metadata, compiled, stream, graph_pool, session, coordinator, *channels,
                    vision_inputs, vision_prefill, vision_state, vision_storage, scratch_pool, graph_buffers, private_buffers, speculation, frontend_assets),
-        close_resources=channels)
+        close_resources=(*channels, *((scoring,) if scoring is not None else ())))

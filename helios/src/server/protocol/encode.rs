@@ -60,6 +60,13 @@ pub(crate) struct Encoder {
     logprob_format: Option<(crate::server::inference::LogprobOptions, std::sync::Arc<crate::frontend::Frontend>)>,
     logprob_entries: Vec<Vec<crate::server::logprobs::Formatted>>,
     part_logprobs: Vec<Vec<Value>>,
+    prompt_format: Option<(usize, std::sync::Arc<crate::frontend::Frontend>)>,
+    prompt_values: Vec<Vec<Value>>,
+    prompt_legacy: Vec<Value>,
+    prompt_positions: Vec<usize>,
+    prompt_offsets: Vec<usize>,
+    echo_offsets: Vec<usize>,
+    echo_logprobs: bool,
     streaming: bool,
     pub protocol: Protocol,
     pub id: String,
@@ -102,6 +109,13 @@ impl Encoder {
             logprob_format: None,
             logprob_entries: vec![vec![]; choices],
             part_logprobs: vec![],
+            prompt_format: None,
+            prompt_values: vec![],
+            prompt_legacy: vec![],
+            prompt_positions: vec![],
+            prompt_offsets: vec![],
+            echo_offsets: vec![],
+            echo_logprobs: false,
             streaming: false,
             chats: (0..choices)
                 .map(|i| Accumulator::new(format!("{id}_{i}")))
@@ -136,6 +150,46 @@ impl Encoder {
         self.logprob_format = options.map(|options| (options, frontend));
         self.streaming = streaming;
     }
+    pub fn set_prompt_logprobs(&mut self, top: Option<usize>, frontend: std::sync::Arc<crate::frontend::Frontend>,
+        echo: bool, echo_offsets: Vec<usize>) {
+        if top.is_none() { return; }
+        let choices = self.outputs.len();
+        self.prompt_values = vec![vec![]; choices];
+        self.prompt_positions = vec![0; choices];
+        self.prompt_offsets = vec![0; choices];
+        if echo {
+            self.prompt_legacy = vec![json!({"tokens":[],"token_logprobs":[],"top_logprobs":[],"text_offset":[]}); choices];
+        }
+        self.prompt_format = top.map(|top| (top, frontend));
+        self.echo_logprobs = echo;
+        self.echo_offsets = echo_offsets;
+    }
+
+    pub fn prompt_logprobs(&mut self, index: usize, start: usize, tokens: &[u32],
+        values: &[Option<crate::execution::PromptLogprobs>]) -> Result<Vec<Frame>> {
+        if self.prompt_positions[index] != start { return Err("prompt logprob chunks are out of order".into()); }
+        let (top, frontend) = self.prompt_format.as_ref().ok_or("unexpected prompt logprobs")?;
+        let token_ids = self.logprob_format.as_ref().is_some_and(|(o, _)| o.token_ids);
+        let (dictionaries, mut legacy) = crate::server::logprobs::prompt(tokens, values, *top,
+            token_ids, frontend, &mut self.prompt_offsets[index], self.echo_logprobs)?;
+        self.prompt_positions[index] += tokens.len();
+        if self.echo_logprobs {
+            let requested = self.logprob_format.as_ref().unwrap().0.top;
+            if requested != *top {
+                let mut offset = legacy["text_offset"][0].as_u64().unwrap_or(0) as usize;
+                legacy = crate::server::logprobs::prompt(tokens, values, requested, token_ids, frontend, &mut offset, true)?.1;
+            }
+        }
+        if !self.streaming {
+            self.prompt_values[index].extend(dictionaries);
+            if self.echo_logprobs { crate::server::logprobs::append_legacy(&mut self.prompt_legacy[index], legacy); }
+            return Ok(vec![]);
+        }
+        let mut frame = self.chunk(index, json!(""), Value::Null);
+        frame.data["choices"][0]["logprobs"] = legacy;
+        Ok(vec![frame])
+    }
+
     pub fn set_continuous_usage(&mut self, enabled: bool) {
         self.continuous_usage = self.include_usage && enabled;
     }
@@ -385,8 +439,11 @@ impl Encoder {
                 Event::TokenLogprobs(entries) => {
                     if self.protocol != Protocol::Responses {
                         let (options, frontend) = self.logprob_format.as_ref().ok_or("unexpected logprob entries")?;
-                        let entries = entries.iter().map(|e| crate::server::logprobs::format(e, *options, frontend))
-                            .collect::<Result<Vec<_>>>()?;
+                        let entries = entries.iter().map(|e| {
+                            let mut value = crate::server::logprobs::format(e, *options, frontend)?;
+                            value.offset += self.echo_offsets.get(index).copied().unwrap_or(0);
+                            Ok(value)
+                        }).collect::<Result<Vec<_>>>()?;
                         if !self.streaming { self.logprob_entries[index].extend(entries.iter().cloned()); }
                         if self.streaming && !entries.is_empty() {
                             let mut frame = self.chunk(index, if self.protocol == Protocol::Completions { json!("") } else { json!({}) }, Value::Null);
@@ -569,10 +626,23 @@ impl Encoder {
                 if self.logprob_format.is_some() {
                     response["choices"][0]["logprobs"] = crate::server::logprobs::chat(&self.logprob_entries[0]);
                 }
+                if self.prompt_format.is_some() { response["prompt_logprobs"] = json!(self.prompt_values[0]); }
                 response
             }
             Protocol::Completions => {
-                json!({"id":self.id,"object":"text_completion","created":self.created,"model":self.model,"choices":self.outputs.iter().enumerate().map(|(i,o)|json!({"index":i,"text":o.text(),"logprobs":if self.logprob_format.is_some() { crate::server::logprobs::legacy(&self.logprob_entries[i]) } else { Value::Null },"finish_reason":self.reasons[i]})).collect::<Vec<_>>(),"usage":self.usage_value()})
+                json!({"id":self.id,"object":"text_completion","created":self.created,"model":self.model,"choices":self.outputs.iter().enumerate().map(|(i,o)| {
+                    let logprobs = if self.logprob_format.is_some() {
+                        let generated = crate::server::logprobs::legacy(&self.logprob_entries[i]);
+                        if self.echo_logprobs {
+                            let mut prompt = self.prompt_legacy[i].clone();
+                            crate::server::logprobs::append_legacy(&mut prompt, generated);
+                            prompt
+                        } else { generated }
+                    } else { Value::Null };
+                    let mut choice = json!({"index":i,"text":o.text(),"logprobs":logprobs,"finish_reason":self.reasons[i]});
+                    if self.prompt_format.is_some() { choice["prompt_logprobs"] = json!(self.prompt_values[i]); }
+                    choice
+                }).collect::<Vec<_>>(),"usage":self.usage_value()})
             }
             Protocol::Messages => {
                 json!({"id":self.id,"type":"message","role":"assistant","model":self.model,"content":(0..self.outputs[0].blocks.len()).map(|i|self.anthropic_block(i,true)).collect::<Vec<_>>(),"stop_reason":self.reasons[0].map(|r|if r=="length"{"max_tokens"}else if r=="tool_calls"{"tool_use"}else if self.stop.is_some(){"stop_sequence"}else{"end_turn"}),"stop_sequence":self.stop,"usage":self.usage_value()})

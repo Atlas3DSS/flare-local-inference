@@ -10,6 +10,9 @@ from pathlib import Path
 import torch
 
 from ignition.components.completion import CompletionOutputs
+from ignition.components.prompt_logprobs import (
+    PreparedScoredPrefill, PromptScoring, prefill_graph_count, prefill_modes,
+)
 
 from ignition.components.capacity import batch_capacities, prefill_capacities, request_capacity, speculative_shapes, speculative_token_capacity
 from ignition.components.parallel import TensorParallelShard
@@ -53,6 +56,7 @@ REDUCE_ROWS = 1024
 
 @dataclass(frozen=True)
 class PreparationConfig:
+    prompt_logprobs: bool = False
     image_concurrency: int | None = None
     compile_workers: int | None = None
     tuning_replica: TuningReplica | None = None
@@ -273,6 +277,8 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
             request_pending_token=requests.pending_token,
             sampling_grammar_mask=requests.grammar_mask, frame_index=frame,
             submission_sequence=sequence, **completion.buffers())
+    scoring = PromptScoring.allocate(config, device, buffers, frame=frame, group=group,
+        ipc=package_storage.peer_storage, runtime=collective, coordinator=coordinator)
     forwards, signatures, metadata = {}, {}, {}
     decoder_buffers = DecoderStorage.allocate(weights.config, shard, device, allocator=cursor, scratch={
         "total": total, "kda": {"output": kda_output},
@@ -291,10 +297,13 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
             decoder_buffers=decoder_buffers, draft_tokens=config.draft_tokens, context_runtime=context_collective,
             page_tokens=config.page_tokens, draft_argmax=draft_argmax)
     modes = (True, False) if drafting else (False,)
-    count = (len(modes) * (len(prefill_sizes) + 4 * len(batch_sizes)) + len(batch_sizes)
+    count = (len(modes) * (prefill_graph_count(prefill_sizes, scoring) + 4 * len(batch_sizes)) + len(batch_sizes)
              + len(config.speculative_shapes) + len(patches))
     with phase(progress, "Construct graph catalog", total=count) as stage:
         def add(name, forward, kind, rows, tokens, fields, *, enabled=None):
+            if kind == "scored_prefill":
+                forward = PreparedScoredPrefill(forward, requests, inputs)
+                fields = (*fields, "prompt_target_tokens")
             forwards[name] = forward
             signatures[name] = GraphSignature(kind, rows, tokens, tuple(fields), speculation_enabled=enabled)
             stage.update(advance=1)
@@ -304,13 +313,14 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
             # Speculative packages also hold plain graphs, selected when Flare loads without drafts.
             mode_weights = weights if enabled else replace(weights, draft=None)
             suffix = "-no-mtp" if drafting and not enabled else ""
-            for mode, sizes in (("prefill", reversed(prefill_sizes)), ("decode", () if enabled else reversed(batch_sizes))):
+            for kind, mode, sizes in prefill_modes(prefill_sizes, () if enabled else reversed(batch_sizes), scoring):
                 for capacity in sizes:
                     rows = 1 if mode == "prefill" else capacity
-                    name = f"{mode}{capacity}" + (suffix if mode == "prefill" else "")
+                    name = f"{kind}{capacity}" + (suffix if mode == "prefill" else "")
                     m = metadata[name] = Metadata.allocate(capacity, rows, blocks, device)
                     scratch = (prefill_storage if mode == "prefill" else decode_storage).rows(capacity, rows)
                     decoder = PreparedDecoder(mode_weights, scratch, m, pool, mode=mode,
+                        scoring=scoring if kind == "scored_prefill" else None,
                         session=session, name=name, workspace=arena, buffers=decoder_buffers, **collectives)
                     batch = PreparedBatch(inputs, requests, m, mode=mode, shard=weights.shard, pool=pool,
                         validate_prefill=vision_state.validate_prefill if mode == "prefill" and patches else None,
@@ -320,7 +330,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                         coordinator=coordinator, session=session, name=name + ".generation", workspace=arena,
                         context_factory=(None if speculation is None or not enabled
                                          else speculation.forwards.context))
-                    add(name, forward, mode, rows, capacity if mode == "prefill" else 1,
+                    add(name, forward, kind, rows, capacity if mode == "prefill" else 1,
                         (*forward_inputs, *(vision_prefill.buffers() if mode == "prefill" and patches else ())),
                         enabled=enabled)
         if speculation is not None:
@@ -385,7 +395,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
             compile_decoder=config.compile_decoder, progress=progress, cache_root=config.kernel_cache,
             retain_graphs=config.retain_graphs, materialize=materialize,
             warmup_storage=package_storage,
-            compile_kinds=("prefill", "decode", "resume", "vision", "speculative"))
+            compile_kinds=("prefill", "scored_prefill", "decode", "resume", "vision", "speculative"))
     finally:
         scratch_pool.materialize()
     session.freeze()
@@ -420,6 +430,8 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         kv_bytes=pages * page_bytes(weights.config), completion_output_bytes=completion.nbytes, operator_scratch_bytes=arena.nbytes, graphs=len(graphs),
         prefill_capacities=prefill_sizes, free_device_bytes=free, total_device_bytes=total,
         headroom_bytes=config.headroom_bytes, tuning=tuning, compiled_decoder=config.compile_decoder)
+    if scoring is not None:
+        memory.update(scoring.memory_report())
     if drafting:
         server_config.update(speculative_widths=config.speculative_widths,
             speculative_token_capacity=speculative_token_capacity(config.max_active, max(config.speculative_widths),
@@ -430,12 +442,14 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         speculation.kda_records.corrections, speculation.kda_records.keys_and_gates]
     return PreparedModel(rebuild_weights={"weights": weights}, device=config.devices[rank], graphs=graphs, buffers=buffers, signatures=signatures,
         max_active=config.max_active, session=session, server_config=server_config, memory_report=memory,
-        export_zero_ranges=(*storage_ranges([prefill_storage, decode_storage, graph_buffers.chunks,
+        close_resources=(() if scoring is None else (scoring,)),
+        export_zero_ranges=(*(() if scoring is None else scoring.zero_ranges()),
+                           *storage_ranges([prefill_storage, decode_storage, graph_buffers.chunks,
             None if speculation is None else speculation.sampling_buffers.chunks, arena.tensor, metadata,
                                            *(() if context is None else (context.slab,)),
                                            *(() if not patches else (vision_storage, vision_state.arena)),
                                            decoder_buffers.scratch_tensors(), *draft_disposable]), *completion.zero_ranges()),
-        resources=(weights, pool, requests, inputs, admission, commands, arena, forwards, prefill_storage, context,
+        resources=(scoring, weights, pool, requests, inputs, admission, commands, arena, forwards, prefill_storage, context,
                    decode_storage, metadata, compiled, stream, graph_pool, session, coordinator, collective,
                    vocabulary_collective, embedding_collective, router_collective, route_collective, frontend_assets,
                    vision_inputs, vision_prefill, vision_state, vision_storage, scratch_pool, shared_scratch, graph_buffers,

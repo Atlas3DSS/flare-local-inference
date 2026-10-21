@@ -156,7 +156,7 @@ class PreparedDecoderLayer(torch.nn.Module):
 
 class PreparedDecoder:
     def __init__(self, weights, scratch, metadata, pool, *, mode, runtime, embedding_runtime, vocabulary_runtime,
-                 coordinator, session, name, workspace, overlap=True, vision=None, buffers=None):
+                 coordinator, session, name, workspace, overlap=True, vision=None, buffers=None, scoring=None):
         self.weights, self.scratch, self.metadata, self.pool = weights, scratch, metadata, pool
         self.vision = vision if mode == "prefill" else None
         self.auxiliary = ((torch.zeros_like(scratch.embedding) if buffers is None
@@ -182,6 +182,12 @@ class PreparedDecoder:
                                else buffers.zeros(scratch.hidden.shape, scratch.hidden.dtype))
         self.norm = PreparedRMSNorm(self.sampled_hidden, weights.norm, scratch.hidden,
             eps=weights.config.text["rms_norm_eps"], session=session, name=name + ".norm", zero_centered=True)
+        self.scoring = None if scoring is None else scoring.prepare(scratch.embedding, weights.head,
+            vocabulary=weights.config.text["vocab_size"], session=session, coordinator=coordinator,
+            name=name + ".prompt", copy_source=True)
+        self.score_norm = None if self.scoring is None else PreparedRMSNorm(self.scoring.source, weights.norm,
+            self.scoring.source, eps=weights.config.text["rms_norm_eps"], session=session,
+            name=name + ".prompt_norm", zero_centered=True)
         self.head = PreparedVocabularyProjection(scratch.hidden, weights.head, scratch.local_logits, scratch.logits,
             runtime=vocabulary_runtime, coordinator=coordinator, session=session, name=name + ".head", buffers=buffers)
 
@@ -203,6 +209,10 @@ class PreparedDecoder:
         # The checkpoint narrows the residual before its final normalization.
         self.sampled_hidden.copy_(residual[self.metadata.sample_indices])
         self.norm(self.sampled_hidden)
+        if self.scoring is not None:
+            self.scoring.source.copy_(residual)
+            self.score_norm(self.scoring.source)
+            self.scoring()
         self.head(self.scratch.hidden)
 
     def commit(self, counts):

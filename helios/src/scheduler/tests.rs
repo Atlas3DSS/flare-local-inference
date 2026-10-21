@@ -205,6 +205,7 @@ pub(super) fn spec(tokens: usize, max_new: u32) -> RequestSpec {
         max_new_tokens: max_new,
         grammar_constrained: false,
         host_stops: false,
+        prompt_logprobs: false,
         growable_output: false,
     }
 }
@@ -1929,6 +1930,7 @@ fn declared_model_capabilities_drive_state_slots_vision_buckets_and_copy_validat
             max_new_tokens: 8,
             grammar_constrained: false,
             host_stops: false,
+            prompt_logprobs: false,
             growable_output: false,
         })
         .unwrap();
@@ -3159,4 +3161,54 @@ fn image_preparation_wait_does_not_block_unrelated_prefill() {
     assert!(scheduler.plan().is_none());
     scheduler.conditioned_inputs_ready(image, true).unwrap();
     assert_eq!(scheduler.plan().unwrap().kind, GraphKind::Vision);
+}
+
+#[test]
+fn scored_requests_bypass_prefix_lookup_and_keep_their_own_prefill_catalog() {
+    let mut scheduler = scheduler(4, 128, 16);
+    let mut scored = spec(700, 0);
+    scored.prompt_logprobs = true;
+    assert!(scheduler.admit(scored.clone()).is_err());
+    scheduler.scored_prefill_graphs(&[128, 512]).unwrap();
+    let mut graphs = duration_graphs(4);
+    let scored_graphs: Vec<_> = graphs.iter().filter(|g| g.kind == GraphKind::Prefill
+        && [128, 512].contains(&g.token_capacity)).cloned().map(|mut graph| {
+            graph.kind = GraphKind::ScoredPrefill;
+            graph.name = format!("scored-{}", graph.name);
+            graph
+        }).collect();
+    graphs.extend(scored_graphs);
+    scheduler.measured_graph_durations(&graphs).unwrap();
+    let before = scheduler.stats().cache_lookups;
+    let handle = scheduler.admit(scored).unwrap();
+    assert_eq!(scheduler.stats().cache_lookups, before);
+    assert_eq!(scheduler.request(handle).unwrap().reused_prompt_tokens(), 0);
+    init(&mut scheduler, 1);
+    let mut fence = 2;
+    let mut consumed = 0;
+    while consumed < 700 {
+        let step = scheduler.plan().unwrap();
+        assert_eq!(step.kind, GraphKind::ScoredPrefill);
+        assert!([128, 512].contains(&step.token_capacity));
+        consumed += step.lanes[0].tokens;
+        scheduler.commit(&step, Fence(fence)).unwrap();
+        scheduler.complete(Fence(fence), &records(handle, fence, consumed as i64, 0, -1,
+            if consumed == 700 { 2 } else { 1 }), Default::default()).unwrap();
+        fence += 1;
+    }
+    assert_eq!(scheduler.request(handle).unwrap().generated_tokens, 0);
+    assert_eq!(scheduler.request(handle).unwrap().phase, RequestPhase::Snapshot);
+    let snapshot = scheduler.plan().unwrap();
+    scheduler.commit(&snapshot, Fence(fence)).unwrap();
+    let done = state_records(&scheduler, &snapshot, fence);
+    scheduler.complete(Fence(fence), &done, Default::default()).unwrap();
+    scheduler.finish(handle).unwrap();
+    assert!(scheduler.stats().snapshot_publications > 0);
+    let mut again = spec(700, 1);
+    again.prompt_logprobs = true;
+    let scored = scheduler.plan_admission(&again).unwrap();
+    assert!(scored.lookup.checkpoint.is_none());
+    again.prompt_logprobs = false;
+    let ordinary = scheduler.plan_admission(&again).unwrap();
+    assert!(ordinary.lookup.checkpoint.is_some());
 }

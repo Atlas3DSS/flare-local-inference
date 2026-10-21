@@ -91,6 +91,12 @@ pub(super) fn prepare_inference_cached(
 ) -> Result<PreparedInference> {
     use super::inference::{Constraint, Input, RawPrompt, ToolChoice};
     let opts = &request.options;
+    if let Some(top) = opts.prompt_logprobs {
+        if !config.contract.graphs.iter().any(|g| g.kind == crate::model::contract::GraphOperation::ScoredPrefill) {
+            return Err("prompt logprobs are not available in this model package; export with --prompt-logprobs".into());
+        }
+        if top > crate::execution::MAX_TOP_LOGPROBS { return Err("prompt_logprobs exceeds 20".into()); }
+    }
     if let Some(logprobs) = opts.logprobs {
         if config.max_top_logprobs == 0 {
             return Err("logprobs are not available in this model package".into());
@@ -325,6 +331,7 @@ pub(super) fn prepare_inference_cached(
             grammar,
             ignore_eos,
             logprobs: opts.logprobs.is_some(),
+            prompt_logprobs: opts.prompt_logprobs.is_some(),
         },
         output,
         rendered_prompt: rendered.text,

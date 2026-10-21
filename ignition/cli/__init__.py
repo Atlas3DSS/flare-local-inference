@@ -170,6 +170,8 @@ def _preparation_arguments(running):
                           help="most prompt tokens per prefill step; larger chunks reach a long prompt's first"
                                " token sooner and pause other requests longer; a multiple of 64"
                                " (default: see MODEL --help)")
+    capacity.add_argument("--prompt-logprobs", action="store_true",
+                          help="capture dedicated prefill graphs for raw prompt token logprobs")
     capacity.add_argument("--mixed-prefill", action="store_true",
                           help="capture graphs combining prompt prefill with decode or verification"
                                " (Qwen only; default: disabled)")

@@ -100,9 +100,9 @@ impl Inputs {
                             }
                             LiveRows | PrefillRow => binding.indexing == Scalar,
                             ImageFeatureSlot => binding.indexing == Scalar && elements == 1
-                                && matches!(graph.kind, GraphKind::Vision | GraphKind::Prefill | GraphKind::Mixed),
+                                && matches!(graph.kind, GraphKind::Vision | GraphKind::Prefill | GraphKind::ScoredPrefill | GraphKind::Mixed),
                             PageTable | LiveStateRows => binding.indexing == RequestRow,
-                            PromptToken
+                            PromptToken | PromptTargetToken
                             | PromptAndPendingToken
                             | PromptPosition
                             | ImageFeatureIndex
@@ -141,7 +141,7 @@ impl Inputs {
                             let rows = if graph.kind == GraphKind::Mixed {
                                 graph.prefill_capacity
                                     + (graph.batch_capacity - 1) * graph.token_capacity
-                            } else if graph.kind == GraphKind::Prefill {
+                            } else if graph.kind.is_prefill() {
                                 graph.token_capacity
                             } else {
                                 graph.packed_tokens()
@@ -369,7 +369,7 @@ impl Inputs {
                         ValueSource::LiveRows => frame.step.lanes.len() as i64,
                         ValueSource::ImageFeatureSlot => {
                             match frame.step.lanes.iter().enumerate().find(|(row, _)|
-                                frame.step.lane_kind(*row) == GraphKind::Prefill) {
+                                frame.step.lane_kind(*row).is_prefill()) {
                                 Some((_, lane)) => frame.scheduler.request(lane.request)?.image_slot.map_or(-1, |slot| slot as i64),
                                 None => -1,
                             }
@@ -467,8 +467,16 @@ impl Inputs {
                     RequestGeneration => values.push(lane.request.generation as i64),
                     QueryLength => values.push(lane.tokens as i64),
                     SampleEnabled => values.push(frame.samples[row] as i64),
+                    PromptTargetToken => {
+                        for position in lane.start_position as usize + 1..=lane.start_position as usize + lane.tokens {
+                            let token = admission.prompt.get(position).copied();
+                            let image = admission.data.is_image_position(position);
+                            values.push(token.filter(|t| !image && (*t as usize) < frame.config.contract.vocabulary)
+                                .map_or(-1, |t| t as i64));
+                        }
+                    }
                     PromptToken | PendingToken | PromptAndPendingToken => {
-                        if lane_kind == GraphKind::Prefill && binding.source != PendingToken {
+                        if lane_kind.is_prefill() && binding.source != PendingToken {
                             let start = usize::try_from(lane.start_position)
                                 .map_err(|_| "prompt offset overflow")?;
                             let end = start
@@ -482,7 +490,7 @@ impl Inputs {
                                     .iter()
                                     .map(|t| *t as i64),
                             );
-                        } else if lane_kind != GraphKind::Prefill && binding.source != PromptToken {
+                        } else if !lane_kind.is_prefill() && binding.source != PromptToken {
                             values.push(
                                 *live
                                     .tokens()
@@ -493,7 +501,7 @@ impl Inputs {
                         }
                     }
                     PromptPosition | ImageFeatureIndex | ImageLeftContext | ImageRightContext => {
-                        if lane_kind != GraphKind::Prefill {
+                        if !lane_kind.is_prefill() {
                             continue;
                         }
                         let start = usize::try_from(lane.start_position)

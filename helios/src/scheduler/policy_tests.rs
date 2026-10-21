@@ -50,6 +50,7 @@ fn add(s: &mut RequestScheduler, id: u32, prompt: usize, output: u32) -> Request
         max_new_tokens: output,
         grammar_constrained: false,
         host_stops: false,
+        prompt_logprobs: false,
         growable_output: false,
     })
     .unwrap()
@@ -1566,6 +1567,7 @@ fn prerequisite_cohort_accounts_for_ready_batch_mates() {
             max_new_tokens: 128,
             grammar_constrained: false,
             host_stops: false,
+            prompt_logprobs: false,
             growable_output: false,
         })
         .unwrap();
@@ -2098,6 +2100,7 @@ fn mixed_cancellation_keeps_other_rows_live_and_retires_pages_only_after_complet
             max_new_tokens: 128,
             grammar_constrained: false,
             host_stops: false,
+            prompt_logprobs: false,
             growable_output: false,
         })
         .is_err()

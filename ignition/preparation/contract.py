@@ -22,17 +22,19 @@ def text_inputs(kind):
     if kind != "resume":
         values += [b("page_tables", p.PAGE_TABLE, p.REQUEST_ROW),
                    b("draft_page_tables", p.PAGE_TABLE, p.REQUEST_ROW)]
-    if kind in ("prefill", "decode", "speculative", "proposal", "verification", "mixed", "resume"):
+    if kind in ("prefill", "scored_prefill", "decode", "speculative", "proposal", "verification", "mixed", "resume"):
         values += [b("sampling_grammar_mask", p.GRAMMAR_MASK, p.REQUEST_ROW)]
         if kind != "resume":
             values += [b("sample_enabled", p.SAMPLE_ENABLED), b("query_lengths", p.QUERY_LENGTH)]
-    if kind in ("prefill", "mixed"):
+    if kind in ("prefill", "scored_prefill", "mixed"):
         values += [b("token_ids", p.PROMPT_AND_PENDING_TOKEN if kind == "mixed" else p.PROMPT_TOKEN, p.PACKED_TOKEN),
                    b("prefill_positions", p.PROMPT_POSITION, p.PACKED_TOKEN),
                    b("vision_token_indices", p.IMAGE_FEATURE_INDEX, p.PACKED_TOKEN),
                    b("vision_feature_slot", p.IMAGE_FEATURE_SLOT, p.SCALAR, padding=-1),
                    b("vision_left", p.IMAGE_LEFT_CONTEXT, p.PACKED_TOKEN),
                    b("vision_right", p.IMAGE_RIGHT_CONTEXT, p.PACKED_TOKEN)]
+    if kind == "scored_prefill":
+        values += [b("prompt_target_tokens", p.PROMPT_TARGET_TOKEN, p.PACKED_TOKEN, padding=-1)]
     if kind in ("decode", "speculative", "proposal", "verification"):
         values += [b("token_ids", p.PENDING_TOKEN)]
     if kind == "mixed":
@@ -77,7 +79,8 @@ def graph_contracts(signatures, inputs, *, continuation, pending, cursor=None, r
         result.append(dict(graph=name, kind=p.GraphOperation.Value(kind.upper()), inputs=values, state=states,
             state_rows_per_request=signature.token_capacity if rows is None and kind in ("speculative", "verification") else (rows or 1),
             draft_cursor=cursor if signature.speculation_enabled and kind in ("speculative", "verification", "mixed") else None,
-            embedding_tables=list(embedding_tables) if kind in ("prefill", "decode", "speculative", "verification", "mixed") else [],
+            embedding_tables=list(embedding_tables) if kind in (
+                "prefill", "scored_prefill", "decode", "speculative", "verification", "mixed") else [],
             pending_token=pending if reads_pending else None))
     return result
 

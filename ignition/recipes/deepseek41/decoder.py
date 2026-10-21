@@ -212,14 +212,14 @@ class PreparedLayer:
 class PreparedDecoder:
     def __init__(self, weights, tables, scratch, metadata, pool, *, mode, runtime,
                  vocabulary_runtime, coordinator, session, name, workspace,
-                 window_staging=None, suffix_scratch=None, vision=None, mla_compute_mode="auto"):
+                 window_staging=None, suffix_scratch=None, vision=None, mla_compute_mode="auto", scoring=None):
         self.weights, self.scratch, self.metadata, self.pool = weights, scratch, metadata, pool
         self.mode = mode
         self.vision = vision if mode == "prefill" else None
         self.table_requests = PreparedTableRequests(tables, metadata, pool, session=session, name=name + ".table_requests")
         decoder_start = weights.config.decoder_start
         self.packing = None
-        if mode == "prefill" and metadata.positions.numel() > 128 and decoder_start is not None:
+        if mode == "prefill" and metadata.positions.numel() > 128 and decoder_start is not None and scoring is None:
             if (any(layer.engram is not None for layer in weights.layers[decoder_start:])
                     or any(source.layer > decoder_start for source in weights.config.sources)):
                 raise ValueError("decoder suffix replay requires Engram and compressed KV sources before its boundary")
@@ -283,6 +283,8 @@ class PreparedDecoder:
                 window_metadata=(self.window_metadata if layer_metadata is metadata else self.suffix_window_metadata)))
             carry = defer
         buffers.join(*layer_cursors)
+        self.scoring = None if scoring is None else scoring.prepare(scratch.embedding, weights.head,
+            vocabulary=129280, session=session, coordinator=coordinator, name=name + ".prompt", copy_source=True)
         self.compact_head = scratch.hidden.shape[0] > self.output_metadata.token_ids.numel()
         head_rows = self.output_metadata.token_ids.numel() if self.compact_head else scratch.hidden.shape[0]
         self.head_hidden = scratch.hidden[:head_rows]
@@ -316,7 +318,13 @@ class PreparedDecoder:
         premix = (self.output_scratch.pre_mix if self.compact_head
                   else self.output_scratch.pre_mix[samples])[:, :, None]
         collapsed = (residual * premix).sum(1).bfloat16()
-        normalize(collapsed, self.weights.norm, self.head_hidden, self.weights.config.text["rms_norm_eps"])
+        if self.scoring is not None:
+            collapsed = (s.residual.float() * s.pre_mix[:, :, None]).sum(1).bfloat16()
+            normalize(collapsed, self.weights.norm, self.scoring.source, self.weights.config.text["rms_norm_eps"])
+            self.scoring()
+            self.head_hidden.copy_(self.scoring.source[samples])
+        else:
+            normalize(collapsed, self.weights.norm, self.head_hidden, self.weights.config.text["rms_norm_eps"])
         self.head(self.head_hidden)
         if self.compact_head:
             s.hidden.copy_(self.head_hidden[samples])

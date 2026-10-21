@@ -25,7 +25,8 @@ def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress, retain_
 
             drafting["draft_checkpoint"] = snapshot_download(DSPARK_REPOSITORY, revision=DSPARK_REVISION, cache_dir=plan.hub_cache,
                                                              allow_patterns=("config.json", "model.safetensors"))
-    config = PreparationConfig(compile_workers=plan.compile_workers, tuning_replica=plan.tuning_replica,
+    config = PreparationConfig(prompt_logprobs=plan.prompt_logprobs,
+        compile_workers=plan.compile_workers, tuning_replica=plan.tuning_replica,
         devices=tuple(range(plan.world_size)), context=plan.context,
         max_active=plan.concurrency, image_concurrency=plan.image_concurrency, prefill_chunk_size=plan.prefill_chunk,
         snapshot_budget_bytes=plan.snapshots * plan.costs.state_row_bytes,

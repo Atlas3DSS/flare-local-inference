@@ -273,10 +273,14 @@ pub(super) async fn generate(
     let mut echoes = vec![];
     let mut prompts = vec![];
     let mut zero = vec![];
+    let mut echo_chars = vec![];
     for (i, p) in prepared.into_iter().enumerate() {
         configs.push(p.output);
+        if decoded.request.options.prompt_logprobs.is_some() {
+            echo_chars.push(if decoded.echo { p.echo.chars().count() } else { 0 });
+        }
         echoes.push(p.echo);
-        if p.prompt.max_new_tokens == 0 {
+        if p.prompt.max_new_tokens == 0 && !p.prompt.prompt_logprobs {
             zero.push(i);
         } else {
             prompts.push(p.prompt);
@@ -335,6 +339,10 @@ pub(super) async fn generate(
         decoded.metadata,
     );
     encoder.set_logprobs(decoded.request.options.logprobs, state.frontend.clone(), decoded.stream);
+    if decoded.request.options.prompt_logprobs.is_some() {
+        encoder.set_prompt_logprobs(decoded.request.options.prompt_logprobs, state.frontend.clone(),
+            decoded.echo && decoded.request.options.logprobs.is_some(), echo_chars);
+    }
     encoder.set_tool_grammars(tool_grammars);
     encoder.set_continuous_usage(continuous_usage);
     let streaming = decoded.stream;
@@ -415,6 +423,7 @@ pub(super) async fn generate(
             })
             .await;
             let result = match event {
+                GenerationEvent::PromptLogprobs { start, tokens, values } => encoder.prompt_logprobs(index, start, &tokens, &values),
                 GenerationEvent::LogprobToken(value) => decoders[index]
                     .push_logprob(value)
                     .and_then(|events| encoder.apply(index, events)),

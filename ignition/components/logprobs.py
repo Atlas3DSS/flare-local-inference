@@ -14,9 +14,22 @@ from .completion import (
 _VOCAB_TILE = 1024
 # A global top-20 token is in its tile's top 20; round up to 32 for the merge sort.
 _TILE_CANDIDATES = triton.next_power_of_2(MAX_TOP_LOGPROBS)
-_KEY_WORD_BITS = 32
 _REDUCTION_WARPS = 4
 _MERGE_WARPS = 8
+
+
+@triton.jit
+def _sort_key(value, ids):
+    bits = tl.where(value == 0., 0., value).to(tl.uint32, bitcast=True)
+    ordered = tl.where(bits & 0x80000000 != 0, ~bits, bits ^ 0x80000000)
+    return (ordered.to(tl.uint64) << 32) | (0xffffffff - ids.to(tl.uint32)).to(tl.uint64)
+
+
+@triton.jit
+def _sort_pair(keys):
+    ordered = (keys >> 32).to(tl.uint32)
+    bits = tl.where(ordered & 0x80000000 != 0, ordered ^ 0x80000000, ~ordered)
+    return (0xffffffff - (keys & 0xffffffff)).to(tl.int32), bits.to(tl.float32, bitcast=True)
 
 
 @triton.jit
@@ -75,9 +88,7 @@ def _normalization(Records, Frame, Requested, Slots, Epochs, Live, Stats, Lse,
 def _candidates(Logits, Records, Frame, Requested, Slots, Epochs, Live, Lse, Keys,
                 V: tl.constexpr, WIDTH: tl.constexpr, TILES: tl.constexpr,
                 SLOTS: tl.constexpr, FIELDS: tl.constexpr, BLOCK: tl.constexpr,
-                CANDIDATES: tl.constexpr, WORD_BITS: tl.constexpr):
-    SIGN_BIT: tl.constexpr = 1 << (WORD_BITS - 1)
-    WORD_MASK: tl.constexpr = (1 << WORD_BITS) - 1
+                CANDIDATES: tl.constexpr):
     row, col, tile = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     _, _, valid = _position(Records, Frame, Requested, Slots, Epochs, Live, row, col, SLOTS, FIELDS)
     if valid:
@@ -85,10 +96,7 @@ def _candidates(Logits, Records, Frame, Requested, Slots, Epochs, Live, Lse, Key
         x = tl.load(Logits + (row * WIDTH + col) * V + ids, ids < V, other=-float("inf")).to(tl.float32)
         x -= tl.load(Lse + row * WIDTH + col)
         # Rank the reported FP32 values, including ties introduced by subtraction.
-        bits = tl.where(x == 0., 0., x).to(tl.uint32, bitcast=True)
-        ordered = tl.where(bits & SIGN_BIT != 0, ~bits, bits ^ SIGN_BIT)
-        key = (ordered.to(tl.uint64) << WORD_BITS) | (WORD_MASK - ids.to(tl.uint32)).to(tl.uint64)
-        keys = tl.sort(tl.where(ids < V, key, 0), descending=True)
+        keys = tl.sort(tl.where(ids < V, _sort_key(x, ids), 0), descending=True)
         index = (row * WIDTH + col) * TILES + tile
         k = tl.arange(0, BLOCK)
         tl.store(Keys + index * CANDIDATES + k, keys, k < CANDIDATES)
@@ -98,20 +106,15 @@ def _candidates(Logits, Records, Frame, Requested, Slots, Epochs, Live, Lse, Key
 def _finish(Logits, Records, Frame, Requested, Slots, Epochs, Live, Lse, Keys, Output,
             V: tl.constexpr, WIDTH: tl.constexpr, TILES: tl.constexpr,
             SLOTS: tl.constexpr, FIELDS: tl.constexpr, BLOCK: tl.constexpr,
-            CANDIDATES: tl.constexpr, WORD_BITS: tl.constexpr, TOP: tl.constexpr,
+            CANDIDATES: tl.constexpr, TOP: tl.constexpr,
             OUTPUT_TOKENS: tl.constexpr, OUTPUT_FIELDS: tl.constexpr, PAIR_FIELDS: tl.constexpr):
-    SIGN_BIT: tl.constexpr = 1 << (WORD_BITS - 1)
-    WORD_MASK: tl.constexpr = (1 << WORD_BITS) - 1
     row, col = tl.program_id(0), tl.program_id(1)
     slot, token, valid = _position(Records, Frame, Requested, Slots, Epochs, Live, row, col, SLOTS, FIELDS)
     if valid:
         k = tl.arange(0, BLOCK)
         keys = tl.load(Keys + (row * WIDTH + col) * TILES * CANDIDATES + k, k < TILES * CANDIDATES, other=0)
         keys = tl.sort(keys, descending=True)
-        ids = (WORD_MASK - (keys & WORD_MASK)).to(tl.int32)
-        ordered = (keys >> WORD_BITS).to(tl.uint32)
-        bits = tl.where(ordered & SIGN_BIT != 0, ordered ^ SIGN_BIT, ~ordered)
-        values = bits.to(tl.float32, bitcast=True)
+        ids, values = _sort_pair(keys)
         out = Output + ((tl.load(Frame) * SLOTS + slot) * OUTPUT_TOKENS + col) * OUTPUT_FIELDS
         chosen = tl.load(Logits + (row * WIDTH + col) * V + token).to(tl.float32) - tl.load(Lse + row * WIDTH + col)
         tl.store(out, token.to(tl.int32))
@@ -139,9 +142,9 @@ class PreparedLogprobs:
             (_normalization, (*common[1:], self.stats, self.lse, *dimensions[1:],
                 triton.next_power_of_2(tiles)), (batch, width, 1), _REDUCTION_WARPS),
             (_candidates, (*common, self.lse, self.keys, *dimensions, _VOCAB_TILE,
-                _TILE_CANDIDATES, _KEY_WORD_BITS), (batch, width, tiles), _REDUCTION_WARPS),
+                _TILE_CANDIDATES), (batch, width, tiles), _REDUCTION_WARPS),
             (_finish, (*common, self.lse, self.keys, completion.logprobs, *dimensions,
-                triton.next_power_of_2(tiles * _TILE_CANDIDATES), _TILE_CANDIDATES, _KEY_WORD_BITS,
+                triton.next_power_of_2(tiles * _TILE_CANDIDATES), _TILE_CANDIDATES,
                 MAX_TOP_LOGPROBS, MAX_OUTPUT_TOKENS, LOGPROB_FIELDS, LOGPROB_PAIR_FIELDS),
                 (batch, width, 1), _MERGE_WARPS),
         )

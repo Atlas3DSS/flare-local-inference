@@ -99,7 +99,7 @@ class PreparedDecoder:
 
     def __init__(self, weights: ModelWeights, scratch: DecoderScratch, state: DecoderState,
                  metadata: DecoderMetadata, *, mode, runtime, vocabulary_runtime, coordinator, session, name,
-                 workspace, progress=None, feedback=None, max_cache_pages=None, context=None, kda_records=None):
+                 workspace, progress=None, feedback=None, max_cache_pages=None, context=None, kda_records=None, scoring=None):
         language = weights.tree.model.language_model
         if len(weights.layers) != 45 or len(language.layers) != 45 or len(state.layers) != 45:
             raise ValueError("GLM text execution requires all 45 decoder layers")
@@ -108,7 +108,9 @@ class PreparedDecoder:
         if metadata.sample_indices.shape != scratch.hidden.shape[:1]:
             raise ValueError("GLM sample indices and hidden-output capacities differ")
         self.weights, self.scratch, self.state, self.metadata = weights, scratch, state, metadata
-        self.feedback = feedback
+        self.scoring = None if scoring is None else scoring.prepare(scratch.embedding, weights.tree.lm_head.weight,
+            vocabulary=154880, session=session, coordinator=coordinator, name=name + ".prompt", copy_source=True)
+        self.feedback = feedback if self.scoring is None else self.scoring.source
         self.embedding = PreparedEmbedding(language.embed_tokens.weight, metadata.token_ids, scratch.embedding,
             num_rows=metadata.recurrent.num_tokens, session=session, name=f"{name}.embedding")
         self.layers = []
@@ -157,5 +159,7 @@ class PreparedDecoder:
             rms_norm(collapsed, language.norm.weight, self.feedback, language.norm.variance_epsilon,
                 round_before_weight=True)
             torch.index_select(self.feedback, 0, self.metadata.sample_indices, out=s.hidden)
+        if self.scoring is not None:
+            self.scoring()
         self.lm_head(s.hidden)
         return s.hidden

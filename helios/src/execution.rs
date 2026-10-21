@@ -16,7 +16,8 @@ mod worker;
 pub use parallel::{TensorParallelExecutor, serve_rank};
 pub(crate) use ranks::RankExecutor;
 pub use transport::{
-    CompletionRecord, ExecutionTiming, FrameCompletion, GraphExecutor, TokenLogprobs, TokenVector, Upload,
+    CompletionRecord, ExecutionTiming, FrameCompletion, GraphExecutor, PromptLogprobs, TokenLogprobs,
+    TokenVector, Upload,
 };
 pub use worker::{ExecutionWorker, OwnedUpload};
 
@@ -26,6 +27,6 @@ mod tests;
 pub use manifest::{
     ABI_VERSION, BATCH_CAPACITIES, BufferDescriptor, CollectiveHealth, Dtype, ExecutionManifest,
     GraphDescriptor, GraphKind, InputBinding, LOGPROB_FIELDS, LOGPROB_PAIR_FIELDS,
-    MAX_OUTPUT_TOKENS, MAX_TOP_LOGPROBS, RECORD_FIELDS, REQUEST_LANES,
+    MAX_OUTPUT_TOKENS, MAX_TOP_LOGPROBS, PROMPT_FIELDS, RECORD_FIELDS, REQUEST_LANES,
     SPECULATIVE_ABI_VERSION, SamplingMode, VECTOR_RECORD_FIELDS,
 };

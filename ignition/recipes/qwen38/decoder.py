@@ -208,7 +208,7 @@ class PreparedDecoder:
                  max_cache_pages: int | None = None,
                  residual_output: torch.Tensor | None = None, verification: bool = False,
                  gdn_records=None, gdn_in_place: bool = False, runtime=None, vocabulary_runtime=None, coordinator=None,
-                 sampling_workspace=None):
+                 sampling_workspace=None, scoring=None):
         from ignition.components.embedding import PreparedEmbedding
         from ignition.components.linear import UnquantizedProjection
 
@@ -295,6 +295,8 @@ class PreparedDecoder:
             self.lm_head = PreparedVocabularyProjection(scratch.sample_hidden, weights.tree.lm_head.weight,
                 scratch.local_logits, scratch.logits, runtime=vocabulary_runtime, session=session,
                 coordinator=coordinator, name=f"{name}.lm_head")
+        self.scoring = None if scoring is None else scoring.prepare(scratch.hidden, weights.tree.lm_head.weight,
+            vocabulary=248320, session=session, coordinator=coordinator, name=name + ".prompt")
         self.sampler = None
         if not verification:
             from ignition.components.sampling import PreparedSampling
@@ -367,6 +369,8 @@ class PreparedDecoder:
         if self.residual_output is not None:
             self.residual_output.copy_(s.residual)
         s.hidden.copy_(self.final_mixer.mix(s.residual, pre_normalized=True))
+        if self.scoring is not None:
+            self.scoring()
         self.state.finish()
         self.lm_head(s.sample_hidden)
         if sampler is not None:

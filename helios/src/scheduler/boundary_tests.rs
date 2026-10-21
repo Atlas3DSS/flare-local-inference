@@ -46,6 +46,7 @@ fn spec(system: Option<usize>, prompt: usize, output: u32) -> RequestSpec {
         max_new_tokens: output,
         grammar_constrained: false,
         host_stops: false,
+        prompt_logprobs: false,
         growable_output: false,
     }
 }

@@ -11,6 +11,9 @@ from pathlib import Path
 import torch
 
 from ignition.components.completion import CompletionOutputs
+from ignition.components.prompt_logprobs import (
+    PreparedScoredPrefill, PromptScoring, prefill_graph_count, prefill_modes,
+)
 
 from ignition.preparation.tuning_replicas import TuningReplica
 
@@ -61,6 +64,7 @@ from .vision import PreparedVision, VisionScratch
 
 @dataclass(frozen=True)
 class PreparationConfig:
+    prompt_logprobs: bool = False
     image_concurrency: int | None = None
     compile_workers: int | None = None
     tuning_replica: TuningReplica | None = None
@@ -341,12 +345,18 @@ def _prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, t
                     sampling_workspace=sampling_workspace, graph_buffers=graph_buffers,
                     verification_width=max(config.speculative_widths), **collectives)
                 buffers.update(speculation.buffers())
+        scoring = PromptScoring.allocate(config, device, buffers, frame=frame, group=group, ipc=ipc,
+            runtime=collective, coordinator=coordinator)
         serving_modes = (True, False) if config.mtp else (False,)
-        graph_count = (4 + len(serving_modes) * (len(config.prefill_capacities) + 4 * len(config.batch_capacities))
+        graph_count = (4 + len(serving_modes) * (prefill_graph_count(config.prefill_capacities, scoring)
+                                              + 4 * len(config.batch_capacities))
                        + len(config.batch_capacities) + (len(config.speculative_shapes) if config.mtp else 0)
                        + len(config.mixed_shapes))
         with phase(progress, "Construct graph catalog", total=graph_count) as stage:
             def add(name, function, kind, batch, tokens, fields, *, enabled=None, prefill_capacity=0):
+                if kind == "scored_prefill":
+                    function = PreparedScoredPrefill(function, requests, inputs)
+                    fields = (*fields, "prompt_target_tokens")
                 functions[name] = function
                 signatures[name] = GraphSignature(kind, batch, tokens, tuple(fields), speculation_enabled=enabled,
                                                   prefill_capacity=prefill_capacity)
@@ -372,13 +382,12 @@ def _prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, t
                 suffix = "-no-mtp" if config.mtp and not enabled else ""
                 forward_fields = (*inputs.buffers(), "sampling_grammar_mask",
                                   *(("draft_page_tables",) if enabled and has_mtp else ()))
-                modes = (("prefill", tuple(reversed(config.prefill_capacities))),)
-                if not enabled:
-                    modes += (("decode", reversed(config.batch_capacities)),)
-                for mode, capacities in modes:
+                modes = prefill_modes(config.prefill_capacities,
+                    () if enabled else reversed(config.batch_capacities), scoring)
+                for kind, mode, capacities in modes:
                     for capacity in capacities:
                         rows = 1 if mode == "prefill" else capacity
-                        name = f"{mode}{capacity}" + (suffix if mode == "prefill" else "")
+                        name = f"{kind}{capacity}" + (suffix if mode == "prefill" else "")
                         metadata = PreparedDecoderState(inputs, requests, state, tokens=capacity, rows=rows, mode=mode,
                             maintain_draft_state=enabled)
                         s = scratch.rows(capacity, rows)
@@ -391,10 +400,12 @@ def _prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, t
                         decoder = PreparedDecoder(weights, s, metadata, cache, rotary, table, workspaces,
                             completion, frame, sequence, session=session, name=name,
                             embedding_injection=injection, max_cache_pages=planned_pages,
-                            sampling_workspace=sampling_workspace, **collectives)
+                            sampling_workspace=sampling_workspace,
+                            scoring=scoring if kind == "scored_prefill" else None, **collectives)
                         forward = speculation.prefill(decoder, name) if enabled else decoder
-                        add(name, forward, mode, rows,
-                            capacity if mode == "prefill" else 1, forward_fields, enabled=enabled)
+                        add(name, forward, kind, rows,
+                            capacity if mode == "prefill" else 1,
+                            forward_fields, enabled=enabled)
                         decoders.append(decoder)
 
             if speculation is not None:
@@ -532,6 +543,8 @@ def _prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, t
             "mixed_shapes": config.mixed_shapes,
             "mixed_prefill": config.mixed_prefill,
             "compiled_decoder": compile_decoder, "rank": rank, "world_size": shard.world_size}
+        if scoring is not None:
+            memory.update(scoring.memory_report())
         if speculation is not None:
             memory.update(mtp_weights_bytes=0 if mtp_weights is None else mtp_weights.allocated_bytes,
                 speculative_widths=config.speculative_widths,
@@ -562,7 +575,7 @@ def _prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, t
                 speculative_proposal_source=config.speculative_proposal_source,
                 speculative_fixed_width=config.speculative_fixed_width,
                 history_drafts=config.history_drafts)
-        resources = (weights, table, session, state, requests, inputs, scratch, workspaces, rotary,
+        resources = (scoring, weights, table, session, state, requests, inputs, scratch, workspaces, rotary,
             cache, final_cache, admission, transfer, features, vision_inputs, vision_scratch, graph_buffers,
             functions, compiled_functions, decoders, owners, stream, graph_pool, speculation, mtp_weights, collective, vocabulary_collective, coordinator)
         report(f"prepared {len(graphs)} graphs with {page_capacity} preparation KV pages")
@@ -574,9 +587,12 @@ def _prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, t
 
         export_zero_ranges = (*export_zero_ranges, *storage_ranges(graph_buffers.chunks))
         return PreparedModel(rebuild_weights={"weights": weights, "mtp": mtp_weights}, device=device.index, max_active=config.max_active, graphs=graphs, buffers=buffers, signatures=signatures,
-            export_zero_ranges=(*export_zero_ranges, *completion.zero_ranges(), *((t.data_ptr(), t.nbytes) for t in table.buffers().values())),
+            export_zero_ranges=(*export_zero_ranges, *(() if scoring is None else scoring.zero_ranges()), *completion.zero_ranges(),
+                                *((t.data_ptr(), t.nbytes) for t in table.buffers().values())),
             export_events=table.events(), package_data=table if rank == 0 else None,
-            resources=resources, server_config=server_config, memory_report=memory, session=session, close_resources=(table, *((vocabulary_collective, collective) if collective is not None else ())))
+            resources=resources, server_config=server_config, memory_report=memory, session=session,
+            close_resources=(table, *((scoring,) if scoring is not None else ()),
+                             *((vocabulary_collective, collective) if collective is not None else ())))
     except BaseException:
         torch.cuda.synchronize(device)
         for graph in graphs.values():

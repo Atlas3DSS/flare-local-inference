@@ -41,7 +41,7 @@ class Scratch:
 
 class PreparedDecoder:
     def __init__(self, weights, scratch, metadata, pool, *, mode, session, name, workspace,
-                 layer_buffers, coordinator=None, vocabulary_runtime=None, buffers=None, vision_state=None):
+                 layer_buffers, coordinator=None, vocabulary_runtime=None, buffers=None, vision_state=None, scoring=None):
         self.weights, self.scratch, self.metadata, self.pool = weights, scratch, metadata, pool
         self.vision_state = vision_state if mode == "prefill" else None
         self.cache_metadata = PagedAttentionMetadata(metadata, page_tokens=PAGE_TOKENS, buffers=buffers)
@@ -89,6 +89,8 @@ class PreparedDecoder:
             self.layers.append((norm, block))
         self.final = PreparedRMSNorm(scratch.activations, weights.norm, source,
             eps=config.text["layer_norm_epsilon"], residual=previous, session=session, name=name + ".norm_f")
+        self.scoring = None if scoring is None else scoring.prepare(scratch.normalized, weights.head,
+            vocabulary=weights.config.text["vocab_size"], session=session, coordinator=coordinator, name=name + ".prompt")
         self.head = PreparedVocabularyProjection(scratch.hidden, weights.head, scratch.local_logits, scratch.logits,
             runtime=vocabulary_runtime, coordinator=coordinator, session=session, name=name + ".head", activation_mode="auto")
 
@@ -127,5 +129,7 @@ class PreparedDecoder:
         if len(self.layers) - 1 in self.target_layers:
             offset = self.target_layers.index(len(self.layers) - 1) * residual.shape[1]
             self.auxiliary[:, offset:offset + residual.shape[1]].copy_(residual)
+        if self.scoring is not None:
+            self.scoring()
         self.scratch.hidden.copy_(normalized[m.sample_indices])
         self.head(self.scratch.hidden)

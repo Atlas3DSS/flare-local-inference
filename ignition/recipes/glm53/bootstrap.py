@@ -10,6 +10,9 @@ from pathlib import Path
 import torch
 
 from ignition.components.completion import CompletionOutputs
+from ignition.components.prompt_logprobs import (
+    PreparedScoredPrefill, PromptScoring, prefill_graph_count, prefill_modes,
+)
 
 from ignition.components.capacity import speculative_token_capacity, batch_capacities, prefill_capacities, request_capacity
 from ignition.components.parallel import TensorParallelShard
@@ -50,7 +53,7 @@ from .state import DecoderMetadata
 from .weights import ModelWeights
 
 
-_COMPILED_KINDS = ("prefill", "decode", "resume", "speculative")
+_COMPILED_KINDS = ("prefill", "scored_prefill", "decode", "resume", "speculative")
 # Prefill chunks of at least this many tokens all-reduce through the copy-engine ring.
 _DMA_PREFILL_TOKENS = 1024
 # Allocator granularity and fragmentation slack beyond the headroom kept after the final KV allocation.
@@ -59,6 +62,7 @@ _KV_ALLOCATION_MARGIN = 64 << 20
 
 @dataclass(frozen=True)
 class PreparationConfig:
+    prompt_logprobs: bool = False
     compile_workers: int | None = None
     tuning_replica: TuningReplica | None = None
     devices: tuple[int, ...] = (0, 1)
@@ -381,12 +385,18 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
             buffers["draft_page_tables"] = speculation.draft_tables
             forward_inputs += ("draft_page_tables",)
 
+    scoring = PromptScoring.allocate(config, device, buffers, frame=frame, group=group,
+        ipc=package_storage.peer_storage, runtime=collective, coordinator=coordinator)
     serving_modes = (True, False) if config.mtp else (False,)
-    graph_count = (len(serving_modes) * (len(config.prefill_capacities) + 4 * len(config.batch_capacities))
+    graph_count = (len(serving_modes) * (prefill_graph_count(config.prefill_capacities, scoring)
+                           + 4 * len(config.batch_capacities))
                    + len(config.batch_capacities) + (len(config.speculative_shapes) if config.mtp else 0))
     memory(f"after model state (continuation {pool.backing.nbytes >> 20} MiB, {state_rows} rows)")
     with phase(progress, "Construct graph catalog", total=graph_count) as stage:
         def add(name, function, kind, rows, tokens, fields, *, enabled=None):
+            if kind == "scored_prefill":
+                function = PreparedScoredPrefill(function, requests, inputs)
+                fields = (*fields, "prompt_target_tokens")
             forwards[name] = function
             signatures[name] = GraphSignature(kind, rows, tokens, tuple(fields), speculation_enabled=enabled)
             stage.update(advance=1)
@@ -394,15 +404,18 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
         for enabled in serving_modes:
             suffix = "-no-mtp" if config.mtp and not enabled else ""
             mode_inputs = tuple(field for field in forward_inputs if enabled or field != "draft_page_tables")
-            for mode, capacities in (("prefill", reversed(config.prefill_capacities)), ("decode", () if enabled else config.batch_capacities)):
+            for kind, mode, capacities in prefill_modes(
+                    config.prefill_capacities, () if enabled else config.batch_capacities, scoring):
                 for capacity in capacities:
                     rows = 1 if mode == "prefill" else capacity
-                    name = f"{mode}{capacity}" + (suffix if mode == "prefill" else "")
+                    name = f"{kind}{capacity}" + (suffix if mode == "prefill" else "")
                     metadata[name] = DecoderMetadata.allocate(capacity, rows, blocks, device)
                     storage = prefill_storage if mode == "prefill" else decoder_storage
                     scratch[name] = storage.rows(capacity, mode, sample_rows=rows)
-                    feedback = torch.empty((capacity, 4096), dtype=torch.bfloat16, device=device) if enabled else None
+                    feedback = (torch.empty((capacity, 4096), dtype=torch.bfloat16, device=device)
+                                if enabled and kind != "scored_prefill" else None)
                     decoders[name] = PreparedDecoder(weights, scratch[name], pool.decoder, metadata[name], mode=mode,
+                        scoring=scoring if kind == "scored_prefill" else None,
                         runtime=prefill_collective if mode == "prefill" and capacity >= _DMA_PREFILL_TOKENS else collective,
                         vocabulary_runtime=vocabulary_collective, coordinator=coordinator,
                         session=session, name=name, workspace=arena, feedback=feedback,
@@ -414,8 +427,8 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
                     if enabled:
                         from .speculative import PreparedPrefill
 
-                        forward = PreparedPrefill(speculation, forward, feedback, name)
-                    add(name, forward, mode, rows, capacity if mode == "prefill" else 1, mode_inputs, enabled=enabled)
+                        forward = PreparedPrefill(speculation, forward, decoders[name].feedback, name)
+                    add(name, forward, kind, rows, capacity if mode == "prefill" else 1, mode_inputs, enabled=enabled)
         if speculation is not None:
             from .speculative import PreparedRound
 
@@ -487,6 +500,8 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
 
     def rebind_pages():
         for forward in forwards.values():
+            if isinstance(forward, PreparedScoredPrefill):
+                forward = forward.forward
             if hasattr(forward, "rebind_pages"):
                 forward.rebind_pages(pages)
 
@@ -496,6 +511,8 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
         with compile_only_launches():
             pool.replace_pages(pages, metadata_mode=deferred_mode(), ranks=context_ranks)
             for name, forward in forwards.items():
+                if isinstance(forward, PreparedScoredPrefill):
+                    forward = forward.forward
                 if signatures[name].kind in _COMPILED_KINDS and hasattr(forward, "rebind_pages"):
                     forward.rebind_pages(pages)
     shared_pages = []
@@ -550,6 +567,8 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
         "allocated_bytes": torch.cuda.memory_allocated(device), "reserved_bytes": torch.cuda.memory_reserved(device),
         "tuning": tuning, "compiled_decoder": config.compile_decoder, "breakdown": breakdown,
         "state_row_bytes": pool.backing.nbytes // max(1, state_rows + 1)}
+    if scoring is not None:
+        memory.update(scoring.memory_report())
     assets = {role: {"path": str(snapshot / filename), "sha256": hashlib.sha256((snapshot / filename).read_bytes()).hexdigest()}
         for role, filename in (("tokenizer", "tokenizer.json"), ("chat_template", "chat_template.jinja"))}
     generation = json.loads((snapshot / "generation_config.json").read_text())
@@ -572,7 +591,7 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
             speculative_token_capacity=speculative_token_capacity(config.max_active, max(config.speculative_widths), config.speculative_token_capacity),
             speculative_fixed_width=config.speculative_fixed_width)
         memory.update(speculative_shapes=config.speculative_shapes)
-    resources = (weights, pool, requests, inputs, admission, commands, arena, forwards, decoders,
+    resources = (scoring, weights, pool, requests, inputs, admission, commands, arena, forwards, decoders,
         decoder_storage, prefill_storage, scratch, metadata, compiled, stream, graph_pool, session, collective,
         prefill_collective, vocabulary_collective, coordinator, speculation, context)
     from .export import disposable_ranges
@@ -580,8 +599,10 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
     return PreparedModel(rebuild_weights={"weights": weights}, device=config.devices[rank], graphs=graphs, buffers=buffers, signatures=signatures,
         max_active=config.max_active, resources=resources, session=session,
         forwards={name: compiled.get(name, forward) for name, forward in forwards.items()},
-        export_zero_ranges=(*disposable_ranges((decoder_storage, prefill_storage), arena, forwards), *completion.zero_ranges()),
-        close_resources=(*(() if context is None else (context.heads, context.candidates)), *shared_pages,
+        export_zero_ranges=(*(() if scoring is None else scoring.zero_ranges()),
+                            *disposable_ranges((decoder_storage, prefill_storage), arena, forwards), *completion.zero_ranges()),
+        close_resources=(*((scoring,) if scoring is not None else ()),
+                         *(() if context is None else (context.heads, context.candidates)), *shared_pages,
                          *(() if virtual_pages is None else (virtual_pages,)),
                          *(runtime for runtime in (prefill_collective, vocabulary_collective, collective)
                            if runtime is not None)),

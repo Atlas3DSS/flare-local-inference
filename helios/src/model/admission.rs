@@ -58,6 +58,7 @@ pub struct Admission {
     pub data: crate::model::PromptData,
     pub grammar_mask: Option<Vec<i32>>,
     pub ignore_eos: bool,
+    pub prompt_logprobs: bool,
 }
 
 impl Admission {
@@ -67,7 +68,7 @@ impl Admission {
             || self.handle.generation == 0
             || self.handle.generation > i64::MAX as u64
             || self.sampling.top_k > config.contract.vocabulary as i32
-            || self.max_new_tokens == 0
+            || (self.max_new_tokens == 0 && !self.prompt_logprobs)
             || self.max_new_tokens > i32::MAX as u32
             || self.prompt.is_empty()
             || self
@@ -112,6 +113,7 @@ impl Admission {
                 .as_ref()
                 .map(|grammar| grammar.mask().to_vec()),
             ignore_eos,
+            prompt_logprobs: prompt.prompt_logprobs,
         };
         admission.validate(config)?;
         Ok(admission)
@@ -146,7 +148,7 @@ pub fn validate_prompt(config: &ModelConfig, prompt: &crate::server::Prompt) -> 
             .iter()
             .any(|token| *token as usize >= config.contract.input_vocabulary)
         || prompt.sampling.top_k > config.contract.vocabulary as i32
-        || prompt.max_new_tokens == 0
+        || (prompt.max_new_tokens == 0 && !prompt.prompt_logprobs)
         || prompt.max_new_tokens > i32::MAX as u32
         || (!config.contract.vision.enabled()
             && (!prompt.conditioned_inputs.is_empty() || !prompt.conditioning.is_empty()))

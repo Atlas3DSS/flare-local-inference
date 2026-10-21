@@ -268,7 +268,7 @@ pub fn select_shape(
                         speculative_shape(config, batch, tokens)
                     }
             }
-            GraphKind::Prefill => {
+            GraphKind::Prefill | GraphKind::ScoredPrefill => {
                 batch == 1
                     && tokens > 0
                     && tokens <= config.limits.prefill_chunk_size

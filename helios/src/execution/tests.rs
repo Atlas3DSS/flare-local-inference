@@ -878,3 +878,73 @@ fn logprob_readback_uses_only_emitted_positions_and_validates_chosen_ids() {
     let decoded = transport::decode_logprobs(&bytes, &records, MAX_TOP_LOGPROBS, 1 << 2).unwrap();
     assert!(decoded[2][0].is_none());
 }
+
+#[test]
+fn prompt_payload_guards_ranks_order_and_frame_extents_are_checked() {
+    let row = |token: i32, lp: f32, rank: i32| {
+        let mut words = vec![-1i32; PROMPT_FIELDS];
+        words[..3].copy_from_slice(&[token, lp.to_bits() as i32, rank]);
+        for i in 0..MAX_TOP_LOGPROBS {
+            words[3 + 2 * i] = i as i32;
+            words[4 + 2 * i] = (-((i + 1) as f32)).to_bits() as i32;
+        }
+        words
+    };
+    let guard = row(-1, f32::NAN, 0);
+    let actual = row(30, -12., 43);
+    let bytes: Vec<_> = guard.iter().chain(&actual).flat_map(|v| v.to_ne_bytes()).collect();
+    let result = transport::decode_prompt_logprobs(&bytes, 2).unwrap();
+    assert!(result[0].is_none());
+    let value = result[1].as_ref().unwrap();
+    assert_eq!(value.rank, 43);
+    assert_eq!(value.value.token, 30);
+    assert_eq!(value.value.top[19], (19, -20.));
+    assert!(transport::decode_prompt_logprobs(&bytes[..bytes.len() - 1], 2).is_err());
+    assert_eq!(transport::decode_prompt_logprobs(&bytes, 1).unwrap(), vec![None]);
+    for bad in [row(30, f32::NAN, 1), row(30, -1., 0), row(-1, -1., 0)] {
+        let bytes: Vec<_> = bad.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        assert!(transport::decode_prompt_logprobs(&bytes, 1).is_err());
+    }
+}
+
+#[test]
+fn older_manifests_have_no_prompt_storage_and_scoring_requires_a_complete_layout() {
+    let mut value = manifest();
+    assert_eq!(value.prompt_logprob_capacity().unwrap(), 0);
+    value.validate().unwrap();
+    value.buffers.push(BufferDescriptor { name: "prompt_target_tokens".into(), address: 0x100000,
+        nbytes: 512 * 4, dtype: Dtype::Int32, shape: vec![512], strides: vec![1] });
+    assert!(value.validate().is_err());
+}
+
+#[test]
+fn prompt_catalog_storage_and_bindings_are_validated_together() {
+    let mut value = with_logprobs(MAX_TOP_LOGPROBS);
+    value.buffers.push(BufferDescriptor { name: "prompt_target_tokens".into(), address: 0x300000,
+        nbytes: 512 * 4, dtype: Dtype::Int32, shape: vec![512], strides: vec![1] });
+    value.buffers.push(BufferDescriptor { name: "prompt_logprobs".into(), address: 0x400000,
+        nbytes: 2 * 512 * PROMPT_FIELDS * 4, dtype: Dtype::Int32, shape: vec![2, 512, PROMPT_FIELDS],
+        strides: vec![512 * PROMPT_FIELDS, PROMPT_FIELDS, 1] });
+    value.graphs[0].kind = GraphKind::ScoredPrefill;
+    value.graphs[0].batch_capacity = 1;
+    value.graphs[0].token_capacity = 512;
+    value.graphs[0].input_bindings.push(InputBinding { buffer_name: "prompt_target_tokens".into(),
+        host_offset: value.input_frame_bytes, nbytes: 512 * 4 });
+    value.input_frame_bytes += 512 * 4;
+    value.validate().unwrap();
+    assert_eq!(value.prompt_logprob_capacity().unwrap(), 512);
+    for name in ["prompt_logprobs", "prompt_target_tokens"] {
+        let mut partial = value.clone();
+        partial.buffers.retain(|b| b.name != name);
+        assert!(partial.validate().is_err());
+    }
+    let mut malformed = value.clone();
+    malformed.graphs[0].token_capacity = 1024;
+    assert!(malformed.validate().is_err());
+    let mut missing = value.clone();
+    missing.graphs[0].input_bindings.retain(|b| b.buffer_name != "prompt_target_tokens");
+    assert!(missing.validate().is_err());
+    let mut ordinary = value;
+    ordinary.graphs[0].kind = GraphKind::Prefill;
+    assert!(ordinary.validate().is_err());
+}

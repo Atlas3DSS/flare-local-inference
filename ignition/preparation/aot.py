@@ -33,6 +33,7 @@ from .host_memory import release_unused
 _GUARD_LOCK = RLock()
 _GUARD_TENSOR_MODE = ContextVar("flare_guard_tensor_mode", default=None)
 _DEFERRED_BINDINGS = ContextVar("flare_deferred_bindings", default=False)
+_CHECK_BINDINGS = ContextVar("flare_check_bindings", default=False)
 
 
 def _load_inductor(data, original):
@@ -52,6 +53,10 @@ def _load_inductor(data, original):
         if graph._triton_bundle is not None:
             graph._triton_bundle.kernel_artifacts.clear()
     return AOTCompiledArtifact(compiled), serialized
+
+
+class _BindingsChecked(Exception):
+    pass
 
 
 class BindingMismatch(ValueError):
@@ -296,7 +301,11 @@ class StorageBackend(SerializableCallable):
                 raise BindingMismatch('compiled forward input shapes, layouts, or storage aliases changed: '
                     f'{len(self.signature)} expected inputs, {len(signature)} supplied; '
                     f'first differences (index, expected, actual): {differences[:4]}')
+            if _CHECK_BINDINGS.get():
+                raise _BindingsChecked
             self._bound = identity, [item.bind(args) for item in self.inputs]
+        if _CHECK_BINDINGS.get():
+            raise _BindingsChecked
         token = _INVOCATIONS.set(self.invocations)
         try:
             return self.artifact(*self._bound[1])
@@ -604,19 +613,12 @@ class ForwardCache:
             with phase(progress, "Warm compiled forwards", total=len(functions)) as stage:
                 for name, forward in functions.items():
                     with _guard_code_cache(self.root / 'guards'):
-                        compiled[name] = self._load(forward, paths[name], required=True)
-                    try:
-                        with warmup():
-                            compiled[name]()
-                    except BindingMismatch:
-                        # A cached forward from a catalog with another storage layout binds the same
-                        # signature to other aliases; it is recompiled in place and replaces the cached one.
-                        with _guard_code_cache(self.root / 'guards'):
+                        try:
+                            bound = self._load(forward, paths[name], required=True)
+                        except BindingMismatch:
                             bound = BoundForward(aot_forward(forward, options=self.options), forward, False)
-                            with warmup():
-                                bound()
-                            bound.artifact.save_compiled_function(str(paths[name]))
-                        compiled[name] = bound
+                        with warmup():
+                            compiled[name] = self._warm(bound, paths[name], name=name)
                     stage.update(advance=1)
         release_unused()
         return compiled
@@ -800,12 +802,24 @@ class ForwardCache:
         # deserialization temporaries here; scan the retained heap once at each
         # preparation phase boundary instead of once per restored forward.
         release_unused(generation=0)
-        if artifact.guard_check(forward):
+        if not artifact.guard_check(forward):
+            if required:
+                reason = artifact._artifacts.guard_manager.check_verbose(artifact.prepare_f_locals(forward))
+                raise BindingMismatch(f"rank-local forward does not match compiled guards: {reason}")
+            return None
+        # Dynamo guards omit some offsets and aliases checked by the storage backend.
+        token = _CHECK_BINDINGS.set(True)
+        try:
+            artifact(forward)
+        except _BindingsChecked:
             return BoundForward(artifact, forward, True)
-        if required:
-            reason = artifact._artifacts.guard_manager.check_verbose(artifact.prepare_f_locals(forward))
-            raise BindingMismatch(f"rank-local forward does not match compiled guards: {reason}")
-        return None
+        except BindingMismatch:
+            if required:
+                raise
+            return None
+        finally:
+            _CHECK_BINDINGS.reset(token)
+        raise RuntimeError("compiled forward did not validate its storage bindings")
 
     def _path(self, forward, *, name, signature):
         identity = (type(forward).__module__, type(forward).__qualname__, name, signature)

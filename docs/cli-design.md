@@ -1144,6 +1144,10 @@ paired addresses. See
 for routing, buffer ownership, setup, the transport test harness, and qualification
 limits.
 
+`--prompt-logprobs` is an opt-in preparation flag for `run`, `export`, and
+development `serve`. It captures separate scored prefill graphs; default exports
+contain no prompt scoring storage or graphs. See [the logprob contract](logprobs-design.md#prompt-scoring).
+
 ## 10. Non-goals
 
 Topology files, model families, launch override blocks, per-host environment

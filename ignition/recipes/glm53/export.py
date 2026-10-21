@@ -1,6 +1,7 @@
 """Disposable GLM forward storage excluded from persistent tensor payloads."""
 
 from ignition.preparation.disposable import storage_ranges
+from ignition.components.prompt_logprobs import PreparedScoredPrefill
 from .generation import PreparedGeneration
 from .resume import PreparedResume
 from .speculative import PreparedPrefill, PreparedRound
@@ -9,6 +10,8 @@ from .speculative import PreparedPrefill, PreparedRound
 def disposable_ranges(scratch, arena, forwards):
     values = [scratch, arena.tensor]
     for forward in forwards.values():
+        if isinstance(forward, PreparedScoredPrefill):
+            forward = forward.forward
         if isinstance(forward, PreparedPrefill):
             values.extend((forward.feedback, forward.previous, forward.before))
             values.extend(_draft_scratch(forward.absorb))

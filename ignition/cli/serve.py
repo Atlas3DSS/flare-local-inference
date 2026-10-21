@@ -126,7 +126,8 @@ def run(args) -> int:
                   speculation=speculation(args, model, configuration), prefill_chunk=args.prefill_chunk_size,
                   context_parallel=context_parallel(args, model), stream_overlap=stream_overlap(args, model),
                   roce_ring=args.roce_ring,
-                  mixed_prefill=args.mixed_prefill, expert_scale_compression=args.expert_scale_compression,
+                  mixed_prefill=args.mixed_prefill, prompt_logprobs=args.prompt_logprobs,
+                  expert_scale_compression=args.expert_scale_compression,
                   online_mxfp8=args.online_mxfp8, language_model_only=args.language_model_only,
                   mla_compute_mode=args.mla_compute_mode)
     runtime = binary()
@@ -248,7 +249,8 @@ def _export_hosts(args, *, export_path) -> int:
                          speculation=speculation(args, model, configuration), prefill_chunk=args.prefill_chunk_size,
                          context_parallel=context_parallel(args, model), stream_overlap=stream_overlap(args, model),
                          roce_ring=args.roce_ring,
-                         mixed_prefill=args.mixed_prefill, expert_scale_compression=args.expert_scale_compression,
+                         mixed_prefill=args.mixed_prefill, prompt_logprobs=args.prompt_logprobs,
+                         expert_scale_compression=args.expert_scale_compression,
                          online_mxfp8=args.online_mxfp8, language_model_only=args.language_model_only,
                          mla_compute_mode=args.mla_compute_mode)
     plan = replace(plan, compile_workers=compiler_workers(configuration, args.compile_workers), hub_cache=hub_cache)
@@ -319,7 +321,8 @@ def _prepare(args, *, export_path) -> int:
                       speculation=speculation(args, model, configuration), prefill_chunk=args.prefill_chunk_size,
                       context_parallel=context_parallel(args, model), stream_overlap=stream_overlap(args, model),
                       roce_ring=args.roce_ring,
-                      mixed_prefill=args.mixed_prefill, expert_scale_compression=args.expert_scale_compression,
+                      mixed_prefill=args.mixed_prefill, prompt_logprobs=args.prompt_logprobs,
+                      expert_scale_compression=args.expert_scale_compression,
                       online_mxfp8=args.online_mxfp8, language_model_only=args.language_model_only,
                       mla_compute_mode=args.mla_compute_mode)
         indices = planning.format_gpus(gpu.index for gpu in plan.gpus)
@@ -332,6 +335,7 @@ def _prepare(args, *, export_path) -> int:
             serial += " · experimental RoCE ring (native neighbor relays)"
         stage.update(f"GPU{'s' if plan.world_size > 1 else ''} {indices}{restricted}"
                      f" · concurrency {plan.concurrency} · images {plan.image_concurrency} · {display.speculation(plan.speculation, brief=True)}{capacity}{serial}"
+                     f" · prompt logprobs {'on' if plan.prompt_logprobs else 'off'}"
                      f" · mixed prefill {'on' if plan.mixed_prefill else 'off'}"
                      f" · expert scales {plan.expert_scale_compression or 'native'}"
                      f"{' · online MXFP8' if plan.online_mxfp8 else ''}"
@@ -485,7 +489,7 @@ def serve(args) -> int:
                          speculation=speculation(args, model, configuration), prefill_chunk=args.prefill_chunk_size,
                          context_parallel=context_parallel(args, model), stream_overlap=stream_overlap(args, model),
                          roce_ring=args.roce_ring,
-                         cache_states=args.prefix_cache_states, mixed_prefill=args.mixed_prefill,
+                         cache_states=args.prefix_cache_states, mixed_prefill=args.mixed_prefill, prompt_logprobs=args.prompt_logprobs,
                          expert_scale_compression=args.expert_scale_compression, online_mxfp8=args.online_mxfp8,
                          language_model_only=args.language_model_only, mla_compute_mode=args.mla_compute_mode)
     plan = replace(plan, compile_workers=compiler_workers(configuration, args.compile_workers), hub_cache=hub_cache)

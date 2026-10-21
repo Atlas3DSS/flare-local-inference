@@ -78,3 +78,9 @@
     proposal/verification transitions. Use per-fence scheduler traces and request
     latency measurements; measure GPU replay, queueing, and host planning separately.
     See scheduling-runtime-design.md#funded-timing-refresh.
+
+[ ] Qualify prompt scoring on remaining recipes and cache lifecycles;
+    see docs/logprobs-design.md for TP4 costs and numerical limits.
+
+[ ] Respect ignore_eos when classifying EOS at the output limit;
+    see helios/src/server/runtime.rs.

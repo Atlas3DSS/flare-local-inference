@@ -256,7 +256,7 @@ class PreparedDecoder:
 
     def __init__(self, weights, scratch, metadata, pool, *, mode, runtime, vocabulary_runtime, embedding_runtime, router_runtime, vision_state,
                  coordinator, session, name, workspace, buffers, kda_records=None, route_runtime=None, context=None,
-                 latent_runtimes=()):
+                 latent_runtimes=(), scoring=None):
         # Verification records its candidate rows; other modes ignore records.
         if mode not in ("prefill", "decode", "verify") or mode == "verify" and kda_records is None:
             raise ValueError("Kimi K3 verification decodes recorded candidate rows")
@@ -325,6 +325,8 @@ class PreparedDecoder:
         # consumed; the one entering the MLP takes the attention output, which its reduction consumed.
         self.mlp_input = self.buffers["kda"]["output"][:tokens]
         self.residual = ResidualStream(r["prefix"][:tokens], r["blocks"][:tokens], self.buffers["moe"]["output"][:tokens])
+        self.scoring = None if scoring is None else scoring.prepare(self.residual.output, weights.head,
+            vocabulary=weights.config.text["vocab_size"], session=session, coordinator=coordinator, name=name + ".prompt")
         self.head = PreparedVocabularyProjection(scratch.hidden, weights.head, scratch.local_logits, scratch.logits,
             runtime=vocabulary_runtime, coordinator=coordinator, session=session, name=name + ".head")
         # DSpark's context: the AttnRes mixture each auxiliary layer receives, before its input norm. Plans
@@ -386,5 +388,7 @@ class PreparedDecoder:
             delta, mode = reduce(mlp(hidden)), ADD
         hidden = self.residual.mix(delta, mode, sources=-(-len(self.layers) // size), write=-1,
             score=self.weights.output_res_score, norm=self.weights.norm, eps=eps, output_eps=eps)
+        if self.scoring is not None:
+            self.scoring()
         self.scratch.hidden.copy_(hidden[m.sample_indices])
         self.head(self.scratch.hidden)

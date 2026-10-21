@@ -258,7 +258,7 @@ impl RequestScheduler {
                 .iter()
                 .find(|l| l.request == request.handle);
             let (tokens, delivery) = match (submission.kind, lane) {
-                (GraphKind::Prefill, Some(l)) => (l.tokens as f64, 0.0),
+                (GraphKind::Prefill | GraphKind::ScoredPrefill, Some(l)) => (l.tokens as f64, 0.0),
                 (GraphKind::Decode, Some(_)) => (1.0, 1.0),
                 _ => (0.0, 0.0),
             };

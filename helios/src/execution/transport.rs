@@ -151,6 +151,12 @@ pub struct TokenLogprobs {
     pub top_count: usize,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct PromptLogprobs {
+    pub value: TokenLogprobs,
+    pub rank: u32,
+}
+
 #[derive(Debug)]
 pub struct FrameCompletion {
     pub fence: Fence,
@@ -158,6 +164,7 @@ pub struct FrameCompletion {
     pub timing: ExecutionTiming,
     pub records: CompletionRecords,
     pub logprobs: Option<Vec<[Option<TokenLogprobs>; MAX_OUTPUT_TOKENS]>>,
+    pub prompt_logprobs: Option<Vec<Option<PromptLogprobs>>>,
     /// Confidence by proposal batch row; rows and columns outside the graph shape are zero.
     pub proposal_confidence: Option<[[f32; MAX_OUTPUT_TOKENS - 1]; REQUEST_LANES]>,
 }
@@ -176,6 +183,7 @@ pub struct ExecutionTiming {
 #[derive(Clone, Copy)]
 struct Pending {
     logprobs: u64,
+    prompt_rows: usize,
     fence: Fence,
     graph_index: usize,
     grammar: bool,
@@ -188,6 +196,7 @@ struct Frame {
     output: PinnedHost,
     confidence: Option<Readback>,
     logprobs: Option<Readback>,
+    prompt_logprobs: Option<Readback>,
     produced: Event,
     started: Event,
     transferred: Event,
@@ -332,6 +341,14 @@ impl GraphExecutor {
                 output: model.host_buffer(manifest.completion_bytes())?,
                 logprobs: if manifest.max_top_logprobs()? != 0 {
                     let b = manifest.buffer("completion_logprobs")?;
+                    Some(Readback::new(
+                        &model, b.address + index * b.nbytes / 2, b.nbytes / 2,
+                    )?)
+                } else {
+                    None
+                },
+                prompt_logprobs: if manifest.prompt_logprob_capacity()? != 0 {
+                    let b = manifest.buffer("prompt_logprobs")?;
                     Some(Readback::new(
                         &model, b.address + index * b.nbytes / 2, b.nbytes / 2,
                     )?)
@@ -537,8 +554,17 @@ impl GraphExecutor {
                 }
             }
         }
+        let prompt_rows = if self.copy_logprobs && graph.kind == GraphKind::ScoredPrefill {
+            let bytes = uploads.iter().filter(|u| u.buffer == "prompt_target_tokens")
+                .map(|u| u.offset + u.bytes.len()).max().unwrap_or(0);
+            if bytes == 0 || bytes % 4 != 0 || bytes / 4 > graph.token_capacity {
+                return Err("scored prefill requires one target per live prompt row".into());
+            }
+            bytes / 4
+        } else { 0 };
         frame.pending = Some(Pending {
             logprobs,
+            prompt_rows,
             fence,
             graph_index,
             grammar: grammar_constrained,
@@ -582,6 +608,11 @@ impl GraphExecutor {
                     frame.logprobs.as_ref().unwrap().enqueue_copy(
                         &resources.copy, b.address + index * b.nbytes / 2, b.nbytes / 2,
                     )?;
+                }
+                if prompt_rows != 0 {
+                    let b = self.manifest.buffer("prompt_logprobs")?;
+                    frame.prompt_logprobs.as_ref().unwrap().enqueue_copy(&resources.copy,
+                        b.address + index * b.nbytes / 2, prompt_rows * super::PROMPT_FIELDS * 4)?;
                 }
                 if graph.kind == GraphKind::Proposal {
                     let confidence = self.manifest.buffer("proposal_confidence")?;
@@ -669,6 +700,14 @@ impl GraphExecutor {
         } else {
             None
         };
+        let prompt_logprobs = if pending.prompt_rows != 0 && !records.iter().any(|r| r.status == 3) {
+            // SAFETY: The transfer event covers this frame; decoding precedes its release.
+            let bytes = unsafe { frame.prompt_logprobs.as_ref().unwrap().bytes() };
+            match decode_prompt_logprobs(bytes, pending.prompt_rows) {
+                Ok(values) => Some(values),
+                Err(error) => { self.poison = Some(error.clone()); return Err(error); }
+            }
+        } else { None };
         let elapsed_ns = match frame.produced.elapsed_ns(&frame.started) {
             Ok(value) => value,
             Err(error) => {
@@ -707,6 +746,7 @@ impl GraphExecutor {
             },
             records,
             logprobs,
+            prompt_logprobs,
             proposal_confidence: if self.manifest.graphs[pending.graph_index].kind
                 == GraphKind::Proposal
             {
@@ -1043,6 +1083,49 @@ pub(super) fn decode_logprobs(
         }
     }
     Ok(result)
+}
+
+pub(super) fn decode_prompt_logprobs(bytes: &[u8], rows: usize) -> Result<Vec<Option<PromptLogprobs>>> {
+    let fields = super::PROMPT_FIELDS;
+    if bytes.len() < rows * fields * 4 {
+        return Err("prompt logprob frame extent mismatch".into());
+    }
+    bytes[..rows * fields * 4].chunks_exact(fields * 4).map(|row| {
+        let int = |i: usize| i32::from_ne_bytes(row[i * 4..(i + 1) * 4].try_into().unwrap());
+        let float = |i: usize| f32::from_bits(int(i) as u32);
+        if int(0) == -1 {
+            if int(2) != 0 || !float(1).is_nan() {
+                return Err("invalid prompt logprob guard".into());
+            }
+            return Ok(None);
+        }
+        if int(0) < 0 || int(2) <= 0 || float(1).is_nan() || float(1) > 0. {
+            return Err("invalid prompt logprob result".into());
+        }
+        let mut value = TokenLogprobs {
+            token: int(0) as u32, logprob: float(1),
+            top: [(0, 0.); super::MAX_TOP_LOGPROBS], top_count: 0,
+        };
+        for i in 0..super::MAX_TOP_LOGPROBS {
+            let token = int(3 + 2 * i);
+            if token == -1 {
+                break;
+            }
+            let lp = float(4 + 2 * i);
+            if token < 0 || lp.is_nan() || lp > 0. {
+                return Err("invalid prompt alternative".into());
+            }
+            if i > 0 {
+                let (previous, previous_lp) = value.top[i - 1];
+                if lp > previous_lp || (lp == previous_lp && token as u32 <= previous) {
+                    return Err("prompt alternatives are not ordered".into());
+                }
+            }
+            value.top[i] = (token as u32, lp);
+            value.top_count += 1;
+        }
+        Ok(Some(PromptLogprobs { value, rank: int(2) as u32 }))
+    }).collect()
 }
 
 #[cfg(test)]

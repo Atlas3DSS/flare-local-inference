@@ -43,6 +43,65 @@ pub(super) fn legacy(entries: &[Formatted]) -> Value {
         "top_logprobs":top, "text_offset":entries.iter().map(|e| e.offset).collect::<Vec<_>>()})
 }
 
+pub(super) fn prompt(
+    tokens: &[u32], values: &[Option<crate::execution::PromptLogprobs>], top: usize,
+    token_ids: bool, frontend: &Frontend, offset: &mut usize, echo: bool,
+) -> Result<(Vec<Value>, Value)> {
+    if tokens.len() != values.len() { return Err("prompt logprob token count mismatch".into()); }
+    let mut dictionaries = Vec::with_capacity(tokens.len());
+    let (mut texts, mut probabilities, mut alternatives, mut offsets) = (vec![], vec![], vec![], vec![]);
+    let text = |id| -> Result<String> {
+        Ok(String::from_utf8_lossy(frontend.token_bytes(id)?).into_owned())
+    };
+    let displayed = |id, decoded: &str| if token_ids { format!("token_id:{id}") } else { decoded.to_owned() };
+    let number = |lp: f32| if lp.is_finite() { lp } else { -9999. };
+    for (&token, value) in tokens.iter().zip(values) {
+        let decoded = if value.is_none() { text(token).unwrap_or_default() } else { text(token)? };
+        let shown = displayed(token, &decoded);
+        if echo {
+            texts.push(json!(shown));
+            offsets.push(json!(*offset));
+            *offset += shown.chars().count();
+        }
+        let Some(value) = value else {
+            if echo {
+                probabilities.push(Value::Null);
+                alternatives.push(Value::Null);
+            }
+            dictionaries.push(Value::Null);
+            continue;
+        };
+        let mut dictionary = serde_json::Map::new();
+        let mut legacy = serde_json::Map::new();
+        let mut rank = 1;
+        for (index, &(id, lp)) in value.value.top[..value.value.top_count.min(top)].iter().enumerate() {
+            if index > 0 && lp < value.value.top[index - 1].1 {
+                rank = index + 1;
+            }
+            let decoded = text(id)?;
+            dictionary.insert(id.to_string(), json!({"logprob":number(lp),"rank":rank,"decoded_token":decoded}));
+            if echo {
+                legacy.entry(displayed(id, &decoded)).or_insert_with(|| json!(number(lp)));
+            }
+        }
+        dictionary.insert(token.to_string(), json!({"logprob":number(value.value.logprob),"rank":value.rank,"decoded_token":decoded}));
+        dictionaries.push(Value::Object(dictionary));
+        if echo {
+            legacy.entry(shown).or_insert_with(|| json!(number(value.value.logprob)));
+            probabilities.push(json!(number(value.value.logprob)));
+            alternatives.push(Value::Object(legacy));
+        }
+    }
+    Ok((dictionaries, json!({"tokens":texts,"token_logprobs":probabilities,
+        "top_logprobs":alternatives,"text_offset":offsets})))
+}
+
+pub(super) fn append_legacy(output: &mut Value, following: Value) {
+    for key in ["tokens", "token_logprobs", "top_logprobs", "text_offset"] {
+        output[key].as_array_mut().unwrap().extend(following[key].as_array().unwrap().iter().cloned());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -320,5 +379,67 @@ mod utf8_entry_tests {
             assert_eq!(attributed, tokens.len());
             assert_eq!(offsets, if tokens.len() == 4 { vec![0,0,0,1] } else { (0..65).collect() });
         }
+    }
+}
+
+#[cfg(test)]
+mod prompt_tests {
+    use super::*;
+    use crate::{execution::{PromptLogprobs, TokenLogprobs}, server::{inference::ToolChoice, protocol::{Encoder, Protocol, PromptUsage}}};
+    use std::sync::Arc;
+
+    #[test]
+    fn tied_prompt_tokens_have_the_same_competition_rank() {
+        let frontend = crate::server::output::tests::frontend(&["A", "B", "C", "D"]);
+        for token in [1, 2, 3] {
+            let mut top = [(0, 0.); crate::execution::MAX_TOP_LOGPROBS];
+            top[..4].copy_from_slice(&[(0, -1.), (1, -2.), (2, -2.), (3, -2.)]);
+            let values = [Some(PromptLogprobs { value: TokenLogprobs {
+                token, logprob: -2., top, top_count: 4,
+            }, rank: 2 })];
+            let (dictionary, _) = prompt(&[token], &values, 4, false, &frontend, &mut 0, true).unwrap();
+            assert_eq!(dictionary[0]["0"]["rank"], 1);
+            for id in ["1", "2", "3"] {
+                assert_eq!(dictionary[0][id]["rank"], 2);
+            }
+        }
+    }
+
+    #[test]
+    fn prompt_formats_nulls_actual_rank_echo_streams_and_chat_placement() {
+        let frontend = Arc::new(crate::server::output::tests::frontend(&["A", " B", " C"]));
+        let values = [None, Some(PromptLogprobs { value: TokenLogprobs { token: 1, logprob: -3.,
+            top: [(2, -1.); crate::execution::MAX_TOP_LOGPROBS], top_count: 1 }, rank: 8 })];
+        let (dictionary, legacy) = prompt(&[0, 1], &values, 1, true, &frontend, &mut 0, true).unwrap();
+        assert_eq!(dictionary[1]["1"]["decoded_token"], " B");
+        assert_eq!(dictionary[1]["2"]["decoded_token"], " C");
+        assert_eq!(legacy["tokens"], json!(["token_id:0", "token_id:1"]));
+        for protocol in [Protocol::Completions, Protocol::Chat] {
+            let mut encoder = Encoder::new(protocol, "id".into(), "model".into(), 0, 1,
+                vec![PromptUsage { tokens: 2, image_tokens: 0 }], vec![], ToolChoice::Auto, true, false, json!({}));
+            encoder.set_logprobs(Some(crate::server::inference::LogprobOptions { top: 1, token_ids: false }), frontend.clone(), false);
+            encoder.set_prompt_logprobs(Some(1), frontend.clone(), protocol == Protocol::Completions, vec![3]);
+            encoder.prompt_logprobs(0, 0, &[0, 1], &values).unwrap();
+            let response = encoder.response();
+            let prompt = if protocol == Protocol::Chat { &response["prompt_logprobs"] } else { &response["choices"][0]["prompt_logprobs"] };
+            assert!(prompt[0].is_null());
+            assert_eq!(prompt[1]["1"]["rank"], 8);
+            assert_eq!(prompt[1]["2"]["rank"], 1);
+            assert_eq!(prompt[1]["1"]["decoded_token"], " B");
+            if protocol == Protocol::Completions {
+                let logprobs = &response["choices"][0]["logprobs"];
+                assert_eq!(logprobs["tokens"], json!(["A", " B"]));
+                assert_eq!(logprobs["token_logprobs"], json!([null, -3.]));
+                assert_eq!(logprobs["text_offset"], json!([0, 1]));
+            }
+        }
+        let mut encoder = Encoder::new(Protocol::Completions, "id".into(), "model".into(), 0, 1,
+            vec![PromptUsage { tokens: 2, image_tokens: 0 }], vec![], ToolChoice::Auto, true, false, json!({}));
+        encoder.set_logprobs(Some(crate::server::inference::LogprobOptions { top: 1, token_ids: false }), frontend.clone(), true);
+        encoder.set_prompt_logprobs(Some(1), frontend, true, vec![3]);
+        let frames = encoder.prompt_logprobs(0, 0, &[0, 1], &values).unwrap();
+        assert_eq!(frames[0].data["choices"][0]["logprobs"]["token_logprobs"], json!([null, -3.]));
+        assert!(encoder.prompt_logprobs(0, 0, &[0], &[None]).is_err());
+        assert!(encoder.response()["choices"][0]["prompt_logprobs"].as_array().unwrap().is_empty());
     }
 }

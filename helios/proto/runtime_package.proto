@@ -236,6 +236,7 @@ enum ValueSource {
   COPY_GRAMMAR_COUNT = 36;
   IMAGE_TENSOR = 37;
   IMAGE_FEATURE_SLOT = 38;
+  PROMPT_TARGET_TOKEN = 39;
 }
 enum InputIndexing {
   INDEXING_UNSPECIFIED = 0;
@@ -286,6 +287,7 @@ enum GraphOperation {
   MIXED = 9;
   PROPOSAL = 10;
   VERIFICATION = 11;
+  SCORED_PREFILL = 12;
 }
 message GraphContract {
   string graph = 1;

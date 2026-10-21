@@ -559,9 +559,6 @@ fn generation_logprobs(protocol: Protocol, body: &Value) -> Result<Option<Logpro
             if present(body, "top_logprobs") { return Err("completions use integer logprobs".into()); }
             let enabled = present(body, "logprobs");
             let top = integer("logprobs")?;
-            if enabled && flag(body, "echo", false)? {
-                return Err("echo with logprobs requires prompt logprobs, which are not supported".into());
-            }
             (enabled, top)
         }
         Protocol::Responses => {
@@ -612,6 +609,19 @@ pub(crate) fn decode(protocol: Protocol, body: Value, count: bool) -> Result<Dec
         reject(&body, &["suffix"])?;
     }
     let logprobs = generation_logprobs(protocol, &body)?;
+    let prompt_logprobs = if present(&body, "prompt_logprobs") {
+        if !matches!(protocol, Protocol::Completions | Protocol::Chat) {
+            return Err("prompt_logprobs requires completions or chat completions".into());
+        }
+        if flag(&body, "stream", false)? {
+            return Err("prompt_logprobs are not available when stream=true; use echo with logprobs".into());
+        }
+        Some(body["prompt_logprobs"].as_u64()
+            .filter(|n| *n <= crate::execution::MAX_TOP_LOGPROBS as u64)
+            .ok_or("prompt_logprobs must be an integer from 0 through 20")? as usize)
+    } else if protocol == Protocol::Completions && flag(&body, "echo", false)? {
+        logprobs.map(|v| v.top)
+    } else { None };
     let choices = body
         .get("n")
         .filter(|v| !v.is_null())
@@ -723,6 +733,7 @@ pub(crate) fn decode(protocol: Protocol, body: Value, count: bool) -> Result<Dec
         Protocol::Completions => Input::Raw(raw_prompts(&body["prompt"])?),
     };
     options.logprobs = logprobs;
+    options.prompt_logprobs = prompt_logprobs;
     let request = Request {
         input,
         options,
@@ -956,6 +967,27 @@ mod native_prompt_tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn prompt_only_completions_and_chat_zero_limit_follow_endpoint_rules() {
+        let (frontend, compiler, mut config) = native(PromptEncoder::DeepseekV41);
+        config.contract.graphs.push(crate::model::contract::GraphContract {
+            graph: "score".into(), kind: crate::model::contract::GraphOperation::ScoredPrefill,
+            inputs: vec![], state: vec![], state_rows_per_request: 1,
+            draft_cursor: None, embedding_tables: vec![], pending_token: None,
+        });
+        let completion = decode(Protocol::Completions,
+            json!({"prompt":[7,42],"max_tokens":0,"prompt_logprobs":0}), false).unwrap();
+        let prepared = crate::server::request::prepare_inference(
+            &frontend, None, &compiler, &config, &completion.request, 0, false).unwrap();
+        assert_eq!(prepared.prompt.max_new_tokens, 0);
+        assert!(prepared.prompt.prompt_logprobs);
+        let chat = decode(Protocol::Chat,
+            json!({"messages":[{"role":"user","content":"Hello"}],"max_tokens":0,"prompt_logprobs":0}), false).unwrap();
+        let error = crate::server::request::prepare_inference(
+            &frontend, None, &compiler, &config, &chat.request, 0, false).err().unwrap();
+        assert!(error.to_string().contains("output limit must be between 1"), "{error}");
     }
 
     #[test]

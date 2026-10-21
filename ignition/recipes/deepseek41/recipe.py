@@ -15,7 +15,8 @@ def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress, retain_
     drafting = {} if speculation is None else {
         "speculative_widths": speculation.widths, "speculative_token_capacity": plan.speculative_token_capacity,
         "speculative_fixed_width": speculation.fixed_width, "packed_verification": speculation.packed_verification}
-    config = PreparationConfig(compile_workers=plan.compile_workers, tuning_replica=plan.tuning_replica,
+    config = PreparationConfig(prompt_logprobs=plan.prompt_logprobs,
+        compile_workers=plan.compile_workers, tuning_replica=plan.tuning_replica,
         image_concurrency=plan.image_concurrency,
         devices=tuple(range(plan.world_size)) if ranks is None else (0,) * plan.world_size,
         hosts=None if ranks is None else ranks.hosts, roce_ring=plan.roce_ring, compile_decoder=compile_forwards,

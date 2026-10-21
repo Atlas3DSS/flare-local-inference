@@ -590,6 +590,7 @@ pub(crate) fn consumes(kind: GraphKind) -> bool {
     matches!(
         kind,
         GraphKind::Prefill
+            | GraphKind::ScoredPrefill
             | GraphKind::Decode
             | GraphKind::Speculative
             | GraphKind::Verification

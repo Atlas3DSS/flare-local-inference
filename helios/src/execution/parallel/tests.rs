@@ -131,6 +131,7 @@ fn completed(status: i64) -> FrameCompletion {
     };
     FrameCompletion {
         logprobs: None,
+        prompt_logprobs: None,
         proposal_confidence: None,
         fence: Fence(3),
         graph_index: 2,
