@@ -1,8 +1,0 @@
-.                                                                        [100%]
-=============================== warnings summary ===============================
-.venv/lib/python3.12/site-packages/flashinfer/cute_dsl/availability.py:136
-  /home/nvidia/erakhmatulin/flare-glm53-ring-20261020/flare/.venv/lib/python3.12/site-packages/flashinfer/cute_dsl/availability.py:136: DeprecationWarning: Arch from arch.py is deprecated. Use Arch from enums.py instead.
-    from cutlass.base_dsl.arch import Arch
-
--- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
-1 passed, 1 warning in 1.18s

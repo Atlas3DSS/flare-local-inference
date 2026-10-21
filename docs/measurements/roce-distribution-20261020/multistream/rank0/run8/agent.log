@@ -1,3 +1,0 @@
-2026-10-20T10:54:03-07:00 spark-1ae8 flare-multistream-test-bin[1909439]: running 1 test
-2026-10-20T10:54:03-07:00 spark-1ae8 flare-multistream-test-bin[1909439]: flare agent spark-1ae8 (4a78d1a3d040790aa5dd877c0cf2d28af26519db0d083e8e97a5be98b8e6a6c3) listening on 0.0.0.0:29910; cache /home/nvidia/erakhmatulin/flare-multistream-20261020/run8/cache; controller set revision 1
-2026-10-20T10:55:03-07:00 spark-1ae8 flare-multistream-test-bin[1909439]: test orbit::agent::tests::serve_ring_transfer_fixture has been running for over 60 seconds

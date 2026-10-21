@@ -1,3 +1,0 @@
-TasksMax=153552
-LimitNOFILE=500000
-LimitNOFILESoft=1024

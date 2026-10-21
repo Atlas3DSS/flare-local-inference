@@ -1,4 +1,0 @@
-Oct 20 10:18:57 spark-1ae8 systemd[9946]: Started flare-roce-route-recheck-20261020.service - /home/nvidia/erakhmatulin/flare-ring-test-bin-20261020 --ignored --exact orbit::agent::tests::serve_ring_transfer_fixture --nocapture.
-Oct 20 10:18:57 spark-1ae8 flare-ring-test-bin-20261020[1864322]: running 1 test
-Oct 20 10:18:57 spark-1ae8 flare-ring-test-bin-20261020[1864322]: flare agent spark-1ae8 (4a78d1a3d040790aa5dd877c0cf2d28af26519db0d083e8e97a5be98b8e6a6c3) listening on 0.0.0.0:29910; cache /home/nvidia/erakhmatulin/flare-roce-route-recheck-20261020/cache; controller set revision 1
-Oct 20 10:19:57 spark-1ae8 flare-ring-test-bin-20261020[1864322]: test orbit::agent::tests::serve_ring_transfer_fixture has been running for over 60 seconds

@@ -1,2 +1,0 @@
-{"host":"spark-1afa","date":"2026-10-20","path":"RootSource -> SourceServer -> loopback TCP -> RemoteSource","request_bytes":4,"requests":100,"sender_tcp_nodelay":false,"receiver_tcp_nodelay":true,"seconds":4.227447618963197}
-{"host":"spark-1afa","date":"2026-10-20","path":"RootSource -> SourceServer -> loopback TCP -> RemoteSource","request_bytes":4,"requests":100,"sender_tcp_nodelay":true,"receiver_tcp_nodelay":true,"seconds":0.04243454698007554}
