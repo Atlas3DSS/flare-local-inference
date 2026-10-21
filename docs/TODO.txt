@@ -91,3 +91,14 @@
 
 [ ] Validate embedding readiness timestamps in full Qwen3.8 PLE serving and
     cross-node RoCEnante TP packages for Qwen3.8 and DeepSeek V4.1.
+
+[ ] Measure cross-host rank handoff polling and completion yielding: CPU time,
+    request p99, and complete-round latency under active and idle workloads.
+    See helios/src/execution/parallel.rs and performance-work.md.
+
+[ ] Profile cached CSF FC1 metadata in FlashInfer for register pressure, spills,
+    occupancy, and complete DeepSeek V4.1 graph latency.
+
+[ ] Investigate DeepSeek V4.1 grouped MoE CSF plan selection with representative
+    routes: compare inline reconstruction and separate expansion in complete
+    graphs before adding a preparation override. See performance-work.md.
