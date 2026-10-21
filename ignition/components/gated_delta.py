@@ -276,7 +276,7 @@ class PreparedGDN:
         self.partitions = partitions
         if self.sm70:
             if partitions is not None or records is not None or in_place:
-                raise ValueError("SM70 GDN requires ordinary unpartitioned execution")
+                raise ValueError("SM70 GDN requires unpartitioned execution with explicit checkpoint columns")
             from .sm70_gdn import PreparedSM70GDNSequence
             self.sm70_sequence = PreparedSM70GDNSequence(module, scratch, state, metadata,
                 mode=mode, norm_weight_bf16=module.norm_weight_bf16, session=session,

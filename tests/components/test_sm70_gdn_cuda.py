@@ -29,9 +29,9 @@ def device():
     return result
 
 
-def _case(device, activation, weight_bf16):
+def _case(device, activation, weight_bf16, *, history_columns=3, state_columns=1, slots=6):
     generator = torch.Generator().manual_seed(48128)
-    capacity, requests, slots = 17, 4, 6
+    capacity, requests = 17, 4
 
     def random(shape, scale=.1, *, rounded=True):
         value = torch.randn(shape, generator=generator) * scale
@@ -56,9 +56,9 @@ def _case(device, activation, weight_bf16):
         recurrence=torch.full((capacity, VALUES * DIM), 13.0, device=device),
         gated=torch.full((capacity, VALUES * DIM), 17.0, device=device))
     # Real state views include padding as in the hybrid cache pool.
-    conv_backing = torch.full((slots, CHANNELS * 3 + 64), 19.0, device=device)
+    conv_backing = torch.full((slots, CHANNELS * history_columns + 64), 19.0, device=device)
     state_backing = torch.full((slots, VALUES * DIM * DIM + 64), 23.0, device=device)
-    state = SimpleNamespace(convolution=conv_backing[:, :CHANNELS * 3].view(slots, CHANNELS, 3),
+    state = SimpleNamespace(convolution=conv_backing[:, :CHANNELS * history_columns].view(slots, CHANNELS, history_columns),
                             recurrent=state_backing[:, :VALUES * DIM * DIM].view(slots, VALUES, DIM, DIM))
     state.convolution.copy_(random(state.convolution.shape))
     state.recurrent.copy_(random(state.recurrent.shape, .025, rounded=False))
@@ -69,7 +69,7 @@ def _case(device, activation, weight_bf16):
     metadata = SimpleNamespace(query_start_loc=zeros((requests + 1,)),
         convolution_slots=torch.full((requests,), -1, dtype=torch.int64, device=device),
         fresh=zeros((requests,), torch.bool), accepted_tokens=torch.ones(requests, dtype=torch.int32, device=device),
-        state_indices=zeros((requests, 1), torch.int64), initial_state_indices=zeros((requests,), torch.int64),
+        state_indices=zeros((requests, state_columns), torch.int64), initial_state_indices=zeros((requests,), torch.int64),
         final_state_indices=zeros((requests,), torch.int64), checkpoint_state_indices=zeros((requests,), torch.int64),
         checkpoint_offsets=zeros((requests,)), num_seqs=zeros((1,)), num_tokens=zeros((1,)))
     return module, scratch, state, metadata, (conv_backing, state_backing)
@@ -112,18 +112,27 @@ def _reference(module, scratch, recurrent, convolution, meta, mode, weight_bf16)
         slot = int(meta.convolution_slots[sequence])
         fresh = bool(meta.fresh[sequence])
         if slot >= 0:
-            history = torch.zeros_like(convolution[slot]) if fresh else convolution[slot].clone()
+            selected = 0 if mode == "prefill" else int(meta.accepted_tokens[sequence]) - 1
+            history = convolution[slot, :, selected:selected + 3].clone()
+            if fresh:
+                history.zero_()
+            convolution[slot].zero_()
             for token in range(start, end):
                 x = _round(qkv[token])
                 summed = ((history[:, 0] * conv_weight[:, 0] + history[:, 1] * conv_weight[:, 1])
                           + history[:, 2] * conv_weight[:, 2]) + x * conv_weight[:, 3]
                 convolved[token] = _round(F.silu(_round(summed)))
                 history = torch.cat((history[:, 1:], x[:, None]), dim=1)
-            convolution[slot] = history
+                if mode == "decode":
+                    candidate = token - start
+                    convolution[slot, :, candidate:candidate + 3] = history
+            if mode == "prefill":
+                convolution[slot, :, :3] = history
         else:
             convolved[start:end].zero_()
         final = int(meta.final_state_indices[sequence] if mode == "prefill" else meta.state_indices[sequence, 0])
-        initial = int(meta.initial_state_indices[sequence]) if mode == "prefill" else final
+        initial = (int(meta.initial_state_indices[sequence]) if mode == "prefill"
+                   else int(meta.state_indices[sequence, int(meta.accepted_tokens[sequence]) - 1]))
         if final == 0:
             outputs[start:end].zero_()
             continue
@@ -144,7 +153,12 @@ def _reference(module, scratch, recurrent, convolution, meta, mode, weight_bf16)
                 checkpoint = int(meta.checkpoint_state_indices[sequence])
                 if checkpoint > 0:
                     recurrent[checkpoint] = current
-        recurrent[final] = current
+            if mode == "decode":
+                destination = int(meta.state_indices[sequence, token - start])
+                if destination > 0:
+                    recurrent[destination] = current
+        if mode == "prefill":
+            recurrent[final] = current
     live = int(meta.num_tokens)
     gated = torch.zeros_like(scratch.gated, device="cpu")
     hidden = outputs[:live].reshape(-1, VALUES, DIM)
@@ -209,11 +223,11 @@ def test_prefill_continuation_decode_and_inactive_state(device, activation, weig
     assert not scratch.gated.any()
 
 
-def test_rejects_speculative_history_and_bf16_visible_operands(device):
+def test_rejects_invalid_history_and_bf16_visible_operands(device):
     from ignition.components.sm70_gdn import PreparedSM70GDNSequence
 
     module, scratch, state, meta, _ = _case(device, "silu", True)
-    invalid = SimpleNamespace(convolution=torch.zeros((6, CHANNELS, 4), device=device), recurrent=state.recurrent)
+    invalid = SimpleNamespace(convolution=torch.zeros((6, CHANNELS, 2), device=device), recurrent=state.recurrent)
     with pytest.raises(ValueError, match="three chronological"):
         PreparedSM70GDNSequence(module, scratch, invalid, meta, mode="prefill", norm_weight_bf16=True)
     invalid = SimpleNamespace(**vars(scratch))
@@ -225,24 +239,26 @@ def test_rejects_speculative_history_and_bf16_visible_operands(device):
         PreparedSM70GDNSequence(module, scratch, state, meta, mode="prefill", norm_weight_bf16=True)
 
 
-@pytest.mark.parametrize("mode", ["prefill", "decode"])
+@pytest.mark.parametrize("mode,columns", [("prefill", 1), ("prefill", 4), ("decode", 1), ("decode", 4)])
 @torch.no_grad()
-def test_recorded_preparation_compiled_capture_and_aliased_state(device, mode):
+def test_recorded_preparation_compiled_capture_and_aliased_state(device, mode, columns):
     from b12x._lib.compile_plan import observe_programs
     from ignition.components.sm70_gdn import PreparedSM70GDNSequence
     from ignition.preparation.compilation import compile_forward
     from ignition.preparation.tuning import RecordedPreparationSession
 
-    module, scratch, original, meta, _ = _case(device, "silu", True)
+    module, scratch, original, meta, _ = _case(device, "silu", True,
+        history_columns=columns + 2, state_columns=columns, slots=6 if columns == 1 else 18)
     if mode == "decode":
-        scratch = SimpleNamespace(**{name: value[:4] for name, value in vars(scratch).items()})
+        scratch = SimpleNamespace(**{name: value[:4 * columns] for name, value in vars(scratch).items()})
     # Production convolution and recurrence are disjoint views of one cache
     # allocation. Whole-forward compilation must preserve both mutations.
-    conv_size, recurrent_size = CHANNELS * 3, VALUES * DIM * DIM
-    backing = torch.full((6, conv_size + recurrent_size + 64), 29., device=device)
+    slots = original.recurrent.shape[0]
+    conv_size, recurrent_size = CHANNELS * (columns + 2), VALUES * DIM * DIM
+    backing = torch.full((slots, conv_size + recurrent_size + 64), 29., device=device)
     state = SimpleNamespace(
-        convolution=backing[:, :conv_size].view(6, CHANNELS, 3),
-        recurrent=backing[:, conv_size:conv_size + recurrent_size].view(6, VALUES, DIM, DIM))
+        convolution=backing[:, :conv_size].view(slots, CHANNELS, columns + 2),
+        recurrent=backing[:, conv_size:conv_size + recurrent_size].view(slots, VALUES, DIM, DIM))
     state.convolution.copy_(original.convolution)
     state.recurrent.copy_(original.recurrent)
     expected_conv, expected_state = state.convolution.cpu(), state.recurrent.cpu()
@@ -263,10 +279,14 @@ def test_recorded_preparation_compiled_capture_and_aliased_state(device, mode):
             compiled()
         session.freeze()
         for continuation in (False, True):
-            lengths = (4, 0, 7, 2) if mode == "prefill" else (1, 0, 1, 1)
+            lengths = (4, 0, 7, 2) if mode == "prefill" else (columns, 0, columns, columns)
             _set_metadata(meta, lengths, (1, 5, 2, -1),
                 (not continuation, True, False, False),
                 initial=(1 if continuation else 0, 0, 2 if continuation else 3, 0))
+            if columns > 1 and mode == "decode":
+                meta.state_indices.copy_(torch.tensor([[1, 6, 7, 8], [5, 9, 10, 11],
+                    [2, 12, 13, 14], [0, 0, 0, 0]], dtype=torch.int64, device=device))
+                meta.accepted_tokens.fill_(columns if continuation else 1)
             expected = _reference(module, scratch, expected_state, expected_conv, meta, mode, True)
             allocations = torch.cuda.memory_stats()["allocation.all.allocated"]
             graph.replay()
@@ -280,3 +300,133 @@ def test_recorded_preparation_compiled_capture_and_aliased_state(device, mode):
             torch.testing.assert_close(state.convolution.cpu(), expected_conv, rtol=0, atol=0)
             assert torch.all(backing[:, -64:] == 29)
         graph.reset()
+
+
+@pytest.mark.parametrize("width,accepted", [(width, accepted) for width in range(1, 5)
+                                          for accepted in range(1, width + 1)])
+@torch.no_grad()
+def test_speculative_checkpoints_and_selected_prefix_are_byte_exact(device, width, accepted):
+    from ignition.components.sm70_gdn import PreparedSM70GDNSequence
+
+    module, scratch, state, meta, backing = _case(device, "silu", True,
+        history_columns=6, state_columns=4, slots=18)
+    scratch = SimpleNamespace(**{name: value[:16] for name, value in vars(scratch).items()})
+    _, sequential_scratch, sequential_state, sequential_meta, _ = _case(device, "silu", True)
+    sequential_scratch = SimpleNamespace(**{name: value[:4] for name, value in vars(sequential_scratch).items()})
+    live_requests = (0, 1, 2, 3)
+    canonical = (1, 5, 9, 13)
+    # Give the ordinary and speculative executions exactly the same starting
+    # state. Random unused checkpoint columns expose accidental initial reads.
+    for request in live_requests:
+        sequential_state.recurrent[request + 1].copy_(state.recurrent[canonical[request]])
+        sequential_state.convolution[request + 1].copy_(state.convolution[canonical[request], :, :3])
+    before_state = state.recurrent.clone()
+    before_conv = state.convolution.clone()
+    verify = PreparedSM70GDNSequence(module, scratch, state, meta, mode="decode", norm_weight_bf16=True)
+    sequential = PreparedSM70GDNSequence(module, sequential_scratch, sequential_state,
+        sequential_meta, mode="decode", norm_weight_bf16=True)
+    for operation in (verify, sequential):
+        for program in operation.prepared.programs:
+            assert program.asm["cubin"]
+            assert ".target sm_70" in program.asm["ptx"]
+    graphs = []
+    for operation in (verify, sequential):
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            operation()
+        graphs.append(graph)
+    _set_metadata(meta, (width,) * 4, canonical, (False, False, True, False))
+    columns = torch.tensor([[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12], [13, 14, 15, 16]],
+        dtype=torch.int64, device=device)
+    meta.state_indices.copy_(columns)
+    allocation_count = torch.cuda.memory_stats()["allocation.all.allocated"]
+    graphs[0].replay()
+    torch.cuda.synchronize()
+    assert torch.cuda.memory_stats()["allocation.all.allocated"] == allocation_count
+    snapshots = []
+    for candidate in range(width):
+        _set_metadata(sequential_meta, (1,) * 4, (1, 2, 3, 4),
+            (False, False, candidate == 0, False))
+        for packed, request in enumerate(live_requests):
+            row = packed * width + candidate
+            for name in ("projected_qkv", "a", "b", "z"):
+                getattr(sequential_scratch, name)[packed].copy_(getattr(scratch, name)[row])
+        graphs[1].replay()
+        torch.cuda.synchronize()
+        for packed, request in enumerate(live_requests):
+            row = packed * width + candidate
+            assert torch.equal(state.recurrent[canonical[request] + candidate], sequential_state.recurrent[request + 1])
+            assert torch.equal(state.convolution[canonical[request], :, candidate:candidate + 3],
+                sequential_state.convolution[request + 1])
+            for name in ("convolved_qkv", "recurrence", "gated"):
+                assert torch.equal(getattr(scratch, name)[row], getattr(sequential_scratch, name)[packed])
+        snapshots.append((sequential_state.recurrent.clone(), sequential_state.convolution.clone()))
+    written = {slot + candidate for slot in canonical for candidate in range(width)}
+    for slot in range(state.recurrent.shape[0]):
+        if slot not in written:
+            assert torch.equal(state.recurrent[slot], before_state[slot])
+        if slot not in canonical:
+            assert torch.equal(state.convolution[slot], before_conv[slot])
+    assert not scratch.gated[4 * width:].any()
+    # Reject the suffix, then resume using accepted_tokens with the same graph.
+    # The corresponding ordinary state was saved immediately after that input.
+    sequential_state.recurrent.copy_(snapshots[accepted - 1][0])
+    sequential_state.convolution.copy_(snapshots[accepted - 1][1])
+    _set_metadata(meta, (1,) * 4, canonical, (False, False, False, False))
+    meta.state_indices.copy_(columns)
+    meta.accepted_tokens.fill_(accepted)
+    _set_metadata(sequential_meta, (1,) * 4, (1, 2, 3, 4), (False, False, False, False))
+    for name in ("projected_qkv", "a", "b", "z"):
+        getattr(sequential_scratch, name).copy_(getattr(scratch, name)[:4])
+    graphs[0].replay()
+    graphs[1].replay()
+    torch.cuda.synchronize()
+    for packed, request in enumerate(live_requests):
+        assert torch.equal(state.recurrent[canonical[request]], sequential_state.recurrent[request + 1])
+        assert torch.equal(state.convolution[canonical[request], :, :3], sequential_state.convolution[request + 1])
+        assert not state.convolution[canonical[request], :, 3:].any()
+        for name in ("convolved_qkv", "recurrence", "gated"):
+            assert torch.equal(getattr(scratch, name)[packed], getattr(sequential_scratch, name)[packed])
+    assert torch.all(backing[0][:, -64:] == 19)
+    assert torch.all(backing[1][:, -64:] == 23)
+    for graph in graphs:
+        graph.reset()
+
+
+@torch.no_grad()
+def test_convolution_commit_normalizes_every_layer_and_preserves_padding(device):
+    from ignition.components.sm70_gdn import PreparedSM70ConvolutionCommit
+
+    # 48 dense layers, four requests, all accepted-prefix lengths, and strided
+    # canonical row IDs as supplied by DeltaMetadata.state_indices[:, 0].
+    layers, slots, channels, columns, padding = 48, 5, 128, 6, 32
+    layer_size = channels * columns + padding
+    floats = torch.arange(slots * layers * layer_size, dtype=torch.float32, device=device).view(slots, -1)
+    histories = {layer: floats[:, layer * layer_size:layer * layer_size + channels * columns].view(slots, channels, columns)
+                 for layer in range(layers)}
+    rows = torch.arange(1, 5, dtype=torch.int64, device=device)[:, None].expand(-1, 4).clone()[:, 0]
+    counts = torch.zeros(4, dtype=torch.int32, device=device)
+    commit = PreparedSM70ConvolutionCommit(floats.view(torch.uint8), histories, rows, counts)
+    assert commit.operation.compiled.asm["cubin"]
+    assert ".target sm_70" in commit.operation.compiled.asm["ptx"]
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        commit()
+    expected = floats.clone()
+    counts.copy_(torch.arange(1, 5, dtype=torch.int32, device=device))
+    for layer in range(layers):
+        for request in range(4):
+            base = layer * layer_size
+            target = expected[request + 1, base:base + channels * columns].view(channels, columns)
+            target[:, :3].copy_(histories[layer][request + 1, :, request:request + 3])
+            target[:, 3:].zero_()
+    allocations = torch.cuda.memory_stats()["allocation.all.allocated"]
+    graph.replay()
+    torch.cuda.synchronize()
+    assert torch.cuda.memory_stats()["allocation.all.allocated"] == allocations
+    assert torch.equal(floats, expected)
+    counts.zero_()
+    graph.replay()
+    torch.cuda.synchronize()
+    assert torch.equal(floats, expected)
+    graph.reset()
