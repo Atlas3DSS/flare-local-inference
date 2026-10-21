@@ -457,6 +457,25 @@ impl ModelRuntime {
                         }
                         Ok(())
                     })
+                    .and_then(|()| {
+                        if !policy.pipelined_speculation {
+                            return Ok(());
+                        }
+                        // A queued round reads only device state; host-built copy proposals
+                        // and history drafts would come from the previous round's tokens.
+                        use crate::model::contract::{GraphOperation, ValueSource};
+                        if worker_config.speculative_proposal_source
+                            != crate::scheduler::speculation::ProposalSource::Mtp
+                            || worker_config.history_drafts
+                            || worker_config.contract.graphs.iter()
+                                .filter(|g| g.kind == GraphOperation::Speculative)
+                                .flat_map(|g| &g.inputs)
+                                .any(|b| matches!(b.source, ValueSource::PendingToken | ValueSource::PromptAndPendingToken))
+                        {
+                            return Err("pipelined speculation requires device MTP proposals and pending tokens without history drafts".into());
+                        }
+                        executor.pipeline_speculation()
+                    })
                 {
                     let _ = ready_tx.send(Err(error.clone()));
                     let mut shutdown = executor.close();

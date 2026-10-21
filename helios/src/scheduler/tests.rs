@@ -1334,6 +1334,111 @@ fn speculative_rounds_wait_for_feedback_and_use_actual_counts() {
     assert_eq!(s.request(h).unwrap().tokens().last(), Some(&12));
 }
 #[test]
+fn pipelined_speculative_rounds_queue_without_feedback_and_rebound_positions() {
+    let (mut s, h) = speculative_scheduler(65, 32);
+    s.policy.pipelined_speculation = true;
+    let first = s.plan().unwrap();
+    assert_eq!((first.kind, first.token_capacity), (GraphKind::Speculative, 8));
+    assert!(!first.requires_feedback);
+    s.commit(&first, Fence(4)).unwrap();
+    // The next round is planned from the running round's widest advance.
+    let second = s.plan().unwrap();
+    assert_eq!(second.lanes[0].start_position, 73);
+    s.commit(&second, Fence(5)).unwrap();
+    assert!(s.plan().is_none());
+    s.complete(
+        Fence(4),
+        &vector_records(h, 4, 67, 3, &[10, 11], 8, 1),
+        Default::default(),
+    )
+    .unwrap();
+    // Two accepted tokens bound the queued round's endpoint by 67 + 8, not 73 + 8.
+    assert_eq!(s.request(h).unwrap().scheduled_consumed, 75);
+    let third = s.plan().unwrap();
+    assert_eq!(third.lanes[0].start_position, 75);
+    s.commit(&third, Fence(6)).unwrap();
+    s.complete(
+        Fence(5),
+        &vector_records(h, 5, 70, 6, &[12, 13, 14], 8, 1),
+        Default::default(),
+    )
+    .unwrap();
+    assert_eq!(s.request(h).unwrap().scheduled_consumed, 78);
+    s.complete(
+        Fence(6),
+        &vector_records(h, 6, 71, 7, &[15], 8, 1),
+        Default::default(),
+    )
+    .unwrap();
+    let request = s.request(h).unwrap();
+    assert_eq!((request.consumed_tokens, request.scheduled_consumed), (71, 71));
+    assert_eq!(request.tokens()[65..], [900, 10, 11, 12, 13, 14, 15]);
+}
+#[test]
+fn a_round_queued_behind_a_finishing_round_retires_without_tokens() {
+    let (mut s, h) = speculative_scheduler(65, 32);
+    s.policy.pipelined_speculation = true;
+    let first = s.plan().unwrap();
+    s.commit(&first, Fence(4)).unwrap();
+    let second = s.plan().unwrap();
+    s.commit(&second, Fence(5)).unwrap();
+    // End of sequence inside the running round finishes the request on the device.
+    let out = s
+        .complete(
+            Fence(4),
+            &vector_records(h, 4, 67, 3, &[10, 11], 8, 2),
+            Default::default(),
+        )
+        .unwrap();
+    assert!(out.last().unwrap().finished);
+    // The terminal snapshot waits for the queued round, which the device masks.
+    assert!(s.plan().is_none());
+    let out = s
+        .complete(
+            Fence(5),
+            &vector_records(h, 5, 67, 3, &[], 8, 2),
+            Default::default(),
+        )
+        .unwrap();
+    assert!(out.is_empty());
+    assert_eq!(s.request(h).unwrap().scheduled_consumed, 67);
+    assert_eq!(s.plan().unwrap().kind, GraphKind::Snapshot);
+}
+#[test]
+fn a_queued_round_that_the_output_limit_could_clip_waits_for_feedback() {
+    let (mut s, h) = speculative_scheduler(65, 12);
+    s.policy.pipelined_speculation = true;
+    let first = s.plan().unwrap();
+    assert_eq!(first.lanes[0].tokens, 8);
+    assert!(!first.requires_feedback);
+    s.commit(&first, Fence(4)).unwrap();
+    // Eleven outputs remain: a round of eight behind eight in flight could be clipped.
+    assert!(s.plan().is_none());
+    s.complete(
+        Fence(4),
+        &vector_records(h, 4, 67, 3, &[10, 11], 8, 1),
+        Default::default(),
+    )
+    .unwrap();
+    let second = s.plan().unwrap();
+    assert_eq!((second.lanes[0].tokens, second.requires_feedback), (8, false));
+    s.commit(&second, Fence(5)).unwrap();
+    assert!(s.plan().is_none());
+}
+#[test]
+fn pipelined_speculation_keeps_one_round_for_grammars_and_host_stops() {
+    for grammar in [false, true] {
+        let (mut s, h) = speculative_scheduler(65, 32);
+        s.policy.pipelined_speculation = true;
+        s.request_mut(h).unwrap().grammar_constrained = grammar;
+        s.request_mut(h).unwrap().host_stops = !grammar;
+        let step = s.plan().unwrap();
+        assert!(step.requires_feedback);
+        s.commit(&step, Fence(4)).unwrap();
+        assert!(s.plan().is_none());
+    }
+}
+#[test]
 fn speculative_output_limit_masks_rows_without_queueing_terminal_work() {
     let (mut s, h) = speculative_scheduler(60, 2);
     let first = s.plan().unwrap();

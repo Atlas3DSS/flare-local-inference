@@ -15,6 +15,10 @@ pub struct PolicyConfig {
     pub decode_age_price: f64,
     pub adaptation_ms: f64,
     pub estimate_ttl_ns: u64,
+    /// Keep a second unconstrained speculative round in flight. Captured graphs own
+    /// positions, pending tokens and acceptance, so the next round needs no host
+    /// feedback; the host then hides graph submission behind the running round.
+    pub pipelined_speculation: bool,
 }
 
 impl Default for PolicyConfig {
@@ -27,6 +31,7 @@ impl Default for PolicyConfig {
             decode_age_price: 0.1,
             adaptation_ms: 100.0,
             estimate_ttl_ns: 30_000_000_000,
+            pipelined_speculation: false,
         }
     }
 }
@@ -204,7 +209,8 @@ impl RequestScheduler {
         }
         if request.pending > 0
             && !(request.phase == RequestPhase::Decode
-                && self.speculative_widths.is_empty()
+                && (self.speculative_widths.is_empty()
+                    || (self.policy.pipelined_speculation && self.split.is_none()))
                 && self.capabilities.completion_inputs.is_empty()
                 && request.pending < 2
                 && !request.grammar_constrained
@@ -220,6 +226,16 @@ impl RequestScheduler {
         } else {
             true
         }
+    }
+
+    /// Whether a speculative round queued behind `request`'s in-flight rounds has the width it
+    /// would have after their completion: no output or context limit can clip it even if every
+    /// in-flight round emits its maximum. Otherwise the round waits for feedback.
+    fn queued_round_is_exact(&self, request: &LiveRequest, width: usize) -> bool {
+        let ahead = request.scheduled_consumed - request.consumed_tokens;
+        request.pending == 0
+            || (u64::from(request.max_new_tokens - request.generated_tokens) >= ahead + width as u64
+                && self.limits.max_sequence_tokens as u64 >= request.scheduled_consumed + width as u64)
     }
 
     pub(super) fn prefill_work(&self, request: &LiveRequest, capacity: usize) -> usize {
@@ -767,11 +783,13 @@ impl RequestScheduler {
         let feedback = !self.costs.is_fresh(cost::Key {
             kind, batch, tokens: capacity, prefill: 0, packed: 0,
         })
-            || !matches!(kind, GraphKind::Decode | GraphKind::Prefill)
+            || !(matches!(kind, GraphKind::Decode | GraphKind::Prefill)
+                || (kind == GraphKind::Speculative && self.policy.pipelined_speculation))
             || bits(selected).any(|slot| {
                 let r = self.slots[slot].request.as_ref().unwrap();
                 r.grammar_constrained
                     || r.host_stops
+                    || (kind == GraphKind::Speculative && !self.queued_round_is_exact(r, capacity))
                     || (kind == GraphKind::Prefill
                         && (r.consumed_tokens + self.prefill_work(r, capacity) as u64
                             == r.prompt_tokens as u64

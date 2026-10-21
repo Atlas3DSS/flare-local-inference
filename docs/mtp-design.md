@@ -335,6 +335,11 @@ bits, candidate and draft-cache lengths, verification width, and eight padded
 token IDs. A frame cannot be reused until its transfer finishes. Ordinary ABI2
 decode retains its two-submission pipeline. A two-round speculative pipeline
 requires a separate measurement and explicit configuration before deployment.
+`flare run --mtp-pipeline` is that configuration on one local rank with device
+MTP proposals: an unconstrained round is queued behind the running one, its
+width is chosen from earlier completions, and each completion lowers the queued
+round's endpoint to the accepted count. Copy proposals, history drafts, host-owned
+pending tokens and coordinated rank groups are rejected at startup.
 
 Copy-only grammar rounds clone tentative native grammar states and upload a
 mask for each copied prefix, including the target bonus position. Rust advances

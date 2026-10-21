@@ -1899,6 +1899,13 @@ impl RequestScheduler {
         }
         self.refresh.validate_completion(step.origin, timing)?;
         let submission = self.submissions.remove(&fence).unwrap();
+        // Tokens that work still in flight may consume beyond this completion, per request.
+        let mut ahead = [0u64; REQUEST_LANES];
+        for later in self.submissions.values() {
+            for lane in later.lanes.iter().filter(|lane| submission.lanes.iter().any(|l| l.request == lane.request)) {
+                ahead[lane.request.slot as usize] += lane.tokens as u64;
+            }
+        }
         self.refresh.complete(submission.origin, timing);
         self.observe_execution(&submission.step, timing);
         let step = submission.step;
@@ -2042,6 +2049,12 @@ impl RequestScheduler {
             }
             if request.pending == 0 {
                 request.scheduled_consumed = request.consumed_tokens;
+            } else {
+                // Later work was planned from this step's widest advance; a speculative round
+                // that accepted fewer tokens lowers the bound so positions do not drift upward.
+                request.scheduled_consumed = request
+                    .scheduled_consumed
+                    .min(request.consumed_tokens + ahead[lane.request.slot as usize]);
             }
         }
         self.advance_retirement(fence)?;

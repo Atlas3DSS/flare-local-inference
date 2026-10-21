@@ -269,6 +269,7 @@ impl OrbitPush {
             rank: None,
             api_key_file: None,
             scheduler_policy: "balanced".into(),
+            mtp_pipeline: false,
             serving: self.serving.clone(),
         }
     }
@@ -413,6 +414,7 @@ impl OrbitRun {
                 .scheduler_policy
                 .clone()
                 .unwrap_or_else(|| "balanced".into()),
+            mtp_pipeline: false,
             serving: self.serving.clone(),
         }
     }
@@ -482,6 +484,11 @@ pub struct Run {
     #[arg(long, value_name = "MODE", default_value = "balanced",
         value_parser = ["balanced", "throughput", "agent"], help_heading = "Serving options")]
     pub scheduler_policy: String,
+
+    /// Queue the next speculative round behind the running one so graph submission overlaps
+    /// execution; one local rank, device MTP proposals, no grammar or custom stops.
+    #[arg(long, help_heading = "Speculation options")]
+    pub mtp_pipeline: bool,
 
     #[command(flatten)]
     pub serving: ServingOptions,

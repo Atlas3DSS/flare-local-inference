@@ -418,7 +418,7 @@ For Qwen at concurrency four:
 | PLE delivery | Compact GPU rows supplied by Helios from disk or RAM |
 | Checkpoint endpoints | Rendered message endpoints, final prompt, and terminal consumed prefix |
 | MTP draft limit | Five drafts plus the pending input |
-| Speculative scheduling | One round in flight |
+| Speculative scheduling | One round in flight; two with `--mtp-pipeline` |
 | Vision | Prepared image capacities; video validation remains separate |
 
 Ignition's `--prefill-chunk-size` selects a multiple of 64 between 64 and the

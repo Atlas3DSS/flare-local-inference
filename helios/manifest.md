@@ -145,7 +145,9 @@ stream. A copy stream waits for each production event, transfers the selected
 completion row, and records its completion event. A frame remains occupied
 until that transfer completes. Ordinary work allows at most two submissions
 in flight. Every speculative graph uses a submission barrier, including direct
-executor calls without an explicit grammar flag. Grammar-constrained work and
+executor calls without an explicit grammar flag, unless serving configured
+pipelined speculation on one local rank; proposal and verification graphs always
+use it. Grammar-constrained work and
 host token stops also run with one submission in flight,
 so host token processing finishes before the next generation step.
 

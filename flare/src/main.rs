@@ -189,6 +189,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut config = owner.server_config().clone();
     config["bind"] = bind.to_string().into();
     config["scheduler_policy"] = args.scheduler_policy.into();
+    config["pipelined_speculation"] = args.mtp_pipeline.into();
     if let Some(name) = args.served_model_name {
         config["served_names"] = serde_json::json!([name]);
     }

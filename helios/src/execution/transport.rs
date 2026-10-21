@@ -297,6 +297,9 @@ struct Resources {
 pub struct GraphExecutor {
     manifest: ExecutionManifest,
     pub(super) copy_logprobs: bool,
+    /// Speculative graphs may queue behind another frame; proposal and verification
+    /// graphs always keep the submission barrier.
+    pub(super) pipelined_speculation: bool,
     resources: Option<Resources>,
     resolved_uploads: Vec<ResolvedUpload>,
     next_sequence: u64,
@@ -362,6 +365,7 @@ impl GraphExecutor {
         Ok(Self {
             manifest,
             copy_logprobs: true,
+            pipelined_speculation: false,
             resources: Some(Resources {
                 model,
                 copy,
@@ -445,10 +449,7 @@ impl GraphExecutor {
         Ok(self
             .can_submit(
                 grammar
-                    || matches!(
-                        self.manifest.graphs[graph].kind,
-                        GraphKind::Speculative | GraphKind::Proposal | GraphKind::Verification
-                    ),
+                    || requires_barrier(self.manifest.graphs[graph].kind, self.pipelined_speculation),
             )
             .then_some(fence))
     }
@@ -489,10 +490,7 @@ impl GraphExecutor {
                 Error::execution(ExecutionError::State, "graph index out of range")
             })?;
         let grammar_constrained = grammar_constrained
-            || matches!(
-                graph.kind,
-                GraphKind::Speculative | GraphKind::Proposal | GraphKind::Verification
-            )
+            || requires_barrier(graph.kind, self.pipelined_speculation)
             || resources.engram.is_some();
         let resolved = validate_uploads(
             &self.manifest,
@@ -766,6 +764,16 @@ impl GraphExecutor {
 impl Drop for GraphExecutor {
     fn drop(&mut self) {
         self.close();
+    }
+}
+
+/// Whether a graph kind waits for every earlier frame: proposal and verification
+/// always do, and speculative rounds do unless pipelining was configured.
+fn requires_barrier(kind: GraphKind, pipelined_speculation: bool) -> bool {
+    match kind {
+        GraphKind::Speculative => !pipelined_speculation,
+        GraphKind::Proposal | GraphKind::Verification => true,
+        _ => false,
     }
 }
 
@@ -1048,6 +1056,17 @@ pub(super) fn decode_logprobs(
 #[cfg(test)]
 mod input_copy_tests {
     use super::*;
+
+    #[test]
+    fn only_configured_pipelining_lifts_the_speculative_submission_barrier() {
+        for pipelined in [false, true] {
+            assert_eq!(requires_barrier(GraphKind::Speculative, pipelined), !pipelined);
+            assert!(requires_barrier(GraphKind::Proposal, pipelined));
+            assert!(requires_barrier(GraphKind::Verification, pipelined));
+            assert!(!requires_barrier(GraphKind::Decode, pipelined));
+            assert!(!requires_barrier(GraphKind::Prefill, pipelined));
+        }
+    }
 
     #[test]
     fn input_batches_preserve_every_partial_range_across_both_driver_limits() {
