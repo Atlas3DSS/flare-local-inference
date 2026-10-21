@@ -262,7 +262,7 @@ def test_fetch_downloads_the_pinned_revision_into_the_hub_cache(host, tmp_path, 
     cache = tmp_path / ".cache/huggingface/hub"
     assert preparation.fetch(model, cache) == "/snapshots/x"
     assert calls == [("nvidia/GLM-5.3-Flash-FP4-Local",
-                      "5b865baa418c3ebd339c310df11b5e4faa2daa18", tmp_path / ".cache/huggingface/hub")]
+                      "76348ddb2be2e35e39ecfc00e75dc07703f4f3d5", tmp_path / ".cache/huggingface/hub")]
 
     def fail(*args, **kwargs):
         raise OSError("network unreachable")

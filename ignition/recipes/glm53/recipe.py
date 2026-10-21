@@ -68,7 +68,7 @@ RECIPE = Recipe(
         ranges={"temperature": SamplingRange(.95, 1.), "top_p": SamplingRange(.95, 1.)}),
     checkpoints=(Checkpoint(
         alias="glm-5.3-flash", repository="nvidia/GLM-5.3-Flash-FP4-Local",
-        revision="5b865baa418c3ebd339c310df11b5e4faa2daa18", architecture="Glm5NextForConditionalGeneration",
+        revision="76348ddb2be2e35e39ecfc00e75dc07703f4f3d5", architecture="Glm5NextForConditionalGeneration",
         stored_bytes=178_175_535_810,
         # Language model, draft layer, and output head; the vision tower is not loaded.
         device_bytes=177_784_906_130,
