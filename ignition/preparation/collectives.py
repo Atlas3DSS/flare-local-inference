@@ -91,10 +91,12 @@ def create_result_broadcast_runtime(group, device, *, layouts, ipc=None):
     sizes = [packed_broadcast_layout(layout.values())[1] for layout in layouts]
     if not sizes or min(sizes) <= 0:
         raise ValueError("result broadcasts require nonempty payload layouts")
-    # Each rank partition contains complete groups of 64 BF16 values.
-    local_columns = (max(sizes) + 127) // 128 * 64
-    return create_all_gather_runtime(group, device, max_rows=1,
-        columns=local_columns * dist.get_world_size(group), ipc=ipc)
+    # Gather warps copy 512-byte segments. Use one segment per rank per row
+    # so short results transfer fewer rows while large results keep every
+    # copying lane active. All payload sizes share the same channel storage.
+    max_rows = (max(sizes) + 511) // 512
+    return create_all_gather_runtime(group, device, max_rows=max_rows,
+        columns=256 * dist.get_world_size(group), ipc=ipc)
 
 
 def create_vocabulary_argmax_runtime(group, device, *, local_vocab_size, max_rows, ipc=None):

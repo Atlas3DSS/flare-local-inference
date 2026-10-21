@@ -59,8 +59,8 @@ def _rank(rank, world, rendezvous, result_channel=False):
         layouts=(PreparedDraftDistribution.broadcast_layout(8), SpeculativeAcceptance.storage_layout(8, 6)))
         if result_channel else None)
     if result_channel:
-        assert result_runtime.max_batch_size == 1
-        assert result_runtime.heads_per_rank * result_runtime.query_head_dim * 2 == 6272
+        assert result_runtime.max_batch_size == 13
+        assert result_runtime.heads_per_rank * result_runtime.query_head_dim * 2 == 512
     graphs, owners, references, calls = {}, [], [], []
     worker = None
     try:
@@ -168,15 +168,16 @@ def test_native_sampling_broadcast(world, tmp_path):
     mp.spawn(_rank, args=(world, (tmp_path / "rendezvous").as_uri()), nprocs=world, join=True)
 
 
-def test_native_sampling_result_channel_catalog(tmp_path):
+@pytest.mark.parametrize("world", [2, 4])
+def test_native_sampling_result_channel_catalog(tmp_path, world):
     assert os.environ.get("CUDA_VISIBLE_DEVICES")
-    assert torch.cuda.device_count() >= 4
-    mp.spawn(_rank, args=(4, (tmp_path / "rendezvous").as_uri(), True), nprocs=4, join=True)
+    assert torch.cuda.device_count() >= world
+    mp.spawn(_rank, args=(world, (tmp_path / "rendezvous").as_uri(), True), nprocs=world, join=True)
 
 
 def _byte_rank(rank, world, rendezvous):
     from ignition.components.collectives import PreparedBroadcast
-    from ignition.preparation.collectives import CollectivePreparation, create_all_gather_runtime
+    from ignition.preparation.collectives import CollectivePreparation, create_result_broadcast_runtime
     from ignition.preparation.compilation import compile_forward
     from ignition.preparation.graphs import PreparedGraphBundle
     from ignition.preparation.tuning import RecordedPreparationSession
@@ -186,11 +187,13 @@ def _byte_rank(rank, world, rendezvous):
     dist.init_process_group("gloo", init_method=rendezvous, rank=rank, world_size=world,
                             timeout=timedelta(minutes=5))
     coordinator = CollectivePreparation(dist.group.WORLD)
-    runtime = create_all_gather_runtime(dist.group.WORLD, device, max_rows=64, columns=world * 64)
+    runtime = create_result_broadcast_runtime(dist.group.WORLD, device, layouts=(
+        {"ids": ((8, 64), torch.int64), "probabilities": ((8, 64), torch.float32),
+         "seed": ((8,), torch.int64), "valid": ((8, 1), torch.bool)},))
     graphs, owners, calls, cases = {}, [], [], []
     worker = None
     try:
-        # A sampling support payload spans 49 rows of this 128-byte rank partition.
+        # A sampling support payload spans 13 rows of this 512-byte rank partition.
         payload = (torch.empty((8, 64), dtype=torch.int64, device=device),
                    torch.empty((8, 64), dtype=torch.float32, device=device),
                    torch.empty(8, dtype=torch.int64, device=device),
@@ -267,7 +270,8 @@ def _byte_rank(rank, world, rendezvous):
         dist.destroy_process_group()
 
 
-def test_native_broadcast_bytes_and_overlapping_views(tmp_path):
+@pytest.mark.parametrize("world", [2, 4])
+def test_native_broadcast_bytes_and_overlapping_views(tmp_path, world):
     assert os.environ.get("CUDA_VISIBLE_DEVICES")
-    assert torch.cuda.device_count() >= 4
-    mp.spawn(_byte_rank, args=(4, (tmp_path / "rendezvous").as_uri()), nprocs=4, join=True)
+    assert torch.cuda.device_count() >= world
+    mp.spawn(_byte_rank, args=(world, (tmp_path / "rendezvous").as_uri()), nprocs=world, join=True)
