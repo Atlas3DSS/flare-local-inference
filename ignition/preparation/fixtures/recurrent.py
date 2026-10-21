@@ -101,9 +101,15 @@ class RecurrentBenchmarkInputs:
         quotient, remainder = divmod(self.tokens, self.live_sequences)
         self.lengths = tuple(quotient + (index < remainder) for index in range(self.live_sequences))
         columns = original["state_indices"].shape[1] if "state_indices" in original else 1
-        rows = 1 if self.recording else columns
-        self.live_slots = tuple(1 + index * rows for index in range(self.live_sequences))
-        self.state_rows = self.live_sequences * rows + 1
+        # Padded verification columns address the null row; only live checkpoints need storage.
+        widths = self.lengths if "state_indices" in original and not self.recording else (1,) * self.live_sequences
+        if max(widths) > columns:
+            raise ValueError("benchmark sequence length exceeds its state-index columns")
+        self.live_slots, self.state_rows = [], 1
+        for width in widths:
+            self.live_slots.append(self.state_rows)
+            self.state_rows += width
+        self.live_slots = tuple(self.live_slots)
         if mode == "prefill" and "checkpoint_state_indices" in original:
             self.state_rows += self.live_sequences
         if self.state_rows > self.state.shape[0]:
@@ -152,7 +158,7 @@ class RecurrentBenchmarkInputs:
                 a["state_slot_ids"][row] = self.live_slots[row]
             if "state_indices" in a:
                 for column in range(columns):
-                    a["state_indices"][row, column] = (0 if self.recording and column
+                    a["state_indices"][row, column] = (0 if column >= length or (self.recording and column)
                                                        else self.live_slots[row] + column)
             if "final_state_indices" in a:
                 a["final_state_indices"][row] = self.live_slots[row]
