@@ -136,11 +136,11 @@ class PreparedRoutedExperts:
             for plane in decoder.indexed_scales or ():
                 record_numeric_tensor(plane.storage)
         # A16 experts prepared with A4 capability run large prefill calls with quantized activations.
-        precision = {"a4_prefill": True} if a4_prefill else {}
+        precision = {"a4_prefill": a4_prefill}
         self.source = source
         self.output = output
         self.scratch = None
-        invocation = FrozenMapping({"tuning_route_pattern": TUNING_WORKLOAD_VERSION,
+        invocation = FrozenMapping({**precision, "tuning_route_pattern": TUNING_WORKLOAD_VERSION,
             "tuning_route_source": "b12x",
             **({"tuning_execution": "cuda_graph"} if experts.has_csf_blocks else {})})
         self.scale_plan = fused_moe.plan_scale_expansion(
