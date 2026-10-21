@@ -1,4 +1,4 @@
-"""Reviewed Sol-7 projections with fixed reductions and prepared, bounded storage."""
+"""Reviewed Sol-10 projections with fixed reductions and prepared, bounded storage."""
 from dataclasses import dataclass
 from functools import lru_cache
 import ctypes as C
@@ -19,16 +19,23 @@ from ignition.preparation.tensor_metadata import record_numeric_tensor
 @dataclass(frozen=True)
 class RepackedNVFP4(NVFP4LinearWeight):
     """Same byte count; values/scales use the reviewed N-partitioned layout."""
+    member_widths: tuple = ()
+    member_gains: tuple = ()
 
 
 @dataclass(frozen=True)
 class RepackedFP8(TensorFP8LinearWeight):
     """Same byte count; values use the reviewed N-partitioned layout."""
+    member_widths: tuple = ()
+    member_gains: tuple = ()
 
 
 # Reviewed M=16 tuple (BK, warps, split, path), fixed across all row counts.
 PINNED = {
-    ('tensor_fp8', 6144, 5120): (128, 4, 4, 51),
+    ('nvfp4', 5120, 34816): (256, 4, 2, 60),
+    ('tensor_fp8', 5120, 16384): (64, 2, 2, 60),
+    ('tensor_fp8', 5120, 14336): (64, 2, 4, 60),
+    ('tensor_fp8', 6144, 5120): (64, 1, 8, 60),
     ('tensor_fp8', 5120, 10240): (128, 4, 4, 51),
     ('tensor_fp8', 5120, 6144): (128, 4, 4, 51),
     ('nvfp4', 5120, 17408): (256, 8, 2, 51),
@@ -47,22 +54,31 @@ ADMISSIONS = []
 
 
 def tactic(query):
+    if query.rows > 20:
+        from .sm70_prefill import PINNED as prefill_shapes
+        if query.member_widths or (query.kind, query.in_features, query.out_features) in prefill_shapes:
+            return ('prefill_tc', 512)
     bk, warps, split, path = PINNED[(query.kind, query.in_features, query.out_features)]
     return ('row_tc', bk, warps, split, path)
 
 
 @lru_cache(None)
-def compile_library():
+def compile_library(kernel_cache=None):
+    from torch.utils.cpp_extension import CUDA_HOME
+    from ignition.preparation.compilation import DEFAULT_CACHE_ROOT
+
+    if CUDA_HOME is None:
+        raise RuntimeError('SM70 projection preparation requires the configured CUDA toolkit')
     directory = Path(__file__).parent
-    sources = [directory / name for name in ('sm70_projection_tc.cu', 'repacked.cu', 'repacked_kernel.cuh', 'fast_kernel.cuh', 'deep_kernel.cuh')]
-    digest = hashlib.sha256(b''.join(p.read_bytes() for p in sources)).hexdigest()
-    cache = Path(os.environ.get('FLARE_SM70_KERNEL_CACHE', '/mnt/storage16tb/flare/kernel-cache'))
-    cache.mkdir(exist_ok=True)
+    sources = [directory / name for name in ('sm70_projection_tc.cu', 'repacked.cu', 'repacked_kernel.cuh', 'fast_kernel.cuh', 'deep_kernel.cuh', 'local_kernel.cuh')]
+    digest = hashlib.sha256(b''.join(p.read_bytes() for p in sources) + Path(__file__).read_bytes()).hexdigest()
+    cache = Path(DEFAULT_CACHE_ROOT if kernel_cache is None else kernel_cache).expanduser().resolve()
+    cache.mkdir(parents=True, exist_ok=True)
     output = cache / (digest + '.so')
     with (cache / (digest + '.lock')).open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         if not output.exists():
-            nvcc = Path(os.environ.get('CUDA_HOME', '/usr/local/cuda-12.9')) / 'bin/nvcc'
+            nvcc = Path(CUDA_HOME) / 'bin/nvcc'
             command = [str(nvcc), '--threads', str(len(os.sched_getaffinity(0))),
                 '--split-compile=' + str(len(os.sched_getaffinity(0))), '-std=c++17', '-O3',
                 '-arch=compute_70', '-code=sm_70', '-Xcompiler=-fPIC', '--shared',
@@ -72,10 +88,12 @@ def compile_library():
 
 
 @lru_cache(None)
-def library():
-    lib = C.CDLL(compile_library())
+def library(kernel_cache=None):
+    if torch.cuda.is_current_stream_capturing():
+        raise RuntimeError('SM70 projection library must be loaded before capture')
+    lib = C.CDLL(compile_library(kernel_cache))
     lib.atlas_produce.argtypes = [C.c_void_p] * 3 + [C.c_int] * 3 + [C.c_float, C.c_void_p]
-    lib.atlas_project.argtypes = [C.c_void_p] * 4 + [C.c_float, C.c_int] + [C.c_void_p] * 3 + [C.c_int] * 9 + [C.c_void_p]
+    lib.atlas_project.argtypes = [C.c_void_p] * 4 + [C.c_float, C.c_int] + [C.c_void_p] * 3 + [C.c_int] * 9 + [C.c_void_p] * 2
     lib.atlas_repack.argtypes = [C.c_void_p] * 4 + [C.c_int] * 4 + [C.c_void_p]
     lib.atlas_position_exact.argtypes = [C.c_void_p, C.c_int, C.c_int, C.c_void_p]
     lib.atlas_fp8_exact.argtypes = [C.c_void_p] * 3
@@ -91,11 +109,11 @@ def checked(status):
         raise RuntimeError(f'SM70 tensor-core CUDA launch failed: {status}')
 
 
-def load_weight(loader, prefix, *, storage=None):
+def load_weight(loader, prefix, *, storage=None, kernel_cache=None):
     # Keep temporary native/reverse-repacked weights out of the retained pool.
     # Otherwise their interleaved large allocations strand device segments.
     with storage.transient() if storage is not None else nullcontext():
-        return _load_weight(loader, prefix, storage=storage)
+        return _load_weight(loader, prefix, storage=storage, kernel_cache=kernel_cache)
 
 
 def _weight_pool(storage):
@@ -106,7 +124,7 @@ def _weight_pool(storage):
     return storage._sm70_repacked_weights
 
 
-def _load_weight(loader, prefix, *, storage):
+def _load_weight(loader, prefix, *, storage, kernel_cache):
     """Read native checkpoint bytes; prove both repack round trips before use."""
     from .tensor_fp8 import TensorFP8Weight
 
@@ -152,7 +170,7 @@ def _load_weight(loader, prefix, *, storage):
     inverse = torch.empty_like(raw)
     inverse_scales = torch.empty_like(native_scales) if fp4 else None
     stream = C.c_void_p(torch.cuda.current_stream(values.device).cuda_stream)
-    lib = library()
+    lib = library(kernel_cache)
     checked(lib.atlas_repack(ptr(raw), ptr(native_scales), ptr(packed), ptr(packed_scales), n, k, fp4, 0, stream))
     checked(lib.atlas_repack(ptr(packed), ptr(packed_scales), ptr(inverse), ptr(inverse_scales), n, k, fp4, 1, stream))
     if not torch.equal(inverse, raw):
@@ -174,10 +192,13 @@ def _load_weight(loader, prefix, *, storage):
 
 
 def workspace_layout(query, selected):
+    if selected[0] == 'prefill_tc':
+        from .sm70_prefill import workspace_layout
+        return workspace_layout(query)
     m = min(16, next((m for m in ROWS if m >= query.rows), 16))
     k, n, split = query.in_features, query.out_features, selected[3]
     return ((torch.float32, (m, k)), (torch.float16, (m, k)), (torch.float32, (m,)),
-            (torch.float32, (split, m, n)), (torch.float32, (m, n)))
+            (torch.float32, (split if selected[4] != 60 and split > 1 else 0, m, n)), (torch.float32, (m, n)))
 
 
 def workspace_bytes(query, selected):
@@ -186,7 +207,12 @@ def workspace_bytes(query, selected):
                for dtype, shape in workspace_layout(query, selected))
 
 
-def run(query, selected, source, values, scales, output, workspace, bias):
+def run(query, selected, source, values, scales, output, workspace, bias, gain=None, *,
+        kernel_cache=None, cutlass_include=None):
+    if selected[0] == 'prefill_tc':
+        from .sm70_prefill import run
+        return run(query, source, values, scales, output, workspace, bias,
+                   kernel_cache=kernel_cache, cutlass_include=cutlass_include)
     import math
     views, offset = [], 0
     for dtype, shape in workspace_layout(query, selected):
@@ -194,7 +220,7 @@ def run(query, selected, source, values, scales, output, workspace, bias):
         views.append(workspace[offset:offset + size].view(dtype).view(shape))
         offset += (size + 255) // 256 * 256
     staging, half, inverse, partial, result = views
-    lib = library()
+    lib = library(kernel_cache)
     stream = C.c_void_p(torch.cuda.current_stream(source.device).cuda_stream)
     bk, warps, split, path = selected[1:]
     for begin in range(0, query.rows, 16):
@@ -214,7 +240,56 @@ def run(query, selected, source, values, scales, output, workspace, bias):
         checked(lib.atlas_project(ptr(half), ptr(values), ptr(scales), ptr(inverse), query.gain_value,
             query.global_scale_kind == 'reciprocal', ptr(bias), ptr(y), ptr(partial), m,
             query.out_features, query.in_features, query.padded_in_features, split,
-            query.kind == 'nvfp4', bk, warps, path, stream))
+            query.kind == 'nvfp4', bk, warps, path, ptr(gain) if query.column_gains else None, stream))
         if not direct:
             destination.copy_(y[:live])
     return output
+
+
+def load_fused(loader, prefixes, *, storage=None, kernel_cache=None):
+    """Concatenate admitted 32-column blocks without changing checkpoint codes."""
+    from .tensor_fp8 import TensorFP8Weight
+    roles = tuple(prefix.rsplit('.', 1)[-1] for prefix in prefixes)
+    if roles not in (('gate_proj', 'up_proj'), ('in_proj_qkv', 'in_proj_z'), ('q_proj', 'k_proj', 'v_proj')):
+        raise ValueError('unreviewed fusion member order')
+    if any(prefix + '.bias' in loader.manifest.tensors for prefix in prefixes):
+        raise ValueError('reviewed Qwen fusion requires bias-free checkpoint members')
+    with storage.transient() if storage is not None else nullcontext():
+        members = [load_weight(loader, prefix, kernel_cache=kernel_cache) for prefix in prefixes]
+        fp8 = isinstance(members[0], TensorFP8Weight)
+        if any(isinstance(member, TensorFP8Weight) != fp8 for member in members):
+            raise ValueError('fused projections must share their format')
+        packed = [member.packed if fp8 else member for member in members]
+        first = packed[0]
+        if any(type(part) is not type(first) or part.values.dtype != first.values.dtype
+               or part.in_features != first.in_features or part.padded_in_features != first.padded_in_features
+               or part.out_features % 32 for part in packed):
+            raise ValueError('fused projections require equal input geometry and 32-column blocks')
+        if fp8:
+            if any(not torch.equal(member.input_scale, members[0].input_scale) for member in members[1:]):
+                raise ValueError('FP8 fusion requires bit-identical calibrated input scales')
+            gains = [part.output_scale for part in packed]
+        else:
+            if any(part.global_scale_kind != first.global_scale_kind for part in packed):
+                raise ValueError('fused projections must share the reciprocal convention')
+            gains = [part.global_scale for part in packed]
+        widths = tuple(part.out_features for part in packed)
+        scalars = tuple(float(gain) for gain in gains)
+        kind = 'tensor_fp8' if fp8 else 'nvfp4'
+        if (kind, first.in_features, sum(widths)) not in PINNED:
+            raise ValueError('unreviewed fused projection shape')
+        with torch.cuda.use_mem_pool(_weight_pool(storage), device=first.values.device) if storage is not None else nullcontext():
+            # Packed N blocks are consecutive. Byte views avoid FP8 cat kernels on SM70.
+            values = torch.cat([part.values.view(torch.uint8) for part in packed]).view(first.values.dtype)
+            column_gains = torch.cat([gain.expand(width) for gain, width in zip(gains, widths, strict=True)])
+            if fp8:
+                unit = first.block_scale.clone()
+                result = TensorFP8Weight(RepackedFP8(values, unit, unit, column_gains,
+                    first.in_features, first.padded_in_features, sum(widths), widths, scalars), members[0].input_scale.clone())
+            else:
+                scales = torch.cat([part.scale_mma for part in packed])
+                result = RepackedNVFP4(values, scales, column_gains, first.global_scale_kind,
+                    first.in_features, sum(widths), first.activation_global_scale.clone(), widths, scalars)
+        for tensor in (values, column_gains, result.input_scale if fp8 else scales):
+            record_numeric_tensor(tensor)
+        return result

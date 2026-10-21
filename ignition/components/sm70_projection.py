@@ -54,11 +54,18 @@ class ProjectionQuery:
     has_bias: bool = False
     row_invariant: bool = False
     repacked: bool = False
+    column_gains: bool = False
+    member_widths: tuple = ()
+    member_gains: tuple = ()
     gain_value: float = 1.0
     input_scale_value: float = 1.0
 
 
 def _tiles(query):
+    from .sm70_dense import tactic as dense_tactic
+    dense = dense_tactic(query)
+    if dense is not None:
+        return (dense,)
     if query.repacked:
         from .sm70_projection_tc import tactic
         return (tactic(query),)
@@ -79,7 +86,7 @@ def _tiles(query):
 
 
 CONTRACT = native_contract(component_id=COMPONENT, query_type=ProjectionQuery, tactics=_tiles,
-                           semantic_version=7)
+                           semantic_version=8)
 
 
 def _scratch_shapes(query, tactic):
@@ -90,7 +97,9 @@ def _scratch_shapes(query, tactic):
 
 
 def workspace_bytes(query, tactic):
-    if tactic[0] == "row_tc":
+    if tactic[0] == "row_dense":
+        return 0
+    if tactic[0] in ("row_tc", "prefill_tc"):
         from .sm70_projection_tc import workspace_bytes as tc_workspace_bytes
         return tc_workspace_bytes(query, tactic)
     return sum((rows * columns * (2 if tactic[0] == "hgemm" and index < 2 else 4) + 255) // 256 * 256
@@ -343,6 +352,8 @@ class PreparedProjection:
     tactic: tuple
     expansion: object = None
     gemv: object = None
+    kernel_cache: str | None = None
+    cutlass_include: str | None = None
 
     @property
     def tile(self):
@@ -353,9 +364,13 @@ class PreparedProjection:
         return workspace_bytes(self.query, self.tactic)
 
     def run(self, source, values, scales, gain, input_scale, output, workspace, bias=None):
-        if self.tactic[0] == "row_tc":
+        if self.tactic[0] == 'row_dense':
+            from .sm70_dense import run
+            return run(self.query, self.tactic, source, values, output, bias, kernel_cache=self.kernel_cache)
+        if self.tactic[0] in ("row_tc", "prefill_tc"):
             from .sm70_projection_tc import run
-            return run(self.query, self.tactic, source, values, scales, output, workspace, bias)
+            return run(self.query, self.tactic, source, values, scales, output, workspace, bias, gain,
+                       kernel_cache=self.kernel_cache, cutlass_include=self.cutlass_include)
         if self.tactic[0] in ("gemv", "row_gemv"):
             if self.query.kind == "tensor_fp8":
                 inputs, = _scratch_views(self.query, self.tactic, workspace)
@@ -417,13 +432,14 @@ class _Projection:
             if tensor is not None and tensor.device != source.device:
                 raise ValueError("SM70 projection scales must share the source device")
         for scalar in (gain, input_scale):
-            if scalar is not None and (scalar.dtype != torch.float32 or scalar.numel() != 1
+            expected = query.out_features if scalar is gain and query.column_gains else 1
+            if scalar is not None and (scalar.dtype != torch.float32 or scalar.numel() != expected
                     or not bool((torch.isfinite(scalar) & (scalar > 0)).all())):
                 raise ValueError("SM70 projection scales must be positive finite FP32 scalars")
         if query.repacked:
             if source.dtype != torch.float32 or output.dtype != torch.float32:
                 raise ValueError("reviewed SM70 tensor-core preparation requires FP32 physical input/output")
-            query = replace(query, gain_value=1.0 if gain is None else float(gain),
+            query = replace(query, gain_value=1.0 if gain is None or query.column_gains else float(gain),
                             input_scale_value=1.0 if input_scale is None else float(input_scale))
         for tensor in (values, scales, gain, input_scale, bias):
             if tensor is not None:
@@ -431,9 +447,11 @@ class _Projection:
         self.output, self.values, self.scales = output, values, scales
         self.gain, self.input_scale, self.bias = gain, input_scale, bias
         payload = CONTRACT.encode_query(query)
+        kernel_cache = getattr(session, 'kernel_cache', None)
+        cutlass_include = getattr(session, 'cutlass_include', None)
 
         def compile_jobs(tactic, device):
-            if tactic[0] == "row_tc":
+            if tactic[0] in ("row_tc", "prefill_tc", "row_dense"):
                 return ()  # Native sm_70 library was built before checkpoint repacking.
             jobs = []
             if query.kind == "nvfp4":
@@ -446,10 +464,17 @@ class _Projection:
             return tuple(jobs)
 
         def materialize(tactic):
-            if tactic[0] == "row_tc":
+            if tactic[0] == 'row_dense':
+                from .sm70_dense import library as dense_library
+                dense_library(kernel_cache)
+                return PreparedProjection(query, tactic, kernel_cache=kernel_cache)
+            if tactic[0] in ("row_tc", "prefill_tc"):
                 from .sm70_projection_tc import library
-                library()  # Retained native modules; no compilation during capture/replay.
-                return PreparedProjection(query, tactic)
+                library(kernel_cache)  # Retained native modules; no compilation during capture/replay.
+                if tactic[0] == 'prefill_tc':
+                    from .sm70_prefill import library as prefill_library
+                    prefill_library(kernel_cache, cutlass_include)
+                return PreparedProjection(query, tactic, kernel_cache=kernel_cache, cutlass_include=cutlass_include)
             expansion, gemv = None, None
             programs = []
             if query.kind == "nvfp4":
@@ -552,7 +577,10 @@ class PackedProjection(_Projection):
         repacked = isinstance(weight, RepackedNVFP4)
         scales = weight.scale_mma if repacked else scale_storage(weight.scale_mma, n, weight.padded_in_features, 16)
         query = ProjectionQuery("nvfp4", source.shape[0], k, weight.padded_in_features, n,
-                                weight.global_scale_kind, row_invariant=row_invariant, repacked=repacked)
+                                weight.global_scale_kind, row_invariant=row_invariant, repacked=repacked,
+                                column_gains=repacked and weight.global_scale.numel() > 1,
+                                member_widths=weight.member_widths if repacked else (),
+                                member_gains=weight.member_gains if repacked else ())
         self._initialize(query, source, weight.values, output, scales=scales, gain=weight.global_scale,
                          bias=bias, session=session, name=name, workspace=workspace)
 
@@ -576,7 +604,10 @@ class TensorFP8Projection(_Projection):
         from .sm70_projection_tc import RepackedFP8
         query = ProjectionQuery("tensor_fp8", source.shape[0], packed.in_features,
                                 packed.padded_in_features, packed.out_features, "multiplier", row_invariant=row_invariant,
-                                repacked=isinstance(packed, RepackedFP8))
+                                repacked=isinstance(packed, RepackedFP8),
+                                column_gains=isinstance(packed, RepackedFP8) and packed.output_scale.numel() > 1,
+                                member_widths=packed.member_widths if isinstance(packed, RepackedFP8) else (),
+                                member_gains=packed.member_gains if isinstance(packed, RepackedFP8) else ())
         # SM70 Inductor cannot type FP8 operands even for an opaque call: its
         # functionalization pattern pass skips such nodes. The checkpoint's
         # bits cross the boundary as bytes; only the implementation views E4M3.

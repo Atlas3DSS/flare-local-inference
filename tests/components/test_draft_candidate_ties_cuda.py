@@ -43,9 +43,13 @@ def _captured_proposal(scores, top_k):
     worker = bundle.start_worker()
     def replay():
         torch.cuda.synchronize()
+        allocations = torch.cuda.memory_stats()["allocation.all.allocated"]
+        pointer = probabilities.data_ptr()
         ticket = worker.submit(bundle.graph_indices["proposal"], repetitions=2)
         completion = worker.poll(timeout_ms=120000)
         assert completion is not None and completion.ticket == ticket and completion.error is None
+        assert torch.cuda.memory_stats()["allocation.all.allocated"] == allocations
+        assert probabilities.data_ptr() == pointer
     try:
         yield probabilities, valid, sampled, replay
     finally:
@@ -78,7 +82,7 @@ def test_higher_score_survives_local_and_global_cutoff_ties(higher_indices, top_
 
 
 @pytest.mark.parametrize("vocab", [17, 8192])
-@pytest.mark.parametrize("top_k", [0, 7, 64])
+@pytest.mark.parametrize("top_k", [0, 1, 7, 64])
 @torch.no_grad()
 def test_signed_zero_scores_preserve_boundary_ties_and_draw_order(vocab, top_k):
     scores = torch.zeros((1, vocab), device="cuda")
@@ -92,3 +96,18 @@ def test_signed_zero_scores_preserve_boundary_ties_and_draw_order(vocab, top_k):
         assert torch.equal(probabilities, expected_probabilities)
         assert torch.equal(sampled, expected_sampled)
         assert valid.all()
+
+
+@torch.no_grad()
+def test_top_one_chooses_lowest_id_across_tiles_and_more_than_64_ties():
+    scores = torch.full((1, 8193), -torch.inf, device="cuda")
+    scores[0, 4095] = -2.
+    with _captured_proposal(scores, 1) as (probabilities, valid, sampled, replay):
+        for tied in ([4095, 4096, 8192], list(range(4096, 4225)), [17, 4095, 8192]):
+            scores.fill_(-torch.inf)
+            scores[0, tied] = -2.
+            replay()
+            assert valid.all()
+            assert sampled.item() == min(tied)
+            assert probabilities.count_nonzero() == 1
+            assert probabilities[0, min(tied)] == 1

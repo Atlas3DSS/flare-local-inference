@@ -50,6 +50,7 @@ class PreparationConfig:
     compile_decoder: bool = True
     retain_graphs: bool = False
     kernel_cache: Path | None = None
+    cutlass_include: Path | None = None
     mtp: bool = False
     speculative_widths: tuple[int, ...] = (1, 2, 3, 4)
     speculative_fixed_width: int | None = None
@@ -86,16 +87,22 @@ def prepare(snapshot, config, *, progress=None, package_storage):
     snapshot = Path(snapshot).resolve()
     device = torch.device("cuda", config.device)
     torch.cuda.set_device(device)
+    if config.mtp and torch.cuda.get_device_capability(device) == (7, 0):
+        from ignition.components.sm70_prefill import _cutlass_headers
+
+        _cutlass_headers(config.cutlass_include)
     with phase(progress, "Inspect checkpoint"):
         manifest = inspect_indexed_checkpoint(snapshot)
     transient = contextlib.ExitStack()
     transient.enter_context(package_storage.transient())
-    weights = ModelWeights.load(manifest, device, progress=progress, row_invariant=config.mtp, package_storage=package_storage)
+    weights = ModelWeights.load(manifest, device, progress=progress, row_invariant=config.mtp,
+        package_storage=package_storage, kernel_cache=config.kernel_cache)
     mtp_weights = None
     if config.mtp:
         from .mtp_weights import MTPWeights
         mtp_weights = MTPWeights.load(manifest, device, config=weights.config,
-            embedding_weight=weights.tree.embed_tokens.weight, lm_head_weight=weights.head, progress=progress, package_storage=package_storage)
+            embedding_weight=weights.tree.embed_tokens.weight, lm_head_weight=weights.head, progress=progress,
+            package_storage=package_storage, kernel_cache=config.kernel_cache)
     release_unused()
     if config.mtp:
         # Repacking leaves large dead checkpoint/inverse buffers in the private
@@ -140,7 +147,8 @@ def prepare(snapshot, config, *, progress=None, package_storage):
             compile_workers=config.compile_workers, tuning_replica=config.tuning_replica,
             device=device, checkpoint=identity,
             workload_schema="qwen38-dense", numerical_policy="default", coordinator=coordinator,
-            headroom_bytes=config.headroom_bytes, benchmark_storage=package_storage)
+            headroom_bytes=config.headroom_bytes, benchmark_storage=package_storage,
+            kernel_cache=config.kernel_cache, cutlass_include=config.cutlass_include)
         session.__enter__()
         register_benchmark_state(session, pool.reserved_backing, storage=pool.reserved_backing,
                                  restore=pool.clear_for_preparation)

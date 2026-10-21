@@ -335,9 +335,10 @@ def test_native_conditional_filtering_full_vocabulary_ties_and_masks():
     args = tensors(4, 8)
     state, slots, epochs, live, inputs, records, frame, sequence = args
     logits = torch.full((4, 8, VOCAB), -torch.inf, device="cuda")
-    logits[:, :, 10:12] = 4
-    logits[:, :, 12] = 2
-    candidates = torch.tensor([[10, 11, 10, 11, 10, 11, 10]] * 4, device="cuda")
+    low, high, third = 4095, 4096, VOCAB - 1
+    logits[:, :, [low, high]] = 4
+    logits[:, :, third] = 2
+    candidates = torch.tensor([[low, high, low, high, low, high, low]] * 4, device="cuda")
     state.top_k.fill_(1)
     state.parameters[:, 3] = 2
     state.parameters[1, 0] = .7
@@ -347,11 +348,10 @@ def test_native_conditional_filtering_full_vocabulary_ties_and_masks():
         replay()
         assert op.valid.all()
         probabilities = op.probabilities.cpu()
-        torch.testing.assert_close(probabilities[0, 0, 10:12], torch.tensor([.5, .5]), rtol=0, atol=0)
-        assert probabilities[0, 1, 11] == 1
-        torch.testing.assert_close(probabilities[1, 0, 10:12], torch.tensor([.5, .5]), rtol=0, atol=0)
-        assert probabilities[:, :, :10].count_nonzero() == 0
-        assert probabilities[:, :, 13:].count_nonzero() == 0
+        torch.testing.assert_close(probabilities[0, 0, [low, high]], torch.tensor([1., 0.]), rtol=0, atol=0)
+        assert probabilities[0, 1, high] == 1
+        torch.testing.assert_close(probabilities[1, 0, [low, high]], torch.tensor([1., 0.]), rtol=0, atol=0)
+        assert probabilities.count_nonzero() == 4 * 8
         state.grammar_enabled[3] = 1
         live[0] = 3
         replay()
@@ -359,6 +359,72 @@ def test_native_conditional_filtering_full_vocabulary_ties_and_masks():
         assert not op.valid[3].any()
         torch.testing.assert_close(op.probabilities[0, 0].cpu(), probabilities[0, 0], rtol=0, atol=0)
         assert op.probabilities[0, 1:, 0].eq(1).all() and op.probabilities[3, :, 0].eq(1).all()
+        # Invalid prefixes have finite original maxima but sanitized token-zero
+        # scores. A missing maximum match must preserve that dummy distribution.
+        assert op.scores[0, 1:, 0].eq(0).all()
+        assert op.scores[0, 1:, 1:].isneginf().all()
+        # A zero original maximum matches the sanitized dummy's token zero;
+        # selecting that winner must still leave these prefixes invalid.
+        logits.fill_(-torch.inf)
+        logits[:, :, [low, high]] = 0.
+        replay()
+        assert op.maximum.eq(0).all()
+        assert op.valid[0].tolist() == [True] + [False] * 7
+        assert not op.valid[3].any()
+        assert op.scores[0, 1:, 0].eq(0).all()
+        assert op.scores[0, 1:, 1:].isneginf().all()
+        assert op.probabilities[0, 1:, 0].eq(1).all()
+        assert op.probabilities[3, :, 0].eq(1).all()
+
+
+@pytest.mark.parametrize("compiled", [False, True])
+@torch.no_grad()
+def test_width_four_mixed_top_one_and_twenty_ties_preserve_greedy_verification(compiled):
+    args = tensors(4, 4)
+    state, slots, epochs, live, *_ = args
+    tied = [4095, 4096, VOCAB - 1]
+    logits = torch.full((4, 4, VOCAB), -torch.inf, device="cuda")
+    logits[:, :, tied] = -2.
+    drafts = torch.full((4, 3), tied[0], dtype=torch.int64, device="cuda")
+    draft_probs = torch.zeros((4, 3, VOCAB), device="cuda")
+    draft_probs[:, :, tied[0]] = 1.
+    target = PreparedSpeculativeDistributions(logits, state, slots, epochs, live, drafts)
+    target.prepare()
+    rng = SpeculativeRngState.allocate("cuda")
+    rng.generation.fill_(7)
+    verify = PreparedStochasticVerification(draft_probs, drafts, target.probabilities,
+        state, slots, epochs, live, rng=rng, target_valid=target.valid)
+    verify.prepare()
+
+    def run():
+        target()
+        verify()
+
+    if compiled:
+        from ignition.preparation.compilation import compile_forward
+        run = compile_forward(run)
+    resources = (*args, logits, drafts, draft_probs, target, rng, verify, run)
+    with captured(run, resources, {"probabilities": target.probabilities}) as replay:
+        for iteration, policies in enumerate(((1, 20, 1, 20), (20, 1, 20, 1), (1, 20, 1, 20))):
+            state.top_k[slots.long()] = torch.tensor(policies, dtype=torch.int32, device="cuda")
+            rng.target_offset.fill_(iteration * 12)
+            target.top_one_candidates.fill_(VOCAB + 9)
+            replay()
+            assert target.valid.all() and verify.output.valid.all()
+            for row, top_k in enumerate(policies):
+                expected_ids = tied[:1] if top_k == 1 else tied
+                for column in range(4):
+                    probabilities = target.probabilities[row, column].cpu()
+                    assert probabilities.gt(0).nonzero().flatten().tolist() == expected_ids
+                count = int(verify.output.proposed_count[row])
+                tokens = verify.output.token_ids[row, :count].cpu().tolist()
+                assert all(token in expected_ids for token in tokens)
+                if top_k == 1:
+                    assert target.probabilities[row, :, tied[0]].eq(1).all()
+                    assert verify.output.accepted_drafts[row] == 3
+                    assert count == 4 and tokens == [tied[0]] * 4
+                else:
+                    assert target.top_one_candidates[row * 4:(row + 1) * 4].eq(VOCAB + 9).all()
 
 
 @pytest.mark.parametrize("width", range(1, 9))

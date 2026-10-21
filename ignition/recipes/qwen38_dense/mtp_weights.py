@@ -75,7 +75,8 @@ class MTPWeights:
     allocated_bytes: int
 
     @classmethod
-    def load(cls, manifest, device, *, embedding_weight, lm_head_weight, config=None, progress=None, package_storage=None):
+    def load(cls, manifest, device, *, embedding_weight, lm_head_weight, config=None, progress=None,
+             package_storage=None, kernel_cache=None):
         config = ModelConfig.load(manifest.snapshot) if config is None else config
         stored = validate_checkpoint(manifest, config)
         device = torch.device(device)
@@ -105,7 +106,7 @@ class MTPWeights:
                 prefix = "mtp." + name.removesuffix(".weight")
                 if prefix in config.quantization:
                     from ignition.components.sm70_projection_tc import load_weight
-                    tensors[name] = load_weight(loader, prefix, storage=package_storage)
+                    tensors[name] = load_weight(loader, prefix, storage=package_storage, kernel_cache=kernel_cache)
                 else:
                     tensors[name] = loader.load_tensor("mtp." + name, dtype=dtype)
         return cls(config, tensors, embedding_weight, lm_head_weight, stored,

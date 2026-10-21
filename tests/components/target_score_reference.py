@@ -10,7 +10,10 @@ from ignition.preparation.scratch import bind_scratch
 
 @torch.compiler.allow_in_graph
 def filter_probabilities(logits, top_k, top_p, row_states, softmax_workspace):
-    """Reference filtering with separate input and output tensors."""
+    """Independent lowest-ID top-one reference with separate input and output tensors."""
+    winner = logits.argmax(-1, keepdim=True)
+    tokens = torch.arange(logits.shape[-1], device=logits.device)
+    logits = logits.masked_fill((top_k[:, None] == 1) & (tokens[None, :] != winner), -torch.inf)
     module = sampling.get_sampling_module()
     masked = module.top_k_mask_logits(logits, top_k, 0, row_states)
     probabilities = module.softmax(softmax_workspace, masked, None, 1.,

@@ -7,6 +7,7 @@ from collections import Counter
 from collections.abc import Hashable
 from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import replace
+from pathlib import Path
 from threading import get_ident
 
 import torch
@@ -35,7 +36,7 @@ class RecordedPreparationSession(PreparationSession):
     def __init__(self, *, device, checkpoint: str, workload_schema: str,
                  numerical_policy: str, search_limits=None, namespace=None, race_budget=None,
                  coordinator=None, headroom_bytes=0, benchmark_storage=None, compile_workers=None,
-                 tuning_replica=None):
+                 tuning_replica=None, kernel_cache=None, cutlass_include=None):
         if not isinstance(checkpoint, str) or not checkpoint:
             raise ValueError("tuning requires an exact checkpoint revision")
         if any(not isinstance(value, str) or not value for value in (workload_schema, numerical_policy)):
@@ -55,6 +56,8 @@ class RecordedPreparationSession(PreparationSession):
         cpu_workers(compile_workers)
         self.requested_compile_workers = compile_workers
         self.tuning_replica = tuning_replica
+        self.kernel_cache = None if kernel_cache is None else str(Path(kernel_cache).expanduser().resolve())
+        self.cutlass_include = None if cutlass_include is None else str(Path(cutlass_include).expanduser().resolve())
         self._replica_coordinator = None
         self._coordinator = coordinator
         self._recorded_requests = {}

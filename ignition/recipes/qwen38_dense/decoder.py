@@ -85,8 +85,12 @@ class SM70DecoderLayer(torch.nn.Module):
         norm = layer.post_attention_layernorm
         hidden_states = (self.norms[1](hidden_states) if self.norms is not None
                          else rms_norm(hidden_states, norm.weight, norm.eps))
-        gate = round_bf16(layer.mlp.gate_proj(hidden_states))
-        up = round_bf16(layer.mlp.up_proj(hidden_states))
+        if hasattr(layer.mlp, 'gate_up_proj'):
+            gate, up = layer.mlp.gate_up_proj(hidden_states).chunk(2, dim=-1)
+            gate, up = round_bf16(gate), round_bf16(up)
+        else:
+            gate = round_bf16(layer.mlp.gate_proj(hidden_states))
+            up = round_bf16(layer.mlp.up_proj(hidden_states))
         activated = round_bf16(layer.mlp.act_fn(gate))
         product = round_bf16(activated * up)
         hidden_states = round_bf16(layer.mlp.down_proj(product))
@@ -107,8 +111,18 @@ class FullAttention(torch.nn.Module):
                 buffers[field] = torch.zeros((tokens, width), dtype=source.dtype, device=device)
             return buffers[field]
 
-        self.qg = empty("qg", 2 * self.heads * self.dim)
-        self.k, self.v = (empty(field, self.kv_heads * self.dim) for field in ("k", "v"))
+        self.fused_qkv = f"layers.{layer}.self_attn.qkv_proj" in weights.projections
+        if self.fused_qkv:
+            widths = (2 * self.heads * self.dim, self.kv_heads * self.dim, self.kv_heads * self.dim)
+            self.qkv = empty('qkv', sum(widths))
+            self.qkv_members = self.qkv.split(widths, dim=-1)
+            # Head-wise RMSNorm flattens token/head rows; keep its existing
+            # contiguous geometry while the rounding copies read fused strides.
+            self.qg = empty('qg', widths[0])
+            self.k, self.v = (empty(field, width) for field, width in zip(('k', 'v'), widths[1:], strict=True))
+        else:
+            self.qg = empty("qg", 2 * self.heads * self.dim)
+            self.k, self.v = (empty(field, self.kv_heads * self.dim) for field in ("k", "v"))
         self.q = empty("q", self.heads * self.dim).view(tokens, self.heads, self.dim)
         self.key = empty("key", self.kv_heads * self.dim).view(tokens, self.kv_heads, self.dim)
         self.attended, self.output = empty("attended", self.heads * self.dim), empty("output", config.hidden)
@@ -116,8 +130,10 @@ class FullAttention(torch.nn.Module):
         self.projections = {
             field: TensorFP8Projection(inputs, weights.projections[prefix + field], output,
                                        session=session, workspace=workspace, name=name + "." + field, row_invariant=row_invariant)
-            for field, inputs, output in (("q_proj", source, self.qg), ("k_proj", source, self.k),
-                                         ("v_proj", source, self.v), ("o_proj", self.attended, self.output))
+            for field, inputs, output in (
+                (("qkv_proj", source, self.qkv), ("o_proj", self.attended, self.output)) if self.fused_qkv else
+                (("q_proj", source, self.qg), ("k_proj", source, self.k),
+                 ("v_proj", source, self.v), ("o_proj", self.attended, self.output)))
         }
         self.slots = torch.full((tokens,), -1, dtype=torch.int64, device=device)
         self.lengths = torch.zeros_like(metadata.lengths)
@@ -146,11 +162,12 @@ class FullAttention(torch.nn.Module):
     def forward(self, hidden_states, position_embeddings, **kwargs):
         from transformers.models.qwen3_5.modeling_qwen3_5 import apply_rotary_pos_emb
 
-        for field in ("q_proj", "k_proj", "v_proj"):
+        for field in (("qkv_proj",) if self.fused_qkv else ("q_proj", "k_proj", "v_proj")):
             self.projections[field](hidden_states)
         if self.sm70:
-            for projected in (self.qg, self.k, self.v):
-                projected.copy_(round_bf16(projected))
+            outputs = (self.qg, self.k, self.v)
+            for projected, raw in zip(outputs, self.qkv_members if self.fused_qkv else outputs, strict=True):
+                projected.copy_(round_bf16(raw))
         query, gate = self.qg.view(-1, self.heads, 2 * self.dim).chunk(2, dim=-1)
         key = self.k.view(-1, self.kv_heads, self.dim)
         if self.sm70:
@@ -194,10 +211,14 @@ class PreparedDecoder:
         self.feedback_output = feedback_output
         config, source = weights.config, scratch.activations
         attention_buffers = {}
+        fused_projections = "layers.0.mlp.gate_up_proj" in weights.projections
         mlp_buffers = {field: torch.zeros((source.shape[0], width), dtype=source.dtype, device=source.device)
                        for field, width in (("gate_proj", config.text["intermediate_size"]),
                                             ("up_proj", config.text["intermediate_size"]),
                                             ("down_proj", config.hidden))}
+        if fused_projections:
+            mlp_buffers['gate_up_proj'] = torch.zeros((source.shape[0], 2 * config.text['intermediate_size']),
+                dtype=source.dtype, device=source.device)
         mlp_input = torch.zeros_like(mlp_buffers["gate_proj"])
         norm_buffers = [torch.zeros_like(source) for _ in range(2)] if self.sm70 and row_invariant else None
         self.layers = []
@@ -206,7 +227,8 @@ class PreparedDecoder:
             prefix = f"layers.{index}."
             if original.block_type == "linear_attention":
                 projections = {field: weights.projections[prefix + "linear_attn." + field]
-                               for field in ("in_proj_qkv", "in_proj_z", "in_proj_ba", "out_proj")}
+                               for field in (("in_proj_qkvz", "in_proj_ba", "out_proj") if fused_projections else
+                                             ("in_proj_qkv", "in_proj_z", "in_proj_ba", "out_proj"))}
                 layer.linear_attn = RecurrentAttention(PreparedGDN(original.linear_attn, projections, source,
                     scratch.gdn, pool.recurrent(index), self.delta, mode=mode, session=session,
                     name=name + "." + prefix + "gdn", workspace=workspace, projection_workspace=workspace, row_invariant=row_invariant))
@@ -215,7 +237,7 @@ class PreparedDecoder:
                     mode=mode, session=session, workspace=workspace, name=name + "." + prefix + "attention",
                     buffers=attention_buffers, row_invariant=row_invariant)
             layer.mlp = module_copy(original.mlp)
-            for field in ("gate_proj", "up_proj", "down_proj"):
+            for field in (("gate_up_proj", "down_proj") if fused_projections else ("gate_proj", "up_proj", "down_proj")):
                 weight = weights.projections[prefix + "mlp." + field]
                 inputs = source if field != "down_proj" else mlp_input
                 output = mlp_buffers[field]

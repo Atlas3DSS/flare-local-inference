@@ -31,6 +31,7 @@ def disposable_ranges(*, cache, scratch, workspaces, vision_scratch, decoders, o
                     "draft_probabilities", "draft_valid", "copy_mask", "raw_backup", "seed", "offset",
                     "base_offset", "sampled"))
                 target, proposals, verify, _, _ = operation.operations
+                values.append(target.top_one_candidates)
                 for distribution in (target, *proposals):
                     values.extend(getattr(distribution, name) for name in (
                         "scores", "probabilities", "maximum", "valid",

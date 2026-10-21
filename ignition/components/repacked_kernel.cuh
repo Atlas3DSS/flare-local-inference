@@ -101,19 +101,6 @@ template<bool INVERSE> __global__ void repack_scales(const uint8_t*src,uint8_t*d
   }
   if constexpr(!INVERSE)reinterpret_cast<uint32_t*>(dst)[i]=v;
 }
-extern "C" int sol6_repack(const uint8_t*w,const uint8_t*s,uint8_t*rw,uint8_t*rs,int n,int pk,int fp4,int inv) {
-  if(n<1||pk%64)return cudaErrorInvalidValue;
-  int64_t count=(int64_t)((n+31)/32)*(pk/(fp4?32:16))*32;
-  #define R(F,I) repack_weights<F,I><<<(count+255)/256,256>>>(w,rw,n,pk)
-  if(fp4){if(inv){R(true,true);}else{R(true,false);}}
-  else {if(inv){R(false,true);}else{R(false,false);}}
-  #undef R
-  if(fp4) {count=(int64_t)((n+31)/32)*(pk/64)*32;
-    if(inv)repack_scales<true><<<(count+255)/256,256>>>(s,rs,n,pk);
-    else repack_scales<false><<<(count+255)/256,256>>>(s,rs,n,pk);
-  }
-  return cudaGetLastError();
-}
 template<bool F> __device__ __forceinline__ uint4 load_raw(const uint4*w,int nw,int k,int PK,int end,int lane) {
   constexpr int Q=F?32:16;
   uint4 r={0,0,0,0};

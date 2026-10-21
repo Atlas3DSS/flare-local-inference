@@ -1,8 +1,9 @@
 """Bounded top-k draft proposals: filtering and sampling over at most DRAFT_CANDIDATES tokens.
 
 Proposals follow the request policy after penalties, grammar and temperature:
-top-k, softmax, top-p and min-p, each retaining boundary ties among the
-candidates, then renormalization. A request whose top-k exceeds
+top-k, softmax, top-p and min-p, retaining boundary ties among the
+candidates except top-k one, which selects the lowest maximum token ID,
+then renormalization. A request whose top-k exceeds
 DRAFT_CANDIDATES, including disabled top-k, proposes from the
 DRAFT_CANDIDATES highest scores. Chain verification receives exactly the
 distribution each draft was drawn from, so verified output is unchanged;
@@ -105,9 +106,9 @@ def _select_and_sample(Candidates, Selected, Probabilities, Valid, TopK, TopP, P
     min_p = tl.load(Params + slot * 6 + 2)
     top_p = tl.load(TopP + row)
 
-    # Top-k keeps every candidate tied with the k-th score.
+    # Sorted keys put the lowest token ID first among equal maximum scores.
     pivot = tl.max(tl.where(rank == top_k - 1, scores, -float("inf")), 0)
-    kept = finite & (scores >= pivot)
+    kept = finite & tl.where(top_k == 1, rank == 0, scores >= pivot)
     maximum = tl.max(tl.where(kept, scores, -float("inf")), 0)
     weights = tl.where(kept, tl.exp(scores - maximum), 0.)
     probabilities = weights / tl.sum(weights, 0)
@@ -267,7 +268,9 @@ class PreparedDraftDistribution(PreparedSpeculativeDistributions):
 
     @staticmethod
     def scratch_layout(batch, width, vocab):
-        return {**PreparedSpeculativeDistributions.scratch_layout(batch, width, vocab),
+        shared = PreparedSpeculativeDistributions.scratch_layout(batch, width, vocab)
+        del shared["top_one_candidates"]  # The bounded proposal selects its winner in existing scratch.
+        return {**shared,
             "block_max": ((batch, triton.cdiv(vocab, _SCORE_BLOCK)), torch.float32),
             "proposal_candidates": ((batch, triton.cdiv(vocab, BLOCK), DRAFT_CANDIDATES), torch.int64),
             "proposal_selected": ((batch, DRAFT_CANDIDATES), torch.int64)}

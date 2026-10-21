@@ -14,7 +14,7 @@ from ignition.components.speculation import (
     DRAFT_RNG_DOMAIN, PreparedSpeculativeCommit, PreparedSpeculativeDistributions,
     PreparedStochasticVerification, SpeculativeRngState,
 )
-from ignition.components.state import gather_rows, scatter_rows, save_hidden
+from ignition.components.state import gather_rows, save_hidden
 from ignition.components.state_transfer import PreparedStateTransfer
 from ignition.preparation.scratch import GraphBufferPool
 
@@ -260,7 +260,14 @@ class PreparedRound:
         self.sampling_scratch = prepare_sampling_scratch(b, w, o.requests.vocab_size, device, buffers=buffers)
         self.probabilities = buffers.zeros((b, w - 1, o.requests.vocab_size), torch.float32)
         self.valid = torch.zeros((b, w - 1), dtype=torch.bool, device=device)
-        self.recurrent_copy = torch.zeros((b, 48 * 128 * 128), dtype=torch.float32, device=device)
+        from ignition.components.sm70_commit import PreparedSM70RecurrentCommit
+        self.commit_sources = torch.zeros(b, dtype=torch.int64, device=device)
+        self.commit_active = torch.zeros(b, dtype=torch.uint8, device=device)
+        self.recurrent_commit = PreparedSM70RecurrentCommit(
+            o.pool.reserved_backing,
+            (o.pool.recurrent(i).recurrent.flatten(1) for i, kind in enumerate(o.weights.config.layers)
+             if kind == "linear_attention"), self.commit_sources, self.metadata.state_rows,
+            self.commit_active, o.pool.memory_capacity, kernel_cache=getattr(o.session, 'kernel_cache', None))
         from ignition.components.sm70_gdn import PreparedSM70ConvolutionCommit
         self.commit_counts = torch.zeros(b, dtype=torch.int32, device=device)
         self.convolution_commit = PreparedSM70ConvolutionCommit(
@@ -273,6 +280,7 @@ class PreparedRound:
         if self.operations is not None:
             return
         o, b, w = self.owner, self.batch, self.width
+        self.recurrent_commit.prepare()
         args = (o.requests, o.inputs.row_slot_ids[:b], o.inputs.row_generations[:b], o.inputs.live_rows)
         target = PreparedSpeculativeDistributions(self.decoder.scratch.logits.view(b, w, -1),
             *args, self.drafts, workspace=self.sampling_scratch["target"])
@@ -361,11 +369,9 @@ class PreparedRound:
         commit()
         counts = commit.emitted_count
         selected = states.gather(1, (counts - 1).long().clamp_min(0)[:, None])[:, 0]
-        for i, kind in enumerate(o.weights.config.layers):
-            if kind == "linear_attention":
-                recurrent = o.pool.recurrent(i).recurrent.flatten(1)
-                gather_rows(recurrent, selected, self.recurrent_copy)
-                scatter_rows(self.recurrent_copy, self.metadata.state_rows, recurrent, counts > 0)
+        self.commit_sources.copy_(selected)
+        self.commit_active.copy_(counts > 0)
+        self.recurrent_commit()
         self.commit_counts.copy_(counts)
         self.convolution_commit()
         # Repair all accepted MTP pairs from true target feedback. Proposal KV

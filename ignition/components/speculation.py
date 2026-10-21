@@ -12,7 +12,8 @@ from dataclasses import dataclass
 
 import torch
 
-from ignition.components.flashinfer_sampling import filter_probabilities_out, probability_filter_workspace, verify_chain
+from ignition.components.flashinfer_sampling import (TOP_ONE_BLOCK, filter_probabilities_out, prepare_top_one,
+                                                     probability_filter_workspace, verify_chain)
 
 from ignition.components.capacity import BATCH_CAPACITIES
 from ignition.components.logprobs import PreparedLogprobs
@@ -189,6 +190,7 @@ class PreparedSpeculativeDistributions:
     @staticmethod
     def scratch_layout(batch, width, vocab):
         return dict(scores=((batch, width, vocab), torch.float32),
+            top_one_candidates=((batch * width, (vocab + TOP_ONE_BLOCK - 1) // TOP_ONE_BLOCK), torch.int32),
             probabilities=((batch, width, vocab), torch.float32),
             maximum=((batch, width), torch.float32), valid=((batch, width), torch.bool),
             packed_top_k=((batch * width,), torch.int32), packed_top_p=((batch * width,), torch.float32))
@@ -279,6 +281,8 @@ class PreparedSpeculativeDistributions:
         )
         self.top_p_workspace = probability_filter_workspace(
             self.packed_top_p.numel(), self.state.vocab_size, self.logits.device)
+        self.top_one = prepare_top_one(self.scores.view(-1, self.state.vocab_size), self.maximum,
+                                      self.packed_top_k, self.top_one_candidates)
         self._prepared = True
         self()
 
@@ -290,7 +294,7 @@ class PreparedSpeculativeDistributions:
         self.scores.copy_(torch.where(self.valid[:, :, None], self.scores, dummy))
         flat = self.scores.view(-1, self.state.vocab_size)
         filter_probabilities_out(flat, self.packed_top_k, self.packed_top_p,
-            *self.library_scratch, self.probabilities.view_as(flat), self.top_p_workspace)
+            *self.library_scratch, self.probabilities.view_as(flat), self.top_p_workspace, top_one=self.top_one)
         return self.normalization(self.probabilities, params)
 
 

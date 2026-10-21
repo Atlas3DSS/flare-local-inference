@@ -1,6 +1,7 @@
 // Reviewed Sol-7 paths 47/51 share one helper translation unit.
 // Stream-aware launch wrappers and the reviewed Sol-5 row-local producer.
 #include "repacked.cu"
+#include "local_kernel.cuh"
 __global__ void produce(const float* x,half* y,float* inverse,int M,int K) {
   __shared__ float maxima[256];
   int row=blockIdx.x,t=threadIdx.x;
@@ -69,8 +70,34 @@ template<int M,bool F>void atlas_dispatch(const half*x,const uint8_t*w,const uin
  else {if(bk==128)GO(128,8);else GO(256,8);}
  #undef GO
 }
+template<int M,bool F,int BK,int W,int S> void atlas_local(const half*x,const uint8_t*w,const uint8_t*s,const float*i,
+ float g,int rec,const float*b,float*y,int n,int k,int pk,const float*cg,cudaStream_t stream) {
+ static_assert(S*2*((M+7)/8)*8*(BK+4)*2<=49152 && S*((M+7)/8)*8*W*32*4<=49152 && W*S<=32);
+ projection_local<M,F,BK,W,S><<<n/(W*32),W*S*32,0,stream>>>(x,(const uint4*)w,(const uint32_t*)s,i,g,rec,b,y,nullptr,n,k,pk,S,0,cg);
+}
+template<int M> void atlas_dispatch_local(const half*x,const uint8_t*w,const uint8_t*s,const float*i,
+ float g,int rec,const float*b,float*y,int n,int k,int pk,int fp4,int split,const float*cg,cudaStream_t stream) {
+ #define LOCAL(F,B,W,S) atlas_local<M,F,B,W,S>(x,w,s,i,g,rec,b,y,n,k,pk,cg,stream)
+ if(fp4){LOCAL(true,256,4,2);}
+ else if(split==8){LOCAL(false,64,1,8);}
+ else if(split==2){LOCAL(false,64,2,2);}
+ else {LOCAL(false,64,2,4);}
+ #undef LOCAL
+}
 extern "C" int atlas_project(const half*x,const uint8_t*w,const uint8_t*s,const float*i,float g,int rec,
- const float*b,float*y,float*p,int m,int n,int k,int pk,int split,int fp4,int bk,int warps,int path,cudaStream_t stream) {
+ const float*b,float*y,float*p,int m,int n,int k,int pk,int split,int fp4,int bk,int warps,int path,const float*cg,cudaStream_t stream) {
+ if(path==60) {
+  bool tuple=fp4 ? bk==256&&warps==4&&split==2 : bk==64&&((warps==1&&split==8)||(warps==2&&(split==2||split==4)));
+  int padded=(m+7)/8*8;
+  if(!tuple||m<1||m>16||n<1||k<64||pk<k||pk%64||n%(warps*32)||k%(split*bk)||
+     (int64_t)n*(pk/(fp4?2:1))>2147483647LL||(int64_t)n*(pk/16)>2147483647LL||
+     (int64_t)m*n*split>2147483647LL||split*2*padded*(bk+4)*2>49152||split*padded*warps*32*4>49152) return cudaErrorInvalidValue;
+  #define LOCAL_RUN(M) atlas_dispatch_local<M>(x,w,s,i,g,rec,b,y,n,k,pk,fp4,split,cg,stream)
+  switch(m){case 1:{LOCAL_RUN(1);break;}case 2:{LOCAL_RUN(2);break;}case 4:{LOCAL_RUN(4);break;}case 8:{LOCAL_RUN(8);break;}case 12:{LOCAL_RUN(12);break;}case 16:{LOCAL_RUN(16);break;}default:return cudaErrorInvalidValue;}
+  #undef LOCAL_RUN
+  return cudaGetLastError();
+ }
+ if(cg)return cudaErrorInvalidValue;
  if(n<1||n%128||k<1||pk<k||k%64||pk%64||(bk!=128&&bk!=256)||(warps!=4&&warps!=8)||split<1||n%(warps*32)||k%(split*bk)||(path!=47&&path!=51)||
    (int64_t)((n+31)/32)*(pk/(fp4?32:16))*32>2147483647LL||(int64_t)m*n*split>2147483647LL)return cudaErrorInvalidValue;
  #define RUN(M) if(fp4)atlas_dispatch<M,true>(x,w,s,i,g,rec,b,y,p,n,k,pk,split,bk,warps,path,stream);else atlas_dispatch<M,false>(x,w,s,i,g,rec,b,y,p,n,k,pk,split,bk,warps,path,stream)

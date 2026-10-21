@@ -23,7 +23,7 @@ class ModelWeights:
     draft: object = None
 
     @classmethod
-    def load(cls, manifest, device, *, progress=None, row_invariant=False, package_storage=None):
+    def load(cls, manifest, device, *, progress=None, row_invariant=False, package_storage=None, kernel_cache=None):
         from transformers import Qwen3_5TextConfig, Qwen3_5TextModel
 
         config = ModelConfig.load(manifest.snapshot)
@@ -33,13 +33,34 @@ class ModelWeights:
         projections = {}
         before = torch.cuda.memory_allocated(device)
         if row_invariant:
-            from ignition.components.sm70_projection_tc import load_weight
+            from ignition.components.sm70_projection_tc import load_weight, load_fused
         with DirectWeightLoader(manifest, device, prefixes=(TEXT_PREFIX + ".", "lm_head."),
                                 progress=progress) as loader:
+            fused_members = set()
+            if row_invariant:
+                for index, layer in enumerate(tree.layers):
+                    groups = [(f'layers.{index}.mlp.', ('gate_proj', 'up_proj'), 'gate_up_proj')]
+                    groups.append((f'layers.{index}.linear_attn.', ('in_proj_qkv', 'in_proj_z'), 'in_proj_qkvz')
+                        if layer.block_type == 'linear_attention' else
+                        (f'layers.{index}.self_attn.', ('q_proj', 'k_proj', 'v_proj'), 'qkv_proj'))
+                    for base, roles, fused in groups:
+                        names = tuple(base + role for role in roles)
+                        weight = load_fused(loader,
+                            tuple(TEXT_PREFIX + '.' + name for name in names), storage=package_storage,
+                            kernel_cache=kernel_cache)
+                        packed = weight.packed if isinstance(weight, TensorFP8Weight) else weight
+                        for name, width in zip(names, packed.member_widths, strict=True):
+                            if (width, packed.in_features) != tuple(tree.get_parameter(name + '.weight').shape):
+                                raise ValueError(f"{name}: checkpoint projection shape differs from the model")
+                        projections[base + fused] = weight
+                        fused_members.update(name + '.weight' for name in names)
             for name, parameter in tree.named_parameters():
+                if name in fused_members:
+                    continue
                 prefix = TEXT_PREFIX + "." + name.removesuffix(".weight")
                 if name.endswith(".weight") and prefix in config.quantization:
-                    weight = load_weight(loader, prefix, storage=package_storage) if row_invariant else loader.load_linear(prefix)
+                    weight = load_weight(loader, prefix, storage=package_storage,
+                                         kernel_cache=kernel_cache) if row_invariant else loader.load_linear(prefix)
                     packed = weight.packed if isinstance(weight, TensorFP8Weight) else weight
                     if (packed.out_features, packed.in_features) != tuple(parameter.shape):
                         raise ValueError(f"{prefix}: checkpoint projection shape differs from the model")
@@ -56,7 +77,8 @@ class ModelWeights:
                         tree.get_submodule(parent.rpartition(".")[0]).norm_weight_bf16 = tensor.dtype == torch.bfloat16
                     tensor = tensor.float()
                 setattr(tree.get_submodule(parent), field, torch.nn.Parameter(tensor, requires_grad=False))
-            head = load_weight(loader, "lm_head", storage=package_storage) if row_invariant else loader.load_linear("lm_head")
+            head = load_weight(loader, "lm_head", storage=package_storage,
+                               kernel_cache=kernel_cache) if row_invariant else loader.load_linear("lm_head")
             if (head.out_features, head.in_features) != (config.vocabulary, config.hidden):
                 raise ValueError("Qwen vocabulary projection shape differs from the model")
         for index, layer in enumerate(tree.layers):

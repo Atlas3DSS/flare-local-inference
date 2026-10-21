@@ -34,6 +34,11 @@ def _fixture(batch, width, dtype, *, vocab=10000, offset=0, prefix_masks=False):
     live = torch.tensor([batch], dtype=torch.int32, device="cuda:0")
     candidates = torch.tensor([[7, 7, -1, 9, vocab, 3, 4, 5]] * batch, dtype=torch.int64, device="cuda:0")
     logits = torch.randn((batch, width, vocab), generator=generator).to(dtype).cuda()
+    if dtype == torch.bfloat16 and torch.cuda.get_device_capability()[0] < 8:
+        # SM70 production keeps BF16-rounded logits in FP32 storage. Inductor
+        # cannot compile native BF16 inputs on this architecture; retain the
+        # rounded values while exercising every catalog shape in its real dtype.
+        logits = logits.float()
     masks = state.grammar_mask[:, None].expand(-1, 8, -1).clone() if prefix_masks else None
     counts = torch.full((capacity,), 2, dtype=torch.int32, device="cuda:0") if prefix_masks else None
     options = dict(prefix_offset=offset, grammar_masks=masks, grammar_mask_count=counts)

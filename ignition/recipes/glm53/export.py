@@ -26,6 +26,7 @@ def disposable_ranges(scratch, arena, forwards):
             if forward.draft is not None:
                 values.extend(_draft_scratch(forward.draft))
             target, proposals, verify, _ = forward.operations
+            values.append(target.top_one_candidates)
             for distribution in (target, *proposals):
                 values.extend(getattr(distribution, name) for name in (
                     "scores", "probabilities", "maximum", "valid",

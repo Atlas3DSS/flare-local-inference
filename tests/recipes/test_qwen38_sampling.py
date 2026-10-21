@@ -98,7 +98,9 @@ def _reference(logits, counts, params, seed, counter, grammar=None):
         scores[~grammar] = -torch.inf
     scores /= params.temperature
     values, ids = torch.sort(scores, descending=True, stable=True)
-    if params.top_k > 0:
+    if params.top_k == 1:
+        values[1:] = -torch.inf
+    elif params.top_k > 0:
         values[values < values[params.top_k - 1].clone()] = -torch.inf
     probabilities = values.softmax(0)
     starts = torch.searchsorted(-values, -values, right=False)

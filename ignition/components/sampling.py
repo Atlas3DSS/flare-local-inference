@@ -16,7 +16,8 @@ import triton.language as tl
 from .completion import CompletionOutputs
 from .logprobs import PreparedLogprobs
 from .capacity import BATCH_CAPACITIES
-from .flashinfer_sampling import filter_probabilities_out, probability_filter_workspace, sample_probabilities
+from .flashinfer_sampling import (TOP_ONE_BLOCK, filter_probabilities_out, prepare_top_one,
+                                 probability_filter_workspace, sample_probabilities)
 from ignition.preparation.scratch import bind_scratch
 
 EOS_CAPACITY = 8
@@ -448,7 +449,8 @@ class PreparedSampling:
     """Captured FlashInfer sampling with explicit request-owned Philox state.
 
     Penalties and grammar precede temperature and FlashInfer top-k, softmax,
-    and top-p. Both cutoff filters retain boundary ties. Min-p keeps equality
+    and top-p. Top-k one selects the lowest token ID at the maximum score;
+    larger top-k and top-p retain boundary ties. Min-p keeps equality
     against the largest remaining probability, then renormalizes. Temperature
     must be positive.
 
@@ -463,6 +465,7 @@ class PreparedSampling:
     @staticmethod
     def scratch_layout(rows, vocab):
         return dict(scores=((rows, vocab), torch.float32), maximum=((rows,), torch.float32),
+            top_one_candidates=((rows, triton.cdiv(vocab, TOP_ONE_BLOCK)), torch.int32),
             probabilities=((rows, vocab), torch.float32), probability_maximum=((rows,), torch.float32),
             probability_mass=((rows, 1), torch.float32), packed_top_k=((rows,), torch.int32),
             packed_top_p=((rows,), torch.float32), packed_min_p=((rows,), torch.float32),
@@ -537,6 +540,7 @@ class PreparedSampling:
             (self.probabilities, self.probabilities, self.probability_maximum,
              self.packed_min_p, self.state.vocab_size, 1024), self._grid,
             num_warps=4, enable_fp_fusion=False)
+        self.top_one = prepare_top_one(self.scores, self.maximum, self.packed_top_k, self.top_one_candidates)
         # FlashInfer's public operators share these buffers on the model stream.
         self.scratch_tensors["flashinfer_top_k_row_states"] = self._flashinfer._get_cache_buf(
             f"top_k_mask_logits_row_states_{self.logits.device}", 1024 * 1024,
@@ -556,7 +560,7 @@ class PreparedSampling:
         filter_probabilities_out(self.scores, self.packed_top_k, self.packed_top_p,
             self.scratch_tensors["flashinfer_top_k_row_states"],
             self.scratch_tensors["flashinfer_softmax_workspace"], self.probabilities,
-            self.scratch_tensors["flashinfer_top_p_workspace"])
+            self.scratch_tensors["flashinfer_top_p_workspace"], top_one=self.top_one)
         probabilities = self.probabilities
         torch.amax(probabilities, dim=-1, out=self.probability_maximum)
         from ignition.preparation.triton import launch_triton

@@ -141,13 +141,15 @@ def test_native_sampling_reuses_operands_across_row_capacities():
 @pytest.mark.parametrize("compile_forward", [False, True, 'aot'])
 def test_native_flashinfer_cutoff_ties_and_device_parameter_changes(compile_forward, vocab_size):
     cases = (
-        # Threshold top-k retains every tie, including more than k tokens.
+        # Top-k above one retains every tie, including more than k tokens.
         ([4., 3., 3., 1.], 2, 1., 0., [0, 1, 2]),
         # The top-p cutoff retains both equal-probability boundary tokens.
         ([math.log(2.), 0., 0.], 0, .6, 0., [0, 1, 2]),
         ([math.log(2.), 0., 0.], -1, 1., .6, [0]),
         ([0., 0., 0.], 0, 1., 1., [0, 1, 2]),
-        ([0., 0., 0.], 1, 1., 0., [0, 1, 2]),
+        ([0., 0., 0.], 1, 1., 0., [0]),
+        ([-2., -1., -1.], 1, .8, 1., [1]),
+        ([-0., 0., -0.], 1, .95, 0., [0]),
         ([4., 3., 3., 1.], vocab_size, 1., 0., [0, 1, 2, 3]),
         ([4., 3., 3., 1.], 2, 1., 0., [0, 1, 2]),
     )
@@ -201,8 +203,11 @@ def test_native_flashinfer_rng_is_invariant_to_capacity_packing_and_physical_slo
             assert 0 <= sampled[0] < 16
 
 
-def test_native_flashinfer_rejects_invalid_rows_and_ignores_masked_nan(vocab_size):
+@pytest.mark.parametrize("top_k", [0, 1])
+def test_native_flashinfer_rejects_invalid_rows_and_ignores_masked_nan(vocab_size, top_k):
     with captured(4, vocab_size=vocab_size) as owner:
+        for slot in range(4):
+            owner.admit(slot, top_k=top_k)
         owner.live.fill_(4)
         owner.logits.zero_()
         owner.logits[0, 5] = torch.nan
@@ -225,13 +230,45 @@ def test_native_flashinfer_rejects_invalid_rows_and_ignores_masked_nan(vocab_siz
         for name in before:
             assert torch.equal(before[name], after[name]), name
 
-        owner.admit(2)
+        owner.admit(2, top_k=top_k)
         owner.slots[0] = 2
         owner.live.fill_(1)
         owner.logits[0].fill_(-torch.inf)
         records = owner.replay()
         assert records[2].tolist() == [1, 1, 0, 0, -1, ERROR, INVALID_DISTRIBUTION, 0]
         assert owner.state.rng_counter[2].item() == 0
+
+
+@pytest.mark.parametrize("compile_forward", [False, True, 'aot'])
+def test_native_top_one_tile_ties_and_mixed_policy_changes(vocab_size, compile_forward):
+    with captured(4, vocab_size=vocab_size, compile_forward=compile_forward) as owner:
+        owner.live.fill_(4)
+        owner.slots.copy_(torch.tensor([3, 0, 2, 1], dtype=torch.int32))
+        tied = [4095, 4096, vocab_size - 1]
+        for iteration, policies in enumerate(((1, 2, 20, 1), (20, 1, 1, 2), (1, 2, 20, 1))):
+            owner.logits.fill_(-torch.inf)
+            owner.logits[:, tied] = -2.
+            owner.sampler.top_one_candidates.fill_(vocab_size + 9)
+            for row, slot in enumerate(owner.slots.cpu().tolist()):
+                owner.admit(slot, seed=19 + iteration, counter=2**32 + iteration,
+                            top_k=policies[row], top_p=.95)
+            # A lower-ID tied maximum excluded by grammar must never win.
+            owner.state.grammar_enabled[1] = 1
+            owner.state.grammar_mask[1].zero_()
+            owner.state.grammar_mask[1, 4096 // 32] = 1 << (4096 % 32)
+            bit = (vocab_size - 1) % 32
+            owner.state.grammar_mask[1, (vocab_size - 1) // 32] |= -(1 << 31) if bit == 31 else 1 << bit
+            records = owner.replay()
+            for row, slot in enumerate(owner.slots.cpu().tolist()):
+                allowed = tied[1:] if slot == 1 else tied
+                support = allowed[:1] if policies[row] == 1 else allowed
+                probabilities = owner.sampler.probabilities[row].cpu()
+                assert torch.nonzero(probabilities > 0).flatten().tolist() == support
+                if policies[row] == 1:
+                    assert probabilities[support[0]] == 1
+                    assert records[slot, 4] == support[0]
+                else:
+                    assert owner.sampler.top_one_candidates[row].eq(vocab_size + 9).all()
 
 
 def test_native_flashinfer_stale_duplicate_and_disabled_rows_do_not_sample(vocab_size):
