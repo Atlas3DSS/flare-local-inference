@@ -80,6 +80,7 @@ RECIPE = Recipe(
     # Shared experts, KDA gate projections, and decode query chains run on an auxiliary stream.
     stream_overlap=True, max_images=4, image_bytes=32 << 20, language_model_only=True,
     ranks=MappingProxyType({
+        # DGX Station can hold GLM on one GPU; TP1 must remain a supported rank count.
         # One rank holds every head: twice TP2's recurrent rows less the replicated part.
         1: _costs(161_123_584, _GRAPH_BYTES, ranks=1, speculating=True),
         2: _costs(81_464_576, _GRAPH_BYTES, ranks=2, speculating=True),

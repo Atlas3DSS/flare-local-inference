@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -103,19 +102,14 @@ def test_clamped_swiglu_experts_match_checkpoint_reference(manifest, tokens, act
         weight = decode_nvfp4(projection.packed, projection.scales, torch.ones(()))
         return (inputs.to(torch.bfloat16).float() @ weight.T) * projection.weight_scale_2.reshape(())
 
-    # trtllm-gen quantizes FC1 inputs once for every route, with the largest expert input scale.
-    shared = max(float(projection.input_scale.reshape(())) for gate, up, _ in projections for projection in (gate, up))
-
-    def a4(inputs, projection, fc1=False):
-        # FlashInfer quantizes FC1 inputs; trtllm-gen's FC1 epilogue quantizes the FP32 activation for FC2.
-        if fc1:
-            projection = replace(projection, input_scale=torch.tensor(shared))
+    def a4(inputs, projection):
+        # Each route retains its calibrated FC1 scale; FC2 quantizes the FP32 activation.
         return nvfp4_linear_reference(inputs, projection, quant_scale_math="flashinfer")
 
     def reference(expert, values):
         gate, up, down = projections[expert]
         if activation == "a4":
-            first, project = (lambda inputs, projection: a4(inputs, projection, fc1=True)), a4
+            first = project = a4
         else:
             first = project = a16
         hidden = F.silu(first(values, gate).clamp(max=LIMIT)) * first(values, up).clamp(-LIMIT, LIMIT)

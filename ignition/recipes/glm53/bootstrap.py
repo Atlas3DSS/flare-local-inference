@@ -86,8 +86,8 @@ class PreparationConfig:
     retain_graphs: bool = False
     kernel_cache: Path | None = None
     mtp: bool = False
-    # Routed NVFP4-CSF experts: A16 activations with A4 prefill launches, or A4 throughout.
-    expert_activation: str = "a16"
+    # SM103 uses checkpoint-scaled A4; SM120/121 retain A16 with A4 prefill launches.
+    expert_activation: str = "auto"
     # Shard latent records and C4 pools across the tensor-parallel ranks (decode context parallelism).
     context_parallel: bool = False
     # Expand routed experts' CSF block scales once at load instead of before every expert launch.
@@ -100,6 +100,8 @@ class PreparationConfig:
     speculative_token_capacity: int | None = None
 
     def __post_init__(self):
+        if self.expert_activation not in ("auto", "a4", "a16"):
+            raise ValueError("GLM expert activation must be auto, a4, or a16")
         if self.roce_ring and (self.hosts is None or not 2 <= len(self.hosts) <= 16):
             raise ValueError("RoCE ring requires 2..16 ranks on separate hosts")
         if type(self.mtp) is not bool:
@@ -249,7 +251,12 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
     torch.cuda.set_device(device)
     with phase(progress, "Inspect checkpoint"):
         manifest = inspect_indexed_checkpoint(snapshot)
-    if config.expert_activation == "a16":
+    from ignition.components.sm103 import is_sm103
+
+    expert_activation = config.expert_activation
+    if expert_activation == "auto":
+        expert_activation = "a4" if is_sm103(device) else "a16"
+    if expert_activation == "a16":
         # b12x retains activation scales for A4 prefill launches only while preparing with this switch.
         os.environ["B12X_W4A16_A4_PREFILL"] = "1"
     # Loading, construction and tuning free most of what they allocate; a transient package pool returns
@@ -258,7 +265,7 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
     if package_storage is not None:
         transient.enter_context(package_storage.transient())
     weights = ModelWeights.load(manifest, device, shard=shard, progress=progress, mtp=config.mtp,
-                                expert_activation=config.expert_activation,
+                                expert_activation=expert_activation,
                                 expand_expert_scales=config.expand_expert_scales, language_model_only=config.language_model_only)
     if torch.cuda.get_device_properties(device).is_integrated:
         from ignition.preparation.host_memory import release_page_cache

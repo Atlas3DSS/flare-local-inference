@@ -22,7 +22,7 @@ def test_default_catalog_covers_4096_prefill_and_four_requests():
     {"devices": ()}, {"devices": (0, 0)}, {"devices": (0, 1, 2)}, {"devices": (-1, 0)},
     {"context": 513}, {"context": 2097152}, {"prefill_chunk_size": 4097},
     {"context": 256, "prefill_chunk_size": 512}, {"max_active": 65}, {"pages": 0},
-    {"snapshot_budget_bytes": 0}, {"headroom_bytes": -1},
+    {"snapshot_budget_bytes": 0}, {"headroom_bytes": -1}, {"expert_activation": "fp8"},
 ])
 def test_invalid_prepared_geometry_rejects_before_gpu_use(values):
     with pytest.raises((ValueError, TypeError)):
