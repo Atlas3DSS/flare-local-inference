@@ -103,7 +103,20 @@ def test_clamped_swiglu_experts_match_checkpoint_reference(manifest, tokens, act
         return (inputs.to(torch.bfloat16).float() @ weight.T) * projection.weight_scale_2.reshape(())
 
     def a4(inputs, projection):
-        # Each route retains its calibrated FC1 scale; FC2 quantizes the FP32 activation.
+        if inputs.dtype == torch.bfloat16:
+            from flashinfer.quantization import fp4_quantize
+
+            # Match CUDA's approximate reciprocal at FP4 rounding boundaries;
+            # CPU division can change codes for calibrated BF16 input values.
+            packed, scales = fp4_quantize(inputs.cuda(), projection.input_scale.reciprocal().cuda(),
+                is_sf_swizzled_layout=False, enable_pdl=False, nvfp4_4over6=None)
+            rows, width = inputs.shape
+            scales = scales.view(-1)[:rows * width // 16].reshape(rows, width // 16)
+            values = decode_nvfp4(packed.cpu().view(torch.uint8), scales.cpu().view(torch.float8_e4m3fn),
+                                  torch.ones(()))
+            weight = decode_nvfp4(projection.packed, projection.scales, torch.ones(()))
+            return (values @ weight.T) * (projection.weight_scale_2 / projection.input_scale.reciprocal())
+        # FC2 quantizes the FP32 SwiGLU activation before its independent CPU GEMM.
         return nvfp4_linear_reference(inputs, projection, quant_scale_math="flashinfer")
 
     def reference(expert, values):

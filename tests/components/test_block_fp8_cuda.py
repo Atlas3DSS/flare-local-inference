@@ -13,7 +13,7 @@ pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
                                reason="requires FLARE_RUN_CUDA_TESTS=1 and an assigned GPU")
 
 
-@pytest.mark.parametrize("rows", [1, 4, 64, 4096])
+@pytest.mark.parametrize("rows", [1, 2, 4, 32, 64, 4096])
 def test_block_fp8_compiled_replay(rows):
     from flashinfer.quantization import per_token_group_quant_8bit
 
