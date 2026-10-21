@@ -605,7 +605,9 @@ pub struct ServingOptions {
     )]
     pub mtp_max_verification_token_budget: Option<NonZeroUsize>,
 
-    /// Adapt verification width to acceptance estimates and execution cost [default: package setting].
+    /// Adapt verification width to acceptance estimates and execution cost [default: fixed width].
+    /// Adaptive rounds depend on batch composition, so sampled outputs then differ between
+    /// concurrent and solo requests.
     #[arg(
         long,
         overrides_with = "no_mtp_adaptive_verification",
@@ -613,7 +615,7 @@ pub struct ServingOptions {
     )]
     pub mtp_adaptive_verification: bool,
 
-    /// Use the maximum width where captured, otherwise width one [default: package setting].
+    /// Use the maximum width where captured, otherwise width one [default].
     #[arg(
         long,
         overrides_with = "mtp_adaptive_verification",

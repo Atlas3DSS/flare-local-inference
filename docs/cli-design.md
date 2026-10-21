@@ -149,7 +149,9 @@ The package records prepared concurrency, the available prefill and speculation
 graphs, and maximum virtual extents for cache storage. `--max-concurrency N`
 and `--mtp-draft-tokens N` select supported reductions at load time;
 `--mtp-adaptive-verification` and `--no-mtp-adaptive-verification` select the
-verification policy. Omitted flags use package defaults. Only selected graphs
+verification policy; serving defaults to fixed-width rounds at the maximum loaded
+width so that sampled outputs do not depend on batch composition. Other omitted
+flags use package defaults. Only selected graphs
 and required kernels load. Continuation rows and KV pages receive physical
 storage according to those selections and available GPU memory.
 
@@ -409,7 +411,7 @@ Help exits with status 0; usage errors go to stderr with status 2. Its options a
 | `--kv-cache-limit concurrency\|context\|memory` | Bound shared KV history by prepared context times selected concurrency, one prepared context, or available memory | `memory` |
 | `--memory-limit LIMIT` | Per-GPU occupied size (`30G`), free-memory reserve (`-30G`), or fraction of total memory (`0.8`) | Package serving reserve |
 | `--mtp-draft-tokens N` | Reduce the maximum draft count; zero selects ordinary execution without draft generation, absorption, or draft-state maintenance | Package default |
-| `--mtp-adaptive-verification` / `--no-mtp-adaptive-verification` | Adaptive or fixed selection among captured widths | Package default |
+| `--mtp-adaptive-verification` / `--no-mtp-adaptive-verification` | Adaptive or fixed selection among captured widths; adaptive rounds depend on batch composition, so sampled outputs then differ between concurrent and solo requests | Fixed (maximum loaded width) |
 | `--mtp-pipeline` | Queue an unconstrained speculative round behind the running one (single local rank, device MTP proposals) | One round in flight |
 | `--unclamped-sampling` | Validation only: accept request sampling values outside the model-author ranges, e.g. `top_k` 1 for greedy comparisons | Model-author ranges |
 | `--mtp-verification-token-budget N` | Select one exact captured packed verification capacity per batch | All captured capacities |

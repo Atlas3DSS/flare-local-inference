@@ -135,7 +135,14 @@ impl LoadOptions {
                 "verification policy requires a package captured with speculation",
             ));
         }
-        let adaptive = self.adaptive_verification.unwrap_or(fixed.is_none());
+        // Combined speculative catalogs default to fixed-width rounds: adaptive selection
+        // changes a request's round structure with batch composition, so sampled outputs
+        // would differ between concurrent and solo serving. Split proposal and packed
+        // verification catalogs select their rows adaptively by construction.
+        let adaptive_catalog = execution.graphs.iter()
+            .any(|g| g.kind == "proposal" || g.packed_token_capacity != 0);
+        let adaptive = self.adaptive_verification
+            .unwrap_or(fixed.is_none() && adaptive_catalog);
         let fixed = if widths.is_empty() || adaptive {
             None
         } else {
@@ -933,8 +940,9 @@ mod tests {
             .unwrap()
             .graphs
             .retain(|g| g.name != "speculative2x3");
+        // Adaptive selection loads every captured width, so every rank needs all of them.
         assert!(
-            LoadOptions::default()
+            LoadOptions { adaptive_verification: Some(true), ..Default::default() }
                 .select(&mut packages, &mut config())
                 .unwrap_err()
                 .to_string()
