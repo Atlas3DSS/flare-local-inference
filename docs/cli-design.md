@@ -369,6 +369,10 @@ throughput with output cadence. For throughput-oriented serving, use
 `flare run model.safetensors --gpus 0,1,2,3 --scheduler-policy throughput`.
 This preference retains token-service fairness and can produce longer gaps
 between larger output bursts. It uses the package's existing graphs.
+`--scheduler-policy agent` values a consumed prompt token like an output token.
+Coding agents block on each prompt (tool output) before generating again, so a
+waiting prompt is served before other requests drain their decoding instead of
+after; the decoders pause for that prefill and then decode together with it.
 
 `flare run PACKAGE` loads an exported file without the Ignition configuration
 reader. `PACKAGE` can also be a Hugging Face repository ID with an optional

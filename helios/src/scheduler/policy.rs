@@ -8,6 +8,8 @@ use super::{
 #[derive(Clone, Copy, Debug)]
 pub struct PolicyConfig {
     pub output_token_value: f64,
+    /// Prompt-value units per consumed prompt token.
+    pub prefill_token_value: f64,
     pub token_fairness: f64,
     pub delivery_fairness: f64,
     pub decode_age_price: f64,
@@ -19,6 +21,7 @@ impl Default for PolicyConfig {
     fn default() -> Self {
         Self {
             output_token_value: 64.0,
+            prefill_token_value: 1.0,
             token_fairness: 16.0,
             delivery_fairness: 4.0,
             decode_age_price: 0.1,
@@ -33,6 +36,14 @@ impl PolicyConfig {
     /// the frequency of output bursts or their age separately.
     pub fn throughput() -> Self {
         Self { delivery_fairness: 0.0, decode_age_price: 0.0, ..Self::default() }
+    }
+
+    /// Agents block on every prompt (tool output) before producing more tokens, so a
+    /// consumed prompt token is worth an output token: a waiting prompt is served
+    /// before other requests drain their decoding, and then decodes with them.
+    pub fn agent() -> Self {
+        let default = Self::default();
+        Self { prefill_token_value: default.output_token_value, ..default }
     }
 }
 
@@ -94,6 +105,8 @@ impl RequestScheduler {
         }
         if !policy.output_token_value.is_finite()
             || policy.output_token_value <= 0.0
+            || !policy.prefill_token_value.is_finite()
+            || policy.prefill_token_value <= 0.0
             || !policy.adaptation_ms.is_finite()
             || policy.adaptation_ms <= 0.0
             || policy.estimate_ttl_ns == 0
@@ -320,7 +333,8 @@ impl RequestScheduler {
         let unit = (-scale).exp();
         let mut age_price = 0.0;
         for (slot, value) in values.iter_mut().enumerate() {
-            value.prefill_token = unit + (token_log[slot] - scale).exp();
+            value.prefill_token =
+                self.policy.prefill_token_value * unit + (token_log[slot] - scale).exp();
             value.output_token =
                 self.policy.output_token_value * unit + (token_log[slot] - scale).exp();
             value.delivery = (delivery_log[slot] - scale).exp();
@@ -765,9 +779,9 @@ impl RequestScheduler {
                                 &(r.consumed_tokens as usize + self.prefill_work(r, capacity)),
                             ).is_ok()))
             });
-        if feedback && !self.submissions.is_empty() {
-            return;
-        }
+        // A step that needs completion feedback (a new request's Init, a prompt's final chunk, a
+        // stale cost) stays a candidate behind in-flight work; `select_plan` drains the window
+        // when it is the most valuable step.
         let (selected, rate) = self
             .continuation_candidate(
                 kind,
@@ -995,6 +1009,12 @@ impl RequestScheduler {
             let candidate = *continuations.iter().max_by(|a, b| compare(a, b))?;
             return Some(self.materialize(candidate, log_scale,
                 PlanOrigin::RefreshContinuation(episode.id)));
+        }
+        // Pipelined decoding keeps work in flight, so a step that needs completion feedback could
+        // never be queued and a new request would wait until every decoder finished. When such a
+        // step is the most valuable, queue nothing: the window drains and it runs next.
+        if ordinary.feedback && !self.submissions.is_empty() {
+            return None;
         }
         if ordinary.rate.duration_ns == 0 {
             return Some(self.materialize(ordinary, log_scale, PlanOrigin::Discovery));

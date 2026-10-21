@@ -1591,6 +1591,14 @@ fn invalid_utility_configuration_is_rejected_before_admission() {
             ..Default::default()
         },
         PolicyConfig {
+            prefill_token_value: 0.0,
+            ..Default::default()
+        },
+        PolicyConfig {
+            prefill_token_value: f64::NAN,
+            ..Default::default()
+        },
+        PolicyConfig {
             token_fairness: -1.0,
             ..Default::default()
         },
@@ -2486,4 +2494,116 @@ fn cancelling_all_inflight_proposal_owners_keeps_the_charge_and_releases_reused_
     assert!(s.complete_proposal(fence, &records, gpu_time(8 * MS), &[[1.0; 7]; 2]).is_err());
     assert_eq!(s.refresh_credit_ns(), -3_000_000.0);
     assert!(!matches!(s.plan().unwrap().origin, PlanOrigin::RefreshContinuation(_)));
+}
+
+/// Three decoders are live when a fresh 2,048-token prompt arrives (one agent's tool output).
+/// Returns the plans executed before the prompt's first prefill chunk and the first decode
+/// batch after its prefill completes.
+fn waiting_prompt_trace(policy: PolicyConfig) -> (usize, usize) {
+    let mut s = engine(4, false);
+    s.configure_policy(policy).unwrap();
+    let decoders: Vec<_> = (1..=3).map(|id| add(&mut s, id, 65, 4000)).collect();
+    // Under the default policy the short prompts themselves wait behind the first decoder, so
+    // setup allows far more steps than `ready`.
+    for _ in 0..20_000 {
+        if decoders.iter().all(|h| s.request(*h).unwrap().phase == RequestPhase::Decode) {
+            break;
+        }
+        step(&mut s, 0);
+    }
+    assert!(decoders.iter().all(|h| s.request(*h).unwrap().phase == RequestPhase::Decode));
+    let fresh = add(&mut s, 9, 2048, 32);
+    let mut first = None;
+    for n in 0..20_000 {
+        let plan = step(&mut s, 0);
+        if first.is_none()
+            && plan.kind == GraphKind::Prefill
+            && plan.lanes.iter().any(|l| l.request == fresh)
+        {
+            first = Some(n);
+        }
+        if s.request(fresh).unwrap().phase == RequestPhase::Decode {
+            break;
+        }
+    }
+    let first = first.expect("the fresh prompt never started prefill");
+    for _ in 0..8 {
+        let plan = step(&mut s, 0);
+        if plan.kind == GraphKind::Decode {
+            return (first, plan.lanes.len());
+        }
+    }
+    panic!("no decode followed the fresh prompt's prefill");
+}
+
+#[test]
+fn agent_policy_serves_a_waiting_prompt_before_decoders_drain() {
+    let (balanced_wait, _) = waiting_prompt_trace(PolicyConfig::default());
+    let (agent_wait, agent_batch) = waiting_prompt_trace(PolicyConfig::agent());
+    assert!(
+        agent_wait < balanced_wait,
+        "agent {agent_wait} plans vs balanced {balanced_wait} before the prompt starts"
+    );
+    assert!(agent_wait <= 4, "agent policy waited {agent_wait} plans");
+    assert_eq!(agent_batch, 4, "all four requests decode together after the prompt");
+}
+
+#[test]
+fn default_policies_value_prompt_tokens_at_one_unit() {
+    assert_eq!(PolicyConfig::default().prefill_token_value, 1.0);
+    assert_eq!(PolicyConfig::throughput().prefill_token_value, 1.0);
+    let agent = PolicyConfig::agent();
+    assert_eq!(agent.prefill_token_value, agent.output_token_value);
+    assert!(engine(1, false).configure_policy(agent).is_ok());
+}
+
+/// Three decoders are live and one decode is already in flight (pipelined serving) when a
+/// one-chunk prompt arrives; its Init and its only chunk both need completion feedback.
+/// Returns the plan offered while the decode is in flight, the first plan after it completes, and
+/// the plans needed until the prompt reaches decode.
+fn pipelined_prompt_trace(policy: PolicyConfig) -> (Option<GraphKind>, Option<(GraphKind, bool)>, usize) {
+    let mut s = engine(4, false);
+    s.configure_policy(policy).unwrap();
+    let decoders: Vec<_> = (1..=3).map(|id| add(&mut s, id, 65, 4000)).collect();
+    for _ in 0..20_000 {
+        if decoders.iter().all(|h| s.request(*h).unwrap().phase == RequestPhase::Decode) {
+            break;
+        }
+        step(&mut s, 0);
+    }
+    let inflight = s.plan().unwrap();
+    assert_eq!(inflight.kind, GraphKind::Decode);
+    let fence = Fence(s.submitted.0 + 1);
+    s.commit(&inflight, fence).unwrap();
+    let fresh = add(&mut s, 9, 300, 32);
+    let behind = s.plan().map(|p| p.kind);
+    s.advance_to(s.now_ns + inflight.estimated_duration_ns()).unwrap();
+    complete_timed(&mut s, &inflight, fence, 0, true, gpu_time(inflight.estimated_duration_ns()));
+    let after = s
+        .plan()
+        .map(|p| (p.kind, p.lanes.iter().any(|l| l.request == fresh)));
+    let mut plans = 0;
+    while s.request(fresh).unwrap().phase != RequestPhase::Decode {
+        step(&mut s, 0);
+        plans += 1;
+        assert!(plans < 20_000, "the prompt never reached decode");
+    }
+    (behind, after, plans)
+}
+
+#[test]
+fn a_new_request_drains_pipelined_decode_under_the_agent_policy() {
+    let (behind, after, agent_plans) = pipelined_prompt_trace(PolicyConfig::agent());
+    let (_, _, balanced_plans) = pipelined_prompt_trace(PolicyConfig::default());
+    assert_eq!(behind, None, "nothing is queued behind the in-flight decode");
+    let (kind, starts_fresh) = after.unwrap();
+    assert!(starts_fresh && matches!(kind, GraphKind::Init | GraphKind::Prefill), "{kind:?}");
+    assert!(agent_plans <= 4, "agent policy needed {agent_plans} plans to finish the prompt");
+    assert!(agent_plans < balanced_plans, "agent {agent_plans} vs balanced {balanced_plans}");
+}
+
+#[test]
+fn the_balanced_policy_keeps_pipelining_decode_ahead_of_a_one_chunk_prompt() {
+    let (behind, _, _) = pipelined_prompt_trace(PolicyConfig::default());
+    assert_eq!(behind, Some(GraphKind::Decode));
 }

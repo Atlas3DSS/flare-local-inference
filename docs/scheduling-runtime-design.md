@@ -365,6 +365,7 @@ Defaults specify these preferences:
 | Field | Default | Meaning |
 |---|---:|---|
 | `output_token_value` | 64 | Prompt-value units per output token |
+| `prefill_token_value` | 1 | Prompt-value units per consumed prompt token |
 | `token_fairness` | 16 | Token-rate log-utility coefficient, value/ms |
 | `delivery_fairness` | 4 | Delivery-rate log-utility coefficient, value/ms |
 | `decode_age_price` | 0.1 | Linear output-age cost coefficient, value/ms² |
@@ -379,7 +380,11 @@ which uses these coefficients. `--scheduler-policy throughput` retains token
 fairness and output-token value while setting delivery fairness and decode-age
 price to zero. It favors token throughput and can select longer output bursts.
 It changes scheduling preferences without changing captured capacities or
-sampling policy.
+sampling policy. `--scheduler-policy agent` keeps the balanced coefficients and
+sets `prefill_token_value` equal to `output_token_value`, so a waiting prompt
+outranks the remaining decode of other requests; without mixed graphs the
+decoders pause for that prompt's prefill chunks rather than the prompt waiting
+for them to finish.
 
 ## Mixed execution contract
 

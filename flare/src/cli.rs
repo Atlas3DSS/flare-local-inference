@@ -344,9 +344,9 @@ pub struct OrbitRun {
     #[arg(long, value_name = "ALIAS", value_parser = served_model_name, help_heading = "Serving options")]
     pub served_model_name: Option<String>,
 
-    /// Favor throughput or output cadence [default: saved group or balanced].
+    /// Favor throughput, output cadence, or agents' prompt latency [default: saved group or balanced].
     #[arg(long, value_name = "MODE",
-        value_parser = ["balanced", "throughput"], help_heading = "Serving options")]
+        value_parser = ["balanced", "throughput", "agent"], help_heading = "Serving options")]
     pub scheduler_policy: Option<String>,
 
     /// File on rank zero's node containing the serving API key; omit to disable authentication.
@@ -477,9 +477,10 @@ pub struct Run {
     #[arg(long, value_name = "PATH", help_heading = "Serving options")]
     pub api_key_file: Option<PathBuf>,
 
-    /// Favor token throughput or balance it with output cadence; both retain token-service fairness.
+    /// Favor token throughput, balance it with output cadence, or value agents' prompts closer to output;
+    /// all retain token-service fairness.
     #[arg(long, value_name = "MODE", default_value = "balanced",
-        value_parser = ["balanced", "throughput"], help_heading = "Serving options")]
+        value_parser = ["balanced", "throughput", "agent"], help_heading = "Serving options")]
     pub scheduler_policy: String,
 
     #[command(flatten)]
