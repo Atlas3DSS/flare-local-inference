@@ -527,6 +527,21 @@ def test_cooperative_package_clamps_to_device_capacity(tmp_path):
         env={**os.environ, "FLARE_COOPERATIVE_TEST_PACKAGE": str(tmp_path)})
 
 
+@pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1", reason="requires explicit CUDA test opt-in")
+def test_captured_shared_memory_exceeds_function_allowance(tmp_path):
+    assert os.environ.get("CUDA_VISIBLE_DEVICES"), "assign CUDA_VISIBLE_DEVICES before running GPU tests"
+    root = Path(__file__).resolve().parents[2]
+    subprocess.run([
+        sys.executable, str(root / "helios/tests/shared_memory_package_fixture.py"), str(tmp_path),
+    ], check=True, cwd=root, timeout=120)
+    subprocess.run([
+        "cargo", "test", "--manifest-path", str(root / "helios/Cargo.toml"),
+        "--no-default-features", "--features", "runtime-package", "--lib",
+        "captured_shared_memory_exceeding_function_allowance_replays", "--", "--ignored",
+    ], check=True, cwd=root, timeout=180,
+        env={**os.environ, "FLARE_SHARED_MEMORY_TEST_PACKAGE": str(tmp_path)})
+
+
 def test_only_allocator_inactive_granules_are_released():
     allocation = Allocation("weights", 0x80000000000, 66 << 20, alignment=2 << 20, preserve_address=True)
     begin, end = allocation.address, allocation.address + allocation.nbytes
