@@ -34,6 +34,18 @@ pub enum Command {
     Agent(AgentArgs),
     /// Control an orbit of agents from this machine.
     Orbit(OrbitArgs),
+    #[cfg(unix)]
+    #[command(hide = true)]
+    CheckpointConnect {
+        #[arg(long)]
+        grant: PathBuf,
+        #[arg(long)]
+        rank: usize,
+        #[arg(long)]
+        stream: usize,
+        #[arg(long)]
+        fd: i32,
+    },
     /// Manage remembered publisher trust.
     Trust {
         #[command(subcommand)]
@@ -172,6 +184,12 @@ pub struct OrbitArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum OrbitCommand {
+    /// Internal Ignition request: sign a fabric route for an admitted checkpoint source.
+    #[command(hide = true)]
+    CheckpointRoute {
+        #[arg(long)]
+        cluster: Option<String>,
+    },
     /// Pair this controller with the agents on HOSTS.
     Pair {
         #[arg(required = true, value_name = "HOST")]
@@ -252,6 +270,14 @@ pub struct OrbitPush {
     )]
     pub to: Vec<String>,
 
+    /// Stream package data through fabric interfaces in the target nodes' ring order.
+    #[arg(long)]
+    pub roce_ring: bool,
+
+    /// Parallel TCP streams per destination file over the ring fabric [default: 8].
+    #[arg(long, value_name = "N", requires = "roce_ring", value_parser = clap::value_parser!(u8).range(1..=64))]
+    pub transfer_streams: Option<u8>,
+
     #[command(flatten)]
     pub serving: ServingOptions,
 }
@@ -264,7 +290,7 @@ impl OrbitPush {
             host: "127.0.0.1".parse().unwrap(),
             port: 8000,
             served_model_name: None,
-            roce_ring: false,
+            roce_ring: self.roce_ring,
             rendezvous: None,
             rank: None,
             api_key_file: None,
@@ -331,6 +357,10 @@ pub struct OrbitRun {
     /// native CPU relays forward non-neighbor traffic. Also emulates a ring on a switch.
     #[arg(long, help_heading = "Multi-host options")]
     pub roce_ring: bool,
+
+    /// Parallel TCP streams per destination file over the ring fabric [default: saved group or 8].
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u8).range(1..=64), help_heading = "Multi-host options")]
+    pub transfer_streams: Option<u8>,
 
     /// IP address for rank zero's HTTP server [default: saved group or 127.0.0.1].
     #[arg(long, value_name = "ADDR", help_heading = "Serving options")]
@@ -980,6 +1010,92 @@ mod tests {
                 disk_limit: Some(0),
                 transport: Some(Transport::Direct),
             }
+        );
+    }
+
+    #[test]
+    fn ring_prestaging_keeps_target_order_and_selects_fabric_distribution() {
+        let parsed = Cli::try_parse_from([
+            "flare",
+            "orbit",
+            "push",
+            "model.safetensors",
+            "--to",
+            "zero,one,two,three",
+            "--roce-ring",
+            "--transfer-streams",
+            "8",
+        ])
+        .unwrap();
+        let Command::Orbit(OrbitArgs {
+            command: OrbitCommand::Push(push),
+            ..
+        }) = parsed.command
+        else {
+            panic!("expected prestaging command");
+        };
+        assert_eq!(push.to, ["zero", "one", "two", "three"]);
+        assert_eq!(push.transfer_streams, Some(8));
+        assert!(push.run_args().roce_ring);
+    }
+
+    #[test]
+    fn transfer_stream_counts_are_bounded_and_stay_out_of_rank_arguments() {
+        for count in ["1", "4", "8", "16", "32", "64"] {
+            let parsed = Cli::try_parse_from([
+                "flare",
+                "orbit",
+                "run",
+                "model.safetensors",
+                "--roce-ring",
+                "--transfer-streams",
+                count,
+            ])
+            .unwrap();
+            let Command::Orbit(OrbitArgs {
+                command: OrbitCommand::Run(run),
+                ..
+            }) = parsed.command
+            else {
+                panic!("expected orbit run");
+            };
+            assert_eq!(run.transfer_streams, Some(count.parse().unwrap()));
+            assert!(
+                !run.run_args()
+                    .rank_options()
+                    .iter()
+                    .any(|s| s.contains("transfer-streams"))
+            );
+        }
+        for command in ["run", "push"] {
+            for count in ["0", "65", "256"] {
+                let mut args = vec![
+                    "flare",
+                    "orbit",
+                    command,
+                    "m.safetensors",
+                    "--roce-ring",
+                    "--transfer-streams",
+                    count,
+                ];
+                if command == "push" {
+                    args.extend(["--to", "zero,one"]);
+                }
+                assert!(Cli::try_parse_from(args).is_err());
+            }
+        }
+        assert!(
+            Cli::try_parse_from([
+                "flare",
+                "orbit",
+                "push",
+                "m.safetensors",
+                "--to",
+                "zero,one",
+                "--transfer-streams",
+                "4"
+            ])
+            .is_err()
         );
     }
 

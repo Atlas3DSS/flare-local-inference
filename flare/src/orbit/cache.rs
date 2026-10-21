@@ -202,6 +202,131 @@ pub fn store(
     ranges: &[(u64, u64)],
     source: &mut dyn Read,
 ) -> Result<PathBuf, Failure> {
+    store_entry(cache, kind, name, size, ranges, |partial| {
+        store_partial(partial, kind, name, size, ranges, source)
+    })
+}
+
+/// Divide the requested bytes evenly without filling sparse holes or overlapping writes.
+fn split_ranges(ranges: &[(u64, u64)], streams: usize) -> Vec<Vec<(u64, u64)>> {
+    let total = range_bytes(ranges);
+    let width = total.div_ceil(streams as u64).max(1);
+    let mut parts = Vec::new();
+    let mut part = Vec::new();
+    let mut remaining = width;
+    for &(mut offset, mut count) in ranges {
+        while count > 0 {
+            let take = count.min(remaining);
+            part.push((offset, take));
+            offset += take;
+            count -= take;
+            remaining -= take;
+            if remaining == 0 {
+                parts.push(std::mem::take(&mut part));
+                remaining = width;
+            }
+        }
+    }
+    if !part.is_empty() {
+        parts.push(part);
+    }
+    parts
+}
+
+/// Fetch disjoint ranges on independent connections, then publish the complete cache entry.
+/// Each worker holds at most 1 MiB of file data; all workers drain before cleanup or publication.
+pub fn store_parallel<R: Read>(
+    cache: &Path,
+    name: &str,
+    size: u64,
+    ranges: &[(u64, u64)],
+    streams: usize,
+    source: impl Fn(usize, &[(u64, u64)]) -> Result<R, Failure> + Sync,
+) -> Result<PathBuf, Failure> {
+    use std::os::unix::fs::FileExt;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    if !(1..=64).contains(&streams) {
+        return Err("transfer streams must be in 1..=64".into());
+    }
+    store_entry(cache, "package", name, size, ranges, |partial| {
+        let output = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(partial)?;
+        output.set_len(size)?;
+        let parts = split_ranges(ranges, streams);
+        let failed = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            let workers = parts
+                .iter()
+                .enumerate()
+                .map(|(index, part)| {
+                    let source = &source;
+                    let output = &output;
+                    let failed = &failed;
+                    scope.spawn(move || {
+                        let result = (|| -> Result<(), Failure> {
+                            let mut reader = source(index, part)?;
+                            let mut buffer = vec![0; 1 << 20];
+                            for &(mut offset, mut count) in part {
+                                while count > 0 {
+                                    if failed.load(Ordering::Relaxed) {
+                                        return Ok(()); // Another worker's error prevents publication.
+                                    }
+                                    let take = count.min(buffer.len() as u64) as usize;
+                                    reader.read_exact(&mut buffer[..take])?;
+                                    output.write_all_at(&buffer[..take], offset)?;
+                                    offset += take as u64;
+                                    count -= take as u64;
+                                }
+                            }
+                            Ok(())
+                        })();
+                        if result.is_err() {
+                            failed.store(true, Ordering::Relaxed);
+                        }
+                        result
+                    })
+                })
+                .collect::<Vec<_>>();
+            let mut result = Ok(());
+            for worker in workers {
+                let joined = worker
+                    .join()
+                    .unwrap_or_else(|_| Err("transfer worker panicked".into()));
+                if joined.is_err() {
+                    failed.store(true, Ordering::Relaxed);
+                    result = joined;
+                }
+            }
+            result
+        })?;
+        output.sync_all()?;
+        if let Some(blob) = blob_name(name) {
+            // Parallel writes cannot update one ordered digest. Hash the assembled file before
+            // it can enter the shared immutable blob store, including on a cache collision.
+            let mut digest = Sha256::new();
+            std::io::copy(&mut &output, &mut digest)?;
+            if format!("{}.safetensors", super::hex(&digest.finalize())) != blob {
+                return Err(format!("{name}: payload digest mismatch").into());
+            }
+            output.set_permissions(fs::Permissions::from_mode(0o444))?;
+        }
+        Ok(())
+    })
+}
+
+fn store_entry(
+    cache: &Path,
+    kind: &str,
+    name: &str,
+    size: u64,
+    ranges: &[(u64, u64)],
+    write: impl FnOnce(&Path) -> Result<(), Failure>,
+) -> Result<PathBuf, Failure> {
     let path = entry(cache, kind_directory(kind)?, name)?;
     validate_ranges(size, ranges)?;
     if kind == "package" && blob_name(name).is_some() && ranges != [(0, size)] {
@@ -215,7 +340,7 @@ pub fn store(
         ".{}.partial",
         path.file_name().unwrap().to_string_lossy()
     ));
-    let result = store_partial(&partial, kind, name, size, ranges, source);
+    let result = write(&partial);
     if result.is_err() {
         let _ = fs::remove_file(&partial);
         return result.map(|_| path);
@@ -457,6 +582,170 @@ mod tests {
         drop(pinned);
         let removed = evict(&cache.join("packages"), &pins).unwrap();
         assert_eq!(removed, vec![cache.join("packages/e-8-rank1")]);
+    }
+
+    #[test]
+    fn parallel_ranges_preserve_sparse_bytes_and_small_tails() {
+        use std::os::unix::fs::MetadataExt;
+        use std::sync::Barrier;
+        let temp = tempfile::tempdir().unwrap();
+        let bytes = (0..9_000_019).map(|i| (i % 251) as u8).collect::<Vec<_>>();
+        let ranges = [(7, 101), (3_000_000, 5_999_999)];
+        for streams in [1, 4, 8, 16, 32, 64] {
+            let ready = Barrier::new(streams);
+            let path = store_parallel(
+                temp.path(),
+                &format!("rank{streams}/m.safetensors"),
+                bytes.len() as u64,
+                &ranges,
+                streams,
+                |_, part| {
+                    ready.wait(); // Every requested stream must be live concurrently.
+                    let data = part
+                        .iter()
+                        .flat_map(|&(offset, count)| {
+                            bytes[offset as usize..(offset + count) as usize]
+                                .iter()
+                                .copied()
+                        })
+                        .collect::<Vec<_>>();
+                    Ok(std::io::Cursor::new(data))
+                },
+            )
+            .unwrap();
+            let copied = fs::read(&path).unwrap();
+            for &(offset, count) in &ranges {
+                let span = offset as usize..(offset + count) as usize;
+                assert_eq!(copied[span.clone()], bytes[span]);
+            }
+            assert!(copied[108..3_000_000].iter().all(|&b| b == 0));
+            assert!(fs::metadata(path).unwrap().blocks() * 512 < bytes.len() as u64);
+        }
+        let parts = split_ranges(&[(10, 3), (100, 2)], 8);
+        assert_eq!(
+            parts,
+            vec![
+                vec![(10, 1)],
+                vec![(11, 1)],
+                vec![(12, 1)],
+                vec![(100, 1)],
+                vec![(101, 1)]
+            ]
+        );
+        assert!(split_ranges(&[], 8).is_empty());
+        for streams in [0, 65] {
+            assert!(
+                store_parallel(
+                    temp.path(),
+                    "bad/m.safetensors",
+                    1,
+                    &[(0, 1)],
+                    streams,
+                    |_, _| Ok(std::io::empty())
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn parallel_failure_drains_readers_and_removes_partial_files() {
+        use std::sync::{
+            Barrier,
+            atomic::{AtomicUsize, Ordering},
+        };
+        struct Reader<'a> {
+            active: &'a AtomicUsize,
+            fail: bool,
+        }
+        impl Read for Reader<'_> {
+            fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+                if self.fail {
+                    return Err(std::io::Error::other("injected stream failure"));
+                }
+                out.fill(1);
+                Ok(out.len())
+            }
+        }
+        impl Drop for Reader<'_> {
+            fn drop(&mut self) {
+                self.active.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let active = AtomicUsize::new(0);
+        let ready = Barrier::new(8);
+        let error = store_parallel(
+            temp.path(),
+            "rank/m.safetensors",
+            8 << 20,
+            &[(0, 8 << 20)],
+            8,
+            |index, _| {
+                active.fetch_add(1, Ordering::SeqCst);
+                ready.wait();
+                Ok(Reader {
+                    active: &active,
+                    fail: index == 3,
+                })
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("injected stream failure"));
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+        assert!(!temp.path().join("packages/rank/m.safetensors").exists());
+        assert!(
+            !temp
+                .path()
+                .join("packages/rank/.m.safetensors.partial")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn parallel_blobs_verify_the_assembled_bytes_before_publication() {
+        let temp = tempfile::tempdir().unwrap();
+        let bytes = b"a payload split over eight streams with a tail";
+        let blob = format!("{}.safetensors", super::super::hex(&Sha256::digest(bytes)));
+        let name = format!("rank/{blob}");
+        let size = bytes.len() as u64;
+        for corrupt in [true, false] {
+            let result =
+                store_parallel(temp.path(), &name, size, &[(0, size)], 8, |index, part| {
+                    let mut data = part
+                        .iter()
+                        .flat_map(|&(offset, count)| {
+                            bytes[offset as usize..(offset + count) as usize]
+                                .iter()
+                                .copied()
+                        })
+                        .collect::<Vec<_>>();
+                    if corrupt && index == 3 {
+                        data[0] ^= 1;
+                    }
+                    Ok(std::io::Cursor::new(data))
+                });
+            if corrupt {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("payload digest mismatch")
+                );
+                assert!(!temp.path().join("blobs").join(&blob).exists());
+                assert!(!temp.path().join("packages").join(&name).exists());
+            } else {
+                let path = result.unwrap();
+                assert_eq!(fs::read(&path).unwrap(), bytes);
+                assert_eq!(fs::metadata(path).unwrap().permissions().mode() & 0o222, 0);
+            }
+        }
+        assert!(
+            store_parallel(temp.path(), &name, size, &[(0, 2)], 8, |_, _| Ok(
+                std::io::empty()
+            ))
+            .is_err()
+        );
     }
 
     #[test]

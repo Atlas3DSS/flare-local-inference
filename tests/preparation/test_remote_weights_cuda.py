@@ -2,6 +2,7 @@
 
 import json
 import os
+import queue
 import socket
 from types import SimpleNamespace
 from unittest import mock
@@ -12,7 +13,7 @@ from safetensors.torch import save_file
 
 from ignition.components.weights import DirectWeightLoader
 from ignition.preparation.checkpoint import inspect_indexed_checkpoint
-from ignition.preparation.checkpoint_source import RootSource, RemoteSource, SourceServer
+from ignition.preparation.checkpoint_source import RootSource, RemoteSource, SourceServer, authenticate
 
 
 pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
@@ -20,7 +21,8 @@ pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
 
 
 @torch.no_grad()
-def test_remote_native_copies_preserve_bits_strides_expansion_and_csf(tmp_path):
+@pytest.mark.parametrize("streams", [1, 4, 8])
+def test_remote_native_copies_preserve_bits_strides_expansion_and_csf(tmp_path, streams):
     root = tmp_path / "synthetic-source"
     root.mkdir()
     fixed = torch.tensor(([124] * 16 + [0] * 16) * 2, dtype=torch.uint8)
@@ -45,12 +47,31 @@ def test_remote_native_copies_preserve_bits_strides_expansion_and_csf(tmp_path):
     server = SourceServer(source, sender, b"fixture-key" * 4, 1, "synthetic-code")
     server.thread.start()
     remote = None
+    channels = []
     class Loader(DirectWeightLoader):
         def _selected_names(self):
             return super()._selected_names() - {"engram"}
     try:
         remote = RemoteSource(receiver, b"fixture-key" * 4, 1, "synthetic-code", checkpoint, directory=tmp_path)
         server.wait_ready()
+        if streams > 1:
+            remote.control_stats = dict(remote.stats)
+            remote.channels = queue.Queue()
+            remote.streams = streams
+            for _ in range(streams):
+                left, right = socket.socketpair()
+                left.settimeout(30)
+                right.settimeout(30)
+                reader = SourceServer(source, left, b"fixture-key" * 4, 1, "synthetic-code")
+                reader.thread.start()
+                channels.append((reader, right))
+                channel, _ = authenticate(right, b"fixture-key" * 4, rank=1, identity="synthetic-code")
+                channel.receive("catalog")
+                channel.send("ready")
+                channel.receive("ready")
+                stats = dict(payload_bytes=0, metadata_bytes=0, requests=0)
+                remote.channel_stats.append((channel, stats))
+                remote.channels.put((channel, stats))
         with remote.activate():
             manifest = inspect_indexed_checkpoint(remote.snapshot)
             with Loader(manifest, "cuda:0") as loader, \
@@ -85,9 +106,20 @@ def test_remote_native_copies_preserve_bits_strides_expansion_and_csf(tmp_path):
             assert remote.stats["payload_bytes"] == 304
             remote.finish()
         server.join()
-        assert server.stats == remote.stats
-        print(json.dumps(dict(remote_source=remote.stats, gpu=torch.cuda.get_device_name(0)), sort_keys=True))
+        for reader, _ in channels:
+            reader.join()
+        assert {field: server.stats[field] + sum(reader.stats[field] for reader, _ in channels)
+                for field in remote.stats} == remote.stats
+        print(json.dumps(dict(remote_source=remote.report(), gpu=torch.cuda.get_device_name(0)), sort_keys=True))
     finally:
+        for reader, connection in channels:
+            connection.close()
+            try:
+                reader.connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            reader.thread.join(30)
+            reader.connection.close()
         receiver.close()
         try:
             sender.shutdown(socket.SHUT_RDWR)

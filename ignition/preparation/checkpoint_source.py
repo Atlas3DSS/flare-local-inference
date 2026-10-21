@@ -8,12 +8,14 @@ import hmac
 import json
 import os
 from pathlib import Path, PurePosixPath
+import queue
 import secrets
 import socket
 import stat
 import struct
 import tempfile
 import threading
+import time
 
 
 BLOCK_BYTES = 4 << 20
@@ -245,10 +247,11 @@ class RootSource:
 
 
 class SourceServer:
-    """Sole reader of a peer control socket until its authenticated loading drain."""
+    """Own one checkpoint channel until its authenticated loading drain."""
 
-    def __init__(self, source, connection, key, rank, identity):
+    def __init__(self, source, connection, key, rank, identity, *, transport=None):
         self.source, self.connection, self.key, self.rank, self.identity = source, connection, key, rank, identity
+        self.transport = transport
         self.ready = threading.Event()
         self.error = None
         self.stats = dict(payload_bytes=0, metadata_bytes=0, requests=0)
@@ -258,7 +261,8 @@ class SourceServer:
         try:
             channel, _ = authenticate(self.connection, self.key, rank=self.rank, identity=self.identity,
                                       catalog=self.source.catalog)
-            channel.send("catalog", _json(self.source.catalog))
+            self.channel = channel
+            channel.send("catalog", _json(self.source.catalog), transport=self.transport)
             while True:
                 message, payload = channel.receive()
                 if payload:
@@ -266,6 +270,7 @@ class SourceServer:
                 kind = message["kind"]
                 if kind == "ready":
                     channel.send("ready")
+                    self.connection.settimeout(None)
                     self.ready.set()
                 elif kind == "finished":
                     if not self.ready.is_set() or message["stats"] != self.stats:
@@ -309,7 +314,7 @@ class RemoteSource:
 
     def __init__(self, connection, key, rank, identity, checkpoint, *, directory=None, on_created=None):
         self.channel, digest = authenticate(connection, key, rank=rank, identity=identity)
-        _, payload = self.channel.receive("catalog")
+        admission, payload = self.channel.receive("catalog")
         if hashlib.sha256(payload).hexdigest() != digest:
             raise ValueError("checkpoint catalog identity differs")
         catalog = json.loads(payload)
@@ -340,6 +345,13 @@ class RemoteSource:
         self.snapshot.mkdir()
         self.headers = {}
         self.stats = dict(payload_bytes=0, metadata_bytes=0, requests=0)
+        self.control_stats = self.stats
+        self.channels = None
+        self.ring_connections = []
+        self.channel_stats = []
+        self.stats_lock = threading.Lock()
+        self.streams = 1
+        self.read_started = self.read_finished = None
         self.finished = False
         (self.snapshot / MARKER).write_text(json.dumps(dict(catalog_sha256=digest)))
         try:
@@ -356,11 +368,44 @@ class RemoteSource:
                     target = self.snapshot / name
                     target.parent.mkdir(parents=True, exist_ok=True)
                     target.write_bytes(content)
+            if admission.get("transport") is not None:
+                self._connect_ring(admission["transport"], key, rank, identity, digest)
             self.channel.send("ready")
             self.channel.receive("ready")
         except BaseException:
             self.close()
             raise
+
+    def _connect_ring(self, grant, key, rank, identity, digest):
+        from .checkpoint_ring import RingConnection
+
+        # The native helper verifies the controller signature and paired node identity.
+        route = json.loads(grant["body"])
+        if route["catalog_sha256"] != digest or route["identity"] != identity:
+            raise ValueError("checkpoint fabric route differs from its source admission")
+        streams = route["streams"]
+        if type(streams) is not int or not 1 <= streams <= 64:
+            raise ValueError("checkpoint transfer streams must be between 1 and 64")
+        self.control_stats = dict(self.stats)
+        self.channels = queue.Queue()
+        self.streams = streams
+        for stream in range(streams):
+            connection = RingConnection(self.temporary.name, grant, rank, stream)
+            self.ring_connections.append(connection)
+            try:
+                channel, actual = authenticate(connection.connection, key, rank=rank, identity=identity)
+                _, payload = channel.receive("catalog")
+                if actual != digest or hashlib.sha256(payload).hexdigest() != digest:
+                    raise ValueError("checkpoint fabric catalog differs from its admitted source")
+                channel.send("ready")
+                channel.receive("ready")
+            except BaseException:
+                self.ring_connections.pop().close(check=True)
+                raise
+            connection.connection.settimeout(None)
+            stats = dict(payload_bytes=0, metadata_bytes=0, requests=0)
+            self.channel_stats.append((channel, stats))
+            self.channels.put((channel, stats))
 
     @contextmanager
     def activate(self):
@@ -378,23 +423,66 @@ class RemoteSource:
             raise RuntimeError("checkpoint reader has already drained")
         entry = self.files[relative_name(name)]
         row_extent(entry["bytes"], offset, width, rows, stride)
-        self.channel.send("read", read=dict(name=name, offset=offset, width=width, rows=rows, stride=stride))
-        _, data = self.channel.receive("data")
-        if len(data) != width * rows:
-            raise ConnectionError("checkpoint source returned a different byte extent")
-        self.stats["payload_bytes" if entry["header_bytes"] is not None and offset >= entry["header_bytes"]
-                   else "metadata_bytes"] += len(data)
-        self.stats["requests"] += 1
-        return data
+        channel, stats = self.channels.get() if self.channels is not None else (self.channel, self.control_stats)
+        started = time.monotonic()
+        try:
+            channel.send("read", read=dict(name=name, offset=offset, width=width, rows=rows, stride=stride))
+            _, data = channel.receive("data")
+            if len(data) != width * rows:
+                raise ConnectionError("checkpoint source returned a different byte extent")
+            field = ("payload_bytes" if entry["header_bytes"] is not None and offset >= entry["header_bytes"]
+                     else "metadata_bytes")
+            with self.stats_lock:
+                stats[field] += len(data)
+                stats["requests"] += 1
+                if stats is not self.stats:
+                    self.stats[field] += len(data)
+                    self.stats["requests"] += 1
+                if field == "payload_bytes":
+                    self.read_started = started if self.read_started is None else min(self.read_started, started)
+                    self.read_finished = time.monotonic()
+            return data
+        finally:
+            if self.channels is not None:
+                self.channels.put((channel, stats))
 
-    def finish(self):
-        self.channel.send("finished", stats=self.stats)
-        message, _ = self.channel.receive("finished")
-        if message["stats"] != self.stats:
-            raise ValueError("checkpoint completion accounting differs")
+    def finish(self, *, keep_transport=False):
+        total = {field: sum(stats[field] for _, stats in [*self.channel_stats, (self.channel, self.control_stats)])
+                 for field in self.stats}
+        if total != self.stats:
+            raise ValueError("checkpoint stream accounting differs from its aggregate")
+        for channel, stats in [*self.channel_stats, (self.channel, self.control_stats)]:
+            channel.send("finished", stats=stats)
+            message, _ = channel.receive("finished")
+            if message["stats"] != stats:
+                raise ValueError("checkpoint completion accounting differs")
         self.finished = True
+        if not keep_transport:
+            self.close_transport()
+
+    def close_transport(self):
+        while self.ring_connections:
+            self.ring_connections.pop().close(check=True)
+
+    def report(self):
+        seconds = 0 if self.read_started is None else self.read_finished - self.read_started
+        return dict(self.stats, transport="agent-ring-tcp" if self.channels is not None else "rendezvous-tcp",
+                    streams=self.streams, payload_seconds=seconds,
+                    payload_gbps=self.stats["payload_bytes"] * 8 / seconds / 1e9 if seconds else 0)
+
+    def abort_reads(self):
+        """Wake all concurrent reads before their owners release transfer buffers."""
+        connections = ([channel.connection for channel, _ in self.channel_stats] if self.channels is not None
+                       else [self.channel.connection])
+        for connection in connections:
+            try:
+                connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
 
     def close(self):
+        while getattr(self, "ring_connections", []):
+            self.ring_connections.pop().close()
         self.temporary.cleanup()
 
 

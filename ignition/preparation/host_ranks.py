@@ -43,6 +43,7 @@ _MAX_MESSAGE = 1 << 30
 _SHUTDOWN_SECONDS = 120
 _JSON, _PICKLE = b"J", b"P"
 _COPY_BLOCK = 16 << 20
+_EXPORT_PUBLICATION_LOCK = threading.Lock()
 
 
 def _send(sock, kind, payload):
@@ -84,46 +85,105 @@ def receive_object(sock):
     return pickle.loads(_receive(sock, _PICKLE))
 
 
-def send_export_sources(control, path, inventory):
+def _export_workers(function, items, connections):
+    """Abort every stream before joining workers when one export transfer fails."""
+    from concurrent.futures import ThreadPoolExecutor
+    import sys
+
+    failure, lock = [], threading.Lock()
+
+    def run(item):
+        try:
+            return function(item)
+        except BaseException as error:
+            with lock:
+                if not failure:
+                    failure.append(error)
+                    # Closing control sockets can make the rank lifetime watcher
+                    # exit this process before the caller reports the exception.
+                    print(traceback.format_exc(), file=sys.stderr, flush=True)
+                    for connection in connections:
+                        try:
+                            connection.shutdown(socket.SHUT_RDWR)
+                        except OSError:
+                            pass
+            raise
+
+    with ThreadPoolExecutor(max_workers=len(items), thread_name_prefix='flare-export') as pool:
+        try:
+            return list(pool.map(run, items))
+        except BaseException:
+            # A lower-numbered worker may wake with a secondary disconnect first.
+            if failure:
+                raise failure[0]
+            raise
+
+
+def send_export_sources(control, path, inventory, *, channels=None):
     """Send a rank manifest, then the content files requested by the coordinator."""
-    def identity(source):
-        info = os.fstat(source.fileno())
-        return tuple(getattr(info, key) for key in
-                     ('st_dev', 'st_ino', 'st_size', 'st_mtime_ns', 'st_ctime_ns'))
+    from .checkpoint_source import BLOCK_BYTES, file_identity
 
     document = json.loads(Path(path).read_text())
     identities, metadata = {}, {}
-    # Graph catalogs can contain thousands of source files. Retain their identities,
-    # rather than file handles, while the coordinator selects the missing content.
+    # A rank can export thousands of cubins. Hold only one descriptor per worker,
+    # and reject replacement or mutation between the metadata scan and transfer.
     for _, name, _, _ in document['payload']:
         if name in metadata:
             continue
         with Path(name).open('rb') as source:
-            before = identity(source)
+            identity = file_identity(source.fileno())
             digest = hashlib.file_digest(source, 'sha256').hexdigest()
-            if identity(source) != before:
-                raise ValueError(f'rank payload changed during hashing: {name}')
-        identities[name] = before
-        metadata[name] = {'size': before[2], 'sha256': digest,
+            if file_identity(source.fileno()) != identity:
+                raise ValueError('rank export source changed during metadata scan')
+        identities[name] = identity
+        metadata[name] = {'size': identity[2], 'sha256': digest,
                           'blob': Path(name).name == digest + '.safetensors'}
     send_object(control, {'sources': {'document': document, 'files': metadata}, 'memory_inventory': inventory})
     requested = receive_object(control)
-    if not isinstance(requested, list) or len(requested) != len(set(requested)) or any(n not in metadata for n in requested):
+    if (not isinstance(requested, list) or any(not isinstance(n, str) for n in requested) or
+            len(requested) != len(set(requested)) or any(n not in metadata for n in requested)):
         raise ValueError('invalid requested rank export sources')
-    for name in requested:
-        with Path(name).open('rb') as source:
-            if identity(source) != identities[name]:
-                raise ValueError(f'rank payload changed before transfer: {name}')
-            sent = control.sendfile(source, count=metadata[name]['size'])
-            if sent != metadata[name]['size'] or identity(source) != identities[name]:
-                raise ValueError(f'rank payload changed during transfer: {name}')
+
+    def transmit(stream):
+        channel = None if channels is None else channels[stream]
+        names = requested if channel is None else requested[stream::len(channels)]
+        total = 0
+        for name in names:
+            with Path(name).open('rb') as source:
+                if file_identity(source.fileno()) != identities[name]:
+                    raise ValueError('rank export source changed before transfer')
+                size = metadata[name]['size']
+                if channel is None:
+                    if control.sendfile(source, count=size) != size:
+                        raise ConnectionError('rank export source ended before its declared size')
+                else:
+                    for offset in range(0, size, BLOCK_BYTES):
+                        block = source.read(min(BLOCK_BYTES, size - offset))
+                        if len(block) != min(BLOCK_BYTES, size - offset):
+                            raise ConnectionError('rank export source ended before its declared size')
+                        channel.send('export-data', block, name=name, offset=offset)
+                if file_identity(source.fileno()) != identities[name]:
+                    raise ValueError('rank export source changed during transfer')
+                total += size
+        if channel is not None:
+            stats = dict(files=len(names), payload_bytes=total)
+            channel.send('export-finished', stats=stats)
+            message, payload = channel.receive('export-finished')
+            if payload or message.get('stats') != stats:
+                raise ValueError('rank export completion accounting differs')
+
+    if channels is None:
+        transmit(0)
+    else:
+        _export_workers(transmit, list(range(len(channels))), [c.connection for c in channels])
 
 
-def receive_export_sources(control, description, destination, settings):
+def receive_export_sources(control, description, destination, settings, *, channels=None):
     """Reuse verified local blobs and receive only absent files into private storage."""
     import tempfile
     from .package_snapshot import BlobStore
     from .package_file import read_sources
+    from .checkpoint_source import BLOCK_BYTES
 
     document, metadata = description['document'], description['files']
     store = BlobStore(settings.cache)
@@ -139,14 +199,20 @@ def receive_export_sources(control, description, destination, settings):
         target = (store.root / (digest + '.safetensors') if info['blob'] else
                   destination.parent / (digest + '.source'))
         targets[name] = target
-        if target.exists():
+        # Another rank may publish the same content. Wait until its private
+        # hard link is removed, since unlink changes the inode's ctime.
+        with _EXPORT_PUBLICATION_LOCK:
+            exists = target.exists()
+        if exists:
             store.verify(target, bytes.fromhex(digest), size)
         else:
             if info['blob'] and settings.no_weights:
                 raise ValueError('--no-weights requires the peer stored-data blob in the coordinator cache')
             requested.append(name)
     send_object(control, requested)
-    for name in requested:
+    started = time.monotonic()
+
+    def receive_file(name, channel):
         info, target = metadata[name], targets[name]
         descriptor, temporary = tempfile.mkstemp(prefix='.rank-blob-', dir=target.parent)
         partial = Path(temporary)
@@ -155,7 +221,13 @@ def receive_export_sources(control, description, destination, settings):
             with os.fdopen(descriptor, 'wb') as output:
                 remaining = info['size']
                 while remaining:
-                    block = _receive_exact(control, min(_COPY_BLOCK, remaining))
+                    if channel is None:
+                        block = _receive_exact(control, min(_COPY_BLOCK, remaining))
+                    else:
+                        message, block = channel.receive('export-data')
+                        if (message.get('name') != name or message.get('offset') != info['size'] - remaining or
+                                len(block) != min(BLOCK_BYTES, remaining)):
+                            raise ValueError('rank export payload range differs')
                     output.write(block)
                     digest.update(block)
                     remaining -= len(block)
@@ -165,16 +237,44 @@ def receive_export_sources(control, description, destination, settings):
                     os.fchmod(output.fileno(), 0o444)
             if digest.hexdigest() != info['sha256']:
                 raise ValueError('rank payload digest mismatch')
-            try:
-                os.link(partial, target)
-            except FileExistsError:
+            with _EXPORT_PUBLICATION_LOCK:
+                try:
+                    os.link(partial, target)
+                    published = True
+                except FileExistsError:
+                    published = False
+                finally:
+                    partial.unlink(missing_ok=True)
+            if not published:
                 store.verify(target, bytes.fromhex(info['sha256']), info['size'])
         finally:
             partial.unlink(missing_ok=True)
+
+    def receive_stream(stream):
+        channel = None if channels is None else channels[stream]
+        names = requested if channel is None else requested[stream::len(channels)]
+        for name in names:
+            receive_file(name, channel)
+        if channel is not None:
+            stats = dict(files=len(names), payload_bytes=sum(metadata[n]['size'] for n in names))
+            message, payload = channel.receive('export-finished')
+            if payload or message.get('stats') != stats:
+                raise ValueError('rank export completion accounting differs')
+            channel.send('export-finished', stats=stats)
+
+    if channels is None:
+        receive_stream(0)
+    else:
+        _export_workers(receive_stream, list(range(len(channels))), [c.connection for c in channels])
     for item in document['payload']:
         item[1] = str(targets[item[1]])
     destination.write_text(json.dumps(document, separators=(',', ':')))
     read_sources(destination)
+    seconds = time.monotonic() - started
+    size = sum(metadata[n]['size'] for n in requested)
+    return dict(payload_bytes=size, payload_seconds=seconds, payload_gbps=size * 8 / seconds / 1e9,
+                files=len(requested), streams=1 if channels is None else len(channels),
+                transport='rendezvous-tcp' if channels is None else 'agent-ring-tcp')
 
 
 def _rdma_devices():
@@ -266,12 +366,14 @@ class _Peer:
 class HostRendezvous:
     """Rank zero's listener: admits one process per peer rank, each on its own host."""
 
-    def __init__(self, address, world, *, identity, topology, checkpoint_token_file="~/.config/flare/agent.token"):
+    def __init__(self, address, world, *, identity, topology, checkpoint_token_file="~/.config/flare/agent.token",
+                 checkpoint_ring=None):
         if world not in (2, 4):
             raise ValueError("multi-host tensor parallelism requires two or four ranks")
         self.address, self.world = parse_address(address), world
         self.identity, self.topology = identity, topology
         self.checkpoint_token_file = checkpoint_token_file
+        self.checkpoint_ring = checkpoint_ring
         self.session = secrets.token_hex(16)
         self.listener = socket.create_server(self.address, reuse_port=False)
         self.peers = {}
@@ -376,12 +478,20 @@ class HostRendezvous:
 
         source = RootSource(snapshot, checkpoint)
         readers = []
+        ring = None
         try:
             key = token(self.checkpoint_token_file)
             with phase(progress, "Admit checkpoint range readers"):
+                if self.checkpoint_ring is not None:
+                    from .checkpoint_ring import RingSource
+
+                    ring = RingSource(source, key, self.identity, self.topologies, **self.checkpoint_ring)
+                    if progress is not None:
+                        progress(f"checkpoint ranges: agent ring TCP, {ring.streams} streams per peer")
                 for rank, control in enumerate(controls, 1):
                     send_object(control, ("checkpoint-source", checkpoint))
-                    reader = SourceServer(source, control, key, rank, self.identity)
+                    reader = SourceServer(source, control, key, rank, self.identity,
+                                          transport=None if ring is None else ring.grant)
                     readers.append(reader)
                     reader.thread.start()
                 for reader in readers:
@@ -403,6 +513,8 @@ class HostRendezvous:
             # Loading owns each socket's reader until its authenticated end marker is acknowledged.
             for reader in readers:
                 reader.join()
+            if ring is not None:
+                ring.join()
             with phase(progress, "Wait for tensor-parallel ranks", total=len(controls)) as stage:
                 reports = []
                 for control in controls:
@@ -411,12 +523,18 @@ class HostRendezvous:
                         raise RuntimeError(f"peer preparation failed: {message}")
                     reports.append(message["report"])
                     stage.update(advance=1)
-            return HostRankGroup(self, model, reports)
+            group = HostRankGroup(self, model, reports,
+                                  checkpoint_ring=ring if package_storage is not None else None)
+            if package_storage is not None:
+                ring = None  # The group owns the authenticated channels through export.
+            return group
         except BaseException:  # noqa: BLE001 - Preparation interruption must end every rank.
             traceback.print_exc()
             print("flare: terminating tensor-parallel rank group: preparation failed", flush=True)
             os._exit(1)
         finally:
+            if ring is not None:
+                ring.close()
             source.close()
 
     def finish(self):
@@ -449,10 +567,16 @@ class HostRendezvous:
 class HostRankGroup:
     """Root model and its remote peers through native coordinated shutdown."""
 
-    def __init__(self, rendezvous, model, reports):
+    def __init__(self, rendezvous, model, reports, *, checkpoint_ring=None):
         self.rendezvous, self.model = rendezvous, model
         self.memory_report = {"world_size": rendezvous.world, "ranks": [model.memory_report, *reports]}
         self._started = self._closed = False
+        self.checkpoint_ring = checkpoint_ring
+
+    def _close_checkpoint_ring(self):
+        if self.checkpoint_ring is not None:
+            self.checkpoint_ring.close()
+            self.checkpoint_ring = None
 
     @property
     def controls(self):
@@ -487,13 +611,28 @@ class HostRankGroup:
             with export_options(settings.cache, no_weights=settings.no_weights):
                 package = export_model(self.model, images, storage, roots[0], options=options,
                                        progress=progress, sources=True)
-                inventories = [package.memory_inventory]
-                for rank, control in enumerate(self.controls, 1):
+                def receive_rank(rank):
+                    control = self.controls[rank - 1]
                     reply = receive_object(control)
                     if 'sources' not in reply:
                         raise RuntimeError(f'rank {rank} export failed: {reply}')
-                    inventories.append(reply['memory_inventory'])
-                    receive_export_sources(control, reply['sources'], roots[rank], settings)
+                    channels = (None if self.checkpoint_ring is None else
+                                [self.checkpoint_ring.readers[rank, stream].channel
+                                 for stream in range(self.checkpoint_ring.streams)])
+                    report = receive_export_sources(control, reply['sources'], roots[rank], settings, channels=channels)
+                    if progress is not None:
+                        progress(f"received rank {rank} export: {report['payload_bytes'] / (1 << 30):.2f} GiB "
+                                 f"via {report['transport']} ({report['streams']} streams, "
+                                 f"{report['payload_seconds']:.2f}s, {report['payload_gbps']:.2f} Gbit/s)")
+                    return reply['memory_inventory']
+
+                connections = self.controls + ([] if self.checkpoint_ring is None else
+                                               [r.connection for r in self.checkpoint_ring.readers.values()])
+                try:
+                    inventories = [package.memory_inventory, *_export_workers(
+                        receive_rank, list(range(1, self.rendezvous.world)), connections)]
+                finally:
+                    self._close_checkpoint_ring()
                 combine(path, roots, [], publisher=publisher, shard_size=shard_size,
                         cluster=(self.rendezvous.world, export_id))
             print_inventory(inventories, console=getattr(progress, 'console', None))
@@ -502,6 +641,7 @@ class HostRankGroup:
         if self._started or self._closed:
             raise RuntimeError("prepared rank group has already been consumed or closed")
         try:
+            self._close_checkpoint_ring()
             for control in self.controls:
                 send_object(control, "serve")
             self._started = True
@@ -521,6 +661,7 @@ class HostRankGroup:
         """
         if self._started or self._closed:
             raise RuntimeError("prepared rank group has already been consumed or closed")
+        self._close_checkpoint_ring()
         for control in self.controls:
             send_object(control, ("direct", {"eager": eager}))
         self._started = True
@@ -531,6 +672,7 @@ class HostRankGroup:
             return
         self.rendezvous.stopping.set()
         try:
+            self._close_checkpoint_ring()
             if not self._started:
                 for control in self.controls:
                     send_object(control, "close")
@@ -634,10 +776,13 @@ def serve_peer(control, executor, rank, world, *, hub_cache, progress=None, expo
                                     package_storage=storage)
         else:
             model = prepare(snapshot, config, rank=rank, group=dist.group.WORLD, progress=progress)
-        source.finish()
-        model.memory_report["checkpoint_source"] = dict(source.stats)
+        source.finish(keep_transport=bool(assignment.get("packaged")))
+        model.memory_report["checkpoint_source"] = source.report()
         if progress is not None:
-            progress(f"received {source.stats['payload_bytes'] / (1 << 30):.2f} GiB of checkpoint ranges")
+            report = source.report()
+            progress(f"received {source.stats['payload_bytes'] / (1 << 30):.2f} GiB of checkpoint ranges "
+                     f"via {report['transport']} ({source.streams} streams, "
+                     f"{report['payload_seconds']:.2f}s, {report['payload_gbps']:.2f} Gbit/s)")
         model.manifest()
         send_object(control, {"report": model.memory_report})
         command = receive_object(control)
@@ -659,10 +804,13 @@ def serve_peer(control, executor, rank, world, *, hub_cache, progress=None, expo
                 with export_options(package_cache or Path.home() / '.cache/flare/packages'):
                     package = export_model(model, recorder, storage, path, options=options,
                                            bundle_only=True, sources=True)
-                send_export_sources(control, path, package.memory_inventory)
+                send_export_sources(control, path, package.memory_inventory,
+                                    channels=[channel for channel, _ in source.channel_stats] or None)
+                source.close_transport()
             finally:
                 shutil.rmtree(directory, ignore_errors=True)
             command = receive_object(control)
+        source.close_transport()
         if command == "serve":
             if progress is not None:
                 progress("serving")

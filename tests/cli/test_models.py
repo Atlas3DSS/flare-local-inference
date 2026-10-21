@@ -25,13 +25,13 @@ def test_declarations_import_without_model_dependencies():
 
 def test_alias_and_repository_resolve_to_the_declared_checkpoint(tmp_path):
     alias = resolve("qwen3.8-flash")
-    assert alias.directory is None and alias.recipe.name == "qwen38" and alias.source == "dc5b8ab2"
+    assert alias.directory is None and alias.recipe.name == "qwen38" and alias.source == "fb75f0a5"
     assert resolve(alias.checkpoint.repository).checkpoint is alias.checkpoint
     assert resolve(f"{alias.checkpoint.repository}@{alias.checkpoint.revision}").checkpoint is alias.checkpoint
     assert alias.model_id == alias.checkpoint.repository
     assert alias.snapshot(tmp_path) == (
-        tmp_path / "models--local-inference-lab--Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD" / "snapshots"
-        / "dc5b8ab2fa14bc4fecd6886273b7ebc6095662e2")
+        tmp_path / "models--nvidia--Qwen-3.8-Flash-Next-FP4-Local" / "snapshots"
+        / "fb75f0a572feb417652f76aceeb83afdd20fe7f0")
 
 
 def write_checkpoint(directory, architecture, total_size):

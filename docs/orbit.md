@@ -394,7 +394,7 @@ nodes = ["maxwell", "hertz"]
 when the command names none, puts the group's `serving` words before the
 command line's serving options so the command line overrides them, and puts the
 group's `rank_zero` words before explicit command-line HTTP options. It takes
-`nodes`, `gpus`, `roce_ring`, and `executable`
+`nodes`, `gpus`, `roce_ring`, `transfer_streams`, and `executable`
 as constraints when the command line gives none. `nodes` lists candidate
 nodes in rank order; `gpus` lists the NVML indices every member uses on its
 node. A group without them is placed from the whole orbit.
@@ -472,7 +472,7 @@ alone may reclaim little space when hardlinks still exist in the blob store.
 
 ## Prestaging
 
-`flare orbit push PACKAGE --to NODE,...` places a package on nodes ahead of
+`flare orbit push PACKAGE --to NODE,... [--roce-ring]` places a package on nodes ahead of
 any launch. It starts no ranks and sends no executable. With one node per
 multi-host rank, the first node receives the complete package and each peer
 receives its rank's data, in the
@@ -484,6 +484,10 @@ every node's cache directories with their file counts, bytes on disk and
 verification state. A launch reuses staged package data; an explicit executable
 override may still need uploading. Pre-staged package directories are unpinned
 after transfer and can be evicted when another package arrives.
+
+With `--roce-ring`, list exactly one node per multi-host rank in physical ring
+order. Package bytes follow the fabric TCP paths described below, without
+starting serving ranks.
 
 ## Metrics and the dashboard
 
@@ -537,13 +541,64 @@ A record is a big-endian `u16` length and ciphertext of at most 65535 bytes,
 so a record carries at most 65519 plaintext bytes. A frame is a tag byte, a
 little-endian `u64` body length, and the body; its header starts a record and
 the body continues across as many records as its length needs, so a PUT or
-FETCH body of hundreds of gigabytes is one frame. Encryption bounds a transfer
-to one core's ChaCha20-Poly1305 rate, so transfers to different nodes run on
-separate connections in parallel.
+FETCH body of hundreds of gigabytes is one frame. Each connection encrypts on
+one thread. Ring transfers use multiple independent connections per destination
+file, and transfers to different nodes also run in parallel.
 
 After the handshake the agent classifies the remote key as an authorized
 controller, a node named in an active grant, or unknown. Unknown keys may only
 pair.
+
+### Package transfers through ring interfaces
+
+`orbit run --roce-ring` and `orbit push --roce-ring` transfer package data through
+the IPv4 interfaces discovered for the RoCE ring. The controller obtains endpoint
+lists from authenticated agents and uses the collective transport's subnet and
+device matching to select up to two links per neighbor. The signed grant includes
+these TCP endpoints and the selected rank order. Every agent listener must be
+reachable on its fabric IPs at its configured agent port.
+
+Each destination pulls from the source along the shortest ring path; payloads
+take increasing rank numbers when both directions have equal length. A transfer
+from rank 0 to rank 2 in a four-node ring streams through rank 1. Intermediate
+agents forward encrypted sessions one record at a time, without storing another
+rank's shard. TCP backpressure bounds buffering, and each hop verifies its peer
+identity and the signed local and remote interface addresses. Connections bind
+their local fabric IP; failed links report errors without retrying through the
+management network. `--transfer-streams N` selects 1..64 parallel TCP streams per
+destination file (default 8), divided between the available rails. Each stream
+pulls a disjoint, approximately equal share of the requested bytes; sparse holes
+remain holes. Each destination processes one file at a time. The stream count
+applies to each destination, so a source or relay serving several ranks handles
+their combined connections. Higher counts increase CPU and I/O concurrency;
+benchmark the actual package and ring before choosing a larger stream count. A saved group's
+`transfer_streams` value is reused by `orbit run`, and an explicit CLI value
+overrides it. This setting requires ring distribution and does not affect
+collectives. A transfer connection fails after 120 seconds without read or write
+progress.
+
+Destinations reuse verified cached files without opening payload connections.
+Each receiving worker buffers at most 1 MiB of file data in addition to
+encrypted records. Workers write to disjoint offsets in one partial file and
+all finish before it is published. A failed stream
+cancels its siblings, closes their connections, and removes the partial file
+after the workers drain; it cannot publish a verified package. Content-addressed
+payloads are hashed from the assembled file before entering the immutable blob
+store. Signed-package verification runs after all files arrive.
+A controller-held package first uploads to rank zero. A source node outside the
+selected ring first stages a complete copy on rank zero, then ring members fetch
+from that copy.
+
+Controller connections, metadata lookup, and serving rendezvous use the
+configured management addresses. Agent payload transfers use encrypted TCP
+and require no host routing changes or IP forwarding. With
+`ignition export --roce-ring`, checkpoint reads and prepared export payloads
+also use agent fabric connections; preparation control and export manifests
+use the rendezvous connection.
+Ring and direct package transfers use identical package formats; the captured
+collective ABI is independent of package transport. Encryption at each hop,
+disk throughput, and shared links can limit bulk throughput below interface
+line rate.
 
 ## Frames
 
@@ -559,6 +614,8 @@ with a message; an ERROR closes the session.
 | CONTROLLERS | Controller to node | Signed controller-set record | Applies a higher revision signed by a current member |
 | TRANSFER | Controller to node | Grant, publisher profile, source node, cache directory, files with sizes and ranges | The node fetches those ranges from the source node into its cache, verifies the directory's stored data unless it verified before, and replies when done; a push's grant authorizes transfers alone |
 | FETCH | Node to node | Grant, file name, ranges | Streams the file's bytes to a node the grant names, from the package the node holds or its cache |
+| FABRIC | Controller to node | None | Reports active RoCE IPv4 endpoints for planning fabric TCP transfers |
+| FETCH_RING | Node to adjacent node | Grant, source and destination ranks, rail, file name, size, ranges | Pulls a stream through the signed ring path; only the destination stores the bytes |
 | GET | Controller to node | Absolute path, offset, length | Streams up to 256 MiB of a node-local file, used to mirror a package's header and index |
 | STAT | Controller to node | Absolute path | The package file's size and its companions' names and sizes |
 | DOWNLOAD | Controller to node | Repository, resolved revision, filename and cache options, optional access token | Downloads a pinned package and its companions into the node's Hugging Face cache and returns its absolute path |
@@ -628,6 +685,10 @@ The grant also authorizes node-to-node transfers. A FETCH is served only to a
 member of the grant, identified by the key that authenticated the session, for
 the package the grant names.
 
+The grant records each rank's fabric TCP links to its successor in
+`transfer_ring[i]`, where `i` is the member's rank. The final rank links to rank
+zero. The `transfer_ring` list is empty for transfers over paired addresses.
+
 The serving rendezvous checks export identity and rank agreement. The grant
 authenticates the launch at the agent boundary; rank communication requires a
 trusted fabric network.
@@ -668,6 +729,10 @@ refuses an agent whose HELLO reports another version. Serving executables must
 also support the package's GPU architecture, prepared graph contract, and RoCE
 proxy ABI. A controller's CPU architecture does not select the serving build.
 
+Fabric TCP distribution requires agent protocol 5 on the controller and every
+agent, including relays. Updating only a serving executable does not update the
+resident agents that distribute packages.
+
 HELLO's optional `executable` path advertises support for using the installed
 agent binary in RUN. Agents without that field require `--executable PATH`
 until updated. RUN still accepts a cached binary name from controllers that
@@ -681,8 +746,9 @@ The controller does not proxy HTTP; clients reach rank zero's host directly.
 The controller and agents must share the agent protocol version.
 Restarting an agent stops its ranks. Routing between controller and nodes uses
 the addresses recorded at pairing. Orbit does not configure the RoCE fabric,
-interfaces, or firewalls, and package transfers use encrypted TCP rather than
-RDMA. Each connection performs encryption on one CPU thread. Throughput depends
+interfaces, or firewalls. Ring package transfers select fabric IPs as described
+above; other transfers use the paired addresses. All package transfers use
+encrypted TCP. Each connection performs encryption on one CPU thread. Throughput depends
 on that work, the selected route, storage, and verification.
 
 Discovery, a preflight fabric check, preparation through agents, and automatic

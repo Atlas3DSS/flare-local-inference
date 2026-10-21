@@ -23,6 +23,17 @@ from .config import Configuration
 _BODY_BYTES_PER_TOKEN = 32
 
 
+def _checkpoint_ring(args):
+    settings = dict(orbit_file=args.orbit_file, key_file=args.key_file, cluster=args.cluster,
+                    streams=args.transfer_streams)
+    if not args.roce_ring:
+        if any(value is not None for value in settings.values()):
+            raise UsageError("--orbit-file, --key-file, --cluster and --transfer-streams require --roce-ring")
+        return None
+    settings["streams"] = 8 if settings["streams"] is None else settings["streams"]
+    return settings
+
+
 def _address(host: str, port: int) -> str:
     """Validate a listening address and confirm that nothing else holds it."""
     try:
@@ -183,6 +194,7 @@ def export(args) -> int:
         raise UsageError(f"export destination already exists: {args.output}")
     if args.roce_ring and args.ranks < 2:
         raise UsageError("--roce-ring requires at least two hosts")
+    _checkpoint_ring(args)
     if args.ranks > 1 and args.tuning_gpus is not None:
         raise UsageError("--tuning-gpus applies to local preparation; multi-host ranks retain their sharding")
     cache = configuration.directory('package_cache')
@@ -225,6 +237,7 @@ def _export_hosts(args, *, export_path) -> int:
     local = (host.gpus[selected[0]],)
     rendezvous = HostRendezvous(args.rendezvous, args.ranks, identity=source_identity(),
                                 topology=local_topology(local[0]),
+                                checkpoint_ring=_checkpoint_ring(args),
                                 checkpoint_token_file=configuration.get("preparation.checkpoint_token_file").value)
     with phase(progress, "Wait for tensor-parallel hosts") as stage:
         topologies = rendezvous.accept(report=stage.update)
@@ -416,6 +429,7 @@ def serve(args) -> int:
 
     if args.roce_ring and args.ranks < 2:
         raise UsageError("--roce-ring requires at least two hosts")
+    _checkpoint_ring(args)
     if args.ranks > 1 and args.tuning_gpus is not None:
         raise UsageError("--tuning-gpus applies to local preparation; multi-host ranks retain their sharding")
     if args.eager and not args.direct:
@@ -459,6 +473,7 @@ def serve(args) -> int:
         local = (host.gpus[selected[0]],)
         rendezvous = HostRendezvous(args.rendezvous, args.ranks, identity=source_identity(),
                                     topology=local_topology(local[0]),
+                                    checkpoint_ring=_checkpoint_ring(args),
                                     checkpoint_token_file=configuration.get("preparation.checkpoint_token_file").value)
         with phase(progress, "Wait for tensor-parallel hosts") as stage:
             topologies = rendezvous.accept(report=stage.update)

@@ -43,6 +43,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Ok(());
         }
         cli::Command::Inspect(args) => return inspect::run(args),
+        #[cfg(unix)]
+        cli::Command::CheckpointConnect {
+            grant,
+            rank,
+            stream,
+            fd,
+        } => {
+            return orbit::checkpoint::connect(&grant, rank, stream, fd)
+                .map_err(|e| e.to_string().into());
+        }
         #[cfg(windows)]
         cli::Command::Agent(_) => {
             return Err("multi-host serving is not supported on Windows".into());
@@ -203,6 +213,20 @@ fn orbit_command(args: cli::OrbitArgs, matches: &clap::ArgMatches) -> Result<(),
     let mut controller =
         orbit::controller::Controller::open(args.orbit_file.as_deref(), args.key_file.as_deref())?;
     match args.command {
+        cli::OrbitCommand::CheckpointRoute { cluster } => {
+            use std::io::Read;
+            let mut input = Vec::new();
+            std::io::stdin().take(65537).read_to_end(&mut input)?;
+            if input.len() > 65536 {
+                return Err("checkpoint route request exceeds capacity".into());
+            }
+            let request = serde_json::from_slice(&input)?;
+            println!(
+                "{}",
+                serde_json::to_string(&controller.checkpoint_route(cluster.as_deref(), request)?)?
+            );
+            Ok(())
+        }
         cli::OrbitCommand::Pair { hosts, code } => controller.pair(&hosts, code.as_deref()),
         cli::OrbitCommand::Controllers {
             command: cli::ControllersCommand::Add { name, key },
@@ -223,9 +247,12 @@ fn orbit_command(args: cli::OrbitArgs, matches: &clap::ArgMatches) -> Result<(),
         }
         cli::OrbitCommand::Rm { group } => controller.remove(&group),
         cli::OrbitCommand::Forget { node } => controller.forget(&node),
-        cli::OrbitCommand::Push(push) => {
-            controller.push(&push.package, &push.to, &mut push.run_args())
-        }
+        cli::OrbitCommand::Push(push) => controller.push(
+            &push.package,
+            &push.to,
+            &mut push.run_args(),
+            push.transfer_streams,
+        ),
         cli::OrbitCommand::Packages { cluster } => controller.packages(cluster.as_deref()),
         cli::OrbitCommand::Run(run) => controller.run(
             run.package.as_deref(),
@@ -248,6 +275,7 @@ fn orbit_command(args: cli::OrbitArgs, matches: &clap::ArgMatches) -> Result<(),
                 serving: run.rank_options(matches.subcommand_matches("run").unwrap()),
                 rank_zero: run.rank_zero_options(),
                 roce_ring: run.roce_ring,
+                transfer_streams: run.transfer_streams,
                 executable: run.executable.clone(),
                 detach: run.detach,
                 verify_weights: run.serving.verify_weights,

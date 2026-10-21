@@ -284,6 +284,18 @@ are selected only by `--tuning-gpus`.
 
 Both Ignition commands accept `--config`.
 
+For multi-host `ignition export` and `ignition serve`, `--roce-ring` also sends
+checkpoint tensor ranges and prepared export payloads through the paired agents'
+RoCE-interface TCP paths.
+`--cluster NAME` selects an Orbit cluster whose host order matches preparation
+ranks; `--orbit-file PATH` selects the Orbit controller configuration and
+`--key-file PATH` selects its signing key.
+`--transfer-streams N` selects 1 through 64 concurrent payload streams per peer
+(default 8), split across the available rails. These controller and stream
+flags require `--roce-ring`; peers receive the signed route during admission.
+See [checkpoint preparation](multi-host.md#prepare-the-package) for credentials,
+buffer bounds, and rendezvous traffic.
+
 #### Development without package export
 
 For development, `ignition serve` prepares graphs and hands them directly to
@@ -1108,7 +1120,27 @@ ranks. The transport accepts 2..16
 ranks, while recipe validation retains each model's supported TP sizes. This
 option is recorded in the preparation plan, sent to preparation peers, and
 forwarded to serving peers. It changes native transport routing, not the
-captured collective operation contracts. See [RoCE ring transport](roce-ring.md)
+captured collective operation contracts. During preparation it also sends
+checkpoint tensor ranges and prepared export payloads through paired agents
+over the ring's fabric TCP interfaces. `--orbit-file` selects the controller
+configuration, `--key-file` selects its signing key, and `--cluster` selects
+the exact rank-ordered cluster. `--transfer-streams N` selects 1..64 payload
+streams per peer (default 8). Peers connect using `ignition join`; rank zero
+supplies their signed fabric route during admission. Metadata and preparation
+coordination use the rendezvous connection. Export receives missing files
+concurrently over the authenticated fabric streams before rank zero assembles
+and signs the package.
+`flare orbit run --roce-ring` also
+distributes package bytes over TCP through the ring's fabric interfaces.
+`flare orbit push --roce-ring --to NODE,...` uses the same distribution path
+without starting ranks; it requires exactly one target per package rank, in
+ring order. Both Orbit commands accept `--transfer-streams N` (1..64, default 8)
+to fetch each destination file through parallel TCP connections across the
+available rails. Named groups store the stream count as `transfer_streams`;
+an explicit value overrides the saved setting. Controller traffic uses the
+paired addresses. See
+[Orbit fabric transfers](orbit.md#package-transfers-through-ring-interfaces) and
+[RoCE ring transport](roce-ring.md)
 for routing, buffer ownership, setup, the transport test harness, and qualification
 limits.
 

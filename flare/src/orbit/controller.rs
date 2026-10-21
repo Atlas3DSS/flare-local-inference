@@ -159,6 +159,7 @@ pub struct RunOptions {
     /// Options for rank zero alone: the HTTP bind and request handling.
     pub rank_zero: Vec<String>,
     pub roce_ring: bool,
+    pub transfer_streams: Option<u8>,
     /// An executable to upload; absent means each node uses its installed agent executable.
     pub executable: Option<PathBuf>,
     /// Return once every rank has started instead of following the group.
@@ -179,6 +180,7 @@ pub struct LaunchOptions {
     pub serving: Vec<String>,
     pub rank_zero: Vec<String>,
     pub roce_ring: bool,
+    pub transfer_streams: Option<u8>,
     /// Place and verify the package on the members without sending the executable or
     /// starting ranks; the returned launch then has no rank sessions.
     pub stage_only: bool,
@@ -303,6 +305,57 @@ impl Controller {
     /// The orbit file's nodes of a cluster, in rank order.
     pub fn cluster_nodes(&self, name: Option<&str>) -> Result<(String, Vec<Node>), Failure> {
         self.cluster(name)
+    }
+
+    pub fn checkpoint_route(
+        &self,
+        cluster: Option<&str>,
+        request: super::checkpoint::RouteRequest,
+    ) -> Result<Signed, Failure> {
+        let (_, nodes) = self.cluster(cluster)?;
+        if nodes.len() != request.gpu_uuids.len() {
+            return Err(
+                "checkpoint cluster must list exactly one agent per preparation rank".into(),
+            );
+        }
+        let mut records = Vec::new();
+        let mut members = Vec::new();
+        for (rank, node) in nodes.iter().enumerate() {
+            let status = self.node_status(node, None)?;
+            if !status
+                .gpus
+                .iter()
+                .any(|gpu| gpu.uuid == request.gpu_uuids[rank])
+            {
+                return Err(format!(
+                    "checkpoint rank {rank}'s GPU is not on orbit node {}; check cluster order",
+                    node.name
+                )
+                .into());
+            }
+            let (mut session, _) = self.node_session(node)?;
+            session.write_frame(frame::FABRIC, b"{}")?;
+            records.push(session.expect(frame::OK)?);
+            members.push(Member {
+                rank,
+                name: node.name.clone(),
+                public_key: node.public_key.clone(),
+                address: node.address.clone(),
+                gpus: vec![request.gpu_uuids[rank].clone()],
+            });
+        }
+        let grant = super::checkpoint::Grant {
+            purpose: "checkpoint-stream-v1".into(),
+            ring: super::fabric::plan(&nodes, &records)?,
+            members,
+            source_port: request.source_port,
+            streams: request.streams,
+            catalog_sha256: request.catalog_sha256,
+            identity: request.identity,
+            expires: now() + 3600,
+        };
+        grant.validate()?;
+        Signed::sign(&self.key, &grant)
     }
 
     /// The orbit file's nodes of a cluster, in rank order.
@@ -806,6 +859,10 @@ impl Controller {
         let mut rank_zero = spec.as_ref().map_or_else(Vec::new, |s| s.rank_zero.clone());
         rank_zero.extend(options.rank_zero.iter().cloned());
         let roce_ring = options.roce_ring || spec.as_ref().is_some_and(|s| s.roce_ring);
+        let transfer_streams = options
+            .transfer_streams
+            .or_else(|| spec.as_ref().and_then(|s| s.transfer_streams));
+        package_streams(roce_ring, transfer_streams)?;
         let gpus = if options.gpus.is_empty() {
             spec.as_ref().map_or_else(Vec::new, |s| s.gpus.clone())
         } else {
@@ -956,6 +1013,7 @@ impl Controller {
                 nodes: candidates.clone(),
                 gpus,
                 roce_ring,
+                transfer_streams,
                 executable: options
                     .executable
                     .as_deref()
@@ -997,6 +1055,7 @@ impl Controller {
                 serving,
                 rank_zero: rank_zero.clone(),
                 roce_ring,
+                transfer_streams,
                 stage_only: false,
             },
         )?;
@@ -1022,7 +1081,9 @@ impl Controller {
         package: &str,
         to: &[String],
         run_args: &mut crate::cli::Run,
+        transfer_streams: Option<u8>,
     ) -> Result<(), Failure> {
+        package_streams(run_args.roce_ring, transfer_streams)?;
         let resolved = self.resolve_package(package, run_args, false)?;
         let world = resolved.ranks.len();
         let nodes: Vec<Node> = to
@@ -1042,6 +1103,8 @@ impl Controller {
             name: format!("push-{name}"),
             placements: vec![Vec::new(); world],
             stage_only: true,
+            roce_ring: run_args.roce_ring,
+            transfer_streams,
             ..LaunchOptions::default()
         };
         if nodes.len() == world {
@@ -1057,6 +1120,11 @@ impl Controller {
                     .join(", ")
             );
             return Ok(());
+        }
+        if run_args.roce_ring {
+            return Err(
+                "--roce-ring push requires one target node per package rank, in ring order".into(),
+            );
         }
         // Fewer or more nodes than ranks: each listed node gets the complete package, which
         // serves rank zero of a multi-host package or a single-host package entirely.
@@ -1322,6 +1390,7 @@ impl Controller {
         if options.roce_ring && !(package.needs.multi_host && (2..=16).contains(&world)) {
             return Err("--roce-ring requires a multi-host package with 2..16 ranks".into());
         }
+        let streams = package_streams(options.roce_ring, options.transfer_streams)?;
 
         // Every node must be free. Rank zero reports the address it routes toward its peers,
         // where they reach its rendezvous.
@@ -1377,6 +1446,16 @@ impl Controller {
         };
 
         let issued = now();
+        let transfer_ring = if options.roce_ring {
+            let records = all(parallel_mut(&mut sessions, |rank, session| {
+                session
+                    .request(frame::FABRIC, &json!({}))
+                    .map_err(|e| at(&nodes[rank].name, e))
+            }))?;
+            super::fabric::plan(nodes, &records)?
+        } else {
+            Vec::new()
+        };
         let mut grant = Grant {
             group: group_id(&options.name, issued, &random(2)?),
             name: options.name.clone(),
@@ -1407,6 +1486,7 @@ impl Controller {
             serving: options.serving.clone(),
             rank_zero: options.rank_zero.clone(),
             roce_ring: options.roce_ring,
+            transfer_ring,
             single_host: !package.needs.multi_host,
             issued,
             expires: issued + GRANT_SECONDS,
@@ -1474,10 +1554,38 @@ impl Controller {
 
         // Every node other than the source fetches from it: rank zero the complete package,
         // peers their ranks' ranges.
-        let source = match &package.holder {
+        let mut source = match &package.holder {
             Holder::Controller { .. } => nodes[0].clone(),
             Holder::Node { node, .. } => node.clone(),
         };
+        // An outside source has no ring links. Stage it once on rank zero before its peers fetch.
+        if options.roce_ring
+            && !nodes
+                .iter()
+                .any(|node| node.public_key == source.public_key)
+        {
+            let files = package
+                .files
+                .iter()
+                .map(|f| RankFile {
+                    name: f.name.clone(),
+                    size: f.size,
+                    ranges: vec![(0, f.size)],
+                })
+                .collect::<Vec<_>>();
+            transfer(
+                &mut sessions[0],
+                &nodes[0],
+                &statuses[0],
+                &transfer_grant,
+                &package.publisher,
+                &source,
+                &complete,
+                &files,
+                1,
+            )?;
+            source = nodes[0].clone();
+        }
         all(parallel_mut(&mut sessions, |rank, session| {
             if nodes[rank].public_key == source.public_key {
                 return Ok(());
@@ -1505,6 +1613,7 @@ impl Controller {
                 &source,
                 &directory,
                 &files,
+                streams,
             )
             .map_err(|e| at(&nodes[rank].name, e))
         }))?;
@@ -1905,6 +2014,18 @@ fn put(
     Ok(())
 }
 
+fn package_streams(roce_ring: bool, selected: Option<u8>) -> Result<u8, Failure> {
+    match (roce_ring, selected) {
+        (true, None) => Ok(8),
+        (true, Some(streams @ 1..=64)) => Ok(streams),
+        (true, Some(_)) => Err("transfer streams must be in 1..=64".into()),
+        (false, None) => Ok(1),
+        (false, Some(_)) => {
+            Err("--transfer-streams requires --roce-ring or a saved ring group".into())
+        }
+    }
+}
+
 /// Have the node fetch `files` from `source` into its cache under `directory`, skipping files it
 /// already holds, and verify the directory's stored data unless it verified before.
 #[allow(clippy::too_many_arguments)]
@@ -1917,6 +2038,7 @@ fn transfer(
     source: &Node,
     directory: &str,
     files: &[RankFile],
+    streams: u8,
 ) -> Result<(), Failure> {
     let mut needed = 0;
     for file in files {
@@ -1943,6 +2065,7 @@ fn transfer(
         "publisher": publisher,
         "source": {"public_key": source.public_key, "address": source.address},
         "directory": directory,
+        "streams": streams,
         "files": files
             .iter()
             .map(|f| json!({"name": f.name, "size": f.size, "ranges": f.ranges}))
@@ -2696,6 +2819,7 @@ mod tests {
                     serving: vec![],
                     rank_zero: vec!["--port".into(), "8001".into()],
                     roce_ring: true,
+                    transfer_streams: Some(8),
                     stage_only: false,
                 },
             )
@@ -2839,6 +2963,51 @@ mod tests {
         );
         assert!(staged_rank.with_file_name(".verified").is_file());
         assert_eq!(one.verified.lock().unwrap().len(), 2);
+
+        // A source outside the ring stages once on rank zero, which serves the peer over fabric.
+        let outside = crate::orbit::agent::tests::Harness {
+            controller: Key::from_seed(&[21; 32]).unwrap(),
+            ..harness(23)
+        };
+        pair_accept_first(&outside);
+        let external = ResolvedPackage {
+            export: "external".into(),
+            holder: Holder::Node {
+                node: node(&outside, "outside"),
+                path: primary.to_string_lossy().into_owned(),
+            },
+            ..package.clone()
+        };
+        let staged = controller
+            .launch(
+                "push",
+                &nodes,
+                &external,
+                None,
+                &LaunchOptions {
+                    name: "external".into(),
+                    placements: vec![vec![], vec![]],
+                    stage_only: true,
+                    roce_ring: true,
+                    ..LaunchOptions::default()
+                },
+            )
+            .unwrap();
+        let complete = zero.agent.cache.join(format!(
+            "packages/{}/model.safetensors",
+            staged.grant.complete_directory()
+        ));
+        assert_eq!(fs::read(&complete).unwrap(), bytes);
+        assert!(complete.with_file_name(".verified").is_file());
+        let partial = one.agent.cache.join(format!(
+            "packages/{}/model.safetensors",
+            staged.grant.cache_directory(1)
+        ));
+        assert_eq!(
+            fs::read(&partial).unwrap()[40_000..48_000],
+            bytes[40_000..48_000]
+        );
+        assert!(partial.with_file_name(".verified").is_file());
 
         // A second launch is refused while a group runs; after exit it reuses the cache.
         let again = controller

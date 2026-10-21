@@ -21,7 +21,7 @@
 //! needs, so a frame of many gigabytes streams without buffering.
 
 use std::io::{self, Read, Write};
-use std::net::TcpStream;
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream};
 use std::time::Duration;
 
 use ring::aead::{self, Aad, LessSafeKey, Nonce, UnboundKey};
@@ -113,6 +113,66 @@ pub struct Session {
     pending: Vec<u8>,
     /// Body bytes of the current frame not yet consumed.
     remaining: u64,
+    /// A failed streaming write must close the connection, never append another frame.
+    incomplete_write: bool,
+}
+
+/// Independent encrypted directions after an agent admits a checkpoint channel.
+pub struct RecordReader {
+    stream: TcpStream,
+    direction: Direction,
+    pending: Vec<u8>,
+    position: usize,
+}
+
+pub struct RecordWriter {
+    stream: TcpStream,
+    direction: Direction,
+}
+
+impl Read for RecordReader {
+    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        if output.is_empty() {
+            return Ok(0);
+        }
+        if self.position == self.pending.len() {
+            let mut length = [0u8; 2];
+            if self.stream.read(&mut length[..1])? == 0 {
+                return Ok(0);
+            }
+            self.stream.read_exact(&mut length[1..])?;
+            let mut encrypted = vec![0; u16::from_be_bytes(length) as usize];
+            self.stream.read_exact(&mut encrypted)?;
+            self.pending = self.direction.open(encrypted).map_err(io::Error::other)?;
+            self.position = 0;
+            if self.pending.is_empty() {
+                return Err(io::Error::other("empty checkpoint transport record"));
+            }
+        }
+        let count = output.len().min(self.pending.len() - self.position);
+        output[..count].copy_from_slice(&self.pending[self.position..self.position + count]);
+        self.position += count;
+        Ok(count)
+    }
+}
+
+impl Write for RecordWriter {
+    fn write(&mut self, input: &[u8]) -> io::Result<usize> {
+        if input.is_empty() {
+            return Ok(0);
+        }
+        let count = input.len().min(RECORD_PLAINTEXT);
+        let encrypted = self
+            .direction
+            .seal(&input[..count])
+            .map_err(io::Error::other)?;
+        write_record(&mut self.stream, &encrypted).map_err(io::Error::other)?;
+        Ok(count)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.stream.flush()
+    }
 }
 
 fn io_error(context: &str, error: io::Error) -> Failure {
@@ -196,6 +256,61 @@ fn verify_proof(record: &[u8], transcript: &[u8; 32], label: &[u8]) -> Result<Pu
 }
 
 impl Session {
+    /// Connect only through the selected fabric address; never retry on management Ethernet.
+    pub fn connect_from(local: Ipv4Addr, remote: SocketAddrV4, key: &Key) -> Result<Self, Failure> {
+        let socket = socket2::Socket::new(
+            socket2::Domain::IPV4,
+            socket2::Type::STREAM,
+            Some(socket2::Protocol::TCP),
+        )?;
+        socket.bind(&SocketAddr::V4(SocketAddrV4::new(local, 0)).into())?;
+        socket
+            .connect_timeout(&SocketAddr::V4(remote).into(), Duration::from_secs(10))
+            .map_err(|e| format!("cannot reach fabric agent {remote} from {local}: {e}"))?;
+        let stream: TcpStream = socket.into();
+        stream.set_write_timeout(Some(Duration::from_secs(120)))?;
+        let mut session = Self::initiate(stream, key)?;
+        session.transfer_timeout()?;
+        Ok(session)
+    }
+
+    pub fn transfer_timeout(&mut self) -> Result<(), Failure> {
+        self.stream
+            .set_read_timeout(Some(Duration::from_secs(120)))?;
+        self.stream
+            .set_write_timeout(Some(Duration::from_secs(120)))?;
+        Ok(())
+    }
+
+    pub fn addresses(&self) -> Result<(SocketAddr, SocketAddr), Failure> {
+        Ok((self.stream.local_addr()?, self.stream.peer_addr()?))
+    }
+
+    /// Continue the authenticated record stream in both directions. Idle preparation
+    /// channels live until their checkpoint owner closes them, including during compilation.
+    pub fn checkpoint_parts(self) -> Result<(RecordReader, RecordWriter, TcpStream), Failure> {
+        if self.remaining != 0 || !self.pending.is_empty() || self.incomplete_write {
+            return Err("checkpoint channel begins inside an unfinished agent frame".into());
+        }
+        self.stream.set_read_timeout(None)?;
+        self.stream.set_write_timeout(None)?;
+        let writer = self.stream.try_clone()?;
+        let shutdown = self.stream.try_clone()?;
+        Ok((
+            RecordReader {
+                stream: self.stream,
+                direction: self.receive,
+                pending: Vec::new(),
+                position: 0,
+            },
+            RecordWriter {
+                stream: writer,
+                direction: self.send,
+            },
+            shutdown,
+        ))
+    }
+
     /// Open a session to `address` as the initiator.
     pub fn connect(address: &str, key: &Key) -> Result<Self, Failure> {
         let stream = TcpStream::connect_timeout(
@@ -253,6 +368,7 @@ impl Session {
             role: Role::Initiator,
             pending: Vec::new(),
             remaining: 0,
+            incomplete_write: false,
         })
     }
 
@@ -304,6 +420,7 @@ impl Session {
             role: Role::Responder,
             pending: Vec::new(),
             remaining: 0,
+            incomplete_write: false,
         })
     }
 
@@ -372,6 +489,7 @@ impl Session {
                     .map_err(|e| io_error("frame source read failed", e))?;
                 remaining -= want as u64;
             }
+            self.incomplete_write = true;
             self.write_plain(&buffer[..offset + want])?;
             offset = 0;
             if remaining == 0 {
@@ -379,6 +497,7 @@ impl Session {
             }
         }
         self.stream.flush()?;
+        self.incomplete_write = false;
         Ok(())
     }
 
@@ -417,6 +536,11 @@ impl Session {
         Body { session: self }
     }
 
+    /// Consume a fetch connection as a reader; dropping it closes the transfer.
+    pub fn into_body(self) -> impl Read {
+        OwnedBody(self)
+    }
+
     /// The current frame's body, which must not exceed `limit` bytes.
     pub fn read_body(&mut self, length: u64, limit: u64) -> Result<Vec<u8>, Failure> {
         if length > limit {
@@ -453,6 +577,10 @@ impl Session {
     }
 
     pub fn error(&mut self, message: &str) -> Result<(), Failure> {
+        if self.incomplete_write {
+            self.stream.shutdown(std::net::Shutdown::Both)?;
+            return Ok(());
+        }
         self.write_frame(frame::ERROR, message.as_bytes())
     }
 }
@@ -462,6 +590,14 @@ use std::net::ToSocketAddrs;
 /// Reads the current frame's body.
 pub struct Body<'a> {
     session: &'a mut Session,
+}
+
+struct OwnedBody(Session);
+
+impl Read for OwnedBody {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        self.0.body().read(buffer)
+    }
 }
 
 impl Read for Body<'_> {
@@ -506,6 +642,25 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_relay_stream_closes_instead_of_inserting_an_error_into_payload() {
+        let (mut client, mut server) = pair();
+        let length = (RECORD_PLAINTEXT * 3) as u64;
+        let writer = thread::spawn(move || {
+            let bytes = vec![42u8; RECORD_PLAINTEXT * 2];
+            let error = server
+                .write_frame_from(frame::OK, length, &mut bytes.as_slice())
+                .unwrap_err();
+            server.error(&error.to_string()).unwrap();
+        });
+        assert_eq!(client.read_header().unwrap(), (frame::OK, length));
+        let mut received = Vec::new();
+        assert!(client.body().read_to_end(&mut received).is_err());
+        assert!(!received.is_empty());
+        assert!(received.iter().all(|b| *b == 42));
+        writer.join().unwrap();
+    }
+
+    #[test]
     fn both_sides_learn_the_other_identity_and_the_same_binding() {
         let (client, server) = pair();
         assert_eq!(client.remote(), Key::from_seed(&[1; 32]).unwrap().public());
@@ -541,6 +696,43 @@ mod tests {
         client.write_frame(frame::EXIT, &[1, 2, 3]).unwrap();
         assert_eq!(server.read_frame().unwrap(), (frame::EXIT, vec![1, 2, 3]));
         assert!(server.read_body(FRAME_LIMIT + 1, FRAME_LIMIT).is_err());
+    }
+
+    #[test]
+    fn checkpoint_records_reject_replay_tampering_and_truncated_tails() {
+        for corrupt in [false, true] {
+            let (mut client, server) = pair();
+            let (mut reader, _, _) = server.checkpoint_parts().unwrap();
+            let record = client.send.seal(b"exact checkpoint bytes").unwrap();
+            write_record(&mut client.stream, &record).unwrap();
+            let mut bytes = [0; 22];
+            reader.read_exact(&mut bytes).unwrap();
+            assert_eq!(&bytes, b"exact checkpoint bytes");
+            let mut next = if corrupt {
+                client.send.seal(b"next bytes").unwrap()
+            } else {
+                record
+            };
+            if corrupt {
+                next[0] ^= 1;
+            }
+            write_record(&mut client.stream, &next).unwrap();
+            assert!(reader.read(&mut bytes).is_err());
+        }
+        for tail in [vec![0], vec![0, 32, 1, 2, 3]] {
+            let (mut client, server) = pair();
+            let (mut reader, _, _) = server.checkpoint_parts().unwrap();
+            client.stream.write_all(&tail).unwrap();
+            drop(client);
+            assert_eq!(
+                reader.read(&mut [0; 1]).unwrap_err().kind(),
+                io::ErrorKind::UnexpectedEof
+            );
+        }
+        let (client, server) = pair();
+        let (mut reader, _, _) = server.checkpoint_parts().unwrap();
+        drop(client);
+        assert_eq!(reader.read(&mut [0; 1]).unwrap(), 0);
     }
 
     #[test]

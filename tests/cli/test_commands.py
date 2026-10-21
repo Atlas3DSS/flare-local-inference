@@ -261,8 +261,8 @@ def test_fetch_downloads_the_pinned_revision_into_the_hub_cache(host, tmp_path, 
     model = resolve("glm-5.3-flash")
     cache = tmp_path / ".cache/huggingface/hub"
     assert preparation.fetch(model, cache) == "/snapshots/x"
-    assert calls == [("local-inference-lab/GLM-5.3-Flash-NVFP4-MXFP8-CSF-QAD",
-                      "dec48abd33efa73c3bb7c95b74eee10cad34f9be", tmp_path / ".cache/huggingface/hub")]
+    assert calls == [("nvidia/GLM-5.3-Flash-FP4-Local",
+                      "5b865baa418c3ebd339c310df11b5e4faa2daa18", tmp_path / ".cache/huggingface/hub")]
 
     def fail(*args, **kwargs):
         raise OSError("network unreachable")
@@ -292,3 +292,16 @@ def test_roce_ring_requires_multiple_hosts_before_model_or_gpu_work(tmp_path, ca
     args = _parser().parse_args(["export", "qwen3.8-flash", "--output", str(tmp_path / "model"),
                                "--roce-ring", "--ranks", "4"])
     assert args.roce_ring
+    from ignition.cli.serve import _checkpoint_ring
+    assert _checkpoint_ring(args)["streams"] == 8
+    for count in (1, 4, 8, 16, 32, 64):
+        args = _parser().parse_args(["export", "glm-5.3-flash", "--roce-ring", "--ranks", "4",
+                                    "--transfer-streams", str(count), "--cluster", "ring"])
+        assert _checkpoint_ring(args)["streams"] == count
+    for count in (0, 65):
+        with pytest.raises(SystemExit):
+            _parser().parse_args(["export", "--transfer-streams", str(count)])
+    args = _parser().parse_args(["export", "--transfer-streams", "8"])
+    from ignition.errors import UsageError
+    with pytest.raises(UsageError, match="require --roce-ring"):
+        _checkpoint_ring(args)

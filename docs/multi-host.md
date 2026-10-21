@@ -39,11 +39,13 @@ needs only Flare, the driver, and the package.
 | Ignition preparation rendezvous | Preparation rank zero | The selected port; examples use TCP 29630 |
 | Ignition preparation coordination | Preparation hosts | Additional dynamically allocated TCPStore and Gloo ports |
 
-Agent transfers use encrypted TCP to the addresses recorded at pairing.
-Model collectives use RDMA over separately discovered RoCE devices. Pair using
-hostnames or addresses that route over the intended transfer network; selecting
-RoCE rails does not change the agent's TCP route. Flare does not configure
-interfaces, addresses, switches, or firewalls.
+Agent control uses encrypted TCP to the addresses recorded at pairing.
+With `orbit run --roce-ring` or `orbit push --roce-ring`, package transfers use
+TCP on the discovered RoCE interfaces, with agents relaying non-neighbor data
+through the ring. Each agent must listen on its fabric addresses as well as its
+management address. Other package transfers use the paired addresses. Model
+collectives use RDMA. Flare does not configure interfaces, addresses, host routes,
+switches, or firewalls. See [fabric TCP transfers](orbit.md#package-transfers-through-ring-interfaces).
 
 The serving ranks select up to two rails per peer from active devices. The
 package does not pin the physical fabric used during preparation. For direct
@@ -183,8 +185,9 @@ Provision the same preparation token on every host before starting. Set
 `[preparation] checkpoint_token_file` in `~/.config/flare/config.toml`, or use
 its default `~/.config/flare/agent.token`. The file needs identical contents of
 at least 32 random bytes and mode `600` on each host. This token is separate
-from Orbit identities. Checkpoint transfers are authenticated, but their bytes
-are not encrypted.
+from Orbit identities. The default rendezvous checkpoint transfer authenticates
+its bytes without encryption. With `--roce-ring`, checkpoint tensor ranges use
+encrypted TCP through the paired Flare agents on the RoCE interfaces.
 
 The example prepares GLM-5.3 Flash on two Sparks. Run from each checkout root.
 On `maxwell`, whose preparation address is `10.200.0.12`, select an unused output:
@@ -205,6 +208,41 @@ For four hosts, use `--ranks 4` and start peer ranks 1, 2, and 3. Rank zero
 admits each peer once, serves checkpoint metadata and selected byte ranges,
 and coordinates preparation. Peers do not create full checkpoint shards.
 Keep checkpoint source files unchanged during loading.
+
+For a physical ring, add `--roce-ring --cluster NAME` to rank zero's export or
+serve command. The Orbit cluster must list exactly the participating hosts in
+preparation rank order, including rank zero; admission checks each rank's GPU
+UUID against its paired agent. `--orbit-file PATH` selects the controller
+configuration, and `--key-file PATH` selects its signing key.
+All hosts need Flare executables and paired agents from the same revision.
+Ignition finds Flare on `PATH` or at `flare/target/release/flare`;
+the agents must listen on their fabric interfaces. Peers connect using
+`ignition join`; rank zero supplies their signed fabric route during admission.
+
+Checkpoint loading uses eight TCP streams per peer by default. Select 1 through
+64 with `--transfer-streams N`. Streams alternate between the neighbor rails.
+Each peer receives its requested ranges along the shortest path from rank zero;
+equal-length paths follow increasing rank numbers, wrapping at the rank count.
+Each hop binds and checks the signed fabric IPs. A failed fabric channel ends
+preparation instead of retrying through management.
+Admission metadata and coordination use the rendezvous connection.
+Export retains the authenticated fabric channels after checkpoint reads drain:
+peers send missing prepared payload files back through the same ring hops and
+rails. Rank zero receives from all peers concurrently, with one file per stream
+and bounded 4 MiB frames. Each received file is hashed and published atomically.
+On failure, sibling connections are aborted and workers are joined; incomplete
+files are never published. Export manifests and cache requests use the
+rendezvous connection.
+
+Prefetch retains at most one 4 MiB payload per stream plus bounded transport
+buffers. The native weight loader copies data in order, preserving packed rows,
+strides, and conversions. Peers retain metadata and one reusable 4 MiB
+memory-backed file, passed to the loader by file descriptor, without writing
+checkpoint weights to disk. The preparation report records the checkpoint
+transport, stream count, payload bytes, and the interval from the first payload
+read to the last; this interval includes intervening loading work.
+Export reports missing payload bytes, stream count, receive duration, and
+throughput separately for each peer. Cache hits skip bulk payload transfer.
 
 Each rank loads its weights and prepares its graphs. Forward compilation is
 shared across ranks, and compiled artifacts go to the ranks that need them.
