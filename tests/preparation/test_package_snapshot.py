@@ -243,6 +243,73 @@ def test_cached_blob_corruption_is_rejected_without_replacement(tmp_path):
         store.put(64 << 30, lambda: [])
 
 
+def test_blob_verification_retries_metadata_changes_from_a_concurrent_link(tmp_path, monkeypatch):
+    from ignition.preparation.package_snapshot import BlobStore
+
+    store = BlobStore(tmp_path)
+    name = store.put(4, lambda: [b'data'])
+    path = store.root / name
+    original = hashlib.file_digest
+    calls = []
+
+    def digest(source, algorithm):
+        result = original(source, algorithm)
+        calls.append(1)
+        if len(calls) == 1:
+            os.link(path, tmp_path / 'rank-payload')
+        return result
+
+    monkeypatch.setattr(hashlib, 'file_digest', digest)
+    BlobStore.verify(path, bytes.fromhex(name[:-12]), path.stat().st_size)
+    assert len(calls) == 2
+
+
+def test_blob_verification_retry_still_rejects_changed_content(tmp_path, monkeypatch):
+    from ignition.preparation.package_snapshot import BlobStore
+
+    store = BlobStore(tmp_path)
+    name = store.put(4, lambda: [b'data'])
+    path = store.root / name
+    path.chmod(0o644)
+    original = hashlib.file_digest
+    calls = []
+
+    def digest(source, algorithm):
+        result = original(source, algorithm)
+        calls.append(1)
+        if len(calls) == 1:
+            with path.open('r+b') as output:
+                output.seek(4096)
+                output.write(b'nope')
+        return result
+
+    monkeypatch.setattr(hashlib, 'file_digest', digest)
+    with pytest.raises(ValueError, match='cached blob content'):
+        BlobStore.verify(path, bytes.fromhex(name[:-12]), path.stat().st_size)
+    assert len(calls) == 2
+
+
+def test_blob_verification_retries_are_bounded(tmp_path, monkeypatch):
+    from ignition.preparation.package_snapshot import BlobStore
+
+    store = BlobStore(tmp_path)
+    name = store.put(4, lambda: [b'data'])
+    path = store.root / name
+    original = hashlib.file_digest
+    calls = []
+
+    def digest(source, algorithm):
+        result = original(source, algorithm)
+        calls.append(1)
+        os.link(path, tmp_path / f'rank-payload-{len(calls)}')
+        return result
+
+    monkeypatch.setattr(hashlib, 'file_digest', digest)
+    with pytest.raises(ValueError, match='cached blob changed during verification'):
+        BlobStore.verify(path, bytes.fromhex(name[:-12]), path.stat().st_size)
+    assert len(calls) == 3
+
+
 def test_logical_reads_seek_to_overlapping_blobs_and_preserve_padding(tmp_path):
     from ignition.preparation.package_snapshot import LogicalFile
 

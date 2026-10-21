@@ -14,6 +14,7 @@ from ignition.components.window_indices import PreparedWindowIndices
 from ignition.preparation.compilation import compile_forward
 from ignition.preparation.graphs import PreparedGraphBundle
 from ignition.recipes.deepseek4.attention import AttentionIndices
+from ignition.recipes.deepseek41.attention import AttentionIndices as DeepSeek41Indices
 from ignition.preparation.scratch import GraphBufferPool
 from .test_window_indices import assert_metadata_equal, poison, set_metadata
 from .window_indices_reference import LiteralDeepSeek4WindowIndices, LiteralDeepSeek41WindowIndices
@@ -27,7 +28,9 @@ pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
     ("deepseek4", "prefill", 256, 1, 256, True),
     ("deepseek4", "draft", 15, 3, 5, False),
     ("deepseek4", "verify", 24, 8, 3, False),
+    ("deepseek41", "decode", 1, 1, 1, False),
     ("deepseek41", "decode", 8, 8, 1, False),
+    ("deepseek41", "verify", 6, 1, 6, False),
     ("deepseek41", "verify", 24, 8, 6, False),
     ("deepseek41", "verify", 128, 32, 6, False),
     ("deepseek41", "prefill", 4096, 1, 4096, False),
@@ -49,8 +52,9 @@ def test_compiled_native_window_metadata(recipe, mode, tokens, rows, query_capac
         reference = LiteralDeepSeek4WindowIndices
     else:
         buffers = GraphBufferPool(device)
-        actual = PreparedWindowIndices(metadata, mode=mode, tokens=tokens, page_size=page_size,
-            width=width, replay_start=replay_start, buffers=buffers.cursor())
+        actual = DeepSeek41Indices(metadata, mode=mode, tokens=tokens, page_size=page_size,
+            width=width, replay_start=replay_start, ratios=() if mode == "draft" else (1, 2),
+            buffers=buffers.cursor())
         reference = LiteralDeepSeek41WindowIndices
     expected = reference(metadata, mode=mode, tokens=tokens, page_size=page_size, width=width,
                          visible=visibility, replay_start=replay_start)
@@ -77,9 +81,15 @@ def test_compiled_native_window_metadata(recipe, mode, tokens, rows, query_capac
             poison(actual)
             actual()
             assert_metadata_equal(actual, expected)
+            if recipe == "deepseek41":
+                from tests.recipes.test_deepseek41_indices import assert_compression
+
+                assert_compression(actual)
             poison(actual)
             call()
             assert_metadata_equal(actual, expected)
+            if recipe == "deepseek41":
+                assert_compression(actual)
             poison(actual)
             torch.cuda.synchronize()
             allocated = torch.cuda.memory_stats()["allocation.all.allocated"]
@@ -88,6 +98,8 @@ def test_compiled_native_window_metadata(recipe, mode, tokens, rows, query_capac
             assert completion is not None and completion.error is None
             assert torch.cuda.memory_stats()["allocation.all.allocated"] == allocated
             assert_metadata_equal(actual, expected)
+            if recipe == "deepseek41":
+                assert_compression(actual)
     finally:
         worker.close()
         graph.reset()

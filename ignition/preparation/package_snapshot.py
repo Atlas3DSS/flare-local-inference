@@ -276,15 +276,19 @@ class BlobStore:
     def verify(path, expected, size):
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         with os.fdopen(fd, 'rb') as source:
-            info = os.fstat(source.fileno())
-            if not stat.S_ISREG(info.st_mode) or info.st_size != size:
-                raise ValueError('invalid cached blob')
-            digest = hashlib.file_digest(source, 'sha256').digest()
-            if BlobStore._identity(info) != BlobStore._identity(os.fstat(source.fileno())):
-                raise ValueError('cached blob changed during verification')
-        if digest != expected:
-            raise ValueError('cached blob content does not match its hash')
-        return info
+            for _ in range(3):
+                info = os.fstat(source.fileno())
+                if not stat.S_ISREG(info.st_mode) or info.st_size != size:
+                    raise ValueError('invalid cached blob')
+                source.seek(0)
+                digest = hashlib.file_digest(source, 'sha256').digest()
+                if BlobStore._identity(info) != BlobStore._identity(os.fstat(source.fileno())):
+                    # Concurrent rank exports can change ctime by hard-linking this inode.
+                    continue
+                if digest != expected:
+                    raise ValueError('cached blob content does not match its hash')
+                return info
+        raise ValueError('cached blob changed during verification')
 
     def link(self, name, directory):
         target = Path(directory) / name

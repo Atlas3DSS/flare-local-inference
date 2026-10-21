@@ -216,6 +216,9 @@ instantaneous gauges.
 | `pending` | Requests waiting in the model scheduler | `flare_pending_requests` |
 | `completed` | Requests whose generation completed successfully | `flare_requests_completed_total` |
 | `failed` | Requests failed by admission, execution, grammar, or output backpressure | `flare_requests_failed_total` |
+| `replay_gpu_ns` | Sum of maximum rank-local CUDA durations of completed graphs, including readiness waits | `flare_replay_gpu_nanoseconds_total` |
+| `replay_readiness_wait_ns` | Exposed embedding readiness delay measured across ranks, for both RAM and disk delivery | `flare_replay_readiness_wait_nanoseconds_total` |
+| `replay_readiness_samples` | Completed graphs with prepared readiness timing outputs; zero for packages without them | `flare_replay_readiness_samples_total` |
 | `reused_tokens` | Tokens covered by GPU prefix-cache hits | `flare_cache_reused_tokens_total` |
 | `cached_pages` | KV pages owned by immutable checkpoints | `flare_cached_kv_pages` |
 | `free_pages` | KV pages reusable after completed GPU fences | `flare_free_kv_pages` |

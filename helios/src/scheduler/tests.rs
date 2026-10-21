@@ -1337,6 +1337,9 @@ fn speculative_rounds_wait_for_feedback_and_use_actual_counts() {
 #[test]
 fn speculative_output_limit_masks_rows_without_queueing_terminal_work() {
     let (mut s, h) = speculative_scheduler(60, 2);
+    let mut graphs = duration_graphs(1);
+    graphs.retain(|graph| graph.kind != GraphKind::Speculative || graph.token_capacity == 8);
+    s.costs = measured_costs(&graphs);
     let first = s.plan().unwrap();
     assert_eq!(first.token_capacity, 8);
     assert_eq!(first.lanes[0].tokens, 1);
@@ -1388,6 +1391,9 @@ fn speculative_bad_vector_is_transactional_and_cancel_waits_for_round_fence() {
 fn fixed_graph_masks_grammar_and_host_stops_to_one_token() {
     for grammar in [false, true] {
         let (mut s, h) = speculative_scheduler(65, 32);
+        let mut graphs = duration_graphs(1);
+        graphs.retain(|graph| graph.kind != GraphKind::Speculative || graph.token_capacity == 8);
+        s.costs = measured_costs(&graphs);
         s.speculative_fixed_width = Some(8);
         s.request_mut(h).unwrap().grammar_constrained = grammar;
         s.request_mut(h).unwrap().host_stops = !grammar;
@@ -1508,6 +1514,7 @@ fn execution_plan_survives_unrelated_arrival_and_cost_observation() {
     s.observe_execution(
         &plan,
         crate::execution::ExecutionTiming {
+            readiness: None,
             gpu_ns: [
                 Some(20),
                 Some(30),
@@ -1606,6 +1613,9 @@ fn physically_offered_padding_is_not_an_acceptance_observation() {
     use speculation::ProposalSource::Mtp;
     for remaining in [1, 2] {
         let (mut s, h) = speculative_scheduler(65, remaining + 1);
+        let mut graphs = duration_graphs(1);
+        graphs.retain(|graph| graph.kind != GraphKind::Speculative || graph.token_capacity == 8);
+        s.costs = measured_costs(&graphs);
         let plan = s.plan().unwrap();
         assert_eq!(plan.token_capacity, 8);
         assert_eq!(plan.lanes[0].tokens, remaining as usize);
@@ -1662,7 +1672,7 @@ fn completion_learns_only_proven_acceptance_and_is_transactional() {
 }
 
 #[test]
-fn graph_duration_ema_uses_runtime_observations_and_excludes_queue_wait() {
+fn graph_duration_median_uses_runtime_observations_and_excludes_queue_wait() {
     use crate::execution::ExecutionTiming;
     let mut s = scheduler(2, 64, 8);
     let graphs = duration_graphs(2);
@@ -1674,6 +1684,7 @@ fn graph_duration_ema_uses_runtime_observations_and_excludes_queue_wait() {
         s.observe_execution(
             &plan,
             ExecutionTiming {
+                readiness: None,
                 gpu_ns: [
                     Some(1100),
                     None,
@@ -1697,22 +1708,46 @@ fn graph_duration_ema_uses_runtime_observations_and_excludes_queue_wait() {
             },
         );
     }
-    assert_eq!(s.estimated_duration_ns(&plan), Some(13463));
+    assert_eq!(s.estimated_duration_ns(&plan), Some(14075));
     let mut same_graph = (*plan).clone();
     same_graph.lanes[0].start_position = 32769;
     same_graph.lanes[0].tokens = 1;
-    assert_eq!(s.estimated_duration_ns(&same_graph), Some(13463));
+    assert_eq!(s.estimated_duration_ns(&same_graph), Some(14075));
     same_graph.batch_capacity = 2;
     assert_eq!(s.estimated_duration_ns(&same_graph), Some(1000));
     s.observe_execution(
         &plan,
         ExecutionTiming {
+            readiness: None,
             gpu_ns: [None; 16],
             wall_ns: 999_999,
             queued: false,
         },
     );
-    assert_eq!(s.estimated_duration_ns(&plan), Some(13463));
+    assert_eq!(s.estimated_duration_ns(&plan), Some(14075));
+}
+
+#[test]
+fn readiness_correction_changes_shape_cost_without_changing_handoff_or_service_time() {
+    use crate::execution::{ExecutionTiming, ReadinessIntervals};
+    let mut costs = cost::ActionCosts::prepared(&duration_graphs(1)).unwrap();
+    let step = ScheduledStep { kind: GraphKind::Decode, batch_capacity: 1, token_capacity: 1,
+        packed_token_capacity: 0, mixed: None, lanes: vec![], requires_feedback: false };
+    let timestamps = [1000u64, 3000, 3100].into_iter().flat_map(u64::to_ne_bytes).collect::<Vec<_>>();
+    let mut gpu_ns = [None; 16];
+    gpu_ns[0] = Some(10_000);
+    gpu_ns[1] = Some(9_000);
+    let mut timing = ExecutionTiming { gpu_ns, readiness: Some(ReadinessIntervals::decode(&timestamps).unwrap()),
+        wall_ns: 12_000, queued: false };
+    costs.observe(&step, timing);
+    assert_eq!(costs.get(&step), Some(10_000));
+    assert_eq!(cost::observed_duration_ns(timing), Some(12_000));
+    timing.queued = true;
+    timing.wall_ns = 100_000;
+    costs.observe(&step, timing);
+    assert_eq!(costs.get(&step), Some(10_000));
+    assert_eq!(cost::observed_duration_ns(timing), Some(10_000));
+    assert_eq!(timing.gpu_ns[0], Some(10_000));
 }
 
 #[test]

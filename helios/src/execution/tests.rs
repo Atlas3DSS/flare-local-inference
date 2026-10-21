@@ -1,6 +1,22 @@
 use super::*;
 
 #[test]
+fn optional_readiness_output_preserves_uninstrumented_manifests_and_rejects_invalid_layouts() {
+    let mut value = manifest();
+    value.validate().unwrap();
+    value.buffers.push(BufferDescriptor { name: "readiness_timestamps".into(), address: 0x10000,
+        nbytes: 96, dtype: Dtype::Int64, shape: vec![2, 6], strides: vec![6, 1] });
+    value.validate().unwrap();
+    value.buffers.last_mut().unwrap().shape = vec![2, 2, 3];
+    value.buffers.last_mut().unwrap().strides = vec![6, 3, 1];
+    assert!(value.validate().is_err());
+    value.buffers.last_mut().unwrap().shape = vec![2, 6];
+    value.buffers.last_mut().unwrap().strides = vec![6, 1];
+    value.buffers.last_mut().unwrap().dtype = Dtype::Float32;
+    assert!(value.validate().is_err());
+}
+
+#[test]
 fn fp8_cache_buffers_use_single_byte_elements() {
     let mut value = manifest();
     let dtype = Dtype::try_from("float8_e4m3fn").unwrap();

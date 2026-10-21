@@ -1341,6 +1341,7 @@ impl<'a> Worker<'a> {
         };
         self.metrics
             .progress(prefill, generated.len(), accepted, draft_rounds);
+        self.metrics.replay_completed(completion.timing);
         if prefill > 0 && self.store.is_some() {
             self.observe_prefill_rate(completion.fence, prefill);
         }

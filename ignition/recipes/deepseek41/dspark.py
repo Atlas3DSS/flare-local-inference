@@ -2,9 +2,8 @@
 
 from ignition.components.embedding import PreparedEmbedding
 from ignition.components.vocabulary import PreparedVocabularyProjection
-from ignition.components.window_indices import PreparedWindowIndices
 
-from .attention import Rotary, normalize
+from .attention import AttentionIndices, Rotary, normalize
 from .decoder import PreparedLayer
 
 
@@ -16,7 +15,7 @@ class PreparedDraft:
             num_rows=metadata.live_counts[:1], session=session, name=name + ".embedding")
         rotary = Rotary(weights.config, scratch.embedding.device)
         page_size = 128 + metadata.max_query_tokens
-        self.window_metadata = PreparedWindowIndices(metadata, mode="draft",
+        self.window_metadata = AttentionIndices(metadata, mode="draft",
             tokens=metadata.positions.numel(), page_size=page_size, width=page_size,
             buffers=scratch.buffers)
         self.layers = tuple(PreparedLayer(i, layer, None, scratch, metadata, pool, rotary,

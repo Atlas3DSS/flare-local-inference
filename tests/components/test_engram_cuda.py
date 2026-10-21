@@ -13,6 +13,7 @@ from b12x.sequence._shared.disk_table import MappedHostAllocation
 from cuda.bindings import driver
 
 from ignition.components.engram import EngramInputs, PreparedEngramLookup
+from ignition.components.readiness import ReadinessTimings
 
 pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
                               reason="requires an explicitly assigned CUDA device")
@@ -40,7 +41,8 @@ def test_compiled_disk_lookup_waits_at_consumer(tmp_path, tokens):
     paths = [tmp_path / "weights.bin", tmp_path / "scales.bin"]
     for path, tensor in zip(paths, (weight, scales), strict=True):
         path.write_bytes(bytes(4093) + tensor.view(torch.uint8).numpy().tobytes())
-    inputs = EngramInputs.allocate(tokens, device)
+    frame = torch.zeros(1, dtype=torch.int32, device=device)
+    inputs = EngramInputs.allocate(tokens, device, timings=ReadinessTimings.allocate(frame, 1))
     output = torch.empty((tokens, 6144), dtype=torch.bfloat16, device=device)
     count = torch.tensor([tokens], dtype=torch.int32, device=device)
     ready = MappedHostAllocation((1,), torch.int32, device)
@@ -69,6 +71,7 @@ def test_compiled_disk_lookup_waits_at_consumer(tmp_path, tokens):
         allocated = torch.cuda.memory_allocated()
         try:
             for generation, live in enumerate((tokens, max(1, tokens // 2), 0), 1):
+                frame.fill_(generation % 2)
                 ids = (torch.arange(tokens * 24).reshape(tokens, 24) * 19 + generation) % table_rows
                 inputs.hashes.copy_(ids)
                 count.fill_(live)
@@ -110,6 +113,9 @@ def test_compiled_disk_lookup_waits_at_consumer(tmp_path, tokens):
                 if errors:
                     raise errors[0]
                 assert torch.cuda.memory_allocated() == allocated
+                before, ready_at, synchronized = inputs.timings.timestamps.cpu()[generation % 2].tolist()
+                assert before < ready_at <= synchronized
+                assert 8_000_000 <= ready_at - before < 1_000_000_000
                 expected = (weight.float()[ids] * scales.view(torch.float8_e8m0fnu).float()[ids]
                             .repeat_interleave(32, dim=-1)).bfloat16().flatten(1)
                 expected[live:].zero_()

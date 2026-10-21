@@ -321,6 +321,8 @@ def _prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, t
             frame = torch.zeros(1, dtype=torch.int32, device=device)
             sequence = torch.zeros(1, dtype=torch.int64, device=device)
             table.sequence = sequence
+            from ignition.components.readiness import ReadinessTimings
+            table.timings = ReadinessTimings.allocate(frame, 1)
             completion = CompletionOutputs.allocate((2, slots, 24 if config.mtp or config.mixed_shapes else 8), device=device)
             features = VisionFeatureState.allocate(device, capacity=slots, image_slots=config.image_concurrency,
                 feature_slot=inputs.vision_feature_slot)

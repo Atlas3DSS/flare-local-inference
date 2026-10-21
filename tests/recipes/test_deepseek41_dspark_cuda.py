@@ -10,6 +10,7 @@ from b12x.sequence.engram.reference import hash_reference
 from b12x.sequence._shared.disk_table import MappedHostAllocation
 
 from ignition.components.engram import EngramInputs, PreparedEngramRequests
+from ignition.components.readiness import ReadinessTimings
 from ignition.components.embedding_partition import EmbeddingHeadPartition
 from ignition.components.compressed_mla import PreparedCompressedCacheWriter, PreparedCompressedMLA
 from ignition.preparation.compilation import compile_forward
@@ -30,7 +31,8 @@ def test_graph_produced_hashes_publish_after_all_rows_are_visible(rank):
     tokens, rows = 12, 3
     token_map = tuple((i * 7) % 32 for i in range(32))
     geometry = engram.build_geometry(base_table_size=101, compressed_vocab_size=32)
-    inputs = EngramInputs.allocate(tokens, device)
+    frame = torch.zeros(1, dtype=torch.int32, device=device)
+    inputs = EngramInputs.allocate(tokens, device, timings=ReadinessTimings.allocate(frame, 1))
     ids = torch.tensor([13, 5, 7, 28, 13, 8, 2, 1, 5, 7, 9, 1], device=device)
     starts = torch.tensor([0, 3, 3, 9], dtype=torch.int32, device=device)
     history = torch.tensor([[2, 2, 2], [9, 10, 11], [5, 7, 8]], device=device)

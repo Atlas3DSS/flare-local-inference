@@ -4,6 +4,8 @@ mod manifest;
 mod parallel;
 mod rank_stream;
 mod ranks;
+mod readiness;
+pub use readiness::{MAX_READINESS_INTERVALS, ReadinessIntervals};
 pub mod rendezvous;
 #[cfg(feature = "roce")]
 pub mod roce;

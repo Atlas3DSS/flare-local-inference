@@ -1,6 +1,7 @@
 """Windowed MLA, source-shared compression, and two-level sparse selection."""
 
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import torch
 import triton
@@ -24,6 +25,56 @@ from .pool import PAGE_TOKENS
 
 # Bound full-context score storage while amortizing prefill selection launches.
 INDEXER_QUERY_ROWS = 128
+
+
+class AttentionIndices(PreparedWindowIndices):
+    """Window and compression geometry shared by layers with identical query metadata.
+
+    Allocate every compression ratio before per-layer scratch cursors fork.
+    Compressor outputs, pending state, and cache payloads remain layer-owned.
+    """
+
+    def __init__(self, metadata, *, mode, tokens, page_size, width, ratios=(), visible=None,
+                 replay_start=None, buffers=None):
+        super().__init__(metadata, mode=mode, tokens=tokens, page_size=page_size, width=width,
+                         visible=visible, replay_start=replay_start, buffers=buffers)
+        tokens = metadata.positions.numel()
+
+        def zeros(shape, dtype):
+            return (torch.zeros(shape, device=metadata.positions.device, dtype=dtype)
+                    if buffers is None else buffers.zeros(shape, dtype))
+
+        self.position = zeros((tokens,), torch.int64)
+        self.ratios = {}
+        for ratio in sorted(set(ratios)):
+            if type(ratio) is not int or ratio not in (1, 2):
+                raise ValueError("DeepSeek V4.1 compression ratios must be one or two")
+            self.ratios[ratio] = SimpleNamespace(
+                slots=zeros((tokens,), torch.int64).fill_(-1),
+                lengths=zeros((tokens,), torch.int32),
+                index_lengths=zeros((tokens,), torch.int32),
+                active_width=zeros((1,), torch.int32),
+                position=zeros((tokens,), torch.int64))
+
+    def compressed(self, ratio):
+        if ratio not in self.ratios:
+            raise ValueError("compression geometry must be declared before layer scratch is allocated")
+        return self.ratios[ratio]
+
+    def __call__(self):
+        super().__call__()
+        m = self.metadata
+        live = m.positions >= 0
+        self.position.copy_(m.positions.clamp_min(0))
+        if self.ratios:
+            pages = m.page_table[m.requests, (self.position // PAGE_TOKENS).clamp(max=m.page_table.shape[1] - 1)]
+        for ratio, shared in self.ratios.items():
+            shared.lengths.copy_(torch.where(live, (self.position + 1) // ratio, 0))
+            shared.index_lengths.copy_(shared.lengths.clamp(max=512))
+            shared.active_width.copy_(shared.lengths.amax().view(1))
+            shared.slots.copy_(torch.where(live,
+                pages.long() * (PAGE_TOKENS // ratio) + (self.position % PAGE_TOKENS) // ratio, -1))
+            shared.position.copy_((self.position + 1) // ratio * ratio - ratio)
 
 
 def normalize(source, weight, out, eps):
@@ -141,11 +192,13 @@ class PreparedGlobalKV:
     """Project and store every source row before decoder queries are packed."""
 
     def __init__(self, layer, weights, source, scratch, metadata, pool, rotary, *,
-                 session, name, deferred=False, buffers=None):
+                 session, name, indices, deferred=False, buffers=None):
         self.layer, self.metadata, self.pool, self.rotary = layer, metadata, pool, rotary
         self.ratio = pool.config.text["compress_ratios"][layer]
-        self.slots = (torch.full((source.shape[0],), -1, dtype=torch.int64, device=source.device)
-                      if buffers is None else buffers.full((source.shape[0],), -1, torch.int64))
+        if indices.metadata is not metadata or indices.position.shape != (source.shape[0],):
+            raise ValueError("global KV indices must describe every source row")
+        self.geometry = indices.compressed(self.ratio)
+        self.slots = self.geometry.slots
         self.compressor = PreparedCompressor(layer, weights["compressor"], source, metadata,
             pool, self.slots, session=session, name=f"{name}.compress", deferred=deferred, buffers=buffers)
         self.keys, self.normalized_keys = scratch.index_keys, scratch.normalized_keys
@@ -159,16 +212,10 @@ class PreparedGlobalKV:
             name=f"{name}.compressed_write")
 
     def __call__(self, source, indexer):
-        m = self.metadata
-        live = m.positions >= 0
-        position = m.positions.clamp(min=0)
-        pages = m.page_table[m.requests, (position // PAGE_TOKENS).clamp(max=m.page_table.shape[1] - 1)]
-        self.slots.copy_(torch.where(live,
-            pages.long() * (PAGE_TOKENS // self.ratio) + (position % PAGE_TOKENS) // self.ratio, -1))
         latent = self.compressor(source)
         self.index_key(latent)
         self.index_norm(self.keys)
-        compressed_position = (position + 1) // self.ratio * self.ratio - self.ratio
+        compressed_position = self.geometry.position
         self.rotary.apply(self.normalized_keys, compressed_position, compressed=True)
         indexer.write_keys(self.normalized_keys, self.compressor.slots)
         self.rotary.apply(latent, compressed_position, compressed=True)
@@ -219,22 +266,24 @@ class PreparedAttention:
         window_width = self.window_page_size if draft else 128
         self.owns_window_metadata = window_metadata is None
         if window_metadata is None:
-            window_metadata = PreparedWindowIndices(metadata, mode=mode, tokens=tokens,
+            window_metadata = AttentionIndices(metadata, mode=mode, tokens=tokens,
                 page_size=self.window_page_size, width=window_width, replay_start=replay_start,
-                buffers=buffers)
+                ratios=(self.ratio,) if self.ratio else (), buffers=buffers)
         elif (window_metadata.metadata is not metadata or window_metadata.mode != mode
                 or window_metadata.window_page_size != self.window_page_size
                 or window_metadata.window_indices.shape != (tokens, window_width)
-                or window_metadata.replay_start is not replay_start or window_metadata.visible is not None):
+                or window_metadata.replay_start is not replay_start or window_metadata.visible is not None
+                or not isinstance(window_metadata, AttentionIndices)):
             raise ValueError("shared window indices must match the attention metadata and cache geometry")
         self.window_metadata = window_metadata
         self.window_slots = window_metadata.window_slots
         self.window_indices = window_metadata.window_indices
         self.window_lengths = window_metadata.window_lengths
         self.token_offsets = torch.arange(tokens, device=device)
-        self.lengths = zeros(tokens, torch.int32)
-        self.active_width = zeros(1, torch.int32)
-        self.index_lengths = zeros(tokens, torch.int32)
+        geometry = window_metadata.compressed(self.ratio) if self.ratio else None
+        self.lengths = zeros(tokens, torch.int32) if geometry is None else geometry.lengths
+        self.active_width = zeros(1, torch.int32) if geometry is None else geometry.active_width
+        self.index_lengths = zeros(tokens, torch.int32) if geometry is None else geometry.index_lengths
         self.page_table = metadata.token_page_table
         self.projections = {}
         for key, values, out in (
@@ -255,7 +304,7 @@ class PreparedAttention:
         self.selectors = []
         if "compressor" in weights:
             self.global_kv = PreparedGlobalKV(layer, weights, source, scratch, metadata, pool, rotary,
-                session=session, name=name, deferred=mode == "verify", buffers=buffers)
+                session=session, name=name, indices=window_metadata, deferred=mode == "verify", buffers=buffers)
         if "index_q" in weights:
             self.index_query = QuantizedProjection(scratch.query_low, weights["index_q"],
                 scratch.index_query.view(tokens, -1), session=session, name=f"{name}.index_query",
@@ -304,8 +353,7 @@ class PreparedAttention:
         m, s = self.metadata, self.scratch
         if self.owns_window_metadata:
             self.window_metadata()
-        live = m.positions >= 0
-        position = m.positions.clamp(min=0)
+        position = self.window_metadata.position
         if self.mode != "decode":
             gather_rows(self.window, m.state_rows, self.window_cache[:, :128 * 528])
         self.projections["qkv_a"](source)
@@ -316,9 +364,6 @@ class PreparedAttention:
         self.rotary.apply(s.window_values, position, compressed=bool(self.ratio))
         self.window_writer(s.window_values)
         if self.ratio:
-            self.lengths.copy_(torch.where(live, (position + 1) // self.ratio, 0))
-            self.index_lengths.copy_(self.lengths.clamp(max=512))
-            self.active_width.copy_(self.lengths.amax().view(1))
             if self.global_kv is not None:
                 self.global_kv(source, self.selectors[0])
             if self.selectors:

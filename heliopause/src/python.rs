@@ -225,6 +225,8 @@ struct ExecutionCompletion {
     #[pyo3(get)]
     gpu_ns: [Option<u64>; 16],
     #[pyo3(get)]
+    readiness_wait_ns: Option<u64>,
+    #[pyo3(get)]
     wall_ns: u64,
     #[pyo3(get)]
     queued: bool,
@@ -318,6 +320,7 @@ impl PreparedGraphExecutor {
                     proposal_confidence: completion.proposal_confidence
                         .map(|rows| rows[..completion.records.len()].to_vec()),
                     gpu_ns: completion.timing.gpu_ns,
+                    readiness_wait_ns: completion.timing.readiness.map(|sample| sample.wait_ns()),
                     wall_ns: completion.timing.wall_ns,
                     queued: completion.timing.queued,
                     records: completion

@@ -13,10 +13,9 @@ from ignition.components.mhc import MHCWeights, MHCScratch, PreparedMHC, Prepare
 from ignition.components.mlp import MLPScratch, PreparedMLP
 from ignition.components.moe import RouterScratch, PreparedRouter, PreparedRoutedExperts
 from ignition.components.vocabulary import PreparedVocabularyProjection
-from ignition.components.window_indices import PreparedWindowIndices
 from ignition.preparation.scratch import GraphBufferPool, GraphBuffers
 
-from .attention import AttentionScratch, PreparedAttention, PreparedGlobalKV, Rotary, normalize
+from .attention import AttentionIndices, AttentionScratch, PreparedAttention, PreparedGlobalKV, Rotary, normalize
 from .decoder_prefill import PreparedDecoderSuffix
 from .engram import EngramScratch, PreparedEngram, PreparedTableRequests
 
@@ -94,7 +93,7 @@ class PreparedDecoderBoundary:
     """Produce complete global KV, then gather the decoder's bounded replay rows."""
 
     def __init__(self, index, weights, source, target, packing, pool, rotary, *, carry,
-                 session, name, workspace, window_metadata, buffers=None):
+                 session, name, workspace, window_metadata, source_indices, buffers=None):
         self.packing = packing
         self.window_metadata = window_metadata
         self.incoming = ((source.mlp_output, source.ffn_hc.residual, source.ffn_hc.post, source.ffn_hc.comb)
@@ -106,7 +105,8 @@ class PreparedDecoderBoundary:
             norm_eps=text["rms_norm_eps"], hc_eps=text["hc_eps"], sinkhorn_iters=text["hc_sinkhorn_iters"])
         self.normalized = source.attention_hc.normalized
         self.global_kv = PreparedGlobalKV(index, weights.attention, self.normalized, source.attention,
-            packing.source, pool, rotary, session=session, name=name + ".global_kv", buffers=buffers)
+            packing.source, pool, rotary, session=session, name=name + ".global_kv",
+            indices=source_indices, buffers=buffers)
         self.rows = tuple((getattr(source.attention_hc, field), getattr(target.attention_hc, field))
                           for field in ("normalized", "residual", "post", "comb"))
         self.rows += ((source.attn_mix, target.attn_mix),)
@@ -245,16 +245,18 @@ class PreparedDecoder:
                 token_capacity=metadata.max_query_tokens,
                 window_tokens=128, record_bytes=528, staging=window_staging)
         # These addresses stay live through every layer and precede reusable layer buffers.
-        self.window_metadata = PreparedWindowIndices(metadata, mode=mode,
+        ratios = weights.config.text["compress_ratios"][:len(weights.layers)]
+        prefix_ratios = ratios if self.packing is None else ratios[:decoder_start + 1]
+        self.window_metadata = AttentionIndices(metadata, mode=mode,
             tokens=metadata.positions.numel(),
             page_size=128 if mode == "decode" else 128 + metadata.max_query_tokens, width=128,
-            buffers=buffers)
+            ratios=set(prefix_ratios) - {0}, buffers=buffers)
         self.suffix_window_metadata = None
         if self.packing is not None:
-            self.suffix_window_metadata = PreparedWindowIndices(self.output_metadata, mode=mode,
+            self.suffix_window_metadata = AttentionIndices(self.output_metadata, mode=mode,
                 tokens=self.output_metadata.positions.numel(),
                 page_size=128 + self.output_metadata.max_query_tokens, width=128,
-                replay_start=self.packing.replay_start, buffers=buffers)
+                replay_start=self.packing.replay_start, ratios=set(ratios[decoder_start:]) - {0}, buffers=buffers)
         self.layers, carry = [], False
         layer_cursors = []
         for index, layer in enumerate(weights.layers):
@@ -269,7 +271,8 @@ class PreparedDecoder:
                 if index == decoder_start:
                     boundary = PreparedDecoderBoundary(index, layer, scratch, layer_scratch, self.packing,
                         pool, self.rotary, carry=carry, session=session, name=f"{name}.layer{index}", workspace=workspace,
-                        buffers=layer_buffers, window_metadata=self.suffix_window_metadata)
+                        buffers=layer_buffers, window_metadata=self.suffix_window_metadata,
+                        source_indices=self.window_metadata)
                     layer = replace(layer, attention={key: value for key, value in layer.attention.items()
                                                       if key not in ("compressor", "index_k", "index_norm")})
             defer = (index + 1 < len(weights.layers) and weights.layers[index + 1].engram is None

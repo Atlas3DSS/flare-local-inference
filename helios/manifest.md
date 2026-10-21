@@ -96,6 +96,23 @@ device inputs before handoff. The native executor always uploads the reserved
 frame index and positive, monotonic submission sequence. Command callers
 cannot override those two values.
 
+An optional `readiness_timestamps` output has dtype int64 and contiguous shape
+`[2,3*N]`, with `1 <= N <= 64`. Each frame holds one triple per embedding table:
+GPU timestamps before its external readiness wait, after readiness, and after a
+prepared all-rank reduction. Table indices follow the embedding catalog. Every
+graph consuming embedding tables writes all triples for its selected frame.
+Other graphs leave them untouched. The executor retains each frame's readback
+through its transfer fence. Packages without this output retain raw replay-cost
+estimation.
+
+Across ranks, the estimator takes the minimum readiness-through-reduction span
+and the minimum reduction-only span separately for each table. Their difference
+estimates delivery delay exposed after the last rank arrives, retaining the
+reduction's own cost. This uses local durations and requires no cross-device
+clock alignment. Differences between ranks' reduction completion instants remain
+measurement error. The reported CUDA intervals and service charges retain all
+elapsed time.
+
 Each completion lane begins with eight signed 64-bit fields in this order:
 
 1. Positive request generation, bounded by `INT64_MAX`.

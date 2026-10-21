@@ -167,6 +167,9 @@ fn completion_wire_preserves_the_execution_abi() {
     root.timing.gpu_ns[0] = Some(1250);
     root.timing.wall_ns = 2345;
     root.timing.queued = true;
+    root.timing.readiness = Some(super::super::ReadinessIntervals::decode(
+        &[100u64, 110, 111, 200, 210, 215].into_iter().flat_map(u64::to_ne_bytes).collect::<Vec<_>>()
+    ).unwrap());
     let bytes = completion(&root);
     let mut reader = Reader(&bytes);
     assert_eq!(reader.number().unwrap(), 3);
@@ -186,7 +189,7 @@ fn rank_timing_rejects_truncation_and_preserves_zero_duration() {
         root.timing.gpu_ns[0] = gpu;
         root.timing.wall_ns = 1234;
         let bytes = completion(&root);
-        for length in 0..32 {
+        for length in 0..40 {
             assert!(timing(&mut Reader(&bytes[16..16 + length])).is_err());
         }
         assert_eq!(timing(&mut Reader(&bytes[16..])).unwrap(), root.timing);

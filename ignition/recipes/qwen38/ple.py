@@ -99,6 +99,7 @@ class PLETable:
     ready: object
     sources: tuple
     sequence: torch.Tensor | None = None
+    timings: object = None
 
     @classmethod
     def load(cls, manifest, device, *, tokens, progress=None, host_allocator=None):
@@ -141,7 +142,7 @@ class PLETable:
 
     def buffers(self):
         return dict(ple_weights=self.weights, ple_scales=self.scales, ple_hashes=self.hashes,
-                    ple_requests=self.mailbox.device_view)
+                    ple_requests=self.mailbox.device_view, **self.timings.buffers())
 
     def events(self):
         return {"ple_ready": self.ready.cuda_event}
@@ -299,6 +300,8 @@ class PreparedPLE:
         name: str,
         workspace=None,
         partitions=None,
+        runtime=None,
+        coordinator=None,
     ):
         _validate_geometry(module)
         if mode not in ("decode", "prefill"):
@@ -359,7 +362,7 @@ class PreparedPLE:
         from ignition.components.ngram_delivery import PreparedPLELookup
 
         self.embedding_lookup = PreparedPLELookup(table, metadata, scratch.embedding, caps,
-            session=session, name=f"{name}.embedding")
+            session=session, name=f"{name}.embedding", runtime=runtime, coordinator=coordinator)
         self.embedding_output = scratch.embedding
         self.key_projection = UnquantizedProjection(
             self.embedding_output,

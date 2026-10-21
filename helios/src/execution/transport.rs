@@ -6,7 +6,7 @@ use crate::{
     cuda::{BATCH_BYTES, BATCH_ENTRIES, Event, PinnedHost, Stream},
 };
 
-use super::{ExecutionManifest, GraphKind, MAX_OUTPUT_TOKENS, REQUEST_LANES, VECTOR_RECORD_FIELDS};
+use super::{ExecutionManifest, GraphKind, MAX_OUTPUT_TOKENS, REQUEST_LANES, VECTOR_RECORD_FIELDS, ReadinessIntervals};
 
 pub struct Upload<'a> {
     pub buffer: &'a str,
@@ -173,11 +173,24 @@ pub struct FrameCompletion {
 pub struct ExecutionTiming {
     /// Local CUDA event intervals for up to sixteen ranks; absent ranks have no interval.
     pub gpu_ns: [Option<u64>; 16],
+    /// Per-table minima of the readiness-through-barrier and barrier-only intervals.
+    pub readiness: Option<ReadinessIntervals>,
     /// Host interval from dispatch through observation of every rank's completion.
     /// Includes input staging, coordination, device queueing and completion delivery.
     pub wall_ns: u64,
     /// Another frame was outstanding when this frame was dispatched.
     pub queued: bool,
+}
+
+impl ExecutionTiming {
+    pub(crate) fn merge_rank(&mut self, rank: usize, peer: Self) -> Result<()> {
+        self.gpu_ns[rank] = peer.gpu_ns[0];
+        match (&mut self.readiness, peer.readiness) {
+            (Some(local), Some(remote)) => local.merge(remote),
+            (None, None) => Ok(()),
+            _ => Err(Error::execution(ExecutionError::Completion, "rank readiness timestamp bindings differ")),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -195,6 +208,7 @@ struct Frame {
     input: PinnedHost,
     output: PinnedHost,
     confidence: Option<Readback>,
+    readiness: Option<Readback>,
     logprobs: Option<Readback>,
     prompt_logprobs: Option<Readback>,
     produced: Event,
@@ -363,6 +377,9 @@ impl GraphExecutor {
                         let buffer = manifest.buffer("proposal_confidence")?;
                         Readback::new(&model, buffer.address, buffer.nbytes)
                     })
+                    .transpose()?,
+                readiness: manifest.buffers.iter().find(|buffer| buffer.name == "readiness_timestamps")
+                    .map(|buffer| Readback::new(&model, buffer.address + index * buffer.nbytes / 2, buffer.nbytes / 2))
                     .transpose()?,
                 produced: model.event_with_timing(true)?,
                 started: model.event_with_timing(true)?,
@@ -620,6 +637,13 @@ impl GraphExecutor {
                         &resources.copy, confidence.address, confidence.nbytes,
                     )?;
                 }
+                if crate::engram::consumes(graph.kind) {
+                    if let Some(readback) = &frame.readiness {
+                        let buffer = self.manifest.buffer("readiness_timestamps")?;
+                        readback.enqueue_copy(&resources.copy, buffer.address + index * buffer.nbytes / 2,
+                                              buffer.nbytes / 2)?;
+                    }
+                }
             }
             resources.copy.record(&frame.transferred)
         };
@@ -715,10 +739,26 @@ impl GraphExecutor {
                 return Err(error);
             }
         };
+        let readiness = if crate::engram::consumes(self.manifest.graphs[pending.graph_index].kind) {
+            frame.readiness.as_ref().map(|readback| {
+                // SAFETY: The frame's transfer event completed before decoding its retained readback.
+                ReadinessIntervals::decode(unsafe { readback.bytes() })
+            }).transpose()
+        } else { Ok(None) };
+        let readiness = match readiness {
+            Ok(value) if value.is_none_or(|sample| sample.wait_ns() <= elapsed_ns) => value,
+            value => {
+                let error = value.err().unwrap_or_else(|| Error::execution(ExecutionError::Completion,
+                    "readiness delay exceeds its enclosing CUDA interval"));
+                self.poison = Some(error.clone());
+                return Err(error);
+            }
+        };
         Ok(Some(FrameCompletion {
             fence: pending.fence,
             graph_index: pending.graph_index,
             timing: ExecutionTiming {
+                readiness,
                 gpu_ns: [
                     Some(elapsed_ns),
                     None,

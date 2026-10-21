@@ -121,6 +121,10 @@ class PreparedAllReduce:
             group = runtime.exchange_group
 
             def prepare(state):
+                if state.query.surface == "PCIeTwoShotBF16.all_reduce":
+                    from b12x.comm.pcie._twoshot_preparation import prepared_call
+
+                    return prepared_call(state, payload=source, out=output)
                 state.bind_input(source)
                 return PreparedCall(run=lambda: state.run_plain(source, output),
                                     output=output, owners=(runtime, source, output))

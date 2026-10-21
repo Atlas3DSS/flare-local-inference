@@ -88,6 +88,60 @@ impl Candidate {
 }
 
 impl RequestScheduler {
+    pub(super) fn dominates_padding(&self, smaller: Candidate, larger: Candidate) -> bool {
+        let rows = |candidate: Candidate| {
+            if candidate.packed_token_capacity != 0 {
+                candidate.packed_token_capacity
+            } else if candidate.kind == GraphKind::Mixed {
+                candidate.prefill_capacity + (candidate.batch - 1) * candidate.capacity
+            } else {
+                candidate.batch * candidate.capacity
+            }
+        };
+        let physical = |candidate: Candidate| [candidate.batch, candidate.capacity,
+            candidate.prefill_capacity, rows(candidate)];
+        let left = physical(smaller);
+        let right = physical(larger);
+        if smaller.kind != larger.kind || smaller.mask != larger.mask
+            || smaller.prefill_slot != larger.prefill_slot
+            || smaller.verification_budget != larger.verification_budget
+            || left == right || left.iter().zip(right).any(|(a, b)| *a > b) {
+            return false;
+        }
+        if smaller.kind == GraphKind::Prefill {
+            return smaller.work == larger.work;
+        }
+        if smaller.capacity == larger.capacity && smaller.prefill_capacity == larger.prefill_capacity {
+            return true;
+        }
+        bits(smaller.mask).all(|slot| {
+            let request = self.slots[slot].request.as_ref().unwrap();
+            if smaller.prefill_slot == Some(slot) {
+                self.prefill_work(request, smaller.prefill_capacity)
+                    == self.prefill_work(request, larger.prefill_capacity)
+            } else {
+                let kind = if smaller.kind == GraphKind::Mixed {
+                    if self.speculative_widths.is_empty() { GraphKind::Decode } else { GraphKind::Speculative }
+                } else { smaller.kind };
+                self.lane_tokens(request, kind, smaller.capacity)
+                    == self.lane_tokens(request, kind, larger.capacity)
+            }
+        })
+    }
+
+    pub(super) fn prune_padding(&self, candidates: &mut [Candidate]) -> usize {
+        let mut retained = 0;
+        for index in 0..candidates.len() {
+            let candidate = candidates[index];
+            if !candidates.iter().copied().any(|other| self.dominates_padding(other, candidate)) {
+                candidates.swap(index, retained);
+                retained += 1;
+            }
+        }
+        // Keep dominated candidates in the tail for funded cost-refresh probes.
+        retained
+    }
+
     pub fn configure_policy(&mut self, policy: PolicyConfig) -> Result<()> {
         if self.submitted != Fence(0) || self.slots.iter().any(|s| s.request.is_some()) {
             return Err("scheduling policy must be configured before admission".into());
@@ -824,7 +878,7 @@ impl RequestScheduler {
         });
     }
 
-    fn candidates(
+    pub(super) fn candidates(
         &self,
         output: &mut Vec<Candidate>,
         values: &[LaneValue; REQUEST_LANES],
@@ -993,6 +1047,7 @@ impl RequestScheduler {
         let (values, age_price, log_scale) = self.lane_values(window);
         let mut candidates = self.candidates.borrow_mut();
         self.candidates(&mut candidates, &values, age_price);
+        let ordinary_count = self.prune_padding(&mut candidates);
         let compare = |a: &Candidate, b: &Candidate| {
             let last = |c: &Candidate| {
                 bits(c.mask)
@@ -1008,7 +1063,7 @@ impl RequestScheduler {
                 .then(b.prefill_capacity.cmp(&a.prefill_capacity))
                 .then(b.mask.cmp(&a.mask))
         };
-        let ordinary = *candidates.iter().max_by(|a, b| compare(a, b))?;
+        let ordinary = *candidates[..ordinary_count].iter().max_by(|a, b| compare(a, b))?;
         if let Some(episode) = self.refresh_episode() {
             let mut continuations = Vec::new();
             self.refresh_verification_candidates(

@@ -216,8 +216,9 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
     if progress is not None:
         progress(f"Resident model tensors: {weights.allocated_bytes / (1 << 30):.3f} GiB per rank")
     sequence = torch.zeros(1, dtype=torch.int64, device=device)
+    frame = torch.zeros(1, dtype=torch.int32, device=device)
     tables = Tables.prepare(manifest, weights.config, tokens=max(config.prefill_chunk_size, config.decode_tokens),
-        device=device, sequence=sequence, host_allocator=package_storage.host_allocate, progress=progress, shard=shard)
+        device=device, sequence=sequence, frame=frame, host_allocator=package_storage.host_allocate, progress=progress, shard=shard)
     with phase(progress, "Allocate model state and collectives"):
         layout = continuation_layout(weights.config, dspark=config.dspark)
         snapshots = layout.snapshot_capacity(config.snapshot_budget_bytes)
@@ -239,7 +240,6 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         inputs = BatchInputs.allocate(config.prefill_chunk_size, blocks, device, capacity=slots)
         admission = AdmissionBuffers.allocate(device, vocab_size=129280, capacity=slots)
         commands = StateCommands.allocate(device, capacity=slots)
-        frame = torch.zeros(1, dtype=torch.int32, device=device)
         completion = CompletionOutputs.allocate((2, slots, 24 if config.dspark else 8), device=device)
         coordinator = CollectivePreparation(group)
         verification_samples = (slots * max(config.speculative_widths)
@@ -247,6 +247,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         collective, prefill_collective, vocabulary_collective, result_collective = _collective_runtimes(
             config, group, device, coordinator=coordinator, package_storage=package_storage,
             verification_samples=verification_samples)
+        tables = replace(tables, readiness_runtime=collective)
         identity = hashlib.sha256(json.dumps({"config": json.loads((metadata_path / "config.json").read_text()),
             "headers": [s.header_sha256 for s in manifest.shards], "world_size": shard.world_size,
             "contract": "deepseek41.graph-inputs.v1"}, sort_keys=True).encode()).hexdigest()

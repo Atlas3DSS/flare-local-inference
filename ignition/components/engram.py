@@ -9,26 +9,23 @@ from b12x.sequence import engram
 from b12x.sequence.engram._kernels import hash_op, lookup_op
 
 from ignition.components.ngram_delivery import publish_requests
+from ignition.components.readiness import PreparedReadinessWait, ReadinessTimings, wait_for_readiness
 
 from ignition.preparation.tuning import declare
 
 
-@torch.library.custom_op("flare::staged_engram", mutates_args=("out",))
+@torch.library.custom_op("flare::staged_engram", mutates_args=("out", "timings", "barrier_output"))
 def _lookup(source: torch.Tensor, weight: torch.Tensor, scales: torch.Tensor,
             hashes: torch.Tensor, count: torch.Tensor, out: torch.Tensor,
-            plan: int, event: int) -> None:
-    from cuda.bindings import driver
-
-    stream = torch.cuda.current_stream(source.device)
-    flags = int(torch.cuda.is_current_stream_capturing())
-    status, = driver.cuStreamWaitEvent(driver.CUstream(stream.cuda_stream), driver.CUevent(event), flags)
-    if int(status):
-        raise RuntimeError(f"Engram readiness wait failed: {status}")
+            timings: torch.Tensor, frame: torch.Tensor, barrier_input: torch.Tensor,
+            barrier_output: torch.Tensor, interval: int, barrier: int, plan: int, event: int) -> None:
+    wait_for_readiness(source, event, timings, frame, interval, barrier_input, barrier_output, barrier)
     lookup_op(plan, weight.view(torch.float8_e4m3fn), scales, hashes, count, out, hashes.shape[0], True)
 
 
 @_lookup.register_fake
-def _lookup_fake(source, weight, scales, hashes, count, out, plan, event):
+def _lookup_fake(source, weight, scales, hashes, count, out, timings, frame,
+                 barrier_input, barrier_output, interval, barrier, plan, event):
     pass
 
 
@@ -38,27 +35,32 @@ class EngramInputs:
     scales: torch.Tensor
     hashes: torch.Tensor
     ready: object
+    timings: ReadinessTimings
+    interval: int
 
     @classmethod
-    def allocate(cls, tokens, device):
+    def allocate(cls, tokens, device, *, timings, interval=0):
         ready = torch.cuda.Event(external=True)
         ready.record(torch.cuda.current_stream(device))
         return cls(torch.zeros((tokens * 24, 256), dtype=torch.uint8, device=device),
                    torch.zeros((tokens * 24, 8), dtype=torch.uint8, device=device),
-                   torch.full((tokens, 24), -1, dtype=torch.int64, device=device), ready)
+                   torch.full((tokens, 24), -1, dtype=torch.int64, device=device), ready, timings, interval)
 
     def buffers(self, layer):
         return {f"engram_{layer}_{name}": getattr(self, name) for name in ("weights", "scales", "hashes")}
 
 
 class PreparedEngramLookup:
-    def __init__(self, inputs, output, count, *, layer, token_map, geometry, session, name):
+    def __init__(self, inputs, output, count, *, layer, token_map, geometry, session, name,
+                 runtime=None, coordinator=None):
         tokens = output.shape[0]
         self.weights = inputs.weights[:tokens * 24]
         self.scales = inputs.scales[:tokens * 24]
         self.hashes = inputs.hashes[:tokens]
         self.count, self.output = count, output
         self.handle = inputs.ready.cuda_event
+        self.wait = PreparedReadinessWait(inputs.timings, inputs.interval, runtime=runtime, session=session,
+                                         coordinator=coordinator, name=name + ".readiness")
         self.plan = engram.plan(engram.Caps(device=output.device, max_tokens=tokens,
             max_seqs=tokens, max_requests=tokens, vocab_size=len(token_map), layer_id=layer,
             tp_size=1, tp_rank=0), token_map=token_map, geometry=geometry,
@@ -70,7 +72,9 @@ class PreparedEngramLookup:
 
     def __call__(self, source):
         _lookup(source, self.weights, self.scales, self.hashes, self.count,
-                self.output, self.plan.handle, self.handle)
+                self.output, self.wait.timings.timestamps, self.wait.timings.frame,
+                self.wait.input, self.wait.output, self.wait.interval, self.wait.handle,
+                self.plan.handle, self.handle)
         return self.output
 
 

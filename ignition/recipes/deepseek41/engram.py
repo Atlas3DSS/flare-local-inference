@@ -8,6 +8,7 @@ from b12x.preparation import PreparedCall
 from b12x.sequence import engram
 
 from ignition.components.engram import EngramInputs, PreparedEngramLookup, PreparedEngramRequests
+from ignition.components.readiness import ReadinessTimings
 from ignition.components.embedding_partition import EmbeddingHeadPartition
 from ignition.components.linear import QuantizedProjection
 from ignition.components.collectives import PreparedChunkedAllReduce
@@ -28,9 +29,10 @@ class Tables:
     shard: object
     row_mapping: dict
     columns: torch.Tensor
+    readiness_runtime: object = None
 
     @classmethod
-    def prepare(cls, manifest, config, *, tokens, device, sequence, host_allocator, progress=None, shard=None):
+    def prepare(cls, manifest, config, *, tokens, device, sequence, frame, host_allocator, progress=None, shard=None):
         from transformers import PreTrainedTokenizerFast
         from ignition.components.parallel import TensorParallelShard
 
@@ -46,6 +48,7 @@ class Tables:
         if geometry.num_embeddings != tuple(text["engram_num_embeddings"]):
             raise ValueError("Engram hash geometry differs from checkpoint tables")
         sources, inputs, mailboxes, row_mapping = {}, {}, {}, {}
+        timings = ReadinessTimings.allocate(frame, len(geometry.layer_ids))
         with phase(progress, "Prepare embedding tables") as stage:
             for index, layer in enumerate(geometry.layer_ids):
                 rows = geometry.num_embeddings[index]
@@ -60,7 +63,7 @@ class Tables:
                 partition = EmbeddingHeadPartition.for_rank(geometry.offsets[index], rows,
                                                             shard.rank, shard.world_size)
                 row_mapping[layer] = torch.tensor(partition.row_mapping, dtype=torch.int64, device=device)
-                inputs[layer] = EngramInputs.allocate(tokens, device)
+                inputs[layer] = EngramInputs.allocate(tokens, device, timings=timings, interval=index)
                 mailboxes[layer] = host_allocator(f"engram_{layer}_requests", (tokens * 24 + 1,), torch.int64)
                 mailboxes[layer].host_view.zero_()
             stage.update(f"{sum(source.nbytes for pair in sources.values() for source in pair) / (1 << 30):.1f} GiB in checkpoint spans")
@@ -70,7 +73,8 @@ class Tables:
 
     def buffers(self):
         return {**{name: tensor for layer, inputs in self.inputs.items() for name, tensor in inputs.buffers(layer).items()},
-                **{f"engram_{layer}_requests": mailbox.device_view for layer, mailbox in self.mailboxes.items()}}
+                **{f"engram_{layer}_requests": mailbox.device_view for layer, mailbox in self.mailboxes.items()},
+                **next(iter(self.inputs.values())).timings.buffers()}
 
     def events(self):
         return {f"engram_{layer}_ready": inputs.ready.cuda_event for layer, inputs in self.inputs.items()}
@@ -207,7 +211,7 @@ class PreparedEngram:
                 raise ValueError("Engram scratch must match the contiguous lookup and projection geometry")
         self.lookup = PreparedEngramLookup(tables.inputs[layer], self.gathered, metadata.live_counts[:1],
             layer=layer, token_map=tables.token_map, geometry=tables.geometry,
-            session=session, name=name + ".lookup")
+            session=session, name=name + ".lookup", runtime=tables.readiness_runtime, coordinator=coordinator)
         self.projection = QuantizedProjection(self.local, weights["projection"], self.partial,
             session=session, name=name + ".projection", workspace=workspace, activation_mode="auto")
         self.reduce = (PreparedChunkedAllReduce(self.partial.view(-1, 5120), self.projected.view(-1, 5120), runtime=runtime,

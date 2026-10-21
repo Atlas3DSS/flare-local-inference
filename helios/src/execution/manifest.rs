@@ -416,6 +416,14 @@ impl ExecutionManifest {
         }
         let logprobs = self.max_top_logprobs()? != 0;
         self.prompt_logprob_capacity()?;
+        if let Some(buffer) = self.buffers.iter().find(|buffer| buffer.name == "readiness_timestamps") {
+            if buffer.dtype != Dtype::Int64 || buffer.shape.len() != 2 || buffer.shape[0] != 2
+                || buffer.shape[1] == 0 || buffer.shape[1] % 3 != 0
+                || buffer.shape[1] / 3 > super::MAX_READINESS_INTERVALS
+                || buffer.strides != [buffer.shape[1], 1] {
+                return Err("readiness timestamps require two contiguous int64 frames of three timestamps per interval".into());
+            }
+        }
         let mut names = HashSet::new();
         let mut host_spans = HashMap::<&str, (usize, usize)>::new();
         for graph in &self.graphs {
@@ -486,7 +494,7 @@ impl ExecutionManifest {
             let mut bound = HashSet::new();
             for binding in &graph.input_bindings {
                 if !bound.insert(binding.buffer_name.as_str())
-                    || ["completion_records", "completion_logprobs", "prompt_logprobs"].contains(&binding.buffer_name.as_str())
+                    || ["completion_records", "completion_logprobs", "prompt_logprobs", "readiness_timestamps"].contains(&binding.buffer_name.as_str())
                 {
                     return Err(Error::execution(
                         ExecutionError::Manifest,

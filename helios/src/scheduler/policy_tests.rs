@@ -1,7 +1,56 @@
 use super::*;
+use super::{policy::Candidate, utility::ValueRate};
 use crate::execution::{ExecutionTiming, SamplingMode, TokenVector};
 
 const MS: u64 = 1_000_000;
+
+#[test]
+fn padding_pruning_keeps_three_requests_on_batch_four_and_two_requests_on_batch_two() {
+    let mut s = engine(8, false);
+    let handles = (0..3).map(|id| add(&mut s, id, 64, 4096)).collect::<Vec<_>>();
+    for handle in handles {
+        let request = s.request_mut(handle).unwrap();
+        request.phase = RequestPhase::Decode;
+        request.consumed_tokens = 64;
+        request.scheduled_consumed = 64;
+        request.generated_tokens = 1;
+    }
+    let (values, age, _) = s.lane_values(s.window_remaining().unwrap());
+    let mut candidates = Vec::new();
+    s.candidates(&mut candidates, &values, age);
+    assert!(candidates.iter().any(|c| c.kind == GraphKind::Decode && c.batch == 8 && c.mask.count_ones() == 3));
+    let count = s.prune_padding(&mut candidates);
+    candidates.truncate(count);
+    assert!(candidates.iter().any(|c| c.kind == GraphKind::Decode && c.batch == 4 && c.mask.count_ones() == 3));
+    assert!(candidates.iter().any(|c| c.kind == GraphKind::Decode && c.batch == 2 && c.mask.count_ones() == 2));
+    assert!(!candidates.iter().any(|c| c.kind == GraphKind::Decode && c.batch == 8));
+}
+
+#[test]
+fn faster_padded_estimates_do_not_displace_equivalent_unpadded_work() {
+    let mut s = engine(8, false);
+    let h = add(&mut s, 1, 64, 128);
+    ready(&mut s, &[h]);
+    set_cost(&mut s, GraphKind::Decode, 1, 1, 10 * MS);
+    for batch in [2, 4, 8] {
+        set_cost(&mut s, GraphKind::Decode, batch, 1, MS);
+    }
+    let plan = s.plan().unwrap();
+    assert_eq!((plan.kind, plan.batch_capacity, plan.lanes.len()), (GraphKind::Decode, 1, 1));
+}
+
+#[test]
+fn equal_counts_from_different_cohorts_and_different_logical_prefixes_are_not_pruned() {
+    let mut s = engine(4, true);
+    let handles = (0..2).map(|id| add(&mut s, id, 64, 128)).collect::<Vec<_>>();
+    ready(&mut s, &handles);
+    let candidate = Candidate { kind: GraphKind::Speculative, mask: 1 << handles[0].slot,
+        batch: 1, capacity: 1, packed_token_capacity: 0, prefill_capacity: 0, prefill_slot: None,
+        work: 0, duration_ns: MS, rate: ValueRate::new(MS, 1.0, 0.0), feedback: true,
+        verification_budget: None };
+    assert!(!s.dominates_padding(candidate, Candidate { batch: 4, capacity: 4, ..candidate }));
+    assert!(!s.dominates_padding(candidate, Candidate { batch: 4, mask: 1 << handles[1].slot, ..candidate }));
+}
 
 fn engine(active: usize, speculative: bool) -> RequestScheduler {
     let mut s = RequestScheduler::new(
@@ -425,7 +474,7 @@ fn indeterminate_execution_occupies_the_submission_window_until_completion() {
 }
 
 #[test]
-fn stale_graph_cost_retains_its_last_valid_observation_and_restarts_the_ema() {
+fn stale_graph_cost_retains_its_last_valid_observation_and_resets_the_median() {
     let mut s = cold_engine(1, false);
     add(&mut s, 1, 1, 64);
     let plan = s.plan().unwrap();
@@ -542,7 +591,7 @@ fn stale_graph_cost_retains_its_last_valid_observation_and_restarts_the_ema() {
             ..Default::default()
         },
     );
-    assert_eq!(s.estimated_duration_ns(&plan), Some(9 * MS));
+    assert_eq!(s.estimated_duration_ns(&plan), Some(12 * MS));
 }
 
 #[test]
@@ -585,7 +634,7 @@ fn funded_stale_graph_recheck_recovers_a_poisoned_observation() {
             ..Default::default()
         },
     );
-    assert_eq!(s.estimated_duration_ns(&plan), Some(126_750_000));
+    assert_eq!(s.estimated_duration_ns(&plan), Some(501_000_000));
     assert_ne!(s.plan().unwrap().token_capacity, 8);
     let ttl = s.policy.estimate_ttl_ns;
     s.advance_to(ttl / 2).unwrap();
@@ -623,7 +672,7 @@ fn funded_stale_graph_recheck_recovers_a_poisoned_observation() {
     let retry = measured_step(&mut s, 2 * MS, 7);
     assert_eq!(
         (retry.token_capacity, retry.estimated_duration_ns()),
-        (8, 126_750_000)
+        (8, 501_000_000)
     );
     assert!(matches!(retry.origin, PlanOrigin::RefreshStart(_)));
     assert_eq!(s.estimated_duration_ns(&retry), Some(2 * MS));
@@ -1125,13 +1174,13 @@ fn small_prefill_tails_choose_the_best_effective_value_rate() {
 }
 
 #[test]
-fn fully_padded_larger_prefill_can_win_when_its_measured_execution_is_faster() {
+fn equivalent_prefill_tails_use_the_smaller_graph_despite_a_faster_padded_estimate() {
     let mut s = interactive_engine(1, false);
     set_cost(&mut s, GraphKind::Prefill, 1, 4096, MS);
     add(&mut s, 1, 64, 128);
     step(&mut s, 0);
     let plan = s.plan().unwrap();
-    assert_eq!((plan.token_capacity, plan.lanes[0].tokens), (4096, 64));
+    assert_eq!((plan.token_capacity, plan.lanes[0].tokens), (64, 64));
 }
 
 #[test]
@@ -1154,13 +1203,13 @@ fn efficient_thirty_millisecond_speculation_beats_seventeen_millisecond_rounds()
 }
 
 #[test]
-fn physical_decode_batch_padding_is_compared_by_measured_cost() {
+fn equivalent_decode_work_uses_the_smaller_batch_despite_a_faster_padded_estimate() {
     let mut s = interactive_engine(4, false);
     let h = add(&mut s, 1, 64, 1024);
     ready(&mut s, &[h]);
     set_cost(&mut s, GraphKind::Decode, 4, 1, 10 * MS);
     let plan = s.plan().unwrap();
-    assert_eq!((plan.batch_capacity, plan.lanes.len()), (4, 1));
+    assert_eq!((plan.batch_capacity, plan.lanes.len()), (1, 1));
     assert_eq!(plan.lanes[0].request, h);
 }
 
@@ -1835,20 +1884,22 @@ fn mixed_cost_observations_and_expiry_are_specific_to_both_token_capacities() {
     s.advance_to(10 * MS).unwrap();
     s.observe_execution(&make(8, 64), gpu_time(10 * MS));
     assert_eq!(s.estimated_duration_ns(&make(1, 64)), Some(MS));
-    assert_eq!(s.estimated_duration_ns(&make(8, 64)), Some(3 * MS));
+    assert_eq!(s.estimated_duration_ns(&make(8, 64)), Some(6 * MS));
     assert_eq!(s.estimated_duration_ns(&make(8, 512)), Some(3 * MS));
     s.advance_to(s.policy.estimate_ttl_ns).unwrap();
     assert_eq!(s.estimated_duration_ns(&make(8, 512)), Some(3 * MS));
     assert!(!s.costs.is_fresh(cost::Key::from_step(&make(8, 512))));
-    assert_eq!(s.estimated_duration_ns(&make(8, 64)), Some(3 * MS));
+    assert_eq!(s.estimated_duration_ns(&make(8, 64)), Some(6 * MS));
     s.advance_to(s.policy.estimate_ttl_ns + 10 * MS).unwrap();
-    assert_eq!(s.estimated_duration_ns(&make(8, 64)), Some(3 * MS));
+    assert_eq!(s.estimated_duration_ns(&make(8, 64)), Some(6 * MS));
     s.observe_execution(&make(8, 64), gpu_time(MS));
     assert_eq!(s.estimated_duration_ns(&make(8, 64)), Some(MS));
 }
 
 #[test]
 fn mixed_and_separate_selection_matches_exhaustive_useful_work_per_time() {
+    #[derive(Clone, Copy)]
+    struct Alternative { kind: u8, mask: u64, prompt: usize, batch: usize, prefill: usize, rate: f64 }
     for seed in 0..16usize {
         let shapes: Vec<_> = [2, 4, 8]
             .into_iter()
@@ -1882,8 +1933,9 @@ fn mixed_and_separate_selection_matches_exhaustive_useful_work_per_time() {
                 r.generated_tokens = 1;
             }
         }
-        let mut expected = 0.0f64;
+        let mut alternatives = Vec::<Alternative>::new();
         let mut consider = |batch: usize, pcap: usize, ns: u64, allow_p: bool, allow_d: bool| {
+            let mut best = [None::<Alternative>; 2];
             for mask in 1u64..64 {
                 let ps = (mask & 3).count_ones() as usize;
                 let ds = (mask & !3).count_ones() as usize;
@@ -1891,15 +1943,25 @@ fn mixed_and_separate_selection_matches_exhaustive_useful_work_per_time() {
                     continue;
                 }
                 let mut value = 64.0 * ds as f64;
+                let mut prompt_work = 0;
                 for slot in 0..2 {
                     if mask & (1 << slot) == 0 {
                         continue;
                     }
                     let prompt = s.slots[slot].request.as_ref().unwrap().prompt_tokens;
+                    prompt_work = prompt.min(pcap);
                     value += prompt.min(pcap) as f64 + if prompt <= pcap { 64.0 } else { 0.0 };
                 }
-                expected = expected.max(value * 1e6 / ns as f64);
+                let alternative = Alternative { kind: if allow_p && allow_d { 2 } else { u8::from(allow_p) },
+                    mask, prompt: prompt_work, batch, prefill: pcap, rate: value * 1e6 / ns as f64 };
+                let entry = &mut best[usize::from(ps != 0)];
+                if entry.is_none_or(|old| alternative.rate > old.rate
+                    || (alternative.rate == old.rate && (mask.count_ones() > old.mask.count_ones()
+                        || (mask.count_ones() == old.mask.count_ones() && mask < old.mask)))) {
+                    *entry = Some(alternative);
+                }
             }
+            alternatives.extend(best.into_iter().flatten());
         };
         for &p in &s.prefill_catalog {
             consider(
@@ -1922,6 +1984,11 @@ fn mixed_and_separate_selection_matches_exhaustive_useful_work_per_time() {
         for &(b, _, p, t) in &shapes {
             consider(b, p, t, true, true);
         }
+        let expected = alternatives.iter().filter(|candidate| !alternatives.iter().any(|other| {
+            other.kind == candidate.kind && other.mask == candidate.mask && other.prompt == candidate.prompt
+                && other.batch <= candidate.batch && other.prefill <= candidate.prefill
+                && (other.batch < candidate.batch || other.prefill < candidate.prefill)
+        })).map(|candidate| candidate.rate).fold(0.0f64, f64::max);
         let plan = s.plan().unwrap();
         let actual = plan.selection_value_rate() * plan.selection_log_scale().exp();
         assert!(

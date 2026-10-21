@@ -481,6 +481,11 @@ pub(crate) struct Transfers {
 }
 impl Transfers {
     pub fn new(binding: Binding, manifest: &ExecutionManifest) -> Result<Self> {
+        if let Some(buffer) = manifest.buffers.iter().find(|buffer| buffer.name == "readiness_timestamps") {
+            if buffer.shape[1] / 3 != binding.shared.index.tables.len() {
+                return Err("readiness interval count differs from the embedding table catalog".into());
+            }
+        }
         let mut layers = Vec::new();
         for (i, table) in binding.shared.index.tables.iter().enumerate() {
             let stream = Stream::open(manifest.context, manifest.device)?;

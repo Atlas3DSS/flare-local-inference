@@ -12,6 +12,7 @@ from ignition.recipes.deepseek4.attention import AttentionIndices
 from ignition.recipes.deepseek41.decoder import PreparedDecoderBoundary
 from ignition.recipes.deepseek41.decoder_prefill import PreparedDecoderSuffix
 from ignition.recipes.deepseek41.attention import PreparedAttention
+from ignition.recipes.deepseek41.attention import AttentionIndices as DeepSeek41Indices
 from ignition.preparation.scratch import GraphBufferPool
 from .window_indices_reference import LiteralDeepSeek4WindowIndices, LiteralDeepSeek41WindowIndices
 
@@ -29,6 +30,11 @@ def assert_metadata_equal(actual, expected):
 def poison(indices):
     for field in FIELDS:
         getattr(indices, field).fill_(-777)
+    if isinstance(indices, DeepSeek41Indices):
+        indices.position.fill_(-777)
+        for shared in indices.ratios.values():
+            for value in vars(shared).values():
+                value.fill_(-777)
 
 
 def set_metadata(metadata, starts, lengths):
@@ -171,7 +177,7 @@ def test_attention_rejects_incompatible_shared_window_indices(mismatch):
         arguments["replay_start"] = torch.zeros_like(metadata.starts)
     else:
         arguments["visible"] = (torch.zeros(24), torch.zeros(24))
-    helper = PreparedWindowIndices(**arguments)
+    helper = DeepSeek41Indices(**arguments)
     config = SimpleNamespace(text={"compress_ratios": [0], "rms_norm_eps": 1e-6}, source=lambda layer: None)
     pool = SimpleNamespace(config=config, window=lambda *args, **kwargs: torch.zeros((1, 128 * 528), dtype=torch.uint8))
     with pytest.raises(ValueError, match="shared window indices must match"):
@@ -224,7 +230,7 @@ def test_decoder_window_groups_survive_reused_prefill_layer_buffers(monkeypatch)
         attention: dict
 
     layers = [Layer(engram=None, attention={}) for _ in range(3)]
-    weights = SimpleNamespace(config=SimpleNamespace(decoder_start=1, sources=()),
+    weights = SimpleNamespace(config=SimpleNamespace(decoder_start=1, sources=(), text={"compress_ratios": [0, 0, 0]}),
         layers=layers, draft=None, embedding=None, head=None, shard=SimpleNamespace(world_size=4))
     private = []
 

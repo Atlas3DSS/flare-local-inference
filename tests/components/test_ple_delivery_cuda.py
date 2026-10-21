@@ -15,6 +15,7 @@ from b12x.sequence.ple_hash.reference import ple_hash_packed_reference
 from cuda.bindings import driver
 
 from ignition.components.ngram_delivery import PreparedPLELookup
+from ignition.components.readiness import ReadinessTimings
 from ignition.recipes.qwen38.ple import PLEMetadata
 
 pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
@@ -59,6 +60,8 @@ def test_gpu_requests_feed_resident_ple_rows(tmp_path, tokens):
         scale=torch.tensor([.25], dtype=torch.float32, device=device), mailbox=mailbox, ready=ready,
         sequence=torch.zeros(1, dtype=torch.int64, device=device))
     metadata = PLEMetadata.allocate(tokens, 1, device, eos_token_id=2)
+    frame = torch.zeros(1, dtype=torch.int32, device=device)
+    table.timings = ReadinessTimings.allocate(frame, 1)
     output = torch.empty((tokens, 2560), dtype=torch.bfloat16, device=device)
     staging_w = torch.empty_like(table.weights, device="cpu", pin_memory=True)
     staging_s = torch.empty_like(table.scales, device="cpu", pin_memory=True)
@@ -79,6 +82,7 @@ def test_gpu_requests_feed_resident_ple_rows(tmp_path, tokens):
         torch.cuda.synchronize()
         allocated = torch.cuda.memory_allocated()
         for generation, live in enumerate((tokens, max(1, tokens // 2), 0), 1):
+            frame.fill_(generation % 2)
             ids = (torch.arange(tokens) * 17 + generation) % 256
             metadata.token_ids.copy_(ids)
             metadata.query_start_loc.copy_(torch.tensor([0, live], dtype=torch.int32))
@@ -126,6 +130,9 @@ def test_gpu_requests_feed_resident_ple_rows(tmp_path, tokens):
             if errors:
                 raise errors[0]
             assert torch.cuda.memory_allocated() == allocated
+            before, ready_at, synchronized = table.timings.timestamps.cpu()[generation % 2].tolist()
+            assert before < ready_at <= synchronized
+            assert 8_000_000 <= ready_at - before < 1_000_000_000
             expected_ids = ple_hash_packed_reference(ids[:live], torch.tensor([0, live], dtype=torch.int32),
                 metadata.committed_history.cpu(), eos_token_id=2,
                 multipliers=table.geometry.multipliers.cpu(), prime_sizes=table.geometry.prime_sizes.cpu(),

@@ -244,8 +244,8 @@ impl TensorParallelExecutor {
                 .map_err(|error| invalid(format!("rank {}: {error}", index + 1)))?;
         }
         for (index, peer) in self.peers.iter_mut().enumerate() {
-            self.completion.as_mut().unwrap().timing.gpu_ns[index + 1] =
-                peer.completion.as_ref().unwrap().timing.gpu_ns[0];
+            self.completion.as_mut().unwrap().timing.merge_rank(index + 1,
+                peer.completion.as_ref().unwrap().timing)?;
             peer.completion = None;
         }
         self.completion.as_mut().unwrap().timing.wall_ns =

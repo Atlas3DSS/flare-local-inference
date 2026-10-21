@@ -273,7 +273,7 @@ class PreparedDecoder:
             {key: getattr(module, key).weight for key in ("key_proj", "value_proj")},
             scratch.residual, scratch.ple, state.pool.ple_convolution, state.ple, ple_table,
             mode=state.mode, session=session, name=f"{name}.ple", workspace=workspaces,
-            partitions=getattr(state, "ple_partitions", None))
+            partitions=getattr(state, "ple_partitions", None), runtime=runtime, coordinator=coordinator)
         self.final_mixer = PreparedHyperconnection(language.hyper_connection_mixer,
             scratch.hyperconnection, priming_state=scratch.residual,
             session=session, name=f"{name}.final_mixer")

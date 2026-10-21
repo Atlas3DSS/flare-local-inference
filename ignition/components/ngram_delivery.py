@@ -8,6 +8,7 @@ from b12x.preparation.types import plan_from_handle, require_prepared
 from b12x.sequence import ple_embedding
 
 from ignition.preparation.tuning import declare
+from ignition.components.readiness import PreparedReadinessWait, wait_for_readiness
 
 
 @triton.jit
@@ -52,29 +53,25 @@ def _requests_fake(token_ids, query_start, history, num_seqs, num_tokens, multip
     pass
 
 
-@torch.library.custom_op("flare::staged_ple", mutates_args=("out",))
+@torch.library.custom_op("flare::staged_ple", mutates_args=("out", "timings", "barrier_output"))
 def _lookup(source: torch.Tensor, weight: torch.Tensor, scales: torch.Tensor,
             scale: torch.Tensor, ids: torch.Tensor, count: torch.Tensor, out: torch.Tensor,
-            plan: int, event: int) -> None:
-    from cuda.bindings import driver
-
-    stream = torch.cuda.current_stream(source.device)
-    status, = driver.cuStreamWaitEvent(driver.CUstream(stream.cuda_stream), driver.CUevent(event),
-                                      int(torch.cuda.is_current_stream_capturing()))
-    if int(status):
-        raise RuntimeError(f"PLE readiness wait failed: {status}")
+            timings: torch.Tensor, frame: torch.Tensor, barrier_input: torch.Tensor,
+            barrier_output: torch.Tensor, barrier: int, plan: int, event: int) -> None:
+    wait_for_readiness(source, event, timings, frame, 0, barrier_input, barrier_output, barrier)
     state = require_prepared(plan_from_handle(plan), "sequence.ple_embedding", out.device)
     state.run_lookup(weight, scales.view(torch.float8_e4m3fn), scale, ids, count, out,
                      token_count=out.shape[0])
 
 
 @_lookup.register_fake
-def _lookup_fake(source, weight, scales, scale, ids, count, out, plan, event):
+def _lookup_fake(source, weight, scales, scale, ids, count, out, timings, frame,
+                 barrier_input, barrier_output, barrier, plan, event):
     pass
 
 
 class PreparedPLELookup:
-    def __init__(self, table, metadata, output, caps, *, session, name):
+    def __init__(self, table, metadata, output, caps, *, session, name, runtime=None, coordinator=None):
         self.metadata, self.output = metadata, output
         self.geometry, self.scale = table.geometry, table.scale
         self.mailbox, self.sequence = table.mailbox.device_view, table.sequence
@@ -83,6 +80,8 @@ class PreparedPLELookup:
         self.requests = torch.empty(tokens, dtype=torch.int32, device=output.device)
         self.weights, self.scales = table.weights[:tokens * heads], table.scales[:tokens * heads]
         self.handle = table.ready.cuda_event
+        self.wait = PreparedReadinessWait(table.timings, 0, runtime=runtime, session=session,
+                                         coordinator=coordinator, name=name + ".readiness")
         geometry = table.geometry
         self.plan = ple_embedding.plan(caps, geometry=geometry.geometry,
             prime_sizes=geometry.prime_sizes, table_offsets=geometry.table_offsets,
@@ -106,4 +105,5 @@ class PreparedPLELookup:
 
     def __call__(self, source):
         _lookup(source, self.weights, self.scales, self.scale, self.ids,
-                self.metadata.num_tokens, self.output, self.plan.handle, self.handle)
+                self.metadata.num_tokens, self.output, self.wait.timings.timestamps, self.wait.timings.frame,
+                self.wait.input, self.wait.output, self.wait.handle, self.plan.handle, self.handle)

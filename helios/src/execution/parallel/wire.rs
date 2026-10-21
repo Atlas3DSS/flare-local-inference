@@ -242,6 +242,13 @@ pub(super) fn completion(value: &FrameCompletion) -> Vec<u8> {
     number(&mut bytes, value.timing.gpu_ns[0].unwrap_or(0) as usize);
     number(&mut bytes, value.timing.wall_ns as usize);
     number(&mut bytes, usize::from(value.timing.queued));
+    number(&mut bytes, value.timing.readiness.map_or(0, |samples| samples.len));
+    if let Some(samples) = value.timing.readiness {
+        for pair in &samples.intervals[..samples.len] {
+            number(&mut bytes, pair[0] as usize);
+            number(&mut bytes, pair[1] as usize);
+        }
+    }
     number(&mut bytes, usize::from(value.proposal_confidence.is_some()));
     if let Some(rows) = &value.proposal_confidence {
         for value in rows.iter().flatten() {
@@ -278,7 +285,22 @@ pub(super) fn timing(reader: &mut Reader<'_>) -> Result<super::super::ExecutionT
     if present > 1 || queued > 1 || (present == 0 && gpu_ns != 0) {
         return Err(invalid("invalid rank timing interval"));
     }
+    let count = reader.number()?;
+    if count > super::super::MAX_READINESS_INTERVALS {
+        return Err(invalid("rank readiness interval count exceeds capacity"));
+    }
+    let readiness = if count == 0 { None } else {
+        let mut samples = super::super::ReadinessIntervals { len: count, ..Default::default() };
+        for pair in &mut samples.intervals[..count] {
+            *pair = [reader.number()? as u64, reader.number()? as u64];
+            if pair[0] < pair[1] {
+                return Err(invalid("rank readiness interval excludes part of its barrier"));
+            }
+        }
+        Some(samples)
+    };
     Ok(super::super::ExecutionTiming {
+        readiness,
         gpu_ns: [
             (present == 1).then_some(gpu_ns),
             None,

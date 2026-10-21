@@ -49,11 +49,12 @@ def _rank(rank, sockets, root):
     scale = torch.arange(rows * 8).remainder(5).add(125).byte().reshape(rows, 8)
     sources = (FileSource(Path(root) / "weights", 4093, weight.nbytes),
                FileSource(Path(root) / "scales", 4093, scale.nbytes))
-    inputs = EngramInputs.allocate(4, device)
+    from ignition.components.readiness import ReadinessTimings
+    frame = torch.zeros(1, dtype=torch.int32, device=device)
+    inputs = EngramInputs.allocate(4, device, timings=ReadinessTimings.allocate(frame, 1))
     output = torch.empty((4, 6144), dtype=torch.bfloat16, device=device)
     count = torch.full((1,), 4, dtype=torch.int32, device=device)
     source = torch.zeros(1, dtype=torch.int32, device=device)
-    frame = torch.zeros(1, dtype=torch.int32, device=device)
     sequence = torch.zeros(1, dtype=torch.int64, device=device)
     mailbox = MappedHostAllocation((4 * 24 + 1,), torch.int64, device)
     mailbox.host_view.zero_()
@@ -86,6 +87,8 @@ def _rank(rank, sockets, root):
             catalog = tables.resident_catalog()
             buffers = dict(tables.buffers(), output=output, live_count=count, frame_index=frame,
                 submission_sequence=sequence, completion_records=records)
+            # These independent rank lookups do not capture an all-rank readiness reduction.
+            buffers.pop("readiness_timestamps")
             execution = PreparedExecution(device=rank, graphs={"decode": graph}, buffers=buffers,
                 signatures={"decode": GraphSignature("decode", 4, 1, ("engram_1_hashes", "live_count"))},
                 max_active=4, resources=(tables, lookup, compiled, session), export_events=tables.events())

@@ -42,9 +42,36 @@ pub(super) struct PackedShape {
 
 struct Estimate {
     nanos: u64,
+    replays: ReplayTimes,
     handoff_ns: u64,
     observed_at_ns: u64,
     last_attempt_ns: u64,
+}
+
+#[derive(Default)]
+struct ReplayTimes {
+    samples: [u64; 9],
+    len: usize,
+    next: usize,
+}
+
+impl ReplayTimes {
+    fn observe(&mut self, sample: u64, fresh: bool) -> u64 {
+        if !fresh {
+            *self = Self::default();
+        }
+        self.samples[self.next] = sample;
+        self.next = (self.next + 1) % self.samples.len();
+        self.len = (self.len + 1).min(self.samples.len());
+        let mut ordered = self.samples;
+        ordered[..self.len].sort_unstable();
+        let middle = self.len / 2;
+        if self.len % 2 == 0 {
+            ((u128::from(ordered[middle - 1]) + u128::from(ordered[middle]) + 1) / 2) as u64
+        } else {
+            ordered[middle]
+        }
+    }
 }
 
 impl Estimate {
@@ -72,6 +99,7 @@ impl ActionCosts {
         };
         let estimate = &mut self.entries.iter_mut().find(|(k, _)| *k == key).unwrap().1;
         estimate.nanos = nanos;
+        estimate.replays.observe(nanos, false);
         estimate.handoff_ns = 0;
         estimate.observed_at_ns = self.now_ns;
     }
@@ -93,6 +121,7 @@ impl ActionCosts {
                 key,
                 Estimate {
                     nanos: 0,
+                    replays: ReplayTimes::default(),
                     handoff_ns: 0,
                     observed_at_ns: 0,
                     last_attempt_ns: 0,
@@ -193,9 +222,13 @@ impl ActionCosts {
     }
 
     pub fn observe(&mut self, step: &ScheduledStep, timing: ExecutionTiming) {
-        let Some(sample) = timing.gpu_ns.into_iter().flatten().max().filter(|n| *n > 0) else {
+        let Some(raw_sample) = timing.gpu_ns.into_iter().flatten().max().filter(|n| *n > 0) else {
             return;
         };
+        let sample = raw_sample.saturating_sub(timing.readiness.map_or(0, |intervals| intervals.wait_ns()));
+        if sample == 0 {
+            return;
+        }
         let key = Key {
             kind: step.kind,
             batch: step.batch_capacity,
@@ -206,19 +239,53 @@ impl ActionCosts {
         if let Some((_, estimate)) = self.entries.iter_mut().find(|(k, _)| *k == key) {
             let fresh = estimate.fresh(self.now_ns, self.ttl_ns);
             if !timing.queued {
-                let handoff = timing.wall_ns.saturating_sub(sample);
+                let handoff = timing.wall_ns.saturating_sub(raw_sample);
                 estimate.handoff_ns = if fresh {
                     ((7 * u128::from(estimate.handoff_ns) + u128::from(handoff) + 4) / 8) as u64
                 } else { handoff };
             } else if !fresh {
                 estimate.handoff_ns = 0;
             }
-            estimate.nanos = if estimate.fresh(self.now_ns, self.ttl_ns) {
-                ((7 * u128::from(estimate.nanos) + u128::from(sample) + 4) / 8) as u64
-            } else {
-                sample
-            };
+            estimate.nanos = estimate.replays.observe(sample, fresh);
             estimate.observed_at_ns = self.now_ns;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ReplayTimes;
+
+    #[test]
+    fn isolated_slow_replay_does_not_displace_the_steady_cost() {
+        let mut replays = ReplayTimes::default();
+        for _ in 0..9 {
+            assert_eq!(replays.observe(8_000_000, true), 8_000_000);
+        }
+        assert_eq!(replays.observe(16_000_000, true), 8_000_000);
+        for _ in 0..9 {
+            assert_eq!(replays.observe(8_000_000, true), 8_000_000);
+        }
+    }
+
+    #[test]
+    fn sustained_cost_changes_replace_the_window_and_staleness_resets_it() {
+        let mut replays = ReplayTimes::default();
+        for _ in 0..9 {
+            replays.observe(8, true);
+        }
+        for _ in 0..4 {
+            assert_eq!(replays.observe(16, true), 8);
+        }
+        assert_eq!(replays.observe(16, true), 16);
+        assert_eq!(replays.observe(32, false), 32);
+        assert_eq!(replays.observe(16, true), 24);
+    }
+
+    #[test]
+    fn even_sample_median_does_not_overflow() {
+        let mut replays = ReplayTimes::default();
+        assert_eq!(replays.observe(u64::MAX, true), u64::MAX);
+        assert_eq!(replays.observe(u64::MAX - 1, true), u64::MAX);
     }
 }

@@ -90,6 +90,12 @@ pub struct Snapshot {
     pub completed: u64,
     /// Requests failed by admission, execution, grammar, or output backpressure.
     pub failed: u64,
+    /// Sum of maximum rank-local CUDA intervals of completed graphs, including readiness waits.
+    pub replay_gpu_ns: u64,
+    /// Sum of exposed embedding readiness delay measured by instrumented graphs.
+    pub replay_readiness_wait_ns: u64,
+    /// Completed graphs with prepared readiness timing outputs.
+    pub replay_readiness_samples: u64,
     /// Tokens covered by checkpoints returned from GPU prefix lookups.
     pub reused_tokens: u64,
     /// KV pages owned by immutable checkpoints.
@@ -202,6 +208,9 @@ pub(super) struct Metrics {
     pub completed: AtomicU64,
     pub cancelled: AtomicU64,
     pub failed: AtomicU64,
+    replay_gpu_ns: AtomicU64,
+    replay_readiness_wait_ns: AtomicU64,
+    replay_readiness_samples: AtomicU64,
     launches: [AtomicU64; 11],
     sampling_launches: [AtomicU64; 5],
     speculative: [[RoundMetrics; 8]; 7],
@@ -283,6 +292,9 @@ impl Metrics {
             pending: self.pending.load(Ordering::Relaxed),
             completed: self.completed.load(Ordering::Relaxed),
             failed: self.failed.load(Ordering::Relaxed),
+            replay_gpu_ns: self.replay_gpu_ns.load(Ordering::Relaxed),
+            replay_readiness_wait_ns: self.replay_readiness_wait_ns.load(Ordering::Relaxed),
+            replay_readiness_samples: self.replay_readiness_samples.load(Ordering::Relaxed),
             reused_tokens: self.reused_tokens.load(Ordering::Relaxed),
             cached_pages: self.cached_pages.load(Ordering::Relaxed),
             free_pages: self.free_pages.load(Ordering::Relaxed),
@@ -305,6 +317,15 @@ impl Metrics {
             }
         }
         snapshot
+    }
+
+    pub fn replay_completed(&self, timing: crate::execution::ExecutionTiming) {
+        let raw = timing.gpu_ns.into_iter().flatten().max().unwrap_or(0);
+        self.replay_gpu_ns.fetch_add(raw, Ordering::Relaxed);
+        if let Some(intervals) = timing.readiness {
+            self.replay_readiness_wait_ns.fetch_add(intervals.wait_ns(), Ordering::Relaxed);
+            self.replay_readiness_samples.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     pub fn launched(&self, kind: GraphKind) {
@@ -456,6 +477,14 @@ impl Metrics {
 
     pub fn render(&self) -> String {
         let mut text = String::with_capacity(4096);
+        for (name, help, count) in [
+            ("replay_gpu_nanoseconds_total", "Sum of maximum rank-local CUDA durations of completed graphs, including readiness waits.", &self.replay_gpu_ns),
+            ("replay_readiness_wait_nanoseconds_total", "Exposed embedding readiness delay measured across ranks; includes RAM and disk delivery.", &self.replay_readiness_wait_ns),
+            ("replay_readiness_samples_total", "Completed graphs with prepared readiness timing outputs.", &self.replay_readiness_samples),
+        ] {
+            let _ = writeln!(text, "# HELP flare_{name} {help}\n# TYPE flare_{name} counter\nflare_{name} {}",
+                             count.load(Ordering::Relaxed));
+        }
         text.push_str("# HELP flare_http_requests_total HTTP generation or token-count requests by API, before request validation.\n# TYPE flare_http_requests_total counter\n");
         for (api, count) in [
             "chat",
@@ -891,6 +920,26 @@ pub(super) fn metric(text: &mut String, name: &str, kind: &str, help: &str, valu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn readiness_metrics_retain_raw_gpu_time_and_count_only_measured_waits() {
+        let metrics = Metrics::default();
+        let mut timing = crate::execution::ExecutionTiming::default();
+        timing.gpu_ns[0] = Some(10_000);
+        timing.gpu_ns[1] = Some(9_000);
+        metrics.replay_completed(timing);
+        let bytes = [1000u64, 3000, 3100].into_iter().flat_map(u64::to_ne_bytes).collect::<Vec<_>>();
+        timing.readiness = Some(crate::execution::ReadinessIntervals::decode(&bytes).unwrap());
+        metrics.replay_completed(timing);
+        let snapshot = metrics.snapshot(false);
+        assert_eq!(snapshot.replay_gpu_ns, 20_000);
+        assert_eq!(snapshot.replay_readiness_wait_ns, 2_000);
+        assert_eq!(snapshot.replay_readiness_samples, 1);
+        let text = metrics.render();
+        assert!(text.contains("flare_replay_gpu_nanoseconds_total 20000\n"));
+        assert!(text.contains("flare_replay_readiness_wait_nanoseconds_total 2000\n"));
+        assert!(text.contains("flare_replay_readiness_samples_total 1\n"));
+    }
 
     #[test]
     fn scheduler_host_gauges_reset_after_inbound_requests_finish() {

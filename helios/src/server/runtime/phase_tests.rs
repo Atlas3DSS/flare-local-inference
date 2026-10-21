@@ -420,7 +420,7 @@ fn worker_observes_prefill_decode_and_prerequisite_timings() {
         ];
         frame.timing.wall_ns = 350;
         worker.complete(kind, frame).unwrap();
-        assert_eq!(worker.scheduler.estimated_duration_ns(&step), Some(919));
+        assert_eq!(worker.scheduler.estimated_duration_ns(&step), Some(619));
     }
 }
 

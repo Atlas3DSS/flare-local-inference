@@ -163,8 +163,15 @@ has an optimistic work score instead of a division by zero.
 Every loaded physical batch capacity and selected verification width competes.
 For a fixed graph, duration and excluded-stream waiting cost do not depend on
 cohort membership, so the best cohort contains its highest additive lane values.
-Selection uses a fixed 64-entry array. It includes larger padded physical batches
-when those measurements are faster. It does not enumerate exponentially many
+Selection uses a fixed 64-entry array. Before ordinary selection, candidates for
+the same graph kind, request cohort, and logical per-request prefixes discard any physical
+shape whose capacities are all at least as large as an alternative, with at
+least one strictly larger capacity. Mixed candidates also require the same prompt
+row and logical prompt work; proposal candidates require the same planned
+verification budget. Timing estimates cannot make redundant padding preferable.
+A batch-four candidate serving three requests still competes with a batch-two
+candidate serving two requests. Bounded cost-refresh probes remain separate
+from ordinary selection. Selection does not enumerate exponentially many
 request subsets or restrict selection to heuristic acceptance groupings.
 
 Each prefill capacity competes using the actual tokens it can consume. Atomic
@@ -245,15 +252,21 @@ mixed prefill capacity, and packed verification capacity identify a cost entry;
 active row count does not change its identity.
 
 The first positive device observation sets the estimate. Further valid samples
-while fresh use an EMA with weight 1/8. An entry becomes stale after 30 seconds
+while fresh use the median of the last nine replay observations, averaging the
+middle pair when fewer than nine samples give an even count. An entry becomes stale after 30 seconds
 without a valid observation. Its measured cost remains available for selection
 and service-rate normalization. The first valid observation of a stale entry
 replaces its estimate directly; elapsed time alone never makes a measured graph
 unknown.
 
-The device observation is the maximum positive rank-local CUDA replay interval.
+The raw device observation is the maximum positive rank-local CUDA replay interval.
+When the prepared graphs expose frame-owned readiness timestamps, the cost sample
+subtracts exposed embedding-delivery delay after aggregating the ranks' intervals.
+This covers RAM and disk delivery, including CPU mailbox coordination. Raw replay
+and wall durations remain unchanged for service charges and reported throughput.
 An isolated execution also measures host handoff as wall time minus device time,
-clamped at zero. Device and handoff components have separate EMA updates. Queued
+clamped at zero, using the raw device observation before readiness correction.
+Host handoff uses a separate EMA with weight 1/8. Queued
 executions update device time without treating queue wait as handoff. Missing
 or zero device intervals neither change an estimate nor make it fresh.
 

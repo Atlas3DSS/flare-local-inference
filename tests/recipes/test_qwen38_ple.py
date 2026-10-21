@@ -164,6 +164,8 @@ def cuda_components(manifest):
         }
     table = PLETable.load(manifest, "cuda:0", tokens=32)
     table.sequence = torch.zeros(1, dtype=torch.int64, device="cuda:0")
+    from ignition.components.readiness import ReadinessTimings
+    table.timings = ReadinessTimings.allocate(torch.zeros(1, dtype=torch.int32, device="cuda:0"), 1)
     # Native owners retain mappings if stream drain cannot be confirmed.
     yield module, projections, table
 

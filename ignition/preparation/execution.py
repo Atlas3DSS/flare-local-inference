@@ -68,7 +68,7 @@ class GraphSignature:
         if len(set(self.inputs)) != len(self.inputs):
             raise ValueError("graph input names must be unique")
         if any(name in self.inputs for name in ("frame_index", "submission_sequence", "completion_records",
-                                               "completion_logprobs", "logprob_requested")):
+                                               "completion_logprobs", "logprob_requested", "readiness_timestamps")):
             raise ValueError("reserved execution buffers are bound automatically")
 
 

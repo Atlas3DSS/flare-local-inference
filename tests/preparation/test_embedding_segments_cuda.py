@@ -36,11 +36,12 @@ def test_native_replay_reads_balanced_head_segments_without_checkpoint_files(tmp
         path = tmp_path / name
         path.write_bytes(bytes(37) + tensor.view(torch.uint8).numpy().tobytes())
         sources.append(FileSource(path, 37, tensor.nbytes))
-    inputs = EngramInputs.allocate(tokens, device)
+    from ignition.components.readiness import ReadinessTimings
+    frame = torch.zeros(1, dtype=torch.int32, device=device)
+    inputs = EngramInputs.allocate(tokens, device, timings=ReadinessTimings.allocate(frame, 1))
     output = torch.empty((tokens, 6144), dtype=torch.bfloat16, device=device)
     count = torch.full((1,), tokens, dtype=torch.int32, device=device)
     source = torch.zeros(1, dtype=torch.int32, device=device)
-    frame = torch.zeros(1, dtype=torch.int32, device=device)
     sequence = torch.zeros(1, dtype=torch.int64, device=device)
     records = torch.zeros((2, 4, 8), dtype=torch.int64, device=device)
     mailbox = MappedHostAllocation((tokens * 24 + 1,), torch.int64, device)
@@ -103,6 +104,8 @@ def test_native_replay_reads_balanced_head_segments_without_checkpoint_files(tmp
                     time.sleep(.001)
                     completion = worker.poll()
                 assert completion is not None and completion.fence == fence
+                assert completion.readiness_wait_ns is not None
+                assert 0 <= completion.readiness_wait_ns <= max(value for value in completion.gpu_ns if value is not None)
                 assert torch.cuda.memory_stats()["allocation.all.allocated"] == allocated
                 expected = (weights.float()[canonical.clamp_min(0)]
                     * scales.view(torch.float8_e8m0fnu).float()[canonical.clamp_min(0)].repeat_interleave(32, -1))
