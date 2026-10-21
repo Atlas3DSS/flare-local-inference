@@ -365,7 +365,7 @@ class PreparedRound:
             if kind == "linear_attention":
                 recurrent = o.pool.recurrent(i).recurrent.flatten(1)
                 gather_rows(recurrent, selected, self.recurrent_copy)
-                scatter_rows(self.recurrent_copy, states[:, 0], recurrent, counts > 0)
+                scatter_rows(self.recurrent_copy, self.metadata.state_rows, recurrent, counts > 0)
         self.commit_counts.copy_(counts)
         self.convolution_commit()
         # Repair all accepted MTP pairs from true target feedback. Proposal KV
@@ -381,4 +381,4 @@ class PreparedRound:
         self.absorb_feedback.copy_(feedback.reshape(b * w, -1)[indices])
         self.absorb()
         save_hidden(hidden[self.rows, (counts - 1).long().clamp_min(0)], o.pool.last_hidden,
-                    states[:, 0], counts > 0)
+                    self.metadata.state_rows, counts > 0)
