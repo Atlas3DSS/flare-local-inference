@@ -568,35 +568,37 @@ their local fabric IP; failed links report errors without retrying through the
 management network. `--transfer-streams N` selects 1..64 parallel TCP streams per
 destination file (default 8), divided between the available rails. Each stream
 pulls a disjoint, approximately equal share of the requested bytes; sparse holes
-remain holes. Files are processed one at a time. The count applies to each
-destination, so a source or relay serving several ranks handles their combined
-connections. Higher counts increase CPU and I/O concurrency; benchmark the
-actual package and ring before increasing the default. A saved group's
+remain holes. Each destination processes one file at a time. The stream count
+applies to each destination, so a source or relay serving several ranks handles
+their combined connections. Higher counts increase CPU and I/O concurrency;
+benchmark the actual package and ring before choosing a larger stream count. A saved group's
 `transfer_streams` value is reused by `orbit run`, and an explicit CLI value
 overrides it. This setting requires ring distribution and does not affect
 collectives. A transfer connection fails after 120 seconds without read or write
 progress.
 
-Destination cache lookup, sparse writes, content-addressed blob reuse, and
-signed-package verification follow the ordinary transfer path. Cached files do
-not open transfer connections. Each receiving worker buffers at most 1 MiB of
-file data in addition to encrypted records. Workers write to disjoint offsets
-in one partial file and all finish before it is published. A failed stream
+Destinations reuse verified cached files without opening payload connections.
+Each receiving worker buffers at most 1 MiB of file data in addition to
+encrypted records. Workers write to disjoint offsets in one partial file and
+all finish before it is published. A failed stream
 cancels its siblings, closes their connections, and removes the partial file
 after the workers drain; it cannot publish a verified package. Content-addressed
 payloads are hashed from the assembled file before entering the immutable blob
-store. Signed-package verification still runs after all files arrive.
+store. Signed-package verification runs after all files arrive.
 A controller-held package first uploads to rank zero. A source node outside the
 selected ring first stages a complete copy on rank zero, then ring members fetch
 from that copy.
 
-Controller connections, metadata lookup, and serving rendezvous continue to use
-the configured management addresses. These transfers use TCP, not RDMA, and
-require no host routing changes or IP forwarding. With `ignition export --roce-ring`,
-checkpoint reads and prepared export payloads also use agent fabric connections;
-preparation control and export manifests remain on the rendezvous connection.
-Package formats and captured collective ABIs are unaffected. Encryption at each
-hop, disk throughput, and shared links can limit bulk throughput below interface line rate.
+Controller connections, metadata lookup, and serving rendezvous use the
+configured management addresses. Agent payload transfers use encrypted TCP
+and require no host routing changes or IP forwarding. With
+`ignition export --roce-ring`, checkpoint reads and prepared export payloads
+also use agent fabric connections; preparation control and export manifests
+use the rendezvous connection.
+Ring and direct package transfers use identical package formats; the captured
+collective ABI is independent of package transport. Encryption at each hop,
+disk throughput, and shared links can limit bulk throughput below interface
+line rate.
 
 ## Frames
 
@@ -683,8 +685,9 @@ The grant also authorizes node-to-node transfers. A FETCH is served only to a
 member of the grant, identified by the key that authenticated the session, for
 the package the grant names.
 
-For ring transfers, `transfer_ring[i]` lists the fabric TCP endpoint pairs from
-member `i` to member `(i + 1) % world`. It is empty for ordinary transfers.
+The grant records each rank's fabric TCP links to its successor in
+`transfer_ring[i]`, where `i` is the member's rank. The final rank links to rank
+zero. The `transfer_ring` list is empty for transfers over paired addresses.
 
 The serving rendezvous checks export identity and rank agreement. The grant
 authenticates the launch at the agent boundary; rank communication requires a

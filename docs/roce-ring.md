@@ -12,10 +12,10 @@ in the prepared GPU programs. Routing, registered relay buffers, and RDMA
 progress belong to the native transport. Serving has no Python callback,
 runtime compilation, or steady-state GPU allocation.
 
-Orbit also uses this rank order and fabric discovery for encrypted TCP checkpoint
-reads, prepared exports, and package distribution before serving when
-`--roce-ring` is selected. Agents stream bytes through their neighbors; this is
-separate from the RDMA proxy and its captured regions. See
+With `--roce-ring`, Orbit uses preparation or serving rank order and discovers
+RoCE interface IPv4 addresses for encrypted TCP checkpoint reads, prepared
+exports, and package distribution. Agents stream bytes through neighboring
+agents independently of the RDMA proxy and its captured regions. See
 [checkpoint range reads](multi-host.md) and
 [package transfers](orbit.md#package-transfers-through-ring-interfaces).
 
@@ -153,22 +153,23 @@ Run the corresponding command on each peer from its checkout root:
 .venv/bin/ignition join maxwell:29630 --rank 3 --ranks 4
 ```
 
-Rank zero sends the preparation option to peers. The plan records `roce_ring`,
+Rank zero sends the `--roce-ring` setting to peers. The plan records `roce_ring`,
 and the package cache key includes it. `ignition serve` also accepts the option
 with `--ranks` for development without package export.
 
-The paired agent cluster must list exactly these hosts in preparation rank
-order. GPU UUIDs validate that mapping before the controller signs the
-checkpoint route. `--orbit-file` and `--key-file` select nondefault controller
-files. Each peer fetches only its routed checkpoint ranges through 1..64 streams
+The paired agent cluster must list `maxwell`, `ampere`, `faraday`, and `hertz`
+in that preparation rank order. Admission compares each rank's GPU UUID with
+its paired agent before the controller signs the checkpoint route. `--orbit-file`
+selects the controller configuration, and `--key-file` selects its signing key.
+Each peer fetches only its requested checkpoint ranges through 1..64 streams
 (eight by default), alternating the available fabric rails. Rank 2 reads through
-rank 1. Range requests retain their authenticated catalog, exact bounds, and
-completion accounting. Buffering is bounded by the stream count; one reusable
-4 MiB memory-backed buffer feeds the native weight loader without writing received
-weights to peer NVMe. Export payloads return over the same authenticated fabric
-channels; rank zero assembles and signs the package locally. Metadata and
-coordination stay on the management rendezvous. Agents on every hop and the Flare
-executable used by Ignition must include checkpoint transport support.
+rank 1. Range requests are checked against an authenticated tensor catalog,
+with exact bounds and completion accounting. Buffering is bounded by the stream
+count; one reusable 4 MiB memory-backed file feeds the native weight loader
+without writing received weights to peer NVMe. Export payloads return over the
+checkpoint transfer channels; rank zero assembles and signs the package locally.
+Metadata and coordination use the management rendezvous. Agents on every hop
+and the Flare executable used by Ignition must include checkpoint transport support.
 
 ### Serve through the agents
 
@@ -195,10 +196,10 @@ Ranks that disagree about ring mode fail during transport record exchange.
 
 Select ring mode explicitly during serving, including for a package prepared
 with the option. The serving flag chooses routing independently of the
-package's graph catalog. A compatible ABI 9 package can use either transport
-without changing its captured addresses or collective algorithms. Preparation
-on a physical ring also needs `--roce-ring`, because non-neighbor direct routes
-are unavailable during warmup and capture.
+package's graph catalog. A compatible ABI 9 package can use ring or direct peer
+routing without changing its captured addresses or collective algorithms.
+Preparation on a physical ring also needs `--roce-ring`, because non-neighbor
+direct routes are unavailable during warmup and capture.
 
 ## TCP data distribution
 
@@ -211,24 +212,24 @@ host routes.
 
 | Workflow | Payload path |
 | --- | --- |
-| Checkpoint loading | Peers pull their tensor ranges from rank zero, through neighboring agents where needed. |
-| Preparation export | Peers return missing prepared files through the same authenticated channels; rank zero assembles and signs the package. |
+| Checkpoint loading | Peers pull their tensor ranges from rank zero through authenticated channels, relayed by neighboring agents where needed. |
+| Preparation export | Peers return missing prepared files through the checkpoint transfer channels; rank zero assembles and signs the package. |
 | Package distribution | Each destination pulls its rank's files through the shortest ring path; intermediate agents stream without storing the shard. |
 
 `--transfer-streams N` selects 1..64 concurrent TCP streams per destination
 (default 8), split across the available rails. Checkpoint prefetch holds at
 most one 4 MiB payload per stream, plus bounded transport buffers, and feeds
-ordered native copies through a reusable memory-backed descriptor. Export
+ordered native copies through a reusable memory-backed file descriptor. Export
 receives one file per stream in bounded frames. Package distribution splits
 each file's requested ranges among streams and preserves sparse holes.
 
 Checkpoint reads validate immutable source snapshots and exact range bounds.
 Export files are hashed before atomic publication; publication and temporary
 hard-link removal share a lock so concurrent cache verification observes a
-stable inode. Transfer and hashing work remain concurrent. On failure, sibling
+stable inode. Transfers and hashing run concurrently. On failure, sibling
 connections are aborted and workers are joined; incomplete files are never
-published. Cached payloads are verified and reused, and signed-package
-verification remains required after transfer.
+published. Cached payloads are verified and reused. Receivers verify the signed
+package after transfer.
 
 Stream counts increase CPU, memory, descriptor, and storage concurrency as well
 as network concurrency. Encryption, strided checkpoint reads, local hashing,
@@ -239,11 +240,12 @@ for checkpoint admission and export details.
 
 ## Validation and limits
 
-FlashInfer's `tests/experimental/b12x/comm/validate_roce_ring_native.py` drives
-the real C proxy without creating a CUDA context. It checks mixed one-shot,
-two-shot, and variable-length transfers, including empty contributions, unequal
-shards, delayed senders, and buffer reuse. From a matching FlashInfer checkout,
-run one process per host with its rank, fabric devices, and GID index:
+FlashInfer provides a CPU-driven validator for the native RDMA proxy at
+`tests/experimental/b12x/comm/validate_roce_ring_native.py`. It runs without a
+CUDA context and checks mixed one-shot, two-shot, and variable-length transfers,
+including empty contributions, unequal shards, delayed senders, and buffer
+reuse. From a FlashInfer checkout at the revision pinned in `uv.lock`, run one
+process per host with its rank, fabric devices, and GID index:
 
 ```sh
 python3 tests/experimental/b12x/comm/validate_roce_ring_native.py \
@@ -254,12 +256,12 @@ python3 tests/experimental/b12x/comm/validate_roce_ring_native.py \
 Use ranks 1, 2, and 3 on the other hosts. Set `--hca-names` and `--gid-index`
 for the fabric; keep the other options identical. Add `--mesh` on every rank
 to validate direct routing. GPU graph tests additionally exercise changing
-message sizes, buffer ownership, and proxy failures during replay. These checks
-do not qualify arbitrary workloads or recovery from a failed ring neighbor.
+message sizes, buffer ownership, and proxy failures during replay. Recovery
+from a failed ring neighbor is unsupported; stop and restart all ranks together.
 
-Final validation on four DGX Sparks completed GLM-5.3 Flash TP4 preparation,
-export, and native inference, with checkpoint and export payloads confirmed on
-the fabric links. Signed-package checks and coordinated shutdown passed.
+Four DGX Sparks in a physical ring running Flare revision `0a91856` completed
+GLM-5.3 Flash TP4 preparation, export, and native inference. Checkpoint and export
+payloads used fabric TCP links. Signed-package checks and coordinated shutdown passed.
 
 ## Protocol model and runtime checks
 

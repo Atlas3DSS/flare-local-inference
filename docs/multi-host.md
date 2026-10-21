@@ -210,32 +210,35 @@ and coordinates preparation. Peers do not create full checkpoint shards.
 Keep checkpoint source files unchanged during loading.
 
 For a physical ring, add `--roce-ring --cluster NAME` to rank zero's export or
-serve command. The Orbit cluster must list exactly these hosts in preparation
-rank order, including rank zero; admission checks each rank's GPU UUID against
-its paired agent. `--orbit-file PATH` and `--key-file PATH` select nondefault
-controller files. All hosts need the matching Flare executable on `PATH` or at
-`flare/target/release/flare`, and updated paired agents listening on their fabric
-interfaces. The peer `join` command stays the same.
+serve command. The Orbit cluster must list exactly the participating hosts in
+preparation rank order, including rank zero; admission checks each rank's GPU
+UUID against its paired agent. `--orbit-file PATH` selects the controller
+configuration, and `--key-file PATH` selects its signing key.
+All hosts need Flare executables and paired agents from the same revision.
+Ignition finds Flare on `PATH` or at `flare/target/release/flare`;
+the agents must listen on their fabric interfaces. Peers connect using
+`ignition join`; rank zero supplies their signed fabric route during admission.
 
 Checkpoint loading uses eight TCP streams per peer by default. Select 1 through
-64 with `--transfer-streams N`. Streams alternate between the neighbor rails;
-the opposite host receives its requested ranges through a shortest ring path,
-with clockwise ties. Each hop binds and checks the signed fabric IPs. A failed
-fabric channel ends preparation instead of retrying through management.
-Admission metadata and coordination continue using the rendezvous connection.
+64 with `--transfer-streams N`. Streams alternate between the neighbor rails.
+Each peer receives its requested ranges along the shortest path from rank zero;
+equal-length paths follow increasing rank numbers, wrapping at the rank count.
+Each hop binds and checks the signed fabric IPs. A failed fabric channel ends
+preparation instead of retrying through management.
+Admission metadata and coordination use the rendezvous connection.
 Export retains the authenticated fabric channels after checkpoint reads drain:
 peers send missing prepared payload files back through the same ring hops and
 rails. Rank zero receives from all peers concurrently, with one file per stream
-and bounded 4 MiB frames. Each received file is hashed and published atomically;
-failure aborts sibling streams before their temporary files are removed. Export
-manifests and cache requests stay on the rendezvous connection. This changes
-neither host routes nor collective transport.
+and bounded 4 MiB frames. Each received file is hashed and published atomically.
+On failure, sibling connections are aborted and workers are joined; incomplete
+files are never published. Export manifests and cache requests use the
+rendezvous connection.
 
 Prefetch retains at most one 4 MiB payload per stream plus bounded transport
-buffers. b12x destination copies remain ordered, with exact packed rows,
+buffers. The native weight loader copies data in order, preserving packed rows,
 strides, and conversions. Peers retain metadata and one reusable 4 MiB
-memory-backed transfer descriptor, without writing checkpoint weights to disk.
-The preparation report records the checkpoint
+memory-backed file, passed to the loader by file descriptor, without writing
+checkpoint weights to disk. The preparation report records the checkpoint
 transport, stream count, payload bytes, and the interval from the first payload
 read to the last; this interval includes intervening loading work.
 Export reports missing payload bytes, stream count, receive duration, and
