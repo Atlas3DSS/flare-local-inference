@@ -9,7 +9,7 @@ import torch
 from b12x.gemm import bf16_gemv, blockscaled
 from b12x.preparation import PreparationSession, PreparedCall
 
-from ignition.components import sm103_projection
+from ignition.components import sm70_projection, sm103_projection
 from ignition.preparation.fixtures import bf16_gemv as bf16_fixtures
 from ignition.preparation.fixtures import blockscaled_gemm as gemm_fixtures
 from ignition.preparation.fixtures.projection import input_factory
@@ -28,7 +28,14 @@ class UnquantizedProjection:
         session: PreparationSession,
         name: str,
         bias: torch.Tensor | None = None,
+        workspace: ScratchArena | torch.Tensor | None = None,
     ) -> None:
+        self.sm70 = None
+        if sm70_projection.is_sm70(source.device):
+            self.sm70 = sm70_projection.UnquantizedProjection(
+                source, weight, output, session=session, name=name, bias=bias, workspace=workspace)
+            self.weight, self.output, self.bias, self.plan = weight, output, bias, self.sm70.plan
+            return
         if any(t.dtype not in (torch.bfloat16, torch.float32) for t in (source, weight, output)):
             raise TypeError("unquantized projections require BF16 or FP32 operands")
         for tensor in (weight, bias):
@@ -66,6 +73,8 @@ class UnquantizedProjection:
         ),))
 
     def __call__(self, source: torch.Tensor) -> torch.Tensor:
+        if self.sm70 is not None:
+            return self.sm70(source)
         if self.dense:
             torch.ops.flare.sm103_dense_out(source, self.weight, self.output, self.plan.handle)
             return self.output
@@ -85,6 +94,13 @@ class QuantizedProjection:
         bias: torch.Tensor | None = None,
         workspace: ScratchArena | torch.Tensor | None = None,
     ) -> None:
+        self.sm70 = None
+        if sm70_projection.is_sm70(source.device):
+            self.sm70 = sm70_projection.PackedProjection(source, weight, output, session=session,
+                name=name, activation_mode=activation_mode, bias=bias, workspace=workspace)
+            self.weight, self.output, self.bias, self.plan = weight, output, bias, self.sm70.plan
+            self.activation_mode, self.sm103 = self.sm70.activation_mode, False
+            return
         from b12x.gemm.blockscaled._a16 import NVFP4LinearWeight, _overlap, _weight_parts
         from b12x.gemm.blockscaled._linear import MXFP8LinearWeight, _validate_bias
 
@@ -154,6 +170,8 @@ class QuantizedProjection:
         register_finalizer(session, lambda: setattr(self, "workspace", selected_workspace()), workspace=workspace)
 
     def __call__(self, source: torch.Tensor) -> torch.Tensor:
+        if self.sm70 is not None:
+            return self.sm70(source)
         if self.sm103:
             values, scales, gain = self.parts
             if self.workspace is None:

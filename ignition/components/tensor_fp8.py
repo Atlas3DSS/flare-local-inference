@@ -17,7 +17,15 @@ class TensorFP8Weight:
 
 
 class TensorFP8Projection:
-    def __init__(self, source, weight, output, *, session, name):
+    def __init__(self, source, weight, output, *, session, name, workspace=None):
+        from . import sm70_projection
+
+        self.sm70 = None
+        if sm70_projection.is_sm70(source.device):
+            self.sm70 = sm70_projection.TensorFP8Projection(
+                source, weight, output, session=session, name=name, workspace=workspace)
+            self.weight, self.output, self.plan = weight, output, self.sm70.plan
+            return
         if (source.ndim != 2 or source.dtype != torch.bfloat16
                 or source.shape[1] != weight.packed.in_features
                 or output.shape != (source.shape[0], weight.packed.out_features)
@@ -48,6 +56,8 @@ class TensorFP8Projection:
         declare(session, (self.plan.request(name=name, prepare_call=prepare, benchmark_call=benchmark),))
 
     def __call__(self, source):
+        if self.sm70 is not None:
+            return self.sm70(source)
         self.quantized.copy_((source.float() / self.weight.input_scale).clamp(-448, 448))
         self.output.copy_(blockscaled.mm(self.quantized, self.weight.packed, plan=self.plan))
         return self.output
