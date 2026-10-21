@@ -193,9 +193,14 @@ def benchmark_call(prepared, *, arguments, session, name, mode, scratch_specs,
                    workspace, run_options, binding_plan=None, bind_method="bind"):
     template = arguments["conv_state"] if binding_plan is not None else arguments["recurrent_state"]
     key = _benchmark_state_key(template)
-    arena = benchmark_resource(session, key, lambda: BenchmarkStateArena(template))
-    operands = benchmark_resource(session, ("delta_inputs", name),
-        lambda: RecurrentBenchmarkInputs(arguments, mode=mode, arena=arena))
+
+    def create_inputs():
+        arena = benchmark_resource(session, key, lambda: BenchmarkStateArena(template))
+        return RecurrentBenchmarkInputs(arguments, mode=mode, arena=arena)
+
+    # Looking up the state on every candidate evicts the active input fixture when
+    # its arena is privately allocated. The input fixture owns that arena already.
+    operands = benchmark_resource(session, ("delta_inputs", name), create_inputs)
     scratch = planned_scratch(scratch_specs(prepared), workspace)
     binding = getattr(prepared, bind_method)(scratch=scratch, **operands.args,
                             **({"plan": binding_plan} if binding_plan is not None else {}))

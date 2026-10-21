@@ -26,6 +26,37 @@ def make_session(**kwargs):
         numerical_policy="default", **kwargs)
 
 
+@pytest.mark.parametrize("borrowed_state", [False, True])
+def test_recurrent_candidates_share_inputs_with_active_resource_eviction(backend, borrowed_state):
+    from ignition.preparation.fixtures.recurrent import benchmark_call, register_benchmark_state
+
+    state = torch.zeros(3, 1, 2, 2)
+    arguments = {
+        "mixed_qkv": torch.zeros(1, 6, dtype=torch.bfloat16),
+        "recurrent_state": state, "output": torch.zeros(1, 1, 2, dtype=torch.bfloat16),
+        "query_start_loc": torch.zeros(2, dtype=torch.int32),
+        "num_tokens": torch.zeros(1, dtype=torch.int32), "num_seqs": torch.zeros(1, dtype=torch.int32),
+        "num_accepted_tokens": torch.ones(1, dtype=torch.int32),
+        "state_indices": torch.zeros(1, 1, dtype=torch.int64),
+    }
+    workspace = torch.empty(64, dtype=torch.uint8)
+    specs = (SimpleNamespace(shape=(64,), nbytes=64, dtype=torch.uint8, device=workspace.device),)
+    prepared = SimpleNamespace(bind=lambda **kwargs: SimpleNamespace(**kwargs), run=lambda binding: None)
+    session = make_session(device="cuda:0", checkpoint="recurrent-fixture-reuse")
+    if borrowed_state:
+        register_benchmark_state(session, state, storage=torch.empty(state.nbytes, dtype=torch.uint8),
+                                 restore=lambda: None)
+    session._tune_status = "tuning"
+    try:
+        calls = [benchmark_call(prepared, arguments=arguments, session=session, name="decode",
+            mode="decode", scratch_specs=lambda prepared: specs, workspace=workspace, run_options={})
+            for _ in range(4)]
+        assert all(call.owners[0] is calls[0].owners[0] for call in calls)
+        assert all(call.output is calls[0].output for call in calls)
+    finally:
+        session.close()
+
+
 @pytest.fixture
 def backend(monkeypatch):
     events = []
