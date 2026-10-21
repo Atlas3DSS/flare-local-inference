@@ -84,7 +84,7 @@ class PreparationConfig:
     speculative_widths: tuple[int, ...] = (1, 2, 3, 4, 5, 6)
     speculative_fixed_width: int | None = None
     speculative_token_capacity: int | None = None
-    # Run single-row decode's shared expert on an auxiliary stream; without overlap it runs serially.
+    # Overlap shared and routed experts within each eligible text graph.
     stream_overlap: bool = True
     expert_scale_compression: str | None = None
     mla_compute_mode: str = "auto"
