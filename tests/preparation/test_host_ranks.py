@@ -306,7 +306,7 @@ def test_cluster_export_combines_received_manifests_into_signed_snapshot(tmp_pat
     thread.start()
     group = host_ranks.HostRankGroup.__new__(host_ranks.HostRankGroup)
     group._started = group._closed = False
-    group.checkpoint_ring = None
+    group.checkpoint_fabric = None
     group.model = None
     group.rendezvous = SimpleNamespace(world=2, peers={1: SimpleNamespace(control=receiver)})
     output = tmp_path / 'model.safetensors'

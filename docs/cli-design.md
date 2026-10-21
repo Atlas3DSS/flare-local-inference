@@ -99,11 +99,12 @@ flare/target/release/flare run PACKAGE --gpus 0 --host 127.0.0.1 --port 8000
 ```
 
 ```
-flare run PACKAGE [flags]                 serve a package on this host
+flare run [PACKAGE] [flags]               serve locally, join a rank, or launch peer agents
 flare download REPOSITORY [flags]         download a prepared package
 flare inspect PACKAGE [--memory-map] [--graphs] [--frontend] [--all] [--json | --plain]
-flare agent [--listen IP:PORT]            run this host's orbit agent
+flare agent [--listen IP:PORT]            run this host's rank agent
 flare agent install [--join-code CODE | --accept-first] [--listen IP:PORT]
+flare agent pair HOST... [--code CODE]    pair for --hosts or Orbit launches
 flare agent reset                        forget authorized controllers and pairing codes
 flare orbit pair HOST... [--code CODE]    pair this controller with hosts
 flare orbit controllers add NAME KEY | remove KEY
@@ -118,6 +119,29 @@ flare orbit packages [--cluster NAME]     what each node's cache holds
 flare orbit ls | dashboard [--cluster NAME]  groups on the cluster's nodes; their live metrics
 flare trust revoke FINGERPRINT
 ```
+
+`flare run PACKAGE --rank 0 --rendezvous HOST:PORT` serves rank zero of a
+multi-host package. Each peer can run `flare run --rank N --rendezvous HOST:PORT`
+without a local package: serving bootstrap receives its required ranges over
+CX7, verifies the package and publisher trust, then joins capacity agreement.
+A supplied local peer package must have the same export identity as rank zero.
+
+`flare run PACKAGE --hosts PEER1,PEER2,...` runs rank zero locally and starts
+explicitly ordered peer agents. `--hosts` excludes rank zero. Pair the peers
+with `flare agent pair` or reuse Orbit pairings. The head node needs no agent
+or cluster definition. The shared registry and key default to
+`~/.config/flare/orbit.toml` and `~/.config/flare/orbit/controller.key`;
+`--agents-file` and `--controller-key` override them. Agents use their installed
+serving executable. The rendezvous defaults to port 29800 on the head node's
+address toward its first peer; an explicit `--rendezvous` overrides it.
+
+Serving package distribution uses 1..64 streams per peer, selected by rank
+zero's `--transfer-streams` (default 8). Direct and switched fabrics route to
+the peer; `--roce-ring` uses intermediate ranks. `--package-cache` sets the
+receiving rank's cache root (default `~/.cache/flare`). Rank zero's
+`--stage-only` distributes and verifies packages without GPU loading, and exits
+all ranks. Manual ranks need no agents, route signatures, or routing keys.
+All launch modes use the same native distribution and serving bootstrap.
 
 `flare orbit` commands take `--orbit-file PATH` and `--key-file PATH`,
 defaulting to `~/.config/flare/orbit.toml` and
@@ -284,15 +308,16 @@ are selected only by `--tuning-gpus`.
 
 Both Ignition commands accept `--config`.
 
-For multi-host `ignition export` and `ignition serve`, `--roce-ring` also sends
-checkpoint tensor ranges and prepared export payloads through the paired agents'
-RoCE-interface TCP paths.
-`--cluster NAME` selects an Orbit cluster whose host order matches preparation
-ranks; `--orbit-file PATH` selects the Orbit controller configuration and
-`--key-file PATH` selects its signing key.
-`--transfer-streams N` selects 1 through 64 concurrent payload streams per peer
-(default 8), split across the available rails. These controller and stream
-flags require `--roce-ring`; peers receive the signed route during admission.
+Multi-host `ignition export` and `ignition serve` transfer checkpoint tensor
+ranges and prepared export payloads over the discovered CX7 fabric interfaces.
+Direct cables between two ranks and switched fabrics use direct peer TCP
+connections. `--roce-ring` selects forwarding through rank neighbors for a
+physical ring. `--transfer-streams N` selects 1 through 64 concurrent payload
+streams per peer (default 8), split across the available rails in either topology.
+Each rank owns its transfer helper; preparation requires no Orbit agents,
+controller files, pairing, or route signatures. The existing shared preparation
+token authenticates checkpoint and export frames end to end without encryption.
+Metadata, endpoint exchange, and coordination use the rank rendezvous.
 See [checkpoint preparation](multi-host.md#prepare-the-package) for credentials,
 buffer bounds, and rendezvous traffic.
 
@@ -630,8 +655,8 @@ content identity. Changed graph captures and encrypted executable resources may
 produce additional blobs. Regular exports also reuse matching cached blobs.
 
 Multi-host preparation keeps a blob cache on each host. Peers send manifests;
-rank zero requests only files absent from its own cache. Orbit distributes only
-the payload blobs needed by each serving rank and reuses blobs across snapshots.
+rank zero requests only files absent from its own cache. Native serving distributes
+only the payload blobs needed by each rank and reuses blobs across snapshots.
 
 Convert an existing package without a GPU or private signing key:
 
@@ -1120,29 +1145,22 @@ ranks. The transport accepts 2..16
 ranks, while recipe validation retains each model's supported TP sizes. This
 option is recorded in the preparation plan, sent to preparation peers, and
 forwarded to serving peers. It changes native transport routing, not the
-captured collective operation contracts. During preparation it also sends
-checkpoint tensor ranges and prepared export payloads through paired agents
-over the ring's fabric TCP interfaces. `--orbit-file` selects the controller
-configuration, `--key-file` selects its signing key, and `--cluster` selects
-the exact rank-ordered cluster. `--transfer-streams N` selects 1..64 payload
-streams per peer (default 8). Peers connect using `ignition join`; rank zero
-supplies their signed fabric route during admission. Metadata and preparation
-coordination use the rendezvous connection. Export receives missing files
-concurrently over the authenticated fabric streams before rank zero assembles
-and signs the package.
-`flare orbit run --roce-ring` also
-distributes package bytes over TCP through the ring's fabric interfaces.
-`flare orbit push --roce-ring --to NODE,...` uses the same distribution path
-without starting ranks; it requires exactly one target per package rank, in
-ring order. Both Orbit commands accept `--transfer-streams N` (1..64, default 8)
-to fetch each destination file through parallel TCP connections across the
-available rails. Named groups store the stream count as `transfer_streams`;
-an explicit value overrides the saved setting. Controller traffic uses the
-paired addresses. See
-[Orbit fabric transfers](orbit.md#package-transfers-through-ring-interfaces) and
-[RoCE ring transport](roce-ring.md)
-for routing, buffer ownership, setup, the transport test harness, and qualification
-limits.
+captured collective operation contracts. The same routing choice applies to
+checkpoint and prepared export TCP transfers; manual preparation needs only the
+rank rendezvous and the shared preparation token. `--transfer-streams N` selects
+1..64 payload streams per peer (default 8) with direct or ring routing. Peers
+connect using `ignition join`. Rank zero receives missing export files through
+the authenticated streams before assembling and signing the package.
+
+`flare orbit run` starts native serving ranks, which distribute package bytes
+through CX7. `flare orbit push --to NODE,...` prestages through agents when the
+target list contains one node per package rank. Ring prestaging requires that
+exact list in physical ring order. Both Orbit commands accept
+`--transfer-streams N` (1..64, default 8). Named groups retain the stream count;
+an explicit value overrides it. Agent control and prestaging use paired
+identities, encrypted sessions, and signed grants without additional
+configuration. Serving distribution uses plain TCP and normal package trust.
+See [multi-host serving](multi-host.md) and [RoCE ring transport](roce-ring.md).
 
 `--prompt-logprobs` is an opt-in preparation flag for `run`, `export`, and
 development `serve`. It captures separate scored prefill graphs; default exports

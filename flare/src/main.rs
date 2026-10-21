@@ -1,14 +1,26 @@
 //! Serve a prepared model package without a Python interpreter.
 
+#[cfg(unix)]
+mod agent_client;
 mod cli;
 mod cluster;
+#[cfg(unix)]
+mod distribution;
 mod environment;
+#[cfg(unix)]
+mod fabric;
+#[cfg(unix)]
+mod fabric_transport;
 mod hardware;
 mod hub;
 mod identity;
 mod inspect;
 #[cfg(unix)]
+mod launch;
+#[cfg(unix)]
 mod orbit;
+#[cfg(unix)]
+mod package_cache;
 mod trust;
 #[cfg(windows)]
 mod windows;
@@ -34,7 +46,7 @@ extern "C" fn stop(_: libc::c_int) {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let matches = cli::Cli::command().get_matches();
     let parsed = cli::Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
-    let args = match parsed.command {
+    let mut args = match parsed.command {
         cli::Command::Run(args) => *args,
         cli::Command::Download(args) => {
             environment::configure(&args.gpus)?;
@@ -44,14 +56,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         cli::Command::Inspect(args) => return inspect::run(args),
         #[cfg(unix)]
-        cli::Command::CheckpointConnect {
-            grant,
-            rank,
-            stream,
-            fd,
-        } => {
-            return orbit::checkpoint::connect(&grant, rank, stream, fd)
-                .map_err(|e| e.to_string().into());
+        cli::Command::CheckpointTransport { socket } => {
+            return fabric_transport::run(&socket).map_err(|e| e.to_string().into());
         }
         #[cfg(windows)]
         cli::Command::Agent(_) => {
@@ -74,6 +80,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     accept_first,
                     listen,
                 }) => orbit::agent::install(&listen, join_code.as_deref(), accept_first),
+                Some(cli::AgentCommand::Pair {
+                    hosts,
+                    code,
+                    agents_file,
+                    controller_key,
+                }) => agent_client::Client::open(agents_file.as_deref(), controller_key.as_deref())
+                    .and_then(|mut client| client.pair(&hosts, code.as_deref())),
                 Some(cli::AgentCommand::Reset) => orbit::agent::reset(),
             }
             .map_err(|e| e.to_string().into());
@@ -94,7 +107,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     #[cfg(windows)]
-    if args.rank.is_some() || args.rendezvous.is_some() {
+    if args.rank.is_some() || args.rendezvous.is_some() || !args.hosts.is_empty() || args.roce_ring
+    {
         return Err("multi-host serving is not supported on Windows".into());
     }
     #[cfg(windows)]
@@ -105,28 +119,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let bind = args.bind_address();
     environment::configure(&args.gpus)?;
-    // The repository a package came from, compared against the source its publisher signed.
-    let mut origin = None;
-    let package = if hub::is_repository(&args.package) {
-        let text = args.package.to_str().ok_or("repository must be UTF-8")?;
-        origin = Some(hub::repository(text)?.0.to_owned());
-        hub::download(text, &args.hub, args.gpus.len())?
-    } else {
-        // --offline and --token-file also govern the publisher identity check of a local package.
-        if args.hub.revision.is_some()
-            || args.hub.filename.is_some()
-            || args.hub.cache_dir.is_some()
-        {
-            return Err(
-                "download options apply to Hugging Face repositories, not local package paths"
-                    .into(),
-            );
-        }
-        args.package.clone()
-    };
-    let root = package
-        .canonicalize()
-        .map_err(|error| format!("cannot access package {}: {error}", args.package.display()))?;
     let key = args
         .api_key_file
         .as_ref()
@@ -136,40 +128,71 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map_err(|error| format!("cannot read API key file {}: {error}", path.display()))
         })
         .transpose()?;
+    let local_devices: Vec<i32> = (0..args.gpus.len() as i32).collect();
+    let mut progress = StartupProgress::stderr();
+    #[cfg(unix)]
+    let mut launched = None;
+    #[cfg(unix)]
+    let _lease;
+    #[cfg(unix)]
+    let (authorized, mut membership) = if args.rank.is_some_and(|rank| rank != 0) {
+        if !args.hosts.is_empty() {
+            return Err("--hosts applies only to rank zero".into());
+        }
+        let received = distribution::peer(&mut args, &mut progress).map_err(|e| e.to_string())?;
+        _lease = received.lease;
+        (received.authorized, Some(received.membership))
+    } else {
+        let (root, authorized, publisher) = load_package(&args, &mut progress)?;
+        _lease = None;
+        if !args.hosts.is_empty() {
+            launched = Some(
+                launch::Peers::start(&mut args, &authorized, &publisher, &root)
+                    .map_err(|e| e.to_string())?,
+            );
+        }
+        let membership = match (
+            flare_helios::runtime_package::package_cluster(&authorized),
+            args.rendezvous.as_ref(),
+        ) {
+            (Some(_), Some(_)) => {
+                args.rank = Some(0);
+                Some(
+                    distribution::root(&authorized, &publisher, &root, &args, &progress)
+                        .map_err(|e| e.to_string())?,
+                )
+            }
+            (Some(_), None) => {
+                return Err(
+                    "a multi-host package requires --rendezvous HOST:PORT or --hosts".into(),
+                );
+            }
+            (None, Some(_)) => {
+                return Err("--rendezvous applies only to a multi-host package".into());
+            }
+            (None, None) => {
+                if args.roce_ring {
+                    return Err("--roce-ring requires a multi-host package".into());
+                }
+                None
+            }
+        };
+        (authorized, membership)
+    };
+    #[cfg(windows)]
+    let (_, authorized, _) = load_package(&args, &mut progress)?;
+    #[cfg(windows)]
+    let mut membership: Option<cluster::Membership> = None;
+    if args.stage_only {
+        #[cfg(unix)]
+        if let Some(peers) = launched {
+            peers.finish().map_err(|e| e.to_string())?;
+        }
+        return Ok(());
+    }
     let options = args.load_options();
     let roce_ring = args.roce_ring;
-    let devices = &args.gpus;
-    let local_devices: Vec<i32> = (0..devices.len() as i32).collect();
-    let mut progress = StartupProgress::stderr();
-    let (authorized, _publisher) = trust::load(&root, &args, &mut progress, origin.as_deref())?;
-    if roce_ring
-        && flare_helios::runtime_package::package_cluster(&authorized)
-            .is_none_or(|(world, _)| !(2..=16).contains(&world))
-    {
-        return Err("--roce-ring requires a multi-host package with 2..16 ranks".into());
-    }
     let rendezvous = args.rendezvous;
-    // Ranks of a multi-host package join before loading, so every rank allocates the cache
-    // capacity they agree on.
-    let mut membership = match (
-        flare_helios::runtime_package::package_cluster(&authorized),
-        &rendezvous,
-    ) {
-        (Some((world, export_id)), Some(address)) => Some(cluster::join(
-            args.rank.unwrap_or(0),
-            world,
-            &export_id,
-            address,
-            &progress,
-        )?),
-        (Some(_), None) => {
-            return Err("a multi-host package requires --rendezvous HOST:PORT".into());
-        }
-        (None, Some(_)) => {
-            return Err("--rendezvous applies only to a multi-host package".into());
-        }
-        (None, None) => None,
-    };
     // SAFETY: The trusted package owners remain live until every rank drains.
     let owner = unsafe {
         NativeModel::load_agreeing(
@@ -204,7 +227,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     config["api_key"] = key.unwrap_or_default().into();
     phase.finish(config["model_id"].as_str().unwrap_or_default());
-    serve(owner, config, progress, cluster, roce_ring)
+    serve(owner, config, progress, cluster, roce_ring)?;
+    #[cfg(unix)]
+    if let Some(peers) = launched {
+        peers.finish().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+fn load_package(
+    args: &cli::Run,
+    progress: &mut StartupProgress,
+) -> Result<
+    (
+        std::path::PathBuf,
+        flare_helios::runtime_package::AuthorizedPackage,
+        flare_helios::runtime_package::Publisher,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    let package = args
+        .package
+        .as_ref()
+        .ok_or("rank zero requires a package")?;
+    let mut origin = None;
+    let path = if hub::is_repository(package) {
+        let text = package.to_str().ok_or("repository must be UTF-8")?;
+        origin = Some(hub::repository(text)?.0.to_owned());
+        hub::download(text, &args.hub, args.gpus.len())?
+    } else {
+        if args.hub.revision.is_some()
+            || args.hub.filename.is_some()
+            || args.hub.cache_dir.is_some()
+        {
+            return Err(
+                "download options apply to Hugging Face repositories, not local package paths"
+                    .into(),
+            );
+        }
+        package.clone()
+    };
+    let root = path
+        .canonicalize()
+        .map_err(|e| format!("cannot access package {}: {e}", path.display()))?;
+    let (authorized, publisher) = trust::load(&root, args, progress, origin.as_deref())?;
+    Ok((root, authorized, publisher))
 }
 
 /// Run one `flare orbit` command as the controller on this machine.
@@ -213,20 +280,6 @@ fn orbit_command(args: cli::OrbitArgs, matches: &clap::ArgMatches) -> Result<(),
     let mut controller =
         orbit::controller::Controller::open(args.orbit_file.as_deref(), args.key_file.as_deref())?;
     match args.command {
-        cli::OrbitCommand::CheckpointRoute { cluster } => {
-            use std::io::Read;
-            let mut input = Vec::new();
-            std::io::stdin().take(65537).read_to_end(&mut input)?;
-            if input.len() > 65536 {
-                return Err("checkpoint route request exceeds capacity".into());
-            }
-            let request = serde_json::from_slice(&input)?;
-            println!(
-                "{}",
-                serde_json::to_string(&controller.checkpoint_route(cluster.as_deref(), request)?)?
-            );
-            Ok(())
-        }
         cli::OrbitCommand::Pair { hosts, code } => controller.pair(&hosts, code.as_deref()),
         cli::OrbitCommand::Controllers {
             command: cli::ControllersCommand::Add { name, key },

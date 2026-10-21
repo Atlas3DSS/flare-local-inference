@@ -77,7 +77,7 @@ def test_parallel_export_and_verified_cache_reuse(tmp_path, streams):
             thread.join(5)
             assert not thread.is_alive() and not failures
             assert report['streams'] == (streams or 1)
-            assert report['transport'] == ('agent-ring-tcp' if streams else 'rendezvous-tcp')
+            assert report['transport'] == ('fabric-tcp' if streams else 'rendezvous-tcp')
             assert report['files'] == (len(contents) if iteration == 0 else 0)
             expected = sum(info['size'] for info in description['files'].values()) if iteration == 0 else 0
             assert report['payload_bytes'] == expected
@@ -217,7 +217,7 @@ def test_checkpoint_completion_hands_authenticated_channel_to_export(tmp_path):
         report = host_ranks.receive_export_sources(control, description, tmp_path / 'root.json',
             ExportOptions(tmp_path / 'root-cache'), channels=[server.channel])
         thread.join(5)
-        assert report['files'] == 3 and report['transport'] == 'agent-ring-tcp'
+        assert report['files'] == 3 and report['transport'] == 'fabric-tcp'
         assert not thread.is_alive() and not failures
 
 

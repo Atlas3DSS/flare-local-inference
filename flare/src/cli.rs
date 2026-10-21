@@ -36,15 +36,9 @@ pub enum Command {
     Orbit(OrbitArgs),
     #[cfg(unix)]
     #[command(hide = true)]
-    CheckpointConnect {
+    CheckpointTransport {
         #[arg(long)]
-        grant: PathBuf,
-        #[arg(long)]
-        rank: usize,
-        #[arg(long)]
-        stream: usize,
-        #[arg(long)]
-        fd: i32,
+        socket: PathBuf,
     },
     /// Manage remembered publisher trust.
     Trust {
@@ -152,6 +146,17 @@ pub struct AgentArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum AgentCommand {
+    /// Pair this machine with resident agents for --hosts or Orbit launches.
+    Pair {
+        #[arg(required = true, value_name = "HOST")]
+        hosts: Vec<String>,
+        #[arg(long, value_name = "CODE")]
+        code: Option<String>,
+        #[arg(long, value_name = "PATH")]
+        agents_file: Option<PathBuf>,
+        #[arg(long, value_name = "PATH")]
+        controller_key: Option<PathBuf>,
+    },
     /// Install and restart this host's agent service, and prepare controller pairing.
     Install {
         /// One-time code a controller presents to pair.
@@ -184,12 +189,6 @@ pub struct OrbitArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum OrbitCommand {
-    /// Internal Ignition request: sign a fabric route for an admitted checkpoint source.
-    #[command(hide = true)]
-    CheckpointRoute {
-        #[arg(long)]
-        cluster: Option<String>,
-    },
     /// Pair this controller with the agents on HOSTS.
     Pair {
         #[arg(required = true, value_name = "HOST")]
@@ -274,8 +273,8 @@ pub struct OrbitPush {
     #[arg(long)]
     pub roce_ring: bool,
 
-    /// Parallel TCP streams per destination file over the ring fabric [default: 8].
-    #[arg(long, value_name = "N", requires = "roce_ring", value_parser = clap::value_parser!(u8).range(1..=64))]
+    /// Parallel TCP streams per destination file over the fabric [default: 8].
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u8).range(1..=64))]
     pub transfer_streams: Option<u8>,
 
     #[command(flatten)]
@@ -286,13 +285,19 @@ impl OrbitPush {
     /// What package verification and publisher acceptance need, as `flare run` takes them.
     pub fn run_args(&self) -> Run {
         Run {
-            package: PathBuf::from(&self.package),
+            package: Some(PathBuf::from(&self.package)),
             host: "127.0.0.1".parse().unwrap(),
             port: 8000,
             served_model_name: None,
             roce_ring: self.roce_ring,
             rendezvous: None,
             rank: None,
+            hosts: Vec::new(),
+            agents_file: None,
+            controller_key: None,
+            transfer_streams: self.transfer_streams,
+            package_cache: None,
+            stage_only: false,
             api_key_file: None,
             scheduler_policy: "balanced".into(),
             serving: self.serving.clone(),
@@ -358,7 +363,7 @@ pub struct OrbitRun {
     #[arg(long, help_heading = "Multi-host options")]
     pub roce_ring: bool,
 
-    /// Parallel TCP streams per destination file over the ring fabric [default: saved group or 8].
+    /// Parallel TCP streams per destination file over the fabric [default: saved group or 8].
     #[arg(long, value_name = "N", value_parser = clap::value_parser!(u8).range(1..=64), help_heading = "Multi-host options")]
     pub transfer_streams: Option<u8>,
 
@@ -431,13 +436,19 @@ impl OrbitRun {
     /// The equivalent single-host arguments, for publisher trust resolution of the package.
     pub fn run_args(&self) -> Run {
         Run {
-            package: PathBuf::from(self.package.as_deref().unwrap_or_default()),
+            package: Some(PathBuf::from(self.package.as_deref().unwrap_or_default())),
             host: self.host.unwrap_or_else(|| "127.0.0.1".parse().unwrap()),
             port: self.port.unwrap_or(8000),
             served_model_name: self.served_model_name.clone(),
             roce_ring: self.roce_ring,
             rendezvous: None,
             rank: None,
+            hosts: Vec::new(),
+            agents_file: None,
+            controller_key: None,
+            transfer_streams: self.transfer_streams,
+            package_cache: None,
+            stage_only: false,
             api_key_file: self.api_key_file.clone(),
             scheduler_policy: self
                 .scheduler_policy
@@ -465,8 +476,8 @@ pub enum TrustCommand {
 )]
 pub struct Run {
     /// Local prepared .safetensors package or Hugging Face ORG/NAME[@REVISION].
-    #[arg(value_name = "PACKAGE")]
-    pub package: PathBuf,
+    #[arg(value_name = "PACKAGE", required_unless_present = "rank")]
+    pub package: Option<PathBuf>,
 
     /// IP address for the HTTP server.
     #[arg(
@@ -502,6 +513,45 @@ pub struct Run {
     /// This host's rank of a multi-host package.
     #[arg(long, value_name = "N", help_heading = "Multi-host options")]
     pub rank: Option<usize>,
+
+    /// Start peer ranks through paired agents, in rank order; rank zero runs locally.
+    #[arg(
+        long,
+        value_name = "HOST[,HOST...]",
+        value_delimiter = ',',
+        help_heading = "Multi-host options"
+    )]
+    pub hosts: Vec<String>,
+
+    /// Paired agent registry [default: ~/.config/flare/orbit.toml].
+    #[arg(
+        long,
+        value_name = "PATH",
+        requires = "hosts",
+        help_heading = "Multi-host options"
+    )]
+    pub agents_file: Option<PathBuf>,
+
+    /// Paired controller key [default: ~/.config/flare/orbit/controller.key].
+    #[arg(
+        long,
+        value_name = "PATH",
+        requires = "hosts",
+        help_heading = "Multi-host options"
+    )]
+    pub controller_key: Option<PathBuf>,
+
+    /// Parallel CX7 TCP streams per peer for package distribution [default: 8].
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u8).range(1..=64), help_heading = "Multi-host options")]
+    pub transfer_streams: Option<u8>,
+
+    /// Cache root for received rank packages [default: ~/.cache/flare].
+    #[arg(long, value_name = "PATH", help_heading = "Multi-host options")]
+    pub package_cache: Option<PathBuf>,
+
+    /// Distribute and verify rank packages, then exit before GPU initialization.
+    #[arg(long, help_heading = "Multi-host options")]
+    pub stage_only: bool,
 
     /// File containing the serving API key; omit to disable authentication.
     #[arg(long, value_name = "PATH", help_heading = "Serving options")]
@@ -967,6 +1017,44 @@ mod tests {
     }
 
     #[test]
+    fn manual_peers_and_agent_launches_parse_without_orbit_configuration() {
+        let peer = run(&["flare", "run", "--rank", "2", "--rendezvous", "head:29800"]);
+        assert!(peer.package.is_none());
+        assert_eq!(peer.rank, Some(2));
+        let head = run(&[
+            "flare",
+            "run",
+            "model.safetensors",
+            "--hosts",
+            "peer1,peer2,peer3",
+            "--transfer-streams",
+            "16",
+            "--stage-only",
+        ]);
+        assert_eq!(head.hosts, ["peer1", "peer2", "peer3"]);
+        assert_eq!(head.transfer_streams, Some(16));
+        assert!(head.stage_only);
+        assert!(Cli::try_parse_from(["flare", "run"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "flare",
+                "run",
+                "model.safetensors",
+                "--transfer-streams",
+                "0"
+            ])
+            .is_err()
+        );
+        assert!(matches!(
+            Cli::parse_from(["flare", "agent", "pair", "peer1", "--code", "join-code"]).command,
+            Command::Agent(AgentArgs {
+                command: Some(AgentCommand::Pair { .. }),
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn explicit_options_reach_the_loader() {
         let args = run(&[
             "flare",
@@ -994,7 +1082,7 @@ mod tests {
             "--prefix-cache-disk-transport",
             "direct",
         ]);
-        assert_eq!(args.package, PathBuf::from("model.safetensors"));
+        assert_eq!(args.package, Some(PathBuf::from("model.safetensors")));
         assert_eq!(args.bind_address().to_string(), "[::1]:8001");
         assert_eq!(args.api_key_file, Some(PathBuf::from("key.txt")));
         let options = args.load_options();
@@ -1095,7 +1183,7 @@ mod tests {
                 "--transfer-streams",
                 "4"
             ])
-            .is_err()
+            .is_ok()
         );
     }
 

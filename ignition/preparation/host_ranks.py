@@ -274,7 +274,7 @@ def receive_export_sources(control, description, destination, settings, *, chann
     size = sum(metadata[n]['size'] for n in requested)
     return dict(payload_bytes=size, payload_seconds=seconds, payload_gbps=size * 8 / seconds / 1e9,
                 files=len(requested), streams=1 if channels is None else len(channels),
-                transport='rendezvous-tcp' if channels is None else 'agent-ring-tcp')
+                transport='rendezvous-tcp' if channels is None else 'fabric-tcp')
 
 
 def _rdma_devices():
@@ -367,13 +367,13 @@ class HostRendezvous:
     """Rank zero's listener: admits one process per peer rank, each on its own host."""
 
     def __init__(self, address, world, *, identity, topology, checkpoint_token_file="~/.config/flare/agent.token",
-                 checkpoint_ring=None):
+                 checkpoint_fabric=None):
         if world not in (2, 4):
             raise ValueError("multi-host tensor parallelism requires two or four ranks")
         self.address, self.world = parse_address(address), world
         self.identity, self.topology = identity, topology
         self.checkpoint_token_file = checkpoint_token_file
-        self.checkpoint_ring = checkpoint_ring
+        self.checkpoint_fabric = checkpoint_fabric
         self.session = secrets.token_hex(16)
         self.listener = socket.create_server(self.address, reuse_port=False)
         self.peers = {}
@@ -478,20 +478,29 @@ class HostRendezvous:
 
         source = RootSource(snapshot, checkpoint)
         readers = []
-        ring = None
+        fabric = None
         try:
             key = token(self.checkpoint_token_file)
             with phase(progress, "Admit checkpoint range readers"):
-                if self.checkpoint_ring is not None:
-                    from .checkpoint_ring import RingSource
+                if self.checkpoint_fabric is not None:
+                    from .checkpoint_fabric import FabricSource
 
-                    ring = RingSource(source, key, self.identity, self.topologies, **self.checkpoint_ring)
+                    fabric = FabricSource(source, key, self.identity, self.world, **self.checkpoint_fabric)
+                    for control in controls:
+                        send_object(control, ("checkpoint-fabric", self.checkpoint_fabric))
+                    endpoints = [fabric.transport.endpoint, *(receive_object(control) for control in controls)]
+                    for control in controls:
+                        send_object(control, endpoints)
+                    fabric.transport.configure(endpoints)
+                    for control in controls:
+                        if receive_object(control) != {"fabric_ready": True}:
+                            raise RuntimeError("peer did not confirm its checkpoint fabric endpoints")
                     if progress is not None:
-                        progress(f"checkpoint ranges: agent ring TCP, {ring.streams} streams per peer")
+                        progress(f"checkpoint ranges: fabric TCP, {fabric.streams} streams per peer")
                 for rank, control in enumerate(controls, 1):
                     send_object(control, ("checkpoint-source", checkpoint))
                     reader = SourceServer(source, control, key, rank, self.identity,
-                                          transport=None if ring is None else ring.grant)
+                                          transport=None if fabric is None else {"streams": fabric.streams})
                     readers.append(reader)
                     reader.thread.start()
                 for reader in readers:
@@ -513,8 +522,8 @@ class HostRendezvous:
             # Loading owns each socket's reader until its authenticated end marker is acknowledged.
             for reader in readers:
                 reader.join()
-            if ring is not None:
-                ring.join()
+            if fabric is not None:
+                fabric.join()
             with phase(progress, "Wait for tensor-parallel ranks", total=len(controls)) as stage:
                 reports = []
                 for control in controls:
@@ -524,17 +533,17 @@ class HostRendezvous:
                     reports.append(message["report"])
                     stage.update(advance=1)
             group = HostRankGroup(self, model, reports,
-                                  checkpoint_ring=ring if package_storage is not None else None)
+                                  checkpoint_fabric=fabric if package_storage is not None else None)
             if package_storage is not None:
-                ring = None  # The group owns the authenticated channels through export.
+                fabric = None  # The group owns the authenticated channels through export.
             return group
         except BaseException:  # noqa: BLE001 - Preparation interruption must end every rank.
             traceback.print_exc()
             print("flare: terminating tensor-parallel rank group: preparation failed", flush=True)
             os._exit(1)
         finally:
-            if ring is not None:
-                ring.close()
+            if fabric is not None:
+                fabric.close()
             source.close()
 
     def finish(self):
@@ -567,16 +576,16 @@ class HostRendezvous:
 class HostRankGroup:
     """Root model and its remote peers through native coordinated shutdown."""
 
-    def __init__(self, rendezvous, model, reports, *, checkpoint_ring=None):
+    def __init__(self, rendezvous, model, reports, *, checkpoint_fabric=None):
         self.rendezvous, self.model = rendezvous, model
         self.memory_report = {"world_size": rendezvous.world, "ranks": [model.memory_report, *reports]}
         self._started = self._closed = False
-        self.checkpoint_ring = checkpoint_ring
+        self.checkpoint_fabric = checkpoint_fabric
 
-    def _close_checkpoint_ring(self):
-        if self.checkpoint_ring is not None:
-            self.checkpoint_ring.close()
-            self.checkpoint_ring = None
+    def _close_checkpoint_fabric(self):
+        if self.checkpoint_fabric is not None:
+            self.checkpoint_fabric.close()
+            self.checkpoint_fabric = None
 
     @property
     def controls(self):
@@ -616,9 +625,9 @@ class HostRankGroup:
                     reply = receive_object(control)
                     if 'sources' not in reply:
                         raise RuntimeError(f'rank {rank} export failed: {reply}')
-                    channels = (None if self.checkpoint_ring is None else
-                                [self.checkpoint_ring.readers[rank, stream].channel
-                                 for stream in range(self.checkpoint_ring.streams)])
+                    channels = (None if self.checkpoint_fabric is None else
+                                [self.checkpoint_fabric.readers[rank, stream].channel
+                                 for stream in range(self.checkpoint_fabric.streams)])
                     report = receive_export_sources(control, reply['sources'], roots[rank], settings, channels=channels)
                     if progress is not None:
                         progress(f"received rank {rank} export: {report['payload_bytes'] / (1 << 30):.2f} GiB "
@@ -626,13 +635,13 @@ class HostRankGroup:
                                  f"{report['payload_seconds']:.2f}s, {report['payload_gbps']:.2f} Gbit/s)")
                     return reply['memory_inventory']
 
-                connections = self.controls + ([] if self.checkpoint_ring is None else
-                                               [r.connection for r in self.checkpoint_ring.readers.values()])
+                connections = self.controls + ([] if self.checkpoint_fabric is None else
+                                               [r.connection for r in self.checkpoint_fabric.readers.values()])
                 try:
                     inventories = [package.memory_inventory, *_export_workers(
                         receive_rank, list(range(1, self.rendezvous.world)), connections)]
                 finally:
-                    self._close_checkpoint_ring()
+                    self._close_checkpoint_fabric()
                 combine(path, roots, [], publisher=publisher, shard_size=shard_size,
                         cluster=(self.rendezvous.world, export_id))
             print_inventory(inventories, console=getattr(progress, 'console', None))
@@ -641,7 +650,7 @@ class HostRankGroup:
         if self._started or self._closed:
             raise RuntimeError("prepared rank group has already been consumed or closed")
         try:
-            self._close_checkpoint_ring()
+            self._close_checkpoint_fabric()
             for control in self.controls:
                 send_object(control, "serve")
             self._started = True
@@ -661,7 +670,7 @@ class HostRankGroup:
         """
         if self._started or self._closed:
             raise RuntimeError("prepared rank group has already been consumed or closed")
-        self._close_checkpoint_ring()
+        self._close_checkpoint_fabric()
         for control in self.controls:
             send_object(control, ("direct", {"eager": eager}))
         self._started = True
@@ -672,7 +681,7 @@ class HostRankGroup:
             return
         self.rendezvous.stopping.set()
         try:
-            self._close_checkpoint_ring()
+            self._close_checkpoint_fabric()
             if not self._started:
                 for control in self.controls:
                     send_object(control, "close")
@@ -739,17 +748,25 @@ def serve_peer(control, executor, rank, world, *, hub_cache, progress=None, expo
                         cleanup=lambda: [source.close() for source in owned_sources])
     # Rank zero coordinates shutdown; a terminal interrupt must not end a peer mid-drain.
     signal.signal(signal.SIGINT, signal.SIG_IGN)
-    source = source_scope = None
+    source = source_scope = fabric = None
     try:
         from .checkpoint_source import RemoteSource, token
 
         command = receive_object(control)
+        if isinstance(command, tuple) and command[0] == "checkpoint-fabric":
+            from .checkpoint_fabric import FabricTransport
+
+            fabric = FabricTransport(rank, world, **command[1])
+            send_object(control, fabric.endpoint)
+            fabric.configure(receive_object(control))
+            send_object(control, {"fabric_ready": True})
+            command = receive_object(control)
         if not (isinstance(command, tuple) and command[0] == "checkpoint-source"):
             raise RuntimeError(f"rank zero sent {command!r} before its checkpoint")
         _, checkpoint = command
         source = RemoteSource(control, token(checkpoint_token_file), rank,
                               source_identity() if identity is None else identity, checkpoint,
-                              directory=export_staging, on_created=owned_sources.append)
+                              directory=export_staging, on_created=owned_sources.append, fabric=fabric)
         source_scope = source.activate()
         snapshot = source_scope.__enter__()
         assignment = receive_object(control)
@@ -811,6 +828,9 @@ def serve_peer(control, executor, rank, world, *, hub_cache, progress=None, expo
                 shutil.rmtree(directory, ignore_errors=True)
             command = receive_object(control)
         source.close_transport()
+        if fabric is not None:
+            fabric.close()
+            fabric = None
         if command == "serve":
             if progress is not None:
                 progress("serving")
@@ -845,6 +865,8 @@ def serve_peer(control, executor, rank, world, *, hub_cache, progress=None, expo
             source_scope.__exit__(None, None, None)
         if source is not None:
             source.close()
+        if fabric is not None:
+            fabric.close(check=False)
         try:
             send_object(control, {"exit": 1, "error": traceback.format_exc(limit=3)})
         except OSError:

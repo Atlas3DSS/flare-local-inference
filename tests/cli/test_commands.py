@@ -292,16 +292,25 @@ def test_roce_ring_requires_multiple_hosts_before_model_or_gpu_work(tmp_path, ca
     args = _parser().parse_args(["export", "qwen3.8-flash", "--output", str(tmp_path / "model"),
                                "--roce-ring", "--ranks", "4"])
     assert args.roce_ring
-    from ignition.cli.serve import _checkpoint_ring
-    assert _checkpoint_ring(args)["streams"] == 8
+    from ignition.cli.serve import _checkpoint_fabric
+    assert _checkpoint_fabric(args)["streams"] == 8
     for count in (1, 4, 8, 16, 32, 64):
         args = _parser().parse_args(["export", "glm-5.3-flash", "--roce-ring", "--ranks", "4",
-                                    "--transfer-streams", str(count), "--cluster", "ring"])
-        assert _checkpoint_ring(args)["streams"] == count
+                                    "--transfer-streams", str(count)])
+        assert _checkpoint_fabric(args)["streams"] == count
     for count in (0, 65):
         with pytest.raises(SystemExit):
             _parser().parse_args(["export", "--transfer-streams", str(count)])
     args = _parser().parse_args(["export", "--transfer-streams", "8"])
     from ignition.errors import UsageError
-    with pytest.raises(UsageError, match="require --roce-ring"):
-        _checkpoint_ring(args)
+    with pytest.raises(UsageError, match="requires multiple host ranks"):
+        _checkpoint_fabric(args)
+
+
+@pytest.mark.parametrize("ring", [False, True])
+def test_fabric_streams_do_not_require_orbit_configuration(ring):
+    from ignition.cli.serve import _checkpoint_fabric
+
+    args = _parser().parse_args(["export", "glm-5.3-flash", "--ranks", "4", "--transfer-streams", "16",
+                                *(["--roce-ring"] if ring else [])])
+    assert _checkpoint_fabric(args) == dict(ring=ring, streams=16)

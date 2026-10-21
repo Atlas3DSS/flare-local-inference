@@ -1,8 +1,6 @@
 //! Ranks of one model on separate hosts: rendezvous at rank zero and connect their RoCE transport.
 
 use std::sync::Arc;
-#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-use std::time::Duration;
 
 use flare_helios::{
     execution::{CollectiveHealth, RankStream},
@@ -11,10 +9,6 @@ use flare_helios::{
 };
 
 type Failure = Box<dyn std::error::Error>;
-
-// Ranks join before loading; rank zero starts its peers first, so the slowest start bounds the wait.
-#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-const JOIN_TIMEOUT: Duration = Duration::from_secs(1800);
 
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 pub use flare_helios::execution::roce::RoceTransport;
@@ -90,40 +84,6 @@ pub enum Membership {
     Zero(Vec<RankStream>),
     /// A peer's connection to rank zero.
     Peer(RankStream),
-}
-
-/// Join rank zero's rendezvous at `address` before loading: rank zero admits every peer of its
-/// export, and a peer knocks until admitted.
-pub fn join(
-    rank: usize,
-    world: usize,
-    export_id: &str,
-    address: &str,
-    progress: &StartupProgress,
-) -> Result<Membership, Failure> {
-    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-    {
-        use flare_helios::execution::rendezvous;
-
-        if rank == 0 {
-            let phase = progress.phase("Wait for tensor-parallel hosts", None);
-            let streams = rendezvous::accept(address, world, export_id, JOIN_TIMEOUT, |rank| {
-                eprintln!("Rank {rank} joined")
-            })?;
-            phase.finish(format!("{} peer ranks at {address}", streams.len()));
-            Ok(Membership::Zero(streams))
-        } else {
-            let phase = progress.phase("Join rank zero", None);
-            let stream = rendezvous::knock(address, rank, world, export_id, JOIN_TIMEOUT)?;
-            phase.finish(format!("rank {rank} of {world} at {address}"));
-            Ok(Membership::Peer(stream))
-        }
-    }
-    #[cfg(not(all(target_os = "linux", target_arch = "aarch64")))]
-    {
-        let _ = (rank, world, export_id, address, progress);
-        Err("this flare build has no RoCE transport for multi-host packages".into())
-    }
 }
 
 impl Membership {
