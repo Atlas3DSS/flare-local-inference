@@ -1,12 +1,15 @@
 """Dense MTP transactions using the shared acceptance and ABI3 completion engine."""
 
 import torch
+import triton
+import triton.language as tl
 
 from ignition.components.draft_sampling import PreparedDraftDistribution
 from ignition.components.paged_batch import Metadata, PreparedBatch
 from ignition.components.paged_maintenance import PreparedMaintenance
 from ignition.components.parallel_draft import prepare_sampling_scratch
 from ignition.components.recurrent import DeltaMetadata
+from ignition.components.sampling import _check_tensor, _compile
 from ignition.components.speculation import (
     DRAFT_RNG_DOMAIN, PreparedSpeculativeCommit, PreparedSpeculativeDistributions,
     PreparedStochasticVerification, SpeculativeRngState,
@@ -20,8 +23,124 @@ from .decoder import PreparedDecoder
 from .mtp import MTPScratch, PreparedMTP
 
 
+@triton.jit
+def _validate_draft_checkpoint(Sources, Destinations, Operations, Expected, Count, Errors,
+                               Tables, RequestSlots, StateRows, MemoryCapacity,
+                               WIDTH: tl.constexpr, PAGE: tl.constexpr, LIVE: tl.constexpr):
+    row = tl.program_id(0)
+    count, pages = tl.load(Count), tl.load(MemoryCapacity + 1)
+    slot, endpoint = tl.load(RequestSlots + row), tl.load(Expected + row)
+    state = tl.load(StateRows + slot * 8, (slot >= 0) & (slot < LIVE), other=0)
+    restore = tl.load(Destinations + row) == state
+    error = tl.load(Errors + row)
+    active = (row < count) & (error == 0) & (tl.load(Operations + row) == 0) & (endpoint > 1)
+    logical = endpoint // PAGE - 1
+    first = active & (logical >= 0) & (logical < WIDTH)
+    second = active & (endpoint % PAGE >= 2) & (logical + 1 < WIDTH)
+    page0 = tl.load(Tables + slot * WIDTH + logical, first, other=-1)
+    page1 = tl.load(Tables + slot * WIDTH + logical + 1, second, other=-1)
+    invalid = (first & ((page0 < 0) | (page0 >= pages))) | (second & ((page1 < 0) | (page1 >= pages)))
+
+    others = tl.arange(0, LIVE)
+    other_slot, other_endpoint = tl.load(RequestSlots + others), tl.load(Expected + others)
+    other_state = tl.load(StateRows + other_slot * 8, (other_slot >= 0) & (other_slot < LIVE), other=0)
+    other_restore = tl.load(Destinations + others) == other_state
+    other_active = (others < count) & (others != row) & (tl.load(Operations + others) == 0)
+    other_active &= (other_slot >= 0) & (other_slot < LIVE) & (other_endpoint > 1)
+    other_logical = other_endpoint // PAGE - 1
+    other_first = other_active & (other_logical >= 0) & (other_logical < WIDTH)
+    other_second = other_active & (other_endpoint % PAGE >= 2) & (other_logical + 1 >= 0) & (other_logical + 1 < WIDTH)
+    other_page0 = tl.load(Tables + other_slot * WIDTH + other_logical, other_first, other=-1)
+    other_page1 = tl.load(Tables + other_slot * WIDTH + other_logical + 1, other_second, other=-1)
+    overlap = (first & other_first & (page0 == other_page0)) | (first & other_second & (page0 == other_page1))
+    overlap |= (second & other_first & (page1 == other_page0)) | (second & other_second & (page1 == other_page1))
+    conflict = tl.sum((overlap & (restore | other_restore)).to(tl.int32), 0) > 0
+    conflict |= first & second & (page0 == page1)
+    error = tl.where(active & conflict, 4, error)
+    error = tl.where(active & invalid, 6, error)
+    tl.store(Errors + row, error)
+
+
+@triton.jit
+def _copy_draft_checkpoint(Pointers, Backing, Tables, Sources, Destinations, Operations,
+                           Expected, Count, Errors, RequestSlots, StateRows,
+                           ROW_BYTES: tl.constexpr, PAGE_BYTES: tl.constexpr, WIDTH: tl.constexpr,
+                           PAGE: tl.constexpr, LIVE: tl.constexpr, BLOCK: tl.constexpr):
+    row, field_part, tile = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    field, part = field_part // 2, field_part % 2
+    source, destination = tl.load(Sources + row), tl.load(Destinations + row)
+    slot, endpoint = tl.load(RequestSlots + row), tl.load(Expected + row)
+    state = tl.load(StateRows + slot * 8, (slot >= 0) & (slot < LIVE), other=0)
+    snapshot = source == state
+    logical = endpoint // PAGE + part - 1
+    active = (row < tl.load(Count)) & (tl.load(Errors + row) == 0) & (tl.load(Operations + row) == 0)
+    active &= (endpoint > 1) & (logical >= 0) & (logical < WIDTH) & ((part == 0) | (endpoint % PAGE >= 2))
+    page = tl.load(Tables + slot * WIDTH + logical, active, other=0)
+    cache = tl.load(Pointers + field * 3).to(tl.pointer_type(tl.uint8))
+    offset = tl.load(Pointers + field * 3 + part + 1)
+    index = tile * BLOCK + tl.arange(0, BLOCK)
+    mask = active & (index < PAGE_BYTES)
+    saved_slot = tl.where(snapshot, destination, source)
+    saved = Backing + saved_slot * ROW_BYTES + offset + index
+    external = cache + page.to(tl.int64) * PAGE_BYTES + index
+    if snapshot:
+        value = tl.load(external, mask, other=0)
+        tl.store(saved, value, mask)
+    else:
+        value = tl.load(saved, mask, other=0)
+        tl.store(external, value, mask)
+
+
+class PreparedDenseStateTransfer(PreparedStateTransfer):
+    """Save both private draft pages beyond the shared target page prefix.
+
+    With native draft page_offset=1 and N=P//128, draft logical N-1 is
+    private even when fully consumed. Logical N also needs saving at P%128>=2.
+    This is the two-part Qwen38 checkpoint rule with the dense page size.
+    """
+
+    def __init__(self, *args, draft_tables, **kwargs):
+        super().__init__(*args, **kwargs)
+        pool, c, device = self.pool, self.commands, self.pool.backing.device
+        _check_tensor(draft_tables, self.tables.shape, torch.int32, device, "draft_page_tables")
+        values, page_bytes = [], None
+        for name in ("draft.key", "draft.value"):
+            cache = pool.pages[name]
+            region, extra = pool.layout.region(name), pool.layout.region(name + ".extra")
+            if (region.dtype != torch.uint8 or extra.dtype != torch.uint8 or extra.nbytes != region.nbytes
+                    or cache.shape != (self.pages[0][1].shape[0], region.nbytes)
+                    or (page_bytes is not None and page_bytes != region.nbytes)):
+                raise ValueError("dense draft checkpoint pages must match their two byte backup regions")
+            _check_tensor(cache, cache.shape, torch.uint8, device, name)
+            values.append((cache.data_ptr(), region.offset, extra.offset))
+            page_bytes = region.nbytes
+        self.draft_pointers = torch.tensor(values, dtype=torch.int64, device=device)
+        self.draft_validate_args = (c.source_slots, c.destination_slots, c.operation, c.expected_consumed,
+            c.num_ops, c.errors, draft_tables, c.request_slots, self.state_rows, pool.memory_capacity,
+            self.tables.shape[1], PAGE_TOKENS, self.capacity)
+        self.draft_copy_args = (self.draft_pointers, pool.backing, draft_tables, c.source_slots,
+            c.destination_slots, c.operation, c.expected_consumed, c.num_ops, c.errors, c.request_slots,
+            self.state_rows, pool.layout.row_bytes, page_bytes, self.tables.shape[1], PAGE_TOKENS,
+            self.capacity, 1024)
+        self._draft_validate, self._draft_copy = None, None
+
+    def prepare(self):
+        super().prepare()
+        self._draft_validate = _compile(_validate_draft_checkpoint, self.draft_validate_args, (self.capacity, 1, 1))
+        self._draft_copy = _compile(_copy_draft_checkpoint, self.draft_copy_args,
+            (self.capacity, 4, triton.cdiv(self.draft_copy_args[12], 1024)))
+
+    def validate(self):
+        super().validate()
+        self._draft_validate()
+
+    def apply(self):
+        super().apply()
+        self._draft_copy()
+
+
 class DenseMaintenance(PreparedMaintenance):
-    """Snapshot draft partial pages at P-1, including target page boundaries."""
+    """Snapshot the target partial page and both shifted private draft pages."""
 
     def __init__(self, *args, draft_tables=None, **kwargs):
         self.draft_tables = draft_tables
@@ -29,11 +148,10 @@ class DenseMaintenance(PreparedMaintenance):
 
     def _transfer(self):
         enabled = self.draft_tables is not None
-        return PreparedStateTransfer(self.pool, self.commands, self.inputs.page_tables,
+        transfer = PreparedDenseStateTransfer if enabled else PreparedStateTransfer
+        return transfer(self.pool, self.commands, self.inputs.page_tables,
             pages=((name, value) for name, value in self.pool.pages.items() if not name.startswith("draft.")),
-            trailing_pages=((name, value) for name, value in self.pool.pages.items()
-                            if enabled and name.startswith("draft.")),
-            trailing_tables=self.draft_tables, page_tokens=PAGE_TOKENS,
+            **({"draft_tables": self.draft_tables} if enabled else {}), page_tokens=PAGE_TOKENS,
             state_rows=self.inputs.request_state_rows, requests=self.requests,
             excluded_regions=self.excluded_regions)
 

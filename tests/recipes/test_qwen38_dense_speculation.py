@@ -19,7 +19,7 @@ def config():
                                   for i in range(64)]), {})
 
 
-@pytest.mark.parametrize('depth,row_bytes', [(0, 165302528), (2, 169758976), (3, 171725056)])
+@pytest.mark.parametrize('depth,row_bytes', [(0, 165302528), (2, 170283264), (3, 172249344)])
 def test_checkpoint_columns_and_memory(depth, row_bytes):
     model = config()
     layout = continuation_layout(model, dtype=torch.float32, element_bytes=2, draft_tokens=depth)
@@ -32,6 +32,8 @@ def test_checkpoint_columns_and_memory(depth, row_bytes):
     assert page_bytes(model, element_bytes=2, mtp=depth > 0) == ((8 << 20) + (512 << 10 if depth else 0))
     assert {name for name, _ in page_specs(model, element_bytes=2, mtp=depth > 0)
             if name.startswith('draft')} == ({'draft.key', 'draft.value'} if depth else set())
+    assert {r.name for r in layout.regions if r.name.startswith('draft')} == (
+        {'draft.key', 'draft.value', 'draft.key.extra', 'draft.value.extra'} if depth else set())
 
 
 @pytest.mark.parametrize('widths', [(), (2, 3), (1, 1), (1, 3, 2), (1, 5)])

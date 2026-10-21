@@ -34,6 +34,9 @@ def continuation_layout(config, *, dtype=torch.bfloat16, element_bytes=1, draft_
                             (f"layer{index}.recurrent", (48, 128, 128), torch.float32)))
     regions.extend((name, shape, torch.uint8) for name, shape in page_specs(
         config, element_bytes=element_bytes, mtp=draft_tokens > 0))
+    if draft_tokens:
+        regions.extend((name + ".extra", shape, torch.uint8) for name, shape in page_specs(
+            config, element_bytes=element_bytes, mtp=True) if name.startswith("draft."))
     regions.extend((("last_hidden", (config.hidden,), dtype),
                     ("consumed_tokens", (1,), torch.int64)))
     return StateLayout.from_specs(regions)
