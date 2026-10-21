@@ -3,6 +3,7 @@
 use super::{policy::{Candidate, bits}, utility::{LaneValue, ValueRate}, *};
 
 mod packed;
+mod packed_round;
 
 pub(super) struct SplitSpeculation {
     pub width: usize,
@@ -131,7 +132,6 @@ impl RequestScheduler {
             || self.slots.iter().any(|s| s.request.is_some())
             || !(2..=8).contains(&width)
             || self.speculative_widths != (1..=width).collect::<Vec<_>>()
-            || !self.mixed_catalog.is_empty()
             || self.proposal_source != speculation::ProposalSource::Mtp
         {
             return Err("split speculation requires learned proposals and contiguous logical prefix widths before admission".into());
@@ -200,26 +200,19 @@ impl RequestScheduler {
     }
 
     pub(super) fn proposal_round_duration(&self, batch: usize, width: usize) -> Option<u64> {
-        match &self.split {
-            Some(_) if width > 1 => Some(horizon(self.proposal_cost(batch, width)?,
-                self.costs.duration(GraphKind::Verification, batch, width)?)),
-            _ => self.costs.duration(GraphKind::Speculative, batch, width),
-        }
+        let joined = self.costs.duration(GraphKind::Speculative, batch, width);
+        let split = (width > 1).then(|| Some(horizon(self.proposal_cost(batch, width)?,
+            self.costs.duration(GraphKind::Verification, batch, width)?))).flatten();
+        let packed = (width > 1).then(|| self.costs.packed_round_duration(batch, width)).flatten();
+        joined.into_iter().chain(split).chain(packed).min()
     }
 
     pub(super) fn speculative_duration(&self, request: &LiveRequest, batch: usize, width: usize) -> Option<u64> {
-        if self.split.is_some() {
-            if let Some(p) = self.retained_proposal(request) {
-                if width < p.width { return None; }
-                self.costs.duration(GraphKind::Verification, batch, width)
-            } else if width == 1 {
-                self.costs.duration(GraphKind::Speculative, batch, 1)
-            } else {
-                Some(horizon(self.proposal_cost(batch, width)?,
-                    self.costs.duration(GraphKind::Verification, batch, width)?))
-            }
+        if let Some(p) = self.retained_proposal(request) {
+            if width < p.width { return None; }
+            self.costs.duration(GraphKind::Verification, batch, width)
         } else {
-            self.costs.duration(GraphKind::Speculative, batch, width)
+            self.proposal_round_duration(batch, width)
         }
     }
 
@@ -263,7 +256,7 @@ impl RequestScheduler {
         if let Some(shape) = exact {
             shapes.push(shape);
         } else if self.costs.packed_shapes().next().is_some() {
-            shapes.extend(self.costs.packed_shapes().map(|shape| cost::Key {
+            shapes.extend(self.costs.packed_shapes().map(|shape| cost::Key { drafts: 0,
                 kind: GraphKind::Verification, batch: shape.batch, tokens: shape.width,
                 prefill: 0, packed: shape.tokens,
             }));
@@ -271,7 +264,7 @@ impl RequestScheduler {
             for batch in crate::execution::BATCH_CAPACITIES.into_iter()
                 .take_while(|b| *b <= self.limits.max_active.next_power_of_two()) {
                 shapes.extend(self.speculative_catalog[batch.ilog2() as usize].iter().map(|&tokens|
-                    cost::Key { kind: GraphKind::Verification, batch, tokens, prefill: 0, packed: 0 }));
+                    cost::Key { drafts: 0, kind: GraphKind::Verification, batch, tokens, prefill: 0, packed: 0 }));
             }
         }
         for shape in shapes {
@@ -313,7 +306,7 @@ impl RequestScheduler {
             if mask == 0 { continue; }
             let total = offers.iter().filter(|(slot, _)| mask & (1 << slot) != 0)
                 .map(|&(slot, width)| value(slot, width)).sum();
-            output.push(Candidate { kind: GraphKind::Verification, mask, batch: shape.batch,
+            output.push(Candidate { draft_tokens: 0, kind: GraphKind::Verification, mask, batch: shape.batch,
                 capacity: shape.tokens, packed_token_capacity: shape.packed, prefill_capacity: 0,
                 prefill_slot: None, work: 0, duration_ns: nanos,
                 rate: ValueRate::new(nanos, total, age), feedback: true, verification_budget: None });
@@ -342,7 +335,7 @@ impl RequestScheduler {
         for batch in crate::execution::BATCH_CAPACITIES.into_iter()
             .take_while(|b| *b <= self.limits.max_active.next_power_of_two()) {
             for &depth in self.speculative_widths.iter().filter(|width| **width > 1) {
-                let producer = cost::Key { kind: GraphKind::Proposal, batch, tokens: depth, prefill: 0, packed: 0 };
+                let producer = cost::Key { drafts: 0, kind: GraphKind::Proposal, batch, tokens: depth, prefill: 0, packed: 0 };
                 if target.kind == GraphKind::Proposal && producer != target { continue; }
                 let Some(proposal_ns) = self.costs.duration_key(producer) else { continue; };
                 let logical = self.speculative_fixed_width.unwrap_or(depth).min(depth);
@@ -388,7 +381,7 @@ impl RequestScheduler {
                         }).sum();
                         (ValueRate::new(nanos, value, age), None)
                     };
-                    output.push(Candidate { kind: GraphKind::Proposal,
+                    output.push(Candidate { draft_tokens: 0, kind: GraphKind::Proposal,
                         mask: propose.iter().fold(0, |mask, (slot, _)| mask | (1 << slot)),
                         batch, capacity: depth, packed_token_capacity: 0, prefill_capacity: 0,
                         prefill_slot: None, work: 0, duration_ns: proposal_ns, rate,
@@ -503,6 +496,9 @@ impl RequestScheduler {
 
     pub(super) fn split_candidates(&self, output: &mut Vec<Candidate>, values: &[LaneValue; REQUEST_LANES], age_price: f64) {
         if !self.submissions.is_empty() { return; }
+        if self.costs.packed_round_shapes().next().is_some() {
+            self.packed_round_candidates(output, values, age_price);
+        }
         if self.costs.packed_shapes().next().is_some() {
             self.packed_candidates(output, values, age_price);
             return;
@@ -511,7 +507,7 @@ impl RequestScheduler {
         let retained = self.retained_needs();
         let proposal_shapes = self.packing_shapes(GraphKind::Proposal);
         let verification_shapes = self.packing_shapes(GraphKind::Verification);
-        let make = |kind, call: PackedCall, rate| Candidate { packed_token_capacity: 0, verification_budget: None,
+        let make = |kind, call: PackedCall, rate| Candidate { draft_tokens: 0, packed_token_capacity: 0, verification_budget: None,
             kind, mask: call.mask, batch: call.batch, capacity: call.width,
             prefill_capacity: 0, prefill_slot: None, work: 0, duration_ns: call.nanos, rate, feedback: true,
         };
@@ -642,7 +638,7 @@ mod tests {
                     .chain((2..=8).map(|width| (GraphKind::Proposal, width, 0)))
                     .chain((1..=8).map(|width| (GraphKind::Verification, 8, batch * width)))
                 {
-                    graphs.push(GraphDescriptor { name: format!("{kind:?}-{batch}-{width}-{budget}"), kind,
+                    graphs.push(GraphDescriptor { draft_tokens: 0, name: format!("{kind:?}-{batch}-{width}-{budget}"), kind,
                         sampling_mode: SamplingMode::General, handle: 1, batch_capacity: batch, token_capacity: width,
                         packed_token_capacity: budget, prefill_capacity: 0, estimated_duration_ns: 1, input_bindings: vec![] });
                 }
@@ -654,7 +650,7 @@ mod tests {
                     GraphKind::Verification => 8_000_000 + graph.packed_token_capacity as u64 * 375_000,
                     _ => 11_000_000,
                 };
-                s.costs.set_measured(&ScheduledStep { kind: graph.kind, batch_capacity: graph.batch_capacity,
+                s.costs.set_measured(&ScheduledStep { draft_tokens: 0, kind: graph.kind, batch_capacity: graph.batch_capacity,
                     token_capacity: graph.token_capacity, packed_token_capacity: graph.packed_token_capacity,
                     mixed: None, lanes: vec![], requires_feedback: true }, duration);
             }
@@ -700,7 +696,7 @@ mod tests {
         for batch in [1, 2, 4, 8] {
             for (kind,width,budget) in [(GraphKind::Speculative,1,0),(GraphKind::Proposal,8,0)].into_iter()
                 .chain((1..=8).map(|width| (GraphKind::Verification,8,batch*width))) {
-                graphs.push(GraphDescriptor { name: format!("{kind:?}-{batch}-{width}-{budget}"),kind,
+                graphs.push(GraphDescriptor { draft_tokens: 0, name: format!("{kind:?}-{batch}-{width}-{budget}"),kind,
                     sampling_mode: SamplingMode::General, handle: 1, batch_capacity: batch, token_capacity: width,
                     packed_token_capacity: budget, prefill_capacity: 0, estimated_duration_ns: 1, input_bindings: vec![] });
             }
@@ -713,7 +709,7 @@ mod tests {
                 GraphKind::Verification => 8_000_000 + graph.packed_token_capacity as u64 * 375_000,
                 _ => 11_000_000,
             };
-            let step = ScheduledStep { kind: graph.kind, batch_capacity: graph.batch_capacity,
+            let step = ScheduledStep { draft_tokens: 0, kind: graph.kind, batch_capacity: graph.batch_capacity,
                 token_capacity: graph.token_capacity, packed_token_capacity: graph.packed_token_capacity,
                 mixed: None, lanes: vec![], requires_feedback: true };
             s.costs.set_measured(&step, duration);
@@ -765,7 +761,7 @@ mod tests {
         let confidence = [0.73, 0.59, 0.49, 0.43, 0.38, 0.0, 0.0];
         for (batch, plain, draft) in [(1, 7.5, 1.215), (2, 8.5, 1.563), (4, 9.5, 1.935), (8, 10.99, 2.529)] {
             for (kind, width, ms) in [(GraphKind::Speculative, 1, plain), (GraphKind::Proposal, 6, draft)] {
-                s.costs.set_measured(&ScheduledStep { packed_token_capacity: 0, kind, batch_capacity: batch, token_capacity: width,
+                s.costs.set_measured(&ScheduledStep { draft_tokens: 0, packed_token_capacity: 0, kind, batch_capacity: batch, token_capacity: width,
                     mixed: None, lanes: vec![], requires_feedback: true }, (ms * 1e6) as u64);
             }
         }
@@ -819,7 +815,7 @@ mod tests {
             ] {
                 for width in widths {
                     if kind == GraphKind::Verification { shapes.push((batch, width)); }
-                    graphs.push(GraphDescriptor { packed_token_capacity: 0, name: format!("{kind:?}-{batch}-{width}"), kind,
+                    graphs.push(GraphDescriptor { draft_tokens: 0, packed_token_capacity: 0, name: format!("{kind:?}-{batch}-{width}"), kind,
                         sampling_mode: SamplingMode::General, handle: 1, batch_capacity: batch,
                         token_capacity: width, prefill_capacity: 0,
                         estimated_duration_ns: if kind == GraphKind::Speculative { 100_000 } else { 1000 },
@@ -845,7 +841,7 @@ mod tests {
 
     fn proposal(s: &mut RequestScheduler, handles: &[RequestHandle], confidence: &[[f32; 7]]) -> Fence {
         let fence = Fence(s.submitted.0 + 1);
-        let step = ScheduledStep { packed_token_capacity: 0, kind: GraphKind::Proposal, batch_capacity: handles.len().next_power_of_two(),
+        let step = ScheduledStep { draft_tokens: 0, packed_token_capacity: 0, kind: GraphKind::Proposal, batch_capacity: handles.len().next_power_of_two(),
             token_capacity: 8, mixed: None, requires_feedback: true,
             lanes: handles.iter().map(|&h| ScheduledLane { request: h, start_position: 65, tokens: 8 }).collect() };
         let plan = ScheduledPlan { origin: PlanOrigin::Ordinary, selected_cost: Default::default(),
@@ -871,7 +867,7 @@ mod tests {
 
     fn costs(s: &mut RequestScheduler, batch: usize, times: &[u64]) {
         for (i, &ns) in times.iter().enumerate() {
-            s.costs.set_measured(&ScheduledStep { packed_token_capacity: 0, kind: GraphKind::Verification, batch_capacity: batch,
+            s.costs.set_measured(&ScheduledStep { draft_tokens: 0, packed_token_capacity: 0, kind: GraphKind::Verification, batch_capacity: batch,
                 token_capacity: i + 1, mixed: None, lanes: vec![], requires_feedback: true }, ns);
         }
     }
@@ -891,7 +887,7 @@ mod tests {
                                    (GraphKind::Verification, (1..=6).collect())] {
                 for width in widths {
                     if kind == GraphKind::Verification { shapes.push((batch, width)); }
-                    graphs.push(GraphDescriptor { packed_token_capacity: 0, name: format!("{kind:?}-{batch}-{width}"), kind,
+                    graphs.push(GraphDescriptor { draft_tokens: 0, packed_token_capacity: 0, name: format!("{kind:?}-{batch}-{width}"), kind,
                         sampling_mode: SamplingMode::General, handle: 1, batch_capacity: batch,
                         token_capacity: width, prefill_capacity: 0, estimated_duration_ns: 1000, input_bindings: vec![] });
                 }
@@ -932,11 +928,11 @@ mod tests {
         let mut s = measured_split_engine_depths(8, &[2, 3, 4, 5, 6]);
         for batch in [1, 2, 4, 8] {
             for width in 2..=6 {
-                s.costs.set_measured(&ScheduledStep { packed_token_capacity: 0, kind: GraphKind::Proposal, batch_capacity: batch,
+                s.costs.set_measured(&ScheduledStep { draft_tokens: 0, packed_token_capacity: 0, kind: GraphKind::Proposal, batch_capacity: batch,
                     token_capacity: width, mixed: None, lanes: vec![], requires_feedback: true },
                     (width as u64 - 1) * 500_000);
             }
-            s.costs.set_measured(&ScheduledStep { packed_token_capacity: 0, kind: GraphKind::Speculative, batch_capacity: batch,
+            s.costs.set_measured(&ScheduledStep { draft_tokens: 0, packed_token_capacity: 0, kind: GraphKind::Speculative, batch_capacity: batch,
                 token_capacity: 1, mixed: None, lanes: vec![], requires_feedback: true }, 11_000_000);
         }
         for _ in 0..8 { ready(&mut s); }
@@ -955,7 +951,7 @@ mod tests {
         let mut s = measured_split_engine_depths(1, &[2, 6]);
         let h = ready(&mut s);
         let fence = Fence(1);
-        let step = ScheduledStep { packed_token_capacity: 0, kind: GraphKind::Proposal, batch_capacity: 1, token_capacity: 2,
+        let step = ScheduledStep { draft_tokens: 0, packed_token_capacity: 0, kind: GraphKind::Proposal, batch_capacity: 1, token_capacity: 2,
             mixed: None, requires_feedback: true,
             lanes: vec![ScheduledLane { request: h, start_position: 65, tokens: 2 }] };
         let plan = ScheduledPlan { origin: PlanOrigin::Ordinary, selected_cost: Default::default(),
@@ -985,9 +981,9 @@ mod tests {
         let h = s.admit(super::super::tests::spec(65, 1024)).unwrap();
         let r = s.request_mut(h).unwrap();
         (r.phase, r.consumed_tokens, r.scheduled_consumed, r.generated_tokens) = (RequestPhase::Decode, 65, 65, 1);
-        s.costs.set_measured(&ScheduledStep { packed_token_capacity: 0, kind: GraphKind::Speculative, batch_capacity: 1, token_capacity: 1,
+        s.costs.set_measured(&ScheduledStep { draft_tokens: 0, packed_token_capacity: 0, kind: GraphKind::Speculative, batch_capacity: 1, token_capacity: 1,
             mixed: None, lanes: vec![], requires_feedback: true }, ms(7.3));
-        s.costs.set_measured(&ScheduledStep { packed_token_capacity: 0, kind: GraphKind::Proposal, batch_capacity: 1, token_capacity: 6,
+        s.costs.set_measured(&ScheduledStep { draft_tokens: 0, packed_token_capacity: 0, kind: GraphKind::Proposal, batch_capacity: 1, token_capacity: 6,
             mixed: None, lanes: vec![], requires_feedback: true }, ms(1.34));
         let generated = s.request(h).unwrap().generated_tokens;
         s.split.as_mut().unwrap().forecast[h.slot as usize] = Some(Forecast { request: h, prefixes: [0.0; 7], observed_at: [generated; 7] });
@@ -1037,7 +1033,7 @@ mod tests {
         for batch in [1, 2, 4, 8] {
             for (kind, width, nanos) in [(GraphKind::Speculative, 1, 10_000_000),
                                         (GraphKind::Proposal, 6, 2_000_000)] {
-                s.costs.set_measured(&ScheduledStep { packed_token_capacity: 0, kind, batch_capacity: batch,
+                s.costs.set_measured(&ScheduledStep { draft_tokens: 0, packed_token_capacity: 0, kind, batch_capacity: batch,
                     token_capacity: width, mixed: None, lanes: vec![], requires_feedback: true }, nanos);
             }
         }
@@ -1232,7 +1228,7 @@ mod tests {
     }
 
     fn measured_key(s: &mut RequestScheduler, key: cost::Key, nanos: u64) {
-        s.costs.set_measured(&ScheduledStep { kind: key.kind, batch_capacity: key.batch,
+        s.costs.set_measured(&ScheduledStep { draft_tokens: 0, kind: key.kind, batch_capacity: key.batch,
             token_capacity: key.tokens, packed_token_capacity: key.packed, mixed: None,
             lanes: vec![], requires_feedback: true }, nanos);
     }
@@ -1293,7 +1289,7 @@ mod tests {
         let mut s = engine(4);
         s.configure_policy(PolicyConfig::throughput()).unwrap();
         let handles: Vec<_> = (0..4).map(|_| ready(&mut s)).collect();
-        let target = cost::Key { kind: GraphKind::Proposal, batch: 4, tokens: 8, prefill: 0, packed: 0 };
+        let target = cost::Key { drafts: 0, kind: GraphKind::Proposal, batch: 4, tokens: 8, prefill: 0, packed: 0 };
         measured_key(&mut s, target, 10_000_000);
         costs(&mut s, 1, &[10_000_000; 8]);
         costs(&mut s, 2, &[100, 100, 100, 100]);
@@ -1330,7 +1326,7 @@ mod tests {
         retain(&mut s, old, [1.0; 7]);
         s.split.as_mut().unwrap().retained[old.slot as usize].as_mut().unwrap().width = 8;
         let fresh: Vec<_> = (0..3).map(|_| ready(&mut s)).collect();
-        let target = cost::Key { kind: GraphKind::Verification, batch: 2, tokens: 4, prefill: 0, packed: 0 };
+        let target = cost::Key { drafts: 0, kind: GraphKind::Verification, batch: 2, tokens: 4, prefill: 0, packed: 0 };
         measured_key(&mut s, target, 100_000_000);
         stale_only(&mut s, target);
         let plan = s.plan().unwrap();
@@ -1360,7 +1356,7 @@ mod tests {
         retain(&mut s, old, [1.0; 7]);
         s.split.as_mut().unwrap().retained[old.slot as usize].as_mut().unwrap().width = 4;
         let fresh = ready(&mut s);
-        let target = cost::Key { kind: GraphKind::Proposal, batch: 1, tokens: 8, prefill: 0, packed: 0 };
+        let target = cost::Key { drafts: 0, kind: GraphKind::Proposal, batch: 1, tokens: 8, prefill: 0, packed: 0 };
         measured_key(&mut s, target, 10_000_000);
         costs(&mut s, 2, &[100, 100, 100, 100]);
         stale_only(&mut s, target);
@@ -1387,7 +1383,7 @@ mod tests {
         for batch in [1, 2, 4] {
             for (kind, width, budget) in [(GraphKind::Speculative, 1, 0), (GraphKind::Proposal, 8, 0)]
                 .into_iter().chain([2, 4, 8].map(|width| (GraphKind::Verification, width, batch * width))) {
-                graphs.push(GraphDescriptor { name: format!("{kind:?}-{batch}-{width}-{budget}"), kind,
+                graphs.push(GraphDescriptor { draft_tokens: 0, name: format!("{kind:?}-{batch}-{width}-{budget}"), kind,
                     sampling_mode: SamplingMode::General, handle: 1, batch_capacity: batch,
                     token_capacity: width, packed_token_capacity: budget, prefill_capacity: 0,
                     estimated_duration_ns: 1, input_bindings: vec![] });
@@ -1395,7 +1391,7 @@ mod tests {
         }
         s.measured_graph_durations(&graphs).unwrap();
         for graph in &graphs {
-            measured_key(&mut s, cost::Key { kind: graph.kind, batch: graph.batch_capacity,
+            measured_key(&mut s, cost::Key { drafts: 0, kind: graph.kind, batch: graph.batch_capacity,
                 tokens: graph.token_capacity, prefill: graph.prefill_capacity,
                 packed: graph.packed_token_capacity }, graph.estimated_duration_ns);
         }
@@ -1403,7 +1399,7 @@ mod tests {
         retain(&mut s, old, [1.0; 7]);
         s.split.as_mut().unwrap().retained[old.slot as usize].as_mut().unwrap().width = 8;
         for _ in 0..3 { ready(&mut s); }
-        let target = cost::Key { kind: GraphKind::Verification, batch: 4, tokens: 2, prefill: 0, packed: 8 };
+        let target = cost::Key { drafts: 0, kind: GraphKind::Verification, batch: 4, tokens: 2, prefill: 0, packed: 8 };
         measured_key(&mut s, target, 100_000_000);
         stale_only(&mut s, target);
         let plan = s.plan().unwrap();
@@ -1433,19 +1429,19 @@ mod tests {
             graphs.retain(|graph| graph.kind != GraphKind::Speculative);
             for (kind, width, budget) in [(GraphKind::Speculative, 1, 0),
                 (GraphKind::Proposal, 2, 0), (GraphKind::Verification, 8, packed)] {
-                graphs.push(GraphDescriptor { name: format!("{kind:?}-{width}-{budget}"), kind,
+                graphs.push(GraphDescriptor { draft_tokens: 0, name: format!("{kind:?}-{width}-{budget}"), kind,
                     sampling_mode: SamplingMode::General, handle: 1, batch_capacity: 1,
                     token_capacity: width, packed_token_capacity: budget, prefill_capacity: 0,
                     estimated_duration_ns: 1, input_bindings: vec![] });
             }
             s.graph_durations(&graphs).unwrap();
             for graph in &graphs {
-                measured_key(&mut s, cost::Key { kind: graph.kind, batch: graph.batch_capacity,
+                measured_key(&mut s, cost::Key { drafts: 0, kind: graph.kind, batch: graph.batch_capacity,
                     tokens: graph.token_capacity, prefill: graph.prefill_capacity,
                     packed: graph.packed_token_capacity }, graph.estimated_duration_ns);
             }
             let handle = ready(&mut s);
-            let target = cost::Key { kind: GraphKind::Verification, batch: 1, tokens: 8, prefill: 0, packed };
+            let target = cost::Key { drafts: 0, kind: GraphKind::Verification, batch: 1, tokens: 8, prefill: 0, packed };
             measured_key(&mut s, target, 100_000_000);
             stale_only(&mut s, target);
             let plan = s.plan().unwrap();
@@ -1475,7 +1471,7 @@ mod tests {
                     .chain((2..=8).map(|width| (GraphKind::Proposal, width, 0)))
                     .chain([2, 4, 8].into_iter().flat_map(|width|
                         (1..=width).map(move |budget| (GraphKind::Verification, width, batch * budget)))) {
-                    graphs.push(GraphDescriptor { name: format!("{kind:?}-{batch}-{width}-{budget}"), kind,
+                    graphs.push(GraphDescriptor { draft_tokens: 0, name: format!("{kind:?}-{batch}-{width}-{budget}"), kind,
                         sampling_mode: SamplingMode::General, handle: 1, batch_capacity: batch,
                         token_capacity: width, packed_token_capacity: budget, prefill_capacity: 0,
                         estimated_duration_ns: (batch + width + budget) as u64 * 100_000,
@@ -1484,7 +1480,7 @@ mod tests {
             }
             s.graph_durations(&graphs).unwrap();
             for graph in &graphs {
-                measured_key(&mut s, cost::Key { kind: graph.kind, batch: graph.batch_capacity,
+                measured_key(&mut s, cost::Key { drafts: 0, kind: graph.kind, batch: graph.batch_capacity,
                     tokens: graph.token_capacity, prefill: graph.prefill_capacity,
                     packed: graph.packed_token_capacity }, graph.estimated_duration_ns);
             }
@@ -1525,4 +1521,6 @@ mod tests {
             assert!(total > 100 && cache.scores.len() > 10);
         }
     }
+    include!("split/packed_round_tests.rs");
+
 }

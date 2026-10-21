@@ -118,7 +118,7 @@ impl Fixture {
                 GraphKind::Prefill,
             ] {
                 for width in 1..=if kind == GraphKind::Speculative { 8 } else { 1 } {
-                    graphs.push(crate::execution::GraphDescriptor {
+                    graphs.push(crate::execution::GraphDescriptor { draft_tokens: 0,
                         packed_token_capacity: 0,
                         name: format!("{kind:?}-{batch}-{width}"),
                         kind,
@@ -2277,7 +2277,7 @@ fn worker_restores_conditioned_windows_with_fresh_generation_and_unchanged_sampl
         embedding_tables: vec![],
         pending_token: None,
     });
-    manifest.graphs.push(GraphDescriptor {
+    manifest.graphs.push(GraphDescriptor { draft_tokens: 0,
         name: "Vision-1-256".into(),
         kind: GraphKind::Vision,
         handle: 1,

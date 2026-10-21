@@ -356,6 +356,7 @@ pub struct MixedStep {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ScheduledStep {
+    pub draft_tokens: usize,
     pub kind: GraphKind,
     pub batch_capacity: usize,
     pub token_capacity: usize,
@@ -368,10 +369,25 @@ pub struct ScheduledStep {
 
 impl ScheduledStep {
     pub fn validate_mixed(&self) -> Result<()> {
-        if self.packed_token_capacity != 0 && (self.kind != GraphKind::Verification
+        if self.kind == GraphKind::PackedSpeculative {
+            if !(1..=7).contains(&self.draft_tokens)
+                || self.draft_tokens + 1 > self.token_capacity
+                || self.packed_token_capacity == 0 || !self.requires_feedback
+                || self.lanes.is_empty() || self.lanes.len() > self.batch_capacity
+                || !crate::execution::BATCH_CAPACITIES.contains(&self.batch_capacity)
+                || !(1..=8).contains(&self.token_capacity)
+                || self.lanes.iter().any(|lane| !(1..=self.draft_tokens + 1).contains(&lane.tokens))
+                || self.lanes.iter().enumerate().any(|(i, a)| self.lanes[..i].iter().any(|b| a.request.slot == b.request.slot)) {
+                return Err("packed combined lanes exceed their frozen proposal ceilings".into());
+            }
+        } else if self.draft_tokens != 0 {
+            return Err("proposal depth belongs only to packed combined steps".into());
+        }
+        if self.packed_token_capacity != 0 && (!matches!(self.kind, GraphKind::Verification | GraphKind::PackedSpeculative)
             || self.packed_token_capacity < self.batch_capacity
             || self.packed_token_capacity > self.batch_capacity.saturating_mul(self.token_capacity)
-            || self.lanes.iter().map(|lane| lane.tokens).sum::<usize>() > self.packed_token_capacity) {
+            || (self.kind == GraphKind::Verification
+                && self.lanes.iter().map(|lane| lane.tokens).sum::<usize>() > self.packed_token_capacity)) {
             return Err("verification lanes exceed their packed token capacity".into());
         }
         match &self.mixed {
@@ -1927,7 +1943,7 @@ impl RequestScheduler {
                 );
             }
         }
-        if step.kind == GraphKind::Proposal && step.lanes.iter().any(|lane| {
+        if matches!(step.kind, GraphKind::Proposal | GraphKind::PackedSpeculative | GraphKind::Speculative | GraphKind::Mixed) && step.lanes.iter().any(|lane| {
             self.request(lane.request).ok()
                 .and_then(|request| self.retained_proposal(request)).is_some()
         }) {
@@ -2059,6 +2075,37 @@ impl RequestScheduler {
         records: &[CompletionRecord],
         timing: crate::execution::ExecutionTiming,
     ) -> Result<Vec<GeneratedToken>> {
+        if self.submissions.get(&fence).is_some_and(|s| s.kind == GraphKind::PackedSpeculative) {
+            return Err("packed combined completion requires its terminal confidence sidecar".into());
+        }
+        self.complete_inner(fence, records, timing)
+    }
+
+    pub fn complete_packed_round(
+        &mut self,
+        fence: Fence,
+        records: &[CompletionRecord],
+        timing: crate::execution::ExecutionTiming,
+        confidence: &[[f32; 7]],
+    ) -> Result<Vec<GeneratedToken>> {
+        let step = self.submissions.get(&fence)
+            .ok_or("packed combined completion has no submission")?.step.clone();
+        if step.kind != GraphKind::PackedSpeculative || confidence.len() < step.batch_capacity
+            || step.lanes.iter().enumerate().any(|(row, _)| confidence[row][..step.draft_tokens]
+                .iter().any(|p| !p.is_finite() || !(0.0..=1.0).contains(p))) {
+            return Err("invalid packed combined confidence sidecar".into());
+        }
+        let generated = self.complete_inner(fence, records, timing)?;
+        self.observe_packed_forecasts(&step, records, confidence);
+        Ok(generated)
+    }
+
+    fn complete_inner(
+        &mut self,
+        fence: Fence,
+        records: &[CompletionRecord],
+        timing: crate::execution::ExecutionTiming,
+    ) -> Result<Vec<GeneratedToken>> {
         if records.len() < self.limits.request_capacity() || records.len() > REQUEST_LANES {
             return Err("completion does not cover the prepared request capacity".into());
         }
@@ -2078,6 +2125,25 @@ impl RequestScheduler {
             );
         }
         // Validate every live lane before committing any completion state.
+        if step.kind == GraphKind::PackedSpeculative {
+            let mut physical = 0usize;
+            for lane in &step.lanes {
+                let record = &records[lane.request.slot as usize];
+                record.validate_vector()?;
+                let vector = record.vector.ok_or("packed combined completion requires ABI3")?;
+                if record.status != 0 && record.status != 3 {
+                    let offered = usize::try_from(vector.offered_drafts)
+                        .map_err(|_| "negative packed prefix offer")?;
+                    if offered >= lane.tokens || vector.verification_width != step.token_capacity as i64 {
+                        return Err("packed combined completion exceeds its frozen lane ceiling".into());
+                    }
+                    physical = physical.checked_add(offered + 1).ok_or("packed row count overflow")?;
+                }
+            }
+            if physical > step.packed_token_capacity {
+                return Err("packed combined completion exceeds its physical row budget".into());
+            }
+        }
         for (row, lane) in step.lanes.iter().enumerate() {
             let kind = step.lane_kind(row);
             records[lane.request.slot as usize].validate_vector()?;
@@ -2110,20 +2176,20 @@ impl RequestScheduler {
             }
             let record = records[lane.request.slot as usize];
             let emitted = record.generated_tokens - request.generated_tokens as i64;
-            let width = if matches!(kind, GraphKind::Speculative | GraphKind::Verification) {
+            let width = if matches!(kind, GraphKind::Speculative | GraphKind::Verification | GraphKind::PackedSpeculative) {
                 step.token_capacity as i64
             } else {
                 1
             };
             if let Some(vector) = record.vector {
                 if vector.emitted_count != emitted
-                    || (matches!(kind, GraphKind::Speculative | GraphKind::Verification)
+                    || (matches!(kind, GraphKind::Speculative | GraphKind::Verification | GraphKind::PackedSpeculative)
                         && (vector.verification_width != width
                             || record.consumed_tokens - request.consumed_tokens as i64 != emitted))
                 {
                     return Err("token vector does not match committed request progress".into());
                 }
-            } else if matches!(kind, GraphKind::Speculative | GraphKind::Verification) {
+            } else if matches!(kind, GraphKind::Speculative | GraphKind::Verification | GraphKind::PackedSpeculative) {
                 return Err("speculative completion requires ABI3 token vector".into());
             }
             if record.generation != lane.request.generation as i64
@@ -2135,7 +2201,7 @@ impl RequestScheduler {
                 || record.generated_tokens > request.generated_tokens as i64 + width
                 || record.generated_tokens > request.max_new_tokens as i64
                 || (record.status == 1
-                    && !matches!(kind, GraphKind::Speculative | GraphKind::Verification)
+                    && !matches!(kind, GraphKind::Speculative | GraphKind::Verification | GraphKind::PackedSpeculative)
                     && record.consumed_tokens as u64 != lane.start_position + lane.tokens as u64)
                 || (record.status == 1
                     && matches!(
@@ -2143,6 +2209,7 @@ impl RequestScheduler {
                         GraphKind::Decode
                             | GraphKind::Speculative
                             | GraphKind::Verification
+                            | GraphKind::PackedSpeculative
                             | GraphKind::Resume
                     )
                     && record.generated_tokens == request.generated_tokens as i64)
@@ -2216,7 +2283,7 @@ impl RequestScheduler {
             let finished =
                 record.status == 3 || ((record.status >= 2 || record.generated_tokens == request.max_new_tokens as i64)
                     && record.consumed_tokens >= request.prompt_tokens as i64);
-            if matches!(kind, GraphKind::Speculative | GraphKind::Verification)
+            if matches!(kind, GraphKind::Speculative | GraphKind::Verification | GraphKind::PackedSpeculative)
                 && record.status != 3
             {
                 let vector = record.vector.unwrap();

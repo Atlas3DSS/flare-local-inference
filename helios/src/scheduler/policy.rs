@@ -61,6 +61,7 @@ impl RequestAccounting {
 
 #[derive(Clone, Copy)]
 pub(super) struct Candidate {
+    pub draft_tokens: usize,
     pub kind: GraphKind,
     pub mask: u64,
     pub batch: usize,
@@ -77,7 +78,7 @@ pub(super) struct Candidate {
 
 impl Candidate {
     pub(super) fn cost_key(self) -> cost::Key {
-        cost::Key {
+        cost::Key { drafts: self.draft_tokens,
             kind: self.kind,
             batch: self.batch,
             tokens: self.capacity,
@@ -102,7 +103,7 @@ impl RequestScheduler {
             candidate.prefill_capacity, rows(candidate)];
         let left = physical(smaller);
         let right = physical(larger);
-        if smaller.kind != larger.kind || smaller.mask != larger.mask
+        if smaller.kind == GraphKind::PackedSpeculative || smaller.kind != larger.kind || smaller.mask != larger.mask
             || smaller.prefill_slot != larger.prefill_slot
             || smaller.verification_budget != larger.verification_budget
             || left == right || left.iter().zip(right).any(|(a, b)| *a > b) {
@@ -826,7 +827,7 @@ impl RequestScheduler {
             .filter(|(s, _)| selected & (1 << s) != 0)
             .map(|(_, v)| v)
             .sum();
-        let feedback = !self.costs.is_fresh(cost::Key {
+        let feedback = !self.costs.is_fresh(cost::Key { drafts: 0,
             kind, batch, tokens: capacity, prefill: 0, packed: 0,
         })
             || !matches!(kind, GraphKind::Decode | GraphKind::Prefill)
@@ -854,7 +855,7 @@ impl RequestScheduler {
                 age_price,
             )
             .unwrap_or_else(|| (selected, ValueRate::new(duration_ns, expected, age_price)));
-        output.push(Candidate { packed_token_capacity: 0, verification_budget: None,
+        output.push(Candidate { draft_tokens: 0, packed_token_capacity: 0, verification_budget: None,
             kind,
             mask: selected,
             batch,
@@ -908,7 +909,9 @@ impl RequestScheduler {
                     entry
                         .request
                         .as_ref()
-                        .filter(|r| self.eligible(r) && self.request_kind(r) == Some(kind))
+                        .filter(|r| self.eligible(r) && (self.request_kind(r) == Some(kind)
+                            || (kind == GraphKind::Speculative && r.phase == RequestPhase::Decode
+                                && !self.owns_proposal(r))))
                         .map(|_| 1u64 << slot)
                 })
                 .fold(0, |a, b| a | b);
@@ -970,7 +973,10 @@ impl RequestScheduler {
                 let Some(r) = entry.request.as_ref().filter(|r| self.eligible(r)) else {
                     continue;
                 };
-                match self.request_kind(r) {
+                let kind = self.request_kind(r).map(|kind| {
+                    if kind == GraphKind::Proposal && !self.owns_proposal(r) { decode } else { kind }
+                });
+                match kind {
                     Some(GraphKind::Prefill) if self.prefill_work(r, prefill) > 0 => {
                         if duration_ns == 0 && self.mixed_catalog.iter().any(|&(b, w, smaller)| {
                             b == batch && w == width && smaller < prefill
@@ -1023,7 +1029,7 @@ impl RequestScheduler {
                 if mask == 0 {
                     continue;
                 }
-                output.push(Candidate { packed_token_capacity: 0, verification_budget: None,
+                output.push(Candidate { draft_tokens: 0, packed_token_capacity: 0, verification_budget: None,
                     kind: GraphKind::Mixed,
                     mask,
                     batch,
@@ -1060,6 +1066,10 @@ impl RequestScheduler {
                 .then(last(b).cmp(&last(a)))
                 .then(b.batch.cmp(&a.batch))
                 .then(b.capacity.cmp(&a.capacity))
+                .then(b.draft_tokens.cmp(&a.draft_tokens))
+                .then_with(|| if a.kind == GraphKind::PackedSpeculative && b.kind == GraphKind::PackedSpeculative {
+                    b.packed_token_capacity.cmp(&a.packed_token_capacity)
+                } else { std::cmp::Ordering::Equal })
                 .then(b.prefill_capacity.cmp(&a.prefill_capacity))
                 .then(b.mask.cmp(&a.mask))
         };
@@ -1129,7 +1139,9 @@ impl RequestScheduler {
                         candidate.work
                     }
                 } else {
-                    self.lane_tokens(r, kind, candidate.capacity)
+                    if kind == GraphKind::PackedSpeculative {
+                        self.speculative_tokens(r, (candidate.draft_tokens + 1).min(candidate.capacity))
+                    } else { self.lane_tokens(r, kind, candidate.capacity) }
                 },
             });
         }
@@ -1142,7 +1154,7 @@ impl RequestScheduler {
             selection_value_rate: candidate.rate.score,
             selection_log_scale: log_scale,
             verification_budget: candidate.verification_budget,
-            step: ScheduledStep { packed_token_capacity: candidate.packed_token_capacity,
+            step: ScheduledStep { draft_tokens: candidate.draft_tokens, packed_token_capacity: candidate.packed_token_capacity,
                 kind: candidate.kind,
                 batch_capacity: candidate.batch,
                 token_capacity: candidate.capacity,

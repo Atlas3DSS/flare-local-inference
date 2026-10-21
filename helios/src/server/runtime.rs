@@ -443,7 +443,7 @@ impl ModelRuntime {
                                 .filter(|graph| {
                                     matches!(
                                         graph.kind,
-                                        GraphKind::Speculative | GraphKind::Verification
+                                        GraphKind::Speculative | GraphKind::Verification | GraphKind::PackedSpeculative
                                     )
                                 })
                                 .flat_map(|graph| {
@@ -460,7 +460,7 @@ impl ModelRuntime {
                             .manifest()
                             .graphs
                             .iter()
-                            .filter(|g| g.kind == GraphKind::Proposal)
+                            .filter(|g| matches!(g.kind, GraphKind::Proposal | GraphKind::PackedSpeculative))
                             .map(|g| g.token_capacity)
                             .max()
                         {
@@ -1296,6 +1296,7 @@ impl<'a> Worker<'a> {
                 | GraphKind::ScoredPrefill
                 | GraphKind::Speculative
                 | GraphKind::Verification
+                | GraphKind::PackedSpeculative
                 | GraphKind::Mixed
         ) {
             let step = self.scheduler.submitted_step(completion.fence)?;
@@ -1335,6 +1336,11 @@ impl<'a> Worker<'a> {
                 completion.timing,
                 &confidence[..measured_step.batch_capacity],
             )?
+        } else if kind == GraphKind::PackedSpeculative {
+            let confidence = completion.proposal_confidence.as_ref()
+                .ok_or("packed combined completion lacks confidence")?;
+            self.scheduler.complete_packed_round(completion.fence, &completion.records,
+                completion.timing, &confidence[..measured_step.batch_capacity])?
         } else {
             self.scheduler
                 .complete(completion.fence, &completion.records, completion.timing)?
@@ -1358,7 +1364,7 @@ impl<'a> Worker<'a> {
             self.metrics.proposal_completed(measured_step.batch_capacity, measured_step.token_capacity,
                 completion.timing.gpu_ns.into_iter().flatten().max().unwrap_or(0));
         }
-        if matches!(kind, GraphKind::Speculative | GraphKind::Verification) {
+        if matches!(kind, GraphKind::Speculative | GraphKind::Verification | GraphKind::PackedSpeculative) {
             let nanos = completion
                 .timing
                 .gpu_ns
@@ -1367,13 +1373,16 @@ impl<'a> Worker<'a> {
                 .max()
                 .unwrap_or(0);
             let step = &measured_step;
-            self.metrics.speculative_completed(
+            if kind == GraphKind::PackedSpeculative {
+                self.metrics.packed_speculative_completed(step.batch_capacity, step.token_capacity,
+                    step.draft_tokens, nanos, &completion.records);
+            } else { self.metrics.speculative_completed(
                 kind,
                 step.batch_capacity,
                 step.token_capacity,
                 nanos,
                 &completion.records,
-            );
+            ); }
         }
         if kind == GraphKind::ScoredPrefill {
             let lane = &measured_step.lanes[0];
@@ -1810,7 +1819,7 @@ impl<'a> Worker<'a> {
             return Ok(false);
         }
         validate_sampling_admissions(step, &self.admissions)?;
-        let graph = crate::model::catalog::select_shape(
+        let graph = crate::model::catalog::select_shape_with_drafts(
             self.config,
             executor.manifest(),
             step.kind,
@@ -1818,6 +1827,7 @@ impl<'a> Worker<'a> {
             step.token_capacity,
             step.prefill_capacity(),
             step.packed_token_capacity,
+            step.draft_tokens,
             SamplingMode::General,
         )?;
         let fence = executor.next_fence()?;
@@ -2158,7 +2168,7 @@ mod tests {
             GraphKind::Resume,
             GraphKind::Speculative,
         ] {
-            let mut step = ScheduledStep { packed_token_capacity: 0,
+            let mut step = ScheduledStep { draft_tokens: 0, packed_token_capacity: 0,
                 kind,
                 batch_capacity: 4,
                 token_capacity: 1,
@@ -2180,7 +2190,7 @@ mod tests {
                 Error::Execution(ExecutionError::State(_))
             ));
         }
-        let mut step = ScheduledStep { packed_token_capacity: 0,
+        let mut step = ScheduledStep { draft_tokens: 0, packed_token_capacity: 0,
             kind: GraphKind::Decode,
             batch_capacity: 1,
             token_capacity: 1,

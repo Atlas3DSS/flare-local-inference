@@ -211,7 +211,7 @@ pub(super) struct Metrics {
     replay_gpu_ns: AtomicU64,
     replay_readiness_wait_ns: AtomicU64,
     replay_readiness_samples: AtomicU64,
-    launches: [AtomicU64; 11],
+    launches: [AtomicU64; 12],
     sampling_launches: [AtomicU64; 5],
     speculative: [[RoundMetrics; 8]; 7],
     proposals: [[ProposalMetrics; 7]; 7],
@@ -341,13 +341,14 @@ impl Metrics {
             GraphKind::Mixed => 8,
             GraphKind::Proposal => 9,
             GraphKind::Verification => 10,
+            GraphKind::PackedSpeculative => 11,
         };
         self.launches[index].fetch_add(1, Ordering::Relaxed);
         let sampling_index = match kind {
             GraphKind::Prefill | GraphKind::ScoredPrefill => 0,
             GraphKind::Decode => 1,
             GraphKind::Resume => 2,
-            GraphKind::Speculative | GraphKind::Verification => 3,
+            GraphKind::Speculative | GraphKind::Verification | GraphKind::PackedSpeculative => 3,
             GraphKind::Mixed => 4,
             _ => return,
         };
@@ -389,6 +390,12 @@ impl Metrics {
                 }
             }
         }
+    }
+
+    pub fn packed_speculative_completed(&self, batch: usize, width: usize, drafts: usize,
+        elapsed_ns: u64, records: &[CompletionRecord]) {
+        self.learned_draft_steps.fetch_add(drafts as u64, Ordering::Relaxed);
+        self.speculative_completed(GraphKind::PackedSpeculative, batch, width, elapsed_ns, records);
     }
 
     pub fn proposal_completed(&self, batch: usize, width: usize, elapsed_ns: u64) {
@@ -753,6 +760,7 @@ impl Metrics {
             "mixed",
             "proposal",
             "verification",
+            "packed_speculative",
         ]
         .into_iter()
         .zip(&self.launches)
@@ -1151,7 +1159,7 @@ mod tests {
             text.lines()
                 .filter(|line| line.starts_with("flare_graph_launches_total{"))
                 .count(),
-            11
+            12
         );
     }
 }

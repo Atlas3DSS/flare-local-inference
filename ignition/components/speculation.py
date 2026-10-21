@@ -344,6 +344,15 @@ class PreparedStochasticVerification:
         self.token_limits = token_limits
         self._prepared = False
         self.broadcast = None
+        from .probability_mask import PreparedProbabilityMask
+
+        outputs = (self.safe_draft_probs, self.safe_target_probs)
+        self.probability_masks = (
+            PreparedProbabilityMask(self.draft_probs, self.safe_draft_probs, self.output.valid,
+                token_limits, self.dummy, limit_offset=1, outputs=outputs),
+            PreparedProbabilityMask(self.target_probs, self.safe_target_probs, self.output.valid,
+                token_limits, self.dummy, limit_offset=0, outputs=outputs),
+        )
 
     def prepare_broadcast(self, **kwargs):
         from .collectives import PreparedBroadcast
@@ -355,6 +364,8 @@ class PreparedStochasticVerification:
             raise ValueError("FlashInfer chain verification requires CUDA")
         from flashinfer import sampling
         self._flashinfer = sampling
+        for mask in self.probability_masks:
+            mask.prepare()
         self._prepared = True
         self()
 
@@ -381,8 +392,14 @@ class PreparedStochasticVerification:
             entries = (torch.isfinite(slices) & (slices >= 0)).all(-1).all(-1)
             mass = slices.sum(-1).sum(-1)
             valid &= (entries & torch.isfinite(mass) & ((mass - 1).abs() <= 1e-4)).all(-1)
-        self.safe_draft_probs.copy_(torch.where(valid[:, None, None], draft_probs, self.dummy))
-        self.safe_target_probs.copy_(torch.where(valid[:, None, None], target_probs, self.dummy))
+        out.valid.copy_(valid)
+        if self.token_limits is not None:
+            for mask in self.probability_masks:
+                mask.stage()
+        for mask in self.probability_masks:
+            if self.token_limits is None:
+                mask.stage()
+            mask()
         self.safe_ids.copy_(torch.where(valid[:, None], ids, 0))
         self.seed_bits.copy_(self.state.seed.view(torch.int64)[safe] ^ TARGET_RNG_DOMAIN)
         self.offset.copy_(torch.where(self.rng.generation[safe] == self.generations, self.rng.target_offset[safe], 0))
@@ -401,7 +418,6 @@ class PreparedStochasticVerification:
         out.token_ids.copy_(tokens)
         out.accepted_drafts.copy_(torch.where(valid, accepted, 0))
         out.proposed_count.copy_(torch.where(valid, accepted + 1, 0))
-        out.valid.copy_(valid)
         out.rng_increment.copy_(torch.where(valid, self.draw_reservation, 0))
         out.token_ids.masked_fill_(~valid[:, None], -1)
         if self.broadcast is not None:

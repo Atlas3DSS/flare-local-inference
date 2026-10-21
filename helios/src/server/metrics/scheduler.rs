@@ -219,7 +219,7 @@ mod tests {
     use super::*;
 
     fn step() -> ScheduledStep {
-        ScheduledStep { packed_token_capacity: 0,
+        ScheduledStep { draft_tokens: 0, packed_token_capacity: 0,
             kind: GraphKind::Decode,
             batch_capacity: 1,
             token_capacity: 1,

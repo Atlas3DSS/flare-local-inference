@@ -58,7 +58,7 @@ impl TryFrom<&str> for Dtype {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum GraphKind {
     Init,
     Restore,
@@ -71,6 +71,8 @@ pub enum GraphKind {
     Proposal,
     /// Target verification of a retained proposal prefix.
     Verification,
+    /// One proposal and GPU-allocated packed target pass with terminal feedback.
+    PackedSpeculative,
     Mixed,
     Resume,
     Vision,
@@ -89,6 +91,7 @@ impl GraphKind {
                 | Self::Decode
                 | Self::Speculative
                 | Self::Verification
+                | Self::PackedSpeculative
                 | Self::Mixed
                 | Self::Resume
         )
@@ -127,6 +130,7 @@ impl TryFrom<&str> for GraphKind {
             "speculative" => Ok(Self::Speculative),
             "proposal" => Ok(Self::Proposal),
             "verification" => Ok(Self::Verification),
+            "packed_speculative" => Ok(Self::PackedSpeculative),
             "mixed" => Ok(Self::Mixed),
             "resume" => Ok(Self::Resume),
             "vision" => Ok(Self::Vision),
@@ -157,6 +161,8 @@ pub struct InputBinding {
 
 #[derive(Clone, Debug)]
 pub struct GraphDescriptor {
+    /// Proposal depth of a packed combined round; zero for legacy operations.
+    pub draft_tokens: usize,
     pub name: String,
     pub kind: GraphKind,
     pub sampling_mode: SamplingMode,
@@ -427,18 +433,25 @@ impl ExecutionManifest {
         let mut names = HashSet::new();
         let mut host_spans = HashMap::<&str, (usize, usize)>::new();
         for graph in &self.graphs {
-            if graph.packed_token_capacity != 0 && (graph.kind != GraphKind::Verification
+            if graph.packed_token_capacity != 0 && (!matches!(graph.kind, GraphKind::Verification | GraphKind::PackedSpeculative)
                 || graph.packed_token_capacity < graph.batch_capacity
                 || graph.packed_token_capacity > graph.batch_capacity.saturating_mul(graph.token_capacity)) {
                 return Err("packed verification rows exceed declared request-prefix bounds".into());
             }
-            if graph.kind == GraphKind::Proposal {
+            if (graph.kind != GraphKind::PackedSpeculative && graph.draft_tokens != 0)
+                || (graph.kind == GraphKind::PackedSpeculative
+                    && (!(1..=7).contains(&graph.draft_tokens)
+                        || graph.draft_tokens + 1 > graph.token_capacity
+                        || graph.packed_token_capacity == 0)) {
+                return Err("packed combined proposal depth is outside its declared target bounds".into());
+            }
+            if matches!(graph.kind, GraphKind::Proposal | GraphKind::PackedSpeculative) {
                 let confidence = self.buffer("proposal_confidence")?;
                 if graph.token_capacity < 2
                     || confidence.dtype != Dtype::Float32
                     || confidence.shape.len() != 2
                     || confidence.shape[0] != self.request_capacity()
-                    || !(graph.token_capacity - 1..=7).contains(&confidence.shape[1])
+                    || !(if graph.kind == GraphKind::PackedSpeculative { graph.draft_tokens } else { graph.token_capacity - 1 }..=7).contains(&confidence.shape[1])
                     || confidence.strides != [confidence.shape[1], 1]
                 {
                     return Err(
@@ -466,7 +479,7 @@ impl ExecutionManifest {
                             .checked_add((graph.batch_capacity - 1) * graph.token_capacity)
                             .is_some()
                 }
-                GraphKind::Speculative | GraphKind::Proposal | GraphKind::Verification => {
+                GraphKind::Speculative | GraphKind::Proposal | GraphKind::Verification | GraphKind::PackedSpeculative => {
                     self.abi_version == SPECULATIVE_ABI_VERSION
                         && BATCH_CAPACITIES.contains(&graph.batch_capacity)
                         && graph.batch_capacity <= self.request_capacity()

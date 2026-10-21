@@ -30,7 +30,8 @@ def from_plan(model, plan, *, compiled_forwards):
     if (s := plan.speculation) is not None:
         result.speculation.CopyFrom(proto.RebuildSpeculation(draft_tokens=s.draft_tokens,
             adaptive=s.adaptive, proposal_source=s.proposal_source, history_drafts=s.history_drafts,
-            token_capacity=plan.speculative_token_capacity, packed_verification=s.packed_verification))
+            token_capacity=plan.speculative_token_capacity, packed_verification=s.packed_verification,
+            draft_prefix_selection=s.draft_prefix_selection))
     return result.SerializeToString(deterministic=True)
 
 

@@ -180,6 +180,7 @@ pub(crate) fn execution_manifest(value: &Bound<'_, PyAny>) -> PyResult<Execution
             });
         }
         graphs.push(GraphDescriptor {
+            draft_tokens: if field!(graph, "kind", String) == "packed_speculative" { field!(graph, "draft_tokens", usize) } else { 0 },
             name: field!(graph, "name", String),
             kind: GraphKind::try_from(field!(graph, "kind", String).as_str())
                 .map_err(|error| PyValueError::new_err(error.to_string()))?,

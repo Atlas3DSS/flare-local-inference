@@ -44,7 +44,7 @@ fn equal_counts_from_different_cohorts_and_different_logical_prefixes_are_not_pr
     let mut s = engine(4, true);
     let handles = (0..2).map(|id| add(&mut s, id, 64, 128)).collect::<Vec<_>>();
     ready(&mut s, &handles);
-    let candidate = Candidate { kind: GraphKind::Speculative, mask: 1 << handles[0].slot,
+    let candidate = Candidate { draft_tokens: 0, kind: GraphKind::Speculative, mask: 1 << handles[0].slot,
         batch: 1, capacity: 1, packed_token_capacity: 0, prefill_capacity: 0, prefill_slot: None,
         work: 0, duration_ns: MS, rate: ValueRate::new(MS, 1.0, 0.0), feedback: true,
         verification_budget: None };
@@ -1119,7 +1119,7 @@ fn interactive_engine(active: usize, speculative: bool) -> RequestScheduler {
 }
 
 fn set_cost(s: &mut RequestScheduler, kind: GraphKind, batch: usize, capacity: usize, nanos: u64) {
-    let step = ScheduledStep { packed_token_capacity: 0,
+    let step = ScheduledStep { draft_tokens: 0, packed_token_capacity: 0,
         kind,
         batch_capacity: batch,
         token_capacity: capacity,
@@ -1680,7 +1680,7 @@ fn mixed_engine(
             .unwrap();
     }
     for &(batch, width, prefill, nanos) in shapes {
-        graphs.push(crate::execution::GraphDescriptor { packed_token_capacity: 0,
+        graphs.push(crate::execution::GraphDescriptor { draft_tokens: 0, packed_token_capacity: 0,
             name: format!("mixed-{batch}-{prefill}-{width}"),
             kind: GraphKind::Mixed,
             sampling_mode: SamplingMode::General,
@@ -1869,7 +1869,7 @@ fn mixed_cost_observations_and_expiry_are_specific_to_both_token_capacities() {
         true,
         &[(2, 1, 64, MS), (2, 8, 64, 2 * MS), (2, 8, 512, 3 * MS)],
     );
-    let make = |width, prefill| ScheduledStep { packed_token_capacity: 0,
+    let make = |width, prefill| ScheduledStep { draft_tokens: 0, packed_token_capacity: 0,
         kind: GraphKind::Mixed,
         batch_capacity: 2,
         token_capacity: width,
@@ -2193,16 +2193,16 @@ fn mixed_cancellation_keeps_other_rows_live_and_retires_pages_only_after_complet
 fn retained_cost_keys_keep_packed_mixed_and_ordinary_age_independent() {
     let base = super::tests::duration_graphs(2)[0].clone();
     let keys = [
-        cost::Key { kind: GraphKind::Decode, batch: 2, tokens: 1, prefill: 0, packed: 0 },
-        cost::Key { kind: GraphKind::Mixed, batch: 2, tokens: 8, prefill: 64, packed: 0 },
-        cost::Key { kind: GraphKind::Verification, batch: 2, tokens: 8, prefill: 0, packed: 10 },
+        cost::Key { drafts: 0, kind: GraphKind::Decode, batch: 2, tokens: 1, prefill: 0, packed: 0 },
+        cost::Key { drafts: 0, kind: GraphKind::Mixed, batch: 2, tokens: 8, prefill: 64, packed: 0 },
+        cost::Key { drafts: 0, kind: GraphKind::Verification, batch: 2, tokens: 8, prefill: 0, packed: 10 },
     ];
     let graphs: Vec<_> = keys.iter().enumerate().map(|(index, key)| crate::execution::GraphDescriptor {
         name: index.to_string(), kind: key.kind, batch_capacity: key.batch, token_capacity: key.tokens,
         prefill_capacity: key.prefill, packed_token_capacity: key.packed, ..base.clone()
     }).collect();
     let mut costs = cost::ActionCosts::prepared(&graphs).unwrap();
-    let make = |key: cost::Key| ScheduledStep { kind: key.kind, batch_capacity: key.batch,
+    let make = |key: cost::Key| ScheduledStep { draft_tokens: 0, kind: key.kind, batch_capacity: key.batch,
         token_capacity: key.tokens, packed_token_capacity: key.packed,
         mixed: (key.kind == GraphKind::Mixed).then_some(MixedStep {
             prefill_capacity: key.prefill, prefill_row: None, speculative: true,
@@ -2237,9 +2237,9 @@ fn refresh_skips_infeasible_ages_and_resolves_the_oldest_feasible_utility_group(
     let mut s = engine(1, true);
     let h = add(&mut s, 1, 64, 4096);
     ready(&mut s, &[h]);
-    let key = |width| cost::Key { kind: GraphKind::Speculative, batch: 1,
+    let key = |width| cost::Key { drafts: 0, kind: GraphKind::Speculative, batch: 1,
         tokens: width, prefill: 0, packed: 0 };
-    let infeasible = cost::Key { kind: GraphKind::Prefill, batch: 1,
+    let infeasible = cost::Key { drafts: 0, kind: GraphKind::Prefill, batch: 1,
         tokens: 64, prefill: 0, packed: 0 };
     let base = s.now_ns;
     s.advance_to(base + MS).unwrap();
@@ -2380,11 +2380,11 @@ fn saved_fresh_plans_gain_a_physical_staleness_feedback_barrier_at_commit() {
 #[test]
 fn proposal_episode_owns_generations_and_pays_all_verification_captures_in_debt() {
     let h = |slot, generation| RequestHandle { slot, generation };
-    let step = |kind, handles: &[RequestHandle]| ScheduledStep { kind, batch_capacity: 2,
+    let step = |kind, handles: &[RequestHandle]| ScheduledStep { draft_tokens: 0, kind, batch_capacity: 2,
         token_capacity: 8, packed_token_capacity: 0, mixed: None, requires_feedback: true,
         lanes: handles.iter().map(|&request| ScheduledLane { request, start_position: 65, tokens: 8 }).collect() };
     let p = step(GraphKind::Proposal, &[h(0, 1), h(1, 1)]);
-    let target = cost::Key { kind: GraphKind::Verification, batch: 2, tokens: 8, prefill: 0, packed: 0 };
+    let target = cost::Key { drafts: 0, kind: GraphKind::Verification, batch: 2, tokens: 8, prefill: 0, packed: 0 };
     let start = PlanOrigin::RefreshStart(target);
     let mut budget = refresh::RefreshState::default();
     budget.credit_ns = refresh::CREDIT_CAP_NS;
@@ -2520,7 +2520,7 @@ fn cancelling_all_inflight_proposal_owners_keeps_the_charge_and_releases_reused_
     s.split_speculation(2).unwrap();
     let owners = [add(&mut s, 1, 64, 4096), add(&mut s, 2, 64, 4096)];
     ready(&mut s, &owners);
-    let target = cost::Key { kind: GraphKind::Proposal, batch: 2, tokens: 2, prefill: 0, packed: 0 };
+    let target = cost::Key { drafts: 0, kind: GraphKind::Proposal, batch: 2, tokens: 2, prefill: 0, packed: 0 };
     s.advance_to(s.now_ns + s.policy.estimate_ttl_ns).unwrap();
     let others: Vec<_> = s.costs.stale_keys().filter(|key| *key != target)
         .map(|key| (key, s.costs.duration_key(key).unwrap())).collect();

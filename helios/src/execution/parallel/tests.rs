@@ -341,3 +341,17 @@ fn rank_zero_confidence_is_authoritative_without_relaxing_request_agreement() {
     peer.records[0].consumed_tokens += 1;
     assert!(agree(&root, &peer).is_err());
 }
+
+#[test]
+fn packed_combined_process_schema_rejects_a_different_proposal_depth() {
+    let mut root = crate::execution::tests::manifest();
+    let graph = &mut root.graphs[0];
+    graph.kind = crate::execution::GraphKind::PackedSpeculative;
+    graph.token_capacity = 6;
+    graph.packed_token_capacity = 8;
+    graph.draft_tokens = 1;
+    let mut peer = root.clone();
+    assert_eq!(layout(&root), layout(&peer));
+    peer.graphs[0].draft_tokens = 3;
+    assert_ne!(layout(&root), layout(&peer), "different proposal contracts must fail before any rank launch");
+}

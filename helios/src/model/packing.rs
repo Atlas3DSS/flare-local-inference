@@ -20,6 +20,7 @@ struct BoundInput {
 }
 
 struct BoundGraph {
+    drafts: usize,
     semantics: GraphContract,
     inputs: Vec<BoundInput>,
     kind: GraphKind,
@@ -214,6 +215,7 @@ impl Inputs {
                     semantics: semantics.clone(),
                     inputs,
                     kind: graph.kind,
+                    drafts: graph.draft_tokens,
                     batch: graph.batch_capacity,
                     tokens: graph.token_capacity,
                     packed_tokens: graph.packed_token_capacity,
@@ -251,6 +253,7 @@ impl Inputs {
             .iter()
             .find(|g| {
                 g.kind == step.kind
+                    && g.drafts == step.draft_tokens
                     && g.batch == step.batch_capacity
                     && g.tokens == step.token_capacity
                     && g.packed_tokens == step.packed_token_capacity
@@ -341,6 +344,7 @@ impl Inputs {
             .iter()
             .find(|g| {
                 g.kind == frame.step.kind
+                    && g.drafts == frame.step.draft_tokens
                     && g.batch == frame.step.batch_capacity
                     && g.tokens == frame.step.token_capacity
                     && g.packed_tokens == frame.step.packed_token_capacity
@@ -503,7 +507,7 @@ impl Inputs {
                     Constant => values.resize(input.width, 0),
                     RequestSlot => values.push(slot as i64),
                     RequestGeneration => values.push(lane.request.generation as i64),
-                    QueryLength => values.push(lane.tokens as i64),
+                    QueryLength | SpeculativePrefixLimit => values.push(lane.tokens as i64),
                     SampleEnabled => values.push(frame.samples[row] as i64),
                     PromptTargetToken => {
                         for position in lane.start_position as usize + 1..=lane.start_position as usize + lane.tokens {

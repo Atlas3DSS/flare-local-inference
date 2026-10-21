@@ -243,7 +243,8 @@ impl TensorParallelExecutor {
         }
         let root = self.completion.as_ref().unwrap();
         for (index, peer) in self.peers.iter().enumerate() {
-            agree(root, peer.completion.as_ref().unwrap())
+            let agreement = if self.local.manifest().graphs[root.graph_index].kind == super::GraphKind::PackedSpeculative { agree_packed } else { agree };
+            agreement(root, peer.completion.as_ref().unwrap())
                 .map_err(|error| invalid(format!("rank {}: {error}", index + 1)))?;
         }
         for (index, peer) in self.peers.iter_mut().enumerate() {
@@ -344,6 +345,22 @@ pub(super) fn agree(root: &FrameCompletion, peer: &FrameCompletion) -> Result<()
                 "tensor-parallel request epochs, consumption, or status differ at graph {}, fence {}, lane {lane}: root {a:?}, peer {b:?}",
                 root.graph_index, root.fence.0,
             )));
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn agree_packed(root: &FrameCompletion, peer: &FrameCompletion) -> Result<()> {
+    agree(root, peer)?;
+    for (a, b) in root.records.iter().zip(peer.records.iter()) {
+        // ABI3 leaves inactive token/vector payload undefined. Retain the base
+        // transport agreement above, and compare only committed active values.
+        if a.status == 0 && b.status == 0 { continue; }
+        if a.generation != b.generation || a.submission_sequence != b.submission_sequence
+            || a.consumed_tokens != b.consumed_tokens || a.generated_tokens != b.generated_tokens
+            || a.token_id != b.token_id || a.status != b.status || a.error_code != b.error_code
+            || a.reserved != b.reserved || a.vector != b.vector {
+            return Err(invalid("packed combined rank completion prefixes or committed state differ"));
         }
     }
     Ok(())

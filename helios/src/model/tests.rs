@@ -1051,7 +1051,7 @@ fn mixed_manifest(config: &mut ModelConfig, width: usize) -> crate::execution::E
             -1,
         ));
         config.contract.graphs.push(semantics);
-        manifest.graphs.push(GraphDescriptor {
+        manifest.graphs.push(GraphDescriptor { draft_tokens: 0,
             packed_token_capacity: 0,
             name,
             kind: GraphKind::Mixed,
@@ -1366,8 +1366,34 @@ fn retained_proposal_catalog_requires_prefix_coverage_and_proposal_free_decode()
     assert_eq!(packed.graphs[index].packed_tokens(), 3);
     packed.graphs[index].packed_token_capacity = 9;
     assert!(catalog::validate(&config, &packed).is_err());
+    let mut coexist = manifest.clone();
+    let template = coexist.graphs.iter().find(|g|
+        g.kind == GraphKind::Verification && g.token_capacity == 8).unwrap().clone();
+    let prefix_address = coexist.buffers.iter().map(|b| b.address + b.nbytes).max().unwrap().next_multiple_of(8);
+    coexist.buffers.push(crate::execution::BufferDescriptor { name: "speculative_prefix_limits".into(),
+        address: prefix_address, nbytes: 4, dtype: crate::execution::Dtype::Int32,
+        shape: vec![1], strides: vec![1] });
+    for (kind, operation, name) in [
+        (GraphKind::Speculative, GraphOperation::Speculative, "joined"),
+        (GraphKind::PackedSpeculative, GraphOperation::PackedSpeculative, "packed-round"),
+    ] {
+        let mut graph = template.clone();
+        let mut semantics = config.contract.graph(&template.name).unwrap().clone();
+        graph.name = name.into(); graph.kind = kind; graph.handle = coexist.graphs.len() + 1;
+        semantics.graph = name.into(); semantics.kind = operation;
+        if kind == GraphKind::PackedSpeculative {
+            graph.draft_tokens = 5; graph.packed_token_capacity = 4;
+            let input = graph.input_bindings.iter_mut().find(|b| b.buffer_name == "query_lengths").unwrap();
+            input.buffer_name = "speculative_prefix_limits".into(); input.host_offset = coexist.input_frame_bytes;
+            coexist.input_frame_bytes += 8;
+            let input = semantics.inputs.iter_mut().find(|b| b.source == ValueSource::QueryLength).unwrap();
+            input.buffer = "speculative_prefix_limits".into(); input.source = ValueSource::SpeculativePrefixLimit;
+        }
+        coexist.graphs.push(graph); config.contract.graphs.push(semantics);
+    }
+    catalog::validate(&config, &coexist).unwrap();
     config.speculative_token_capacity = 0;
-    assert!(catalog::validate(&config, &manifest).is_err());
+    assert!(catalog::validate(&config, &coexist).is_err());
 }
 
 fn grammar_packing_fixture() -> (
@@ -1460,7 +1486,7 @@ fn grammar_packing_fixture() -> (
             tokens: 3,
         });
     }
-    let step = crate::scheduler::ScheduledStep {
+    let step = crate::scheduler::ScheduledStep { draft_tokens: 0,
         kind: GraphKind::Proposal,
         batch_capacity: 8,
         token_capacity: 6,
@@ -1725,3 +1751,4 @@ fn prefill_compacts_execution_feature_indices_and_preserves_admission_metadata()
         canonical
     );
 }
+include!("packed_round_tests.rs");

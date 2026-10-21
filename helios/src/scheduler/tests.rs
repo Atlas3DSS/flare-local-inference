@@ -4,7 +4,7 @@ pub(super) fn measured_costs(graphs: &[crate::execution::GraphDescriptor]) -> co
     let mut costs = cost::ActionCosts::prepared(graphs).unwrap();
     for graph in graphs {
         costs.observe(
-            &ScheduledStep { packed_token_capacity: 0,
+            &ScheduledStep { draft_tokens: graph.draft_tokens, packed_token_capacity: graph.packed_token_capacity,
                 kind: graph.kind,
                 batch_capacity: graph.batch_capacity,
                 token_capacity: graph.token_capacity,
@@ -154,7 +154,7 @@ pub(crate) fn duration_graphs(active: usize) -> Vec<crate::execution::GraphDescr
             GraphKind::Speculative,
         ] {
             for tokens in 1..=if kind == GraphKind::Speculative { 8 } else { 1 } {
-                graphs.push(crate::execution::GraphDescriptor { packed_token_capacity: 0,
+                graphs.push(crate::execution::GraphDescriptor { draft_tokens: 0, packed_token_capacity: 0,
                     name: format!("{kind:?}-{batch}-{tokens}"),
                     kind,
                     sampling_mode: crate::execution::SamplingMode::General,
@@ -173,7 +173,7 @@ pub(crate) fn duration_graphs(active: usize) -> Vec<crate::execution::GraphDescr
         (GraphKind::Vision, vec![8, 16, 256, 1024, 4096, 16384]),
     ] {
         for tokens in capacities {
-            graphs.push(crate::execution::GraphDescriptor { packed_token_capacity: 0,
+            graphs.push(crate::execution::GraphDescriptor { draft_tokens: 0, packed_token_capacity: 0,
                 name: format!("{kind:?}-{tokens}"),
                 kind,
                 sampling_mode: crate::execution::SamplingMode::General,
@@ -1731,7 +1731,7 @@ fn graph_duration_median_uses_runtime_observations_and_excludes_queue_wait() {
 fn readiness_correction_changes_shape_cost_without_changing_handoff_or_service_time() {
     use crate::execution::{ExecutionTiming, ReadinessIntervals};
     let mut costs = cost::ActionCosts::prepared(&duration_graphs(1)).unwrap();
-    let step = ScheduledStep { kind: GraphKind::Decode, batch_capacity: 1, token_capacity: 1,
+    let step = ScheduledStep { draft_tokens: 0, kind: GraphKind::Decode, batch_capacity: 1, token_capacity: 1,
         packed_token_capacity: 0, mixed: None, lanes: vec![], requires_feedback: false };
     let timestamps = [1000u64, 3000, 3100].into_iter().flat_map(u64::to_ne_bytes).collect::<Vec<_>>();
     let mut gpu_ns = [None; 16];

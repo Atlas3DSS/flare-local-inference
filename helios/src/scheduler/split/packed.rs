@@ -7,7 +7,7 @@ impl RequestScheduler {
     fn budget_choice(&self, offers: &[(usize, usize)], batch: usize, width: usize,
         values: &[LaneValue; REQUEST_LANES], age_price: f64) -> Option<(PackedShape, ValueRate)> {
         self.refresh_budget_choice(offers, batch, width, values, age_price,
-            cost::Key { kind: GraphKind::Proposal, batch, tokens: width, prefill: 0, packed: 0 }, None, None)
+            cost::Key { drafts: 0, kind: GraphKind::Proposal, batch, tokens: width, prefill: 0, packed: 0 }, None, None)
     }
 
     pub(super) fn refresh_budget_choice(&self, offers: &[(usize, usize)], batch: usize, width: usize,
@@ -105,7 +105,7 @@ impl RequestScheduler {
                 value += values[slot].decode(expected(&proposal.confidence,width), shape.nanos as f64 / 1e6);
             }
             if mask != 0 {
-                output.push(Candidate { kind: GraphKind::Verification, mask, batch: shape.batch, verification_budget: None,
+                output.push(Candidate { draft_tokens: 0, kind: GraphKind::Verification, mask, batch: shape.batch, verification_budget: None,
                     capacity: shape.width, packed_token_capacity: shape.tokens, prefill_capacity: 0, prefill_slot: None,
                     work: 0, duration_ns: shape.nanos, rate: ValueRate::new(shape.nanos,value,age), feedback: true });
             }
@@ -120,7 +120,7 @@ impl RequestScheduler {
             let mask = utility::best_cohort::<REQUEST_LANES>(&offers,batch);
             if mask != 0 {
                 let value = offers.iter().filter(|(slot,_)| mask & (1 << slot) != 0).map(|(_,v)| v).sum();
-                output.push(Candidate { kind: GraphKind::Speculative, mask, batch, capacity: 1, packed_token_capacity: 0, verification_budget: None,
+                output.push(Candidate { draft_tokens: 0, kind: GraphKind::Speculative, mask, batch, capacity: 1, packed_token_capacity: 0, verification_budget: None,
                     prefill_capacity: 0, prefill_slot: None, work: 0, duration_ns: nanos,
                     rate: ValueRate::new(nanos,value,age), feedback: true });
             }
@@ -134,7 +134,7 @@ impl RequestScheduler {
                 let offers: Vec<_> = available[..count].iter().map(|&slot|
                     (slot,self.speculative_tokens(self.slots[slot].request.as_ref().unwrap(),width))).collect();
                 if let Some((shape,rate)) = self.budget_choice(&offers,batch,width,values,age) {
-                    output.push(Candidate { kind: GraphKind::Proposal, mask: offers.iter().fold(0,|mask,(slot,_)|mask|(1<<slot)),
+                    output.push(Candidate { draft_tokens: 0, kind: GraphKind::Proposal, mask: offers.iter().fold(0,|mask,(slot,_)|mask|(1<<slot)),
                         batch, capacity: width, packed_token_capacity: 0, prefill_capacity: 0, prefill_slot: None,
                         work: 0, duration_ns: rate.duration_ns, rate, feedback: true, verification_budget: Some(shape.tokens) });
                 }

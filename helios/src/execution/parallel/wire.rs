@@ -212,6 +212,9 @@ pub(super) fn layout(manifest: &ExecutionManifest) -> Vec<u8> {
         ] {
             number(&mut bytes, value);
         }
+        if graph.kind == super::super::GraphKind::PackedSpeculative {
+            number(&mut bytes, graph.draft_tokens);
+        }
         for binding in &graph.input_bindings {
             string(&mut bytes, &binding.buffer_name);
             number(&mut bytes, binding.host_offset);

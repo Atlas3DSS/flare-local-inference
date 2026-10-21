@@ -520,6 +520,10 @@ def serve(args) -> int:
         if not any(signature.packed_token_capacity for signature in local_model.signatures.values()):
             prepared.close()
             raise UsageError("this prepared recipe does not declare packed verification capacities")
+        if plan.speculation.draft_prefix_selection == "gpu" and not any(
+                signature.kind == "packed_speculative" for signature in local_model.signatures.values()):
+            prepared.close()
+            raise UsageError("this prepared recipe does not declare GPU prefix-selection rounds")
     if args.direct:
         from ignition.direct.server import serve_direct
 
