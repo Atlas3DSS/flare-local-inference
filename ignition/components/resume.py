@@ -23,7 +23,9 @@ class PreparedResumeState:
             raise ValueError("resume requires CUDA request state, TP1/2/4, and rows within request capacity")
         if saved_hidden.ndim != 2 or saved_hidden.shape[0] < 2 or saved_hidden.shape[1] <= 0:
             raise ValueError("resume requires saved hidden outputs for all physical request slots")
-        _check_tensor(saved_hidden, saved_hidden.shape, torch.bfloat16, device, "saved_hidden", contiguous=False)
+        from .sm70_projection import is_sm70
+        execution_dtype = torch.float32 if is_sm70(device) else torch.bfloat16
+        _check_tensor(saved_hidden, saved_hidden.shape, execution_dtype, device, "saved_hidden", contiguous=False)
         if saved_hidden.stride(1) != 1 or saved_hidden.stride(0) < saved_hidden.shape[1]:
             raise ValueError("saved hidden rows must be disjoint with contiguous channels")
         for value, shape, dtype, name in ((slots, (rows,), torch.int32, "slots"),
@@ -32,7 +34,7 @@ class PreparedResumeState:
         self.requests, self.saved_hidden = requests, saved_hidden
         self.slots, self.epochs, self.count, self.world_size = slots, epochs, count, world_size
         self.row_ids, self.slot_ids = torch.arange(rows, device=device), torch.arange(self.capacity, device=device)
-        def zeros(shape, dtype=torch.bfloat16):
+        def zeros(shape, dtype=execution_dtype):
             return torch.zeros(shape, dtype=dtype, device=device) if buffers is None else buffers.zeros(shape, dtype)
         self.validation_input = zeros((1, max(8, 2 * self.capacity)))
         self.validation_sum = zeros(self.validation_input.shape)

@@ -28,6 +28,7 @@ class PreparedResume:
         name,
         activation_mode="a16",
         buffers=None,
+        workspace=None,
     ):
         self.state = PreparedResumeState(
             requests,
@@ -39,6 +40,8 @@ class PreparedResume:
             state_rows=inputs.request_state_rows,
             buffers=buffers,
         )
+        from .sm70_projection import is_sm70
+        self.sm70 = is_sm70(pool.backing.device)
         self.validation = PreparedAllReduce(
             self.state.validation_input,
             self.state.validation_sum,
@@ -48,8 +51,8 @@ class PreparedResume:
             name=name + ".validation",
         )
         def empty(shape):
-            return (torch.empty(shape, dtype=torch.bfloat16, device=pool.backing.device) if buffers is None
-                    else buffers.zeros(shape, torch.bfloat16))
+            return (torch.empty(shape, dtype=pool.last_hidden.dtype, device=pool.backing.device) if buffers is None
+                    else buffers.zeros(shape, pool.last_hidden.dtype))
         self.local_logits = empty((rows, weights.head.shape[0] if isinstance(weights.head, torch.Tensor)
                                    else weights.head.out_features))
         self.logits = empty((rows, requests.vocab_size))
@@ -64,6 +67,7 @@ class PreparedResume:
             name=name + ".head",
             activation_mode=activation_mode,
             buffers=buffers,
+            workspace=workspace,
         )
         args = (
             requests,
@@ -95,4 +99,7 @@ class PreparedResume:
     def __call__(self):
         self.validation(self.state.validate())
         self.projection(self.state.gather())
+        if self.sm70:
+            from .sm70_precision import round_bf16
+            self.logits.copy_(round_bf16(self.logits))
         self.completion()

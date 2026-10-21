@@ -143,8 +143,10 @@ class PreparedBatch:
         self.block_ids = torch.arange(inputs.page_tables.shape[1], device=device)
         def zeros(shape, dtype):
             return torch.zeros(shape, dtype=dtype, device=device) if buffers is None else buffers.zeros(shape, dtype)
-        self.validation_input = zeros((1, max(8, 2 * capacity)), torch.bfloat16)
-        self.validation_sum = zeros(self.validation_input.shape, torch.bfloat16)
+        from .sm70_projection import is_sm70
+        dtype = torch.float32 if is_sm70(device) else torch.bfloat16
+        self.validation_input = zeros((1, max(8, 2 * capacity)), dtype)
+        self.validation_sum = zeros(self.validation_input.shape, dtype)
         self.present = zeros((capacity,), torch.bool)
         self.token_state = PreparedTokenState(
             requests,

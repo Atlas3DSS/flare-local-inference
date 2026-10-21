@@ -74,7 +74,10 @@ def prepare(snapshot, config, *, progress=None, package_storage):
     transient.enter_context(package_storage.transient())
     weights = ModelWeights.load(manifest, device, progress=progress)
     release_unused()
-    layout = continuation_layout(weights.config)
+    from ignition.components.sm70_projection import is_sm70
+    dtype, element_bytes = (torch.float32, 2) if is_sm70(device) else (torch.bfloat16, 1)
+    layout = continuation_layout(weights.config, dtype=dtype, element_bytes=element_bytes)
+    bytes_per_page = page_bytes(weights.config, element_bytes=element_bytes)
     snapshots = layout.snapshot_capacity(config.snapshot_budget_bytes)
     if snapshots < 1:
         raise ValueError("snapshot budget must hold a complete Qwen dense continuation")
@@ -84,7 +87,7 @@ def prepare(snapshot, config, *, progress=None, package_storage):
     total_memory = torch.cuda.mem_get_info(device)[1]
     with phase(progress, "Allocate model state"):
         pool = ContinuationPool.for_model(weights.config, state_rows + 1, pages, device,
-            storage=package_storage, maximum_pages=total_memory // page_bytes(weights.config),
+            storage=package_storage, maximum_pages=total_memory // bytes_per_page,
             maximum_rows=total_memory // layout.row_bytes, backed_slots=min(state_rows + 1, 1 + 2 * slots))
         vocabulary = weights.config.vocabulary
         requests = DeviceRequestState.allocate(device, vocab_size=vocabulary, capacity=slots)
@@ -142,7 +145,7 @@ def prepare(snapshot, config, *, progress=None, package_storage):
             name = f"resume{capacity}"
             forward = PreparedResume(weights, requests, pool, inputs, completion, frame, sequence,
                 rows=capacity, runtime=None, vocabulary_runtime=None, coordinator=coordinator,
-                session=session, name=name, activation_mode="auto")
+                session=session, name=name, activation_mode="auto", workspace=arena)
             add(name, forward, "resume", capacity, 1, (*row_inputs, "sampling_grammar_mask"))
             for mode in ("init", "restore", "snapshot"):
                 name = f"{mode}{capacity}"
@@ -183,8 +186,8 @@ def prepare(snapshot, config, *, progress=None, package_storage):
         mapped_host_bytes=0, offloaded_bytes=0, continuation_bytes=pool.backing.nbytes, state_rows=state_rows,
         preparation_state_rows=int(pool.memory_capacity[0].item()),
         preparation_state_bytes=int(pool.memory_capacity[0].item()) * layout.row_bytes,
-        pages=pages, page_bytes=page_bytes(weights.config), page_tokens=PAGE_TOKENS,
-        kv_bytes=pages * page_bytes(weights.config), completion_output_bytes=completion.nbytes, operator_scratch_bytes=arena.nbytes, graphs=len(graphs),
+        pages=pages, page_bytes=bytes_per_page, page_tokens=PAGE_TOKENS,
+        kv_bytes=pages * bytes_per_page, completion_output_bytes=completion.nbytes, operator_scratch_bytes=arena.nbytes, graphs=len(graphs),
         prefill_capacities=prefill_sizes, free_device_bytes=free, total_device_bytes=total,
         headroom_bytes=config.headroom_bytes, tuning=tuning, compiled_decoder=config.compile_decoder)
     return PreparedModel(device=config.device, graphs=graphs, buffers=buffers, signatures=signatures,

@@ -27,6 +27,8 @@ class ModelWeights:
         from transformers import Qwen3_5TextConfig, Qwen3_5TextModel
 
         config = ModelConfig.load(manifest.snapshot)
+        from ignition.components.sm70_projection import is_sm70
+        sm70 = is_sm70(device)
         tree = canonical_tree(Qwen3_5TextModel, Qwen3_5TextConfig.from_dict(config.text))
         projections = {}
         before = torch.cuda.memory_allocated(device)
@@ -45,6 +47,12 @@ class ModelWeights:
                 if tensor.shape != parameter.shape:
                     raise ValueError(f"{name}: checkpoint parameter shape differs from the model")
                 parent, _, field = name.rpartition(".")
+                # Keep large embedding/projection weights packed. Small canonical
+                # parameters participate in Inductor graphs, which require FP32 on Volta.
+                if sm70 and ("norm" in name or name.endswith(("A_log", "dt_bias", "conv1d.weight"))):
+                    if name.endswith("linear_attn.norm.weight"):
+                        tree.get_submodule(parent.rpartition(".")[0]).norm_weight_bf16 = tensor.dtype == torch.bfloat16
+                    tensor = tensor.float()
                 setattr(tree.get_submodule(parent), field, torch.nn.Parameter(tensor, requires_grad=False))
             head = loader.load_linear("lm_head")
             if (head.out_features, head.in_features) != (config.vocabulary, config.hidden):

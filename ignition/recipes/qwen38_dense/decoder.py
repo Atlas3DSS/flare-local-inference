@@ -10,6 +10,7 @@ from ignition.components.gated_delta import GDNScratch, PreparedGDN
 from ignition.components.linear import QuantizedProjection
 from ignition.components.paged_attention import PreparedPagedAttention, PreparedPagedKVWriter
 from ignition.components.recurrent import DeltaMetadata
+from ignition.components.sm70_precision import apply_rotary, rms_norm, round_bf16
 from ignition.components.tensor_fp8 import TensorFP8Projection
 from ignition.components.vocabulary import PreparedVocabularyProjection
 
@@ -25,10 +26,12 @@ class Scratch:
 
     @classmethod
     def allocate(cls, tokens, rows, config, device):
-        return cls(torch.zeros((tokens, config.hidden), dtype=torch.bfloat16, device=device),
-                   torch.zeros((rows, config.hidden), dtype=torch.bfloat16, device=device),
-                   torch.zeros((rows, config.vocabulary), dtype=torch.bfloat16, device=device),
-                   GDNScratch.allocate(tokens, device, hidden_size=config.hidden))
+        from ignition.components.sm70_projection import is_sm70
+        dtype = torch.float32 if is_sm70(device) else torch.bfloat16
+        return cls(torch.zeros((tokens, config.hidden), dtype=dtype, device=device),
+                   torch.zeros((rows, config.hidden), dtype=dtype, device=device),
+                   torch.zeros((rows, config.vocabulary), dtype=dtype, device=device),
+                   GDNScratch.allocate(tokens, device, hidden_size=config.hidden, dtype=dtype))
 
     def rows(self, tokens, rows):
         return Scratch(self.activations[:tokens], self.hidden[:rows], self.logits[:rows], self.gdn.rows(tokens))
@@ -58,6 +61,35 @@ class RecurrentAttention(torch.nn.Module):
         return self.operation(hidden_states)
 
 
+class SM70DecoderLayer(torch.nn.Module):
+    """Canonical Qwen layer arithmetic with BF16 values stored as FP32."""
+
+    def __init__(self, layer):
+        super().__init__()
+        self.layer = layer
+
+    def forward(self, hidden_states, position_embeddings):
+        layer = self.layer
+        residual = hidden_states
+        norm = layer.input_layernorm
+        hidden_states = rms_norm(hidden_states, norm.weight, norm.eps)
+        if layer.block_type == "linear_attention":
+            hidden_states = layer.linear_attn(hidden_states=hidden_states)
+        else:
+            hidden_states, _ = layer.self_attn(hidden_states=hidden_states,
+                                              position_embeddings=position_embeddings)
+        hidden_states = round_bf16(residual + round_bf16(hidden_states))
+        residual = hidden_states
+        norm = layer.post_attention_layernorm
+        hidden_states = rms_norm(hidden_states, norm.weight, norm.eps)
+        gate = round_bf16(layer.mlp.gate_proj(hidden_states))
+        up = round_bf16(layer.mlp.up_proj(hidden_states))
+        activated = round_bf16(layer.mlp.act_fn(gate))
+        product = round_bf16(activated * up)
+        hidden_states = round_bf16(layer.mlp.down_proj(product))
+        return round_bf16(residual + hidden_states)
+
+
 class FullAttention(torch.nn.Module):
     def __init__(self, module, weights, source, metadata, pool, layer, *, mode, session, workspace, name, buffers):
         super().__init__()
@@ -69,7 +101,7 @@ class FullAttention(torch.nn.Module):
 
         def empty(field, width):
             if field not in buffers:
-                buffers[field] = torch.zeros((tokens, width), dtype=torch.bfloat16, device=device)
+                buffers[field] = torch.zeros((tokens, width), dtype=source.dtype, device=device)
             return buffers[field]
 
         self.qg = empty("qg", 2 * self.heads * self.dim)
@@ -80,27 +112,43 @@ class FullAttention(torch.nn.Module):
         prefix = f"layers.{layer}.self_attn."
         self.projections = {
             field: TensorFP8Projection(inputs, weights.projections[prefix + field], output,
-                                       session=session, name=name + "." + field)
+                                       session=session, workspace=workspace, name=name + "." + field)
             for field, inputs, output in (("q_proj", source, self.qg), ("k_proj", source, self.k),
                                          ("v_proj", source, self.v), ("o_proj", self.attended, self.output))
         }
         self.slots = torch.full((tokens,), -1, dtype=torch.int64, device=device)
         self.lengths = torch.zeros_like(metadata.lengths)
         key_cache, value_cache = pool.attention(layer, config)
-        self.writer = PreparedPagedKVWriter(self.key, self.v.view(tokens, self.kv_heads, self.dim),
+        from ignition.components.sm70_projection import is_sm70
+        self.sm70 = is_sm70(device)
+        writer, attention = PreparedPagedKVWriter, PreparedPagedAttention
+        options = dict(mode=mode, workspace=workspace)
+        if self.sm70:
+            from ignition.components.sm70_attention import PreparedWriter, PreparedAttention
+            writer, attention, options = PreparedWriter, PreparedAttention, {}
+        self.writer = writer(self.key, self.v.view(tokens, self.kv_heads, self.dim),
             key_cache, value_cache, self.slots, session=session, name=name + ".write")
-        self.attention = PreparedPagedAttention(self.q, key_cache, value_cache, metadata.page_table,
+        self.attention = attention(self.q, key_cache, value_cache, metadata.page_table,
             self.lengths, metadata.query_start_loc, self.attended.view(tokens, self.heads, self.dim),
-            mode=mode, session=session, workspace=workspace, name=name + ".attention")
+            session=session, name=name + ".attention", **options)
 
     def forward(self, hidden_states, position_embeddings, **kwargs):
         from transformers.models.qwen3_5.modeling_qwen3_5 import apply_rotary_pos_emb
 
         for field in ("q_proj", "k_proj", "v_proj"):
             self.projections[field](hidden_states)
+        if self.sm70:
+            for projected in (self.qg, self.k, self.v):
+                projected.copy_(round_bf16(projected))
         query, gate = self.qg.view(-1, self.heads, 2 * self.dim).chunk(2, dim=-1)
-        q, k = apply_rotary_pos_emb(self.canonical.q_norm(query),
-            self.canonical.k_norm(self.k.view(-1, self.kv_heads, self.dim)), *position_embeddings)
+        key = self.k.view(-1, self.kv_heads, self.dim)
+        if self.sm70:
+            q_norm, k_norm = self.canonical.q_norm, self.canonical.k_norm
+            q, k = apply_rotary(rms_norm(query, q_norm.weight, q_norm.eps),
+                rms_norm(key, k_norm.weight, k_norm.eps), *position_embeddings)
+        else:
+            q, k = apply_rotary_pos_emb(self.canonical.q_norm(query),
+                self.canonical.k_norm(key), *position_embeddings)
         self.q.copy_(q)
         self.key.copy_(k)
         m = self.metadata
@@ -109,14 +157,23 @@ class FullAttention(torch.nn.Module):
         self.lengths.copy_(torch.where(m.lengths > 0, m.starts + m.lengths, 0))
         self.writer()
         self.attention()
-        self.attended.mul_(gate.reshape_as(self.attended).sigmoid())
-        return self.projections["o_proj"](self.attended), None
+        if self.sm70:
+            rounded_gate = round_bf16(gate.reshape_as(self.attended).sigmoid())
+            self.attended.copy_(round_bf16(round_bf16(self.attended) * rounded_gate))
+        else:
+            self.attended.mul_(gate.reshape_as(self.attended).sigmoid())
+        output = self.projections["o_proj"](self.attended)
+        if self.sm70:
+            output.copy_(round_bf16(output))
+        return output, None
 
 
 class PreparedDecoder:
     def __init__(self, weights, scratch, metadata, pool, *, mode, vocabulary_runtime,
                  coordinator, session, name, workspace):
         self.weights, self.scratch, self.metadata, self.pool = weights, scratch, metadata, pool
+        from ignition.components.sm70_projection import is_sm70
+        self.sm70 = is_sm70(scratch.activations.device)
         self.embedding = PreparedEmbedding(weights.tree.embed_tokens.weight, metadata.token_ids,
             scratch.activations, num_rows=metadata.live_counts[:1], session=session, name=name + ".embedding")
         self.delta = DeltaMetadata.allocate(metadata.starts.numel(), scratch.activations.device)
@@ -148,13 +205,14 @@ class PreparedDecoder:
                 output = mlp_buffers[field]
                 setattr(layer.mlp, field, Projection(QuantizedProjection(inputs, weight, output,
                     activation_mode="auto", session=session, workspace=workspace, name=name + "." + prefix + field)))
-            self.layers.append(layer)
+            self.layers.append(SM70DecoderLayer(layer) if self.sm70 else layer)
         rotary = config.text["rope_parameters"]
         dim = int(config.text["head_dim"] * rotary["partial_rotary_factor"])
         self.inverse_frequency = 1.0 / (rotary["rope_theta"] ** (
             torch.arange(0, dim, 2, device=source.device, dtype=torch.float32) / dim))
         self.head = PreparedVocabularyProjection(scratch.hidden, weights.head, scratch.logits, scratch.logits,
-            runtime=vocabulary_runtime, coordinator=coordinator, session=session, name=name + ".head", activation_mode="auto")
+            runtime=vocabulary_runtime, coordinator=coordinator, session=session, name=name + ".head",
+            activation_mode="auto", workspace=workspace)
 
     def __call__(self):
         m, d = self.metadata, self.delta
@@ -169,9 +227,15 @@ class PreparedDecoder:
         d.num_seqs.copy_(m.live_counts[1:])
         frequency = m.positions.float()[:, None] * self.inverse_frequency[None, :]
         embedding = torch.cat((frequency, frequency), dim=-1)
-        position_embeddings = embedding.cos().bfloat16(), embedding.sin().bfloat16()
+        dtype = self.scratch.activations.dtype
+        position_embeddings = ((round_bf16(embedding.cos()), round_bf16(embedding.sin())) if self.sm70
+                               else (embedding.cos().to(dtype), embedding.sin().to(dtype)))
         hidden = self.embedding()
         for layer in self.layers:
             hidden = layer(hidden, position_embeddings=position_embeddings)
-        self.scratch.hidden.copy_(self.weights.tree.norm(hidden[m.sample_indices]))
+        selected = hidden[m.sample_indices]
+        norm = self.weights.tree.norm
+        self.scratch.hidden.copy_(rms_norm(selected, norm.weight, norm.eps) if self.sm70 else norm(selected))
         self.head(self.scratch.hidden)
+        if self.sm70:
+            self.scratch.logits.copy_(round_bf16(self.scratch.logits))

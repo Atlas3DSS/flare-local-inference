@@ -69,12 +69,12 @@ class GDNScratch:
 
     @classmethod
     def allocate(cls, tokens: int, device: torch.device, *, world_size=1, hidden_size=2560, buffers=None,
-                 output=None) -> GDNScratch:
+                 output=None, dtype=torch.bfloat16) -> GDNScratch:
         if type(tokens) is not int or tokens <= 0:
             raise ValueError("GDN token capacity must be positive")
         def zeros(width):
-            return (torch.zeros((tokens, width), device=device, dtype=torch.bfloat16) if buffers is None
-                    else buffers.zeros((tokens, width), torch.bfloat16))
+            return (torch.zeros((tokens, width), device=device, dtype=dtype) if buffers is None
+                    else buffers.zeros((tokens, width), dtype))
         qkvz = zeros(16384 // world_size)
         ba = zeros(96 // world_size)
         convolved, recurrence, gated = (
@@ -169,12 +169,15 @@ class PreparedGDN:
         )
         self.mode = mode
         self.tokens, self.device = source.shape[0], source.device
+        from .sm70_projection import is_sm70
+        self.sm70 = is_sm70(self.device)
+        dtype = torch.float32 if self.sm70 else torch.bfloat16
         if (
             source.ndim != 2
             or source.shape[1] != module.hidden_size
-            or source.dtype != torch.bfloat16
+            or source.dtype != dtype
         ):
-            raise ValueError("GDN source must be BF16 with the module's hidden width")
+            raise ValueError("GDN source must use the device execution dtype and module hidden width")
         if self.device.type != "cuda":
             raise ValueError("prepared GDN requires CUDA")
         widths = tuple(width if index == 7 else width // world_size for index, width in
@@ -187,7 +190,7 @@ class PreparedGDN:
             tensor = getattr(scratch, field.name)
             if (
                 tensor.device != self.device
-                or tensor.dtype != torch.bfloat16
+                or tensor.dtype != dtype
                 or tuple(tensor.shape) != (self.tokens, width)
                 or tensor.stride() != (stride, 1)
             ):
@@ -248,9 +251,9 @@ class PreparedGDN:
             weight = projections[key]
             options = dict(session=session, name=f"{name}.{key}")
             if isinstance(weight, TensorFP8Weight):
-                return TensorFP8Projection(inputs, weight, output, **options)
+                return TensorFP8Projection(inputs, weight, output, workspace=projection_workspace, **options)
             if isinstance(weight, torch.Tensor):
-                return UnquantizedProjection(inputs, weight, output, **options)
+                return UnquantizedProjection(inputs, weight, output, workspace=projection_workspace, **options)
             return QuantizedProjection(inputs, weight, output, activation_mode="auto",
                                        workspace=projection_workspace, **options)
 
@@ -271,6 +274,14 @@ class PreparedGDN:
                     self.projections["in_proj_qkvz"], self.projections["in_proj_ba"],
                     session=session, workspace=projection_workspace)
         self.partitions = partitions
+        if self.sm70:
+            if partitions is not None or records is not None or in_place:
+                raise ValueError("SM70 GDN requires ordinary unpartitioned execution")
+            from .sm70_gdn import PreparedSM70GDNSequence
+            self.sm70_sequence = PreparedSM70GDNSequence(module, scratch, state, metadata,
+                mode=mode, norm_weight_bf16=module.norm_weight_bf16, session=session,
+                name=name + ".sequence", checkpoint_export=checkpoint_export)
+            return
         if partitions is not None:
             self.sequences_by_role = tuple(
                 PreparedGDN(module, projections, part.scratch.output, part.scratch, state, part.metadata,
@@ -437,6 +448,10 @@ class PreparedGDN:
             self.projections["in_proj_ba"](source)
         else:
             self.parallel_projections(source)
+        if self.sm70:
+            from .sm70_precision import round_bf16
+            scratch.projected_qkvz.copy_(round_bf16(scratch.projected_qkvz))
+            scratch.projected_ba.copy_(round_bf16(scratch.projected_ba))
         if self.partitions is None:
             self.run_sequence()
         else:
@@ -445,9 +460,15 @@ class PreparedGDN:
                 part.gather(scratch.projected_ba, part.scratch.projected_ba)
                 sequence.run_sequence()
             self.partitions.combine(tuple(part.scratch.gated for part in self.partitions.parts), scratch.gated)
-        return self.projections["out_proj"](scratch.gated)
+        output = self.projections["out_proj"](scratch.gated)
+        if self.sm70:
+            output.copy_(round_bf16(output))
+        return output
 
     def run_sequence(self):
+        if self.sm70:
+            self.sm70_sequence()
+            return
         scratch = self.scratch
         short_conv.run(self.conv_binding)
         if self.recovered is not None:
