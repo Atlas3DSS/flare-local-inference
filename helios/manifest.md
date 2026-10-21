@@ -158,8 +158,8 @@ Output/context limits bound logical draft depth; termination inside an accepted
 prefix censors later positions. Prefill rows in mixed graphs contain `-1`.
 The buffer cannot be an input binding.
 
-Transport reads this output only for speculative, verification, and mixed
-graphs with width greater than one, using the existing completion stream and
+Transport reads this output only for speculative, verification, packed speculative,
+and mixed graphs with width greater than one, using the existing completion stream and
 fence. Every rank validates its values; rank zero supplies the scheduling
 observations without numeric consensus or an additional collective. Absent
 buffers preserve binary completion feedback for previously exported packages.
