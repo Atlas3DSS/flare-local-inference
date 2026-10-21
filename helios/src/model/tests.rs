@@ -174,6 +174,10 @@ fn admission_histogram_seed_and_partial_page_uploads_preserve_native_semantics()
 #[test]
 fn large_prefill_uploads_preserve_token_position_and_image_indices_without_tail_padding() {
     let mut config = config();
+    let image_contract: PreparedContract =
+        serde_json::from_str(include_str!("../../tests/support/contracts/qwen38.json")).unwrap();
+    config.contract.vision = image_contract.vision;
+    config.contract.frontend = image_contract.frontend;
     config.limits.max_sequence_tokens = 8192;
     config.prepared_sequence_tokens = 8192;
     config.limits.prefill_chunk_size = 4096;
@@ -1508,7 +1512,11 @@ fn grammar_mask_packing_preserves_bits_row_layout_and_transitions() {
 
 #[test]
 fn prefill_compacts_execution_feature_indices_and_preserves_admission_metadata() {
-    let config = config();
+    let mut config = config();
+    let image_contract: PreparedContract =
+        serde_json::from_str(include_str!("../../tests/support/contracts/qwen38.json")).unwrap();
+    config.contract.vision = image_contract.vision;
+    config.contract.frontend = image_contract.frontend;
     let mut scheduler = RequestScheduler::new(
         config.identity,
         config.limits,

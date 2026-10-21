@@ -519,7 +519,11 @@ impl Inputs {
                                     .ok_or("image indices exceed admission")?
                                     .iter()
                                     .map(|v| {
-                                        frame.scheduler.request(lane.request)?.feature_index(*v)
+                                        let index = frame.scheduler.request(lane.request)?.feature_index(*v)?;
+                                        if index >= frame.config.contract.vision.features_per_request as i64 {
+                                            return Err("image feature index exceeds prepared execution arena".into());
+                                        }
+                                        Ok(index)
                                     })
                                     .collect::<Result<Vec<_>>>()?,
                             ),

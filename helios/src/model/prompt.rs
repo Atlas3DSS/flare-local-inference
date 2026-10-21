@@ -118,7 +118,48 @@ pub fn prepare_image_inputs(
         }
     }
     super::validate_prompt_data(config, &prepared.tokens, &prepared.data)?;
+    validate_conditioned_inputs(config, &prepared.tokens, &prepared.data, &prepared.conditioned_inputs)?;
     Ok(prepared)
+}
+
+pub(crate) fn validate_conditioned_inputs(
+    config: &ModelConfig, tokens: &[u32], data: &PromptData,
+    inputs: &[crate::frontend::images::PreparedImageInput],
+) -> Result<()> {
+    let mut token_end = 0;
+    let mut feature_end = 0;
+    let vision = &config.contract.vision;
+    for input in inputs {
+        if input.token_span.start < token_end || input.token_span.start >= input.token_span.end
+            || input.token_span.end > tokens.len() || input.feature_range.start != feature_end
+            || input.feature_range.end.checked_sub(feature_end) != Some(input.geometry.tokens)
+            || input.geometry.tokens == 0 || input.geometry.tokens > vision.features_per_request
+            || input.geometry.patches > vision.patch_capacities.last().copied().unwrap_or(0)
+            || input.geometry.tokens.checked_mul(vision.patches_per_feature) != Some(input.geometry.patches)
+            || input.feature_range.end > tokens.len() || input.feature_range.end > i32::MAX as usize
+        {
+            return Err("conditioned input spans or features violate prompt geometry".into());
+        }
+        let indices = data.vision_token_indices.get(input.token_span.clone())
+            .ok_or("conditioned input has no prompt feature indices")?;
+        let mut seen = vec![false; input.geometry.tokens];
+        for index in indices.iter().copied().filter(|index| *index >= 0) {
+            let local = (index as usize).checked_sub(feature_end)
+                .filter(|local| *local < seen.len()).ok_or("conditioned feature belongs to another input")?;
+            if std::mem::replace(&mut seen[local], true) {
+                return Err("conditioned feature appears more than once in the prompt".into());
+            }
+        }
+        if seen.iter().any(|seen| !seen) {
+            return Err("conditioned input features are absent from its prompt span".into());
+        }
+        token_end = input.token_span.end;
+        feature_end = input.feature_range.end;
+    }
+    if data.vision_token_indices.iter().filter(|index| **index >= 0).count() != feature_end {
+        return Err("prompt features are not owned by conditioned input spans".into());
+    }
+    Ok(())
 }
 
 pub fn message_boundaries(
@@ -261,6 +302,117 @@ pub fn prepare_output(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn image_frontend() -> Frontend {
+        use crate::frontend::{Asset, FrontendAssets};
+        use sha2::{Digest, Sha256};
+        static SERIAL: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let root = std::env::temp_dir().join(format!("flare-image-history-{}-{}", std::process::id(),
+            SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+        std::fs::create_dir_all(&root).unwrap();
+        let vocab: tokenizers::models::bpe::Vocab = (0..128)
+            .map(|id| ((id as u8 as char).to_string(), id)).collect();
+        let model = tokenizers::models::bpe::BPE::builder().vocab_and_merges(vocab, vec![]).build().unwrap();
+        let mut tokenizer = tokenizers::Tokenizer::new(model);
+        tokenizer.add_special_tokens([
+            "<|image_pad|>", "<|video_pad|>", "<|vision_start|>", "<|vision_end|>",
+            "<｜deepseek_image｜>", "<|media_pad|>", "<|media_begin|>", "<|media_content|>",
+            "<|media_end|>", "<im_patch>", "<patch_start>", "<patch_end>", "<patch_newline>",
+            "<im_start>", "<im_end>", "<image>", "<img>", "</img>",
+        ].map(|text| tokenizers::AddedToken::from(text, true))).unwrap();
+        let asset = |name: &str, bytes: &[u8]| {
+            let path = root.join(name); std::fs::write(&path, bytes).unwrap();
+            Asset { range: None, path, sha256: format!("{:x}", Sha256::digest(bytes)) }
+        };
+        let frontend = Frontend::load(FrontendAssets {
+            tokenizer: asset("tokenizer.json", tokenizer.to_string(false).unwrap().as_bytes()),
+            tokens: Default::default(), chat_template: Some(asset("chat_template.jinja", b"{{ messages[0].content }}")),
+        }, Map::new()).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        frontend
+    }
+
+    #[test]
+    fn every_image_layout_describes_history_larger_than_the_feature_window() {
+        use crate::frontend::images::{DeepseekRowMajorImageSettings, ImageSettings,
+            MimoImageSettings, QwenImageSettings};
+        use crate::model::contract::{ImageSpan, ImageTokenLayout};
+        let frontend = image_frontend();
+        let token = |text: &str| frontend.encode(text, false).unwrap()[0];
+        let profiles = [
+            (ImageLayoutKind::Qwen, ImageSettings::Qwen(QwenImageSettings {
+                min_pixels: 4096, max_pixels: 65536, position_side: 48,
+                image_token_id: token("<|image_pad|>"), video_token_id: token("<|video_pad|>"),
+            }), "<|image_pad|>", 4),
+            (ImageLayoutKind::Mimo, ImageSettings::Mimo(MimoImageSettings {
+                min_pixels: 4096, max_pixels: 65536, image_mean: [0.5; 3], image_std: [0.5; 3],
+            }), "<|image_pad|>", 4),
+            (ImageLayoutKind::Deepseek, ImageSettings::Deepseek4 {}, "<｜deepseek_image｜>", 9),
+            (ImageLayoutKind::DeepseekRowMajor, ImageSettings::DeepseekRowMajor(
+                DeepseekRowMajorImageSettings { min_pixels: 46656, max_tokens: 1024,
+                    max_width_height_ratio: None }), "<｜deepseek_image｜>", 9),
+            (ImageLayoutKind::Moonvit, ImageSettings::Moonvit {}, "<|media_pad|>", 4),
+            (ImageLayoutKind::Step, ImageSettings::Step {}, "<im_patch>", 16),
+            (ImageLayoutKind::Radio, ImageSettings::Radio {}, "<image>", 4),
+        ];
+        for (layout, settings, placeholder, merge) in profiles {
+            let initial = ImageProcessor::load(settings.clone(), Default::default()).unwrap();
+            let geometry = initial.geometry(64, 64).unwrap();
+            let mut config = super::super::tests::config();
+            config.limits.max_sequence_tokens = 8192;
+            config.limits.prefill_chunk_size = 4096;
+            config.contract.vocabulary = 1000;
+            config.contract.input_vocabulary = 1005;
+            config.contract.vision = crate::model::VisionCapabilities {
+                feature_slots: 4, features_per_request: geometry.tokens,
+                max_images: 1, patches_per_feature: merge, patch_capacities: vec![geometry.patches],
+            };
+            let syntax = &mut config.contract.frontend;
+            syntax.image_layout = Some(layout);
+            syntax.position_dimensions = if layout == ImageLayoutKind::Qwen { 3 } else { 0 };
+            syntax.rejected_tokens.clear();
+            syntax.image_tokens = Some(ImageTokenLayout {
+                feature_token: match layout { ImageLayoutKind::Deepseek => 1002,
+                    ImageLayoutKind::DeepseekRowMajor => 1001, _ => token(placeholder) },
+                span: match layout {
+                    ImageLayoutKind::Deepseek => Some(ImageSpan { start_token: 1000, end_token: 1004,
+                        max_tokens: 4096, interior_tokens: vec![1003], unscoped_tokens: vec![1001] }),
+                    ImageLayoutKind::DeepseekRowMajor => Some(ImageSpan { start_token: 1000, end_token: 1003,
+                        max_tokens: 4096, interior_tokens: vec![1002], unscoped_tokens: vec![] }),
+                    _ => None,
+                },
+            });
+            let limits = crate::frontend::images::ImageLimits {
+                max_images: config.limits.max_sequence_tokens,
+                max_total_patches: config.limits.max_sequence_tokens * merge,
+                max_patches_per_image: geometry.patches, patches_per_feature: merge,
+                ..Default::default()
+            };
+            let processor = ImageProcessor::load(settings, limits).unwrap();
+            let text = format!("a{placeholder}b{placeholder}c{placeholder}d");
+            let rendered = RenderedPrompt { token_ids: frontend.encode(&text, false).unwrap(),
+                text, image_sources: vec![] };
+            let images = (0..3).map(|i| RgbImage::new(64, 64, vec![i; 64 * 64 * 3]).unwrap()).collect();
+            let prepared = prepare_input(&config, &frontend, Some(&processor), &rendered, images).unwrap();
+            assert_eq!(prepared.conditioned_inputs.len(), 3, "{layout:?}");
+            for (index, input) in prepared.conditioned_inputs.iter().enumerate() {
+                assert_eq!(input.feature_range, index * geometry.tokens..(index + 1) * geometry.tokens);
+                assert_eq!(input.geometry, geometry);
+            }
+            assert_eq!(prepared.data.vision_token_indices.iter().copied().max(), Some((3 * geometry.tokens - 1) as i32));
+            assert_eq!(processor.preparation_counts().prepared_images, 0);
+            assert!(prepared.tokens.len() < config.limits.max_sequence_tokens);
+            let mut malformed = prepared.data.clone();
+            let first = malformed.vision_token_indices.iter_mut().find(|index| **index >= 0).unwrap();
+            *first = geometry.tokens as i32;
+            assert!(validate_conditioned_inputs(&config, &prepared.tokens, &malformed,
+                &prepared.conditioned_inputs).is_err());
+            let mut oversized = config.clone();
+            oversized.contract.vision.features_per_request -= 1;
+            assert!(validate_conditioned_inputs(&oversized, &prepared.tokens, &prepared.data,
+                &prepared.conditioned_inputs).is_err());
+        }
+    }
 
     #[test]
     fn xtml_continuation_distinguishes_literal_channel_markers() {

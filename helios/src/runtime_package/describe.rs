@@ -140,7 +140,10 @@ pub(super) fn describe_index(
             "ranges": sampling.ranges,
         },
         "frontend": frontend_json(frontend, model.frontend.as_ref()),
-        "vision": vision_json(model.vision.as_ref(), frontend),
+        "vision": vision_json(
+            model.vision.as_ref(), frontend,
+            (contract.max_sequence_tokens > 0).then_some(contract.max_sequence_tokens),
+        ),
         "assets": index.assets.iter().map(|a| json!({
             "name": a.name,
             "bytes": a.payload.as_ref().map_or(0, |p| p.nbytes),
@@ -253,7 +256,11 @@ fn frontend_json(
     })
 }
 
-fn vision_json(vision: Option<&wire::VisionCapacity>, settings: &wire::FrontendSettings) -> Value {
+fn vision_json(
+    vision: Option<&wire::VisionCapacity>,
+    settings: &wire::FrontendSettings,
+    context_tokens: Option<u64>,
+) -> Value {
     let Some(vision) = vision.filter(|v| v.max_images > 0) else {
         return Value::Null;
     };
@@ -273,8 +280,9 @@ fn vision_json(vision: Option<&wire::VisionCapacity>, settings: &wire::FrontendS
     });
     json!({
         "feature_slots": vision.feature_slots,
-        "max_image_tokens_per_prompt": vision.features_per_request,
-        "max_images": vision.max_images,
+        "max_image_tokens_per_prompt": context_tokens,
+        "max_images": context_tokens,
+        "image_feature_window_tokens": vision.features_per_request,
         "patches_per_feature": vision.patches_per_feature,
         "patch_capacities": vision.patch_capacities,
         "image": profile,
@@ -646,7 +654,7 @@ mod tests {
             patches_per_feature: 0,
             patch_capacities: vec![],
         };
-        assert_eq!(vision_json(Some(&disabled), &settings), Value::Null);
+        assert_eq!(vision_json(Some(&disabled), &settings, Some(131072)), Value::Null);
         let enabled = wire::VisionCapacity {
             feature_slots: 4,
             features_per_request: 4096,
@@ -654,8 +662,26 @@ mod tests {
             patches_per_feature: 9,
             patch_capacities: vec![3456],
         };
-        let value = vision_json(Some(&enabled), &settings);
-        assert_eq!(value["max_image_tokens_per_prompt"], 4096);
+        let value = vision_json(Some(&enabled), &settings, Some(131072));
+        assert_eq!(value["max_image_tokens_per_prompt"], 131072);
+        assert_eq!(value["max_images"], 131072);
+        assert_eq!(value["image_feature_window_tokens"], 4096);
+        let absent_context = vision_json(Some(&enabled), &settings, None);
+        assert!(absent_context["max_image_tokens_per_prompt"].is_null());
+        assert!(absent_context["max_images"].is_null());
+        assert_eq!(absent_context["image_feature_window_tokens"], 4096);
+        let index = wire::ModelIndex {
+            contract: Some(wire::ServingContract {
+                model_contract: Some(wire::ModelContract { vision: Some(enabled), ..Default::default() }),
+                max_sequence_tokens: 131072, ..Default::default()
+            }),
+            frontend: Some(settings.clone()), sampling_defaults: Some(Default::default()),
+            ..Default::default()
+        };
+        let inspected = describe_index(&index, InspectionOptions { frontend: true,
+            ..Default::default() }, None).unwrap();
+        assert_eq!(inspected["vision"]["max_image_tokens_per_prompt"], 131072);
+        assert_eq!(inspected["vision"]["image_feature_window_tokens"], 4096);
         assert_eq!(value["image"]["profile"], "deepseek4");
         let frontend = frontend_json(&settings, None);
         assert_eq!(frontend["prompt_encoder"], "DEEPSEEK_V41");

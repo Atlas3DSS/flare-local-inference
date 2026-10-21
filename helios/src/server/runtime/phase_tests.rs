@@ -2191,3 +2191,226 @@ fn prepared_image_window_stays_global_until_pack_or_cancellation() {
     assert_eq!(processor.preparation_counts().prepared_images, 2);
     assert_eq!(worker.preparing_image, Some(worker.active[1].as_ref().unwrap().request));
 }
+
+#[test]
+fn worker_restores_conditioned_windows_with_fresh_generation_and_unchanged_sampling() {
+    use crate::frontend::images::{
+        ImageInput, ImageLimits, ImageProcessor, ImageSettings, ImageSource, PreparedImageInput,
+        QwenImageSettings, RgbImage,
+    };
+    use crate::model::contract::{GraphContract, GraphOperation, InputIndexing, ValueSource};
+    use crate::execution::{Dtype, GraphDescriptor, InputBinding, BufferDescriptor, SamplingMode};
+    let mut fixture = Fixture::new();
+    fixture.config.limits.max_sequence_tokens = 512;
+    fixture.config.prepared_sequence_tokens = 512;
+    fixture.config.contract.vision = crate::model::VisionCapabilities {
+        feature_slots: 1,
+        features_per_request: 1,
+        max_images: 4,
+        patches_per_feature: 4,
+        patch_capacities: vec![256],
+    };
+    fixture.config.contract.frontend = serde_json::from_str::<crate::model::PreparedContract>(
+        include_str!("../../../tests/support/contracts/qwen38.json"),
+    )
+    .unwrap()
+    .frontend;
+    let mut manifest = crate::model::testing::manifest(&fixture.config);
+    let mut bindings = vec![];
+    let mut semantic = vec![];
+    for (index, (name, source, dtype)) in [
+        ("window_vision_slot", ValueSource::RequestSlot, Dtype::Int64),
+        (
+            "window_vision_generation",
+            ValueSource::RequestGeneration,
+            Dtype::Int64,
+        ),
+        (
+            "window_vision_feature_slot",
+            ValueSource::ImageFeatureSlot,
+            Dtype::Int32,
+        ),
+        (
+            "window_vision_feature_offset",
+            ValueSource::ImageTensor,
+            Dtype::Int32,
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut binding = crate::model::testing::binding(name, source, InputIndexing::Scalar, 0, 0);
+        if source == ValueSource::ImageTensor {
+            binding.tensor = "vision_feature_offset".into();
+        }
+        semantic.push(binding);
+        let nbytes = dtype.size();
+        manifest.buffers.push(BufferDescriptor {
+            name: name.into(),
+            address: 1_000_000 + index * 16,
+            nbytes,
+            dtype,
+            shape: vec![1],
+            strides: vec![1],
+        });
+        bindings.push(InputBinding {
+            buffer_name: name.into(),
+            host_offset: manifest.input_frame_bytes,
+            nbytes,
+        });
+        manifest.input_frame_bytes += 16;
+    }
+    fixture.config.contract.graphs.push(GraphContract {
+        graph: "Vision-1-256".into(),
+        kind: GraphOperation::Vision,
+        inputs: semantic,
+        state: vec![],
+        state_rows_per_request: 1,
+        draft_cursor: None,
+        embedding_tables: vec![],
+        pending_token: None,
+    });
+    manifest.graphs.push(GraphDescriptor {
+        name: "Vision-1-256".into(),
+        kind: GraphKind::Vision,
+        handle: 1,
+        batch_capacity: 1,
+        token_capacity: 256,
+        prefill_capacity: 0,
+        estimated_duration_ns: 1000,
+        input_bindings: bindings,
+        packed_token_capacity: 0,
+        sampling_mode: SamplingMode::General,
+    });
+    let processor = Arc::new(
+        ImageProcessor::load(
+            ImageSettings::Qwen(QwenImageSettings {
+                min_pixels: 1024,
+                max_pixels: 1024,
+                position_side: 48,
+                image_token_id: 248056,
+                video_token_id: 248057,
+            }),
+            ImageLimits {
+                patches_per_feature: 4,
+                ..Default::default()
+            },
+        )
+        .unwrap(),
+    );
+    let mut tokens = vec![0; 100];
+    let mut data = PromptData {
+        positions: (0..100).map(|n| [n; 3]).collect(),
+        vision_token_indices: vec![-1; 100],
+        ..Default::default()
+    };
+    let mut images = vec![];
+    for (index, position) in [10, 40, 70].into_iter().enumerate() {
+        let source = Arc::new(RgbImage::new(32, 32, vec![index as u8; 32 * 32 * 3]).unwrap());
+        images.push(PreparedImageInput::new(
+            ImageInput {
+                description: processor.describe_image(&source).unwrap(),
+                source: ImageSource::Decoded(source),
+            },
+            position..position + 1,
+            index..index + 1,
+            processor.clone(),
+        ));
+        tokens[position] = 248056;
+        data.vision_token_indices[position] = index as i32;
+    }
+    let (sender, receiver) = mpsc::channel();
+    let (mut incoming, mut generation) = fixture.incoming_for(tokens, 1, data);
+    incoming.prompt.conditioned_inputs = images;
+    incoming.prompt.sampling.seed = 1234567;
+    sender.send(vec![incoming]).unwrap();
+    let mut scheduler = RequestScheduler::new(
+        fixture.config.identity,
+        fixture.config.limits,
+        crate::model::scheduler_capabilities(&fixture.config),
+    )
+    .unwrap();
+    scheduler
+        .measured_graph_durations(&manifest.graphs)
+        .unwrap();
+    let mut worker = Worker::new(
+        &fixture.config,
+        &fixture.frontend,
+        &fixture.stop,
+        &fixture.metrics,
+        scheduler,
+        receiver,
+        4,
+    );
+    worker.inputs = Some(crate::model::Inputs::new(&fixture.config, &manifest).unwrap());
+    worker.image_preparation = Some(ImagePreparation::new(None));
+    let _ = worker.admit().unwrap();
+    let original = worker.active[0].as_ref().unwrap().request;
+    let mut sequence = 0;
+    let mut rollovers = 0;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let _ = worker.admit().unwrap();
+        assert!(
+            std::time::Instant::now() < deadline,
+            "conditioned worker stopped progressing"
+        );
+        let Some(step) = worker.scheduler.plan() else {
+            std::thread::yield_now();
+            continue;
+        };
+        sequence += 1;
+        worker.reserve_and_pack(&step, Fence(sequence)).unwrap();
+        if step.kind == GraphKind::Vision {
+            let uploads = worker.inputs.as_ref().unwrap().uploads();
+            assert_eq!(
+                uploads
+                    .iter()
+                    .find(|upload| upload.buffer == "window_vision_feature_offset")
+                    .unwrap()
+                    .bytes,
+                0i32.to_le_bytes()
+            );
+        }
+        let sampled = (step.kind == GraphKind::Prefill
+            && step.lanes[0].start_position + step.lanes[0].tokens as u64 == 100)
+            .then_some(1);
+        let frame = completion(&worker, &step, sequence, sampled);
+        worker.complete(step.kind, frame).unwrap();
+        let ready = worker.active[0].as_ref().is_some_and(|active| {
+            worker
+                .scheduler
+                .request(active.request)
+                .unwrap()
+                .conditioned_window_ready()
+        });
+        worker.publish().unwrap();
+        if ready {
+            rollovers += 1;
+            let active = worker.active[0].as_ref().unwrap();
+            assert_eq!(active.request.generation, original.generation + rollovers);
+            assert_eq!(
+                worker.admissions[0].as_ref().unwrap().handle,
+                active.request
+            );
+            assert_eq!(active.incoming.prompt.sampling.seed, 1234567);
+            assert_eq!(active.carried.generated_tokens, 0);
+            assert_eq!(
+                worker
+                    .scheduler
+                    .request(active.request)
+                    .unwrap()
+                    .reused_prompt_tokens(),
+                0
+            );
+            assert!(generation.events.try_recv().is_err());
+        }
+        if worker.active[0].is_none() {
+            break;
+        }
+    }
+    assert_eq!(rollovers, 2);
+    assert_eq!(processor.preparation_counts().prepared_images, 3);
+    assert_eq!(fixture.metrics.admitted.load(Ordering::Relaxed), 1);
+    assert_eq!(fixture.metrics.snapshot(false).prefill_tokens, 100);
+}

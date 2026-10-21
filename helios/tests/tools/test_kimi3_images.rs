@@ -71,6 +71,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut contract = support::contract("mimo_v2");
     contract.vocabulary = 163840;
     contract.input_vocabulary = 163840;
+    contract.vision.patch_capacities = vec![256, 1024, 4096, 16384, 65536];
     contract.frontend.rejected_tokens.clear();
     contract.frontend.image_preparation = Some(model::contract::ImagePreparationKind::Moonvit);
     contract.frontend.image_layout = Some(model::contract::ImageLayoutKind::Moonvit);

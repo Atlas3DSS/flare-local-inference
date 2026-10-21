@@ -153,7 +153,13 @@ pub fn validate_prompt(config: &ModelConfig, prompt: &crate::server::Prompt) -> 
     {
         return Err("prompt, output limit, or inputs violate the prepared model contract".into());
     }
-    crate::model::validate_prompt_data(config, &prompt.tokens, &prompt.data)
+    crate::model::validate_prompt_data(config, &prompt.tokens, &prompt.data)?;
+    crate::model::validate_conditioned_inputs(
+        config,
+        &prompt.tokens,
+        &prompt.data,
+        &prompt.conditioned_inputs,
+    )
 }
 
 #[cfg(all(test, feature = "server"))]

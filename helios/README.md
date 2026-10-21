@@ -489,18 +489,29 @@ The model scheduler can transpose the last three rows into `[tokens,3]`.
 
 Prompt construction describes each image without building its tensors. The
 description includes geometry, semantic identity, token dependency span, and
-canonical feature range. Admission validates every image against the package's
-per-image and whole-request capacities. The number of images is bounded by
-feature storage, encoded-body size, and context; feature-slot concurrency is a
-separate limit on requests needing vision computation.
+canonical feature range. Admission validates each image against its captured
+patch capacity and feature-window capacity. Total conversation image tokens
+are bounded by context, with encoded-body limits enforced separately.
+Feature-slot concurrency limits requests needing vision computation.
 
 After prefix lookup, only images whose dependency spans extend past the
 consumed endpoint require tensors or vision graphs. A fixed CPU worker prepares
 those inputs. Host retention can reuse source descriptions and prepared
-tensors through the configured memory and disk tiers. Selected image features
-are packed contiguously from zero without changing canonical prompt positions
-or indices. Preemption and failed restores retain encoded sources and replan
-from the restored endpoint. See [host retention](../docs/prefix-cache-offload.md).
+tensors through the configured memory and disk tiers. Whole images are grouped
+into windows that fit the prepared feature arena. Each window's features are
+packed contiguously from zero without changing canonical prompt positions or
+indices. Prefill stops before the next window's first image dependency; atomic
+image spans remain indivisible.
+
+A request spanning multiple windows reserves one private snapshot row. After
+prefill consumes a window, a snapshot preserves complete continuation state,
+including partial cache pages and recurrent histories. Restore installs that
+state under a fresh execution generation before vision writes reuse the arena.
+The snapshot stays private, does not require host retention, and does not add
+cached-token usage. GPU fences protect the snapshot row, feature slot, and
+inputs through cancellation and retirement. Preemption and failed host restores
+retain encoded sources and replan from the restored endpoint. See
+[host retention](../docs/prefix-cache-offload.md).
 
 `RgbImage` holds the decoded representation required by its profile, including
 alpha and CMYK data where preprocessing consumes them. Semantic identities

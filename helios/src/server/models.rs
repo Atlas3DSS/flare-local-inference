@@ -42,7 +42,7 @@ impl ModelCatalog {
             .contract
             .vision
             .enabled()
-            .then(|| super::config::image_limits(&model.contract.vision).ok())
+            .then(|| super::config::image_limits(&model.contract.vision, model.limits.max_sequence_tokens).ok())
             .flatten();
         // Match vLLM's ModelCard / ModelPermission wire fields while
         // advertising only features supported by this server.
@@ -76,8 +76,9 @@ impl ModelCatalog {
                 "default_max_tokens": model.max_new_tokens,
                 "sampling_defaults": model.sampling_defaults,
                 "sampling_ranges": model.sampling_ranges,
-                "max_images_per_prompt": model.contract.vision.image_count_capacity(),
-                "max_image_tokens_per_prompt": model.contract.vision.features_per_request,
+                "max_images_per_prompt": limits.map_or(0, |l| l.max_images),
+                "max_image_tokens_per_prompt": limits.map_or(0, |l| l.max_image_tokens_per_prompt()),
+                "image_feature_window_tokens": model.contract.vision.features_per_request,
                 "max_image_tokens_per_image": limits.map_or(0, |l| l.max_image_tokens_per_image()),
                 "max_image_pixels": limits.map_or(0, |l| l.max_input_pixels),
                 "max_image_bytes": limits.map_or(0, |l| l.max_encoded_bytes),
@@ -222,13 +223,14 @@ mod tests {
         );
         assert_eq!(
             vision["flare"]["max_images_per_prompt"],
-            model.contract.vision.features_per_request
+            model.limits.max_sequence_tokens
         );
         assert_eq!(
             vision["flare"]["max_image_tokens_per_prompt"],
-            model.contract.vision.features_per_request
+            model.limits.max_sequence_tokens
         );
-        // One image fits the smaller of one graph's patches and the request budget.
+        assert_eq!(vision["flare"]["image_feature_window_tokens"], 256);
+        // One image fits the smaller of one graph's patches and the live feature window.
         assert_eq!(vision["flare"]["max_image_tokens_per_image"], 256);
         assert_eq!(vision["flare"]["max_image_pixels"], 64 * 1024 * 1024);
         assert_eq!(vision["flare"]["max_image_bytes"], 32 * 1024 * 1024);

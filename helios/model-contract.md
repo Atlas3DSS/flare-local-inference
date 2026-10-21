@@ -57,7 +57,7 @@ serving contract and replay path unchanged.
 | `version` | Semantic contract version, currently 1 |
 | `vocabulary` | Valid sampled token range and histogram/mask geometry |
 | `input_vocabulary` | Valid input range, including declared nonsampled image sentinels |
-| `vision` | Image count, feature capacity, patch-to-feature ratio, and captured patch capacities |
+| `vision` | Feature-slot and per-window feature capacities, patch-to-feature ratio, and captured patch capacities |
 | `cache` | Logical page tokens, attention-history storage, and page-table views |
 | `graphs` | Per-program operation, value bindings, persistent-state accesses, and resource dependencies |
 | `frontend` | Independent parser and image implementation identifiers plus their syntax and layout data |

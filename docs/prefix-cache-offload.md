@@ -639,10 +639,13 @@ semantics.
 The frontend describes every input and validates the complete request budget
 before admission. It does not resize images or build patch tensors. Admission
 selects inputs whose complete token dependencies extend past the reused
-checkpoint. A bounded CPU worker materializes only those inputs, using retained
-tensors when available. Vision scheduling waits for its inputs while unrelated
-requests remain runnable. Selected features are packed contiguously from zero;
-canonical prompt positions and feature indices remain unchanged.
+checkpoint. Whole images are grouped into windows that fit prepared feature
+storage. A bounded CPU worker materializes only inputs in the active window,
+using retained tensors when available. Vision scheduling waits for its inputs
+while unrelated requests remain runnable. Each window's features are packed
+contiguously from zero; canonical prompt positions and feature indices remain
+unchanged. Chunked prefill consumes one window before a private GPU
+snapshot/restore boundary permits reusing its feature storage.
 
 CPU records use ordinary host memory. Active leases remain charged until their
 last owner releases them. A bounded serialized-record window covers queued
@@ -682,8 +685,9 @@ fresh execution plan from the prefix actually restored.
 
 With host retention disabled, fully covered inputs still skip tensor
 preparation and vision replay. Source decoding remains necessary to establish
-semantic identity. Existing packages use these paths without re-export, and
-prepared capacity limits remain unchanged.
+semantic identity. Existing packages use these paths without re-export.
+Per-image graph capacities and live feature storage stay fixed; total image
+tokens across a conversation are bounded by context rather than one window.
 
 ## 3. Implementation sequence
 

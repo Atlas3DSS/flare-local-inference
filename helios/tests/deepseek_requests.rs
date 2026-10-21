@@ -414,7 +414,10 @@ fn base64_images_follow_the_rendered_placeholder_order() {
             processor.decode_png(&red).unwrap(),
         ])
         .unwrap();
-    let actual = request.prompt.images.unwrap();
+    let mut actual = flare_helios::frontend::images::ProcessedImages::default();
+    for image in &request.prompt.conditioned_inputs {
+        actual.append(image.materialize().unwrap());
+    }
     assert_eq!(actual.pixel_values, expected.pixel_values);
     assert_eq!(actual.geometry.len(), 2);
     assert_eq!(request.rendered_prompt, rendered.text);

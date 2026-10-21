@@ -218,6 +218,18 @@ sequences. The fixed-pair cohort calculation is exact; longer multistage chains
 use the individual continuation index. The stationary rate-utility result does
 not establish optimality for those multistage decisions.
 
+Image dependencies are grouped into whole-image windows bounded by prepared
+feature storage. Vision prerequisites populate the active window; prefill stops
+before the following window's first dependency. Atomic image spans remain within
+one prefill chunk. A request spanning multiple windows reserves one private
+snapshot row. At each window boundary, submitted work drains before snapshotting
+the exact consumed state. Restore binds that state to a fresh request generation,
+then the next window's vision graphs write compact feature offsets from zero.
+The logical request retains its original prompt, seed, sampling settings, and
+usage counters. Private window snapshots neither publish prefix-cache entries
+nor require host caching. Existing snapshot and restore operations preserve
+partial pages and every declared continuation history.
+
 A terminal snapshot enables the visible response completion and frees the
 request's execution resources. It contributes a delivery with zero output
 tokens. Its delivery-rate reference comes from applicable snapshot graphs.

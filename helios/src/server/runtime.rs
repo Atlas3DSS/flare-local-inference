@@ -1137,34 +1137,26 @@ impl<'a> Worker<'a> {
                 .filter(|input| input.token_span.end > consumed)
                 .cloned()
                 .collect();
-            self.scheduler.set_conditioned_features(
-                handle,
-                &selected_images
-                    .iter()
-                    .map(|image| image.feature_range.clone())
-                    .collect::<Vec<_>>(),
-            )?;
-            let patches = selected_images
+            let inputs = selected_images
                 .iter()
-                .map(|image| image.geometry.patches)
+                .map(|image| crate::scheduler::ConditionedInput {
+                    token_span: image.token_span.clone(),
+                    feature_range: image.feature_range.clone(),
+                    patches: image.geometry.patches,
+                })
                 .collect::<Vec<_>>();
-            if !patches.is_empty() {
-                if let Err(error) = self.scheduler.set_vision_images(handle, &patches) {
-                    self.scheduler.cancel(handle)?;
-                    if matches!(error, Error::Admission(AdmissionError::Capacity(_))) {
-                        incoming.blocked = Some(resources);
-                        match parked {
-                            Some(parked) => self.parked.insert(position, (incoming, parked)),
-                            None => self.pending.insert(position, incoming),
-                        }
-                    } else {
-                        incoming.fail(error);
+            if let Err(error) = self.scheduler.set_conditioned_inputs(handle, &inputs) {
+                self.scheduler.cancel(handle)?;
+                if matches!(error, Error::Admission(AdmissionError::Capacity(_))) {
+                    incoming.blocked = Some(resources);
+                    match parked {
+                        Some(parked) => self.parked.insert(position, (incoming, parked)),
+                        None => self.pending.insert(position, incoming),
                     }
-                    continue;
+                } else {
+                    incoming.fail(error);
                 }
-            }
-            if !selected_images.is_empty() {
-                self.scheduler.conditioned_inputs_ready(handle, false)?;
+                continue;
             }
             self.admissions[slot] = Some(crate::model::Admission::from_prompt(
                 self.config,
@@ -1219,6 +1211,14 @@ impl<'a> Worker<'a> {
                         continue;
                     };
                     if self.scheduler.request(active.request)?.phase == RequestPhase::Inbound {
+                        continue;
+                    }
+                    if active.next_image
+                        >= self
+                            .scheduler
+                            .request(active.request)?
+                            .conditioned_input_end()
+                    {
                         continue;
                     }
                     let Some(image) = active.selected_images.get(active.next_image) else {
@@ -1466,6 +1466,20 @@ impl<'a> Worker<'a> {
             .advance_to(super::observation::monotonic_ns())?;
         let mut progress = false;
         for slot in 0..self.active.len() {
+            if let Some(active) = &mut self.active[slot] {
+                if self
+                    .scheduler
+                    .request(active.request)?
+                    .conditioned_window_ready()
+                {
+                    active.request = self.scheduler.resume_conditioned_window(active.request)?;
+                    self.admissions[slot]
+                        .as_mut()
+                        .ok_or("conditioned window lacks admission")?
+                        .handle = active.request;
+                    progress = true;
+                }
+            }
             if self.park_if_preempted(slot)? {
                 progress = true;
                 continue;
@@ -1708,12 +1722,17 @@ impl<'a> Worker<'a> {
                     .as_ref()
                     .ok_or("missing selected vision inputs")?,
                 0,
-                request
-                    .selected_images
-                    .iter()
-                    .take(request.next_image)
-                    .map(|image| image.feature_range.len())
-                    .sum(),
+                usize::try_from(
+                    self.scheduler.request(request.request)?.feature_index(
+                        i32::try_from(
+                            request.selected_images[request.next_image]
+                                .feature_range
+                                .start,
+                        )
+                        .map_err(|_| "conditioned feature index exceeds integer range")?,
+                    )?,
+                )
+                .map_err(|_| "conditioned feature destination is negative")?,
             )?;
             request.prepared_image = None;
             request.next_image += 1;

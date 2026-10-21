@@ -19,6 +19,8 @@ pub use inputs::{InputStep, pack_inputs};
 pub use packing::Inputs;
 #[cfg(feature = "server")]
 pub use prompt::{prepare_image_inputs, prepare_input, prepare_output, message_boundaries};
+#[cfg(feature = "server")]
+pub(crate) use prompt::validate_conditioned_inputs;
 
 #[cfg_attr(
     any(feature = "frontend", feature = "runtime-package"),
@@ -32,7 +34,7 @@ pub use prompt::{prepare_image_inputs, prepare_input, prepare_output, message_bo
 pub struct VisionCapabilities {
     pub feature_slots: usize,
     pub features_per_request: usize,
-    /// Serialized image-support declaration; admission uses the feature capacity.
+    /// Serialized image-support declaration; image counts are bounded by prompt context.
     pub max_images: usize,
     pub patches_per_feature: usize,
     pub patch_capacities: Vec<usize>,
@@ -51,11 +53,6 @@ impl VisionCapabilities {
 
     pub fn enabled(&self) -> bool {
         self.max_images > 0
-    }
-
-    pub fn image_count_capacity(&self) -> usize {
-        // Every image consumes at least one feature in the shared request buffer.
-        if self.enabled() { self.features_per_request } else { 0 }
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -379,7 +376,7 @@ pub fn validate_prompt_data(config: &ModelConfig, tokens: &[u32], data: &PromptD
                 || data
                     .vision_token_indices
                     .iter()
-                    .any(|i| *i < -1 || *i >= config.contract.vision.features_per_request as i32)))
+                    .any(|i| *i < -1 || (*i >= 0 && (!config.contract.vision.enabled() || *i as usize >= tokens.len())))))
         || data.spans.windows(2).any(|p| p[0].end > p[1].start)
         || data.spans.iter().any(|s| {
             s.start >= s.end || s.end > tokens.len() || s.len() > config.limits.prefill_chunk_size

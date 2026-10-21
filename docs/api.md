@@ -41,9 +41,10 @@ The additional `flare` object reports prepared and selected serving metadata:
 | `default_max_tokens` | Default output-token budget when a request omits it; remaining context still bounds output |
 | `sampling_defaults` | Packaged seed, temperature, filters, and penalties used for omitted request fields |
 | `sampling_ranges` | Inclusive `{min, max}` bounds for distribution parameters; null fixes a parameter at its packaged default; seed remains request-controlled |
-| `max_images_per_prompt` | Upper bound from feature storage; actual image sizes and the total image-token budget bound admission; zero for text-only packages |
-| `max_image_tokens_per_prompt` | Total image-token budget shared by every image in a request, fixed by the package's prepared feature storage; zero for text-only packages |
-| `max_image_tokens_per_image` | Image tokens one image may cost after the profile's normalization; the smaller of one prepared vision graph and the request budget; zero for text-only packages |
+| `max_images_per_prompt` | Context-derived upper bound on image count; image sizes, framing, text, output, and HTTP body size further constrain admission; zero for text-only packages |
+| `max_image_tokens_per_prompt` | Context-derived upper bound on image tokens across the entire conversation; text, framing, and output also occupy context; zero for text-only packages |
+| `image_feature_window_tokens` | Prepared feature storage per active image request; chunked prefill reuses this storage across windows, so it does not limit total conversation image tokens |
+| `max_image_tokens_per_image` | Image tokens one image may cost after the profile's normalization; the smaller of one prepared vision graph and one feature window; zero for text-only packages |
 | `max_image_pixels` | Largest decoded image extent (width times height) accepted before normalization; zero for text-only packages |
 | `max_image_bytes` | Largest encoded image accepted; zero for text-only packages |
 | `input_modalities` | `text`, plus `image` when vision is prepared |
@@ -290,10 +291,13 @@ assistant message.
 
 Named tool selection and strict function schemas are rejected. Hosted search,
 computer execution, file stores, audio, and remote image downloads are unsupported. Images must be
-base64 PNG, JPEG, or static WebP data. Images are encoded sequentially and share
-the loaded package's image-token budget; there is no separate four-image limit.
-Each image must fit a prepared vision graph, and the whole request must fit the
-HTTP body limit and text context. Animated images are unsupported.
+base64 PNG, JPEG, or static WebP data. Images are encoded sequentially into
+bounded feature windows. Chunked prefill consumes each window before its storage
+is reused; the total image tokens across a conversation may exceed
+`image_feature_window_tokens`. There is no separate four-image limit. Each image
+must fit a prepared vision graph and one feature window. The whole request must
+fit the HTTP body limit and the context shared by images, text, and generated
+output. Animated images are unsupported.
 
 Image costs are the token counts that usage reports in
 `prompt_tokens_details.multimodal_tokens.image`: the profile normalizes each
@@ -304,8 +308,9 @@ token. Admission costs every image before rejecting, so a budget rejection
 the first image that crossed the budget with its position, pixel size, and
 tokens. Oversized single images are rejected against
 `max_image_tokens_per_image` or `max_image_pixels` with the observed size.
-Images are not downscaled to fit a budget; a client re-renders at a lower
-resolution. Chat templates add fixed framing tokens around each image that
+Each profile applies its packaged resizing rules independently to each image.
+Flare does not reduce image resolution as conversation history grows or to fit
+a feature window. Chat templates add fixed framing tokens around each image that
 count toward `prompt_tokens` but not toward the image budget or
 `multimodal_tokens.image`.
 
@@ -315,6 +320,11 @@ GPU or host checkpoint covers an image's entire input span, Flare skips its
 preprocessing and vision graph. Appending an image preserves reuse of earlier
 unchanged messages. A prefix ending inside an image requires that image's
 complete vision computation.
+
+Window transitions use a private snapshot of complete model state and restore
+it under a fresh execution generation before reusing the feature arena. They
+work with existing packages and with both host cache tiers disabled. These
+internal transitions do not count as cached prompt tokens.
 
 Configured host memory and disk retention also cache source descriptions and
 CPU vision inputs. These records can avoid decoding and preprocessing even when

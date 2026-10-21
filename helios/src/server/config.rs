@@ -282,7 +282,7 @@ impl Bootstrap {
                 frontend_settings
                     .image
                     .ok_or("vision requires prepared image settings")?,
-                image_limits(&model.contract.vision)?,
+                image_limits(&model.contract.vision, model.limits.max_sequence_tokens)?,
             )?)
         } else {
             if frontend_settings.image.is_some() {
@@ -367,8 +367,8 @@ impl Bootstrap {
     }
 }
 
-pub(crate) fn image_limits(vision: &crate::model::VisionCapabilities) -> Result<ImageLimits> {
-    let max_total_patches = vision
+pub(crate) fn image_limits(vision: &crate::model::VisionCapabilities, context_tokens: usize) -> Result<ImageLimits> {
+    let live_patches = vision
         .features_per_request
         .checked_mul(vision.patches_per_feature)
         .ok_or("prepared image patch capacity overflow")?;
@@ -377,9 +377,14 @@ pub(crate) fn image_limits(vision: &crate::model::VisionCapabilities) -> Result<
         .last()
         .copied()
         .ok_or("vision requires a captured patch capacity")?
-        .min(max_total_patches);
+        .min(live_patches);
+    let max_total_patches = context_tokens.checked_mul(vision.patches_per_feature)
+        .ok_or("image context patch capacity overflow")?;
+    if context_tokens == 0 || context_tokens > i32::MAX as usize {
+        return Err("image context capacity must fit positive int32 indices".into());
+    }
     Ok(ImageLimits {
-        max_images: vision.image_count_capacity(),
+        max_images: context_tokens,
         max_patches_per_image,
         max_total_patches,
         patches_per_feature: vision.patches_per_feature,
@@ -408,12 +413,12 @@ mod tests {
                 patch_capacities: vec![graph_patches],
             };
             vision.validate().unwrap();
-            let limits = image_limits(&vision).unwrap();
-            assert_eq!(limits.max_images, features);
-            assert_eq!(limits.max_total_patches, total);
+            let limits = image_limits(&vision, features * 3).unwrap();
+            assert_eq!(limits.max_images, features * 3);
+            assert_eq!(limits.max_total_patches, total * 3);
             assert_eq!(limits.max_patches_per_image, graph_patches.min(total));
             assert_eq!(limits.patches_per_feature, merge);
-            assert_eq!(limits.max_image_tokens_per_prompt(), features);
+            assert_eq!(limits.max_image_tokens_per_prompt(), features * 3);
             assert_eq!(limits.max_image_tokens_per_image(), graph_patches.min(total) / merge);
             let processor = ImageProcessor::load(ImageSettings::Moonvit {}, limits).unwrap();
             let geometry = processor.geometry(3584, 3584);

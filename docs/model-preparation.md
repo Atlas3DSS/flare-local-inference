@@ -204,9 +204,10 @@ request retirement, including completion of outstanding GPU work after cancellat
 The limit does not change images per request or the prepared patch capacities.
 Changing it requires exporting the package again.
 Packages with vision require the prepared feature-slot capacity and binding.
-Images replay one at a time into the request's feature buffer. Requests may carry
-more than four images when their combined visual tokens fit that buffer. Each
-image must fit a captured patch capacity; HTTP body and context limits also apply.
+Images replay one at a time into bounded windows in the request's feature buffer.
+Chunked prefill consumes each window before the buffer is reused. Combined image
+tokens may exceed the buffer's capacity; each image must fit one window and a
+captured patch capacity. HTTP body and total context limits also apply.
 PNG, JPEG, and static WebP data URLs are accepted.
 
 For Qwen, each feature slot holds 16,384 BF16 vectors of width 2,560: 80 MiB per
@@ -484,9 +485,10 @@ Native package loading sizes serving caches from available device memory;
 in-process diagnostic serving limits admission to physically backed storage.
 Continuation rows preserve KDA
 convolution and recurrent state, DSpark key/value windows, partial latent pages, and the normalized
-last hidden state. The MoonViT encoder accepts a combined 65,536 image patches
-per request and publishes hidden-column-sharded features for causal text
-prefill. XTML encoding distinguishes protocol tokens from literal marker text.
+last hidden state. The MoonViT encoder publishes hidden-column-sharded features
+for causal text prefill, with storage for 65,536 patches per active feature
+window. Conversations can consume multiple windows through chunked prefill.
+XTML encoding distinguishes protocol tokens from literal marker text.
 Serving defaults follow the model card's agentic sampling recommendation:
 temperature 1, top-p 1, no top-k filter, and neutral penalties. Reasoning is
 always enabled; requests to disable thinking are ignored without an error.

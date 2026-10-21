@@ -1000,14 +1000,18 @@ pub fn render(value: &Value, width: usize, color: bool) -> String {
             canvas.row("image profile", &text(&image["profile"]));
             canvas.number(
                 "image tokens per prompt",
-                &format!(
-                    "{} shared by every image",
-                    thousands(u64_of(&vision["max_image_tokens_per_prompt"]))
-                ),
+                &vision["max_image_tokens_per_prompt"].as_u64()
+                    .map(|limit| format!("{} (shared context)", thousands(limit)))
+                    .unwrap_or_else(|| "not declared".into()),
             );
             canvas.number(
                 "images per prompt",
-                &thousands(u64_of(&vision["max_images"])),
+                &vision["max_images"].as_u64().map(thousands)
+                    .unwrap_or_else(|| "not declared".into()),
+            );
+            canvas.number(
+                "image feature window",
+                &thousands(u64_of(&vision["image_feature_window_tokens"])),
             );
             canvas.number(
                 "patches per token",
@@ -1272,7 +1276,8 @@ mod tests {
                                        "wrapping_newlines": 0, "terminal_markers": []},
                          "assistant_marker": "<|im_start|>assistant\n", "message_end_markers": [],
                          "rejected_tokens": 0, "position_dimensions": 1, "prefix_boundary": null},
-            "vision": {"feature_slots": 4, "max_image_tokens_per_prompt": 4096, "max_images": 4096,
+            "vision": {"feature_slots": 4, "max_image_tokens_per_prompt": 1048576, "max_images": 1048576,
+                       "image_feature_window_tokens": 4096,
                        "patches_per_feature": 9, "patch_capacities": [3456], "image": {"profile": "deepseek4"}},
             "assets": [{"name": "tokenizer", "bytes": 11_000_000, "sha256": "ef".repeat(32)}],
             "engram": {"compressed_vocabulary": 120000, "pad_token_id": 2, "token_map_entries": 151936,
@@ -1361,6 +1366,8 @@ mod tests {
         let full = render(&document(), 100, false);
         assert!(full.contains("FRONTEND"));
         assert!(full.contains("Graphs · rank 0"));
+        assert!(full.contains("image feature window"));
+        assert!(full.contains("shared context"));
     }
 
     #[test]

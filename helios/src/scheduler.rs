@@ -152,6 +152,7 @@ pub enum RequestPhase {
 enum BoundaryKind {
     Message,
     Prompt,
+    ConditionedWindow,
 }
 #[derive(Clone, Copy, Debug)]
 struct BoundaryCapture {
@@ -161,10 +162,30 @@ struct BoundaryCapture {
     resume: RequestPhase,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct ConditionedInput {
+    pub token_span: std::ops::Range<usize>,
+    pub feature_range: std::ops::Range<usize>,
+    pub patches: usize,
+}
+
+#[derive(Clone, Debug)]
+struct ConditionedWindow {
+    inputs: std::ops::Range<usize>,
+    token_start: usize,
+    prefill_end: usize,
+    features: Vec<std::ops::Range<usize>>,
+    patches: VecDeque<usize>,
+}
+
 pub struct LiveRequest {
     pub image_slot: Option<usize>,
     conditioned_features: Option<Vec<std::ops::Range<usize>>>,
     conditioned_inputs_ready: bool,
+    conditioned_windows: VecDeque<ConditionedWindow>,
+    window_snapshot: Option<SnapshotId>,
+    window_snapshot_ready: bool,
+    window_restore: bool,
     epoch: u64,
     acceptance: speculation::AcceptanceProfile,
     accounting: RequestAccounting,
@@ -237,7 +258,42 @@ impl LiveRequest {
         self.prefix
     }
     pub fn prefix_snapshot(&self) -> Option<SnapshotId> {
-        self.prefix_snapshot
+        if self.window_restore {
+            self.window_snapshot
+        } else {
+            self.prefix_snapshot
+        }
+    }
+    pub(crate) fn conditioned_input_end(&self) -> usize {
+        self.conditioned_windows
+            .front()
+            .map_or(usize::MAX, |window| window.inputs.end)
+    }
+    pub(crate) fn conditioned_window_ready(&self) -> bool {
+        self.window_snapshot_ready
+    }
+    fn following_conditioned_window(&self) -> Option<&ConditionedWindow> {
+        let window = self.conditioned_windows.front()?;
+        (self.vision_patches.is_empty() && self.consumed_tokens as usize == window.prefill_end)
+            .then(|| self.conditioned_windows.get(1))
+            .flatten()
+    }
+    fn prefill_limit(&self) -> usize {
+        if let Some(window) = self.following_conditioned_window() {
+            return window.prefill_end;
+        }
+        self.conditioned_windows
+            .front()
+            .map_or(self.prompt_tokens, |window| window.prefill_end)
+    }
+    fn prompt_phase(&self) -> RequestPhase {
+        if !self.vision_patches.is_empty() {
+            RequestPhase::Vision
+        } else if self.consumed_tokens == self.prompt_tokens as u64 {
+            RequestPhase::Resume
+        } else {
+            RequestPhase::Prefill
+        }
     }
     pub fn reused_prompt_tokens(&self) -> u64 {
         self.admission_reused_tokens
@@ -452,7 +508,7 @@ pub struct GeneratedToken {
 struct RetiredRequest {
     image_slot: Option<usize>,
     pages: Vec<PageId>,
-    snapshots: [Option<SnapshotId>; 3],
+    snapshots: [Option<SnapshotId>; 4],
     slot: usize,
     through: Fence,
 }
@@ -1336,6 +1392,10 @@ impl RequestScheduler {
             image_slot: None,
             conditioned_features: None,
             conditioned_inputs_ready: true,
+            conditioned_windows: VecDeque::new(),
+            window_snapshot: None,
+            window_snapshot_ready: false,
+            window_restore: false,
             epoch: 0,
             acceptance: speculation::AcceptanceProfile::default(),
             accounting: self.accounting(),
@@ -1575,6 +1635,7 @@ impl RequestScheduler {
     }
 
     /// Maps immutable prompt feature indices into the compact execution arena.
+    #[cfg(test)]
     pub(crate) fn set_conditioned_features(
         &mut self,
         handle: RequestHandle,
@@ -1590,6 +1651,177 @@ impl RequestScheduler {
         }
         request.conditioned_features = Some(ranges.to_vec());
         Ok(())
+    }
+
+    pub(crate) fn set_conditioned_inputs(
+        &mut self,
+        handle: RequestHandle,
+        inputs: &[ConditionedInput],
+    ) -> Result<()> {
+        let maximum = self
+            .capabilities
+            .vision
+            .patch_capacities
+            .last()
+            .copied()
+            .unwrap_or(0);
+        let capacity = self.capabilities.vision.features_per_request;
+        let merge = self.capabilities.vision.patches_per_feature;
+        let request = self.request(handle)?;
+        if request.last_use != Fence(0)
+            || request.conditioned_features.is_some()
+            || inputs.windows(2).any(|pair| {
+                pair[0].token_span.end > pair[1].token_span.start
+                    || pair[0].feature_range.end > pair[1].feature_range.start
+            })
+            || inputs.iter().any(|input| {
+                input.token_span.is_empty()
+                    || input.token_span.end > request.prompt_tokens
+                    || input.token_span.end <= request.consumed_tokens as usize
+                    || input.feature_range.is_empty()
+                    || input.feature_range.len() > capacity
+                    || input.patches == 0
+                    || input.patches > maximum
+                    || merge == 0
+                    || input.patches % merge != 0
+                    || input.feature_range.len() != input.patches / merge
+            })
+        {
+            return Err("conditioned inputs violate prompt or prepared vision geometry".into());
+        }
+        let mut windows: VecDeque<ConditionedWindow> = VecDeque::new();
+        let mut features = 0usize;
+        for (index, input) in inputs.iter().enumerate() {
+            if windows.is_empty() || features + input.feature_range.len() > capacity {
+                if let Some(previous) = windows.back_mut() {
+                    previous.prefill_end = input.token_span.start;
+                }
+                windows.push_back(ConditionedWindow {
+                    inputs: index..index,
+                    token_start: input.token_span.start,
+                    prefill_end: request.prompt_tokens,
+                    features: vec![],
+                    patches: VecDeque::new(),
+                });
+                features = 0;
+            }
+            let window = windows.back_mut().unwrap();
+            window.inputs.end = index + 1;
+            window.features.push(input.feature_range.clone());
+            window.patches.push_back(input.patches);
+            features += input.feature_range.len();
+        }
+        if windows.iter().any(|window| request.prefill_spans.iter().any(|span| {
+            (span.start < window.token_start && window.token_start < span.end)
+                || (span.start < window.prefill_end && window.prefill_end < span.end)
+        })) {
+            return Err("conditioned input windows cannot split atomic prefill spans".into());
+        }
+        if handle
+            .generation
+            .checked_add(windows.len().saturating_sub(1) as u64)
+            .is_none_or(|generation| generation > i64::MAX as u64)
+        {
+            return Err("request generation cannot cover its conditioned input windows".into());
+        }
+        if let Some(window) = windows.front() {
+            self.set_vision_images(handle, &window.patches.iter().copied().collect::<Vec<_>>())?;
+        }
+        if windows.len() > 1 {
+            // Unsubmitted page reservations may be rebound around the snapshot's backing pages.
+            let pages = std::mem::take(&mut self.request_mut(handle)?.reserved_pages);
+            let count = pages.len();
+            self.free_pages.extend(pages);
+            let resources = self.ensure_resources(count, 1);
+            let snapshot = if resources.is_ok() {
+                self.reserve_snapshot(count)
+            } else {
+                None
+            };
+            let mut reserved: Vec<_> = (0..count)
+                .map(|_| self.free_pages.pop_first().unwrap())
+                .collect();
+            reserved.reverse();
+            self.request_mut(handle)?.reserved_pages = reserved;
+            if let Err(error) = resources {
+                let cache = self.cache.stats();
+                let mut prefix = self.request(handle)?.prefix;
+                let mut own_checkpoints = 0;
+                let mut exclusive_prefix = true;
+                while let Some(id) = prefix {
+                    let checkpoint = self.cache.checkpoint(id)?;
+                    exclusive_prefix &= checkpoint.pin_count() == 1;
+                    own_checkpoints += 1;
+                    prefix = checkpoint.parent();
+                }
+                let quiescent = exclusive_prefix
+                    && cache.published_checkpoints == own_checkpoints
+                    && cache.pending_checkpoints == 0
+                    && cache.retired_pages == 0
+                    && cache.retired_snapshots == 0
+                    && self.slots.iter().filter(|slot| slot.request.is_some()).count() == 1
+                    && self.tickets.is_empty()
+                    && self.submissions.is_empty()
+                    && self.retired.is_empty();
+                if quiescent {
+                    return Err(crate::Error::admission(
+                        crate::AdmissionError::Context,
+                        "request pages and a conditioned input checkpoint exceed prepared storage",
+                    ));
+                }
+                return Err(error);
+            }
+            self.request_mut(handle)?.window_snapshot =
+                Some(snapshot.ok_or("conditioned input window lacks reserved snapshot storage")?);
+        }
+        let request = self.request_mut(handle)?;
+        request.conditioned_features = Some(
+            windows
+                .front()
+                .map_or_else(Vec::new, |window| window.features.clone()),
+        );
+        request.conditioned_inputs_ready = inputs.is_empty();
+        request.conditioned_windows = windows;
+        Ok(())
+    }
+
+    pub(crate) fn resume_conditioned_window(
+        &mut self,
+        handle: RequestHandle,
+    ) -> Result<RequestHandle> {
+        let request = self.request(handle)?;
+        if !request.window_snapshot_ready
+            || request.window_snapshot.is_none()
+            || request.pending != 0
+            || request.last_use > self.completed
+            || request.generated_tokens != 0
+            || request.conditioned_windows.len() < 2
+            || request.boundary_capture.is_some()
+        {
+            return Err("conditioned window restore requires a completed private checkpoint before generation".into());
+        }
+        let generation = handle
+            .generation
+            .checked_add(1)
+            .filter(|generation| *generation <= i64::MAX as u64)
+            .ok_or("request generation exhausted")?;
+        self.slots[handle.slot as usize].generation = generation;
+        let next_handle = RequestHandle {
+            slot: handle.slot,
+            generation,
+        };
+        let request = self.request_mut(handle)?;
+        request.handle = next_handle;
+        request.conditioned_windows.pop_front();
+        let window = request.conditioned_windows.front().unwrap();
+        request.conditioned_features = Some(window.features.clone());
+        request.vision_patches = window.patches.clone();
+        request.conditioned_inputs_ready = false;
+        request.window_snapshot_ready = false;
+        request.window_restore = true;
+        request.phase = RequestPhase::Restore;
+        self.reconcile_refresh();
+        Ok(next_handle)
     }
 
     pub fn set_vision_images(&mut self, handle: RequestHandle, patches: &[usize]) -> Result<()> {
@@ -1907,6 +2139,7 @@ impl RequestScheduler {
         let mut generated = Vec::new();
         let mut boundaries = Vec::new();
         let mut captures = Vec::new();
+        let mut window_snapshots = Vec::new();
         for (row, lane) in step.lanes.iter().enumerate() {
             let kind = step.lane_kind(row);
             let Ok(request) = self.request_mut(lane.request) else {
@@ -1939,13 +2172,13 @@ impl RequestScheduler {
                     if kind == GraphKind::Vision {
                         request.vision_patches.pop_front();
                     }
-                    request.phase = if !request.vision_patches.is_empty() {
-                        RequestPhase::Vision
-                    } else if request.consumed_tokens == request.prompt_tokens as u64 {
-                        RequestPhase::Resume
-                    } else {
-                        RequestPhase::Prefill
-                    };
+                    if kind == GraphKind::Restore && request.window_restore {
+                        request.window_restore = false;
+                        if request.conditioned_windows.len() == 1 {
+                            window_snapshots.extend(request.window_snapshot.take());
+                        }
+                    }
+                    request.phase = request.prompt_phase();
                 }
                 continue;
             }
@@ -2010,6 +2243,22 @@ impl RequestScheduler {
             };
             if kind == GraphKind::Prefill && request.error_code.is_none() {
                 let endpoint = request.consumed_tokens;
+                if !finished
+                    && request.conditioned_windows.len() > 1
+                    && request.vision_patches.is_empty()
+                    && request.conditioned_windows.front().is_some_and(|window| endpoint as usize == window.prefill_end)
+                {
+                    captures.push((
+                        lane.request,
+                        Some(BoundaryKind::ConditionedWindow),
+                        endpoint,
+                        RequestPhase::Restore,
+                    ));
+                    continue;
+                }
+                if !finished && request.consumed_tokens < request.prompt_tokens as u64 {
+                    request.phase = request.prompt_phase();
+                }
                 let capture = if request.message_boundaries.binary_search(&(endpoint as usize)).is_ok()
                     && endpoint > request.prefix_tokens
                 {
@@ -2045,6 +2294,9 @@ impl RequestScheduler {
             }
         }
         self.advance_retirement(fence)?;
+        for snapshot in window_snapshots {
+            self.release_snapshot(snapshot);
+        }
         for handle in boundaries {
             self.publish_boundary(handle)?;
         }
@@ -2056,13 +2308,18 @@ impl RequestScheduler {
                     self.free_pages.extend(unused);
                 }
             }
-            let snapshot = self.retain_snapshot()?;
+            let snapshot = if matches!(kind, Some(BoundaryKind::ConditionedWindow)) {
+                self.request(handle)?.window_snapshot
+            } else {
+                self.retain_snapshot()?
+            };
             let request = self.request_mut(handle)?;
             if let Some(snapshot) = snapshot {
                 if let Some(kind) = kind {
                     match kind {
                         BoundaryKind::Message => request.message_snapshot = Some(snapshot),
                         BoundaryKind::Prompt => request.prompt_snapshot = Some(snapshot),
+                        BoundaryKind::ConditionedWindow => {}
                     }
                     request.boundary_capture = Some(BoundaryCapture {
                         kind,
@@ -2087,6 +2344,13 @@ impl RequestScheduler {
     fn publish_boundary(&mut self, handle: RequestHandle) -> Result<()> {
         let request = self.request(handle)?;
         let capture = request.boundary_capture.ok_or("missing boundary capture")?;
+        if matches!(capture.kind, BoundaryKind::ConditionedWindow) {
+            let request = self.request_mut(handle)?;
+            request.boundary_capture = None;
+            request.window_snapshot_ready = true;
+            request.phase = RequestPhase::Restore;
+            return Ok(());
+        }
         let pages = capture.consumed_tokens as usize / self.capabilities.page_tokens
             - request.prefix_tokens as usize / self.capabilities.page_tokens;
         let proposal = Publication {
@@ -2124,11 +2388,13 @@ impl RequestScheduler {
         match capture.kind {
             BoundaryKind::Message => self.stats.message_checkpoints += 1,
             BoundaryKind::Prompt => self.stats.prompt_checkpoints += 1,
+            BoundaryKind::ConditionedWindow => unreachable!(),
         }
         let request = self.request_mut(handle)?;
         match capture.kind {
             BoundaryKind::Message => request.message_snapshot = None,
             BoundaryKind::Prompt => request.prompt_snapshot = None,
+            BoundaryKind::ConditionedWindow => unreachable!(),
         }
         request.boundary_capture = None;
         request.phase = if capture.resume == RequestPhase::Snapshot {
@@ -2252,7 +2518,12 @@ impl RequestScheduler {
         self.retired.push(RetiredRequest {
             image_slot: request.image_slot,
             pages: request.private_pages,
-            snapshots: [snapshot, request.message_snapshot, request.prompt_snapshot],
+            snapshots: [
+                snapshot,
+                request.message_snapshot,
+                request.prompt_snapshot,
+                request.window_snapshot,
+            ],
             slot: handle.slot as usize,
             through: request.last_use,
         });
@@ -2272,3 +2543,6 @@ pub(crate) mod tests;
 
 #[cfg(test)]
 mod policy_tests;
+
+#[cfg(test)]
+mod vision_window_tests;

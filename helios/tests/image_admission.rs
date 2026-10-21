@@ -101,7 +101,8 @@ fn jpeg_and_oriented_png_use_actual_checkpoint_request_preparation() {
         }
         .unwrap();
         let processed = processor.process(&[decoded]).unwrap();
-        let actual = prepared.prompt.images.as_ref().unwrap();
+        assert_eq!(prepared.prompt.conditioned_inputs.len(), 1);
+        let actual = prepared.prompt.conditioned_inputs[0].materialize().unwrap();
         assert_eq!(actual.geometry, processed.geometry, "{}", case["name"]);
         assert_eq!(
             actual

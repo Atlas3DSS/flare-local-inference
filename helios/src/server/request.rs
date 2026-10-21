@@ -495,6 +495,32 @@ mod tests {
     }
 
     #[test]
+    fn image_history_can_exceed_feature_storage_but_remains_context_bounded() {
+        use crate::frontend::images::{ImageLimits, ImageSettings};
+        let initial = ImageProcessor::load(ImageSettings::Deepseek4 {}, ImageLimits::default()).unwrap();
+        let geometry = initial.geometry(1075, 1521).unwrap();
+        let vision = crate::model::VisionCapabilities { feature_slots: 1, max_images: 1,
+            features_per_request: geometry.tokens, patches_per_feature: 9,
+            patch_capacities: vec![geometry.patches] };
+        let context = 2 * geometry.tokens + 64;
+        let limits = crate::server::config::image_limits(&vision, context).unwrap();
+        let processor = ImageProcessor::load(ImageSettings::Deepseek4 {}, limits).unwrap();
+        let url = png_data_url(1075, 1521);
+        let images = describe_images(&[url.clone(), url.clone()], Some(&processor), None).unwrap();
+        assert_eq!(images.len(), 2);
+        assert!(images.iter().map(|image| image.description.geometry.tokens).sum::<usize>()
+            > vision.features_per_request);
+        assert_eq!(processor.preparation_counts().prepared_images, 0);
+        let error = describe_images(&[url.clone(), url.clone(), url.clone()], Some(&processor), None).unwrap_err();
+        assert!(error.to_string().contains(&format!("max_image_tokens_per_prompt is {context}")));
+        let constrained = ImageProcessor::load(ImageSettings::Deepseek4 {}, ImageLimits {
+            max_patches_per_image: geometry.patches - 9, ..limits
+        }).unwrap();
+        assert!(describe_images(&[url], Some(&constrained), None).unwrap_err().to_string()
+            .contains("max_image_tokens_per_image"));
+    }
+
+    #[test]
     fn image_budget_rejections_report_the_whole_request_in_tokens_and_name_the_overrun() {
         use crate::frontend::images::{ImageLimits, ImageProcessor, ImageSettings};
         // DeepSeek merges nine 14-px patches into one image token.

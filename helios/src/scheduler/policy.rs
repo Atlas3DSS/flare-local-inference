@@ -184,7 +184,8 @@ impl RequestScheduler {
     }
 
     pub(super) fn eligible(&self, request: &LiveRequest) -> bool {
-        if self.request_kind(request).is_none()
+        if request.window_snapshot_ready
+            || self.request_kind(request).is_none()
             || (request.phase == RequestPhase::Vision && !request.conditioned_inputs_ready)
         {
             return false;
@@ -217,7 +218,8 @@ impl RequestScheduler {
             .copied()
             .find(|n| *n > start)
             .unwrap_or(request.prompt_tokens)
-            .min(start.saturating_add(capacity));
+            .min(start.saturating_add(capacity))
+            .min(request.prefill_limit());
         if let Some(span) = request
             .prefill_spans
             .iter()
@@ -225,7 +227,7 @@ impl RequestScheduler {
         {
             end = span.start;
         }
-        end - start
+        end.saturating_sub(start)
     }
 
     pub fn submission_window_available(&self, duration_ns: u64) -> bool {
@@ -427,11 +429,22 @@ impl RequestScheduler {
         if duration_ns == 0 || following == 0 {
             return work;
         }
-        for patches in r
-            .vision_patches
-            .iter()
-            .skip(usize::from(kind == GraphKind::Vision))
-        {
+        let next_window = r.following_conditioned_window();
+        if next_window.is_some() {
+            let restore = crate::execution::BATCH_CAPACITIES
+                .into_iter()
+                .take_while(|batch| *batch <= self.limits.max_active.next_power_of_two())
+                .filter_map(|batch| self.costs.duration(GraphKind::Restore, batch, 1))
+                .min()
+                .unwrap_or(0);
+            if restore == 0 {
+                return work;
+            }
+            following = following.saturating_add(restore);
+        }
+        let patches = next_window.map_or(&r.vision_patches, |window| &window.patches);
+        let skip = usize::from(kind == GraphKind::Vision);
+        for patches in patches.iter().skip(skip) {
             let cost = self
                 .capabilities
                 .vision
