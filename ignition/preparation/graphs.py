@@ -7,8 +7,6 @@ from threading import Lock
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
-from ignition.planning import SUPPORTED_ARCHITECTURES, SUPPORTED_CAPABILITIES
-
 if TYPE_CHECKING:
     import torch
 
@@ -25,7 +23,7 @@ class PreparedGraphBundle:
 
     ``device`` is the process-local CUDA ordinal used during capture. PyTorch
     does not expose a graph's capture device, so capture on that device remains
-    a preparation invariant. Registration checks its capability and context,
+    a preparation invariant. Registration checks its device and context,
     every declared buffer's device and extent, and instantiated graph handles.
 
     Graphs must not use PyTorch generator-backed random operations: raw native
@@ -120,10 +118,6 @@ class PreparedGraphBundle:
         import flare_heliopause
 
         with torch.cuda.device(self._device):
-            capability = torch.cuda.get_device_capability(self._device)
-            if capability not in SUPPORTED_CAPABILITIES:
-                raise ValueError(f"CUDA device {self._device} is SM{capability[0]}{capability[1]};"
-                                 f" {SUPPORTED_ARCHITECTURES} is required")
             handles = []
             for name, graph in self._graphs.items():
                 if not isinstance(graph, torch.cuda.CUDAGraph):

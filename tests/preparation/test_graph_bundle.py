@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+import os
 import subprocess
 import sys
 from threading import Event
@@ -116,3 +117,50 @@ def test_invalid_capacity_never_consumes_bundle(capacity):
     with pytest.raises(ValueError, match="queue_capacity"):
         prepared.start_worker(queue_capacity=capacity)
     assert not prepared.consumed
+
+
+@pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
+                    reason="requires FLARE_RUN_CUDA_TESTS=1 and an assigned V100")
+def test_sm70_graph_validation_is_separate_from_recipe_admission():
+    import torch
+    import flare_heliopause
+    from ignition.planning import Gpu
+
+    assert os.environ.get("CUDA_VISIBLE_DEVICES"), "assign a CUDA device explicitly"
+    device = torch.cuda.current_device()
+    capability = torch.cuda.get_device_capability(device)
+    if capability != (7, 0):
+        pytest.skip("requires a real sm_70 GPU")
+    properties = torch.cuda.get_device_properties(device)
+    free, total = torch.cuda.mem_get_info(device)
+    gpu = Gpu(device, properties.name, str(properties.uuid), total, free, capability)
+    assert not gpu.supported, "raw graph qualification must not admit unported recipes"
+
+    source = torch.arange(32, dtype=torch.float32, device=device)
+    output = torch.zeros_like(source)
+    stream = torch.cuda.Stream(device=device)
+    stream.wait_stream(torch.cuda.current_stream(device))
+    with torch.cuda.stream(stream):
+        torch.add(source, 3, out=output)
+    stream.synchronize()
+    graph = torch.cuda.CUDAGraph(keep_graph=True)
+    with torch.cuda.graph(graph, stream=stream):
+        torch.add(source, 3, out=output)
+    graph.instantiate()
+    prepared = PreparedGraphBundle(device=device, graphs={"decode": graph},
+        buffers={"source": source, "output": output}, resources=(stream,))
+
+    context, handles, spans = prepared._validate_resources()
+    assert (context, device) == flare_heliopause.current_context()
+    assert handles == [graph.raw_cuda_graph_exec()]
+    assert spans == [(tensor.data_ptr(), tensor.nbytes) for tensor in (source, output)]
+    assert not prepared.consumed
+    output.zero_()
+    graph.replay()
+    torch.cuda.synchronize(device)
+    torch.testing.assert_close(output.cpu(), torch.arange(32, dtype=torch.float32) + 3, rtol=0, atol=0)
+
+    invalid = PreparedGraphBundle(device=device, graphs={"decode": graph},
+        buffers={"source": torch.zeros(32)}, resources=(source, output, stream))
+    with pytest.raises(ValueError, match="must reside on CUDA device"):
+        invalid._validate_resources()
