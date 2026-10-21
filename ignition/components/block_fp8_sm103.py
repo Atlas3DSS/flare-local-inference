@@ -17,7 +17,7 @@ class BlockFP8Query:
 
 
 CONTRACT = native_contract(component_id=COMPONENT, query_type=BlockFP8Query,
-                           tactics=lambda query: (1, 2))
+                           tactics=lambda query: (1, 2), semantic_version=2)
 
 
 class PreparedBlockFP8:
@@ -29,8 +29,14 @@ class PreparedBlockFP8:
 
         if global_scale is not None:
             raise ValueError("block-FP8 projections carry scales per weight block, without a global scale")
-        return gemm_fp8_nt_groupwise(values, weight, activation_scales.contiguous(), scales,
-            scale_major_mode="K", mma_sm=self.mma_sm, out_dtype=torch.bfloat16, backend="cutlass")
+        # FlashInfer transposes GEMMs through 32 rows. That kernel needs MN-major
+        # scales; K-major keeps larger, unaligned row counts valid for TMA loads.
+        small = values.shape[0] <= 32
+        a_scale = activation_scales.T.contiguous() if small else activation_scales.contiguous()
+        b_scale = scales.T.contiguous() if small else scales
+        return gemm_fp8_nt_groupwise(values, weight, a_scale, b_scale,
+            scale_major_mode="MN" if small else "K", mma_sm=self.mma_sm,
+            out_dtype=torch.bfloat16, backend="cutlass")
 
 
 def plan(rows, in_features, out_features, device):

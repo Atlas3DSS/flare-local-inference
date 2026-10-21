@@ -82,10 +82,11 @@ class BlockFP8Projection:
                 values.copy_(produced)
                 scales.copy_(produced_scales)
 
+            # Call closures own trial inputs; prepared plans must not retain them after priming.
             return PreparedCall(run=lambda: state.run_serialized(values, scales, weight.values,
                 weight.scales, None, ab_dtype="float8_e4m3fn", sf_dtype="float32",
                 c_dtype="bfloat16", sf_vec_size=128, block_fp8=True, stream=None),
-                produce=produce, owners=(trial, values, scales, weight))
+                produce=produce)
 
         declare(session, (self.plan.request(name=name, prepare_call=prepare, benchmark_call=prepare),))
 
