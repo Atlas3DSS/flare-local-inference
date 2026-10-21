@@ -17,13 +17,13 @@ class TensorFP8Weight:
 
 
 class TensorFP8Projection:
-    def __init__(self, source, weight, output, *, session, name, workspace=None):
+    def __init__(self, source, weight, output, *, session, name, workspace=None, row_invariant=False):
         from . import sm70_projection
 
         self.sm70 = None
         if sm70_projection.is_sm70(source.device):
             self.sm70 = sm70_projection.TensorFP8Projection(
-                source, weight, output, session=session, name=name, workspace=workspace)
+                source, weight, output, session=session, name=name, workspace=workspace, row_invariant=row_invariant)
             self.weight, self.output, self.plan = weight, output, self.sm70.plan
             return
         if (source.ndim != 2 or source.dtype != torch.bfloat16

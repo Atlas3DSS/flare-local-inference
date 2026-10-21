@@ -17,7 +17,7 @@ class PreparedVocabularyProjection:
     """
 
     def __init__(self, source, weight, local_output, output, *, runtime, session,
-                 coordinator, name, activation_mode="a16", buffers=None, row_indices=None, workspace=None):
+                 coordinator, name, activation_mode="a16", buffers=None, row_indices=None, workspace=None, row_invariant=False):
         rows = source.shape[0]
         if row_indices is None and output.shape[0] != rows:
             raise ValueError("vocabulary output rows must match projected rows without row indices")
@@ -28,10 +28,10 @@ class PreparedVocabularyProjection:
         self.row_indices = row_indices
         if isinstance(weight, torch.Tensor):
             self.projection = UnquantizedProjection(source, weight, local_output,
-                session=session, name=f"{name}.projection", workspace=workspace)
+                session=session, name=f"{name}.projection", workspace=workspace, row_invariant=row_invariant)
         else:
             self.projection = QuantizedProjection(source, weight, local_output,
-                session=session, name=f"{name}.projection", activation_mode=activation_mode, workspace=workspace)
+                session=session, name=f"{name}.projection", activation_mode=activation_mode, workspace=workspace, row_invariant=row_invariant)
         world = 1 if runtime is None else runtime.world_size
         columns = local_output.shape[1] * world
         if columns < output.shape[1]:

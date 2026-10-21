@@ -52,9 +52,15 @@ class ProjectionQuery:
     input_dtype: str = "float32"
     output_dtype: str = "float32"
     has_bias: bool = False
+    row_invariant: bool = False
 
 
 def _tiles(query):
+    # Exact speculative commits require the same reduction for a row in every
+    # verification bucket. Shape-dependent GEMV/GEMM tuning is not equivalent
+    # at BF16 midpoints, even when both dots satisfy their error bounds.
+    if query.row_invariant:
+        return (("row_fp32", min(query.out_features, 256)),) if query.kind == "dense" else (("row_gemv", 4, 512),)
     if query.kind != "dense" and query.rows <= 4:
         return tuple(("gemv", bn, bk) for bn, bk in
                      ((4, 512), (2, 256), (2, 512), (4, 256), (8, 256), (8, 512)))
@@ -67,11 +73,11 @@ def _tiles(query):
 
 
 CONTRACT = native_contract(component_id=COMPONENT, query_type=ProjectionQuery, tactics=_tiles,
-                           semantic_version=4)
+                           semantic_version=5)
 
 
 def _scratch_shapes(query, tactic):
-    if tactic[0] == "gemv":
+    if tactic[0] in ("gemv", "row_gemv"):
         return ((query.rows, query.in_features),) if query.kind == "tensor_fp8" else ((1, 1),)
     tile = tactic[1]
     return ((query.rows, query.in_features), (tile, query.in_features), (query.rows, tile))
@@ -181,6 +187,9 @@ def _project(query, tactic, expansion, source, values, scales, gain, input_scale
             # CUDA_R_16F operands, CUDA_R_32F C, CUBLAS_COMPUTE_32F.
             # Warmup owns cuBLAS's per-stream workspace through capture/export.
             _hgemm(inputs, weight, result)
+        elif tactic[0] == "row_fp32":
+            for row in range(query.rows):
+                torch.mm(inputs[row:row + 1], weight.T, out=result[row:row + 1])
         else:
             torch.mm(inputs, weight.T, out=result)
         if gain is not None:
@@ -237,12 +246,15 @@ def _gemv_kernel(X, Values, Scales, Gain, Bias, Y, x_row_stride, y_row_stride,
                  M: tl.constexpr, N: tl.constexpr, K: tl.constexpr, PADDED_K: tl.constexpr,
                  KIND: tl.constexpr, GAIN_KIND: tl.constexpr, INPUT_DTYPE: tl.constexpr,
                  OUTPUT_DTYPE: tl.constexpr, HAS_BIAS: tl.constexpr,
-                 BN: tl.constexpr, BK: tl.constexpr):
+                 BN: tl.constexpr, BK: tl.constexpr, ROW_INVARIANT: tl.constexpr):
     # Each packed byte, scale, and FP8 weight is fetched once per CTA slice,
     # then reused across all prepared rows. No inter-CTA reduction or atomics.
     n = (tl.program_id(0) * BN + tl.arange(0, BN)).to(tl.int64)
     pair = tl.arange(0, BK // 2).to(tl.int64)
     rows = tl.arange(0, triton.next_power_of_2(M)).to(tl.int64)
+    if ROW_INVARIANT:
+        X += tl.program_id(1).to(tl.int64) * x_row_stride
+        Y += tl.program_id(1).to(tl.int64) * y_row_stride
     acc = tl.full((triton.next_power_of_2(M), BN), 0., tl.float32)
     for start in range(tl.cdiv(K, BK)):
         k = start * BK + 2 * pair
@@ -287,12 +299,13 @@ def _gemv_kernel(X, Values, Scales, Gain, Bias, Y, x_row_stride, y_row_stride,
 
 
 def _gemv_options(query, tactic):
-    return dict(M=query.rows, N=query.out_features, K=query.in_features,
+    return dict(M=1 if query.row_invariant else query.rows, N=query.out_features, K=query.in_features,
                 PADDED_K=query.padded_in_features, KIND=query.kind,
                 GAIN_KIND=query.global_scale_kind,
                 INPUT_DTYPE="float32" if query.kind == "tensor_fp8" else query.input_dtype,
                 OUTPUT_DTYPE=query.output_dtype, HAS_BIAS=query.has_bias,
-                BN=tactic[1], BK=tactic[2], num_warps=4, enable_fp_fusion=False)
+                BN=tactic[1], BK=tactic[2], ROW_INVARIANT=query.row_invariant,
+                num_warps=4, enable_fp_fusion=False)
 
 
 @program_cache(scope="preparation")
@@ -309,7 +322,8 @@ def compile_gemv(payload, tactic, ordinal):
     bias = torch.empty((query.out_features,), dtype=output_dtype, device="meta") if query.has_bias else None
     output = torch.empty((query.rows, query.out_features), dtype=output_dtype, device="meta")
     with torch.cuda.device(ordinal), compile_only_launches():
-        return launch_triton(_gemv_kernel, (triton.cdiv(query.out_features, tactic[1]), 1, 1),
+        return launch_triton(_gemv_kernel, (triton.cdiv(query.out_features, tactic[1]),
+                             query.rows if query.row_invariant else 1, 1),
                              source, values, scales, gain, bias, output,
                              query.in_features, query.out_features, **_gemv_options(query, tactic))
 
@@ -323,14 +337,14 @@ class PreparedProjection:
 
     @property
     def tile(self):
-        return min(self.query.out_features, 1024) if self.tactic[0] == "gemv" else self.tactic[1]
+        return min(self.query.out_features, 1024) if self.tactic[0] in ("gemv", "row_gemv") else self.tactic[1]
 
     @property
     def required_workspace(self):
         return workspace_bytes(self.query, self.tactic)
 
     def run(self, source, values, scales, gain, input_scale, output, workspace, bias=None):
-        if self.tactic[0] == "gemv":
+        if self.tactic[0] in ("gemv", "row_gemv"):
             if self.query.kind == "tensor_fp8":
                 inputs, = _scratch_views(self.query, self.tactic, workspace)
                 inputs.copy_((source.float() / input_scale).clamp(-448, 448).to(torch.float8_e4m3fn))
@@ -340,7 +354,8 @@ class PreparedProjection:
             if bias is not None and bias.dtype == torch.bfloat16:
                 bias = bias.view(torch.uint16)
             destination = output.view(torch.uint16) if output.dtype == torch.bfloat16 else output
-            self.gemv[(triton.cdiv(self.query.out_features, self.tactic[1]), 1, 1)](
+            self.gemv[(triton.cdiv(self.query.out_features, self.tactic[1]),
+                       self.query.rows if self.query.row_invariant else 1, 1)](
                 source, values, scales, gain, bias, destination, source.stride(0), output.stride(0))
             return output
         return _project(self.query, self.tactic, self.expansion, source, values, scales, gain, input_scale,
@@ -403,10 +418,10 @@ class _Projection:
         def compile_jobs(tactic, device):
             jobs = []
             if query.kind == "nvfp4":
-                tile = min(query.out_features, 1024) if tactic[0] == "gemv" else tactic[1]
+                tile = min(query.out_features, 1024) if tactic[0] in ("gemv", "row_gemv") else tactic[1]
                 jobs.append(CompileJob.create("ignition.components.sm70_projection:compile_expansion",
                                               payload, tile, device.ordinal))
-            if tactic[0] == "gemv":
+            if tactic[0] in ("gemv", "row_gemv"):
                 jobs.append(CompileJob.create("ignition.components.sm70_projection:compile_gemv",
                                               payload, tactic, device.ordinal))
             return tuple(jobs)
@@ -415,10 +430,10 @@ class _Projection:
             expansion, gemv = None, None
             programs = []
             if query.kind == "nvfp4":
-                tile = min(query.out_features, 1024) if tactic[0] == "gemv" else tactic[1]
+                tile = min(query.out_features, 1024) if tactic[0] in ("gemv", "row_gemv") else tactic[1]
                 expansion = compile_expansion(payload, tile, source.device.index)
                 programs.append(expansion)
-            if tactic[0] == "gemv":
+            if tactic[0] in ("gemv", "row_gemv"):
                 gemv = compile_gemv(payload, tactic, source.device.index)
                 programs.append(gemv)
             for program in programs:
@@ -496,7 +511,7 @@ class PackedProjection(_Projection):
     """Checkpoint NVFP4 with legal W4A16 arithmetic; no activation requantization."""
 
     def __init__(self, source, weight, output, *, session, name, activation_mode="auto",
-                 bias=None, workspace=None):
+                 bias=None, workspace=None, row_invariant=False):
         from b12x.gemm.blockscaled._a16 import NVFP4LinearWeight, scale_storage
 
         if not isinstance(weight, NVFP4LinearWeight):
@@ -512,7 +527,7 @@ class PackedProjection(_Projection):
         self.weight, self.activation_mode = weight, "a16"
         scales = scale_storage(weight.scale_mma, n, weight.padded_in_features, 16)
         query = ProjectionQuery("nvfp4", source.shape[0], k, weight.padded_in_features, n,
-                                weight.global_scale_kind)
+                                weight.global_scale_kind, row_invariant=row_invariant)
         self._initialize(query, source, weight.values, output, scales=scales, gain=weight.global_scale,
                          bias=bias, session=session, name=name, workspace=workspace)
 
@@ -520,7 +535,7 @@ class PackedProjection(_Projection):
 class TensorFP8Projection(_Projection):
     """E4M3 activation rounding and the checkpoint's combined output scale."""
 
-    def __init__(self, source, weight, output, *, session, name, workspace=None):
+    def __init__(self, source, weight, output, *, session, name, workspace=None, row_invariant=False):
         from b12x.gemm.blockscaled._linear import TensorFP8LinearWeight
 
         packed = weight.packed
@@ -534,7 +549,7 @@ class TensorFP8Projection(_Projection):
             raise ValueError("tensor-FP8 block scales must retain their packed unit values")
         self.weight = weight
         query = ProjectionQuery("tensor_fp8", source.shape[0], packed.in_features,
-                                packed.padded_in_features, packed.out_features, "multiplier")
+                                packed.padded_in_features, packed.out_features, "multiplier", row_invariant=row_invariant)
         # SM70 Inductor cannot type FP8 operands even for an opaque call: its
         # functionalization pattern pass skips such nodes. The checkpoint's
         # bits cross the boundary as bytes; only the implementation views E4M3.
@@ -545,12 +560,12 @@ class TensorFP8Projection(_Projection):
 class UnquantizedProjection(_Projection):
     """Exact FP32 expansion of BF16/FP16 storage, with FP32 GEMM accumulation."""
 
-    def __init__(self, source, weight, output, *, session, name, bias=None, workspace=None):
+    def __init__(self, source, weight, output, *, session, name, bias=None, workspace=None, row_invariant=False):
         if weight.ndim != 2 or weight.dtype not in _FLOAT_DTYPES:
             raise ValueError("SM70 unquantized projections require a floating matrix")
         self.weight = weight
         n, k = weight.shape
         query = ProjectionQuery("dense", source.shape[0], k, k, n,
-                                weight_dtype=str(weight.dtype).removeprefix("torch."))
+                                weight_dtype=str(weight.dtype).removeprefix("torch."), row_invariant=row_invariant)
         self._initialize(query, source, weight.view(torch.uint8), output, bias=bias, session=session,
                          name=name, workspace=workspace)

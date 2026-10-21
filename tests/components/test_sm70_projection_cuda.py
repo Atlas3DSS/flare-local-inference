@@ -21,6 +21,55 @@ def _require_v100():
         pytest.skip("requires SM70")
 
 
+@pytest.mark.parametrize("kind", ["nvfp4", "tensor_fp8", "dense"])
+@torch.no_grad()
+def test_row_invariant_speculative_projection_is_exact_across_buckets(kind):
+    from b12x.preparation import PreparationSession
+    from ignition.preparation.compilation import compile_forward
+
+    _require_v100()
+    n, k = 384, 5120
+    torch.manual_seed(701603)
+    if kind == "dense":
+        weight = torch.randn((n, k), device="cuda").bfloat16()
+        constructor = sm70.UnquantizedProjection
+    else:
+        weight, _, _, _ = _weight(kind, n, k)
+        constructor = sm70.PackedProjection if kind == "nvfp4" else sm70.TensorFP8Projection
+    seed = torch.randn((4, k), device="cuda").bfloat16().float()
+    expected = []
+    # One-row references and packed verification use independent preparations.
+    for rows in (1, 1, 1, 1, 2, 3, 4, 8, 12, 16):
+        source = torch.zeros((rows, k + 16), device="cuda")[:, :k]
+        output = torch.full((rows, n + 16), 19., device="cuda")[:, :n]
+        row_ids = torch.arange(rows, device="cuda") % 4
+        if len(expected) < 4:
+            row_ids.fill_(len(expected))
+        source.copy_(seed[row_ids])
+        with PreparationSession(device=source.device, autotune=False, compile_workers=0) as session:
+            operation = constructor(source, weight, output, session=session, name="exact",
+                                    row_invariant=True)
+            def forward():
+                operation(source)
+            execute = compile_forward(forward) if rows == 16 else forward
+            execute()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                execute()
+            for _ in range(2):
+                output.fill_(float("nan"))
+                allocations = torch.cuda.memory_stats()["allocation.all.allocated"]
+                graph.replay()
+                torch.cuda.synchronize()
+                assert torch.cuda.memory_stats()["allocation.all.allocated"] == allocations
+                if len(expected) == 4:
+                    reference = torch.cat(expected)[row_ids.cpu()]
+                    assert torch.equal(output.cpu().view(torch.int32), reference.view(torch.int32))
+            if len(expected) < 4:
+                expected.append(output.cpu().clone())
+            graph.reset()
+
+
 def _weight(kind, n, k):
     from b12x._lib.intrinsics.reference import swizzle_block_scale
     from b12x.gemm.blockscaled import pack_weight

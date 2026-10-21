@@ -29,6 +29,7 @@ class PreparedResume:
         activation_mode="a16",
         buffers=None,
         workspace=None,
+        row_invariant=False,
     ):
         self.state = PreparedResumeState(
             requests,
@@ -68,6 +69,7 @@ class PreparedResume:
             activation_mode=activation_mode,
             buffers=buffers,
             workspace=workspace,
+            row_invariant=row_invariant,
         )
         args = (
             requests,

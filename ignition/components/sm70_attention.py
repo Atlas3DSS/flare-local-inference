@@ -92,10 +92,12 @@ class Query:
     kind: str
     operands: tuple
     window: int = -1
+    row_invariant: bool = False
 
 
 CONTRACT = native_contract(component_id="flare.sm70.paged_attention", query_type=Query,
-    tactics=lambda q: ((256, 4),) if q.kind == "write" else ((16, 4), (32, 4)))
+    tactics=lambda q: ((256, 4),) if q.kind == "write" else (((32, 4),) if q.row_invariant else ((16, 4), (32, 4))),
+    semantic_version=2)
 
 
 def _invocation(q, tensors, tactic):
@@ -157,9 +159,9 @@ def _fake_write(key, value, key_cache, value_cache, slots, handle):
     pass
 
 
-def _declare(kind, tensors, *, session, name, window=-1):
+def _declare(kind, tensors, *, session, name, window=-1, row_invariant=False):
     query = Query(kind, tuple((tuple(t.shape), tuple(t.stride()), str(t.dtype).removeprefix("torch."))
-                             for t in tensors), window)
+                             for t in tensors), window, row_invariant)
     payload = CONTRACT.encode_query(query)
     device = tensors[0].device
 
@@ -214,7 +216,7 @@ def _device(tensors):
 
 
 class PreparedAttention:
-    def __init__(self, q, key, value, pages, lengths, cu, output, *, session, name, window=-1):
+    def __init__(self, q, key, value, pages, lengths, cu, output, *, session, name, window=-1, row_invariant=False):
         tensors = (q, key, value, pages, lengths, cu, output)
         _device(tensors)
         if (q.dtype != torch.float32 or output.dtype != torch.float32 or key.dtype != torch.uint16
@@ -228,7 +230,7 @@ class PreparedAttention:
                 or cu.dtype != torch.int32 or window < -1):
             raise ValueError("SM70 paged attention requires FP32 queries/output and UInt16 BF16-bit pages")
         self.tensors = tensors
-        self.plan = _declare("attention", tensors, session=session, name=name, window=window)
+        self.plan = _declare("attention", tensors, session=session, name=name, window=window, row_invariant=row_invariant)
 
     def __call__(self):
         attend(*self.tensors, self.plan.handle)

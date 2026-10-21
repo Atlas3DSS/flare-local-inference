@@ -80,6 +80,53 @@ def _device():
 
 
 @_cuda
+@pytest.mark.parametrize("width,heads", [(128, 2), (256, 4), (5120, 1)])
+@torch.no_grad()
+def test_prepared_norm_is_exact_across_speculative_rows(width, heads):
+    from b12x.preparation import PreparationSession
+    from ignition.components.sm70_norm import PreparedRMSNorm
+    from ignition.preparation.compilation import compile_forward
+
+    device = _device()
+    torch.manual_seed(7070)
+    seed = torch.randn((4, heads, width), device=device).bfloat16().float()
+    weight = (torch.randn(width, device=device) * .2).bfloat16().float()
+    expected = []
+    for rows in (1, 1, 1, 1, 2, 3, 4, 8, 12, 16):
+        source = torch.full((rows, heads, 2 * width), float("nan"), device=device)[..., :width]
+        output = torch.empty((rows, heads, width), device=device)
+        ids = torch.arange(rows, device=device) % 4
+        if len(expected) < 4:
+            ids.fill_(len(expected))
+        source.copy_(seed[ids])
+        with PreparationSession(device=device, autotune=False, compile_workers=0) as session:
+            norm = PreparedRMSNorm(source, weight, output, 1e-6, session=session, name="norm")
+            def forward():
+                norm(source)
+            execute = compile_forward(forward) if rows == 16 else forward
+            execute()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                execute()
+            for _ in range(2):
+                output.fill_(float("nan"))
+                allocations = torch.cuda.memory_stats()["allocation.all.allocated"]
+                graph.replay()
+                torch.cuda.synchronize()
+                assert torch.cuda.memory_stats()["allocation.all.allocated"] == allocations
+                if len(expected) == 4:
+                    assert torch.equal(output.cpu().view(torch.int32), torch.cat(expected)[ids.cpu()].view(torch.int32))
+            if len(expected) < 4:
+                expected.append(output.cpu().clone())
+            value = source.cpu().double()
+            oracle = value * torch.rsqrt(value.square().mean(-1, keepdim=True) + 1e-6)
+            oracle = (oracle * (1. + weight.cpu().double())).bfloat16().float()
+            assert torch.isfinite(output).all()
+            torch.testing.assert_close(output.cpu(), oracle, rtol=2**-7, atol=0.)
+            graph.reset()
+
+
+@_cuda
 @torch.no_grad()
 def test_rounding_compiles_and_replays_without_bf16_storage():
     from ignition.preparation.compilation import compile_forward

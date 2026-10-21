@@ -64,15 +64,17 @@ class RecurrentAttention(torch.nn.Module):
 class SM70DecoderLayer(torch.nn.Module):
     """Canonical Qwen layer arithmetic with BF16 values stored as FP32."""
 
-    def __init__(self, layer):
+    def __init__(self, layer, norms=None):
         super().__init__()
         self.layer = layer
+        self.norms = norms
 
     def forward(self, hidden_states, position_embeddings):
         layer = self.layer
         residual = hidden_states
         norm = layer.input_layernorm
-        hidden_states = rms_norm(hidden_states, norm.weight, norm.eps)
+        hidden_states = (self.norms[0](hidden_states) if self.norms is not None
+                         else rms_norm(hidden_states, norm.weight, norm.eps))
         if layer.block_type == "linear_attention":
             hidden_states = layer.linear_attn(hidden_states=hidden_states)
         else:
@@ -81,7 +83,8 @@ class SM70DecoderLayer(torch.nn.Module):
         hidden_states = round_bf16(residual + round_bf16(hidden_states))
         residual = hidden_states
         norm = layer.post_attention_layernorm
-        hidden_states = rms_norm(hidden_states, norm.weight, norm.eps)
+        hidden_states = (self.norms[1](hidden_states) if self.norms is not None
+                         else rms_norm(hidden_states, norm.weight, norm.eps))
         gate = round_bf16(layer.mlp.gate_proj(hidden_states))
         up = round_bf16(layer.mlp.up_proj(hidden_states))
         activated = round_bf16(layer.mlp.act_fn(gate))
@@ -91,7 +94,7 @@ class SM70DecoderLayer(torch.nn.Module):
 
 
 class FullAttention(torch.nn.Module):
-    def __init__(self, module, weights, source, metadata, pool, layer, *, mode, session, workspace, name, buffers):
+    def __init__(self, module, weights, source, metadata, pool, layer, *, mode, session, workspace, name, buffers, row_invariant=False):
         super().__init__()
         self.canonical, self.metadata = module, metadata
         config = weights.config
@@ -112,7 +115,7 @@ class FullAttention(torch.nn.Module):
         prefix = f"layers.{layer}.self_attn."
         self.projections = {
             field: TensorFP8Projection(inputs, weights.projections[prefix + field], output,
-                                       session=session, workspace=workspace, name=name + "." + field)
+                                       session=session, workspace=workspace, name=name + "." + field, row_invariant=row_invariant)
             for field, inputs, output in (("q_proj", source, self.qg), ("k_proj", source, self.k),
                                          ("v_proj", source, self.v), ("o_proj", self.attended, self.output))
         }
@@ -125,12 +128,20 @@ class FullAttention(torch.nn.Module):
         options = dict(mode=mode, workspace=workspace)
         if self.sm70:
             from ignition.components.sm70_attention import PreparedWriter, PreparedAttention
-            writer, attention, options = PreparedWriter, PreparedAttention, {}
+            writer, attention, options = PreparedWriter, PreparedAttention, dict(row_invariant=row_invariant)
         self.writer = writer(self.key, self.v.view(tokens, self.kv_heads, self.dim),
             key_cache, value_cache, self.slots, session=session, name=name + ".write")
         self.attention = attention(self.q, key_cache, value_cache, metadata.page_table,
             self.lengths, metadata.query_start_loc, self.attended.view(tokens, self.heads, self.dim),
             session=session, name=name + ".attention", **options)
+        self.norms = None
+        if self.sm70 and row_invariant:
+            from ignition.components.sm70_norm import PreparedRMSNorm
+            query = self.qg.view(tokens, self.heads, 2 * self.dim)[..., :self.dim]
+            key = self.k.view(tokens, self.kv_heads, self.dim)
+            self.norms = tuple(PreparedRMSNorm(value, norm.weight, output, norm.eps,
+                session=session, name=name + "." + field) for value, norm, output, field in (
+                    (query, module.q_norm, self.q, "q_norm"), (key, module.k_norm, self.key, "k_norm")))
 
     def forward(self, hidden_states, position_embeddings, **kwargs):
         from transformers.models.qwen3_5.modeling_qwen3_5 import apply_rotary_pos_emb
@@ -144,8 +155,10 @@ class FullAttention(torch.nn.Module):
         key = self.k.view(-1, self.kv_heads, self.dim)
         if self.sm70:
             q_norm, k_norm = self.canonical.q_norm, self.canonical.k_norm
-            q, k = apply_rotary(rms_norm(query, q_norm.weight, q_norm.eps),
-                rms_norm(key, k_norm.weight, k_norm.eps), *position_embeddings)
+            q, k = apply_rotary(
+                self.norms[0](query) if self.norms is not None else rms_norm(query, q_norm.weight, q_norm.eps),
+                self.norms[1](key) if self.norms is not None else rms_norm(key, k_norm.weight, k_norm.eps),
+                *position_embeddings)
         else:
             q, k = apply_rotary_pos_emb(self.canonical.q_norm(query),
                 self.canonical.k_norm(key), *position_embeddings)
@@ -170,7 +183,7 @@ class FullAttention(torch.nn.Module):
 
 class PreparedDecoder:
     def __init__(self, weights, scratch, metadata, pool, *, mode, vocabulary_runtime,
-                 coordinator, session, name, workspace, delta=None, feedback_output=None):
+                 coordinator, session, name, workspace, delta=None, feedback_output=None, row_invariant=False):
         self.weights, self.scratch, self.metadata, self.pool = weights, scratch, metadata, pool
         from ignition.components.sm70_projection import is_sm70
         self.sm70 = is_sm70(scratch.activations.device)
@@ -186,6 +199,7 @@ class PreparedDecoder:
                                             ("up_proj", config.text["intermediate_size"]),
                                             ("down_proj", config.hidden))}
         mlp_input = torch.zeros_like(mlp_buffers["gate_proj"])
+        norm_buffers = [torch.zeros_like(source) for _ in range(2)] if self.sm70 and row_invariant else None
         self.layers = []
         for index, original in enumerate(weights.tree.layers):
             layer = module_copy(original)
@@ -195,26 +209,39 @@ class PreparedDecoder:
                                for field in ("in_proj_qkv", "in_proj_z", "in_proj_ba", "out_proj")}
                 layer.linear_attn = RecurrentAttention(PreparedGDN(original.linear_attn, projections, source,
                     scratch.gdn, pool.recurrent(index), self.delta, mode=mode, session=session,
-                    name=name + "." + prefix + "gdn", workspace=workspace, projection_workspace=workspace))
+                    name=name + "." + prefix + "gdn", workspace=workspace, projection_workspace=workspace, row_invariant=row_invariant))
             else:
                 layer.self_attn = FullAttention(original.self_attn, weights, source, metadata, pool, index,
                     mode=mode, session=session, workspace=workspace, name=name + "." + prefix + "attention",
-                    buffers=attention_buffers)
+                    buffers=attention_buffers, row_invariant=row_invariant)
             layer.mlp = module_copy(original.mlp)
             for field in ("gate_proj", "up_proj", "down_proj"):
                 weight = weights.projections[prefix + "mlp." + field]
                 inputs = source if field != "down_proj" else mlp_input
                 output = mlp_buffers[field]
                 setattr(layer.mlp, field, Projection(QuantizedProjection(inputs, weight, output,
-                    activation_mode="auto", session=session, workspace=workspace, name=name + "." + prefix + field)))
-            self.layers.append(SM70DecoderLayer(layer) if self.sm70 else layer)
+                    activation_mode="auto", session=session, workspace=workspace, name=name + "." + prefix + field, row_invariant=row_invariant)))
+            norms = None
+            if norm_buffers is not None:
+                from ignition.components.sm70_norm import PreparedRMSNorm
+                norms = tuple(PreparedRMSNorm(source, norm.weight, output, norm.eps,
+                    session=session, name=name + "." + prefix + field) for norm, output, field in zip(
+                        (layer.input_layernorm, layer.post_attention_layernorm), norm_buffers,
+                        ("input_norm", "post_attention_norm"), strict=True))
+            self.layers.append(SM70DecoderLayer(layer, norms) if self.sm70 else layer)
         rotary = config.text["rope_parameters"]
         dim = int(config.text["head_dim"] * rotary["partial_rotary_factor"])
         self.inverse_frequency = 1.0 / (rotary["rope_theta"] ** (
             torch.arange(0, dim, 2, device=source.device, dtype=torch.float32) / dim))
         self.head = PreparedVocabularyProjection(scratch.hidden, weights.head, scratch.logits, scratch.logits,
             runtime=vocabulary_runtime, coordinator=coordinator, session=session, name=name + ".head",
-            activation_mode="auto", workspace=workspace)
+            activation_mode="auto", workspace=workspace, row_invariant=row_invariant)
+        self.final_norm = None
+        if self.sm70 and row_invariant:
+            from ignition.components.sm70_norm import PreparedRMSNorm
+            norm = weights.tree.norm
+            self.final_norm = PreparedRMSNorm(torch.empty_like(scratch.hidden), norm.weight, scratch.hidden,
+                                             norm.eps, session=session, name=name + ".final_norm")
 
     def __call__(self):
         m, d = self.metadata, self.delta
@@ -240,7 +267,10 @@ class PreparedDecoder:
         norm = self.weights.tree.norm
         if self.feedback_output is not None:
             self.feedback_output.copy_(rms_norm(hidden, norm.weight, norm.eps) if self.sm70 else norm(hidden))
-        self.scratch.hidden.copy_(rms_norm(selected, norm.weight, norm.eps) if self.sm70 else norm(selected))
+        if self.final_norm is not None:
+            self.final_norm(selected)
+        else:
+            self.scratch.hidden.copy_(rms_norm(selected, norm.weight, norm.eps) if self.sm70 else norm(selected))
         self.head(self.scratch.hidden)
         if self.sm70:
             self.scratch.logits.copy_(round_bf16(self.scratch.logits))

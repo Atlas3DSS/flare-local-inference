@@ -177,7 +177,8 @@ def prepare(snapshot, config, *, progress=None, package_storage):
                     m = metadata[name] = Metadata.allocate(capacity, rows, blocks, device)
                     scratch = (prefill_storage if mode == "prefill" else decode_storage).rows(capacity, rows)
                     decoder = PreparedDecoder(weights, scratch, m, pool, mode=mode,
-                        vocabulary_runtime=None, coordinator=coordinator, session=session, name=name, workspace=arena)
+                        vocabulary_runtime=None, coordinator=coordinator, session=session, name=name, workspace=arena,
+                        row_invariant=config.mtp and mode == "decode")
                     batch = PreparedBatch(inputs, requests, m, mode=mode, shard=weights.shard, pool=pool)
                     forward = PreparedGeneration(decoder, batch, completion, frame, sequence, runtime=None,
                         coordinator=coordinator, session=session, name=name + ".generation", workspace=arena)
@@ -191,7 +192,7 @@ def prepare(snapshot, config, *, progress=None, package_storage):
                 name = f"resume{capacity}" + suffix
                 forward = PreparedResume(weights, requests, pool, inputs, completion, frame, sequence,
                     rows=capacity, runtime=None, vocabulary_runtime=None, coordinator=coordinator,
-                    session=session, name=name, activation_mode="auto", workspace=arena)
+                    session=session, name=name, activation_mode="auto", workspace=arena, row_invariant=config.mtp)
                 add(name, forward, "resume", capacity, 1, (*row_inputs, "sampling_grammar_mask"), enabled)
                 for mode in ("init", "restore", "snapshot"):
                     name = f"{mode}{capacity}" + suffix

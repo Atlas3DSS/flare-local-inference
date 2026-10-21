@@ -154,6 +154,7 @@ class PreparedGDN:
         in_place: bool = False,
         partitions=None,
         prepare_projections: bool = True,
+        row_invariant: bool = False,
     ) -> None:
         self.world_size = 48 // module.num_v_heads
         self.key_heads, self.value_heads = module.num_k_heads, module.num_v_heads
@@ -249,7 +250,7 @@ class PreparedGDN:
 
         def projection(key, inputs, output):
             weight = projections[key]
-            options = dict(session=session, name=f"{name}.{key}")
+            options = dict(session=session, name=f"{name}.{key}", row_invariant=row_invariant)
             if isinstance(weight, TensorFP8Weight):
                 return TensorFP8Projection(inputs, weight, output, workspace=projection_workspace, **options)
             if isinstance(weight, torch.Tensor):

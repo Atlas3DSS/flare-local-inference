@@ -29,11 +29,12 @@ class UnquantizedProjection:
         name: str,
         bias: torch.Tensor | None = None,
         workspace: ScratchArena | torch.Tensor | None = None,
+        row_invariant: bool = False,
     ) -> None:
         self.sm70 = None
         if sm70_projection.is_sm70(source.device):
             self.sm70 = sm70_projection.UnquantizedProjection(
-                source, weight, output, session=session, name=name, bias=bias, workspace=workspace)
+                source, weight, output, session=session, name=name, bias=bias, workspace=workspace, row_invariant=row_invariant)
             self.weight, self.output, self.bias, self.plan = weight, output, bias, self.sm70.plan
             return
         if any(t.dtype not in (torch.bfloat16, torch.float32) for t in (source, weight, output)):
@@ -93,11 +94,12 @@ class QuantizedProjection:
         activation_mode: str = "quantized",
         bias: torch.Tensor | None = None,
         workspace: ScratchArena | torch.Tensor | None = None,
+        row_invariant: bool = False,
     ) -> None:
         self.sm70 = None
         if sm70_projection.is_sm70(source.device):
             self.sm70 = sm70_projection.PackedProjection(source, weight, output, session=session,
-                name=name, activation_mode=activation_mode, bias=bias, workspace=workspace)
+                name=name, activation_mode=activation_mode, bias=bias, workspace=workspace, row_invariant=row_invariant)
             self.weight, self.output, self.bias, self.plan = weight, output, bias, self.sm70.plan
             self.activation_mode, self.sm103 = self.sm70.activation_mode, False
             return
