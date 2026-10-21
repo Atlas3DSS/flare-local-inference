@@ -16,6 +16,11 @@ from ignition.components.vocabulary import PreparedVocabularyProjection
 
 from .config import PAGE_TOKENS
 
+# Completion error code of a prefill chunk the reviewed SM70 prefill attention refused (status word != 0):
+# bit 0 non-finite K/V, bit 1 V range above 2^80 across pages, bit 2 inadmissible (M, context). Codes 1, 6, 32 and 33
+# are taken by sampling, speculation, batch validation and resume.
+PREFILL_ATTENTION_ERROR = 34
+
 
 @dataclass(frozen=True)
 class Scratch:
@@ -98,7 +103,8 @@ class SM70DecoderLayer(torch.nn.Module):
 
 
 class FullAttention(torch.nn.Module):
-    def __init__(self, module, weights, source, metadata, pool, layer, *, mode, session, workspace, name, buffers, row_invariant=False):
+    def __init__(self, module, weights, source, metadata, pool, layer, *, mode, session, workspace, name, buffers,
+                 row_invariant=False, status_sink=None):
         super().__init__()
         self.canonical, self.metadata = module, metadata
         config = weights.config
@@ -142,14 +148,27 @@ class FullAttention(torch.nn.Module):
         self.sm70 = is_sm70(device)
         writer, attention = PreparedPagedKVWriter, PreparedPagedAttention
         options = dict(mode=mode, workspace=workspace)
+        self.status_sink = None
         if self.sm70:
             from ignition.components.sm70_attention import PreparedWriter, PreparedAttention
             writer, attention, options = PreparedWriter, PreparedAttention, dict(row_invariant=row_invariant)
         self.writer = writer(self.key, self.v.view(tokens, self.kv_heads, self.dim),
             key_cache, value_cache, self.slots, session=session, name=name + ".write")
-        self.attention = attention(self.q, key_cache, value_cache, metadata.page_table,
-            self.lengths, metadata.query_start_loc, self.attended.view(tokens, self.heads, self.dim),
-            session=session, name=name + ".attention", **options)
+        attended = self.attended.view(tokens, self.heads, self.dim)
+        if self.sm70 and mode == "prefill" and status_sink is not None:
+            # Reviewed Sol-11s tensor-core prefill attention (one request per prefill graph). Decode, resume and
+            # speculative verification keep the scalar kernel. Its sticky status word is OR-ed into the decoder's
+            # prefill status so an inadmissible chunk fails the request instead of producing silent NaN.
+            from ignition.components.sm70_prefill_attention import PreparedPrefillAttention, admits
+            if not admits(self.q, key_cache, metadata.page_table):
+                raise ValueError("SM70 prefill attention: the prefill graph is outside the reviewed Sol-11s contract")
+            self.attention = PreparedPrefillAttention(self.q, key_cache, value_cache, metadata.page_table,
+                self.lengths, metadata.query_start_loc, attended, session=session, name=name + ".attention",
+                workspace=workspace)
+            self.status_sink = status_sink
+        else:
+            self.attention = attention(self.q, key_cache, value_cache, metadata.page_table,
+                self.lengths, metadata.query_start_loc, attended, session=session, name=name + ".attention", **options)
         self.norms = None
         if self.sm70 and row_invariant:
             from ignition.components.sm70_norm import PreparedRMSNorm
@@ -187,6 +206,8 @@ class FullAttention(torch.nn.Module):
         self.lengths.copy_(torch.where(m.lengths > 0, m.starts + m.lengths, 0))
         self.writer()
         self.attention()
+        if self.status_sink is not None:
+            self.status_sink.bitwise_or_(self.attention.status_word)
         if self.sm70:
             rounded_gate = round_bf16(gate.reshape_as(self.attended).sigmoid())
             self.attended.copy_(round_bf16(round_bf16(self.attended) * rounded_gate))
@@ -200,10 +221,18 @@ class FullAttention(torch.nn.Module):
 
 class PreparedDecoder:
     def __init__(self, weights, scratch, metadata, pool, *, mode, vocabulary_runtime,
-                 coordinator, session, name, workspace, delta=None, feedback_output=None, row_invariant=False):
+                 coordinator, session, name, workspace, delta=None, feedback_output=None, row_invariant=False,
+                 prefill_errors=None):
         self.weights, self.scratch, self.metadata, self.pool = weights, scratch, metadata, pool
         from ignition.components.sm70_projection import is_sm70
         self.sm70 = is_sm70(scratch.activations.device)
+        # SM70 prefill graphs: the reviewed tensor-core attention reports an inadmissible chunk through a sticky status
+        # word; the OR over the 16 layers fails the request (status ERROR, error code PREFILL_ATTENTION_ERROR) before
+        # completion reads the records, so no NaN state is ever sampled or published as a prefix-cache boundary.
+        self.prefill_errors, self.prefill_status = None, None
+        if self.sm70 and mode == "prefill" and prefill_errors is not None:
+            self.prefill_errors = prefill_errors
+            self.prefill_status = torch.zeros(1, dtype=torch.int32, device=scratch.activations.device)
         self.embedding = PreparedEmbedding(weights.tree.embed_tokens.weight, metadata.token_ids,
             scratch.activations, num_rows=metadata.live_counts[:1], session=session, name=name + ".embedding")
         self.delta = delta or DeltaMetadata.allocate(metadata.starts.numel(), scratch.activations.device)
@@ -235,7 +264,7 @@ class PreparedDecoder:
             else:
                 layer.self_attn = FullAttention(original.self_attn, weights, source, metadata, pool, index,
                     mode=mode, session=session, workspace=workspace, name=name + "." + prefix + "attention",
-                    buffers=attention_buffers, row_invariant=row_invariant)
+                    buffers=attention_buffers, row_invariant=row_invariant, status_sink=self.prefill_status)
             layer.mlp = module_copy(original.mlp)
             for field in (("gate_up_proj", "down_proj") if fused_projections else ("gate_proj", "up_proj", "down_proj")):
                 weight = weights.projections[prefix + "mlp." + field]
@@ -265,6 +294,21 @@ class PreparedDecoder:
             self.final_norm = PreparedRMSNorm(torch.empty_like(scratch.hidden), norm.weight, scratch.hidden,
                                              norm.eps, session=session, name=name + ".final_norm")
 
+    def report_prefill_status(self):
+        """Fail the single prefill request when any full-attention layer reported a non-zero status word.
+
+        Only a live row may be failed: an inactive row (length 0) yields an inadmissible plan by construction and its
+        slot id is stale. ``requests.status``/``error_code`` are the existing per-request error channel completion
+        copies into the records (same mechanism as the duplicate-slot code 32 in ``paged_batch``).
+        """
+        from ignition.components.sampling import ERROR
+
+        requests, row_slot_ids = self.prefill_errors
+        bad = (self.prefill_status != 0) & (self.metadata.lengths[:1] > 0)
+        slot = row_slot_ids[:1].long().clamp(0, requests.capacity - 1)
+        requests.status[slot] = torch.where(bad, ERROR, requests.status[slot])
+        requests.error_code[slot] = torch.where(bad, PREFILL_ATTENTION_ERROR, requests.error_code[slot])
+
     def __call__(self):
         m, d = self.metadata, self.delta
         active = m.lengths > 0
@@ -282,9 +326,13 @@ class PreparedDecoder:
         dtype = self.scratch.activations.dtype
         position_embeddings = ((round_bf16(embedding.cos()), round_bf16(embedding.sin())) if self.sm70
                                else (embedding.cos().to(dtype), embedding.sin().to(dtype)))
+        if self.prefill_status is not None:
+            self.prefill_status.zero_()
         hidden = self.embedding()
         for layer in self.layers:
             hidden = layer(hidden, position_embeddings=position_embeddings)
+        if self.prefill_status is not None:
+            self.report_prefill_status()
         selected = hidden[m.sample_indices]
         norm = self.weights.tree.norm
         if self.feedback_output is not None:

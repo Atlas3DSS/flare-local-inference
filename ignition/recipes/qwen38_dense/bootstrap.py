@@ -192,7 +192,8 @@ def prepare(snapshot, config, *, progress=None, package_storage):
                     scratch = (prefill_storage if mode == "prefill" else decode_storage).rows(capacity, rows)
                     decoder = PreparedDecoder(weights, scratch, m, pool, mode=mode,
                         vocabulary_runtime=None, coordinator=coordinator, session=session, name=name, workspace=arena,
-                        row_invariant=config.mtp and mode == "decode")
+                        row_invariant=config.mtp and mode == "decode",
+                        prefill_errors=(requests, inputs.row_slot_ids) if mode == "prefill" else None)
                     batch = PreparedBatch(inputs, requests, m, mode=mode, shard=weights.shard, pool=pool)
                     forward = PreparedGeneration(decoder, batch, completion, frame, sequence, runtime=None,
                         coordinator=coordinator, session=session, name=name + ".generation", workspace=arena)
