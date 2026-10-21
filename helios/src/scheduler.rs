@@ -534,6 +534,8 @@ pub struct RequestScheduler {
     prefill_catalog: Vec<usize>,
     mixed_catalog: Vec<(usize, usize, usize)>,
     proposal_source: speculation::ProposalSource,
+    /// Conditional acceptance over every request, the prior of each request's estimate.
+    acceptance_population: speculation::AcceptancePopulation,
     split: Option<split::SplitSpeculation>,
     costs: cost::ActionCosts,
     refresh: refresh::RefreshState,
@@ -605,6 +607,7 @@ impl RequestScheduler {
             prefill_catalog: prefill_capacities(limits.prefill_chunk_size).collect(),
             mixed_catalog: Vec::new(),
             proposal_source: speculation::ProposalSource::Mtp,
+            acceptance_population: Default::default(),
             split: None,
             costs: cost::ActionCosts::default(),
             refresh: refresh::RefreshState::default(),
@@ -1911,6 +1914,7 @@ impl RequestScheduler {
         let step = submission.step;
         let now_ns = self.now_ns;
         let mut useful_tokens = [0u64; REQUEST_LANES];
+        let mut acceptance_samples = Vec::new();
         let mut generated = Vec::new();
         let mut boundaries = Vec::new();
         let mut captures = Vec::new();
@@ -1966,12 +1970,14 @@ impl RequestScheduler {
                 // ABI3 may count padded proposals in the physical capture. Only
                 // the lane's logical draft extent supplies acceptance observations.
                 let offered = (vector.offered_drafts as usize).min(lane.tokens.saturating_sub(1));
-                request.acceptance.observe(
+                let sample = (
                     offered,
                     (vector.accepted_drafts as usize).min(offered),
                     vector.emitted_count > vector.accepted_drafts,
                     vector.copy_offered_mask as u8,
                 );
+                request.acceptance.observe(sample.0, sample.1, sample.2, sample.3, request.generated_tokens);
+                acceptance_samples.push(sample);
             }
             if record.status == 3 {
                 request.error_code = Some(record.error_code);
@@ -2056,6 +2062,9 @@ impl RequestScheduler {
                     .scheduled_consumed
                     .min(request.consumed_tokens + ahead[lane.request.slot as usize]);
             }
+        }
+        for (offered, accepted, rejected, copy_mask) in acceptance_samples {
+            self.acceptance_population.observe(offered, accepted, rejected, copy_mask);
         }
         self.advance_retirement(fence)?;
         for handle in boundaries {

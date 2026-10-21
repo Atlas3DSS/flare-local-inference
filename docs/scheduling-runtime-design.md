@@ -56,7 +56,13 @@ draws again.
 
 For conditional acceptance estimates `p_i`, expected output at width `W` is
 `1 + p_1 + p_1*p_2 + ... + product(p_1..p_(W-1))`. Combined graphs search all
-loaded widths using request-local historical acceptance. A producer supplying
+loaded widths using request-local historical acceptance weighed against a
+model-local population estimate (a prior worth two observations; each
+observation of any request contributes one sixty-fourth once saturated), so a
+new request starts from earlier requests' acceptance instead of 0.5. A depth a
+request has not observed for 32 output tokens is priced at the bound of its
+shallower prefix, so a width that was never offered, including every draft
+after a run of width-one rounds, becomes worth probing. A producer supplying
 native confidence forecasts proposal work by averaging each observed prefix's
 survival probability. It multiplies conditional probabilities before averaging,
 preserving their correlation within a draft block. Every observation contributes

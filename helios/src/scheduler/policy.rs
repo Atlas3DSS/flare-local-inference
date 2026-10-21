@@ -45,10 +45,12 @@ impl PolicyConfig {
 
     /// Agents block on every prompt (tool output) before producing more tokens, so a
     /// consumed prompt token is worth an output token: a waiting prompt is served
-    /// before other requests drain their decoding, and then decodes with them.
+    /// before other requests drain their decoding, and then decodes with them. Agents
+    /// read whole turns, so output cadence is not priced: like `throughput`, wider
+    /// speculative rounds are chosen whenever they deliver more tokens per GPU second.
     pub fn agent() -> Self {
-        let default = Self::default();
-        Self { prefill_token_value: default.output_token_value, ..default }
+        let throughput = Self::throughput();
+        Self { prefill_token_value: throughput.output_token_value, ..throughput }
     }
 }
 
@@ -432,7 +434,7 @@ impl RequestScheduler {
                 consider(
                     ns,
                     value.decode(
-                        r.acceptance.expected_tokens(self.proposal_source, tokens),
+                        self.expected_speculative_tokens(r, tokens),
                         ns as f64 / 1e6,
                     ),
                 );

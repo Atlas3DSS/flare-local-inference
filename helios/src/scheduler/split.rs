@@ -170,7 +170,12 @@ impl RequestScheduler {
                 .map_or(split.population, |f| f.estimate(&split.population, request.generated_tokens));
             forecast_tokens(&prefixes, width)
         } else {
-            request.acceptance.expected_tokens(self.proposal_source, width)
+            request.acceptance.forecast_tokens(
+                self.proposal_source,
+                width,
+                &self.acceptance_population,
+                request.generated_tokens,
+            )
         }
     }
 

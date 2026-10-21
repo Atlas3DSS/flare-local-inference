@@ -373,6 +373,8 @@ between larger output bursts. It uses the package's existing graphs.
 Coding agents block on each prompt (tool output) before generating again, so a
 waiting prompt is served before other requests drain their decoding instead of
 after; the decoders pause for that prefill and then decode together with it.
+Agents read whole turns, so `agent` does not price output cadence: like
+`throughput`, it picks the speculative width with the most tokens per GPU second.
 `--mtp-pipeline` keeps a second speculative round queued behind the running one.
 Captured graphs own positions, pending tokens and acceptance, so the queued round
 needs no host feedback, and submitting its graph overlaps the running round.

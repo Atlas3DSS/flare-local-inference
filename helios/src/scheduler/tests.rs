@@ -1690,13 +1690,13 @@ fn acceptance_keeps_request_source_and_censored_depths_separate() {
     };
     let mut a = AcceptanceProfile::default();
     let b = AcceptanceProfile::default();
-    a.observe(5, 2, false, 0b10);
+    a.observe(5, 2, false, 0b10, 0);
     assert!(a.probability(Mtp, 0).unwrap() > 0.5);
     assert!(a.probability(Copy, 1).unwrap() > 0.5);
     assert_eq!(a.probability(Copy, 0), Some(0.5));
     assert_eq!(a.probability(Mtp, 1), Some(0.5));
     assert_eq!(a.probability(Mtp, 2), Some(0.5));
-    a.observe(5, 2, true, 0b110);
+    a.observe(5, 2, true, 0b110, 0);
     assert!(a.probability(Copy, 2).unwrap() < 0.5);
     assert_eq!(a.probability(Mtp, 2), Some(0.5));
     assert_eq!(a.probability(Copy, 3), Some(0.5));
