@@ -9,6 +9,9 @@ long conversations, coding agents, and repeated tool use. Its goal is to make
 the memory, bandwidth, and compute in workstations and compact systems such
 as DGX Spark go further, while keeping generation responsive.
 
+This is a research prototype, and is made available via open-source to enable
+technical collaboration and collect early feedback.
+
 The design rests on a few principles:
 
 - **Embrace the standard PyTorch ecosystem at build time; serve from Rust.**
@@ -32,16 +35,11 @@ The design rests on a few principles:
 
 [vLLM](https://docs.vllm.ai/en/latest/) covers a much broader range of models,
 hardware, and deployment patterns. Flare trades that breadth for a focused
-serving contract around selected models and local workloads. That focus lets
-model preparation, kernels, memory management, and scheduling be designed
-together. It also means supported recipes and prepared capacities determine
-what you can run.
+serving contract around selected models and local workloads. Flare is not, and
+will never, be a replacement for production inference englines like vLLM.
 
 Think of Flare as a specialized option when its hardware and model coverage
-fit your machine. Rust gives the serving runtime explicit resource ownership;
-performance still depends on the GPU work, memory traffic, and scheduling.
-[vLLM also uses CUDA graphs](https://docs.vllm.ai/en/latest/design/cuda_graphs/).
-Compare the engines on your actual model and workload.
+fit your machine.
 
 Start with [model preparation and serving](docs/model-preparation.md).
 See the [CLI guide](docs/cli-design.md) for configuration and the
