@@ -472,3 +472,67 @@ def test_gemv_every_e2m1_and_finite_signed_e4m3_scale_code():
         operation(source)
         expected = source[:, :1].cpu() * (table[codes] * selected.view(torch.float8_e4m3fn).float())[None, :]
         torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("rows", [17, 128, 129])
+@pytest.mark.parametrize("k", [5120, 6144])
+@torch.no_grad()
+def test_tensor_fp8_hgemm_fp32_result_and_fp64_bound(rows, k):
+    from b12x.preparation import PreparationSession
+    from b12x.preparation.types import require_prepared
+    import math
+
+    _require_v100()
+    weight, matrix, gain, scale = _weight("tensor_fp8", 1152, k)
+    seed = torch.randn((rows, k), generator=torch.Generator().manual_seed(730))
+    source = torch.empty((rows, k + 16), device="cuda")[:, :k]
+    source.copy_(seed)
+    storage = torch.full((rows, 1168), 19., device="cuda")
+    output = storage[:, :1152]
+    with PreparationSession(device=source.device, autotune=False, compile_workers=0) as session:
+        operation = sm70.TensorFP8Projection(source, weight, output, session=session, name="hgemm-fp64")
+        operation(source)
+        state = require_prepared(operation.plan, sm70.COMPONENT, source.device)
+        assert state.tactic[0] == "hgemm"
+        inputs, expanded, product = sm70._scratch_views(state.query, state.tactic, operation.workspace)
+        assert inputs.dtype == expanded.dtype == torch.float16
+        assert product.dtype == torch.float32
+        calibrated = (seed / scale).clamp(-448, 448).to(torch.float8_e4m3fn).float()
+        reference = (calibrated.double() @ matrix.double().T) * gain.double()
+        magnitude = (calibrated.double().abs() @ matrix.double().abs().T) * gain.double().abs()
+        # Every binary16 product is exact in FP32 here. A serial FP32 sum is
+        # a conservative bound for the cuBLAS reduction tree.
+        unit = 2 ** -24
+        gamma = k * unit / (1 - k * unit)
+        actual = output.cpu().double()
+        assert torch.isfinite(actual).all()
+        assert bool(((actual - reference).abs() <= (gamma + 2 * unit) * magnitude).all())
+        nrms = math.sqrt(float((actual - reference).square().sum() / reference.square().sum()))
+        assert nrms <= 2e-5, nrms
+        assert torch.all(storage[:, 1152:] == 19)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            operation(source)
+        allocations = torch.cuda.memory_stats()["allocation.all.allocated"]
+        for _ in range(4):
+            graph.replay()
+        torch.cuda.synchronize()
+        assert torch.cuda.memory_stats()["allocation.all.allocated"] == allocations
+        torch.testing.assert_close(output.cpu().double(), actual, rtol=0, atol=0)
+
+
+@torch.no_grad()
+def test_hgemm_never_stores_half_result_or_accumulates_in_half():
+    from b12x.preparation import PreparationSession
+
+    _require_v100()
+    weight, _, _, _ = _weight("tensor_fp8", 384, 5120)
+    weight.packed.values.view(torch.uint8).fill_(0x68)  # E4M3 64.
+    weight.packed.output_scale.fill_(1.)
+    weight.input_scale.fill_(1.)
+    source = torch.full((17, 5120), 64., device="cuda")
+    output = torch.empty((17, 384), device="cuda")
+    with PreparationSession(device=source.device, autotune=False, compile_workers=0) as session:
+        operation = sm70.TensorFP8Projection(source, weight, output, session=session, name="hgemm-range")
+        operation(source)
+        torch.testing.assert_close(output, torch.full_like(output, 20971520.), rtol=0, atol=0)

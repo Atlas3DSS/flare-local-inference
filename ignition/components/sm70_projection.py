@@ -1,11 +1,12 @@
-"""SM70 packed projections with fused small-row GEMV and bounded FP32 cuBLAS tiles.
+"""SM70 packed projections with fused GEMV and bounded mixed-precision cuBLAS tiles.
 
 V100 cannot multiply BF16 or FP8 operands. Conversion to FP32 preserves every
 BF16/FP16 value, including BF16 values outside FP16's range. NVFP4 uses the
 existing weight-only arithmetic: E2M1 times its E4M3 block scale, an FP32 dot,
 then the checkpoint global scale. Tensor-FP8 retains calibrated activation
 rounding to E4M3 and applies the combined scale after the dot. Weights remain
-packed; serialized projections reuse caller-owned expansion scratch.
+packed; serialized projections reuse caller-owned expansion scratch. Tensor-FP8
+prefill uses exact FP16 operands with FP32 accumulation and result storage.
 """
 
 from __future__ import annotations
@@ -57,12 +58,16 @@ def _tiles(query):
     if query.kind != "dense" and query.rows <= 4:
         return tuple(("gemv", bn, bk) for bn, bk in
                      ((4, 512), (2, 256), (2, 512), (4, 256), (8, 256), (8, 512)))
-    return tuple(("fp32", width) for width in
+    fp32 = tuple(("fp32", width) for width in
                  dict.fromkeys(min(query.out_features, width) for width in (256, 1024)))
+    if query.kind == "tensor_fp8":
+        return tuple(("hgemm", width) for width in
+                     dict.fromkeys(min(query.out_features, width) for width in (1024, 2048, 4096))) + fp32
+    return fp32
 
 
 CONTRACT = native_contract(component_id=COMPONENT, query_type=ProjectionQuery, tactics=_tiles,
-                           semantic_version=3)
+                           semantic_version=4)
 
 
 def _scratch_shapes(query, tactic):
@@ -73,15 +78,16 @@ def _scratch_shapes(query, tactic):
 
 
 def workspace_bytes(query, tactic):
-    return sum((rows * columns * 4 + 255) // 256 * 256
-               for rows, columns in _scratch_shapes(query, tactic))
+    return sum((rows * columns * (2 if tactic[0] == "hgemm" and index < 2 else 4) + 255) // 256 * 256
+               for index, (rows, columns) in enumerate(_scratch_shapes(query, tactic)))
 
 
 def _scratch_views(query, tactic, workspace):
     views, offset = [], 0
     for rows, columns in _scratch_shapes(query, tactic):
-        size = rows * columns * 4
-        views.append(workspace[offset:offset + size].view(torch.float32).view(rows, columns))
+        dtype = torch.float16 if tactic[0] == "hgemm" and len(views) < 2 else torch.float32
+        size = rows * columns * dtype.itemsize
+        views.append(workspace[offset:offset + size].view(dtype).view(rows, columns))
         offset += (size + 255) // 256 * 256
     return views
 
@@ -140,9 +146,10 @@ def _expand_nvfp4(program, values, scales, output, start, stop, query):
     program[(triton.cdiv((stop - start) * query.in_features, 256), 1, 1)](values, scales, output, start)
 
 
-def _project(query, tile, expansion, source, values, scales, gain, input_scale, output, workspace, bias):
+def _project(query, tactic, expansion, source, values, scales, gain, input_scale, output, workspace, bias):
     """All temporary allocations are bounded by a tile and captured before serving."""
-    inputs, expanded, product = _scratch_views(query, ("fp32", tile), workspace)
+    tile = tactic[1]
+    inputs, expanded, product = _scratch_views(query, tactic, workspace)
     if query.kind == "tensor_fp8":
         inputs.copy_((source.float() / input_scale).clamp(-448, 448).to(torch.float8_e4m3fn))
     else:
@@ -157,7 +164,12 @@ def _project(query, tile, expansion, source, values, scales, gain, input_scale, 
             weight.copy_(values[start:stop, :query.in_features].view(torch.float8_e4m3fn))
         else:
             weight.copy_(values.view(getattr(torch, query.weight_dtype))[start:stop, :query.in_features])
-        torch.mm(inputs, weight.T, out=result)
+        if tactic[0] == "hgemm":
+            # CUDA_R_16F operands, CUDA_R_32F C, CUBLAS_COMPUTE_32F.
+            # Warmup owns cuBLAS's per-stream workspace through capture/export.
+            torch.mm(inputs, weight.T, out_dtype=torch.float32, out=result)
+        else:
+            torch.mm(inputs, weight.T, out=result)
         if gain is not None:
             if query.global_scale_kind == "reciprocal":
                 result.div_(gain)
@@ -318,7 +330,7 @@ class PreparedProjection:
             self.gemv[(triton.cdiv(self.query.out_features, self.tactic[1]), 1, 1)](
                 source, values, scales, gain, bias, destination, source.stride(0), output.stride(0))
             return output
-        return _project(self.query, self.tile, self.expansion, source, values, scales, gain, input_scale,
+        return _project(self.query, self.tactic, self.expansion, source, values, scales, gain, input_scale,
                         output, workspace, bias)
 
 
@@ -387,6 +399,9 @@ class _Projection:
             return tuple(jobs)
 
         def materialize(tactic):
+            if tactic[0] == "hgemm":
+                torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
+                torch.backends.cuda.matmul.allow_fp16_accumulation = False
             expansion, gemv = None, None
             programs = []
             if query.kind == "nvfp4":
