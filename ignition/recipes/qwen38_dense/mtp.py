@@ -7,7 +7,9 @@ import torch.nn.functional as F
 
 from ignition.components.embedding import PreparedEmbedding
 from ignition.components.linear import QuantizedProjection, UnquantizedProjection
-from ignition.components.sm70_attention import PreparedAttention, PreparedWriter
+from ignition.components import sm70_decode_attention as decode_attention
+from ignition.components.sm70_attention import PreparedWriter
+from ignition.components.sm70_decode_attention import DecodeAgents, PreparedDecodeAttention
 from ignition.components.sm70_precision import apply_rotary, round_bf16
 from ignition.components.sm70_norm import PreparedRMSNorm
 from ignition.components.vocabulary import PreparedVocabularyProjection
@@ -126,14 +128,25 @@ class MTPAttention:
             weights.tensors[prefix + "q_norm.weight"], self.query, text["rms_norm_eps"],
             session=session, name=name + ".q_norm")
         self.attended, self.output = zeros(self.heads * self.dim), zeros(weights.config.hidden)
-        self.lengths = torch.zeros_like(metadata.lengths)
         for field, inputs, output in (("q_proj", source, self.qg),
                                       ("o_proj", self.attended, self.output)):
             self.projections[field] = _projection(inputs, weights.tensors[prefix + field + ".weight"],
                 output, session=session, name=name + "." + field, workspace=workspace, row_invariant=True)
-        self.attention = PreparedAttention(self.query, key_cache, value_cache, metadata.page_table,
-            self.lengths, metadata.query_start_loc, self.attended.view_as(self.query), session=session,
-            name=name + ".attention")
+        # astra-13: the draft steps read the draft planes through the reviewed Sol-13c S1L decode attention (raw BF16,
+        # variant R_cap | 128, unchanged kernel) instead of the scalar Triton sweep. A round's draft metadata is b agents
+        # x one row (lengths 0/1, packed cu); the shifted draft page table (contract page_offset=1) is an ordinary
+        # logical-to-physical map indexed pages[agent][position >> 7], as in the target layers. Same admission as the
+        # target decoder (--context 32768): refused at preparation, never a silent fallback.
+        agents, blocks = metadata.page_table.shape
+        if (blocks * PAGE_TOKENS > decode_attention.MAX_LENGTH or not 1 <= agents <= decode_attention.AGENTS
+                or tokens % agents or not 1 <= tokens // agents <= decode_attention.MAX_ROWS_PER_AGENT):
+            raise ValueError(f"dense MTP draft attention: {tokens} rows over {agents} requests with a "
+                             f"{blocks * PAGE_TOKENS}-token page table is outside the SM70 decode attention contract "
+                             f"(prepare with --context 32768)")
+        self.agents = DecodeAgents.allocate(tokens, blocks, source.device)
+        self.attention = PreparedDecodeAttention(self.query, key_cache, value_cache, self.agents,
+            self.attended.view_as(self.query), session=session, name=name + ".attention", workspace=workspace,
+            rows_per_agent=tokens // agents)
 
     def __call__(self, source, position_embeddings):
         w, m = self.weights.tensors, self.metadata
@@ -156,7 +169,8 @@ class MTPAttention:
         self.writer()
         if self.cache_only:
             return None
-        self.lengths.copy_(torch.where(m.lengths > 0, m.starts + m.lengths, 0))
+        # Four-agent view of this draft step (lengths = starts + 1 for live agents, 0 otherwise; pages -1 for padding).
+        self.agents.pack(m.lengths, m.starts, m.query_start_loc, m.page_table)
         self.attention()
         self.attended.copy_(round_bf16(round_bf16(self.attended)
             * round_bf16(gate.reshape_as(self.attended).sigmoid())))

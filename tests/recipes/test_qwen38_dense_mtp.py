@@ -14,9 +14,11 @@ from ignition.recipes.qwen38_dense.config import ModelConfig
 from ignition.recipes.qwen38_dense.mtp_weights import MTPWeights, tensor_shapes, validate_checkpoint
 
 
-def _config(*, full=False):
+def _config(*, full=False, attention=False):
+    # attention=True: the real attention geometry (24 q / 4 KV heads, head_dim 256) that the SM70 S1L draft attention
+    # admits, with a toy hidden size and vocabulary.
     hidden, intermediate, dim, heads, kvheads, vocabulary = (
-        (5120, 17408, 256, 24, 4, 248320) if full else (32, 64, 8, 4, 2, 64))
+        (5120, 17408, 256, 24, 4, 248320) if full else (32, 64, 256, 24, 4, 64) if attention else (32, 64, 8, 4, 2, 64))
     return ModelConfig(dict(hidden_size=hidden, intermediate_size=intermediate, head_dim=dim,
         num_attention_heads=heads, num_key_value_heads=kvheads, vocab_size=vocabulary,
         mtp_num_hidden_layers=1, mtp_use_dedicated_embeddings=False, rms_norm_eps=1e-6,
@@ -106,13 +108,16 @@ def _attend(query, key, value, pages, lengths, cu):
     return output
 
 
-class _Attention:
-    def __init__(self, query, key, value, pages, lengths, cu, output, **kwargs):
-        self.args, self.output = (query, key, value, pages, lengths, cu), output
+class _DecodeAttention:
+    """CPU stand-in for the SM70 S1L draft attention: reads the real four-agent DecodeAgents packing."""
+
+    def __init__(self, query, key, value, agents, output, *, rows_per_agent, **kwargs):
+        self.args, self.agents, self.output, self.rows_per_agent = (query, key, value), agents, output, rows_per_agent
 
     def __call__(self):
-        query, key, value, pages, lengths, cu = self.args
-        self.output.copy_(_attend(query, key.view(torch.bfloat16), value.view(torch.bfloat16), pages, lengths, cu))
+        query, key, value = self.args
+        a = self.agents
+        self.output.copy_(_attend(query, key.view(torch.bfloat16), value.view(torch.bfloat16), a.pages, a.lengths, a.cu))
 
 
 @pytest.fixture
@@ -120,7 +125,7 @@ def cpu_primitives(monkeypatch):
     monkeypatch.setattr(torch.cuda, "_lazy_init", lambda: pytest.fail("CPU test initialized CUDA"))
     for name, replacement in (("UnquantizedProjection", _Projection), ("PreparedEmbedding", _Embedding),
                               ("PreparedVocabularyProjection", _Vocabulary), ("PreparedWriter", _Writer),
-                              ("PreparedAttention", _Attention), ("PreparedRMSNorm", _RMSNorm)):
+                              ("PreparedDecodeAttention", _DecodeAttention), ("PreparedRMSNorm", _RMSNorm)):
         monkeypatch.setattr(mtp, name, replacement)
 
 
@@ -237,6 +242,11 @@ def test_feedback_decoder_and_cache_only_match_bf16_reference(cpu_primitives):
         assert not torch.equal(output.hidden, output.residual)
         # Recursive proposals consume final normalized hidden, same as target input.
         hidden.copy_(output.hidden)
+    # Four-agent packing of the draft metadata: two live agents (starts + query lengths), two padded agents.
+    agents = operation.attention.agents
+    assert agents.lengths.tolist() == [129, 2, 0, 0] and agents.cu.tolist() == [0, 2, 4, 4, 4]
+    assert agents.pages[2:].eq(-1).all() and torch.equal(agents.pages[:2], metadata.page_table)
+    assert operation.attention.attention.rows_per_agent == 3
     absorbed_key, absorbed_value = initial_k.view(torch.uint16).clone(), initial_v.view(torch.uint16).clone()
     absorption = mtp.PreparedMTP(weights, scratch, ids, hidden, metadata, absorbed_key, absorbed_value, None,
         output_indices=indices, session=None, name="absorb", cache_only=True, mode="prefill")
@@ -245,6 +255,23 @@ def test_feedback_decoder_and_cache_only_match_bf16_reference(cpu_primitives):
     operation()
     assert absorption() is None
     assert torch.equal(absorbed_key, key) and torch.equal(absorbed_value, value)
+
+
+def test_draft_attention_admission_matches_the_target_decoder(cpu_primitives):
+    """The draft attention takes the target decoder's S1L admission: <= 32,768 tokens, <= 4 agents, <= 5 rows each."""
+    config, weights = _config(), _weights(_config())
+    for tokens, agents, blocks in ((6, 2, 257), (6, 1, 2), (10, 5, 2), (5, 2, 2)):
+        scratch = mtp.MTPScratch.allocate(tokens, 1, config, "cpu")
+        metadata = SimpleNamespace(positions=torch.zeros(tokens, dtype=torch.int64),
+            starts=torch.zeros(agents, dtype=torch.int64), lengths=torch.zeros(agents, dtype=torch.int32),
+            query_start_loc=torch.zeros(agents + 1, dtype=torch.int32),
+            page_table=torch.full((agents, blocks), -1, dtype=torch.int32),
+            token_page_table=torch.full((tokens, blocks), -1, dtype=torch.int32))
+        cache = torch.zeros((4, 128, 2, 8), dtype=torch.uint16)
+        with pytest.raises(ValueError, match="SM70 decode attention contract"):
+            mtp.PreparedMTP(weights, scratch, torch.zeros(tokens, dtype=torch.int64),
+                torch.zeros((tokens, config.hidden)), metadata, cache, cache.clone(), None,
+                output_indices=torch.zeros(1, dtype=torch.int64), session=None, name="admission")
 
 
 def test_scratch_views_and_feedback_alias_rejected(cpu_primitives):
@@ -270,13 +297,14 @@ def test_dense_mtp_compiles_and_replays_with_existing_sm70_operators():
     if torch.cuda.get_device_capability() != (7, 0):
         pytest.skip("requires V100")
     device = torch.device("cuda", torch.cuda.current_device())
-    config, cpu_weights = _config(), _weights(_config())
+    # astra-13: the draft attention is the SM70 S1L decode attention, which admits only the real attention geometry.
+    config, cpu_weights = _config(attention=True), _weights(_config(attention=True))
     weights, metadata = _weights(config, device), _metadata(device)
     ids_cpu, indices_cpu = torch.tensor([2, 3, 4, 5, -200, 999999]), torch.tensor([1, 3])
     ids, indices = ids_cpu.to(device), indices_cpu.to(device)
     torch.manual_seed(3880)
     hidden = torch.randn((6, config.hidden)).bfloat16().float().to(device)
-    initial = torch.zeros((4, 128, 2, 8), dtype=torch.bfloat16)
+    initial = torch.zeros((4, 128, 4, 256), dtype=torch.bfloat16)
     key, value = initial.view(torch.uint16).to(device), initial.view(torch.uint16).to(device)
     scratch = mtp.MTPScratch.allocate(6, 2, config, device)
     workspace = ScratchArena(device)
