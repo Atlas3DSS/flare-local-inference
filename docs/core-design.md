@@ -466,9 +466,14 @@ participate in the decision.
 For text requests, admission reserves the prompt and one page of output. The
 output limit bounds generation without reserving all of its potential history.
 Reservations grow a page ahead of decode rounds, evicting unpinned prefix pages
-first; admission waits while pages are short. When a running request still cannot
-continue, the newest eligible decoder publishes its terminal checkpoint when
-backing allows and is readmitted with its history and remaining output budget.
+first; admission waits while pages are short. A waiting request is retried when a
+GPU fence completes, when pages, snapshots or request slots are freed, or when the
+worker releases a checkpoint pin (a finished host-store copy-out or a readmission
+pin): a released pin makes cached pages evictable without changing any free count,
+and with nothing running it is the only event that can reopen admission. When a
+running request still cannot continue, the newest eligible decoder publishes its
+terminal checkpoint when backing allows and is readmitted with its history and
+remaining output budget.
 The checkpoint restores all declared continuation state; eviction can instead
 require recomputing the history, and recomputing generated tokens with prefill
 graphs changes their state bits. The checkpoint is therefore pinned until

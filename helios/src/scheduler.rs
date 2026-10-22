@@ -122,6 +122,18 @@ pub struct SchedulerStats {
     pub conversation_pin_releases: u64,
 }
 
+/// See `RequestScheduler::admission_key`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AdmissionKey {
+    completed: Fence,
+    free_pages: usize,
+    free_snapshots: usize,
+    free_slots: usize,
+    /// Checkpoint pins the worker released (host-store copy-outs, readmissions). A released
+    /// pin makes cached pages evictable without changing any count above.
+    pin_releases: u64,
+}
+
 #[derive(Clone)]
 pub struct RequestSpec {
     pub prompt: Vec<u32>,
@@ -558,6 +570,8 @@ pub struct RequestScheduler {
     track_publications: bool,
     publications: Vec<CheckpointId>,
     admissions: u64,
+    /// Pins released through `unpin_checkpoint` and `release_readmission`; see `admission_key`.
+    pin_releases: u64,
 }
 
 impl RequestScheduler {
@@ -632,6 +646,7 @@ impl RequestScheduler {
             track_publications: false,
             publications: Vec::new(),
             admissions: 0,
+            pin_releases: 0,
         })
     }
 
@@ -946,6 +961,24 @@ impl RequestScheduler {
     pub fn free_snapshot_count(&self) -> usize {
         self.free_snapshots.len()
     }
+    /// Resources whose change may let a request that found no capacity be admitted: completed
+    /// GPU work; free pages, snapshots and request slots; and checkpoint pins the worker
+    /// released (`unpin_checkpoint`, `release_readmission`). A released pin makes cached pages
+    /// evictable without changing any free count; once nothing runs, no fence completes, so
+    /// without it a refused request would wait forever. The scheduler's own releases
+    /// (conversation pins, retiring prefixes, readmission pins under page pressure, restore
+    /// tickets) happen in transitions that complete a fence or free pages, snapshots or
+    /// slots, or in an admission attempt that evicts everything they stop protecting.
+    pub fn admission_key(&self) -> AdmissionKey {
+        let stats = self.stats();
+        AdmissionKey {
+            completed: self.completed,
+            free_pages: stats.free_pages,
+            free_snapshots: stats.free_snapshots,
+            free_slots: stats.free_slots,
+            pin_releases: self.pin_releases,
+        }
+    }
     pub fn has_available_slot(&self) -> bool {
         self.slots.iter().any(|slot| {
             slot.request.is_none() && !slot.retiring && slot.generation < i64::MAX as u64
@@ -1125,6 +1158,7 @@ impl RequestScheduler {
         if let Some(index) = self.readmission_pins.iter().position(|pin| *pin == id) {
             self.readmission_pins.remove(index);
             self.cache.unpin(id)?;
+            self.pin_releases += 1;
         }
         Ok(())
     }
@@ -1633,7 +1667,9 @@ impl RequestScheduler {
     }
 
     pub fn unpin_checkpoint(&mut self, id: CheckpointId) -> Result<()> {
-        self.cache.unpin(id)
+        self.cache.unpin(id)?;
+        self.pin_releases += 1;
+        Ok(())
     }
 
     pub fn record_host_lookup(&mut self) {
@@ -2406,6 +2442,8 @@ mod cache_memory;
 
 #[cfg(test)]
 mod boundary_tests;
+#[cfg(test)]
+mod progress_tests;
 #[cfg(test)]
 pub(crate) mod tests;
 

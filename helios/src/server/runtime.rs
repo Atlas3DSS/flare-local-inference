@@ -138,8 +138,8 @@ struct Incoming {
     host_lookup: bool,
     /// Admitted once already, so the admission counter is not advanced again.
     readmitted: bool,
-    /// Retry capacity admission only after the scheduler's resources change.
-    blocked: Option<(crate::cache::Fence, usize, usize, usize)>,
+    /// Retry capacity admission only after the scheduler's admission key changes.
+    blocked: Option<crate::scheduler::AdmissionKey>,
 }
 impl Incoming {
     fn notify_admission(&self, result: Result<()>) {
@@ -1098,13 +1098,7 @@ impl<'a> Worker<'a> {
             }
         }
         while self.scheduler.has_available_slot() {
-            let stats = self.scheduler.stats();
-            let resources = (
-                self.scheduler.completed(),
-                stats.free_pages,
-                stats.free_snapshots,
-                stats.free_slots,
-            );
+            let resources = self.scheduler.admission_key();
             let eligible = |incoming: &Incoming| incoming.blocked != Some(resources);
             let parked = self
                 .parked
