@@ -63,6 +63,10 @@ forwards inside completed speculative graphs; verification steps count completed
 speculative graphs. Copy-only proposals contribute no drafter steps. Mean draft
 acceptance length is accepted draft tokens per progressing request round with
 at least one offered draft, excluding the bonus token and width-one rounds.
+DEPTH is allocated draft positions per progressing decode or verification request
+round, including zero-draft rounds. Packed rounds contribute their allocated
+per-request prefixes; the graph's maximum width and padded batch size do not
+determine this average. Rejected drafts count toward depth.
 The display also shows active/queued requests, completed/failed requests, reused
 tokens, and cached/free KV pages. Token counters are available through `/metrics`.
 

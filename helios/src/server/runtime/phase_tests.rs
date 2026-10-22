@@ -430,6 +430,9 @@ fn worker_observes_prefill_decode_and_prerequisite_timings() {
         frame.timing.wall_ns = 350;
         worker.complete(kind, frame).unwrap();
         assert_eq!(worker.scheduler.estimated_duration_ns(&step), Some(619));
+        let metrics = fixture.metrics.snapshot(false);
+        assert_eq!(metrics.verification_drafts, 0);
+        assert_eq!(metrics.verification_rounds, u64::from(kind == GraphKind::Decode));
     }
 }
 
@@ -903,6 +906,8 @@ fn speculative_dashboard_counts_live_rounds_and_batched_forward_passes() {
                 .is_err()
         );
         assert_eq!(fixture.metrics.snapshot(!copy).generated_tokens, 1);
+        assert_eq!(fixture.metrics.snapshot(!copy).verification_rounds, 0);
+        assert_eq!(fixture.metrics.snapshot(!copy).verification_drafts, 0);
         worker.complete(GraphKind::Speculative, frame).unwrap();
         let profile = worker
             .scheduler
@@ -916,9 +921,88 @@ fn speculative_dashboard_counts_live_rounds_and_batched_forward_passes() {
         let metrics = fixture.metrics.snapshot(!copy);
         assert_eq!((metrics.prefill_tokens, metrics.generated_tokens), (13, 4));
         assert_eq!((metrics.accepted_drafts, metrics.draft_rounds), (2, 1));
+        assert_eq!((metrics.verification_drafts, metrics.verification_rounds), (3, 1));
         assert_eq!(metrics.verify_steps, 1);
         assert_eq!(metrics.draft_steps, if copy { 0 } else { 3 });
     }
+}
+
+#[test]
+fn packed_dashboard_depth_uses_allocated_prefixes_and_live_request_count() {
+    use crate::model::contract::{GraphOperation, ValueSource};
+    let mut fixture = Fixture::new();
+    fixture.config.speculative_widths = (1..=8).collect();
+    let mut manifest = crate::model::testing::manifest(&fixture.config);
+    let name = "Speculative-4-8";
+    let graph = manifest.graphs.iter_mut().find(|g| g.name == name).unwrap();
+    graph.kind = GraphKind::PackedSpeculative;
+    graph.draft_tokens = 7;
+    graph.packed_token_capacity = 9;
+    let contract = fixture.config.contract.graphs.iter_mut().find(|g| g.graph == name).unwrap();
+    contract.kind = GraphOperation::PackedSpeculative;
+    for input in &mut contract.inputs {
+        if input.source == ValueSource::QueryLength {
+            input.source = ValueSource::SpeculativePrefixLimit;
+        }
+    }
+    let mut scheduler = RequestScheduler::new(fixture.config.identity, fixture.config.limits,
+        crate::model::scheduler_capabilities(&fixture.config)).unwrap();
+    let graphs: Vec<_> = manifest.graphs.iter().filter(|g|
+        g.kind != GraphKind::Speculative || g.token_capacity == 1).cloned().map(|mut g| {
+            g.estimated_duration_ns = match g.kind {
+                GraphKind::Speculative | GraphKind::Decode => 100_000,
+                GraphKind::PackedSpeculative => 10_000,
+                _ => 100,
+            };
+            g
+        }).collect();
+    scheduler.measured_graph_durations(&graphs).unwrap();
+    scheduler.enable_speculation(&(1..=8).collect::<Vec<_>>()).unwrap();
+    scheduler.split_speculation(8).unwrap();
+    let (sender, receiver) = mpsc::channel();
+    let mut generations = Vec::new();
+    for token in 0..3 {
+        let (incoming, generation) = fixture.incoming(vec![token; 13], 16);
+        sender.send(vec![incoming]).unwrap();
+        generations.push(generation);
+    }
+    let mut worker = Worker::new(&fixture.config, &fixture.frontend, &fixture.stop,
+        &fixture.metrics, scheduler, receiver, 4);
+    worker.inputs = Some(crate::model::Inputs::new(&fixture.config, &manifest).unwrap());
+    assert_eq!(worker.admit().unwrap(), ControlFlow::Continue(true));
+    let mut sequence = 0;
+    let step = loop {
+        sequence += 1;
+        assert!(sequence < 20);
+        let (plan, _) = worker.plan(0).unwrap();
+        let step = plan.unwrap();
+        worker.reserve_and_pack(&step, Fence(sequence)).unwrap();
+        if step.kind == GraphKind::PackedSpeculative { break step; }
+        let frame = completion(&worker, &step, sequence, step.kind.is_prefill().then_some(0));
+        worker.complete(step.kind, frame).unwrap();
+    };
+    assert_eq!((step.batch_capacity, step.token_capacity, step.lanes.len()), (4, 8, 3));
+    let mut frame = completion(&worker, &step, sequence, Some(1));
+    frame.proposal_confidence = Some([[0.5; 7]; crate::execution::REQUEST_LANES]);
+    for (lane, offered) in step.lanes.iter().zip([5, 1, 0]) {
+        let record = &mut frame.records[lane.request.slot as usize];
+        record.consumed_tokens = lane.start_position as i64 + 1;
+        record.vector = Some(crate::execution::TokenVector {
+            emitted_count: 1, offered_drafts: offered, accepted_drafts: 0,
+            verification_width: 8, draft_cache_consumed: lane.start_position as i64,
+            tokens: [1, -1, -1, -1, -1, -1, -1, -1], ..Default::default()
+        });
+    }
+    worker.complete(GraphKind::PackedSpeculative, frame).unwrap();
+    let metrics = fixture.metrics.snapshot(true);
+    assert_eq!((metrics.verification_drafts, metrics.verification_rounds), (6, 3));
+    assert_eq!((metrics.accepted_drafts, metrics.draft_rounds), (0, 2));
+    assert_eq!((metrics.draft_steps, metrics.verify_steps), (7, 1));
+    let start = std::time::Instant::now();
+    let mut history = super::super::dashboard::History::new(start, Default::default());
+    history.sample(start + std::time::Duration::from_secs(1), metrics);
+    assert_eq!(history.rates().depth, Some(2.0));
+    assert_eq!(history.rates().acceptance, Some(0.0));
 }
 
 #[test]
@@ -2203,7 +2287,7 @@ async fn metrics_route_serves_prometheus_or_json_without_the_api_key() {
     use std::io::{Read, Write};
     let (sender, _receiver) = mpsc::sync_channel(4);
     let state = http_state(sender, Some("serving-key".into()));
-    state.model.metrics().progress(10, 3, 0, 0);
+    state.model.metrics().progress(10, 3, 0, 0, 0, 0);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let router = super::super::router(state, &[], 65536);

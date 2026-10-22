@@ -220,7 +220,8 @@ instantaneous gauges.
 | `decode_weight_bytes` | Bytes of weights one decode step reads for one request, as the package's recipe declares for its checkpoint; zero when undeclared. Times verification steps per second it is the weight bandwidth the model consumes, shown as WEIGHTS on the dashboards | `flare_decode_weight_bytes` |
 | `draft_steps` | Draft positions run by the learned drafter; zero without one | none |
 | `verify_steps` | Completed speculative or verification graphs | sum of `flare_speculative_rounds_total` |
-| `verification_drafts` | Draft positions verified: verification width minus one per graph | sum of `flare_speculative_rounds_total` × (`width` − 1) |
+| `verification_drafts` | Draft positions allocated for progressing request rounds, including rejected drafts and excluding padding | `flare_verification_draft_tokens_total` |
+| `verification_rounds` | Progressing decode or verification request rounds, including zero-draft rounds | `flare_verification_request_rounds_total` |
 | `accepted_drafts` | Accepted draft tokens, excluding the bonus token | `flare_accepted_draft_tokens_total` |
 | `draft_rounds` | Request rounds that offered at least one draft | `flare_draft_request_rounds_total` |
 | `active` | Model slots with a live request | `flare_active_requests` |
@@ -242,6 +243,13 @@ instantaneous gauges.
 | `host_bytes_out` | Bytes copied from GPU checkpoints to the host store | `flare_host_cache_bytes_out_total` |
 | `host_bytes_in` | Bytes copied from the host store into GPU pages and rows | `flare_host_cache_bytes_in_total` |
 | `learned_drafter` | Boolean: the model has a learned drafter | none |
+
+Dashboard DEPTH is the change in `verification_drafts` divided by the change in
+`verification_rounds` over the sampling window. It averages each request's planned
+draft-prefix length, including zero-draft rounds, rather than graph width or batch
+capacity. For packed speculation, completion records report the prefixes allocated
+on the GPU before target verification. Prefill, resume sampling, inactive padding,
+failed lanes, and terminal rounds without progress do not enter this average.
 
 ## Conversation and tool semantics
 

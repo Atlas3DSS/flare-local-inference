@@ -1319,10 +1319,13 @@ impl<'a> Worker<'a> {
         let mut prefill = 0;
         let mut accepted = 0;
         let mut draft_rounds = 0;
+        let mut verification_drafts = 0;
+        let mut verification_rounds = 0;
         if matches!(
             kind,
             GraphKind::Prefill
                 | GraphKind::ScoredPrefill
+                | GraphKind::Decode
                 | GraphKind::Speculative
                 | GraphKind::Verification
                 | GraphKind::PackedSpeculative
@@ -1343,9 +1346,11 @@ impl<'a> Worker<'a> {
                         .saturating_sub(live.consumed_tokens)
                         .min(lane.tokens as u64);
                 } else if record.generated_tokens > live.generated_tokens as i64 {
+                    verification_rounds += 1;
                     if let Some(vector) = record.vector {
                         let offered =
                             (vector.offered_drafts as usize).min(lane.tokens.saturating_sub(1));
+                        verification_drafts += offered as u64;
                         if offered > 0 {
                             accepted += (vector.accepted_drafts as usize).min(offered) as u64;
                             draft_rounds += 1;
@@ -1377,7 +1382,8 @@ impl<'a> Worker<'a> {
                     completion.speculative_survival.as_ref().map(|rows| rows.as_slice()))?
         };
         self.metrics
-            .progress(prefill, generated.len(), accepted, draft_rounds);
+            .progress(prefill, generated.len(), accepted, draft_rounds,
+                verification_drafts, verification_rounds);
         self.metrics.replay_completed(completion.timing);
         if prefill > 0 && self.store.is_some() {
             self.observe_prefill_rate(completion.fence, prefill);
