@@ -414,7 +414,11 @@ fn serve_peer(
     if let Some(records) = records
         && let Err(error) = records.join()
     {
-        eprintln!("Host prefix record service: {error}");
+        // The service could not confirm its drain, so its transfers may still
+        // use this rank's context and registered staging.
+        std::mem::forget(joined.transport);
+        std::mem::forget(owner);
+        return Err(format!("host prefix record service did not drain: {error}").into());
     }
     // The proxy stops before the package releases the region it posts from.
     drop(joined.transport);

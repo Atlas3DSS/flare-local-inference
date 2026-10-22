@@ -17,9 +17,12 @@
 use std::{
     collections::HashMap,
     io::{ErrorKind, Read, Write},
-    net::{TcpListener, TcpStream},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Condvar, Mutex,
+        mpsc::{Receiver, SyncSender, TrySendError, sync_channel},
+    },
     thread::JoinHandle,
     time::{Duration, Instant},
 };
@@ -52,6 +55,12 @@ const INTERNAL_JOBS: u64 = 1 << 63;
 const FRAME_LIMIT: usize = 64 << 20;
 const IDLE: Duration = Duration::from_millis(1);
 const BUSY: Duration = Duration::from_micros(100);
+/// Frames a connection may queue before a job fails instead of waiting.
+const BACKLOG: usize = 64;
+/// A peer answers its record handshake within this time.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+/// A job every rank accepted completes within this time, or its link is unusable.
+const JOB_TIMEOUT: Duration = Duration::from_secs(120);
 
 const HELLO: u8 = 1;
 const SUMMARY: u8 = 2;
@@ -231,9 +240,37 @@ impl<'a> Reader<'a> {
     }
 }
 
-/// One end of a record connection. Reads never block; a write waits for socket space.
-struct Link {
+/// Writes queued frames on one connection and records how many are still queued.
+#[derive(Default)]
+struct Outgoing {
+    state: Mutex<OutgoingState>,
+    changed: Condvar,
+}
+
+#[derive(Default)]
+struct OutgoingState {
+    queued: usize,
+    failure: Option<String>,
+}
+
+impl Outgoing {
+    fn lock(&self) -> std::sync::MutexGuard<'_, OutgoingState> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+/// One end of a record connection.
+///
+/// Reads never block. Writes go through a writer thread, so the model worker
+/// thread only enqueues a frame; a peer that stops reading fills the queue and
+/// fails the job instead of stalling the worker.
+pub(crate) struct Link {
     stream: TcpStream,
+    outgoing: Option<SyncSender<Vec<u8>>>,
+    writer: Option<JoinHandle<()>>,
+    queued: Arc<Outgoing>,
     received: Vec<u8>,
     /// Set once the connection failed or the other end closed it.
     broken: Option<Error>,
@@ -245,47 +282,157 @@ impl Link {
             .set_nodelay(true)
             .and_then(|()| stream.set_nonblocking(true))
             .map_err(|error| record::io_failure("configure a prefix record connection", error))?;
+        let writer_stream = stream
+            .try_clone()
+            .map_err(|error| record::io_failure("duplicate a prefix record connection", error))?;
+        let (sender, jobs) = sync_channel(BACKLOG);
+        let queued = Arc::new(Outgoing::default());
+        let progress = queued.clone();
+        let writer = std::thread::Builder::new()
+            .name("flare-offload-link".into())
+            .spawn(move || write_frames(writer_stream, jobs, progress))
+            .map_err(|error| invalid(format!("cannot start a prefix record writer: {error}")))?;
         Ok(Self {
             stream,
+            outgoing: Some(sender),
+            writer: Some(writer),
+            queued,
             received: Vec::new(),
             broken: None,
         })
     }
 
     fn fail(&mut self, error: Error) -> Error {
-        self.broken.get_or_insert(error).clone()
+        let error = self.broken.get_or_insert(error).clone();
+        // The peer must learn that this rank stopped driving it, so its own
+        // transfers drain instead of running on with no one to report to.
+        let _ = self.stream.shutdown(Shutdown::Both);
+        error
     }
 
-    fn send(&mut self, frame: &[u8]) -> Result<()> {
+    /// Queue a frame without waiting. Fails when the peer is not keeping up.
+    fn enqueue(&mut self, frame: &[u8]) -> Result<()> {
         if let Some(error) = &self.broken {
             return Err(error.clone());
         }
-        let mut sent = 0;
+        if frame.len() > FRAME_LIMIT {
+            return Err(self.fail(invalid("prefix record frame exceeds its limit")));
+        }
+        let mut state = self.queued.lock();
+        if let Some(failure) = &state.failure {
+            let error = invalid(failure.clone());
+            drop(state);
+            return Err(self.fail(error));
+        }
+        state.queued += 1;
+        drop(state);
+        let sender = self
+            .outgoing
+            .as_ref()
+            .ok_or_else(|| invalid("prefix record connection is closed"))?;
+        match sender.try_send(frame.to_vec()) {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(_)) => {
+                self.queued.lock().queued -= 1;
+                Err(self.fail(invalid(
+                    "prefix record connection backlog is full; the peer is not keeping up",
+                )))
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                self.queued.lock().queued -= 1;
+                Err(self.fail(invalid("prefix record connection closed")))
+            }
+        }
+    }
+
+    /// Queue a frame and wait until the writer has sent every queued frame.
+    fn send(&mut self, frame: &[u8]) -> Result<()> {
+        self.enqueue(frame)?;
+        self.drain_outgoing(REPLY_TIMEOUT)
+    }
+
+    /// Wait until nothing is queued, the writer failed, or `timeout` passes.
+    fn drain_outgoing(&mut self, timeout: Duration) -> Result<()> {
+        let deadline = Instant::now() + timeout;
+        let mut state = self.queued.lock();
+        loop {
+            if let Some(failure) = &state.failure {
+                let error = invalid(failure.clone());
+                drop(state);
+                return Err(self.fail(error));
+            }
+            if state.queued == 0 {
+                return Ok(());
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                drop(state);
+                return Err(self.fail(invalid("prefix record connection stalled")));
+            }
+            state = self
+                .queued
+                .changed
+                .wait_timeout(state, deadline - now)
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .0;
+        }
+    }
+}
+
+impl Drop for Link {
+    fn drop(&mut self) {
+        let _ = self.stream.shutdown(Shutdown::Both);
+        self.outgoing.take();
+        if let Some(writer) = self.writer.take() {
+            let _ = writer.join();
+        }
+    }
+}
+
+/// Write queued frames in order. A failure is recorded for the owner and the
+/// connection is shut down so the peer stops.
+fn write_frames(mut stream: TcpStream, jobs: Receiver<Vec<u8>>, progress: Arc<Outgoing>) {
+    for frame in jobs {
         let deadline = Instant::now() + REPLY_TIMEOUT;
+        let mut sent = 0;
+        let mut failure = None;
         while sent < frame.len() {
-            match self.stream.write(&frame[sent..]) {
+            match stream.write(&frame[sent..]) {
                 Ok(0) => {
-                    return Err(self.fail(invalid("prefix record connection closed")));
+                    failure = Some("prefix record connection closed".to_owned());
+                    break;
                 }
                 Ok(count) => sent += count,
                 Err(error) if error.kind() == ErrorKind::WouldBlock => {
                     if Instant::now() >= deadline {
-                        return Err(self.fail(invalid("prefix record connection stalled")));
+                        failure = Some("prefix record connection stalled".to_owned());
+                        break;
                     }
                     std::thread::sleep(BUSY);
                 }
                 Err(error) if error.kind() == ErrorKind::Interrupted => {}
                 Err(error) => {
-                    return Err(self.fail(record::io_failure(
-                        "send on a prefix record connection",
-                        error,
-                    )));
+                    failure = Some(format!("send on a prefix record connection: {error}"));
+                    break;
                 }
             }
         }
-        Ok(())
+        let mut state = progress.lock();
+        state.queued -= 1;
+        if failure.is_some() {
+            state.failure = failure;
+        }
+        let failed = state.failure.is_some();
+        drop(state);
+        progress.changed.notify_all();
+        if failed {
+            let _ = stream.shutdown(Shutdown::Both);
+            return;
+        }
     }
+}
 
+impl Link {
     /// The next complete frame, if one has arrived.
     fn receive(&mut self) -> Result<Option<(u8, Vec<u8>)>> {
         if let Some(error) = &self.broken {
@@ -369,6 +516,7 @@ struct Pending {
     path: Option<PathBuf>,
     /// The store a cleanup unlink belongs to, with the failure it reports.
     cleanup: Option<(JobId, Error)>,
+    started: Instant,
 }
 
 /// Rank zero's transport for a model whose ranks run as separate processes: rank zero's own
@@ -380,17 +528,21 @@ pub struct Sharded {
     events: Vec<TransportEvent>,
     next_internal: u64,
     closed: bool,
+    /// A job this transport accepted can no longer be accounted for. No event
+    /// follows: the ids and pins it holds must not be reused or released.
+    poison: Option<Error>,
 }
 
 impl Sharded {
-    fn new(local: Staged, peers: Vec<TcpStream>) -> Result<Self> {
+    fn new(local: Staged, peers: Vec<Link>) -> Result<Self> {
         Ok(Self {
             local,
-            peers: peers.into_iter().map(Link::new).collect::<Result<_>>()?,
+            peers,
             pending: HashMap::new(),
             events: Vec::new(),
             next_internal: INTERNAL_JOBS,
             closed: false,
+            poison: None,
         })
     }
 
@@ -398,13 +550,22 @@ impl Sharded {
         self.peers.len() + 1
     }
 
-    /// Begin tracking a job rank zero accepted, and send it to every peer.
+    /// Begin tracking a job rank zero accepted, and queue it for every peer.
+    ///
+    /// Queueing never waits for a peer: a peer that is not keeping up fails the
+    /// job, and a failed send stops the transport because that peer's state is
+    /// no longer known.
     fn begin(&mut self, kind: Kind, id: JobId, path: Option<PathBuf>, frame: &[u8]) {
         let mut results = vec![None; self.ranks()];
+        let mut broken = None;
         for (index, peer) in self.peers.iter_mut().enumerate() {
-            if let Err(error) = peer.send(frame) {
-                results[index + 1] = Some(Err(error));
+            if let Err(error) = peer.enqueue(frame) {
+                results[index + 1] = Some(Err(error.clone()));
+                broken.get_or_insert((index + 1, error));
             }
+        }
+        if let Some((rank, error)) = broken {
+            self.abandon(rank, error);
         }
         self.pending.insert(
             (kind, id),
@@ -413,11 +574,15 @@ impl Sharded {
                 results,
                 path,
                 cleanup: None,
+                started: Instant::now(),
             },
         );
     }
 
     fn record(&mut self, kind: Kind, id: JobId, rank: usize, result: Result<u64>) {
+        if self.poison.is_some() {
+            return;
+        }
         let Some(pending) = self.pending.get_mut(&(kind, id)) else {
             return;
         };
@@ -440,6 +605,21 @@ impl Sharded {
                 _ => None,
             });
         if let Some((store, error)) = pending.cleanup {
+            // A cleanup unlink that also failed leaves a file no index charges
+            // for; report it with the failure rather than discarding it.
+            let leftover =
+                pending
+                    .results
+                    .iter()
+                    .enumerate()
+                    .find_map(|(rank, result)| match result {
+                        Some(Err(failure)) => Some(format!("rank {rank}: {failure}")),
+                        _ => None,
+                    });
+            let error = match leftover {
+                Some(failure) => invalid(format!("{error}; cleanup unlink failed on {failure}")),
+                None => error,
+            };
             self.events.push(TransportEvent::Stored {
                 id: store,
                 result: Err(error),
@@ -487,7 +667,7 @@ impl Sharded {
             let sent = if rank == 0 {
                 self.local.unlink(id, path.clone())
             } else {
-                self.peers[rank - 1].send(&frame)
+                self.peers[rank - 1].enqueue(&frame)
             };
             results[rank] = sent.err().map(Err);
         }
@@ -496,6 +676,7 @@ impl Sharded {
             results,
             path: None,
             cleanup: Some((store, error)),
+            started: Instant::now(),
         };
         if pending.results.iter().all(Option::is_some) {
             self.finish(id, pending);
@@ -506,7 +687,7 @@ impl Sharded {
 
     fn absorb_local(&mut self) {
         let mut events = Vec::new();
-        self.local.poll(&mut events);
+        let _ = self.local.poll(&mut events);
         for event in events {
             let (kind, id, result) = Kind::of(&event);
             self.record(kind, id, 0, result);
@@ -538,24 +719,47 @@ impl Sharded {
         }
     }
 
-    /// Fail every job still waiting on a rank whose connection broke.
+    /// Stop reporting completions when a rank's connection breaks.
+    ///
+    /// The peer may still be copying into the ids of the jobs it already
+    /// received. Reporting those jobs as failed would return their pages and
+    /// state slot to the scheduler's free lists while the peer's transfer
+    /// thread is still writing them, so the transport stops instead and the
+    /// worker stops with it.
     fn abandon(&mut self, rank: usize, error: Error) {
-        let waiting: Vec<(Kind, JobId)> = self
-            .pending
-            .iter()
-            .filter(|(_, pending)| pending.results[rank].is_none())
-            .map(|(key, _)| *key)
-            .collect();
-        for (kind, id) in waiting {
-            self.record(kind, id, rank, Err(error.clone()));
+        if self.poison.is_none() {
+            self.poison = Some(invalid(format!(
+                "rank {rank}'s prefix record connection failed while jobs were outstanding: {error}"
+            )));
         }
     }
 
     fn accept(&self) -> Result<()> {
+        if let Some(error) = &self.poison {
+            return Err(error.clone());
+        }
         if self.closed {
             return Err(invalid("the sharded record transport is closed"));
         }
         Ok(())
+    }
+
+    /// Stop every link once a job outlives [`JOB_TIMEOUT`].
+    fn expire(&mut self) {
+        let Some((kind, id)) = self
+            .pending
+            .iter()
+            .find(|(_, pending)| pending.started.elapsed() >= JOB_TIMEOUT)
+            .map(|(key, _)| *key)
+        else {
+            return;
+        };
+        if self.poison.is_none() {
+            self.poison = Some(invalid(format!(
+                "a prefix record job ({kind:?} {}) did not complete within {JOB_TIMEOUT:?}",
+                id.0
+            )));
+        }
     }
 }
 
@@ -674,12 +878,25 @@ impl DiskTransport for Sharded {
         Ok(())
     }
 
-    fn poll(&mut self, events: &mut Vec<TransportEvent>) {
+    fn poll(&mut self, events: &mut Vec<TransportEvent>) -> Result<()> {
+        if let Some(error) = &self.poison {
+            events.clear();
+            self.events.clear();
+            return Err(error.clone());
+        }
         if !self.closed {
             self.absorb_local();
             self.absorb_peers();
+            self.expire();
+        }
+        if let Some(error) = &self.poison {
+            // Nothing completed here can be trusted to describe the peer's state.
+            events.clear();
+            self.events.clear();
+            return Err(error.clone());
         }
         events.append(&mut self.events);
+        Ok(())
     }
 
     /// Close every peer's transport and rank zero's, collecting the completions each reaches.
@@ -723,6 +940,11 @@ impl DiskTransport for Sharded {
             }
         }
         self.closed = true;
+        // A poisoned transport never confirms its drain: the caller retains it,
+        // and with it the registered staging its transfers may still use.
+        if let Some(error) = &self.poison {
+            return Err(error.clone());
+        }
         match failure {
             Some(error) => Err(error),
             None => Ok(()),
@@ -745,7 +967,7 @@ fn decode_closed(payload: &[u8]) -> Result<()> {
 pub(super) fn transport(
     staging: Option<super::slab::SlabPool>,
     transfers: Arc<Mutex<Transfers>>,
-    peers: Vec<TcpStream>,
+    peers: Vec<Link>,
 ) -> Result<Box<dyn DiskTransport>> {
     let local = Staged::new(staging, transfers, DiskThread::start("flare-offload-disk")?);
     Ok(Box::new(Sharded::new(local, peers)?))
@@ -757,16 +979,32 @@ pub(super) fn transport(
 /// A peer rank's record service: its staged transport, driven by rank zero over one connection.
 pub struct Service {
     thread: Option<JoinHandle<Result<()>>>,
+    finished: Receiver<Result<()>>,
+    /// What this rank joined with, for the startup report.
+    pub summary: String,
 }
 
 impl Service {
     /// Wait for rank zero to close the service, or for its connection to end.
+    ///
+    /// A rank zero that stays alive without closing cannot hold this rank's
+    /// shutdown open: after [`JOB_TIMEOUT`] the service is reported as not
+    /// drained, and its resources are retained by the caller.
     pub fn join(mut self) -> Result<()> {
-        match self.thread.take().map(JoinHandle::join) {
-            Some(Ok(result)) => result,
-            Some(Err(_)) => Err(invalid("the prefix record service panicked")),
-            None => Ok(()),
+        let result = match self.finished.recv_timeout(JOB_TIMEOUT) {
+            Ok(result) => result,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(invalid(
+                "rank zero did not close the prefix record service in time",
+            )),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                Err(invalid("the prefix record service ended without a result"))
+            }
+        };
+        if let Some(thread) = self.thread.take() {
+            // The service reports its result before it returns.
+            let _ = thread.join();
         }
+        result
     }
 }
 
@@ -774,23 +1012,33 @@ struct Peer {
     staged: Staged,
     directory: PathBuf,
     fingerprint: [u8; 16],
+    /// This rank's own cache geometry: every header rank zero sends must
+    /// describe the same plane and row sizes before any I/O starts.
+    geometry: Vec<super::geometry::CacheGeometry>,
     link: Link,
     /// Retains the record directory through every job.
     _lock: record::DirectoryLock,
 }
 
 impl Peer {
-    /// Rank zero's header with this rank's own layout fingerprint.
-    fn own(&self, mut header: Header) -> Header {
+    /// Rank zero's header with this rank's own layout fingerprint, after
+    /// checking that its sizes are this rank's sizes.
+    fn own(&self, mut header: Header) -> Result<Header> {
+        if !header.matches(&self.geometry) {
+            return Err(invalid(format!(
+                "record {} was described with a layout this rank does not have",
+                record::file_name(&header.key)
+            )));
+        }
         header.fingerprint = self.fingerprint;
-        header
+        Ok(header)
     }
 
     fn dispatch(&mut self, tag: u8, payload: &[u8]) -> Result<Option<(Kind, JobId, Error)>> {
         let mut reader = Reader(payload);
         let id = JobId(reader.u64()?);
         if tag == STORE {
-            let header = self.own(reader.header()?);
+            let header = self.own(reader.header()?)?;
             let temporary = file(&self.directory, reader.text()?)?;
             let path = file(&self.directory, reader.text()?)?;
             let slot = StateSlotId(reader.u32()?);
@@ -814,7 +1062,7 @@ impl Peer {
             let mut plan = Vec::with_capacity(segments);
             for _ in 0..segments {
                 let path = file(&self.directory, reader.text()?)?;
-                let header = self.own(reader.header()?);
+                let header = self.own(reader.header()?)?;
                 plan.push(FetchSegment {
                     path,
                     header,
@@ -854,7 +1102,7 @@ impl Peer {
 
     fn forward(&mut self) -> Result<()> {
         let mut events = Vec::new();
-        self.staged.poll(&mut events);
+        self.staged.poll(&mut events)?;
         for event in &events {
             let (kind, id, result) = Kind::of(event);
             self.link.send(&encode_event(kind, id, &result))?;
@@ -862,34 +1110,45 @@ impl Peer {
         Ok(())
     }
 
+    /// Drain the transport and report the outcome to rank zero.
+    ///
+    /// `Err` means the drain is unconfirmed: the caller must retain this peer,
+    /// and with it the registered staging its copy and I/O threads may use.
+    fn shutdown(&mut self) -> Result<()> {
+        let closed = self.staged.close();
+        let forwarded = self.forward();
+        let mut writer = Writer::new(CLOSED);
+        match &closed {
+            Ok(()) => writer.u8(1),
+            Err(error) => writer.u8(0).text(&error.to_string()),
+        };
+        let sent = self.link.send(&writer.finish());
+        closed.and(forwarded).and(sent)
+    }
+
+    /// Serve rank zero until it closes the connection or the link fails.
+    ///
+    /// Never closes the transport: `serve` owns that decision, so a transport
+    /// whose close did not confirm its drain is retained rather than dropped
+    /// underneath its copy and I/O threads.
     fn run(&mut self) -> Result<()> {
         loop {
             let mut progressed = false;
             loop {
                 match self.link.receive() {
                     Ok(None) => break,
-                    Ok(Some((CLOSE, _))) => {
-                        let closed = self.staged.close();
-                        self.forward()?;
-                        let mut writer = Writer::new(CLOSED);
-                        match &closed {
-                            Ok(()) => writer.u8(1),
-                            Err(error) => writer.u8(0).text(&error.to_string()),
-                        };
-                        self.link.send(&writer.finish())?;
-                        return closed;
-                    }
+                    Ok(Some((CLOSE, _))) => return Ok(()),
                     Ok(Some((tag, payload))) => {
                         progressed = true;
-                        if let Some((kind, id, error)) = self.dispatch(tag, &payload)? {
-                            self.link.send(&encode_event(kind, id, &Err(error)))?;
+                        match self.dispatch(tag, &payload) {
+                            Ok(Some((kind, id, error))) => {
+                                self.link.send(&encode_event(kind, id, &Err(error)))?
+                            }
+                            Ok(None) => {}
+                            Err(error) => return Err(error),
                         }
                     }
-                    Err(error) => {
-                        // Rank zero is gone: finish what this rank started and stop.
-                        let _ = self.staged.close();
-                        return Err(error);
-                    }
+                    Err(error) => return Err(error),
                 }
             }
             self.forward()?;
@@ -921,7 +1180,11 @@ fn serve(prepared: Prepared, link: Link) -> Result<()> {
     let pool = staging_pool
         .as_ref()
         .ok_or_else(|| invalid("a peer's prefix record service needs a staging pool"))?;
-    let transfers = Arc::new(Mutex::new(Transfers::start(&contexts, geometry, pool)?));
+    let transfers = Arc::new(Mutex::new(Transfers::start(
+        &contexts,
+        geometry.clone(),
+        pool,
+    )?));
     let staged = Staged::new(
         staging_pool,
         transfers,
@@ -931,10 +1194,23 @@ fn serve(prepared: Prepared, link: Link) -> Result<()> {
         staged,
         directory,
         fingerprint,
+        geometry,
         link,
         _lock: lock,
     };
-    peer.run()
+    let outcome = peer.run();
+    // Rank zero's CLOSE and a failed link both end the service, and both need
+    // the transport drained before its staging can be released.
+    let shutdown = peer.shutdown();
+    if shutdown.is_err() {
+        // The drain is unconfirmed: keep the transport, its transfer threads,
+        // its disk thread, and its registered staging alive together.
+        std::mem::forget(peer);
+    }
+    match outcome {
+        Err(error) => Err(error),
+        Ok(()) => shutdown,
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1091,22 +1367,16 @@ fn mirrored(prepared: &Prepared) -> Result<bool> {
     Ok(prepared.directory_lock.is_some())
 }
 
-fn nonce() -> [u8; 16] {
-    let mut hash = Blake2b::<U16>::new();
-    hash.update(std::process::id().to_le_bytes());
-    hash.update(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-            .to_le_bytes(),
-    );
+/// A fresh token that only the ranks of this launch know.
+///
+/// Failing here stops startup: a predictable token would let any host on the
+/// network claim a peer's record connection.
+fn nonce() -> Result<[u8; 16]> {
     let mut random = [0u8; 16];
-    if let Ok(mut source) = std::fs::File::open("/dev/urandom") {
-        let _ = source.read_exact(&mut random);
-    }
-    hash.update(random);
-    hash.finalize().into()
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut source| source.read_exact(&mut random))
+        .map_err(|error| record::io_failure("read a prefix record token", error))?;
+    Ok(random)
 }
 
 /// Rank zero, after its peers joined and before serving: agree with every peer on whether a disk
@@ -1121,36 +1391,88 @@ pub fn join_rank_zero(store: Option<&Shared>, peers: &mut [RankStream]) -> Resul
         Some(prepared) => mirrored(prepared)?,
         None => false,
     };
-    let local_ip = match peers.first() {
-        Some(RankStream::Tcp(stream)) => stream
-            .local_addr()
-            .map_err(|error| record::io_failure("inspect the rendezvous connection", error))?
-            .ip(),
-        _ => {
-            return Err(invalid(
+    // Each peer's own view of this rank: the local address of the rendezvous
+    // connection that peer opened, so a multi-homed rank zero is reachable
+    // from every peer on the interface that peer already uses.
+    let addresses = peers
+        .iter()
+        .map(|peer| match peer {
+            RankStream::Tcp(stream) => {
+                let remote = stream.peer_addr().map_err(|error| {
+                    record::io_failure("inspect a rendezvous connection", error)
+                })?;
+                let local = stream.local_addr().map_err(|error| {
+                    record::io_failure("inspect a rendezvous connection", error)
+                })?;
+                Ok((remote, local))
+            }
+            _ => Err(invalid(
                 "a multi-host prefix store requires TCP rank connections",
-            ));
-        }
-    };
+            )),
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let remote: Vec<SocketAddr> = addresses.iter().map(|(remote, _)| *remote).collect();
+    let local: Vec<SocketAddr> = addresses.iter().map(|(_, local)| *local).collect();
     let listener = if enabled {
+        let wildcard = match local.first().map(|local| local.is_ipv4()) {
+            Some(true) => SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
+            Some(false) => SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
+            None => return Err(invalid("a multi-host prefix store needs a peer rank")),
+        };
         Some(
-            TcpListener::bind((local_ip, 0))
+            TcpListener::bind(wildcard)
                 .map_err(|error| record::io_failure("listen for prefix record peers", error))?,
         )
     } else {
         None
     };
-    let token = nonce();
-    let mut offer = vec![enabled as u8];
-    if let Some(listener) = &listener {
-        let address = listener
-            .local_addr()
-            .map_err(|error| record::io_failure("inspect the prefix record listener", error))?;
-        offer.extend(token);
-        offer.extend(address.to_string().as_bytes());
+    let token = nonce()?;
+    let world = peers.len() + 1;
+    let layout = prepared
+        .as_ref()
+        .map(|prepared| super::geometry::fingerprint(&prepared.geometry));
+    let limit = prepared
+        .as_ref()
+        .map(|prepared| prepared.resolved.disk_limit);
+    let mut offers = vec![Vec::new()];
+    for peer_local in &local {
+        let mut offer = vec![enabled as u8];
+        if let Some(listener) = &listener {
+            let port = listener
+                .local_addr()
+                .map_err(|error| record::io_failure("inspect the prefix record listener", error))?
+                .port();
+            let address = SocketAddr::new(peer_local.ip(), port);
+            offer.extend(token);
+            offer.extend(layout.unwrap_or_default());
+            offer.extend(limit.unwrap_or_default().to_le_bytes());
+            offer.extend((address.to_string().len() as u32).to_le_bytes());
+            offer.extend(address.to_string().as_bytes());
+        }
+        offers.push(offer);
     }
-    let replies = rendezvous::share_records(peers, offer)?;
-    let peer_enabled: Vec<bool> = replies[1..].iter().map(|reply| reply == &[1]).collect();
+    let replies = rendezvous::share_records_each(peers, offers)?;
+    let mut peer_enabled = Vec::with_capacity(peers.len());
+    let mut limits = Vec::with_capacity(peers.len());
+    for (index, reply) in replies[1..].iter().enumerate() {
+        let enabled = reply.first() == Some(&1);
+        peer_enabled.push(enabled);
+        if enabled {
+            let mut reader = Reader(&reply[1..]);
+            let peer_layout = reader.take(16)?;
+            let peer_limit = reader.u64()?;
+            reader.end()?;
+            if let Some(layout) = layout
+                && peer_layout != layout
+            {
+                return Err(invalid(format!(
+                    "rank {} describes a different cache layout than rank zero; every rank of a multi-host package must have the same plane and row sizes",
+                    index + 1
+                )));
+            }
+            limits.push(peer_limit);
+        }
+    }
     if let Some(rank) = peer_enabled.iter().position(|&peer| peer != enabled) {
         return Err(invalid(format!(
             "rank {} {} a disk prefix store and rank zero {}; give every rank the same --prefix-cache-disk settings",
@@ -1162,21 +1484,26 @@ pub fn join_rank_zero(store: Option<&Shared>, peers: &mut [RankStream]) -> Resul
     let (Some(listener), Some(prepared)) = (listener, prepared) else {
         return Ok(None);
     };
-    let world = peers.len() + 1;
+    // The limit applies to every host's directory, so the smallest one bounds
+    // the records every host can hold.
+    if let Some(minimum) = limits.iter().copied().min() {
+        prepared.resolved.disk_limit = prepared.resolved.disk_limit.min(minimum);
+        prepared.disk_budget.set_limit(prepared.resolved.disk_limit);
+    }
     let mut links: Vec<Option<Link>> = (1..world).map(|_| None).collect();
     listener
         .set_nonblocking(true)
         .map_err(|error| record::io_failure("configure the prefix record listener", error))?;
     let deadline = Instant::now() + CONNECT_TIMEOUT;
     while links.iter().any(Option::is_none) {
+        if Instant::now() >= deadline {
+            return Err(invalid(
+                "peer ranks did not connect their prefix record connections",
+            ));
+        }
         let stream = match listener.accept() {
-            Ok((stream, _)) => stream,
+            Ok((stream, address)) => (stream, address),
             Err(error) if error.kind() == ErrorKind::WouldBlock => {
-                if Instant::now() >= deadline {
-                    return Err(invalid(
-                        "peer ranks did not connect their prefix record connections",
-                    ));
-                }
                 std::thread::sleep(IDLE);
                 continue;
             }
@@ -1184,16 +1511,24 @@ pub fn join_rank_zero(store: Option<&Shared>, peers: &mut [RankStream]) -> Resul
                 return Err(record::io_failure("accept a prefix record peer", error));
             }
         };
+        let (stream, address) = stream;
         let mut link = Link::new(stream)?;
-        let Ok(hello) = link.expect(HELLO, CONNECT_TIMEOUT) else {
+        let Ok(hello) = link.expect(HELLO, HANDSHAKE_TIMEOUT) else {
             continue;
         };
         let mut reader = Reader(&hello);
-        let (Ok(offered), Ok(rank)) = (reader.take(16), reader.u32()) else {
+        let (Ok(offered), Ok(rank), Ok(peer_layout)) =
+            (reader.take(16), reader.u32(), reader.take(16))
+        else {
             continue;
         };
         let rank = rank as usize;
-        if offered != token || !(1..world).contains(&rank) || links[rank - 1].is_some() {
+        if offered != token
+            || !(1..world).contains(&rank)
+            || links[rank - 1].is_some()
+            || address.ip() != remote[rank - 1].ip()
+            || Some(peer_layout) != layout.as_ref().map(|layout| layout.as_slice())
+        {
             continue;
         }
         links[rank - 1] = Some(link);
@@ -1210,10 +1545,11 @@ pub fn join_rank_zero(store: Option<&Shared>, peers: &mut [RankStream]) -> Resul
     }
     let scanned = prepared.scanned.len();
     retain(prepared, &agreed)?;
-    prepared.shards = links.into_iter().map(|link| link.stream).collect();
+    prepared.shards = links;
     Ok(Some(format!(
-        "{} of {scanned} records on every rank",
-        prepared.scanned.len()
+        "{} of {scanned} records on every rank, limit {}",
+        prepared.scanned.len(),
+        super::gibibytes(prepared.resolved.disk_limit)
     )))
 }
 
@@ -1227,15 +1563,22 @@ pub fn join_peer(
 ) -> Result<Option<Service>> {
     use crate::execution::rendezvous;
 
-    let enabled = match store
-        .map(Shared::lock)
-        .as_ref()
-        .and_then(|guard| guard.as_ref())
-    {
-        Some(prepared) => mirrored(prepared)?,
-        None => false,
+    // Read what the offer needs, then release the guard: taking the prepared
+    // resources below locks the same shared cell.
+    let (enabled, layout, limit) = match store.map(Shared::lock).as_ref().and_then(|g| g.as_ref()) {
+        Some(prepared) => (
+            mirrored(prepared)?,
+            super::geometry::fingerprint(&prepared.geometry),
+            prepared.resolved.disk_limit,
+        ),
+        None => (false, [0; 16], 0),
     };
-    let records = rendezvous::exchange_record(stream, &[enabled as u8], world)?;
+    let mut record = vec![enabled as u8];
+    if enabled {
+        record.extend(layout);
+        record.extend(limit.to_le_bytes());
+    }
+    let records = rendezvous::exchange_record(stream, &record, world)?;
     let offer = &records[0];
     let zero = offer.first() == Some(&1);
     if zero != enabled {
@@ -1248,16 +1591,25 @@ pub fn join_peer(
     if !enabled {
         return Ok(None);
     }
-    if records[1..].iter().any(|record| record != &[1]) {
+    if records[1..].iter().any(|record| record.first() != Some(&1)) {
         return Err(invalid(
             "another peer rank lacks a disk prefix store; give every rank the same --prefix-cache-disk settings",
         ));
     }
-    let (token, address) = offer[1..]
-        .split_at_checked(16)
-        .ok_or_else(|| invalid("rank zero's prefix record offer is malformed"))?;
-    let address = std::str::from_utf8(address)
+    let mut reader = Reader(&offer[1..]);
+    let token = reader.take(16)?;
+    let zero_layout = reader.take(16)?;
+    let zero_limit = reader.u64()?;
+    let length = reader.u32()? as usize;
+    let address = std::str::from_utf8(reader.take(length)?)
         .map_err(|_| invalid("rank zero's prefix record address is malformed"))?;
+    reader.end()?;
+    if zero_layout != layout {
+        return Err(invalid(format!(
+            "rank {rank} describes a different cache layout than rank zero; every rank of a multi-host package must have the same plane and row sizes"
+        )));
+    }
+    let limit = zero_limit.min(limit);
     let connected = TcpStream::connect_timeout(
         &address
             .parse()
@@ -1272,21 +1624,37 @@ pub fn join_peer(
     })?;
     let mut link = Link::new(connected)?;
     let mut hello = Writer::new(HELLO);
-    hello.bytes(token).u32(rank as u32);
+    hello.bytes(token).u32(rank as u32).bytes(&layout);
     link.send(&hello.finish())?;
     let shared = store.ok_or_else(|| invalid("a peer's prefix store vanished"))?;
     let mut prepared = shared
         .take()
         .ok_or_else(|| invalid("a peer's prefix store was already opened"))?;
+    // The smallest limit among the ranks bounds what every host can hold.
+    if limit < prepared.resolved.disk_limit {
+        prepared.resolved.disk_limit = limit;
+        prepared.disk_budget.set_limit(limit);
+    }
     link.send(&summary(&prepared.scanned)?)?;
     let agreed = decode_agreed(&link.expect(AGREED, REPLY_TIMEOUT)?)?;
     retain(&mut prepared, &agreed)?;
+    let summary = format!(
+        "serving rank zero, limit {}",
+        super::gibibytes(prepared.resolved.disk_limit)
+    );
+    let (finished, outcome) = std::sync::mpsc::channel();
     let thread = std::thread::Builder::new()
         .name("flare-offload-peer".into())
-        .spawn(move || serve(prepared, link))
+        .spawn(move || {
+            let result = serve(prepared, link);
+            let _ = finished.send(result.clone());
+            result
+        })
         .map_err(|error| invalid(format!("cannot start the prefix record service: {error}")))?;
     Ok(Some(Service {
         thread: Some(thread),
+        finished: outcome,
+        summary,
     }))
 }
 
@@ -1364,7 +1732,7 @@ mod tests {
         let directory = directory("zero");
         let (zero, peer) = connected();
         let mut peer = Link::new(peer).unwrap();
-        let mut transport = Sharded::new(staged(), vec![zero]).unwrap();
+        let mut transport = Sharded::new(staged(), vec![Link::new(zero).unwrap()]).unwrap();
 
         // Rank zero's unlink finishes first; the job waits for the peer.
         let first = record_file(&directory, 128);
@@ -1419,6 +1787,7 @@ mod tests {
                 results: vec![Some(Ok(8192)), None],
                 path: Some(third.clone()),
                 cleanup: None,
+                started: Instant::now(),
             },
         );
         transport.record(Kind::Stored, JobId(3), 1, Err(invalid("no space")));
@@ -1445,6 +1814,7 @@ mod tests {
                 results: vec![Some(Err(invalid("short write"))), None],
                 path: Some(fourth.clone()),
                 cleanup: None,
+                started: Instant::now(),
             },
         );
         transport.record(Kind::Stored, JobId(4), 1, Ok(8192));
@@ -1469,30 +1839,73 @@ mod tests {
             other => panic!("{other:?}"),
         }
 
+        // A cleanup unlink that itself fails leaves a file the index does not
+        // charge for, so the failure names the rank that kept it.
+        let sixth = record_file(&directory, 576);
+        transport.pending.insert(
+            (Kind::Stored, JobId(6)),
+            Pending {
+                kind: Kind::Stored,
+                results: vec![Some(Err(invalid("no space"))), None],
+                path: Some(sixth.clone()),
+                cleanup: None,
+                started: Instant::now(),
+            },
+        );
+        transport.record(Kind::Stored, JobId(6), 1, Ok(8192));
+        let (tag, payload) = reply(&mut peer);
+        let mut reader = Reader(&payload);
+        let internal = reader.u64().unwrap();
+        assert_eq!(tag, UNLINK);
+        peer.send(&encode_event(
+            Kind::Unlinked,
+            JobId(internal),
+            &Err(invalid("directory is read-only")),
+        ))
+        .unwrap();
+        match events(&mut transport, 1).as_slice() {
+            [
+                TransportEvent::Stored {
+                    id: JobId(6),
+                    result: Err(error),
+                },
+            ] => {
+                let error = error.to_string();
+                assert!(error.contains("no space"), "{error}");
+                assert!(error.contains("cleanup unlink failed"), "{error}");
+                assert!(error.contains("rank 1"), "{error}");
+            }
+            other => panic!("{other:?}"),
+        }
+
         // A broken connection fails every job still waiting on that rank.
         let fifth = record_file(&directory, 640);
         transport.unlink(JobId(5), fifth).unwrap();
         assert_eq!(reply(&mut peer).0, UNLINK);
         drop(peer);
-        assert!(matches!(
-            events(&mut transport, 1).as_slice(),
-            [TransportEvent::Unlinked {
-                id: JobId(5),
-                result: Err(_)
-            }]
-        ));
+        // The peer may still be copying into the ids of the jobs it already
+        // received, so the transport stops instead of reporting them failed.
+        let mut reported = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let error = loop {
+            assert!(
+                Instant::now() < deadline,
+                "the transport never noticed the broken link"
+            );
+            match transport.poll(&mut reported) {
+                Ok(()) => std::thread::sleep(IDLE),
+                Err(error) => break error,
+            }
+        };
+        assert!(error.to_string().contains("rank 1"), "{error}");
+        assert!(reported.is_empty(), "{reported:?}");
         assert!(
             transport
                 .unlink(JobId(6), record_file(&directory, 768))
-                .is_ok()
+                .is_err()
         );
-        assert!(matches!(
-            events(&mut transport, 1).as_slice(),
-            [TransportEvent::Unlinked {
-                id: JobId(6),
-                result: Err(_)
-            }]
-        ));
+        // A poisoned transport never confirms its drain, so its staging and
+        // transfer threads stay alive with it.
         assert!(transport.close().is_err());
         std::fs::remove_dir_all(directory).unwrap();
     }
@@ -1505,16 +1918,22 @@ mod tests {
         let lock = record::DirectoryLock::acquire(&peer_directory).unwrap();
         let service_directory = peer_directory.clone();
         let service = std::thread::spawn(move || {
-            Peer {
+            let mut peer = Peer {
                 staged: staged(),
                 directory: service_directory,
                 fingerprint: [3; 16],
+                geometry: vec![geometry(64, &[("kv", 4096)], 4096)],
                 link: Link::new(peer).unwrap(),
                 _lock: lock,
+            };
+            let outcome = peer.run();
+            let shutdown = peer.shutdown();
+            if shutdown.is_err() {
+                std::mem::forget(peer);
             }
-            .run()
+            outcome.and(shutdown)
         });
-        let mut transport = Sharded::new(staged(), vec![zero]).unwrap();
+        let mut transport = Sharded::new(staged(), vec![Link::new(zero).unwrap()]).unwrap();
         let (ours, theirs) = (
             record_file(&zero_directory, 128),
             record_file(&peer_directory, 128),
@@ -1584,6 +2003,124 @@ mod tests {
             row,
             modified: SystemTime::now(),
         }
+    }
+
+    #[test]
+    fn an_unconfirmed_drain_is_reported_so_the_peer_keeps_its_staging() {
+        let directory = directory("drain");
+        let lock = record::DirectoryLock::acquire(&directory).unwrap();
+        let (zero, peer) = connected();
+        let mut peer = Peer {
+            staged: staged(),
+            directory,
+            fingerprint: [3; 16],
+            geometry: vec![geometry(64, &[("kv", 4096)], 4096)],
+            link: Link::new(peer).unwrap(),
+            _lock: lock,
+        };
+        // The link failed, so the peer cannot report that it drained. The
+        // caller must retain the transport rather than release its staging
+        // under copies that may still run.
+        peer.link.fail(invalid("rank zero closed the connection"));
+        assert!(peer.shutdown().is_err());
+        drop(zero);
+    }
+
+    #[test]
+    fn ranks_without_a_store_exchange_no_record_settings() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        let mut zero_stream = RankStream::Tcp(server);
+        let mut peer_stream = RankStream::Tcp(client);
+        let zero = std::thread::spawn(move || {
+            let mut peers = vec![zero_stream];
+            join_rank_zero(None, &mut peers)
+        });
+        assert!(join_peer(None, &mut peer_stream, 1, 2).unwrap().is_none());
+        assert!(zero.join().unwrap().unwrap().is_none());
+    }
+
+    #[test]
+    fn a_job_past_its_deadline_stops_the_transport() {
+        let (zero, _peer) = connected();
+        let mut transport = Sharded::new(staged(), vec![Link::new(zero).unwrap()]).unwrap();
+        transport.pending.insert(
+            (Kind::Unlinked, JobId(7)),
+            Pending {
+                kind: Kind::Unlinked,
+                results: vec![Some(Ok(0)), None],
+                path: None,
+                cleanup: None,
+                started: Instant::now() - JOB_TIMEOUT - Duration::from_secs(1),
+            },
+        );
+        transport.expire();
+        let mut events = Vec::new();
+        let error = transport.poll(&mut events).unwrap_err();
+        assert!(error.to_string().contains("did not complete"), "{error}");
+        assert!(events.is_empty(), "{events:?}");
+    }
+
+    #[test]
+    fn a_peer_rejects_a_header_from_another_layout() {
+        let directory = directory("layout");
+        let lock = record::DirectoryLock::acquire(&directory).unwrap();
+        let (zero, peer) = connected();
+        let mut peer = Peer {
+            staged: staged(),
+            directory,
+            fingerprint: [3; 16],
+            geometry: vec![geometry(64, &[("kv", 4096)], 4096)],
+            link: Link::new(peer).unwrap(),
+            _lock: lock,
+        };
+        let own = Header::new(
+            &peer.geometry,
+            [7; 32],
+            [1; 16],
+            key(128, 0x5a),
+            None,
+            [0; 16],
+            2,
+            UNIX_EPOCH + Duration::from_secs(1_000_000),
+        )
+        .unwrap();
+        assert!(peer.own(own).is_ok());
+        let wider = vec![geometry(64, &[("kv", 8192)], 8192)];
+        let foreign = Header::new(
+            &wider,
+            [7; 32],
+            [1; 16],
+            key(128, 0x5a),
+            None,
+            [0; 16],
+            2,
+            UNIX_EPOCH + Duration::from_secs(1_000_000),
+        )
+        .unwrap();
+        assert!(peer.own(foreign).is_err());
+        drop(zero);
+    }
+
+    #[test]
+    fn a_peer_that_stops_reading_fails_the_job_instead_of_blocking() {
+        let (zero, peer) = connected();
+        let mut link = Link::new(zero).unwrap();
+        // The peer never reads, so the socket buffer and then the queue fill.
+        let frame = vec![0u8; 1 << 20];
+        let started = Instant::now();
+        let mut failure = None;
+        for _ in 0..(BACKLOG * 4) {
+            if let Err(error) = link.enqueue(&frame) {
+                failure = Some(error);
+                break;
+            }
+        }
+        assert!(started.elapsed() < Duration::from_secs(5));
+        let failure = failure.expect("the queue accepted more than its backlog");
+        assert!(failure.to_string().contains("backlog"), "{failure}");
+        drop(peer);
     }
 
     #[test]

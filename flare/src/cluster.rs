@@ -180,10 +180,9 @@ pub fn peer(
             cluster.rank,
             cluster.world,
         )?;
-        phase.finish(if records.is_some() {
-            "serving rank zero"
-        } else {
-            "none"
+        phase.finish(match &records {
+            Some(service) => service.summary.clone(),
+            None => "none".to_owned(),
         });
         Ok(Joined {
             streams: stream,

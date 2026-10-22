@@ -1936,7 +1936,7 @@ impl<'a> Worker<'a> {
             }
         }
         let mut events = Vec::new();
-        store.poll(&mut events);
+        store.poll(&mut events)?;
         let mut requeued = Vec::new();
         for event in events {
             progress = true;

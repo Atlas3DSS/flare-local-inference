@@ -190,7 +190,7 @@ pub struct Prepared {
     pub directory_lock: Option<record::DirectoryLock>,
     /// Rank zero's record connection to each peer rank, ranks 1 onward, when the ranks run as
     /// separate processes; see [`shard`].
-    pub shards: Vec<std::net::TcpStream>,
+    pub(crate) shards: Vec<shard::Link>,
 }
 
 /// The loader's result: either prepared resources or the reason no store exists.
@@ -722,6 +722,10 @@ pub struct StoreStats {
 /// The worker pins the GPU checkpoint before `store` and unpins it when `store`
 /// returns `Ok(false)` or an error, or when the matching `StoreEvent::Stored`
 /// arrives. Ticket ids belong to the scheduler until `StoreEvent::Fetched`.
+///
+/// A store whose transfers can no longer be trusted reports the failure from
+/// `poll` and stops producing events. The worker then stops, so ids and pins
+/// held by transfers it cannot account for are never reused or released.
 pub trait PrefixStore {
     /// Deepest record chain extending the GPU checkpoint at `resident` tokens.
     fn lookup(&mut self, history: &PrefixHistory, resident: u64) -> Option<HostHit>;
@@ -730,7 +734,10 @@ pub trait PrefixStore {
     fn store(&mut self, checkpoint: &PublishedCheckpoint) -> Result<bool>;
     /// Copy a looked-up chain into the ticket's ids. An error means no event follows.
     fn fetch(&mut self, hit: HostHit, ticket: InboundTicket) -> Result<()>;
-    fn poll(&mut self, events: &mut Vec<StoreEvent>);
+    /// Report completed work. `Err` means the store can no longer report
+    /// completions: transfers may still be running, and the worker must stop
+    /// rather than free the ids and pins they hold.
+    fn poll(&mut self, events: &mut Vec<StoreEvent>) -> Result<()>;
     fn stats(&self) -> StoreStats;
     /// Drain transfers, join threads, and finish pending disk writes.
     /// On failure the caller must retain the store: transfer jobs may still
