@@ -53,7 +53,9 @@ impl RequestScheduler {
         Some(id)
     }
 
-    pub(super) fn retain_snapshot(&mut self) -> Result<Option<SnapshotId>> {
+    /// Reserves a snapshot, evicting unpinned checkpoints. Only a capture worth more than an
+    /// idle conversation's checkpoint (`release_pins`) also releases conversation pins.
+    pub(super) fn retain_snapshot(&mut self, release_pins: bool) -> Result<Option<SnapshotId>> {
         loop {
             if let Some(id) = self.reserve_snapshot(0) {
                 return Ok(Some(id));
@@ -65,7 +67,7 @@ impl RequestScheduler {
             self.stats.snapshot_evictions += evicted.retired.len() as u64;
             let update = self.cache.advance_completed(self.completed)?;
             self.apply_completion(update);
-            if evicted.retired.is_empty() {
+            if evicted.retired.is_empty() && !(release_pins && self.release_conversation_pin()?) {
                 return Ok(None);
             }
         }

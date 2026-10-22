@@ -216,6 +216,7 @@ pub(super) struct Metrics {
     snapshot_publications: AtomicU64,
     snapshot_evictions: AtomicU64,
     preemptions: AtomicU64,
+    conversation_pin_releases: AtomicU64,
     message_checkpoints: AtomicU64,
     prompt_checkpoints: AtomicU64,
     active_requests: AtomicU64,
@@ -405,6 +406,7 @@ impl Metrics {
             (&self.snapshot_publications, stats.snapshot_publications),
             (&self.snapshot_evictions, stats.snapshot_evictions),
             (&self.preemptions, stats.preemptions),
+            (&self.conversation_pin_releases, stats.conversation_pin_releases),
             (&self.message_checkpoints, stats.message_checkpoints),
             (&self.prompt_checkpoints, stats.prompt_checkpoints),
             (&self.active_requests, stats.active_requests as u64),
@@ -644,6 +646,11 @@ impl Metrics {
                 "preemptions_total",
                 "Requests that yielded their KV pages under pressure and were readmitted.",
                 &self.preemptions,
+            ),
+            (
+                "conversation_pin_releases_total",
+                "Conversation checkpoints released before their next turn because resources ran short.",
+                &self.conversation_pin_releases,
             ),
             (
                 "host_cache_lookups_total",

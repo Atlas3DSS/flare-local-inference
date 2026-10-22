@@ -475,19 +475,28 @@ fn message_and_prompt_checkpoints_evict_complete_page_chains_under_pressure() {
             s.finish(handle).unwrap();
             lengths.push(length);
         }
+        assert_eq!(s.stats().cached_checkpoints, capacity);
+        if capacity < 4 {
+            // Fewer snapshots than conversation pins: the newest conversations' message
+            // checkpoints fill the pool, and terminal endpoints wait for free storage.
+            let pages: usize = lengths[lengths.len() - capacity..].iter().map(|n| (n - 10) / 64).sum();
+            assert_eq!(s.stats().cached_pages, pages);
+            assert_eq!(s.stats().snapshot_publications, (turns + capacity - 1) as u64);
+            assert_eq!(s.conversation_pins.len(), capacity);
+            continue;
+        }
         let pairs = capacity / 2;
         let mut pages: usize = lengths[lengths.len() - pairs..].iter().map(|n| n / 64).sum();
         if capacity % 2 != 0 {
             pages += (lengths[lengths.len() - pairs - 1] - 10) / 64;
         }
-        assert_eq!(s.stats().cached_checkpoints, capacity);
         assert_eq!(s.stats().cached_pages, pages);
         assert_eq!(s.stats().snapshot_publications, (2 * turns) as u64);
     }
 }
 
 #[test]
-fn every_message_endpoint_can_restore_after_a_changed_following_turn() {
+fn first_and_last_message_endpoints_restore_and_every_endpoint_still_cuts_a_chunk() {
     let endpoints = vec![1, 7, 63, 64, 65, 129, 300, 514, 700];
     for page_tokens in [64, 128, 256, 2048] {
         for mtp in [false, true] {
@@ -495,29 +504,187 @@ fn every_message_endpoint_can_restore_after_a_changed_following_turn() {
             let mut request = spec(None, 901, 3);
             request.message_boundaries = endpoints.clone();
             let handle = s.admit(request).unwrap();
-            for &end in &endpoints {
-                stop_at_capture(&mut s, handle, end as u64);
-                assert_eq!(s.request(handle).unwrap().generated_tokens, 0);
-                run_step(&mut s);
-                assert_eq!(s.request(handle).unwrap().prefix_tokens, end as u64);
+            let mut chunks = Vec::new();
+            while s.request(handle).unwrap().phase != RequestPhase::Finishing {
+                let step = run_step(&mut s);
+                if step.kind == GraphKind::Prefill {
+                    chunks.push((step.lanes[0].start_position, step.lanes[0].tokens));
+                }
             }
-            finish(&mut s, handle);
-            assert_eq!(s.stats().message_checkpoints, endpoints.len() as u64);
+            let mut starts = vec![0];
+            starts.extend(endpoints.iter().map(|&n| n as u64));
+            let expected: Vec<_> = starts
+                .iter()
+                .zip(starts.iter().skip(1).chain([901].iter()))
+                .map(|(&start, &end)| (start, (end - start) as usize))
+                .collect();
+            assert_eq!(chunks, expected);
+            s.finish(handle).unwrap();
+            assert_eq!(s.stats().message_checkpoints, 2);
             for &end in &endpoints {
                 let mut branch = spec(None, end + 10, 1);
                 branch.prompt[end..].fill(1000);
                 branch.message_boundaries = endpoints.iter().copied().filter(|&n| n <= end).collect();
                 let branch = s.admit(branch).unwrap();
-                assert_eq!(s.request(branch).unwrap().reused_prompt_tokens(), end as u64);
+                // Intermediate endpoints were not retained; the branch restores the first
+                // endpoint and repeats the original chunk cuts from there.
+                let restored = if end == 700 { 700 } else { 1 };
+                assert_eq!(s.request(branch).unwrap().reused_prompt_tokens(), restored as u64);
                 assert_eq!(run_step(&mut s).kind, GraphKind::Restore);
                 let step = s.plan().unwrap();
                 assert_eq!(step.kind, GraphKind::Prefill);
-                assert_eq!(step.lanes[0].start_position, end as u64);
-                assert_eq!(step.lanes[0].tokens, 10);
+                assert_eq!(step.lanes[0].start_position, restored as u64);
+                let next = endpoints.iter().copied().find(|&n| n > restored).filter(|&n| n <= end);
+                assert_eq!(step.lanes[0].tokens, next.unwrap_or(end + 10) - restored);
                 s.cancel(branch).unwrap();
             }
         }
     }
+}
+
+#[test]
+fn only_captured_message_endpoints_drain_the_submission_window() {
+    let mut s = scheduler(8, false);
+    let mut request = spec(None, 400, 3);
+    request.message_boundaries = vec![100, 200, 300];
+    let h = s.admit(request).unwrap();
+    let mut prefills = Vec::new();
+    while s.request(h).unwrap().consumed_tokens < 400 {
+        let plan = s.plan().unwrap();
+        if plan.kind == GraphKind::Prefill {
+            let lane = &plan.lanes[0];
+            prefills.push((lane.start_position, lane.tokens, s.plan_requires_feedback(&plan)));
+        }
+        run_step(&mut s);
+    }
+    assert_eq!(
+        prefills,
+        [(0, 100, true), (100, 100, false), (200, 100, true), (300, 100, true)]
+    );
+}
+
+fn turn(tag: u32, prompt: usize, boundaries: &[usize], output: u32) -> RequestSpec {
+    let mut request = spec(None, prompt, output);
+    request.prompt[0] = 100_000 + tag;
+    request.message_boundaries = boundaries.to_vec();
+    request
+}
+
+/// The second turn of conversation `tag`: the first turn's prompt through its last message
+/// endpoint, followed by a differently rendered assistant header and a new message.
+fn next_turn(tag: u32, first: usize, prompt: usize, output: u32) -> RequestSpec {
+    let mut request = turn(tag, prompt, &[first, prompt - 5], output);
+    request.prompt[first + 1] = 50_000;
+    request
+}
+
+#[test]
+fn conversation_checkpoints_survive_other_conversations_until_their_next_turn() {
+    let mut s = scheduler(6, false);
+    let mut last = Vec::new();
+    for tag in 0..3 {
+        let h = s.admit(turn(tag, 300, &[295], 2)).unwrap();
+        finish(&mut s, h);
+        let id = *s.conversation_pins.back().unwrap();
+        assert_eq!(s.cache.checkpoint(id).unwrap().prefix().consumed_tokens, 295);
+        last.push(id);
+    }
+    // LRU alone retires conversation 0's terminal, prompt and then message checkpoint for the
+    // third conversation's captures; the conversation pin keeps the message checkpoint.
+    assert!(s.stats().snapshot_evictions > 0);
+    assert!(last.iter().all(|id| s.holds_conversation(*id)));
+    let h = s.admit(next_turn(0, 295, 600, 2)).unwrap();
+    assert_eq!(s.request(h).unwrap().reused_prompt_tokens(), 295);
+    assert_eq!(s.request(h).unwrap().prefix(), Some(last[0]));
+    assert!(!s.holds_conversation(last[0]));
+    finish(&mut s, h);
+    let newest = s.conversation_pins.back().copied().unwrap();
+    assert_eq!(s.cache.checkpoint(newest).unwrap().prefix().consumed_tokens, 595);
+    assert_eq!(s.stats().conversation_pin_releases, 0);
+}
+
+#[test]
+fn conversation_pins_hold_one_checkpoint_per_request_slot() {
+    let mut s = scheduler(32, false);
+    for tag in 0..6 {
+        let h = s.admit(turn(tag, 200, &[190], 2)).unwrap();
+        finish(&mut s, h);
+    }
+    assert_eq!(s.conversation_pins.len(), 4);
+    assert_eq!(s.stats().conversation_pin_releases, 0);
+    assert_eq!(s.stats().snapshot_evictions, 0);
+}
+
+#[test]
+fn only_message_captures_release_conversation_pins() {
+    let mut s = scheduler(2, false);
+    let mut pinned = Vec::new();
+    for tag in 0..2 {
+        let h = s.admit(turn(tag, 300, &[295], 2)).unwrap();
+        finish(&mut s, h);
+        pinned.push(*s.conversation_pins.back().unwrap());
+    }
+    // The second conversation's prompt and terminal endpoints found no free snapshot and
+    // were skipped rather than releasing the first conversation's checkpoint.
+    assert_eq!(s.stats().prompt_checkpoints, 1);
+    assert_eq!(s.stats().conversation_pin_releases, 0);
+    assert!(pinned.iter().all(|id| s.holds_conversation(*id)));
+    let h = s.admit(turn(2, 300, &[295], 2)).unwrap();
+    finish(&mut s, h);
+    assert_eq!(s.stats().conversation_pin_releases, 1);
+    assert!(!s.holds_conversation(pinned[0]));
+    assert!(s.holds_conversation(pinned[1]));
+    assert_eq!(s.conversation_pins.len(), 2);
+}
+
+fn small_scheduler(pages: u32) -> RequestScheduler {
+    let template = scheduler(8, false);
+    let mut s = RequestScheduler::new(
+        [9; 32],
+        SchedulerLimits {
+            pages,
+            ..template.limits
+        },
+        template.capabilities.clone(),
+    )
+    .unwrap();
+    s.measured_graph_durations(&super::tests::duration_graphs(4))
+        .unwrap();
+    s
+}
+
+#[test]
+fn admission_releases_conversation_pins_instead_of_failing() {
+    let mut s = small_scheduler(128);
+    let h = s.admit(turn(0, 4000, &[3995], 2)).unwrap();
+    finish(&mut s, h);
+    assert_eq!(s.conversation_pins.len(), 1);
+    let h = s.admit(turn(1, 5000, &[4995], 2)).unwrap();
+    assert_eq!(s.stats().conversation_pin_releases, 1);
+    assert!(s.conversation_pins.is_empty());
+    finish(&mut s, h);
+    assert_eq!(s.conversation_pins.len(), 1);
+}
+
+#[test]
+fn growing_decoders_release_conversation_pins_before_preemption() {
+    let mut s = small_scheduler(64);
+    let h = s.admit(turn(0, 2000, &[1995], 2)).unwrap();
+    finish(&mut s, h);
+    assert_eq!(s.conversation_pins.len(), 1);
+    let mut growing = turn(1, 1500, &[1495], 1000);
+    growing.growable_output = true;
+    let h = s.admit(growing).unwrap();
+    for _ in 0..2000 {
+        if s.request(h).unwrap().phase == RequestPhase::Finishing {
+            break;
+        }
+        run_step(&mut s);
+    }
+    assert_eq!(s.request(h).unwrap().generated_tokens, 1000);
+    s.finish(h).unwrap();
+    assert_eq!(s.stats().conversation_pin_releases, 1);
+    assert_eq!(s.stats().preemptions, 0);
 }
 
 #[test]

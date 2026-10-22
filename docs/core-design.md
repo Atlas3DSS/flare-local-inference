@@ -416,7 +416,7 @@ For Qwen at concurrency four:
 | Context limit | 262,144 tokens |
 | Main KV / GDN recurrence | BF16 / FP32 |
 | PLE delivery | Compact GPU rows supplied by Helios from disk or RAM |
-| Checkpoint endpoints | Rendered message endpoints, final prompt, and terminal consumed prefix |
+| Checkpoint endpoints | First and last rendered message endpoints, final prompt, and terminal consumed prefix |
 | MTP draft limit | Five drafts plus the pending input |
 | Speculative scheduling | One round in flight; two with `--mtp-pipeline` |
 | Vision | Prepared image capacities; video validation remains separate |
@@ -1273,9 +1273,10 @@ trimming must not mutate cached model history.
 ### Immutable message, prompt, and terminal cache
 
 The cache retains immutable, content-addressed checkpoints at the rendered
-endpoints of complete messages, final prompt boundary, and terminal consumed boundary.
-Equal endpoints share one checkpoint. Parent-linked complete-page chains,
-ancestor pinning, and eviction preserve ownership across active branches.
+endpoints of a prompt's first and last complete messages, final prompt boundary,
+and terminal consumed boundary. Equal endpoints share one checkpoint. Parent-linked
+complete-page chains, ancestor pinning, and eviction preserve ownership across
+active branches.
 
 The [Rust prefix cache](../helios/src/cache.rs) manages ownership, readiness,
 pinning, and eviction. Helios allocates backing storage when loading the package;
@@ -1362,7 +1363,25 @@ snapshot destination when it reaches an endpoint, using normal cache eviction.
 If all snapshot slots are pinned, inference continues without publishing that
 checkpoint. The number of messages does not enlarge the prepared snapshot pool.
 
-At each required prefill endpoint, the scheduler drains submitted work, snapshots
+Every message endpoint ends a prefill chunk, but only two are captured: the
+prompt's first message endpoint, which leading instructions shared by other
+conversations end at, and its last, where the conversation's next turn
+continues. Each snapshot is a complete continuation row that, where rows alias
+KV backing, also excludes its page range, so capturing every crossed endpoint
+would evict other conversations' histories for checkpoints that append-only
+conversations do not restore. Because chunk cuts still follow every endpoint, a
+prefill repeats the same chunks from any captured endpoint it restores.
+
+The checkpoint at a request's last message endpoint becomes its conversation's
+pinned checkpoint, at most one per request slot. Admission that restores it
+transfers the pin to the request; a newer one beyond the bound releases the
+oldest. Admission, message-endpoint capture, a preempted request's terminal
+capture, and decode reservation growth release the oldest conversation pin only
+when nothing else is evictable, before readmission pins or preemption, so these
+pins reorder eviction without blocking progress. Prompt and other terminal
+captures are skipped instead.
+
+At each captured prefill endpoint, the scheduler drains submitted work, snapshots
 the exact live state, and publishes only after the copy fence completes. The
 published endpoint pins the request's shared parent and transfers its completed
 private pages into that chain without changing physical page order. Further
