@@ -314,7 +314,9 @@ def test_replay_commit_matches_candidate_columns_byte_for_byte(device, width):
         layouts[name] = sorted(set(_LAYOUT.findall(program.asm["ttgir"])))
     assert layouts["candidate"] == layouts["replay_mode"] == layouts["replay"], layouts
     assert any(expected in layout for layout in layouts["replay"]), layouts["replay"]
-    assert not re.search(r"^\s*(fma|mad)\.", commit.operation.compiled.asm["ptx"], re.M), "replay commit must not fuse"
+    # No floating-point fused multiply-add in the replay commit (integer mad.lo/mad.wide are address arithmetic).
+    fused = re.findall(r"^\s*(?:fma|mad)(?:\.[a-z0-9]+)*\.f(?:16|32|64)\b.*$", commit.operation.compiled.asm["ptx"], re.M)
+    assert not fused, ("replay commit must not fuse floating-point multiply-adds", fused[:4])
 
     lengths, fresh = (width, 0, width, width), (False, False, True, False)      # request 1 inactive this round
     columns = [[canonical_old[request] + column for column in range(width)] for request in range(requests)]
