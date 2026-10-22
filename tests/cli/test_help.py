@@ -44,7 +44,7 @@ def test_model_help_explains_step5_limits_and_compression(command, capsys):
     output = captured.out
     assert "--gpus: select 4, 8, 16 GPUs" in output
     assert "--mtp-draft-tokens: 0..3; default 3" in output
-    assert "--max-concurrency: 1..64; recipe default 4" in output
+    assert "--max-concurrency: 1..64; recipe default 32" in output
     assert "--expert-scale-compression [MODE]" in output
     assert "estimated 6% less resident weight storage" in output
     assert "MODE: csf" in output
@@ -114,6 +114,21 @@ def test_optional_features_follow_the_selected_recipe(capsys):
         assert ("--history-drafts" in details) == recipe.history_copy
         assert ("--no-stream-overlap" in details) == recipe.stream_overlap
         assert ("--expert-scale-compression" in details) == bool(checkpoint.scale_compressed_device_bytes)
+
+
+@pytest.mark.parametrize("command", ["export", "serve"])
+def test_all_recipe_help_reports_concurrency_and_speculative_capacity_defaults(command, capsys):
+    for recipe in recipes():
+        for checkpoint in recipe.checkpoints:
+            with pytest.raises(SystemExit) as error:
+                main([command, checkpoint.alias, "--help"])
+            assert error.value.code == 0
+            output = capsys.readouterr().out
+            assert "--max-concurrency: 1..64; recipe default 32" in output
+            if recipe.speculation is None:
+                assert "Multi-token speculation: unavailable" in output
+            else:
+                assert "--speculative-token-capacity: at least drafts + 1; default 128" in output
 
 
 @pytest.mark.parametrize("flag", [["--expert-scale-compression"], ["--expert-scale-compression", "csf"],

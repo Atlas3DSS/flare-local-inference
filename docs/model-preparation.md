@@ -608,6 +608,27 @@ override sampling defaults. Preserve assistant reasoning in conversation history
 
 ## Storage and graph capacities
 
+Every recipe defaults to 32 concurrent requests. Speculative recipes default to
+128 target-token rows, independently of the selected concurrency. Explicit flags
+and configuration override these defaults; existing packages retain their
+captured capacities. Memory planning rejects capacities that do not fit the
+selected GPUs.
+
+| Recipe | Draft tokens | Verification layout | Speculative graphs at default concurrency | Maximum drafts at batch 32 |
+|---|---:|---|---:|---:|
+| Qwen3.8 Flash, GLM 5.3, DeepSeek V4 | 5 | Rectangular | 34 | 3 |
+| Step-5 | 3 | Rectangular | 24 | 3 |
+| MiMo V2.6 Pro, Kimi K3, Nemotron Bolt | 7 | Rectangular | 44 | 3 |
+| DeepSeek V4.1 | 5 | Packed | 64 packed + 6 width-one | Up to 5, sharing 128 rows across requests |
+| Qwen3.8 27B | None | Ordinary decode | None | None |
+
+Rectangular catalogs cover full draft depth through batch 16. The counts include
+width-one speculative graphs and exclude ordinary decode, prefill, maintenance,
+and vision graphs. Capturing full rectangular depth at batch 32 requires 192 rows
+for five drafts or 256 rows for seven drafts, set with
+`--speculative-token-capacity`. DeepSeek V4.1's packed graph count is bounded
+independently by `--speculative-graph-budget`.
+
 Every model export prints a VRAM inventory for each rank after final publication,
 including exports without `--verbose`. Heliopause measures device usage and package
 allocator mappings; Ignition attributes retained ranges to checkpoint tensors,
@@ -659,9 +680,8 @@ Ignition captures power-of-two
 batch capacities through the concurrency limit
 and width one at every bucket. Rectangular speculative and verification shapes
 require `batch * width <= speculative_token_capacity`; the preparation flag
-`--speculative-token-capacity` defaults to the larger of padded concurrency and
-maximum verification width, except Qwen Flash and DeepSeek V4.1, which default
-to 128 physical target rows. DeepSeek V4.1's packed capacities follow the table
+`--speculative-token-capacity` defaults to 128 physical target rows for every
+speculative recipe. DeepSeek V4.1's packed capacities follow its packed catalog table
 above rather than rectangular `batch * width` shapes. Previously exported separate-proposal
 catalogs cover every bucket and load-time draft depth independently of that limit.
 Flare can reduce concurrency at load time. Rectangular catalogs permit smaller

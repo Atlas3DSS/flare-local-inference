@@ -11,6 +11,7 @@ from ignition import planning
 from ignition.cli import display
 from ignition.errors import CapacityError, UsageError
 from ignition.recipes.declaration import Checkpoint, RankCosts, Recipe, SamplingDefaults, Speculation
+from ignition.recipes import recipes
 
 GIB, MIB = 1 << 30, 1 << 20
 
@@ -217,7 +218,9 @@ def test_prefill_chunk_defaults_to_the_recipe_and_accepts_an_override():
 
 
 @pytest.mark.parametrize("alias,world_size,packed", [
-    ("qwen3.8-flash", 1, False), ("deepseek-v4.1-flash", 4, True),
+    (checkpoint.alias, 8 if recipe.name == "mimo_v2" else recipe.tensor_parallel[0],
+     recipe.speculation.packed_verification)
+    for recipe in recipes() if recipe.speculation is not None for checkpoint in recipe.checkpoints
 ])
 @pytest.mark.parametrize("flags,configuration_text,expected", [
     ((), "", (32, 4096, 128)),
@@ -239,12 +242,15 @@ def test_cli_plan_resolves_recipe_configuration_and_flag_defaults(tmp_path, alia
     selected = preparation.speculation(args, model, configuration)
     concurrency = configuration.max_concurrency(model.checkpoint.alias, model.recipe.concurrency,
                                                 args.max_concurrency)
-    host = preparation.Host(tuple(gpu(index, 95) for index in range(4)), None)
+    devices = tuple(gpu(index, 95) for index in range(world_size))
+    if model.recipe.name != "mimo_v2":
+        devices = tuple(replace(device, total_bytes=256 * GIB, free_bytes=255 * GIB) for device in devices)
+    host = preparation.Host(devices, None)
     plan = preparation.derive(configuration, model, host, gpus=args.gpus, concurrency=concurrency,
                               speculation=selected, prefill_chunk=args.prefill_chunk_size)
     assert plan.world_size == world_size
     assert (plan.concurrency, plan.prefill_chunk, plan.speculative_token_capacity) == expected
-    assert plan.speculation.draft_tokens == 5 and plan.speculation.adaptive
+    assert plan.speculation.draft_tokens == model.recipe.speculation.draft_tokens and plan.speculation.adaptive
     assert plan.speculation.packed_verification is packed
     assert plan.speculation.draft_prefix_selection == ("gpu" if packed else "cpu")
     record = plan.to_dict()

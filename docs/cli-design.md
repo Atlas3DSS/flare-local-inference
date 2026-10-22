@@ -209,7 +209,7 @@ explicit flags take precedence.
 | `--expert-scale-compression [MODE]` | Losslessly compress routed-expert scales: DeepSeek V4.1 backbone and DSpark MXFP4 scales, or Step-5 NVFP4 scales including BF16 experts converted to W4A16. `csf` is a compressed scale encoding expanded during execution. Estimated resident GPU weight savings are 3% for DeepSeek V4.1 and 6% for Step-5; actual savings depend on encoded scales. A bare flag selects `csf`; `--expert-scale-compression csf` also works. Retain compressed scales and share expansion scratch across serial layers. | Native scales |
 | `--no-mtp` | Disable multi-token speculation: load no draft model, keep no verification rows, and decode one token per step. | Speculation on |
 | `--mtp-draft-tokens N` | Most draft tokens verified in one round; see `MODEL --help` for its limit. Verification capacities cover counts from 0 through `N` within the speculative token capacity. Retained and packed proposal producers execute the full configured block; verification adapts using measured cost and historical acceptance or native proposal confidence. Zero retains draft state with width-one execution; `--no-mtp` excludes draft weights and state. | Recipe declaration |
-| `--speculative-token-capacity N` | Maximum physical target-token rows in wider speculative graphs; width one covers every request bucket. Applies to every speculative recipe. | 128 for Qwen Flash and DeepSeek V4.1; otherwise larger of padded concurrency and maximum verification width |
+| `--speculative-token-capacity N` | Maximum physical target-token rows in wider speculative graphs; width one covers every request bucket. Applies to every speculative recipe. | 128 |
 | `--speculative-graph-budget N` | Maximum packed round graphs to capture, independently of physical target-token rows. Excludes mandatory width-one and ordinary graphs; requires packed adaptive learned speculation at positive draft depth. Must cover both physical-row endpoints for every eligible request bucket. | 64 for DeepSeek V4.1 |
 | `--no-mtp-adaptive-verification` | Default to fixed-width serving. Capture includes every smaller width within the speculative token capacity. Positive-depth DeepSeek V4.1 DSpark requires adaptive verification. | Adaptive |
 | `--mtp-proposal-source {mtp,copy}` | Where drafts come from: the checkpoint's MTP module, or `copy` for continuations from shared decoded history, which loads no draft model. Qwen only. | `mtp` |
@@ -232,7 +232,11 @@ fixed, and `branches serialized` under `--no-stream-overlap`. That flag is also
 recorded in the plan and the exported graph catalog; it changes graph scheduling,
 not kernel selection, so its packages share tuned kernels with overlapped ones.
 
-Each recipe selects its proposal and prefix-allocation mode.
+Every recipe defaults to 32 concurrent requests. Speculative recipes declare
+128 target-token rows. Rectangular catalogs cover the recipe's full draft depth
+through batch 16 and up to three drafts at batch 32; Step-5's three-draft catalog
+covers its full depth at batch 32. Each recipe selects its proposal and
+prefix-allocation mode.
 DeepSeek V4.1 defaults to five draft tokens, concurrency 32, a 4096-token
 prefill chunk, 128 physical target rows, and at most 64 packed round graphs,
 with packed GPU prefix selection.
@@ -841,8 +845,7 @@ cuda = "/opt/cuda"                # Used when installed packages provide no tool
 `[models.<alias>]` overrides `[defaults]`; flags override both.
 Both sections accept `speculative_token_capacity`, overridden during preparation
 by `--speculative-token-capacity`. Omitting it uses the recipe declaration when
-supplied: Qwen Flash and DeepSeek V4.1 declare 128 target rows. Other recipes
-derive the capacity from prepared concurrency and draft depth.
+supplied: every speculative recipe declares 128 target rows.
 Both sections also accept positive integer `speculative_graph_budget`, overridden
 by `--speculative-graph-budget`. DeepSeek V4.1 declares 64 packed round graphs.
 The `[defaults]` graph budget applies only to active packed adaptive learned
