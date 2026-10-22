@@ -30,6 +30,11 @@ pub enum Command {
     Download(Download),
     /// Summarize a package's metadata, with optional memory, graph, and frontend details.
     Inspect(Inspect),
+    #[command(hide = true)]
+    HardwareRevision {
+        #[arg(value_parser = clap::value_parser!(i32).range(1..))]
+        gpu_count: i32,
+    },
     /// Run this host's agent, which pairs with controllers and supervises serving ranks.
     Agent(AgentArgs),
     /// Control an orbit of agents from this machine.
@@ -595,8 +600,9 @@ pub struct ServingOptions {
     pub hub: HubOptions,
 
     /// GPUs in rank order, relative to CUDA_VISIBLE_DEVICES when set.
+    /// Omitted: the first N visible GPUs, where N is the package's local rank count.
     #[arg(long, value_name = "N[,N...]", value_delimiter = ',', action = clap::ArgAction::Set,
-        default_value = "0", value_parser = clap::value_parser!(i32).range(0..),
+        value_parser = clap::value_parser!(i32).range(0..),
         help_heading = "Serving options")]
     pub gpus: Vec<i32>,
 
@@ -749,6 +755,12 @@ impl Run {
 }
 
 impl ServingOptions {
+    pub fn select_gpus(&mut self, local_ranks: usize) {
+        if self.gpus.is_empty() {
+            self.gpus = (0..local_ranks as i32).collect();
+        }
+    }
+
     /// Serving options every rank of a multi-host package must load with.
     pub fn rank_options(&self, roce_ring: bool) -> Vec<String> {
         let mut options = Vec::new();
@@ -834,7 +846,7 @@ impl ServingOptions {
             } else {
                 None
             },
-            device_labels: Some(self.gpus.clone()),
+            device_labels: (!self.gpus.is_empty()).then(|| self.gpus.clone()),
             prefix_cache: PrefixCacheOffload {
                 memory_bytes: self.prefix_cache_memory,
                 disk: self.prefix_cache_disk.clone(),
@@ -946,6 +958,30 @@ mod tests {
     }
 
     #[test]
+    fn omitted_gpus_follow_package_ranks_and_explicit_selection_wins() {
+        for ranks in [1, 2, 4, 8, 16] {
+            let mut args = run(&["flare", "run", "model.safetensors"]);
+            assert!(args.gpus.is_empty());
+            args.serving.select_gpus(ranks);
+            let expected: Vec<_> = (0..ranks as i32).collect();
+            assert_eq!(args.gpus, expected);
+            assert_eq!(args.load_options().device_labels, Some(expected));
+        }
+        for (flag, expected) in [("0", vec![0]), ("3,1", vec![3, 1])] {
+            let mut args = run(&["flare", "run", "model.safetensors", "--gpus", flag]);
+            args.serving.select_gpus(4);
+            assert_eq!(args.gpus, expected);
+        }
+        let mut args = run(&["flare", "run", "model.safetensors"]);
+        args.serving.select_gpus(2);
+        assert_eq!(
+            crate::environment::visibility(&args.gpus, Some("4,7,5")).unwrap(),
+            "4,7"
+        );
+        assert!(crate::environment::visibility(&args.gpus, Some("4")).is_err());
+    }
+
+    #[test]
     fn embedding_workers_reach_loader_and_remote_arguments() {
         assert_eq!(
             run(&["flare", "run", "model.safetensors"])
@@ -997,7 +1033,7 @@ mod tests {
         assert_eq!(args.scheduler_policy, "balanced");
         assert_eq!(args.mtp_adaptive_verification_alpha, None);
         let options = args.load_options();
-        assert_eq!(options.device_labels, Some(vec![0]));
+        assert_eq!(options.device_labels, None);
         assert_eq!(options.embedding_table_storage, None);
         assert_eq!(options.embedding_table_cache_bytes, 0);
         assert_eq!(options.max_concurrency, None);

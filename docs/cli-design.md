@@ -443,7 +443,7 @@ Help exits with status 0; usage errors go to stderr with status 2. Its options a
 | `--dangerously-accept-publisher NAMESPACE` | Accept this exact publisher namespace; requires the matching key flag | Interactive first use or remembered trust |
 | `--trust-store PATH` | Persistent key/namespace acceptance file | `~/.config/flare/trust.toml` |
 | `--verify-weights` | Verify the stored allocation and table ranges of the ranks served before loading model GPU resources | off |
-| `--gpus N[,N...]` | Selected GPUs in rank order; indices follow an inherited `CUDA_VISIBLE_DEVICES` list when present | `0` |
+| `--gpus N[,N...]` | Selected GPUs in rank order; indices follow an inherited `CUDA_VISIBLE_DEVICES` list when present | First N visible GPUs for the package's N local ranks; one GPU per host for multi-host packages |
 | `--host ADDR` | Listener IP address, IPv4 or IPv6 | `127.0.0.1` |
 | `--port N` | Listener port | `8000` |
 | `--served-model-name ALIAS` | Replace the package's serving aliases with this nonblank alias | Package aliases |
@@ -578,11 +578,16 @@ flare run ORG/MODEL@gb202 --filename model.safetensors --gpus 0,1,2,3
 These examples use `ORG/MODEL` as a repository placeholder. Repositories contain
 prepared Flare packages, not source Transformers checkpoints. Hardware variants
 are separate Hugging Face revisions named `gb10` and `gb202`. Automatic selection
-queries the selected GPUs' PCI device identifiers through the CUDA driver without
-creating a context. GB10 selects `gb10`; known GB202 devices, including RTX PRO
+queries the selected GPUs' PCI device identifiers through NVML without initializing
+CUDA. GB10 selects `gb10`; known GB202 devices, including RTX PRO
 6000 Blackwell, select `gb202`. All selected GPUs must belong to the same family.
 An unknown identifier or a driver unable to report it requires an explicit
 revision. GPU selection follows `CUDA_VISIBLE_DEVICES` for both commands.
+Revision detection runs in a short-lived process so NVML's worker threads cannot
+overlap CUDA visibility changes. Without `--gpus`, it uses the first visible GPU.
+After reading the package, `flare run` selects its required number of
+local GPUs and narrows CUDA visibility before initializing the serving driver.
+An explicit GPU list must match the package's local rank count.
 
 An explicit `--revision` overrides `@revision` and hardware detection. It accepts
 a branch, tag, or commit, and permits downloading on a machine without NVIDIA
