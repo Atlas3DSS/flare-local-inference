@@ -5,7 +5,7 @@ from time import monotonic
 
 import torch
 
-from ignition.progress import phase
+from ignition.progress import graph_catalog, phase
 
 from .aot import ForwardCache
 from .compilation import _defer_full_collection
@@ -23,6 +23,10 @@ def capture_forwards(functions, signatures, *, session, device, stream, pool,
     Only graph-local intermediates may use the shared graph memory pool;
     serving replays variants serially and may choose them in any order.
     """
+    if (progress is not None and not getattr(session, "_graph_catalog_reported", False)
+            and (not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0)):
+        graph_catalog(progress, (signatures[name] for name in functions))
+        session._graph_catalog_reported = True
     graphs, compiled = {}, {}
     warmup = nullcontext if warmup_storage is None else warmup_storage.transient
     if compile_decoder:

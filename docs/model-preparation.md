@@ -629,6 +629,10 @@ package load time without another export. See
 [runtime memory limits](cli-design.md#runtime-memory-limits) for rounding,
 minimum capacities, and integrated-memory accounting. Preparation retains its
 own existing memory policy.
+
+Before compilation and capture, preparation prints a persistent graph catalog
+with counts, batch and prefill capacities, logical widths, physical target rows,
+and draft depths, including when `--verbose` is omitted.
 Ignition captures power-of-two
 batch capacities through the concurrency limit
 and width one at every bucket. Rectangular speculative and verification shapes
