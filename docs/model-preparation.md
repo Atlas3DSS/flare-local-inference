@@ -109,6 +109,21 @@ explicit flag wins. The plan carries the setting to every preparation rank
 and tuning replica. Effort separates cached selections and prepared packages;
 identical kernel programs share compilation artifacts across efforts.
 
+Tuning checkpoints each completed measurement batch in a SQLite database beside
+the kernel selection cache. Tensor-parallel ranks save independently, including
+completed local races waiting for winner exchange. Restarting the same workload
+restores measured candidates and the carried winner, then measures unfinished
+candidates against that winner. The progress display distinguishes restored,
+newly measured, and rejected candidates. An interruption loses the unfinished
+measurement batch on each rank; compilation artifacts remain separately cached.
+
+Partial checkpoints require the same candidate program identities, effort,
+tuning shard count, and measurement settings. A kernel or predicate change
+invalidates the affected race's checkpoint. Completed selection caches remain
+usable independently of the tuning shard count. Resource-dependent cooperative
+launch rejections are retried after restart; fatal CUDA errors still require
+restarting preparation in fresh processes.
+
 `--compile-workers N` sets a positive CPU compiler process budget per host for
 b12x kernel compilation and complete-forward compilation. Available RAM and
 device memory can reduce it; local preparation ranks share the budget. Set

@@ -595,3 +595,41 @@ def test_list_views_preserve_offsets_and_mutations_under_capture(operation):
         torch.testing.assert_close(output, expected.sum(1))
         expected[:, 0].add_(7)
         torch.testing.assert_close(storage, expected)
+
+
+@pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1", reason="explicit CUDA assignment required")
+@torch.no_grad()
+def test_compilation_cache_relocates_between_cuda_ordinals(tmp_path, monkeypatch):
+    if torch.cuda.device_count() < 2:
+        pytest.skip("requires two explicitly selected CUDA GPUs")
+    monkeypatch.setattr("ignition.preparation.compilation.DEFAULT_CACHE_ROOT", tmp_path)
+    graphs, outputs, functions = [], [], []
+    for ordinal in (0, 1):
+        with torch.cuda.device(ordinal):
+            source = torch.full((64,), ordinal + 1., device=f"cuda:{ordinal}")
+            output = torch.empty_like(source)
+
+            def forward(source=source, output=output):
+                output.copy_(source * 3)
+
+            compiled = compile_forward(forward)
+            assert compiled.cache_hit == bool(ordinal)
+            graph = torch.cuda.CUDAGraph()
+            stream = torch.cuda.Stream(device=ordinal)
+            stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.graph(graph, stream=stream):
+                compiled()
+            torch.cuda.current_stream().wait_stream(stream)
+            outputs.append(output)
+            graphs.append(graph)
+            functions.append((compiled, source))
+    assert len(tuple((tmp_path / "compiled").glob("*.bin"))) == 1
+    for ordinal, (graph, output, (_, source)) in enumerate(zip(graphs, outputs, functions, strict=True)):
+        with torch.cuda.device(ordinal):
+            source.fill_(ordinal + 4.)
+            output.fill_(float("nan"))
+            allocated = torch.cuda.memory_allocated()
+            graph.replay()
+            torch.testing.assert_close(output, torch.full_like(output, (ordinal + 4.) * 3), rtol=0, atol=0)
+            assert torch.cuda.memory_allocated() == allocated
+            graph.reset()

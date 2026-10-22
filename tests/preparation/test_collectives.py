@@ -263,3 +263,20 @@ def test_roce_setup_preserves_routing_and_package_transport_owner(monkeypatch, r
     assert runtime.options["max_size"] == 2 << 20
     assert runtime.options["pipe_bytes"] == 4096 * 4096 * 2
     assert callable(runtime.options["region_allocator"])
+
+
+def test_differing_tuning_races_report_bounded_counts_and_release_job(monkeypatch):
+    owner = coordinator(monkeypatch)
+    local = tuple(race(f"local-{index:064x}", 1., index) for index in range(1200))
+    peer = tuple(race(f"peer-{index:064x}", 1., index) for index in range(1200))
+    state = SimpleNamespace(done=False, ready_collectives=(), ready_cache=None, ready_tuning=local)
+    closed = []
+    job = SimpleNamespace(advance=lambda **kwargs: state, close=lambda: closed.append(True))
+    monkeypatch.setattr(dist, "all_gather_object",
+        lambda states, value, **kwargs: states.__setitem__(slice(None), [value, (False, (), None, None, peer)]))
+    with pytest.raises(RuntimeError, match="tuning races differ across ranks") as error:
+        owner.prepare(SimpleNamespace(begin=lambda *args, **kwargs: job), ())
+    assert "counts={4: 1200, 7: 1200}" in str(error.value)
+    assert "'missing': 1200, 'extra': 1200" in str(error.value)
+    assert len(str(error.value)) < 500
+    assert closed == [True]

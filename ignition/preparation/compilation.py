@@ -201,9 +201,13 @@ class CompiledForward:
 
 
 def _compile_module(module, calls, owner, output_tree):
+    import copy
+
     from torch._inductor import standalone_compile
     from torch._inductor.codecache import torch_key
-    from torch._inductor.standalone_compile import CompiledArtifact
+
+    from .aot import _load_inductor
+    from .device_binding import bind_device
 
     graph = module.graph
     inputs = []
@@ -228,15 +232,24 @@ def _compile_module(module, calls, owner, output_tree):
         storage = tensor.untyped_storage()._cdata
         alias = storages.setdefault(storage, len(storages))
         metadata.append((tuple(tensor.shape), tensor.stride(), tensor.storage_offset(),
-                         tensor.untyped_storage().nbytes(), tensor.dtype, tensor.device,
+                         tensor.untyped_storage().nbytes(), tensor.dtype, tensor.device.type,
                          tensor.requires_grad, alias))
-    key = hashlib.sha256(pickle.dumps((module.code, metadata, _OPTIONS, torch_key(),
+    cache_graph = copy.deepcopy(module.graph)
+    def portable_device(value):
+        return torch.device(value.type) if isinstance(value, torch.device) else value
+    for node in cache_graph.nodes:
+        node.args = torch.fx.node.map_aggregate(node.args, portable_device)
+        node.kwargs = torch.fx.node.map_aggregate(node.kwargs, portable_device)
+    cache_code = torch.fx.GraphModule({}, cache_graph).code
+    key = hashlib.sha256(pickle.dumps(('compiled-forward-portable-device-v1', cache_code, metadata, _OPTIONS, torch_key(),
         torch.cuda.get_device_capability(), torch.cuda.get_device_name()))).hexdigest()
     path = DEFAULT_CACHE_ROOT / 'compiled' / (key + '.bin')
     cache_hit = path.is_file()
     if cache_hit:
-        with _artifact_kernel_table():
-            artifact = CompiledArtifact.load(path=str(path))
+        with path.open('rb') as file:
+            original, serialized = pickle.load(file)
+        with bind_device(torch.device('cuda', torch.cuda.current_device())), _artifact_kernel_table():
+            artifact, _ = _load_inductor(serialized, original)
     else:
         with _compiler_recursion(module):
             artifact = standalone_compile(module, inputs, dynamic_shapes='from_example_inputs',
@@ -250,7 +263,9 @@ def _compile_module(module, calls, owner, output_tree):
     if not cache_hit:
         path.parent.mkdir(parents=True, exist_ok=True)
         with _artifact_kernel_table():
-            artifact.save(path=str(path))
+            serialized = artifact.serialize()
+        from torch._inductor.codecache import write_atomic
+        write_atomic(path, pickle.dumps((torch.device('cuda', torch.cuda.current_device()), serialized)))
     return CompiledForward(artifact, inputs, calls, owner, output_tree, cache_hit)
 
 

@@ -266,7 +266,15 @@ class CollectivePreparation:
                 if all(item[4] for item in states):
                     races = [sorted(contribution.key for contribution in item[4]) for item in states]
                     if any(keys != races[0] for keys in races[1:]):
-                        raise RuntimeError(f"tuning races differ across ranks: {races}")
+                        reference = set(races[0])
+                        counts = dict(zip(self.ranks, map(len, races), strict=True))
+                        differences = {}
+                        for rank, keys in zip(self.ranks[1:], races[1:], strict=True):
+                            missing, extra = reference - set(keys), set(keys) - reference
+                            if missing or extra:
+                                differences[rank] = {"missing": len(missing), "extra": len(extra),
+                                                     "examples": sorted(missing | extra)[:2]}
+                        raise RuntimeError(f"tuning races differ across ranks: counts={counts}, differences={differences}")
                     winners = _winners(contribution for item in states for contribution in item[4])
                     authorization = {"tuning": winners[0] if len(winners) == 1 else winners}
                     continue

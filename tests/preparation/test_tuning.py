@@ -100,7 +100,8 @@ def backend(monkeypatch):
                 retained_trials.clear()
 
         return SimpleNamespace(coverage={}, cache_hits=2 if autotune else 0,
-            benchmarked_candidates=7 if autotune else 0, elapsed_seconds=1.25,
+            benchmarked_candidates=7 if autotune else 0, restored_candidates=3 if autotune else 0,
+            rejected_candidates=0, elapsed_seconds=1.25,
             parent_cute_compilations=0, parent_triton_compilations=0, close=close)
 
     def envelope(self, requests):
@@ -194,6 +195,7 @@ def test_declarations_do_no_work_and_prepare_in_one_tuned_batch(backend):
     ]
     assert calls == ["benchmark", "prime"] * 4 + ["bind"]
     assert report["cache_hits"] == 2 and report["benchmarked_candidates"] == 7
+    assert report["restored_candidates"] == 3 and report["rejected_candidates"] == 0
     assert events.count(("result_close", True)) == 1
     assert arena.frozen
 
