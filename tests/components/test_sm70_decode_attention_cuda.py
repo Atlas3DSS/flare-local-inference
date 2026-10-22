@@ -1,4 +1,4 @@
-"""Captured Sol-13b S1L decode attention: four-agent packing, replay identity, padded rows and an FP64 reference."""
+"""Captured Sol-13c S1L decode attention: four-agent packing, replay identity, padded rows and an FP64 reference."""
 
 import os
 

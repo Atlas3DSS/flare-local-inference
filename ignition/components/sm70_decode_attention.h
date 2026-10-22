@@ -4,7 +4,9 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-/* Sol-13b: long-context verification attention for sm_70 tensor cores (build S1L = v2b + S1 + partition ladder).
+/* Sol-13c: Sol-13b S1L (long-context verification attention for sm_70 tensor cores) with the Flare row contract:
+ * row j of an agent with R rows produces the SAME BITS as a single-row launch (R = 1) with length ctx0 + j + 1 on the
+ * same Q row and K/V (ctx0 = length - R). Drop-in: same symbols, arguments, variants and workspace size as sol-13b.
  * Same call shape as sol13_attention so an integrator can swap kernels.
  *
  * Q/Out: packed [M,24,256] FP32, RoPE applied. cu[5]: prefix sum of 0..5 rows per agent (empty agents allowed).
@@ -13,16 +15,16 @@ extern "C" {
  *
  * variant = R_cap | flags:
  *   R_cap 4 -> up to 4 rows per agent, 5 -> up to 5 (both plans give identical row bits).
- *   +128  partition ladder: per agent, from its committed context ctx0 = length - R only (row-invariant):
- *         ctx0 <= 1275 -> 128-token partitions, <= 2555 -> 256, else `partition` (512). Recommended.
+ *   +128  partition ladder, per ROW j from its own committed context ctx0 + j (= its single-row decode's rung):
+ *         ctx0 + j <= 1275 -> 128-token partitions, <= 2555 -> 256, else `partition` (512). Recommended.
  *   +256  encoded K/V (S1): `meta` (uint8_t*, cast to const int32_t* to keep the sol13 argument list) describes each
  *         32-token x 64-dim block: 0..224 = block stored as exact bf16*2^(112-D) FP16 (written by
  *         sol13b_encode_committed); 0xFE/0xFF = block stored as raw BF16. Without +256 all of K/V must be raw BF16.
  *         Encoded and raw mode give identical bits for the same logical K/V.
  *   +64   harness only: dump the query hi/lo representation and debug counters into the workspace.
  * partition: 512 recommended (pinned; multiple of 32 in [32,4096]). A row's bits depend only on its Q row, its
- * visible K/V, its committed context ctx0 and the plan (partition, ladder flag). Not on R, packing, other agents,
- * max_length or R_cap.
+ * visible K/V (positions < ctx0 + j + 1), that visible length and the plan (partition, ladder flag): equal to the
+ * single-row launch at that length. Not on R, ctx0 itself, packing, other agents, max_length or R_cap.
  * max_length <= 32768 must cover every active length; pagecols >= ceil(max_length/128). Visible K/V finite.
  * Graph capturable; caller stream; caller workspace; no allocation, no host sync, no atomics. Returns cudaError_t. */
 int sol13b_init(void); /* call once before CUDA graph capture */

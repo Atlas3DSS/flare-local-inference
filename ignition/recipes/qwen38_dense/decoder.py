@@ -167,7 +167,7 @@ class FullAttention(torch.nn.Module):
                 workspace=workspace)
             self.status_sink = status_sink
         elif self.sm70 and mode == "decode" and decode_agents is not None:
-            # Reviewed Sol-13b S1L tensor-core verification attention (raw BF16 mode, four-agent metadata packed once
+            # Reviewed Sol-13c S1L tensor-core verification attention (raw BF16 mode, four-agent metadata packed once
             # per forward by the decoder); ordinary decode and speculative verification rows, never prefill.
             from ignition.components.sm70_decode_attention import PreparedDecodeAttention
             self.attention = PreparedDecodeAttention(self.q, key_cache, value_cache, decode_agents, attended,
@@ -239,7 +239,7 @@ class PreparedDecoder:
         if self.sm70 and mode == "prefill" and prefill_errors is not None:
             self.prefill_errors = prefill_errors
             self.prefill_status = torch.zeros(1, dtype=torch.int32, device=scratch.activations.device)
-        # SM70 decode graphs: the reviewed Sol-13b S1L attention reads four-agent metadata packed once per forward.
+        # SM70 decode graphs: the reviewed Sol-13c S1L attention reads four-agent metadata packed once per forward.
         # Option (a) of REVIEW-ARGON-S1L.md: the kernel admits a served context of 32,768 tokens; a wider page table is
         # refused at preparation (prepare with --context 32768) rather than served by a slower, unreviewed mixture.
         self.decode_agents, self.rows_per_agent = None, None

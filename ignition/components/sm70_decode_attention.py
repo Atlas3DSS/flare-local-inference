@@ -1,4 +1,10 @@
-"""Reviewed Sol-13b S1L tensor-core decode/verification attention for the 16 full-attention layers on SM70.
+"""Reviewed Sol-13c S1L tensor-core decode/verification attention for the 16 full-attention layers on SM70.
+
+Sol-13c keeps Sol-13b's ABI (sol13b_* entry points, variants, workspace) and adds the Flare row contract: verification row j
+of an agent with R rows is bit-identical to the single-row launch at visible length ctx0 + j + 1 (per-row boundary-tile
+conversion, per-row ladder rung), so accepting k rows leaves the state of k ordinary greedy decodes (forced_prefix gate).
+The kernel sizes its own grid (gsplits grows at a ladder straddle) and workspace from max_length; the wrapper only asks
+sol13b_workspace_bytes and never derives a launch size itself.
 
 Raw-BF16 mode (variant = R_cap | 128: partition ladder, no S1 writer, meta = NULL): K/V pages stay canonical BF16 bits
 for the prefill kernel, the KV writer, prefix-cache offload and snapshot/restore; bits equal the encoded mode. The kernel
@@ -34,7 +40,7 @@ MAX_ROWS = 20              # 4 agents x 5 rows
 MAX_ROWS_PER_AGENT = 5
 MAX_LENGTH = 32768         # valid_cfg: n <= 32768 and splits(n, 512) <= 64
 PARTITION = 512
-LADDER = 128               # variant flag: 128/256/512-token partitions from the agent's committed context
+LADDER = 128               # variant flag: 128/256/512-token partitions per ROW from its own committed context ctx0 + j
 HEADS, KV_HEADS, DIM = 24, 4, 256
 
 
@@ -55,7 +61,7 @@ def compile_library(kernel_cache=None):
         fcntl.flock(lock, fcntl.LOCK_EX)
         if not output.exists():
             workers = len(os.sched_getaffinity(0))
-            # Exactly sol-13b/build.sh (the qualified attention.so): the SASS must stay identical.
+            # Exactly sol-13c/build.sh (= sol-13b's flags; the qualified attention.so): the SASS must stay identical.
             subprocess.run([str(Path(CUDA_HOME) / "bin/nvcc"), "--threads", str(workers), "-std=c++17", "-O3",
                 "-arch=compute_70", "-code=sm_70", "-Xcompiler=-fPIC", "--shared", "-lineinfo", "--fmad=false",
                 str(source), "-o", str(output)], check=True)
@@ -195,7 +201,7 @@ class PreparedDecodeAttention:
                 or any(t.device != device for t in (key_cache, value_cache, output, agents.lengths, agents.cu,
                                                     agents.pages, agents.row_index))
                 or torch._C._overlaps(output, q)):
-            raise ValueError("SM70 decode attention operands are outside the reviewed Sol-13b contract")
+            raise ValueError("SM70 decode attention operands are outside the reviewed Sol-13c contract")
         if not 1 <= max_length <= MAX_LENGTH:
             # Argon required change 4 (option (a)): the kernel admits 32,768 tokens; prepare with --context 32768.
             raise ValueError(f"SM70 decode attention admits a served context of at most {MAX_LENGTH} tokens "

@@ -1,3 +1,10 @@
+// Sol-13c: Sol-13b S1L with the Flare row contract: verify row j of a multi-row launch produces the SAME BITS as a
+// single-row launch (R = 1) with length ctx0 + j + 1 on the same Q row and K/V. Changes vs sol-13b (NUMERICS.md,
+// "Row semantics"): (1) row passes on boundary tiles: a token that the shared conversion flags (outside the window of
+// the positions < ctx0 + 1) no longer takes an FP32 special path; the block is re-converted (reconvert) with the voter
+// set of the first row that sees that token, and those rows' scores / PV are recomputed on the tensor (or raw) path,
+// exactly as their single-row runs compute them; (2) per-row rung: row j uses ladder_P(ctx0 + j); an agent whose rows
+// straddle a cutoff gets a second partition set. Row 0 and every R = 1 launch are bit-identical to sol-13b.
 // Sol-13b: long-context verification attention on sm_70 tensor cores (mma.m8n8k4). PROMOTED build S1L = v2b + S1 + ladder:
 // + append-time exact K/V encoding (variant +256): committed 32x64 blocks are stored as exact scaled FP16 by
 // sol13b_encode_committed; for those tiles the hot loop skips the max pass and conversion (D from metadata).
@@ -14,7 +21,7 @@
 //  * Blocks that fail admission (span > 2^30 within a 32x64 block, non-finite) and query slices whose
 //    two-half representation is off by more than 2^-20 componentwise take an FP32 SIMT path for that
 //    block / row only. No row ever selects another row's arithmetic.
-#include "sm70_decode_attention.h"   // = sol-13b/attention.h verbatim (astra-7: the only edit to attention.cu)
+#include "sm70_decode_attention.h"   // = sol-13c/attention.h verbatim (astra-10: the only edit to attention.cu)
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <math_constants.h>
@@ -30,9 +37,45 @@ constexpr int MAX_R = 5, LADDER_SPLITS = 10;
 __host__ __device__ __forceinline__ int ladder_P(int ctx0, int plong) {
   return ctx0 <= 10 * 128 - MAX_R ? 128 : (ctx0 <= 10 * 256 - MAX_R ? 256 : plong);  // ctx0 <= 1275 / <= 2555
 }
+// sol-13c per-row rung: row j of an agent (committed context ctx0, R rows) uses ladder_P(ctx0 + j), the rung its own
+// single-row decode uses. Rows [0, jb) share rung PA, rows [jb, R) rung PB (jb = R: one rung; R <= 5 crosses at most one
+// cutoff). Straddling agent: CTAs x < nA compute rung PA (nA covers the longest PA row, visible ctx0 + jb) for rows
+// [0, jb) into slots x; CTAs x in [nA, nA + ceil(len/PB)) compute rung PB for rows [jb, R) into slots x - nA. The two
+// rungs share slot numbers (disjoint rho = 6j + h rows, Argon PROMPT26), so the merge reads slots 0..chunks-1 for every
+// row and the workspace is unchanged; only the grid grows (15 instead of 10 x-blocks at a straddle).
+struct Rung { int PA, PB, jb, nA; };
+__host__ __device__ __forceinline__ Rung rung_plan(int ctx0, int R, int plong) {
+  Rung g;
+  g.PA = g.PB = ladder_P(ctx0, plong);
+  g.jb = R;
+  for (int j = 1; j < R; ++j)
+    if (g.jb == R && ladder_P(ctx0 + j, plong) != g.PA) { g.jb = j; g.PB = ladder_P(ctx0 + j, plong); }
+  g.nA = g.jb < R ? (ctx0 + g.jb + g.PA - 1) / g.PA : 0;
+  return g;
+}
 // S1 metadata: one byte per (page, 32-token tile, KV head, 64-dim slice, K|V): 0..224 = D (block holds exact
 // bf16*2^(112-D) FP16), META_UNENC = raw BF16 not yet encoded, META_RAW = raw BF16 kept (inadmissible block).
 constexpr uint8_t META_UNENC = 0xFE, META_RAW = 0xFF;
+// sol-13c row passes on boundary tiles. 0 (default, "lazy"): a row gets its own conversion only when the conversion
+// that would otherwise serve it flagged a token the row sees; by the NUMERICS.md lemma every other row's conversion
+// already equals its single-row run's. 1 ("eager", Argon PROMPT26 Q2 literally): every row j whose visible set in the
+// tile differs from the previous row's gets its own pass, loading only positions < ctx0 + j + 1 (others zero) and
+// converting with all of them voting = load_block(len = vis_j) + convert_block<false>. Both must give identical bits
+// (qualification compares the two builds); lazy does no extra work unless a token is flagged.
+#ifndef ROWPASS_EAGER
+#define ROWPASS_EAGER 0
+#endif
+// Rows rho < return value are final with the conversion whose flags are `spec` (first row to re-pass, times 6; 32 = all).
+__device__ __forceinline__ int pass_end(unsigned spec, int jlo, int start, int ctx0, int R) {
+#if ROWPASS_EAGER
+  int jn = spec ? start + __ffs(spec) - 1 - ctx0 : R;
+  const int je = max(jlo + 1, start - ctx0);  // next row that sees one more token of this tile
+  if (je < R && ctx0 + je < start + 32) jn = min(jn, je);
+  return jn < R ? 6 * jn : 32;
+#else
+  return spec ? 6 * (start + __ffs(spec) - 1 - ctx0) : 32;
+#endif
+}
 __host__ __device__ __forceinline__ size_t meta_index(int page, int tile, int head, int slice, int isv) {
   return ((((size_t(page) * 4 + tile) * 4 + head) * 4 + slice) << 1) | isv;
 }
@@ -136,8 +179,9 @@ __device__ __forceinline__ void store_v_block(unsigned char* kv, const uint4 (&b
 // (then b is left in an unspecified state and must be reloaded).
 // BND (boundary tile, start+TILE > ctx0+1): only positions < vlimit = ctx0+1 (seen by EVERY verify row) vote for D
 // and for raw. A later verify row's token (position >= vlimit) that does not fit the window [D+1, D+30] is zeroed
-// in the tile and reported in `spec` (bit = token in tile); its contribution is computed exactly in FP32 for the
-// rows that see it. So a later verify row can never change an earlier row's arithmetic.
+// in the tile and reported in `spec` (bit = token in tile). sol-13c: the rows that see a flagged token are recomputed
+// by a row pass (reconvert with their own voter set); no FP32 special path. So a later verify row can never change an
+// earlier row's arithmetic, and every row's arithmetic equals its single-row run's.
 template <bool BND>
 __device__ __forceinline__ int convert_block(uint4 (&b)[8], bool& raw, unsigned& spec, int vlimit, int start, int lane) {
   uint32_t mh = 0, ml = 0;
@@ -196,10 +240,11 @@ __device__ __forceinline__ int convert_block(uint4 (&b)[8], bool& raw, unsigned&
 
 // Rare FP32 paths, kept out of line so they do not raise register pressure of the tensor-core path.
 // Score fallback: lane = token. Rows with raw K (whole block) or a flagged query slice use FP32 dots.
+// sol-13c: rr = rlo | rhi << 8, rows rho in [rlo, rhi) (a row pass recomputes only the rows it finalizes and later ones).
 __device__ __noinline__ void qk_fallback(float* spw, const unsigned char* kv, const float* q0, bool kraw, unsigned qmask,
-                                         int Dk, int rows, int lane) {
+                                         int Dk, int rr, int lane) {
   const int t = lane;
-  for (int rho = 0; rho < rows; ++rho) {
+  for (int rho = rr & 0xFF; rho < (rr >> 8); ++rho) {
     const bool need = kraw || ((qmask >> ((rho & 3) + 16 * ((rho >> 2) & 1) + 4 * (rho >> 3))) & 1);
     if (!need) continue;
     const int j = rho / 6, hh = rho - 6 * j;
@@ -233,62 +278,119 @@ __device__ __noinline__ void pv_fallback(float* out, const unsigned char* kv, co
   }
 }
 
-// Boundary-tile tokens of later verify rows that did not fit the voters' window (see convert_block): exact FP32.
-// Scores: lane = row; overwrites column t of this warp's score partial (true units / 16) for every row.
-__device__ __noinline__ void qk_special(float* spw, unsigned spec, const float* q0, const uint16_t* ktile, int rows,
-                                        int lane) {
-  const int rho = lane;
-  const int j = rho / 6, hh = rho - 6 * j;
-  const float* qrow = q0 + (size_t(j) * 24 + hh) * 256;
-  while (spec) {
-    const int t = __ffs(spec) - 1;
-    spec &= spec - 1;
-    if (rho < rows) {
-      const uint16_t* krow = ktile + size_t(t) * 4 * 256;
-      float dot = 0.f;
-      for (int d = 0; d < 64; ++d) dot = __fmaf_rn(__ldg(qrow + d), bf2f(__ldg(krow + d)), dot);
-      spw[rho * 32 + 2 * ((t >> 1) ^ sp_h(rho)) + (t & 1)] = __fmul_rn(dot, 0.0625f);
-    }
+// sol-13c row pass (rare path, out of line): re-convert this warp's 32x64 block of a boundary tile with voters =
+// positions < vlimit, where vlimit = ctx0 + j + 1 is the visible length of the first row j that sees a token flagged by
+// the previous conversion. Per element and per decision this is exactly convert_block<true>(vlimit): same D, same raw
+// decision, same flagged-and-zeroed tokens, same FP16 bits (identical expressions), so a row finalized by this pass gets
+// the block its own single-row run converts (NUMERICS.md lemma). Streamed global -> shared in 8 token chunks (two passes
+// over L2-resident data) so it needs few registers. Positions >= len are zero (never loaded), as in load_block.
+// Stores the converted block, or the raw BF16 block if it is not admitted, to kv with the K (isv = 0) or V swizzle.
+// pk = start | isv << 16. Returns spec | (D | raw << 8) << 32.
+__device__ __forceinline__ void store_chunk(unsigned char* kv, int t, int lane, const uint32_t (&w)[4], int isv) {
+  if (!isv) {
+    *reinterpret_cast<uint4*>(kv + t * 128 + (((lane & 7) ^ (t & 7)) << 4)) = make_uint4(w[0], w[1], w[2], w[3]);
+  } else {
+    const int g = (t & 1) | (((t >> 1) & 1) << 3), u = 2 * (lane & 7);
+    *reinterpret_cast<uint2*>(kv + t * 128 + ((u ^ g) << 3)) = make_uint2(w[0], w[1]);
+    *reinterpret_cast<uint2*>(kv + t * 128 + (((u + 1) ^ g) << 3)) = make_uint2(w[2], w[3]);
   }
 }
-// Output: lane = dim of the 32-dim half b; out[rho*32+lane] = sum over flagged tokens t (ascending) that row rho
-// sees of p(t)/den * v(t,dim). The caller adds it to rows that see the lowest flagged token.
-// Packed small ints keep every argument in registers (no stack-passed ABI parameters): pk = start | b<<16 | rows<<17.
-__device__ __noinline__ void pv_special(float* out, unsigned spec, const uint16_t* vtile, const unsigned char* sm, int pk) {
-  const unsigned char* ps = sm + SM_P;
-  const float2* st = reinterpret_cast<const float2*>(sm + SM_ST);
-  const int* vist = reinterpret_cast<const int*>(sm + SM_VIS);
-  const int start = pk & 0xFFFF, b = (pk >> 16) & 1, rows = pk >> 17, lane = threadIdx.x & 31;
-  const int dim = 32 * b + lane;
-  for (int rho = 0; rho < rows; ++rho) {
-    const float w = __fmul_rn(st[rho].y, 0x1p-15f);
-    float sum = 0.f;
-    unsigned m = spec;
-    while (m) {
-      const int t = __ffs(m) - 1;
-      m &= m - 1;
-      if (start + t >= vist[rho]) break;  // tokens ascend: the rest are masked for this row
-      const __half* prow = reinterpret_cast<const __half*>(ps + rho * 144 + (t >> 2) * 16);
-      const float pv = __fmul_rn(__fadd_rn(__half2float(prow[t & 3]), __half2float(prow[4 + (t & 3)])), w);
-      if (pv == 0.f) continue;
-      sum = __fmaf_rn(pv, bf2f(__ldg(vtile + size_t(t) * 4 * 256 + dim)), sum);
+__device__ __noinline__ unsigned long long reconvert(unsigned char* kv, const uint16_t* tile, int pk, int vlimit, int len) {
+  const int lane = threadIdx.x & 31, start = pk & 0xFFFF, isv = pk >> 16;
+  const uint16_t* src = tile + size_t(lane >> 3) * 4 * 256 + 8 * (lane & 7);
+  uint32_t mh = 0, ml = 0;
+#pragma unroll 1
+  for (int i = 0; i < 8; ++i) {
+    const int pos = start + 4 * i + (lane >> 3);
+    if (pos < vlimit && pos < len) {  // voters only (positions >= len are zero: they never raise the max)
+      const uint4 x = __ldg(reinterpret_cast<const uint4*>(src + size_t(4 * i) * 4 * 256));
+      const uint32_t w[4] = {x.x, x.y, x.z, x.w};
+#pragma unroll
+      for (int j = 0; j < 4; ++j) {
+        const uint32_t a = w[j] & 0x7FFF7FFFu;
+        mh = max(mh, a);
+        ml = max(ml, a << 16);
+      }
     }
-    out[rho * 32 + lane] = sum;
   }
+  uint32_t m = max(mh, ml);
+#pragma unroll
+  for (int o = 16; o; o >>= 1) m = max(m, __shfl_xor_sync(0xffffffffu, m, o));
+  const int F = int(m >> 23);
+  unsigned spec = 0;
+  int D = 0;
+  bool raw = F == 255;
+  if (!raw) {
+    D = max(F - 30, 0);
+    const uint32_t Kb = (0x8000u - (uint32_t(D) << 7)) * 0x10001u;
+    const uint32_t Kv = (0x8000u - (uint32_t(D + 1) << 7)) * 0x10001u;
+    const uint32_t Kh = (0x8000u - (uint32_t(D + 31) << 7)) * 0x10001u;
+    uint32_t bad = 0;
+  #pragma unroll 1
+  for (int i = 0; i < 8; ++i) {
+      const int t = 4 * i + (lane >> 3), pos = start + t;
+      const bool vote = pos < vlimit;
+      uint4 x = make_uint4(0u, 0u, 0u, 0u);
+      if (pos < len) x = __ldg(reinterpret_cast<const uint4*>(src + size_t(4 * i) * 4 * 256));
+      uint32_t w[4] = {x.x, x.y, x.z, x.w};
+      uint32_t oor = 0;
+#pragma unroll
+      for (int j = 0; j < 4; ++j) {  // convert_block<true>, element for element
+        const uint32_t xx = w[j], a = xx & 0x7FFF7FFFu;
+        const uint32_t bb = a + Kb, vv = a + Kv, nz = a + 0x7FFF7FFFu;
+        if (!vote) oor |= (nz & ~vv) | (a + Kh);
+        else bad |= nz & ~vv;
+        const uint32_t msk = prmt(vv, 0xBB99u);
+        w[j] = ((bb << 3) & msk & 0x7FF87FF8u) | (xx & 0x80008000u);
+      }
+      const bool sp = !vote && (oor & 0x80008000u) != 0;
+      const unsigned bl = __ballot_sync(0xffffffffu, sp);
+#pragma unroll
+      for (int k = 0; k < 4; ++k)
+        if ((bl >> (8 * k)) & 0xFFu) spec |= 1u << (4 * i + k);
+      if ((bl >> (lane & 24)) & 0xFFu) w[0] = w[1] = w[2] = w[3] = 0u;  // whole token zeroed in this slice
+      store_chunk(kv, t, lane, w, isv);
+    }
+    raw = __any_sync(0xffffffffu, (bad & 0x80008000u) != 0);
+  }
+  if (raw) {  // not admitted: this warp's block as original BF16 (FP32 SIMT path), positions >= len zero
+    spec = 0;
+  #pragma unroll 1
+  for (int i = 0; i < 8; ++i) {
+      const int t = 4 * i + (lane >> 3);
+      uint4 x = make_uint4(0u, 0u, 0u, 0u);
+      if (start + t < len) x = __ldg(reinterpret_cast<const uint4*>(src + size_t(4 * i) * 4 * 256));
+      const uint32_t w[4] = {x.x, x.y, x.z, x.w};
+      store_chunk(kv, t, lane, w, isv);
+    }
+  }
+  return (unsigned long long)spec | ((unsigned long long)(unsigned(D) | (unsigned(raw) << 8)) << 32);
 }
 
 template <int MT>
 __global__ void __launch_bounds__(128, 2) attn_kernel(Params p) {
   extern __shared__ __align__(16) unsigned char sm[];
   const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
-  const int split = blockIdx.x, group = blockIdx.y, req = group >> 2, head = group & 3;
+  const int group = blockIdx.y, req = group >> 2, head = group & 3;
   const int begin = p.cu[req], R = p.cu[req + 1] - begin, len = p.lens[req];
-  const int P = p.shortp ? ladder_P(len - R, p.P) : p.P;  // ladder: from the agent's committed context only
-  const int t_begin = split * P;
   constexpr int CAP = MT == 3 ? 4 : 5;
-  if (R <= 0 || R > CAP || t_begin >= len) return;
-  const int t_end = min(len, t_begin + P);
+  if (R <= 0 || R > CAP) return;
   const int ctx0 = len - R;  // local row j sees positions < ctx0 + j + 1
+  // sol-13c per-row rung (rung_plan): this CTA (slot blockIdx.x) serves rows [rlo, rhi) at partition P. Without a
+  // straddle (every agent except at ctx0 in [cutoff-3, cutoff] with R >= 2) that is all rows at ladder_P(ctx0).
+  // (rlo/rhi are recomputed for the partial stores at the end so they are not live in the tile loop.)
+  int P = p.P, split = blockIdx.x, vend = len;  // vend: visible length of the last served row (= len unless straddle)
+  if (p.shortp) {
+    const Rung g = rung_plan(ctx0, R, p.P);
+    P = g.PA;
+    if (g.jb < R) {
+      if (split < g.nA) vend = ctx0 + g.jb;
+      else { P = g.PB; split -= g.nA; }
+    }
+  }
+  const int t_begin = split * P;
+  if (t_begin >= vend) return;
+  const int t_end = min(vend, t_begin + P);
   const int nrows = 6 * R;
   const int qp = (lane >> 2) & 3, loc = (lane & 3) | ((lane >> 4) << 2);
   unsigned char* kv = sm + SM_KV + warp * 4096;
@@ -304,11 +406,12 @@ __global__ void __launch_bounds__(128, 2) attn_kernel(Params p) {
   if (tid < npg) pgs[tid] = pg[(t_begin >> 7) + tid];
   uint4 buf[8];
   load_block(buf, p.k, pg[t_begin >> 7], t_begin, len, head, warp, lane);
-  int mk = META_RAW, mv = META_RAW;  // S1 metadata of the current tile (this warp's slice)
+  // S1 metadata of the current tile (this warp's slice): K byte | V byte << 8 (adjacent bytes, one 16-bit load; sol-13c
+  // packs them in one register to keep the 5-row kernel free of spills in the tile loop).
+  int mkv = META_RAW | (META_RAW << 8);
   if (p.enc) {
     const int pg0 = pg[t_begin >> 7], tl0 = (t_begin & 127) >> 5;
-    mk = __ldg(p.meta + meta_index(pg0, tl0, head, warp, 0));
-    mv = __ldg(p.meta + meta_index(pg0, tl0, head, warp, 1));
+    mkv = __ldg(reinterpret_cast<const unsigned short*>(p.meta + meta_index(pg0, tl0, head, warp, 0)));
   }
 
   // ---- query slice: this lane owns A row rho_a = 8*qp + loc of slice [64w, 64w+64)
@@ -376,7 +479,10 @@ __global__ void __launch_bounds__(128, 2) attn_kernel(Params p) {
     // ---------------- K block: admit, convert, store (warp private) ----------------
     bool kraw = false;
     unsigned kspec = 0, vspec = 0;
-    const bool bnd = start + TILE > ctx0 + 1;  // tile holds later verify rows' tokens: only positions <= ctx0 vote
+    // Boundary tile: holds later verify rows' tokens. The shared conversion uses positions <= ctx0 as voters (row 0's
+    // prefix); a token it flags starts a row pass for the rows that see it (sol-13c, below).
+    const bool bnd = start + TILE > ctx0 + 1;
+    const int mk = mkv & 0xFF, mv = mkv >> 8;
     const bool kenc = p.enc && !bnd && mk <= 224, venc = p.enc && !bnd && mv <= 224;
     int Dk;
     if (kenc) Dk = mk;  // S1: block stored as exact scaled FP16 by the writer (same D convert_block<false> picks)
@@ -399,6 +505,14 @@ __global__ void __launch_bounds__(128, 2) attn_kernel(Params p) {
     // combined as (hi + lo): shorter FP32 chains, 2-way ILP, 16 accumulator registers instead of 32.
     // P3: per-row power-of-two factors f1*f2 (identical to scale2's two multiplies), computed once per tile.
     float* spw = sp + warp * 1024;
+    // sol-13c row passes. Pass 0 uses the shared conversion. If it flagged a token (boundary tile only; first flagged
+    // position p, seen by rows j >= p - ctx0), rows rho < khi = 6(p - ctx0) are final, and the block is re-converted with
+    // the voter set of row khi/6 (reconvert); that pass rewrites rows rho >= klo = khi, and so on. Each pass strictly
+    // advances (its flagged tokens lie at or beyond its own voter limit), at most R - 1 re-passes per block. A row's
+    // final pass never flags a token the row sees, so its D, raw decision and FP16 bits equal its single-row run's.
+    // Interior tiles: kspec = 0, one pass, identical to sol-13b.
+    for (int klo = 0;;) {
+    const int khi = pass_end(kspec, klo / 6, start, ctx0, R);
     float f1[2], f2[2];
 #pragma unroll
     for (int vb = 0; vb < 2; ++vb) {
@@ -437,6 +551,7 @@ __global__ void __launch_bounds__(128, 2) attn_kernel(Params p) {
 #pragma unroll
           for (int vb = 0; vb < 2; ++vb) {
             const int rho = 8 * qp + (lane & 1) + 4 * (lane >> 4) + 2 * vb, h = sp_h(rho);
+            if (rho < klo) continue;  // finalized by an earlier pass
 #pragma unroll
             for (int vh = 0; vh < 2; ++vh) {
               const int c = 4 * vh + 2 * vb, pair = 4 * (n0 + u) + ((lane >> 1) & 1) + 2 * vh;
@@ -448,18 +563,24 @@ __global__ void __launch_bounds__(128, 2) attn_kernel(Params p) {
           }
       }
     }
-    if (kraw || qmask) {  // FP32 fallback: whole block (raw K) or individual query rows (bad split)
+    if (kraw || qmask) {  // FP32 fallback: whole block (raw K) or individual query rows (bad split), rows >= klo
       __syncwarp();
-      qk_fallback(spw, kv, p.q + (size_t(begin) * 24 + head * 6) * 256 + 64 * warp, kraw, qmask, Dk, min(MT * 8, nrows), lane);
-      __syncwarp();
-    }
-    if (kspec) {  // later verify rows' tokens outside the voters' window: exact FP32 score columns
-      if (p.debug && lane == 0) atomicAdd(p.dbg_e + MAXROWS * 24 * 8 + 2, __popc(kspec));  // harness only
-      __syncwarp();
-      qk_special(spw, kspec, p.q + (size_t(begin) * 24 + head * 6) * 256 + 64 * warp,
-                 p.k + ((size_t(pgs[(start - t_begin) >> 7]) * 128 + (start & 127)) * 4 + head) * 256 + 64 * warp, min(MT * 8, nrows), lane);
+      qk_fallback(spw, kv, p.q + (size_t(begin) * 24 + head * 6) * 256 + 64 * warp, kraw, qmask, Dk, klo | (nrows << 8), lane);
       __syncwarp();
     }
+    if (khi >= nrows) break;  // every row is final (always, unless a flagged token is seen by some row)
+    klo = khi;
+    __syncwarp();  // all lanes finished reading kv
+    {
+      const unsigned long long rc = reconvert(kv, p.k + ((size_t(pgs[(start - t_begin) >> 7]) * 128 + (start & 127)) * 4 + head) * 256 + 64 * warp,
+                                              start, ctx0 + 1 + klo / 6, ROWPASS_EAGER ? ctx0 + 1 + klo / 6 : len);
+      kspec = unsigned(rc);
+      Dk = int(rc >> 32) & 0xFF;
+      kraw = ((rc >> 40) & 1) != 0;
+    }
+    if (p.debug && lane == 0) atomicAdd(p.dbg_e + MAXROWS * 24 * 8 + 2, 1);  // harness only: K row passes
+    __syncwarp();
+    }  // row passes (K)
     // ---------------- V block: admit, convert, store (after all lanes finished reading K) ----------------
     bool vraw = false;
     int Dv;
@@ -481,8 +602,7 @@ __global__ void __launch_bounds__(128, 2) attn_kernel(Params p) {
       const int ns = start + TILE, npg = pgs[(ns - t_begin) >> 7];
       load_block(buf, p.k, npg, ns, len, head, warp, lane);
       if (p.enc) {  // metadata of the next tile, issued with its K payload
-        mk = __ldg(p.meta + meta_index(npg, (ns & 127) >> 5, head, warp, 0));
-        mv = __ldg(p.meta + meta_index(npg, (ns & 127) >> 5, head, warp, 1));
+        mkv = __ldg(reinterpret_cast<const unsigned short*>(p.meta + meta_index(npg, (ns & 127) >> 5, head, warp, 0)));
       }
     }
     __syncthreads();  // B1: all score partials written; previous PV finished reading P/stats
@@ -521,8 +641,13 @@ __global__ void __launch_bounds__(128, 2) attn_kernel(Params p) {
         l = __fadd_rn(l, __shfl_xor_sync(0xffffffffu, l, 4));
         const float old = __fmul_rn(d_run[which], a), dn = __fadd_rn(old, l);
         if (sc == 0) st[rho] = make_float2(dn > 0.f ? __fdiv_rn(old, dn) : 0.f, dn > 0.f ? __fdiv_rn(1.f, dn) : 0.f);
-        m_run[which] = mn;
-        d_run[which] = dn;
+        // sol-13c (Argon PROMPT26 Q3.1): a row with no visible token in this tile keeps its state, as its single-row run
+        // never enters the tile. For finite state this is what the update computes anyway (mn = m, dn = d exactly); it
+        // differs only for a NaN running max (fmaxf(NaN, -inf) = -inf), i.e. non-finite visible K.
+        if (start < vis) {
+          m_run[which] = mn;
+          d_run[which] = dn;
+        }
         __half hi[4], lo[4];
 #pragma unroll
         for (int k = 0; k < 4; ++k) {
@@ -536,86 +661,93 @@ __global__ void __launch_bounds__(128, 2) attn_kernel(Params p) {
     }
     __syncthreads();  // B2: P and stats ready
     // ---------------- O_w += P V_w on tensor cores, per 32-dim half ----------------
-    const int vshift = -15 - (112 - Dv);
-    // invd in [2^-9, 1]: invd*2^vshift is a normal number iff Dv >= 10; tiny-V blocks scale the tile sum instead.
-    const bool vfast = vraw || Dv >= 16;
+    // sol-13c row passes for V (same rule as K): each pass updates rows rho in [vlo, vhi) exactly once per tile. Pass 0
+    // (shared conversion) is the hot path; the re-passes run only if the shared conversion flagged a token that some row
+    // sees (boundary tile). The PV body is one inlined lambda used by both (kept out of a loop on the hot path:
+    // a loop around it costs registers/spills in the 5-row kernel).
+    auto pv_rows = [&](const int vlo, const int vhi, const int Dv, const bool vraw) {
+      const int vshift = -15 - (112 - Dv);
+      // invd in [2^-9, 1]: invd*2^vshift is a normal number iff Dv >= 10; tiny-V blocks scale the tile sum instead.
+      const bool vfast = vraw || Dv >= 16;
 #pragma unroll
-    for (int b = 0; b < 2; ++b) {
-      float tl[MT][8];
-#pragma unroll
-      for (int rt = 0; rt < MT; ++rt)
-#pragma unroll
-        for (int c = 0; c < 8; ++c) tl[rt][c] = 0.f;
-      if (!vraw) {
-        const int c = 8 * b + 2 * qp + (lane >> 4), g = (lane & 1) | (((lane >> 1) & 1) << 3);
-#pragma unroll
-        for (int s4 = 0; s4 < 8; ++s4) {
-          const int t = 4 * s4 + (lane & 3);
-          const uint2 vb2 = *reinterpret_cast<const uint2*>(kv + t * 128 + ((c ^ g) << 3));
-#pragma unroll
-          for (int rt = 0; rt < MT; ++rt) {
-            const uint4 pa = *reinterpret_cast<const uint4*>(ps + (8 * rt + loc) * 144 + s4 * 16);
-            mma_rr(tl[rt], pa.x, pa.y, vb2.x, vb2.y);
-            mma_rr(tl[rt], pa.z, pa.w, vb2.x, vb2.y);
-          }
-        }
-      }
-      else {  // FP32 fallback for a V block that failed admission; result staged in this warp's score area
-        __syncwarp();
-        pv_fallback(spw, kv, ps, st, b, min(MT * 8, nrows), lane);
-        __syncwarp();
+      for (int b = 0; b < 2; ++b) {
+        float tl[MT][8];
 #pragma unroll
         for (int rt = 0; rt < MT; ++rt)
 #pragma unroll
-          for (int c = 0; c < 8; ++c)
-            tl[rt][c] = spw[(8 * rt + (lane & 1) + 4 * (lane >> 4) + 2 * ((c >> 1) & 1)) * 32 + 8 * qp +
-                            2 * ((lane >> 1) & 1) + (c & 1) + 4 * (c >> 2)];
-        __syncwarp();
-      }
+          for (int c = 0; c < 8; ++c) tl[rt][c] = 0.f;
+        if (!vraw) {
+          const int c = 8 * b + 2 * qp + (lane >> 4), g = (lane & 1) | (((lane >> 1) & 1) << 3);
 #pragma unroll
-      for (int rt = 0; rt < MT; ++rt)
+          for (int s4 = 0; s4 < 8; ++s4) {
+            const int t = 4 * s4 + (lane & 3);
+            const uint2 vb2 = *reinterpret_cast<const uint2*>(kv + t * 128 + ((c ^ g) << 3));
 #pragma unroll
-        for (int vb = 0; vb < 2; ++vb) {
-          const int rho = 8 * rt + (lane & 1) + 4 * (lane >> 4) + 2 * vb;
-          if (start < vist[rho]) {  // skip tiles with no visible token for this row
-            const float2 x = st[rho];
-            if (vfast) {
-              const float be = vraw ? 1.f : scale2(x.y, vshift);  // raw path is already normalized
-#pragma unroll
-              for (int c = 2 * vb; c < 8; c += (c & 1) ? 3 : 1)  // c in {2vb, 2vb+1, 2vb+4, 2vb+5}
-                acc[rt][b][c] = __fmaf_rn(tl[rt][c], be, __fmul_rn(acc[rt][b][c], x.x));
-            } else {
-#pragma unroll
-              for (int c = 2 * vb; c < 8; c += (c & 1) ? 3 : 1)
-                acc[rt][b][c] = __fmaf_rn(scale2(tl[rt][c], vshift), x.y, __fmul_rn(acc[rt][b][c], x.x));
+            for (int rt = 0; rt < MT; ++rt) {
+              const uint4 pa = *reinterpret_cast<const uint4*>(ps + (8 * rt + loc) * 144 + s4 * 16);
+              mma_rr(tl[rt], pa.x, pa.y, vb2.x, vb2.y);
+              mma_rr(tl[rt], pa.z, pa.w, vb2.x, vb2.y);
             }
           }
         }
-      if (vspec) {  // later verify rows' V tokens outside the voters' window: exact FP32, added after the tile
-        if (p.debug && lane == 0 && b == 0) atomicAdd(p.dbg_e + MAXROWS * 24 * 8 + 3, __popc(vspec));  // harness only
-        __syncwarp();
-        pv_special(spw, vspec, p.v + ((size_t(pgs[(start - t_begin) >> 7]) * 128 + (start & 127)) * 4 + head) * 256 + 64 * warp, sm,
-                   start | (b << 16) | (min(MT * 8, nrows) << 17));
-        __syncwarp();
-        const int tfirst = start + __ffs(vspec) - 1;
+        else {  // FP32 fallback for a V block that failed admission; result staged in this warp's score area
+          __syncwarp();
+          pv_fallback(spw, kv, ps, st, b, min(MT * 8, nrows), lane);
+          __syncwarp();
+#pragma unroll
+          for (int rt = 0; rt < MT; ++rt)
+#pragma unroll
+            for (int c = 0; c < 8; ++c)
+              tl[rt][c] = spw[(8 * rt + (lane & 1) + 4 * (lane >> 4) + 2 * ((c >> 1) & 1)) * 32 + 8 * qp +
+                              2 * ((lane >> 1) & 1) + (c & 1) + 4 * (c >> 2)];
+          __syncwarp();
+        }
 #pragma unroll
         for (int rt = 0; rt < MT; ++rt)
 #pragma unroll
           for (int vb = 0; vb < 2; ++vb) {
             const int rho = 8 * rt + (lane & 1) + 4 * (lane >> 4) + 2 * vb;
-            if (tfirst < vist[rho]) {
+            if (start < vist[rho] && rho >= vlo && rho < vhi) {  // skip tiles with no visible token; rows of this pass
+              const float2 x = st[rho];
+              if (vfast) {
+                const float be = vraw ? 1.f : scale2(x.y, vshift);  // raw path is already normalized
 #pragma unroll
-              for (int c = 2 * vb; c < 8; c += (c & 1) ? 3 : 1)
-                acc[rt][b][c] = __fadd_rn(acc[rt][b][c], spw[rho * 32 + 8 * qp + 2 * ((lane >> 1) & 1) + (c & 1) + 4 * (c >> 2)]);
+                for (int c = 2 * vb; c < 8; c += (c & 1) ? 3 : 1)  // c in {2vb, 2vb+1, 2vb+4, 2vb+5}
+                  acc[rt][b][c] = __fmaf_rn(tl[rt][c], be, __fmul_rn(acc[rt][b][c], x.x));
+              } else {
+#pragma unroll
+                for (int c = 2 * vb; c < 8; c += (c & 1) ? 3 : 1)
+                  acc[rt][b][c] = __fmaf_rn(scale2(tl[rt][c], vshift), x.y, __fmul_rn(acc[rt][b][c], x.x));
+              }
             }
           }
+      }
+    };
+    const int vhi0 = pass_end(vspec, 0, start, ctx0, R);
+    pv_rows(0, vhi0, Dv, vraw);
+    if (vhi0 < nrows) {
+      const uint16_t* vtile = p.v + ((size_t(pgs[(start - t_begin) >> 7]) * 128 + (start & 127)) * 4 + head) * 256 + 64 * warp;
+      for (int vlo = vhi0;;) {
+        __syncwarp();  // all lanes finished reading kv (and the pv_fallback staging)
+        const unsigned long long rc = reconvert(kv, vtile, start | (1 << 16), ctx0 + 1 + vlo / 6, ROWPASS_EAGER ? ctx0 + 1 + vlo / 6 : len);
+        if (p.debug && lane == 0) atomicAdd(p.dbg_e + MAXROWS * 24 * 8 + 3, 1);  // harness only: V row passes
         __syncwarp();
+        const int vhi = pass_end(unsigned(rc), vlo / 6, start, ctx0, R);
+        pv_rows(vlo, vhi, int(rc >> 32) & 0xFF, ((rc >> 40) & 1) != 0);
+        if (vhi >= nrows) break;
+        vlo = vhi;
       }
     }
     __syncwarp();  // all lanes finished reading V before the next K store
   }
   // ---------------- partition outputs: normalized partial, max, mass ----------------
-  const size_t cta = size_t(split) * 16 + group;
+  // Partition slot = split (rung PB CTAs of a straddling agent reuse rung PA's slot numbers for their own rows).
+  int rlo = 0, rhi = R, slot = blockIdx.x;  // rows this CTA serves (all rows unless the agent straddles a cutoff)
+  if (p.shortp) {
+    const Rung g = rung_plan(ctx0, R, p.P);
+    if (g.jb < R) { if (slot < g.nA) rhi = g.jb; else { rlo = g.jb; slot -= g.nA; } }
+  }
+  const size_t cta = size_t(slot) * 16 + group;
 #pragma unroll
   for (int rt = 0; rt < MT; ++rt)
 #pragma unroll
@@ -624,13 +756,13 @@ __global__ void __launch_bounds__(128, 2) attn_kernel(Params p) {
       for (int c = 0; c < 8; c += 2) {
         const int rho = 8 * rt + (lane & 1) + 4 * (lane >> 4) + 2 * ((c >> 1) & 1);
         const int dim = 64 * warp + 32 * b + 8 * qp + 2 * ((lane >> 1) & 1) + 4 * (c >> 2);
-        if (rho < nrows)
+        if (rho >= 6 * rlo && rho < 6 * rhi)  // served rows (all rows unless straddle)
           *reinterpret_cast<float2*>(p.partO + (cta * 32 + rho) * 256 + dim) = make_float2(acc[rt][b][c], acc[rt][b][c + 1]);
       }
 #pragma unroll
   for (int which = 0; which < 2; ++which) {
     const int rho = sr0 + 16 * which;
-    if (sc == 0 && rho < nrows)
+    if (sc == 0 && rho >= 6 * rlo && rho < 6 * rhi)
       *reinterpret_cast<float2*>(p.partS + (cta * 32 + rho) * 2) = make_float2(m_run[which], d_run[which]);
   }
 }
@@ -685,8 +817,14 @@ __global__ void __launch_bounds__(64) merge_kernel(const float* __restrict__ par
   const int group = req * 4 + qh / 6, rho = j * 6 + qh % 6;
   float4* dst = reinterpret_cast<float4*>(out + (size_t(row) * 24 + qh) * 256) + tid;
   if (R > cap) { *dst = make_float4(CUDART_NAN_F, CUDART_NAN_F, CUDART_NAN_F, CUDART_NAN_F); return; }
-  const int P = shortp ? ladder_P(lens[req] - R, Plong) : Plong;
-  const int vis = lens[req] - R + j + 1, chunks = (vis + P - 1) / P;
+  // sol-13c: the row's own rung ladder_P(ctx0 + j) and its slot range (rung_plan, identical to the attention CTAs).
+  const int ctx0 = lens[req] - R, vis = ctx0 + j + 1;
+  int P = Plong;
+  if (shortp) {
+    const Rung g = rung_plan(ctx0, R, Plong);
+    P = j < g.jb ? g.PA : g.PB;
+  }
+  const int chunks = (vis + P - 1) / P;
   if (tid < 32) {
     float m[2], d[2];
 #pragma unroll
@@ -722,8 +860,20 @@ __global__ void __launch_bounds__(64) merge_kernel(const float* __restrict__ par
 }
 
 size_t splits(int n, int p) { return size_t((n + p - 1) / p); }
-// Workspace/grid: maximum split count over all rungs (short rungs never exceed LADDER_SPLITS).
+// Workspace: maximum slot count over all rungs (short rungs never exceed LADDER_SPLITS). Unchanged from sol-13b: a
+// straddling agent's two rungs share slots (rung_plan).
 size_t wsplits(int n, int p) { return std::max(splits(n, p), std::min<size_t>(LADDER_SPLITS, splits(n, 128))); }
+// Grid x (sol-13c): an agent whose rows straddle cutoff c (ctx0 <= c < ctx0 + R - 1, so length >= c + 2) needs
+// ceil((c+1)/PA) + ceil(length/PB) CTAs per head, length <= min(n, c + MAX_R): 10 + 5 = 15 at both cutoffs for P = 512.
+size_t gsplits(int n, int p) {
+  size_t g = wsplits(n, p);
+  const int cut[2] = {10 * 128 - MAX_R, 10 * 256 - MAX_R};
+  for (int c : cut) {
+    const int pa = ladder_P(c, p), pb = ladder_P(c + 1, p);
+    if (pa != pb && n >= c + 2) g = std::max(g, splits(c + 1, pa) + splits(std::min(n, c + MAX_R), pb));
+  }
+  return g;
+}
 size_t partO_bytes(int n, int p) { return wsplits(n, p) * 16 * 32 * 256 * 4; }
 size_t partS_bytes(int n, int p) { return wsplits(n, p) * 16 * 32 * 2 * 4; }
 bool valid_cfg(int n, int p) { return n >= 1 && n <= 32768 && p >= 32 && p <= 4096 && p % 32 == 0 && splits(n, p) <= 64; }
@@ -759,7 +909,7 @@ extern "C" int sol13b_attention(const float* q, const uint16_t* k, const uint16_
   p.pagecols = pagecols; p.P = partition; p.debug = debug; p.shortp = shortp; p.enc = enc;
   p.meta = reinterpret_cast<const uint8_t*>(meta);
   auto s = static_cast<cudaStream_t>(stream);
-  const size_t gx = shortp ? wsplits(maxlen, partition) : splits(maxlen, partition);
+  const size_t gx = shortp ? gsplits(maxlen, partition) : splits(maxlen, partition);
   const dim3 grid(unsigned(gx), 16);
   if (rows == 4) attn_kernel<3><<<grid, 128, SM_BYTES, s>>>(p);
   else attn_kernel<4><<<grid, 128, SM_BYTES, s>>>(p);
