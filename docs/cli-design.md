@@ -428,11 +428,19 @@ Help exits with status 0; usage errors go to stderr with status 2. Its options a
 | `--memory-limit LIMIT` | Per-GPU occupied size (`30G`), free-memory reserve (`-30G`), or fraction of total memory (`0.8`) | Package serving reserve |
 | `--mtp-draft-tokens N` | Reduce the maximum draft count; zero selects ordinary execution without draft generation, absorption, or draft-state maintenance | Package default |
 | `--mtp-adaptive-verification` / `--no-mtp-adaptive-verification` | Adaptive or fixed selection among captured widths | Package default |
+| `--mtp-adaptive-verification-alpha ALPHA` | Positive finite exponent on split-proposal prefix-survival scheduling scores; below 1 favors longer verification prefixes | `1.0` |
 | `--mtp-verification-token-budget N` | Select one exact captured packed verification capacity per batch | All captured capacities |
 | `--mtp-max-verification-token-budget N` | Retain all captured packed verification capacities at or below a total-row ceiling | All captured capacities |
 | `--embedding-table-storage disk\|ram` | PLE and Engram table storage; both modes deliver compact GPU rows | `disk` |
 | `--embedding-table-cache-size SIZE` | Per-host budget for cached disk-backed PLE/Engram rows, including the index, usage counters and miss workspace; accepts sizes such as `1G` or `2GiB` | `0` (disabled) |
 | `--embedding-table-resident-scales` | Keep original embedding scale bytes in host RAM while weights remain on disk; adds to the row-cache budget | Disabled |
+
+`--mtp-adaptive-verification-alpha 0.5` scores each joint prefix-survival
+probability `p` as `sqrt(p)` when choosing split-proposal verification widths
+and packed budgets. `1.0` uses the probabilities directly; values above `1.0`
+favor shorter prefixes. Confidence observations and token acceptance remain
+unchanged. This serving option uses existing package graphs and does not enable
+adaptive verification when fixed-width selection is configured.
 
 `--embedding-table-workers 1|2|4|8` controls Windows disk-reader workers.
 Workers share 128 I/O slots and 8 MiB of direct-read staging per embedding table.

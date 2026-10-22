@@ -99,7 +99,7 @@ impl RequestScheduler {
             offers.sort_unstable_by(|&(a,aw),&(b,bw)| {
                 let value = |slot: usize, width: usize| {
                     let proposal = self.split.as_ref().unwrap().retained[slot].unwrap();
-                    values[slot].decode(expected(&proposal.confidence,width), shape.nanos as f64 / 1e6)
+                    values[slot].decode(expected(&proposal.confidence,width,self.policy.adaptive_verification_alpha), shape.nanos as f64 / 1e6)
                 };
                 (value(b,bw)/bw as f64).total_cmp(&(value(a,aw)/aw as f64)).then(a.cmp(&b))
             });
@@ -108,7 +108,7 @@ impl RequestScheduler {
                 if count == shape.batch || tokens + width > shape.tokens { continue; }
                 mask |= 1 << slot;tokens += width;count += 1;
                 let proposal = self.split.as_ref().unwrap().retained[slot].unwrap();
-                value += values[slot].decode(expected(&proposal.confidence,width), shape.nanos as f64 / 1e6);
+                value += values[slot].decode(expected(&proposal.confidence,width,self.policy.adaptive_verification_alpha), shape.nanos as f64 / 1e6);
             }
             if mask != 0 {
                 output.push(Candidate { draft_tokens: 0, kind: GraphKind::Verification, mask, batch: shape.batch, verification_budget: None,

@@ -79,25 +79,30 @@ fn horizon(a: u64, b: u64) -> u64 {
 const FORECAST_PRIOR: f32 = 0.5;
 const POPULATION_WEIGHT: f32 = 1.0 / 64.0;
 
-fn expected(confidence: &[f32; 7], width: usize) -> f64 {
+// Bias scheduling value without changing observed prefix probabilities.
+fn prefix_value(probability: f64, alpha: f64) -> f64 {
+    if alpha == 1.0 { probability } else { probability.powf(alpha) }
+}
+
+fn expected(confidence: &[f32; 7], width: usize, alpha: f64) -> f64 {
     let mut survival = 1.0;
     let mut tokens = 1.0;
     for &p in &confidence[..width.saturating_sub(1)] {
         survival *= f64::from(p);
-        tokens += survival;
+        tokens += prefix_value(survival, alpha);
     }
     tokens
 }
 
-fn continuation_tokens(confidence: &[f32; 7], forecast: &[f64; 7], frontier: usize, width: usize) -> f64 {
-    if width <= frontier { return expected(confidence, width); }
-    let mut total = expected(confidence, frontier);
+fn continuation_tokens(confidence: &[f32; 7], forecast: &[f64; 7], frontier: usize, width: usize, alpha: f64) -> f64 {
+    if width <= frontier { return expected(confidence, width, alpha); }
+    let mut total = expected(confidence, frontier, alpha);
     let mut prefix = confidence[..frontier].iter().map(|p| f64::from(*p)).product::<f64>();
-    total += prefix;
+    total += prefix_value(prefix, alpha);
     for depth in frontier..width - 1 {
         let conditional = if forecast[depth - 1] > 0.0 { forecast[depth] / forecast[depth - 1] } else { 0.5 };
         prefix *= conditional;
-        total += prefix;
+        total += prefix_value(prefix, alpha);
     }
     total
 }
@@ -107,11 +112,11 @@ fn survival(confidence: &[f32; 7]) -> [f32; 7] {
     confidence.map(|p| { prefix *= p; prefix })
 }
 
-fn forecast_tokens(prefixes: &[f32; 7], width: usize) -> f64 {
+fn forecast_tokens(prefixes: &[f32; 7], width: usize, alpha: f64) -> f64 {
     let mut bound = 1.0f32;
     1.0 + prefixes[..width.saturating_sub(1)].iter().map(|&p| {
         bound = bound.min(p);
-        f64::from(bound)
+        prefix_value(f64::from(bound), alpha)
     }).sum::<f64>()
 }
 
@@ -185,10 +190,10 @@ impl RequestScheduler {
 
     pub(super) fn expected_speculative_tokens(&self, request: &LiveRequest, width: usize) -> f64 {
         if let Some(proposal) = self.retained_proposal(request) {
-            return expected(&proposal.confidence, width.min(proposal.width));
+            return expected(&proposal.confidence, width.min(proposal.width), self.policy.adaptive_verification_alpha);
         }
         if self.split.is_some() {
-            forecast_tokens(&self.speculative_curve(request, false).map(|p| p as f32), width)
+            forecast_tokens(&self.speculative_curve(request, false).map(|p| p as f32), width, self.policy.adaptive_verification_alpha)
         } else {
             request.acceptance.expected_tokens(self.proposal_source, width)
         }
@@ -215,7 +220,7 @@ impl RequestScheduler {
     }
 
     fn proposal_forecast_tokens(&self, request: &LiveRequest, width: usize, optimistic: bool) -> f64 {
-        f64::from(width != 0) + self.speculative_curve(request, optimistic)[..width.saturating_sub(1)].iter().sum::<f64>()
+        f64::from(width != 0) + self.speculative_curve(request, optimistic)[..width.saturating_sub(1)].iter().map(|&p| prefix_value(p, self.policy.adaptive_verification_alpha)).sum::<f64>()
     }
 
     fn proposal_cost(&self, batch: usize, width: usize) -> Option<u64> {
@@ -299,7 +304,7 @@ impl RequestScheduler {
             let Some(nanos) = self.costs.duration_key(shape) else { continue; };
             let value = |slot: usize, width: usize| {
                 let proposal = self.split.as_ref().unwrap().retained[slot].unwrap();
-                values[slot].decode(expected(&proposal.confidence, width), nanos as f64 / 1e6)
+                values[slot].decode(expected(&proposal.confidence, width, self.policy.adaptive_verification_alpha), nanos as f64 / 1e6)
             };
             let mut offers: Vec<_> = retained.iter().copied().filter(|(_, width)| *width <= shape.tokens).collect();
             offers.sort_unstable_by(|&(a, aw), &(b, bw)| {
@@ -404,7 +409,7 @@ impl RequestScheduler {
                     let value = verify.iter().map(|&(slot, width)| {
                         let tokens = split.retained[slot].map_or_else(|| self.proposal_forecast_tokens(
                             self.slots[slot].request.as_ref().unwrap(), width, false),
-                            |proposal| expected(&proposal.confidence, proposal.width));
+                            |proposal| expected(&proposal.confidence, proposal.width, self.policy.adaptive_verification_alpha));
                         values[slot].decode(tokens, nanos as f64 / 1e6)
                     }).sum();
                     (ValueRate::new(nanos, value, age), None)
@@ -449,7 +454,7 @@ impl RequestScheduler {
                 let packing = pack(needs, &decision.shapes).ok_or("no verification packing for retained proposals")?;
                 let value = needs.iter().map(|&(slot, width)| {
                     let confidence = &split.retained[slot].unwrap().confidence;
-                    let tokens = continuation_tokens(confidence, &decision.forecasts[slot], frontiers[slot], width);
+                    let tokens = continuation_tokens(confidence, &decision.forecasts[slot], frontiers[slot], width, self.policy.adaptive_verification_alpha);
                     decision.values[slot].decode(tokens, packing.nanos as f64 / 1e6)
                 }).sum();
                 Ok(ValueRate::new(packing.nanos, value, decision.age_price))
@@ -467,8 +472,8 @@ impl RequestScheduler {
                             let end = target.min(proposal.limit);
                             (fresh & (1 << slot) != 0 && width < end && (cohort == 0 || cohort == width)).then(|| {
                                 let gain = decision.values[slot].output_token *
-                                    (continuation_tokens(&proposal.confidence, &decision.forecasts[slot], width, end)
-                                        - expected(&proposal.confidence, width));
+                                    (continuation_tokens(&proposal.confidence, &decision.forecasts[slot], width, end, self.policy.adaptive_verification_alpha)
+                                        - expected(&proposal.confidence, width, self.policy.adaptive_verification_alpha));
                                 (index, end, gain)
                             })
                         }).collect();
@@ -536,7 +541,7 @@ impl RequestScheduler {
             for call in packing.calls {
                 let value = bits(call.mask).map(|s| {
                     let p = split.retained[s].unwrap();
-                    values[s].decode(expected(&p.confidence, p.width), call.nanos as f64 / 1e6)
+                    values[s].decode(expected(&p.confidence, p.width, self.policy.adaptive_verification_alpha), call.nanos as f64 / 1e6)
                 }).sum();
                 output.push(make(GraphKind::Verification, call, ValueRate::new(call.nanos, value, age_price)));
             }
@@ -578,7 +583,7 @@ impl RequestScheduler {
                 let ns = horizon(proposal.nanos, verification.nanos);
                 let expected = verify.iter().map(|&(s, w)| {
                     let tokens = split.retained[s].map_or_else(|| self.proposal_forecast_tokens(self.slots[s].request.as_ref().unwrap(), w, optimistic),
-                        |p| expected(&p.confidence, p.width));
+                        |p| expected(&p.confidence, p.width, self.policy.adaptive_verification_alpha));
                     values[s].decode(tokens, ns as f64 / 1e6)
                 }).sum();
                 if let Some(call) = proposal.calls.into_iter().max_by(|a, b| {
@@ -810,7 +815,8 @@ mod tests {
 
     #[test]
     fn throughput_preference_can_choose_more_tokens_in_a_longer_burst() {
-        for (policy, wanted) in [(PolicyConfig::default(), 2), (PolicyConfig::throughput(), 3)] {
+        for (policy, wanted) in [(PolicyConfig::default(), 2), (PolicyConfig::throughput(), 3),
+            (PolicyConfig { adaptive_verification_alpha: 0.5, ..Default::default() }, 3)] {
             let mut s = measured_split_engine(8);
             s.configure_policy(policy).unwrap();
             costs(&mut s, 8, &[10.8, 14.5, 16.6, 22.0, 25.0, 28.0].map(|x| (x * 1e6) as u64));
@@ -1092,6 +1098,33 @@ mod tests {
     }
 
     #[test]
+    fn verification_alpha_biases_scores_without_changing_observations() {
+        for alpha in [0.5, 1.0, 2.0] {
+            let mut s = engine(1);
+            s.configure_policy(PolicyConfig { adaptive_verification_alpha: alpha, ..Default::default() }).unwrap();
+            let h = ready(&mut s);
+            let raw = s.speculative_curve(s.request(h).unwrap(), false);
+            let score = 1.0 + 0.5f64.powf(alpha) + 0.25f64.powf(alpha);
+            assert_eq!(s.proposal_forecast_tokens(s.request(h).unwrap(), 3, false), score);
+            assert_eq!(s.expected_speculative_tokens(s.request(h).unwrap(), 3), score);
+            retain(&mut s, h, [0.5; 7]);
+            s.finalize_proposals(1 << h.slot, None, &s.proposal_decision()).unwrap();
+            assert_eq!(s.speculative_curve(s.request(h).unwrap(), false), raw);
+            assert_eq!(s.split.as_ref().unwrap().population.map(f64::from), raw);
+            assert_eq!(s.retained_proposal(s.request(h).unwrap()).unwrap().confidence, [0.5; 7]);
+            assert_eq!(expected(&[0.5; 7], 3, alpha), score);
+            assert_eq!(continuation_tokens(&[0.5; 7], &raw, 1, 3, alpha), score);
+            assert_eq!(prefix_value(0.0, alpha), 0.0);
+            assert_eq!(prefix_value(1.0, alpha), 1.0);
+        }
+        for alpha in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(engine(1).configure_policy(PolicyConfig {
+                adaptive_verification_alpha: alpha, ..Default::default()
+            }).is_err());
+        }
+    }
+
+    #[test]
     fn forecasting_averages_joint_prefixes_before_summing_token_value() {
         let mut s = engine(1);
         let h = ready(&mut s);
@@ -1106,12 +1139,12 @@ mod tests {
         s.split.as_mut().unwrap().retained[h.slot as usize] = None;
         for width in 1..=8 {
             assert!((s.expected_speculative_tokens(s.request(h).unwrap(), width)
-                - forecast_tokens(&reference, width)).abs() < 1e-6);
+                - forecast_tokens(&reference, width, 1.0)).abs() < 1e-6);
         }
         // Two perfectly correlated Bernoulli positions have E[p1*p2] = 0.5;
         // multiplying their separate means would incorrectly predict 0.25.
-        assert_eq!(forecast_tokens(&[0.5; 7], 3), 2.0);
-        assert_eq!(expected(&[0.5; 7], 3), 1.75);
+        assert_eq!(forecast_tokens(&[0.5; 7], 3, 1.0), 2.0);
+        assert_eq!(expected(&[0.5; 7], 3, 1.0), 1.75);
     }
 
     #[test]
@@ -1285,7 +1318,7 @@ mod tests {
             let needs = [(first.slot as usize, widths[0]), (second.slot as usize, widths[1])];
             let packed = s.pack(GraphKind::Verification, &needs).unwrap();
             let value = needs.iter().map(|&(slot, width)| {
-                values[slot].decode(expected(&[0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], width),
+                values[slot].decode(expected(&[0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], width, 1.0),
                     packed.nanos as f64 / 1e6)
             }).sum();
             ValueRate::new(packed.nanos, value, age_price)
@@ -1373,7 +1406,7 @@ mod tests {
         assert_eq!(replacement.slot, h.slot);
         assert_ne!(replacement.generation, h.generation);
         assert!(!s.owns_proposal(s.request(replacement).unwrap()));
-        let prior = forecast_tokens(&s.split.as_ref().unwrap().population, 8);
+        let prior = forecast_tokens(&s.split.as_ref().unwrap().population, 8, 1.0);
         assert!((s.expected_speculative_tokens(s.request(replacement).unwrap(), 8) - prior).abs() < 1e-10);
         assert!(prior < 2.1, "one proposal moves the population prior only slightly: {prior}");
     }

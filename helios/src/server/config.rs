@@ -304,13 +304,19 @@ impl Bootstrap {
                 .ok_or("served_names must contain strings")?,
             Some(_) => return Err("served_names must be an array".into()),
         };
+        let mut scheduling_policy = match object.get("scheduler_policy") {
+            None => crate::scheduler::PolicyConfig::default(),
+            Some(Value::String(value)) if value == "balanced" => crate::scheduler::PolicyConfig::default(),
+            Some(Value::String(value)) if value == "throughput" => crate::scheduler::PolicyConfig::throughput(),
+            Some(_) => return Err("scheduler_policy must be balanced or throughput".into()),
+        };
+        if let Some(value) = object.get("mtp_adaptive_verification_alpha") {
+            scheduling_policy.adaptive_verification_alpha = value.as_f64()
+                .filter(|v| v.is_finite() && *v > 0.0)
+                .ok_or("adaptive verification alpha must be finite and greater than zero")?;
+        }
         let server = ServerConfig {
-            scheduling_policy: match object.get("scheduler_policy") {
-                None => crate::scheduler::PolicyConfig::default(),
-                Some(Value::String(value)) if value == "balanced" => crate::scheduler::PolicyConfig::default(),
-                Some(Value::String(value)) if value == "throughput" => crate::scheduler::PolicyConfig::throughput(),
-                Some(_) => return Err("scheduler_policy must be balanced or throughput".into()),
-            },
+            scheduling_policy,
             api_key: Some(optional_text("api_key")?).filter(|key| !key.is_empty()),
             served_names,
             context_hint: optional_text("context_hint")?,
@@ -539,6 +545,19 @@ mod tests {
         legacy["assets"]["chat_template"] = template_asset.clone();
         let loaded = Bootstrap::load(&legacy.to_string(), &manifest).unwrap();
         assert_eq!(loaded.frontend.prompt_encoder(), PromptEncoder::Jinja);
+        assert_eq!(loaded.server.scheduling_policy.adaptive_verification_alpha, 1.0);
+        for preference in ["balanced", "throughput"] {
+            let mut configured = legacy.clone();
+            configured["scheduler_policy"] = preference.into();
+            configured["mtp_adaptive_verification_alpha"] = 0.5.into();
+            let loaded = Bootstrap::load(&configured.to_string(), &manifest).unwrap();
+            assert_eq!(loaded.server.scheduling_policy.adaptive_verification_alpha, 0.5);
+            for invalid in [json!(0), json!(-0.5), json!("NaN"), json!(null)] {
+                configured["mtp_adaptive_verification_alpha"] = invalid;
+                assert!(Bootstrap::load(&configured.to_string(), &manifest).err().unwrap()
+                    .to_string().contains("adaptive verification alpha"));
+            }
+        }
         assert_eq!(
             loaded.model.sampling_ranges,
             crate::model::SamplingRanges::default()

@@ -686,6 +686,11 @@ pub struct ServingOptions {
     )]
     pub no_mtp_adaptive_verification: bool,
 
+    /// Exponent on split-proposal prefix-survival scores; below 1 favors longer verification [default: 1.0].
+    #[arg(long, value_name = "ALPHA", value_parser = verification_alpha,
+        help_heading = "Advanced speculation options")]
+    pub mtp_adaptive_verification_alpha: Option<f64>,
+
     /// Host memory for prefix checkpoints and prepared inputs, e.g. 16G; 0 disables [default: disabled].
     #[arg(long, value_name = "SIZE", value_parser = parse_size, help_heading = "Prefix cache options")]
     pub prefix_cache_memory: Option<u64>,
@@ -711,6 +716,11 @@ fn served_model_name(value: &str) -> Result<String, String> {
     } else {
         Ok(value.to_owned())
     }
+}
+
+fn verification_alpha(value: &str) -> Result<f64, String> {
+    value.parse::<f64>().ok().filter(|v| v.is_finite() && *v > 0.0)
+        .ok_or_else(|| "adaptive verification alpha must be finite and greater than zero".into())
 }
 
 impl std::ops::Deref for Run {
@@ -771,6 +781,9 @@ impl ServingOptions {
         }
         if self.no_mtp_adaptive_verification {
             options.push("--no-mtp-adaptive-verification".into());
+        }
+        if let Some(alpha) = self.mtp_adaptive_verification_alpha {
+            options.extend(["--mtp-adaptive-verification-alpha".into(), alpha.to_string()]);
         }
         if let Some(storage) = self.embedding_table_storage {
             options.extend([
@@ -851,6 +864,8 @@ mod tests {
                     "8000",
                     "--scheduler-policy",
                     "balanced",
+                    "--mtp-adaptive-verification-alpha",
+                    "1.0",
                     "--kv-cache-limit",
                     "memory",
                     "--embedding-table-cache-size",
@@ -882,6 +897,8 @@ mod tests {
                 "8001".into(),
                 "--scheduler-policy".into(),
                 "throughput".into(),
+                "--mtp-adaptive-verification-alpha".into(),
+                "0.5".into(),
                 "--kv-cache-limit".into(),
                 "context".into(),
                 "--embedding-table-cache-size".into(),
@@ -893,6 +910,7 @@ mod tests {
                 panic!()
             };
             assert_eq!(effective.port, if explicit { 8000 } else { 8001 });
+            assert_eq!(effective.mtp_adaptive_verification_alpha, Some(if explicit { 1.0 } else { 0.5 }));
             assert_eq!(
                 effective.host.to_string(),
                 if explicit { "127.0.0.1" } else { "0.0.0.0" }
@@ -977,6 +995,7 @@ mod tests {
         assert_eq!(args.bind_address().to_string(), "127.0.0.1:8000");
         assert_eq!(args.served_model_name, None);
         assert_eq!(args.scheduler_policy, "balanced");
+        assert_eq!(args.mtp_adaptive_verification_alpha, None);
         let options = args.load_options();
         assert_eq!(options.device_labels, Some(vec![0]));
         assert_eq!(options.embedding_table_storage, None);
@@ -1270,6 +1289,22 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn adaptive_verification_alpha_is_validated_and_forwarded() {
+        for value in ["0.5", "1.0", "2.0"] {
+            let args = run(&["flare", "run", "model.safetensors", "--mtp-adaptive-verification-alpha", value]);
+            assert_eq!(args.mtp_adaptive_verification_alpha, Some(value.parse().unwrap()));
+            let mut forwarded = vec!["flare".to_owned(), "run".into(), "model.safetensors".into()];
+            forwarded.extend(args.rank_options());
+            let Command::Run(peer) = Cli::try_parse_from(forwarded).unwrap().command else { panic!() };
+            assert_eq!(peer.mtp_adaptive_verification_alpha, args.mtp_adaptive_verification_alpha);
+        }
+        for value in ["0", "-0.5", "NaN", "inf", "-inf", "invalid"] {
+            assert!(Cli::try_parse_from(["flare", "run", "model.safetensors",
+                &format!("--mtp-adaptive-verification-alpha={value}")]).is_err());
+        }
     }
 
     #[test]

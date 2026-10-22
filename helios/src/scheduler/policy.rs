@@ -13,6 +13,7 @@ pub struct PolicyConfig {
     pub decode_age_price: f64,
     pub adaptation_ms: f64,
     pub estimate_ttl_ns: u64,
+    pub adaptive_verification_alpha: f64,
 }
 
 impl Default for PolicyConfig {
@@ -24,6 +25,7 @@ impl Default for PolicyConfig {
             decode_age_price: 0.1,
             adaptation_ms: 100.0,
             estimate_ttl_ns: 30_000_000_000,
+            adaptive_verification_alpha: 1.0,
         }
     }
 }
@@ -146,6 +148,9 @@ impl RequestScheduler {
     pub fn configure_policy(&mut self, policy: PolicyConfig) -> Result<()> {
         if self.submitted != Fence(0) || self.slots.iter().any(|s| s.request.is_some()) {
             return Err("scheduling policy must be configured before admission".into());
+        }
+        if !policy.adaptive_verification_alpha.is_finite() || policy.adaptive_verification_alpha <= 0.0 {
+            return Err("adaptive verification alpha must be finite and greater than zero".into());
         }
         if !policy.output_token_value.is_finite()
             || policy.output_token_value <= 0.0
