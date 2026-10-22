@@ -104,7 +104,7 @@ class SM70DecoderLayer(torch.nn.Module):
 
 class FullAttention(torch.nn.Module):
     def __init__(self, module, weights, source, metadata, pool, layer, *, mode, session, workspace, name, buffers,
-                 row_invariant=False, status_sink=None):
+                 row_invariant=False, status_sink=None, decode_agents=None, rows_per_agent=None):
         super().__init__()
         self.canonical, self.metadata = module, metadata
         config = weights.config
@@ -166,6 +166,12 @@ class FullAttention(torch.nn.Module):
                 self.lengths, metadata.query_start_loc, attended, session=session, name=name + ".attention",
                 workspace=workspace)
             self.status_sink = status_sink
+        elif self.sm70 and mode == "decode" and decode_agents is not None:
+            # Reviewed Sol-13c S1L tensor-core verification attention (raw BF16 mode, four-agent metadata packed once
+            # per forward by the decoder); ordinary decode and speculative verification rows, never prefill.
+            from ignition.components.sm70_decode_attention import PreparedDecodeAttention
+            self.attention = PreparedDecodeAttention(self.q, key_cache, value_cache, decode_agents, attended,
+                session=session, name=name + ".attention", workspace=workspace, rows_per_agent=rows_per_agent)
         else:
             self.attention = attention(self.q, key_cache, value_cache, metadata.page_table,
                 self.lengths, metadata.query_start_loc, attended, session=session, name=name + ".attention", **options)
@@ -233,6 +239,21 @@ class PreparedDecoder:
         if self.sm70 and mode == "prefill" and prefill_errors is not None:
             self.prefill_errors = prefill_errors
             self.prefill_status = torch.zeros(1, dtype=torch.int32, device=scratch.activations.device)
+        # SM70 decode graphs: the reviewed Sol-13c S1L attention reads four-agent metadata packed once per forward.
+        # Option (a) of REVIEW-ARGON-S1L.md: the kernel admits a served context of 32,768 tokens; a wider page table is
+        # refused at preparation (prepare with --context 32768) rather than served by a slower, unreviewed mixture.
+        self.decode_agents, self.rows_per_agent = None, None
+        if self.sm70 and mode == "decode":
+            from ignition.components import sm70_decode_attention as decode_attention
+            tokens, agents, blocks = scratch.activations.shape[0], metadata.page_table.shape[0], metadata.page_table.shape[1]
+            if blocks * PAGE_TOKENS > decode_attention.MAX_LENGTH:
+                raise ValueError(f"SM70 decode attention admits {decode_attention.MAX_LENGTH} tokens of context; the "
+                                 f"page table serves {blocks * PAGE_TOKENS}: prepare with --context 32768")
+            if not (1 <= agents <= decode_attention.AGENTS and tokens % agents == 0
+                    and 1 <= tokens // agents <= decode_attention.MAX_ROWS_PER_AGENT):
+                raise ValueError(f"SM70 decode attention: {tokens} rows over {agents} requests is outside the contract")
+            self.decode_agents = decode_attention.DecodeAgents.allocate(tokens, blocks, scratch.activations.device)
+            self.rows_per_agent = tokens // agents
         self.embedding = PreparedEmbedding(weights.tree.embed_tokens.weight, metadata.token_ids,
             scratch.activations, num_rows=metadata.live_counts[:1], session=session, name=name + ".embedding")
         self.delta = delta or DeltaMetadata.allocate(metadata.starts.numel(), scratch.activations.device)
@@ -264,7 +285,8 @@ class PreparedDecoder:
             else:
                 layer.self_attn = FullAttention(original.self_attn, weights, source, metadata, pool, index,
                     mode=mode, session=session, workspace=workspace, name=name + "." + prefix + "attention",
-                    buffers=attention_buffers, row_invariant=row_invariant, status_sink=self.prefill_status)
+                    buffers=attention_buffers, row_invariant=row_invariant, status_sink=self.prefill_status,
+                    decode_agents=self.decode_agents, rows_per_agent=self.rows_per_agent)
             layer.mlp = module_copy(original.mlp)
             for field in (("gate_up_proj", "down_proj") if fused_projections else ("gate_proj", "up_proj", "down_proj")):
                 weight = weights.projections[prefix + "mlp." + field]
@@ -328,6 +350,8 @@ class PreparedDecoder:
                                else (embedding.cos().to(dtype), embedding.sin().to(dtype)))
         if self.prefill_status is not None:
             self.prefill_status.zero_()
+        if self.decode_agents is not None:
+            self.decode_agents.pack(m.lengths, m.starts, m.query_start_loc, m.page_table)
         hidden = self.embedding()
         for layer in self.layers:
             hidden = layer(hidden, position_embeddings=position_embeddings)
