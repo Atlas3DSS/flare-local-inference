@@ -724,7 +724,8 @@ outside the model's cache budget. RAM embedding tables load before cache
 sizing. Disk embedding tables use bounded staging and can retain their scale
 planes in RAM with `--embedding-table-resident-scales`. The loader accounts for
 resident scales and the optional row cache before sizing KV, for both PLE and
-Engram packages.
+Engram packages. Disk tables default to a 1 GiB host-RAM row cache per Spark;
+`--embedding-table-cache-size` overrides it, and `0` disables it.
 
 Spark's NVML interface does not report VRAM capacity. Ignition identifies an
 integrated device through CUDA and uses Linux `MemAvailable`, capped by CUDA's

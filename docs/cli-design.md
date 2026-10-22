@@ -457,7 +457,7 @@ Help exits with status 0; usage errors go to stderr with status 2. Its options a
 | `--mtp-verification-token-budget N` | Select one exact captured packed verification capacity per batch | All captured capacities |
 | `--mtp-max-verification-token-budget N` | Retain all captured packed verification capacities at or below a total-row ceiling | All captured capacities |
 | `--embedding-table-storage disk\|ram` | PLE and Engram table storage; both modes deliver compact GPU rows | `disk` |
-| `--embedding-table-cache-size SIZE` | Per-host budget for cached disk-backed PLE/Engram rows, including the index, usage counters and miss workspace; accepts sizes such as `1G` or `2GiB` | `0` (disabled) |
+| `--embedding-table-cache-size SIZE` | Per-host RAM budget for cached disk-backed PLE/Engram rows, including the index, usage counters and miss workspace; accepts sizes such as `1G` or `2GiB`; `0` disables | `4GiB` on discrete GPUs; `1GiB` on unified-memory GPUs such as DGX Spark |
 | `--embedding-table-resident-scales` | Keep original embedding scale bytes in host RAM while weights remain on disk; adds to the row-cache budget | Disabled |
 
 `--mtp-adaptive-verification-alpha 0.5` scores each joint prefix-survival
@@ -475,9 +475,13 @@ cost is included in gather latency. Small gathers stay on the delivery thread.
 Worker phase counters sum overlapping worker intervals and must not be subtracted
 from elapsed gather time. RAM storage rejects this disk-only option.
 
-An embedding row cache selects disk storage and cannot be combined with
-`--embedding-table-storage ram`. Each host shares its budget across embedding
-tables and local tensor-parallel ranks. The loader commits cache memory before
+Disk-backed embedding tables default to a 4 GiB host-RAM row cache per host,
+or 1 GiB when any selected GPU shares host memory, as on DGX Spark. Explicit
+cache sizes, including `0` to disable caching, override the hardware default.
+RAM table storage and packages without embedding tables allocate no row cache
+by default. An explicit nonzero cache requires disk storage and an embedding
+table catalog. Each host shares its budget across embedding tables and local
+tensor-parallel ranks. The loader commits cache memory before
 sizing KV and continuation pools, so the cache uses part of the integrated GPU's
 existing memory budget. The cache remains fixed in size while serving and warms
 from requests each time the server starts.
