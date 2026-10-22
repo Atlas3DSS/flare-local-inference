@@ -795,9 +795,9 @@ impl RequestScheduler {
                     || (kind == GraphKind::Prefill
                         && (r.consumed_tokens + self.prefill_work(r, capacity) as u64
                             == r.prompt_tokens as u64
-                            || r.message_boundaries.binary_search(
-                                &(r.consumed_tokens as usize + self.prefill_work(r, capacity)),
-                            ).is_ok()))
+                            || r.captures_message(
+                                r.consumed_tokens as usize + self.prefill_work(r, capacity),
+                            )))
             });
         // A step that needs completion feedback (a new request's Init, a prompt's final chunk, a
         // stale cost) stays a candidate behind in-flight work; `select_plan` drains the window

@@ -118,6 +118,8 @@ pub struct SchedulerStats {
     pub inbound_waiting: usize,
     /// Growable requests finished early to free KV pages and requeued by the runtime.
     pub preemptions: u64,
+    /// Conversation pins released early because resources ran short.
+    pub conversation_pin_releases: u64,
 }
 
 #[derive(Clone)]
@@ -274,6 +276,15 @@ impl LiveRequest {
     }
     pub fn pages(&self) -> impl Iterator<Item = PageId> + '_ {
         self.shared_pages.iter().chain(&self.private_pages).copied()
+    }
+    /// Whether reaching `endpoint` captures a message checkpoint: only the prompt's first
+    /// message endpoint (the leading instructions other conversations share) and its last one
+    /// (where the conversation's next turn continues). Every message endpoint still ends a
+    /// prefill chunk, so a restore from any captured endpoint repeats the same chunks.
+    fn captures_message(&self, endpoint: usize) -> bool {
+        endpoint as u64 > self.prefix_tokens
+            && (self.message_boundaries.first() == Some(&endpoint)
+                || self.message_boundaries.last() == Some(&endpoint))
     }
 }
 
@@ -538,6 +549,8 @@ pub struct RequestScheduler {
     acceptance_population: speculation::AcceptancePopulation,
     /// Terminal checkpoints of preempted requests kept for their readmission, oldest first.
     readmission_pins: Vec<CheckpointId>,
+    /// Each conversation's newest last-message checkpoint, kept for its next turn, oldest first.
+    conversation_pins: VecDeque<CheckpointId>,
     split: Option<split::SplitSpeculation>,
     costs: cost::ActionCosts,
     refresh: refresh::RefreshState,
@@ -611,6 +624,7 @@ impl RequestScheduler {
             proposal_source: speculation::ProposalSource::Mtp,
             acceptance_population: Default::default(),
             readmission_pins: Vec::new(),
+            conversation_pins: VecDeque::new(),
             split: None,
             costs: cost::ActionCosts::default(),
             refresh: refresh::RefreshState::default(),
@@ -980,7 +994,7 @@ impl RequestScheduler {
             self.stats.snapshot_evictions += evicted.retired.len() as u64;
             let update = self.cache.advance_completed(self.completed)?;
             self.apply_completion(update);
-            if evicted.retired.is_empty() {
+            if evicted.retired.is_empty() && !self.release_conversation_pin()? {
                 return Err(crate::Error::admission(
                     crate::AdmissionError::Capacity,
                     "live request resources are exhausted or awaiting GPU retirement",
@@ -1035,14 +1049,17 @@ impl RequestScheduler {
 
     /// Grows each decoding growable reservation a page beyond its next rounds, evicting
     /// unpinned prefix pages when the free list is short. If a request still cannot run,
-    /// the oldest readmission checkpoint becomes evictable before the newest growable
-    /// decoder without work in flight is preempted.
+    /// the oldest conversation checkpoint, then the oldest readmission checkpoint becomes
+    /// evictable before the newest growable decoder without work in flight is preempted.
     fn refill_reservations(&mut self) -> Result<()> {
         while self.refill_growable()? {
             // A preempted request still taking its terminal checkpoint frees its pages when it
             // retires; preempting another request now would only cascade.
             if self.slots.iter().filter_map(|slot| slot.request.as_ref()).any(|r| r.preempted) {
                 return Ok(());
+            }
+            if self.release_conversation_pin()? {
+                continue;
             }
             if self.readmission_pins.is_empty() {
                 return self.preempt_newest();
@@ -1063,6 +1080,39 @@ impl RequestScheduler {
             self.readmission_pins.push(id);
         }
         pinned
+    }
+
+    /// Keeps the checkpoint at a request's last message endpoint out of eviction after the
+    /// request retires, so the conversation's next turn restores it instead of prefilling
+    /// its history again. At most one pin per request slot is held; the oldest is released
+    /// first when a newer one exceeds that bound and whenever admission, a message or
+    /// preemption capture, or a running request finds nothing else to evict.
+    fn pin_conversation(&mut self, id: CheckpointId) -> Result<()> {
+        if self.conversation_pins.contains(&id) {
+            return Ok(());
+        }
+        self.cache.pin(id)?;
+        self.conversation_pins.push_back(id);
+        while self.conversation_pins.len() > self.limits.max_active {
+            let oldest = self.conversation_pins.pop_front().unwrap();
+            self.cache.unpin(oldest)?;
+        }
+        Ok(())
+    }
+
+    /// Releases the oldest conversation pin under resource pressure; false when none is held.
+    fn release_conversation_pin(&mut self) -> Result<bool> {
+        let Some(id) = self.conversation_pins.pop_front() else {
+            return Ok(false);
+        };
+        self.cache.unpin(id)?;
+        self.stats.conversation_pin_releases += 1;
+        Ok(true)
+    }
+
+    /// Whether a conversation checkpoint is pinned for its next turn.
+    pub fn holds_conversation(&self, id: CheckpointId) -> bool {
+        self.conversation_pins.contains(&id)
     }
 
     /// Whether a readmission checkpoint is still pinned.
@@ -1171,7 +1221,8 @@ impl RequestScheduler {
         }
         let unused = std::mem::take(&mut request.reserved_pages);
         self.free_pages.extend(unused);
-        if let Some(snapshot) = self.retain_snapshot()? {
+        // A preempted request's terminal checkpoint keeps its generated history exact.
+        if let Some(snapshot) = self.retain_snapshot(preempted)? {
             let request = self.request_mut(handle)?;
             request.terminal_snapshot = Some(snapshot);
             request.phase = RequestPhase::Snapshot;
@@ -1426,6 +1477,13 @@ impl RequestScheduler {
         self.stats.cache_lookups += 1;
         self.stats.cache_hits += u64::from(hit);
         self.stats.reused_tokens += reused;
+        // The request's own prefix pin keeps its conversation's checkpoint from here on.
+        if let Some(index) =
+            prefix.and_then(|id| self.conversation_pins.iter().position(|pin| *pin == id))
+        {
+            let id = self.conversation_pins.remove(index).unwrap();
+            self.cache.unpin(id)?;
+        }
         Ok(Admitted { handle, ticket })
     }
 
@@ -2067,9 +2125,7 @@ impl RequestScheduler {
             };
             if kind == GraphKind::Prefill && request.error_code.is_none() {
                 let endpoint = request.consumed_tokens;
-                let capture = if request.message_boundaries.binary_search(&(endpoint as usize)).is_ok()
-                    && endpoint > request.prefix_tokens
-                {
+                let capture = if request.captures_message(endpoint as usize) {
                     Some(BoundaryKind::Message)
                 } else {
                     None
@@ -2122,7 +2178,9 @@ impl RequestScheduler {
                     self.free_pages.extend(unused);
                 }
             }
-            let snapshot = self.retain_snapshot()?;
+            // Message endpoints outrank an idle conversation's pin; prompt and terminal
+            // endpoints are captured only when storage is otherwise free.
+            let snapshot = self.retain_snapshot(matches!(kind, Some(BoundaryKind::Message)))?;
             let request = self.request_mut(handle)?;
             if let Some(snapshot) = snapshot {
                 if let Some(kind) = kind {
@@ -2165,8 +2223,16 @@ impl RequestScheduler {
             },
             ready_after: request.last_use,
         };
+        let last_message = matches!(capture.kind, BoundaryKind::Message)
+            && request.message_boundaries.last() == Some(&(capture.consumed_tokens as usize));
         let history = request.history.clone();
         let result = self.cache.publish(&history, &proposal)?;
+        if last_message
+            && let PublishResult::Created { id, ready: true }
+            | PublishResult::Existing { id, ready: true } = result
+        {
+            self.pin_conversation(id)?;
+        }
         if let PublishResult::Created { id, ready } = result {
             if !ready {
                 return Err("completed boundary copy was not GPU-ready".into());
