@@ -278,6 +278,17 @@ class PreparedGDN:
         if self.sm70:
             if partitions is not None or records is not None or in_place:
                 raise ValueError("SM70 GDN requires unpartitioned execution with explicit checkpoint columns")
+            if mode == "prefill":
+                # Reviewed Sol-15 conv1d + recurrence prefill kernels (bit-identical to the Triton sequence); decode
+                # and speculative verification keep the Triton kernels. A prefill graph outside the reviewed contract
+                # fails preparation instead of silently taking another path.
+                from .sm70_gdn_prefill import PreparedSM70GDNPrefillSequence, admits
+                if not admits(module, scratch, state):
+                    raise ValueError("SM70 GDN prefill: the prefill graph is outside the reviewed Sol-15 contract")
+                self.sm70_sequence = PreparedSM70GDNPrefillSequence(module, scratch, state, metadata,
+                    norm_weight_bf16=module.norm_weight_bf16, session=session, name=name + ".sequence",
+                    workspace=workspace, checkpoint_export=checkpoint_export)
+                return
             from .sm70_gdn import PreparedSM70GDNSequence
             self.sm70_sequence = PreparedSM70GDNSequence(module, scratch, state, metadata,
                 mode=mode, norm_weight_bf16=module.norm_weight_bf16, session=session,

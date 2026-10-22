@@ -230,6 +230,96 @@ def _fake(inputs, state, outputs, handle):
     pass
 
 
+@dataclass(frozen=True)
+class ValidatedSequence:
+    """Operand tuples of one validated GDN sequence, in ``_launches`` order (inputs, state, outputs)."""
+    inputs: tuple
+    state: tuple
+    outputs: tuple
+    keys: int
+    values: int
+    epsilon: float
+    history: int
+
+    @property
+    def tensors(self):
+        return (*self.inputs, *self.state, *self.outputs)
+
+
+def validate_sequence(module, scratch, state, metadata, *, mode, norm_weight_bf16, checkpoint_export):
+    """Admit the FP32 token-major operands, state pools and metadata of one prefill or decode sequence."""
+    if (mode not in ("decode", "prefill") or type(norm_weight_bf16) is not bool
+            or type(checkpoint_export) is not bool):
+        raise ValueError("SM70 GDN requires an ordinary decode/prefill mode and explicit norm precision")
+    if checkpoint_export and mode != "prefill":
+        raise ValueError("SM70 GDN checkpoint export is a prefill operation")
+    keys, values = module.num_k_heads, module.num_v_heads
+    channels = (2 * keys + values) * 128
+    if (keys <= 0 or values <= 0 or values % keys or module.head_k_dim != 128 or module.head_v_dim != 128
+            or module.conv_dim != channels or module.conv_kernel_size != 4
+            or module.activation != "silu" or module.norm.activation not in ("silu", "sigmoid")
+            or module.conv1d.bias is not None):
+        raise ValueError("SM70 GDN requires grouped 128-element heads and a bias-free SiLU conv4")
+    x = scratch.projected_qkv
+    if x.ndim != 2 or x.shape[1] != channels or x.shape[0] <= 0:
+        raise ValueError("SM70 GDN requires nonempty packed QKV token rows")
+    capacity, device = x.shape[0], x.device
+    if device.type != "cuda" or torch.cuda.get_device_capability(device) != (7, 0):
+        raise ValueError("SM70 GDN requires a Volta CUDA device")
+    for field, width in (("projected_qkv", channels), ("convolved_qkv", channels),
+                         ("a", values), ("b", values), ("z", values * 128),
+                         ("recurrence", values * 128), ("gated", values * 128)):
+        tensor = getattr(scratch, field)
+        if (tensor.shape != (capacity, width) or tensor.dtype != torch.float32
+                or tensor.device != device or tensor.stride(1) != 1 or tensor.stride(0) < width
+                or (field in ("convolved_qkv", "recurrence", "gated") and not tensor.is_contiguous())):
+            raise ValueError(f"SM70 GDN scratch {field} requires its FP32 token-major layout")
+    if state.recurrent.ndim != 4 or state.convolution.ndim != 3:
+        raise ValueError("SM70 GDN requires rank-four recurrence and rank-three convolution history")
+    slots = state.recurrent.shape[0]
+    history = state.convolution.shape[2]
+    if (state.recurrent.shape != (slots, values, 128, 128) or slots < 2
+            or state.recurrent.stride()[1:] != (16384, 128, 1)
+            or state.recurrent.stride(0) < values * 16384
+            or not 3 <= history <= 10 or state.convolution.shape != (slots, channels, history)
+            or state.convolution.stride()[1:] != (history, 1)
+            or state.convolution.stride(0) < channels * history
+            or any(t.device != device or t.dtype != torch.float32 for t in (state.convolution, state.recurrent))):
+        raise ValueError("SM70 GDN requires FP32 recurrence and three chronological FP32 history columns plus zero through seven drafts")
+    conv_weight = module.conv1d.weight.squeeze(1)
+    for tensor, shape in ((conv_weight, (channels, 4)), (module.A_log, (values,)),
+                          (module.dt_bias, (values,)), (module.norm.weight, (128,))):
+        if tensor.shape != shape or tensor.dtype != torch.float32 or tensor.device != device or not tensor.is_contiguous():
+            raise ValueError("SM70 GDN canonical parameters must retain their values in contiguous FP32 storage")
+    requests = metadata.query_start_loc.numel() - 1
+    columns = metadata.state_indices.shape[1] if metadata.state_indices.ndim == 2 else 0
+    if not 1 <= columns <= history - 2:
+        raise ValueError("SM70 GDN state_indices columns exceed convolution history capacity")
+    expected = {"query_start_loc": ((requests + 1,), torch.int32),
+                "convolution_slots": ((requests,), torch.int64), "fresh": ((requests,), torch.bool),
+                "accepted_tokens": ((requests,), torch.int32), "state_indices": ((requests, columns), torch.int64),
+                "initial_state_indices": ((requests,), torch.int64), "final_state_indices": ((requests,), torch.int64),
+                "checkpoint_state_indices": ((requests,), torch.int64), "checkpoint_offsets": ((requests,), torch.int32),
+                "num_seqs": ((1,), torch.int32), "num_tokens": ((1,), torch.int32)}
+    if requests <= 0 or (mode == "decode" and capacity > requests * columns):
+        raise ValueError("SM70 GDN decode token capacity exceeds its state_indices columns")
+    for field, (shape, dtype) in expected.items():
+        tensor = getattr(metadata, field)
+        if tensor.shape != shape or tensor.dtype != dtype or tensor.device != device or not tensor.is_contiguous():
+            raise ValueError(f"SM70 GDN metadata {field} has an unsupported shape, dtype or stride")
+    if metadata.num_tokens.item() or metadata.num_seqs.item():
+        raise ValueError("SM70 GDN preparation requires zero live counts")
+    epsilon = float(module.norm.variance_epsilon)
+    if not math.isfinite(epsilon) or epsilon <= 0:
+        raise ValueError("SM70 GDN norm epsilon must be finite and positive")
+    inputs = (x, scratch.a, scratch.b, scratch.z, conv_weight, module.A_log, module.dt_bias,
+              module.norm.weight, metadata.query_start_loc, metadata.convolution_slots, metadata.fresh, metadata.accepted_tokens,
+              metadata.state_indices, metadata.initial_state_indices, metadata.final_state_indices,
+              metadata.checkpoint_state_indices, metadata.checkpoint_offsets, metadata.num_seqs, metadata.num_tokens)
+    return ValidatedSequence(inputs, (state.convolution, state.recurrent),
+                             (scratch.convolved_qkv, scratch.recurrence, scratch.gated), keys, values, epsilon, history)
+
+
 class PreparedSM70GDNSequence:
     """Convolve, update recurrence and normalize already projected Qwen operands.
 
@@ -245,79 +335,13 @@ class PreparedSM70GDNSequence:
 
     def __init__(self, module, scratch, state, metadata, *, mode, norm_weight_bf16,
                  session=None, name=None, checkpoint_export=False):
-        if (mode not in ("decode", "prefill") or type(norm_weight_bf16) is not bool
-                or type(checkpoint_export) is not bool):
-            raise ValueError("SM70 GDN requires an ordinary decode/prefill mode and explicit norm precision")
-        if checkpoint_export and mode != "prefill":
-            raise ValueError("SM70 GDN checkpoint export is a prefill operation")
-        keys, values = module.num_k_heads, module.num_v_heads
-        channels = (2 * keys + values) * 128
-        if (keys <= 0 or values <= 0 or values % keys or module.head_k_dim != 128 or module.head_v_dim != 128
-                or module.conv_dim != channels or module.conv_kernel_size != 4
-                or module.activation != "silu" or module.norm.activation not in ("silu", "sigmoid")
-                or module.conv1d.bias is not None):
-            raise ValueError("SM70 GDN requires grouped 128-element heads and a bias-free SiLU conv4")
-        x = scratch.projected_qkv
-        if x.ndim != 2 or x.shape[1] != channels or x.shape[0] <= 0:
-            raise ValueError("SM70 GDN requires nonempty packed QKV token rows")
-        capacity, device = x.shape[0], x.device
-        if device.type != "cuda" or torch.cuda.get_device_capability(device) != (7, 0):
-            raise ValueError("SM70 GDN requires a Volta CUDA device")
-        for field, width in (("projected_qkv", channels), ("convolved_qkv", channels),
-                             ("a", values), ("b", values), ("z", values * 128),
-                             ("recurrence", values * 128), ("gated", values * 128)):
-            tensor = getattr(scratch, field)
-            if (tensor.shape != (capacity, width) or tensor.dtype != torch.float32
-                    or tensor.device != device or tensor.stride(1) != 1 or tensor.stride(0) < width
-                    or (field in ("convolved_qkv", "recurrence", "gated") and not tensor.is_contiguous())):
-                raise ValueError(f"SM70 GDN scratch {field} requires its FP32 token-major layout")
-        if state.recurrent.ndim != 4 or state.convolution.ndim != 3:
-            raise ValueError("SM70 GDN requires rank-four recurrence and rank-three convolution history")
-        slots = state.recurrent.shape[0]
-        history = state.convolution.shape[2]
-        if (state.recurrent.shape != (slots, values, 128, 128) or slots < 2
-                or state.recurrent.stride()[1:] != (16384, 128, 1)
-                or state.recurrent.stride(0) < values * 16384
-                or not 3 <= history <= 10 or state.convolution.shape != (slots, channels, history)
-                or state.convolution.stride()[1:] != (history, 1)
-                or state.convolution.stride(0) < channels * history
-                or any(t.device != device or t.dtype != torch.float32 for t in (state.convolution, state.recurrent))):
-            raise ValueError("SM70 GDN requires FP32 recurrence and three chronological FP32 history columns plus zero through seven drafts")
-        conv_weight = module.conv1d.weight.squeeze(1)
-        for tensor, shape in ((conv_weight, (channels, 4)), (module.A_log, (values,)),
-                              (module.dt_bias, (values,)), (module.norm.weight, (128,))):
-            if tensor.shape != shape or tensor.dtype != torch.float32 or tensor.device != device or not tensor.is_contiguous():
-                raise ValueError("SM70 GDN canonical parameters must retain their values in contiguous FP32 storage")
-        requests = metadata.query_start_loc.numel() - 1
-        columns = metadata.state_indices.shape[1] if metadata.state_indices.ndim == 2 else 0
-        if not 1 <= columns <= history - 2:
-            raise ValueError("SM70 GDN state_indices columns exceed convolution history capacity")
-        expected = {"query_start_loc": ((requests + 1,), torch.int32),
-                    "convolution_slots": ((requests,), torch.int64), "fresh": ((requests,), torch.bool),
-                    "accepted_tokens": ((requests,), torch.int32), "state_indices": ((requests, columns), torch.int64),
-                    "initial_state_indices": ((requests,), torch.int64), "final_state_indices": ((requests,), torch.int64),
-                    "checkpoint_state_indices": ((requests,), torch.int64), "checkpoint_offsets": ((requests,), torch.int32),
-                    "num_seqs": ((1,), torch.int32), "num_tokens": ((1,), torch.int32)}
-        if requests <= 0 or (mode == "decode" and capacity > requests * columns):
-            raise ValueError("SM70 GDN decode token capacity exceeds its state_indices columns")
-        for field, (shape, dtype) in expected.items():
-            tensor = getattr(metadata, field)
-            if tensor.shape != shape or tensor.dtype != dtype or tensor.device != device or not tensor.is_contiguous():
-                raise ValueError(f"SM70 GDN metadata {field} has an unsupported shape, dtype or stride")
-        if metadata.num_tokens.item() or metadata.num_seqs.item():
-            raise ValueError("SM70 GDN preparation requires zero live counts")
-        epsilon = float(module.norm.variance_epsilon)
-        if not math.isfinite(epsilon) or epsilon <= 0:
-            raise ValueError("SM70 GDN norm epsilon must be finite and positive")
-        self.inputs = (x, scratch.a, scratch.b, scratch.z, conv_weight, module.A_log, module.dt_bias,
-                       module.norm.weight, metadata.query_start_loc, metadata.convolution_slots, metadata.fresh, metadata.accepted_tokens,
-                       metadata.state_indices, metadata.initial_state_indices, metadata.final_state_indices,
-                       metadata.checkpoint_state_indices, metadata.checkpoint_offsets, metadata.num_seqs, metadata.num_tokens)
-        self.state = (state.convolution, state.recurrent)
-        self.outputs = (scratch.convolved_qkv, scratch.recurrence, scratch.gated)
-        self.tensors = (*self.inputs, *self.state, *self.outputs)
+        validated = validate_sequence(module, scratch, state, metadata, mode=mode, norm_weight_bf16=norm_weight_bf16,
+                                      checkpoint_export=checkpoint_export)
+        device = validated.inputs[0].device
+        self.inputs, self.state, self.outputs = validated.inputs, validated.state, validated.outputs
+        self.tensors = validated.tensors
         query = Query(tuple((tuple(t.shape), tuple(t.stride()), str(t.dtype).removeprefix("torch.")) for t in self.tensors),
-                      keys, values, mode, epsilon, module.norm.activation, norm_weight_bf16)
+                      validated.keys, validated.values, mode, validated.epsilon, module.norm.activation, norm_weight_bf16)
         self.plan = None
         if session is None:
             programs = tuple(warmup_triton(kernel, args, grid, **options)
