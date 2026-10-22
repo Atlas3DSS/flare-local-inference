@@ -36,7 +36,7 @@ from ignition.preparation.execution import GraphSignature
 from ignition.preparation.host_memory import device_memory_info
 from ignition.preparation.deferred import deferred_mode
 from ignition.preparation.fixtures.recurrent import register_benchmark_state
-from ignition.preparation.frontend import prepare_frontend
+from ignition.preparation.frontend import annotated_template_asset, prepare_frontend
 from ignition.preparation.model import PreparedModel
 from ignition.preparation.rank_group import minimum_across_ranks
 from ignition.preparation.qwen38 import (
@@ -560,8 +560,7 @@ def _prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, t
                 speculative_state_columns=8, draft_raw_ring_capacity=layout.draft_ring_capacity if has_mtp else 0,
                 speculative_fixed_width=config.speculative_fixed_width,
                 history_drafts=config.history_drafts)
-        hashes = {"tokenizer": ("tokenizer.json", FRONTEND_SHA256["tokenizer.json"]),
-            "chat_template": ("chat_template.jinja", FRONTEND_SHA256["chat_template.jinja"])}
+        hashes = {"tokenizer": ("tokenizer.json", FRONTEND_SHA256["tokenizer.json"])}
         cache_regions = [history_region(buffers, f"cache.{layer}.{name}", getattr(value, name), contract_proto.PAGED_KEY_VALUE,
             tokens_per_record=4 if name == "compressed_k_cache" else 1)
             for layer, value in (final_cache or cache).items()
@@ -575,6 +574,9 @@ def _prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, t
             "model_contract": prepare_contract(signatures, buffers, state, image_slots=config.image_concurrency, page_tokens=64, draft_lag=1 if has_mtp else None, embedding_tables=(0,), regions=cache_regions),
             "assets": {name: {"path": str((manifest.snapshot / filename).resolve()), "sha256": digest}
                        for name, (filename, digest) in hashes.items()}}
+        server_config["assets"]["chat_template"] = annotated_template_asset(
+            (manifest.snapshot / "chat_template.jinja").read_bytes(),
+            Path(__file__).with_name("assets") / "chat_template.jinja")
         if speculation is not None:
             server_config.update(speculative_widths=config.speculative_widths,
             speculative_token_capacity=speculative_token_capacity(config.max_active, max(config.speculative_widths), config.speculative_token_capacity),

@@ -442,7 +442,7 @@ pub(crate) mod tests {
                     tokenizer.to_string(false).unwrap().as_bytes(),
                 ),
                 tokens: Default::default(),
-                chat_template: Some(asset("chat_template.jinja", b"{{ messages[0].content }}")),
+                chat_template: Some(asset("chat_template.jinja", b"{% mark %}{{ messages[0].content }}")),
             },
             Default::default(),
         )

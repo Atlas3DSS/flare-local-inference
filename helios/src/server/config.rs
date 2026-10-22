@@ -476,7 +476,7 @@ mod tests {
             "tokenizer.json",
             tokenizer.to_string(false).unwrap().as_bytes(),
         );
-        let template_asset = asset("chat_template.jinja", b"{{ messages[0].content }}");
+        let template_asset = asset("chat_template.jinja", b"{% mark %}{{ messages[0].content }}");
         let mut model =
             crate::frontend::test_support::model_config(crate::model::testing::metadata());
         model.prepared_sequence_tokens = 2048;

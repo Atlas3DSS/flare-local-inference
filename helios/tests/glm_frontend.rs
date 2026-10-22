@@ -33,7 +33,12 @@ fn checkpoint_template_tokenization_requests_and_message_boundaries_match_transf
         FrontendAssets {
             tokenizer: asset("tokenizer.json"),
             tokens: support::tokens(&asset("tokenizer_config.json")).unwrap(),
-            chat_template: Some(asset("chat_template.jinja")),
+            chat_template: Some({
+                let path=PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../ignition/recipes/glm53/assets/chat_template.jinja");
+                let contents=fs::read_to_string(&path).unwrap();
+                assert_eq!(contents.replace("{%- mark -%}",""),fs::read_to_string(snapshot.join("chat_template.jinja")).unwrap());
+                Asset {range:None,sha256:format!("{:x}",Sha256::digest(contents.as_bytes())),path}
+            }),
         },
         json!({"add_generation_prompt":true})
             .as_object()

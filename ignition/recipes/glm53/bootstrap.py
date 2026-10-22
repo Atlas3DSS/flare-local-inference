@@ -34,7 +34,7 @@ from ignition.preparation.collectives import (
 )
 from ignition.preparation.execution import GraphSignature
 from ignition.preparation.fixtures.recurrent import register_benchmark_state
-from ignition.preparation.frontend import prepare_frontend
+from ignition.preparation.frontend import annotated_template_asset, prepare_frontend
 from ignition.preparation.model import PreparedModel
 from ignition.preparation.rank_group import minimum_across_ranks
 from ignition.preparation.scratch import ScratchArena
@@ -626,7 +626,9 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
     if scoring is not None:
         memory.update(scoring.memory_report())
     assets = {role: {"path": str(snapshot / filename), "sha256": hashlib.sha256((snapshot / filename).read_bytes()).hexdigest()}
-        for role, filename in (("tokenizer", "tokenizer.json"), ("chat_template", "chat_template.jinja"))}
+        for role, filename in (("tokenizer", "tokenizer.json"),)}
+    assets["chat_template"] = annotated_template_asset(
+        (snapshot / "chat_template.jinja").read_bytes(), Path(__file__).with_name("assets") / "chat_template.jinja")
     generation = json.loads((snapshot / "generation_config.json").read_text())
     from .mla import MLAState
     cache_regions = []

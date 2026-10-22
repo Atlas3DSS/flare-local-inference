@@ -278,9 +278,8 @@ impl RequestScheduler {
         let start = request.consumed_tokens as usize;
         let mut end = request
             .message_boundaries
-            .iter()
+            .get(request.message_boundaries.partition_point(|&n| n <= start))
             .copied()
-            .find(|n| *n > start)
             .unwrap_or(request.prompt_tokens)
             .min(start.saturating_add(capacity))
             .min(request.prefill_limit());

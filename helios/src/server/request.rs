@@ -222,6 +222,7 @@ pub(super) fn prepare_inference_cached(
         }
         (
             crate::frontend::RenderedPrompt {
+                message_boundaries: Vec::new(),
                 text: frontend.decode(&token_ids, false)?,
                 token_ids,
                 image_sources: Vec::new(),
@@ -260,11 +261,7 @@ pub(super) fn prepare_inference_cached(
         }
         None => None,
     };
-    let mut message_boundaries = if raw.is_some() {
-        Vec::new()
-    } else {
-        crate::model::message_boundaries(frontend, &rendered.token_ids, &normalized, &options)
-    };
+    let mut message_boundaries = rendered.message_boundaries.clone();
     let crate::model::PreparedInput {
         tokens,
         token_expansions,
@@ -272,12 +269,16 @@ pub(super) fn prepare_inference_cached(
         conditioning,
         conditioned_inputs,
     } = crate::model::prepare_image_inputs(config, frontend, processor, &rendered, images)?;
+    let mut expansions = token_expansions.iter().peekable();
+    let mut additional = 0;
     for boundary in &mut message_boundaries {
         let original = *boundary;
-        *boundary += token_expansions.iter()
-            .take_while(|(index, _)| *index < original)
-            .map(|(_, additional)| additional)
-            .sum::<usize>();
+        while let Some((index, count)) = expansions.peek() {
+            if *index >= original { break; }
+            additional += count;
+            expansions.next();
+        }
+        *boundary += additional;
     }
     let mut sampling = sampling_parameters(object, &config.sampling_defaults, &config.sampling_ranges)?;
     sampling.seed = sampling.seed.wrapping_add(index as u64);

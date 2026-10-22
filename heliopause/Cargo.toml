@@ -24,3 +24,6 @@ serde_json = "1.0"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_System_Console", "Win32_System_Threading"] }
+
+[patch."https://github.com/deepseek-ai/deepseek-recipe"]
+deepseek-recipe-encoding = { path = "../helios/vendor/deepseek-recipe-encoding" }

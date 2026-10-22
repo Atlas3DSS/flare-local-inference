@@ -1,6 +1,7 @@
 """Extract and validate the structural frontend fields consumed by Helios."""
 
 import json
+import hashlib
 from enum import IntEnum
 from pathlib import Path
 
@@ -12,6 +13,15 @@ class PromptEncoder(IntEnum):
 
 
 TOKEN_FIELDS = ("bos_token", "eos_token", "unk_token", "sep_token", "pad_token", "cls_token", "mask_token")
+
+
+def annotated_template_asset(source: bytes, annotated: Path):
+    """Validate output-preserving message annotations against a checkpoint template."""
+    annotated = annotated.resolve()
+    contents = annotated.read_bytes()
+    if contents.replace(b"{%- mark -%}", b"") != source:
+        raise ValueError(f"checkpoint chat template does not match {annotated}")
+    return {"path": str(annotated), "sha256": hashlib.sha256(contents).hexdigest()}
 
 
 def _token(value):

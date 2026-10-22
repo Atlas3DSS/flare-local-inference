@@ -6,7 +6,6 @@ import json
 from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
-from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 
 import torch
@@ -304,12 +303,10 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
     pool.clear_for_preparation()
     torch.cuda.synchronize(device)
     release_unused()
-    from .frontend import inference_template
-    frontend_assets = TemporaryDirectory(prefix="flare-step5-frontend-")
-    template = Path(frontend_assets.name) / "chat_template.jinja"
-    template.write_text(inference_template(snapshot))
+    from .frontend import template_asset
     assets = {role: {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
-              for role, path in (("tokenizer", snapshot / "tokenizer.json"), ("chat_template", template))}
+              for role, path in (("tokenizer", snapshot / "tokenizer.json"),)}
+    assets["chat_template"] = template_asset(snapshot)
     frontend = prepare_frontend(snapshot, eos_token_ids=weights.config.text["eos_token_id"])
     frontend["image"] = {"step": {}}
     server_config = {"identity": identity, "model_id": snapshot.name, "max_sequence_tokens": config.context,
@@ -361,5 +358,5 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                            *storage_ranges(disposable), *completion.zero_ranges()),
         resources=(scoring, weights, pool, requests, inputs, admission, commands, arena, forwards, prefill_storage,
                    decode_storage, metadata, compiled, stream, graph_pool, session, coordinator, *channels,
-                   vision_inputs, vision_prefill, vision_state, vision_storage, scratch_pool, graph_buffers, private_buffers, speculation, frontend_assets),
+                   vision_inputs, vision_prefill, vision_state, vision_storage, scratch_pool, graph_buffers, private_buffers, speculation),
         close_resources=(*channels, *((scoring,) if scoring is not None else ())))

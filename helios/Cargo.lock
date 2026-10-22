@@ -533,7 +533,6 @@ dependencies = [
 [[package]]
 name = "deepseek-recipe-encoding"
 version = "0.1.0"
-source = "git+https://github.com/deepseek-ai/deepseek-recipe?rev=8cadfede7063c896b944e7bae05daa3549ae97ea#8cadfede7063c896b944e7bae05daa3549ae97ea"
 dependencies = [
  "deepseek-recipe-core",
  "serde",
