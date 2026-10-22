@@ -233,8 +233,11 @@ class PreparedGDN:
             raise ValueError("GDN metadata capacities disagree")
         columns = metadata.state_indices.shape[1]
         if mode == "decode" and (
-            self.tokens > self.sequences * columns
-            or columns > self.speculative_tokens + 1
+            columns > self.speculative_tokens + 1
+            or (replay is None and self.tokens > self.sequences * columns)
+            # Replay-commit: one committed column per request; the verification positions live in the decode
+            # scratch and the convolution history (3 + drafts) must still hold every token of a request.
+            or (replay is not None and (columns != 1 or self.tokens > self.sequences * (self.speculative_tokens + 1)))
         ):
             raise ValueError(
                 "decode token/verification capacity exceeds its convolution history"
