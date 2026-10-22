@@ -138,6 +138,11 @@ impl Fixture {
             }
         }
         scheduler.measured_graph_durations(&graphs).unwrap();
+        if self.config.history_drafts
+            || self.config.speculative_proposal_source == crate::scheduler::speculation::ProposalSource::Copy
+        {
+            scheduler.enable_history_drafts().unwrap();
+        }
         let mut worker = Worker::new(
             &self.config,
             &self.frontend,
@@ -917,6 +922,82 @@ fn speculative_dashboard_counts_live_rounds_and_batched_forward_passes() {
 }
 
 #[test]
+fn shared_decoded_history_reaches_copy_and_mtp_uploads_after_response_completion() {
+    use crate::model::contract::{GraphOperation, InputIndexing, ValueSource};
+    use crate::scheduler::speculation::ProposalSource;
+    for source in [ProposalSource::Copy, ProposalSource::Mtp] {
+        let mut fixture = Fixture::new();
+        fixture.config.speculative_widths = vec![1, 8];
+        fixture.config.speculative_fixed_width = Some(8);
+        fixture.config.speculative_proposal_source = source;
+        fixture.config.history_drafts = source == ProposalSource::Mtp;
+        for graph in &mut fixture.config.contract.graphs {
+            if graph.kind != GraphOperation::Speculative { continue; }
+            if source == ProposalSource::Copy { graph.draft_cursor = None; }
+            for (name, value) in [
+                ("copy_ids", ValueSource::CopyTokenIds),
+                ("copy_count", ValueSource::CopyTokenCount),
+                ("copy_consumed", ValueSource::CopyConsumedTokens),
+                ("copy_generation", ValueSource::CopyGeneration),
+                ("copy_masks", ValueSource::CopyGrammarMask),
+                ("copy_mask_count", ValueSource::CopyGrammarCount),
+            ] {
+                graph.inputs.push(crate::model::testing::binding(name, value, InputIndexing::RequestRow, 0, 0));
+            }
+        }
+        let (sender, receiver) = mpsc::channel();
+        let mut worker = fixture.worker(receiver);
+        worker.scheduler.enable_speculation(&[1, 8]).unwrap();
+        worker.scheduler.fixed_speculative_width(Some(8)).unwrap();
+        worker.scheduler.proposal_source(source).unwrap();
+        let (incoming, _first_output) = fixture.incoming(vec![0, 1, 2, 3], 6);
+        sender.send(vec![incoming]).unwrap();
+        assert_eq!(worker.admit().unwrap(), ControlFlow::Continue(true));
+        assert_eq!(worker.scheduler.history_proposal(&[0, 1, 2, 3], 7).1, 0);
+        advance(&mut worker, GraphKind::Init, 1, None);
+        advance(&mut worker, GraphKind::Prefill, 2, Some(0));
+        advance(&mut worker, GraphKind::Snapshot, 3, None);
+        for (index, token) in [1, 2, 3, 4, 2].into_iter().enumerate() {
+            let sequence = index as u64 + 4;
+            let step = planned(&mut worker, GraphKind::Speculative, sequence);
+            let live = worker.scheduler.request(step.lanes[0].request).unwrap();
+            let mut frame = completion(&worker, &step, sequence, Some(token));
+            let record = &mut frame.records[live.handle.slot as usize];
+            record.consumed_tokens = live.consumed_tokens as i64 + 1;
+            record.vector = Some(crate::execution::TokenVector {
+                verification_width: step.token_capacity as i64,
+                offered_drafts: step.lanes[0].tokens as i64 - 1,
+                emitted_count: 1,
+                accepted_drafts: 0,
+                draft_cache_consumed: if source == ProposalSource::Copy { -1 } else { record.consumed_tokens - 1 },
+                tokens: [i64::from(token), -1, -1, -1, -1, -1, -1, -1],
+                ..Default::default()
+            });
+            worker.complete(GraphKind::Speculative, frame).unwrap();
+        }
+        advance(&mut worker, GraphKind::Snapshot, 9, None);
+        worker.publish().unwrap();
+        assert!(worker.active.iter().all(Option::is_none));
+        let (incoming, _second_output) = fixture.incoming(vec![4, 0, 1, 2], 16);
+        sender.send(vec![incoming]).unwrap();
+        assert_eq!(worker.admit().unwrap(), ControlFlow::Continue(true));
+        advance(&mut worker, GraphKind::Init, 10, None);
+        advance(&mut worker, GraphKind::Prefill, 11, Some(3));
+        advance(&mut worker, GraphKind::Snapshot, 12, None);
+        let step = planned(&mut worker, GraphKind::Speculative, 13);
+        let live = worker.scheduler.request(step.lanes[0].request).unwrap();
+        let uploads = worker.inputs.as_ref().unwrap().uploads();
+        let bytes = |name| uploads.iter().find(|u| u.buffer == name).unwrap().bytes;
+        assert_eq!(i32::from_le_bytes(bytes("copy_count").try_into().unwrap()), 2);
+        assert_eq!(bytes("copy_ids").chunks_exact(8)
+            .map(|b| i64::from_le_bytes(b.try_into().unwrap())).collect::<Vec<_>>(),
+            [4, 2, -1, -1, -1, -1, -1]);
+        assert_eq!(i64::from_le_bytes(bytes("copy_consumed").try_into().unwrap()), live.consumed_tokens as i64);
+        assert_eq!(i64::from_le_bytes(bytes("copy_generation").try_into().unwrap()), live.handle.generation as i64);
+    }
+}
+
+#[test]
 fn observations_precede_grammar_failures_and_token_stop_completion() {
     for invalid in [false, true] {
         let fixture = Fixture::new();
@@ -1454,6 +1535,7 @@ fn exercise_text_preemption(
     evict_checkpoint: bool,
 ) {
     let mut fixture = Fixture::new();
+    fixture.config.history_drafts = true;
     fixture.config.contract = metadata;
     fixture.config.prepared_sequence_tokens = 4096;
     fixture.config.limits.max_sequence_tokens = 4096;
@@ -1504,6 +1586,8 @@ fn exercise_text_preemption(
     assert!(worker.scheduler.stats().preemptions > 0);
     let (incoming, parked) = worker.parked.front_mut().unwrap();
     assert!(parked.carried.generated_tokens > 0);
+    let decoded_sequence = parked.carried.decoded_sequence;
+    assert_ne!(decoded_sequence, Default::default());
     let history_len = incoming.prompt.tokens.len();
     assert_eq!(history_len, 60 + parked.carried.generated_tokens as usize);
     assert_eq!(
@@ -1544,6 +1628,7 @@ fn exercise_text_preemption(
     assert!(worker.parked.is_empty());
     let resumed = worker.active.iter().flatten().next().unwrap().request;
     let live = worker.scheduler.request(resumed).unwrap();
+    assert_eq!(live.decoded_sequence, decoded_sequence);
     if evict_checkpoint {
         assert!(live.consumed_tokens < history_len as u64 - 1);
     } else {
@@ -2319,6 +2404,7 @@ fn failed_host_restore_replans_all_images_from_the_shallower_prefix() {
     let _ = worker.admit().unwrap();
     assert_eq!(worker.active[0].as_ref().unwrap().selected_images.len(), 0);
     worker.active[0].as_mut().unwrap().carried = Carried {
+        decoded_sequence: Default::default(),
         prompt_tokens: Some(90),
         reused_prompt_tokens: Some(56),
         generated_tokens: 7,

@@ -235,9 +235,10 @@ struct Active<'a> {
     held_logprobs: VecDeque<Option<crate::execution::TokenLogprobs>>,
 }
 
-/// What earlier admissions of a preempted request already reported.
+/// Output accounting and decoded tail retained across admissions.
 #[derive(Clone, Copy, Default)]
 struct Carried {
+    decoded_sequence: crate::scheduler::decoded_history::DecodedSequence,
     prompt_tokens: Option<usize>,
     reused_prompt_tokens: Option<u64>,
     generated_tokens: u32,
@@ -421,6 +422,15 @@ impl ModelRuntime {
                     .and_then(|()| scheduler.enable_speculation(&worker_config.speculative_widths))
                     .and_then(|()| {
                         scheduler.proposal_source(worker_config.speculative_proposal_source)
+                    })
+                    .and_then(|()| {
+                        if worker_config.history_drafts
+                            || worker_config.speculative_proposal_source == crate::scheduler::speculation::ProposalSource::Copy
+                        {
+                            scheduler.enable_history_drafts()
+                        } else {
+                            Ok(())
+                        }
                     })
                     .and_then(|()| {
                         scheduler.fixed_speculative_width(worker_config.speculative_fixed_width)
@@ -1220,6 +1230,7 @@ impl<'a> Worker<'a> {
             if !incoming.readmitted {
                 self.metrics.admitted.fetch_add(1, Ordering::Relaxed);
             }
+            self.scheduler.resume_decoded_sequence(handle, parked.carried.decoded_sequence)?;
             incoming.notify_admission(Ok(()));
             self.active[slot] = Some(Active {
                 request: handle,
@@ -1688,6 +1699,7 @@ impl<'a> Worker<'a> {
             return Ok(false);
         }
         let tokens = live.tokens().to_vec();
+        let decoded_sequence = live.decoded_sequence;
         let (generated, prompt_tokens, reused) = (
             live.generated_tokens,
             live.prompt_tokens,
@@ -1711,6 +1723,7 @@ impl<'a> Worker<'a> {
             text_stops: active.text_stops,
             held_logprobs: active.held_logprobs,
             carried: Carried {
+                decoded_sequence,
                 prompt_tokens: Some(active.carried.prompt_tokens.unwrap_or(prompt_tokens)),
                 reused_prompt_tokens: Some(active.carried.reused_prompt_tokens.unwrap_or(reused)),
                 generated_tokens,
@@ -1747,14 +1760,9 @@ impl<'a> Worker<'a> {
                     continue;
                 }
                 let proposal = prepare_copy_proposal(
-                    live.tokens(),
+                    self.scheduler.history_proposal(live.tokens(), if live.host_stops() { 0 } else { 7 }),
                     live.consumed_tokens,
                     request.incoming.prompt.grammar.as_ref(),
-                    if self.config.history_drafts && !live.host_stops() {
-                        7
-                    } else {
-                        0
-                    },
                     &self.config.eos_token_ids,
                 );
                 match proposal {
@@ -2069,13 +2077,11 @@ fn cancel_stopped(
 }
 
 fn prepare_copy_proposal(
-    tokens: &[u32],
+    (mut ids, mut count): ([i64; 7], usize),
     consumed: u64,
     grammar: Option<&crate::grammar::RequestGrammar>,
-    maximum: usize,
     eos_ids: &[u32],
 ) -> Result<crate::scheduler::speculation::CopyProposal> {
-    let (mut ids, mut count) = crate::scheduler::speculation::copy_proposal(tokens, maximum);
     if let Some(end) = ids[..count]
         .iter()
         .position(|id| eos_ids.contains(&(*id as u32)))
@@ -2235,17 +2241,14 @@ mod tests {
     }
 
     #[test]
-    fn copy_preparation_trims_eos_and_explicit_disable_has_no_proposals() {
-        let history = [1, 2, 3, 4, 11, 12, 13, 99, 1, 2, 3, 4];
-        let copy = prepare_copy_proposal(&history, 11, None, 7, &[12]).unwrap();
+    fn copy_preparation_trims_eos_and_preserves_empty_proposals() {
+        let copy = prepare_copy_proposal(([11, 12, 13, -1, -1, -1, -1], 3), 11, None, &[12]).unwrap();
         assert_eq!(copy.count, 1);
         assert_eq!(copy.tokens, [11, -1, -1, -1, -1, -1, -1]);
         assert_eq!(copy.consumed, 11);
         assert!(copy.grammar_masks.is_empty());
-        let disabled = prepare_copy_proposal(&history, 11, None, 0, &[12]).unwrap();
-        assert_eq!((disabled.count, disabled.tokens), (0, [-1; 7]));
-        let absent = prepare_copy_proposal(&[1, 2, 3, 4], 3, None, 7, &[]).unwrap();
-        assert_eq!(absent.count, 0);
+        let empty = prepare_copy_proposal(([-1; 7], 0), 11, None, &[12]).unwrap();
+        assert_eq!((empty.count, empty.tokens), (0, [-1; 7]));
     }
 
     #[test]

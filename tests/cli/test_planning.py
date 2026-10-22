@@ -184,9 +184,9 @@ def test_speculation_settings_are_validated_and_described():
     assert display.speculation(DRAFTING) == "up to 3 draft tokens per round · MTP module"
     assert display.speculation(fixed) == "exactly 2 draft tokens per round · MTP module"
     assert display.speculation(Speculation(4, history_drafts=True)) == (
-        "up to 4 draft tokens per round · MTP module and request history")
+        "up to 4 draft tokens per round · MTP module and shared decoded history")
     assert display.speculation(Speculation(1, proposal_source="copy")) == (
-        "up to 1 draft token per round · request history")
+        "up to 1 draft token per round · shared decoded history")
     assert display.speculation(None, brief=True) == "speculation off"
     assert display.speculation(DRAFTING, brief=True) == "up to 3 draft tokens"
     assert display.speculation(fixed, brief=True) == "exactly 2 draft tokens"

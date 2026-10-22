@@ -8,12 +8,23 @@ weights, kernels, storage and CUDA graphs; Rust schedules requests and launches
 graphs. Acceptance and token feedback remain on the device. Speculative serving uses a versioned token-vector completion contract.
 Ignition prepares the recipe's learned drafter unless `--no-mtp` is given. The advanced flags
 select the draft-token maximum, the default verification policy, and the
-proposal source. Draft continuations from request history are
-disabled by default and enabled on the Qwen recipe with `--history-drafts`,
-which sets `PreparationConfig(history_drafts=True)`.
+proposal source. Qwen's `--mtp-proposal-source copy` drafts from shared decoded
+history without loading an MTP module. `--history-drafts` adds those proposals
+to the learned MTP source and is disabled by default.
+
+With copying enabled, each loaded model retains the most recent 65,536 committed
+generated tokens across requests in a host-memory ring. Exact eight-token and four-token indexes
+match the active request's suffix, preferring eight-token matches and then the
+most recent occurrence. They return up to seven observed continuation tokens.
+Per-response links preserve sequence boundaries under interleaving and
+preemption. Prompt ingestion, prefix restores, and disk checkpoints do not
+populate the ring; only validated completion outputs, including accepted drafts
+and target samples, extend it. Rejected proposals and failed completions do not.
+The ring survives request completion and is discarded when the model unloads.
+Queries may use prompt context without inserting it into the shared corpus.
 
 The design combines adaptive verification budgets, native MTP proposals and
-continuations copied from request history. Compact recurrent commit and token
+continuations copied from shared decoded history. Compact recurrent commit and token
 trees are additional capabilities with explicit operator requirements. A
 separately trained parallel drafter is optional; it is not needed to use the
 checkpoint's MTP weights.

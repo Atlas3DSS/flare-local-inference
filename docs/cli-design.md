@@ -212,8 +212,8 @@ explicit flags take precedence.
 | `--speculative-token-capacity N` | Maximum physical target-token rows in wider speculative graphs; width one covers every request bucket. Applies to every speculative recipe. | 128 for DeepSeek V4.1; otherwise larger of padded concurrency and maximum verification width |
 | `--speculative-graph-budget N` | Maximum packed round graphs to capture, independently of physical target-token rows. Excludes mandatory width-one and ordinary graphs; requires packed adaptive learned speculation at positive draft depth. Must cover both physical-row endpoints for every eligible request bucket. | 64 for DeepSeek V4.1 |
 | `--no-mtp-adaptive-verification` | Default to fixed-width serving. Capture includes every smaller width within the speculative token capacity. Positive-depth DeepSeek V4.1 DSpark requires adaptive verification. | Adaptive |
-| `--mtp-proposal-source {mtp,copy}` | Where drafts come from: the checkpoint's MTP module, or `copy` for continuations of the request's own history, which loads no draft model. Qwen only. | `mtp` |
-| `--history-drafts` | Also draft continuations copied from the request's own history. Qwen only. | off |
+| `--mtp-proposal-source {mtp,copy}` | Where drafts come from: the checkpoint's MTP module, or `copy` for continuations from shared decoded history, which loads no draft model. Qwen only. | `mtp` |
+| `--history-drafts` | Also draft continuations copied from shared decoded history. Qwen only. | off |
 | `--mla-compute-mode {auto,bf16}` | Constrain DeepSeek V4.1 MLA arithmetic while preserving packed KV storage and autotuning among compatible kernels. | `auto` |
 | `--no-stream-overlap` | Run every concurrent branch (shared experts, projection chains, query chains) serially on the main stream with the same kernels, to diagnose scheduling-dependent faults. Slower. Recipes that run no branches concurrently reject it. | Overlap |
 | `--autotune-effort off\|low\|medium\|high\|max` | Kernel search effort. Off uses heuristics; low applies broad exclusions; medium balances search cost; high retains only conservative exclusions; max enumerates every declared legal candidate. Overrides `[preparation] autotune_effort`. | Medium |
@@ -1131,7 +1131,7 @@ For the command line to stay this small, every recipe declares:
   live state per active request, and a graph-and-scratch estimate for a cold
   host;
 - a prefill chunk and the decode capacities;
-- its speculation settings, whether drafts can be copied from request history,
+- its speculation settings, whether drafts can be copied from shared decoded history,
   the draft model's share of weights and pages, and its costs with speculation
   disabled;
 - image limits;
