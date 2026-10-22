@@ -181,7 +181,7 @@ class ModuleImages:
         self._library = cupti_library(library)
         self._subscriber = C.c_void_p()
         self._callback = C.CFUNCTYPE(None, C.c_void_p, C.c_int, C.c_uint, C.c_void_p)(self._record)
-        self.images = []
+        self.images = {}
         self.modules = {}
         self.libraries = {}
         self.allocations = {}
@@ -210,6 +210,9 @@ class ModuleImages:
                 return
             resource = C.cast(data, C.POINTER(_Resource)).contents
             if callback == 2:
+                for context, module_id in tuple(self.images):
+                    if context == resource.context:
+                        self._drop_module_bindings(context, module_id)
                 for address, context in list(self.allocation_contexts.items()):
                     if context == resource.context:
                         self.allocations.pop(address, None)
@@ -222,7 +225,8 @@ class ModuleImages:
             if not module.image or not module.size:
                 raise RuntimeError("CUPTI returned a module without its cubin")
             image = ModuleImage(resource.context, module.id, C.string_at(module.image, module.size))
-            self.images.append(image)
+            with self._binding_lock:
+                self.images[(image.context, image.module_id)] = image
             pending = self._pending.get(threading.get_ident())
             if pending:
                 pending[-1][1].append(image)
@@ -237,6 +241,7 @@ class ModuleImages:
     def _drop_module_bindings(self, context, module_id):
         key = (context, module_id)
         with self._binding_lock:
+            self.images.pop(key, None)
             for handle in self._bindings.pop(key, ()):
                 for table in (self._functions, self._kernels):
                     image = table.get(handle)
@@ -341,7 +346,7 @@ class ModuleImages:
             return self.modules[module.value]
         name = C.c_char_p()
         cuda.call("cuFuncGetName", C.byref(name), C.c_void_p(function))
-        matches = {image.cubin for image in self.images if name.value + b"\0" in image.cubin}
+        matches = {image.cubin for image in tuple(self.images.values()) if name.value + b"\0" in image.cubin}
         if len(matches) != 1:
             raise ValueError(f"cannot uniquely associate captured kernel {name.value!r} with its loaded cubin")
         image, = matches

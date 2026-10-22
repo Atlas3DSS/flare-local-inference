@@ -2,6 +2,7 @@
 
 import ctypes as C
 import threading
+import weakref
 
 import pytest
 
@@ -74,6 +75,7 @@ def test_unload_drops_only_the_unloaded_module(recorder):
     assert 0x22 not in recorder._kernels
     assert recorder._functions[0x33].module_id == 9
     assert recorder._bindings == {(0x1000, 9): {0x33}}
+    assert set(recorder.images) == {(0x1000, 9)}
 
 
 def test_rebound_handle_survives_unload(recorder):
@@ -90,6 +92,7 @@ def test_unload_respects_context(recorder):
     unload(recorder, 0x1000, 7)
     assert 0x11 not in recorder._functions
     assert recorder._functions[0x22].context == 0x2000
+    assert set(recorder.images) == {(0x2000, 7)}
 
 
 def test_unloading_an_unbound_module_changes_nothing(recorder):
@@ -103,9 +106,38 @@ def test_repeated_launches_do_not_grow_bookkeeping(recorder):
         launch(recorder, "cuLaunchKernelEx", 0x11, 0x1000, 7)
     assert len(recorder._bindings[(0x1000, 7)]) == 1
     assert len(recorder._functions) == 1
+    assert len(recorder.images) == 1
     unload(recorder, 0x1000, 7)
     assert recorder._bindings == {}
     assert recorder._functions == {}
+    assert recorder.images == {}
+
+
+def test_unloaded_images_are_released_while_live_images_remain(recorder):
+    launch(recorder, "cuLaunchKernel", 0x11, 0x1000, 7)
+    live = weakref.ref(recorder.images[(0x1000, 7)])
+    for module_id in range(8, 58):
+        launch(recorder, "cuKernelSetAttribute", 0x22, 0x1000, module_id)
+        discarded = weakref.ref(recorder.images[(0x1000, module_id)])
+        unload(recorder, 0x1000, module_id)
+        assert discarded() is None
+        assert live() is recorder._functions[0x11]
+        assert len(recorder.images) == 1
+
+
+def test_context_destruction_releases_its_images_and_bindings(recorder):
+    launch(recorder, "cuLaunchKernel", 0x11, 0x1000, 7)
+    launch(recorder, "cuKernelSetAttribute", 0x22, 0x1000, 8)
+    launch(recorder, "cuLaunchKernel", 0x33, 0x2000, 7)
+    discarded = [weakref.ref(recorder.images[(0x1000, module_id)]) for module_id in (7, 8)]
+    resource = module_images._Resource(C.c_void_p(0x1000), None, None)
+    recorder._record(None, 3, 2, C.pointer(resource))
+    assert recorder._error is None
+    assert all(ref() is None for ref in discarded)
+    assert set(recorder.images) == {(0x2000, 7)}
+    assert set(recorder._functions) == {0x33}
+    assert not recorder._kernels
+    assert recorder._bindings == {(0x2000, 7): {0x33}}
 
 
 def test_rebind_keeps_the_other_table_indexed(recorder):
