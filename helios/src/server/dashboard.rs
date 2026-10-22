@@ -610,7 +610,8 @@ fn render_overview(frame: &mut Frame, history: &History, area: Rect) {
 pub type Series = (&'static str, Color, fn(Rates) -> f64);
 
 /// Draws `series` from the history's rate points as Braille lines over the last
-/// 120 seconds in a rounded block titled `title`, scaled to 115% of the peak.
+/// 120 seconds in a rounded block titled `title`, with 15% headroom.
+/// The upper label shows the observed maximum across the series.
 pub fn plot(frame: &mut Frame, area: Rect, title: &str, history: &History, series: &[Series]) {
     let now = history.points.back().map_or(0.0, |(time, _)| *time);
     let points: Vec<Vec<_>> = series
@@ -627,8 +628,7 @@ pub fn plot(frame: &mut Frame, area: Rect, title: &str, history: &History, serie
         .iter()
         .flatten()
         .map(|(_, value)| *value)
-        .fold(1.0, f64::max)
-        * 1.15;
+        .fold(0.0, f64::max);
     let datasets = series
         .iter()
         .zip(&points)
@@ -663,8 +663,8 @@ pub fn plot(frame: &mut Frame, area: Rect, title: &str, history: &History, serie
             )
             .y_axis(
                 Axis::default()
-                    .bounds([0.0, peak])
-                    .labels(["0".to_owned(), rate(peak)])
+                    .bounds([0.0, peak.max(1.0) * 1.15])
+                    .labels(["0".to_owned(), format!("max {}", rate(peak))])
                     .style(Style::default().fg(MUTED)),
             ),
         area,
