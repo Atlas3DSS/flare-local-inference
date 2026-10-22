@@ -17,13 +17,11 @@ steps under Ignition's diagnostic direct execution (`ignition serve --direct`).
 """
 
 import fcntl
-import hashlib
 import json
 import os
 import pickle
 import secrets
 import select
-import shutil
 import socket
 import struct
 import threading
@@ -35,15 +33,13 @@ from pathlib import Path
 
 from .source_identity import source_identity
 
-PROTOCOL = 4
+PROTOCOL = 5
 # Peers wait here while rank zero compiles the complete serving catalog.
 _PREPARATION_TIMEOUT = timedelta(hours=2)
 _HANDSHAKE_SECONDS = 30
 _MAX_MESSAGE = 1 << 30
 _SHUTDOWN_SECONDS = 120
 _JSON, _PICKLE = b"J", b"P"
-_COPY_BLOCK = 16 << 20
-_EXPORT_PUBLICATION_LOCK = threading.Lock()
 
 
 def _send(sock, kind, payload):
@@ -85,196 +81,30 @@ def receive_object(sock):
     return pickle.loads(_receive(sock, _PICKLE))
 
 
-def _export_workers(function, items, connections):
-    """Abort every stream before joining workers when one export transfer fails."""
-    from concurrent.futures import ThreadPoolExecutor
-    import sys
-
-    failure, lock = [], threading.Lock()
-
-    def run(item):
-        try:
-            return function(item)
-        except BaseException as error:
-            with lock:
-                if not failure:
-                    failure.append(error)
-                    # Closing control sockets can make the rank lifetime watcher
-                    # exit this process before the caller reports the exception.
-                    print(traceback.format_exc(), file=sys.stderr, flush=True)
-                    for connection in connections:
-                        try:
-                            connection.shutdown(socket.SHUT_RDWR)
-                        except OSError:
-                            pass
-            raise
-
-    with ThreadPoolExecutor(max_workers=len(items), thread_name_prefix='flare-export') as pool:
-        try:
-            return list(pool.map(run, items))
-        except BaseException:
-            # A lower-numbered worker may wake with a secondary disconnect first.
-            if failure:
-                raise failure[0]
-            raise
+def _export_channels(channels):
+    if not channels:
+        raise RuntimeError("rank export requires established fabric channels")
+    return [dict(fd=channel.connection.fileno(), key=list(channel.key),
+                 send_role=channel.send_role.decode("ascii"),
+                 receive_role=channel.receive_role.decode("ascii"),
+                 sent=channel.sent, received=channel.received) for channel in channels]
 
 
-def send_export_sources(control, path, inventory, *, channels=None):
-    """Send a rank manifest, then the content files requested by the coordinator."""
-    from .checkpoint_source import BLOCK_BYTES, file_identity
-
-    document = json.loads(Path(path).read_text())
-    identities, metadata = {}, {}
-    # A rank can export thousands of cubins. Hold only one descriptor per worker,
-    # and reject replacement or mutation between the metadata scan and transfer.
-    for _, name, _, _ in document['payload']:
-        if name in metadata:
-            continue
-        with Path(name).open('rb') as source:
-            identity = file_identity(source.fileno())
-            digest = hashlib.file_digest(source, 'sha256').hexdigest()
-            if file_identity(source.fileno()) != identity:
-                raise ValueError('rank export source changed during metadata scan')
-        identities[name] = identity
-        metadata[name] = {'size': identity[2], 'sha256': digest,
-                          'blob': Path(name).name == digest + '.safetensors'}
-    send_object(control, {'sources': {'document': document, 'files': metadata}, 'memory_inventory': inventory})
-    requested = receive_object(control)
-    if (not isinstance(requested, list) or any(not isinstance(n, str) for n in requested) or
-            len(requested) != len(set(requested)) or any(n not in metadata for n in requested)):
-        raise ValueError('invalid requested rank export sources')
-
-    def transmit(stream):
-        channel = None if channels is None else channels[stream]
-        names = requested if channel is None else requested[stream::len(channels)]
-        total = 0
-        for name in names:
-            with Path(name).open('rb') as source:
-                if file_identity(source.fileno()) != identities[name]:
-                    raise ValueError('rank export source changed before transfer')
-                size = metadata[name]['size']
-                if channel is None:
-                    if control.sendfile(source, count=size) != size:
-                        raise ConnectionError('rank export source ended before its declared size')
-                else:
-                    for offset in range(0, size, BLOCK_BYTES):
-                        block = source.read(min(BLOCK_BYTES, size - offset))
-                        if len(block) != min(BLOCK_BYTES, size - offset):
-                            raise ConnectionError('rank export source ended before its declared size')
-                        channel.send('export-data', block, name=name, offset=offset)
-                if file_identity(source.fileno()) != identities[name]:
-                    raise ValueError('rank export source changed during transfer')
-                total += size
-        if channel is not None:
-            stats = dict(files=len(names), payload_bytes=total)
-            channel.send('export-finished', stats=stats)
-            message, payload = channel.receive('export-finished')
-            if payload or message.get('stats') != stats:
-                raise ValueError('rank export completion accounting differs')
-
-    if channels is None:
-        transmit(0)
-    else:
-        _export_workers(transmit, list(range(len(channels))), [c.connection for c in channels])
+def _restore_export_channels(channels, states):
+    if len(channels) != len(states):
+        raise RuntimeError("native export channel count differs")
+    for channel, state in zip(channels, states, strict=True):
+        channel.sent, channel.received = state["sent"], state["received"]
 
 
-def receive_export_sources(control, description, destination, settings, *, channels=None):
-    """Reuse verified local blobs and receive only absent files into private storage."""
-    import tempfile
-    from .package_snapshot import BlobStore
-    from .package_file import read_sources
-    from .checkpoint_source import BLOCK_BYTES
+def send_export_sources(control, package, inventory, *, channels):
+    """Lend sockets exclusively to native export until every I/O worker returns."""
+    import flare_heliopause
 
-    document, metadata = description['document'], description['files']
-    store = BlobStore(settings.cache)
-    targets, requested = {}, []
-    for name, info in metadata.items():
-        digest, size = info['sha256'], info['size']
-        if type(info['blob']) is not bool:
-            raise ValueError('invalid rank payload storage kind')
-        if not isinstance(digest, str) or len(digest) != 64 or any(c not in '0123456789abcdef' for c in digest):
-            raise ValueError('invalid rank payload digest')
-        if type(size) is not int or not 0 < size <= 64 << 30:
-            raise ValueError('rank payload exceeds its size limit')
-        target = (store.root / (digest + '.safetensors') if info['blob'] else
-                  destination.parent / (digest + '.source'))
-        targets[name] = target
-        # Another rank may publish the same content. Wait until its private
-        # hard link is removed, since unlink changes the inode's ctime.
-        with _EXPORT_PUBLICATION_LOCK:
-            exists = target.exists()
-        if exists:
-            store.verify(target, bytes.fromhex(digest), size)
-        else:
-            if info['blob'] and settings.no_weights:
-                raise ValueError('--no-weights requires the peer stored-data blob in the coordinator cache')
-            requested.append(name)
-    send_object(control, requested)
-    started = time.monotonic()
-
-    def receive_file(name, channel):
-        info, target = metadata[name], targets[name]
-        descriptor, temporary = tempfile.mkstemp(prefix='.rank-blob-', dir=target.parent)
-        partial = Path(temporary)
-        try:
-            digest = hashlib.sha256()
-            with os.fdopen(descriptor, 'wb') as output:
-                remaining = info['size']
-                while remaining:
-                    if channel is None:
-                        block = _receive_exact(control, min(_COPY_BLOCK, remaining))
-                    else:
-                        message, block = channel.receive('export-data')
-                        if (message.get('name') != name or message.get('offset') != info['size'] - remaining or
-                                len(block) != min(BLOCK_BYTES, remaining)):
-                            raise ValueError('rank export payload range differs')
-                    output.write(block)
-                    digest.update(block)
-                    remaining -= len(block)
-                output.flush()
-                os.fsync(output.fileno())
-                if info['blob']:
-                    os.fchmod(output.fileno(), 0o444)
-            if digest.hexdigest() != info['sha256']:
-                raise ValueError('rank payload digest mismatch')
-            with _EXPORT_PUBLICATION_LOCK:
-                try:
-                    os.link(partial, target)
-                    published = True
-                except FileExistsError:
-                    published = False
-                finally:
-                    partial.unlink(missing_ok=True)
-            if not published:
-                store.verify(target, bytes.fromhex(info['sha256']), info['size'])
-        finally:
-            partial.unlink(missing_ok=True)
-
-    def receive_stream(stream):
-        channel = None if channels is None else channels[stream]
-        names = requested if channel is None else requested[stream::len(channels)]
-        for name in names:
-            receive_file(name, channel)
-        if channel is not None:
-            stats = dict(files=len(names), payload_bytes=sum(metadata[n]['size'] for n in names))
-            message, payload = channel.receive('export-finished')
-            if payload or message.get('stats') != stats:
-                raise ValueError('rank export completion accounting differs')
-            channel.send('export-finished', stats=stats)
-
-    if channels is None:
-        receive_stream(0)
-    else:
-        _export_workers(receive_stream, list(range(len(channels))), [c.connection for c in channels])
-    for item in document['payload']:
-        item[1] = str(targets[item[1]])
-    destination.write_text(json.dumps(document, separators=(',', ':')))
-    read_sources(destination)
-    seconds = time.monotonic() - started
-    size = sum(metadata[n]['size'] for n in requested)
-    return dict(payload_bytes=size, payload_seconds=seconds, payload_gbps=size * 8 / seconds / 1e9,
-                files=len(requested), streams=1 if channels is None else len(channels),
-                transport='rendezvous-tcp' if channels is None else 'fabric-tcp')
+    states = flare_heliopause.export_send_rank(
+        package.native_output, json.dumps(inventory), control.fileno(),
+        json.dumps(_export_channels(channels)), (control, channels, package))
+    _restore_export_channels(channels, json.loads(states))
 
 
 def _rdma_devices():
@@ -600,7 +430,7 @@ class HostRankGroup:
 
     def export(self, path, *, options, export_id, images, storage, publisher, progress=None, shard_size=64 << 30):
         """Combine rank manifests, receiving only content absent from the coordinator cache."""
-        import tempfile
+        import flare_heliopause
         from .package_snapshot import _OPTIONS, ExportOptions, export_options
         from .package_file import combine
         from .runtime_package import export_model
@@ -609,42 +439,48 @@ class HostRankGroup:
         if self._started or self._closed:
             raise RuntimeError("prepared rank group has already been consumed or closed")
         if publisher is None:
-            raise ValueError('final model publication requires a signing publisher')
-        settings = _OPTIONS.get() or ExportOptions(Path(path).parent / '.flare-cache')
-        for control in self.controls:
-            send_object(control, ("export", options))
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix='.rank-sources-', dir=Path(path).parent) as temporary:
-            stage = Path(temporary)
-            roots = [stage / f'rank-{rank}.json' for rank in range(self.rendezvous.world)]
+            raise ValueError("final model publication requires a signing publisher")
+        if self.checkpoint_fabric is None:
+            raise RuntimeError("multi-host export requires established checkpoint fabric channels")
+        settings = _OPTIONS.get() or ExportOptions(Path(path).parent / ".flare-cache")
+        native_stage = flare_heliopause.NativeExportStage(Path(path))
+        try:
+            stage = Path(native_stage.path)
+            roots = [stage / f"rank-{rank}.json" for rank in range(self.rendezvous.world)]
+            for control in self.controls:
+                send_object(control, ("export", options))
             with export_options(settings.cache, no_weights=settings.no_weights):
                 package = export_model(self.model, images, storage, roots[0], options=options,
                                        progress=progress, sources=True)
-                def receive_rank(rank):
-                    control = self.controls[rank - 1]
-                    reply = receive_object(control)
-                    if 'sources' not in reply:
-                        raise RuntimeError(f'rank {rank} export failed: {reply}')
-                    channels = (None if self.checkpoint_fabric is None else
-                                [self.checkpoint_fabric.readers[rank, stream].channel
-                                 for stream in range(self.checkpoint_fabric.streams)])
-                    report = receive_export_sources(control, reply['sources'], roots[rank], settings, channels=channels)
+                channels = [[self.checkpoint_fabric.readers[rank, stream].channel
+                             for stream in range(self.checkpoint_fabric.streams)]
+                            for rank in range(1, self.rendezvous.world)]
+                requests = [dict(control_fd=control.fileno(), channels=_export_channels(rank_channels),
+                                 destination=str(roots[rank]))
+                            for rank, (control, rank_channels) in enumerate(zip(self.controls, channels, strict=True), 1)]
+                try:
+                    received = json.loads(flare_heliopause.export_receive_ranks(
+                        json.dumps(requests), settings.cache, settings.no_weights,
+                        (self.controls, channels, self.checkpoint_fabric)))
+                    for rank_channels, result in zip(channels, received, strict=True):
+                        _restore_export_channels(rank_channels, result["channels"])
+                finally:
+                    self._close_checkpoint_fabric()
+                inventories = [package.memory_inventory, *(result["inventory"] for result in received)]
+                for rank, result in enumerate(received, 1):
+                    report = result["stats"]
                     if progress is not None:
                         progress(f"received rank {rank} export: {report['payload_bytes'] / (1 << 30):.2f} GiB "
                                  f"via {report['transport']} ({report['streams']} streams, "
                                  f"{report['payload_seconds']:.2f}s, {report['payload_gbps']:.2f} Gbit/s)")
-                    return reply['memory_inventory']
-
-                connections = self.controls + ([] if self.checkpoint_fabric is None else
-                                               [r.connection for r in self.checkpoint_fabric.readers.values()])
-                try:
-                    inventories = [package.memory_inventory, *_export_workers(
-                        receive_rank, list(range(1, self.rendezvous.world)), connections)]
-                finally:
-                    self._close_checkpoint_fabric()
+                self.close()
+                for region in storage.host_regions:
+                    region.close()
                 combine(path, roots, [], publisher=publisher, shard_size=shard_size,
                         cluster=(self.rendezvous.world, export_id))
-            print_inventory(inventories, console=getattr(progress, 'console', None))
+            print_inventory(inventories, console=getattr(progress, "console", None))
+        finally:
+            native_stage.close()
 
     def start_server(self, *, bind="127.0.0.1:8000", template_defaults=None, options=None):
         if self._started or self._closed:
@@ -804,28 +640,25 @@ def serve_peer(control, executor, rank, world, *, hub_cache, progress=None, expo
         send_object(control, {"report": model.memory_report})
         command = receive_object(control)
         if isinstance(command, tuple) and command[0] == "export":
-            import tempfile
-
+            import flare_heliopause
             from .runtime_package import export_model
+            from .package_snapshot import export_options
 
             _, options = command
-            if export_staging is not None:
-                Path(export_staging).mkdir(parents=True, exist_ok=True)
-            directory = Path(tempfile.mkdtemp(prefix="flare-rank-", dir=export_staging))
+            native_stage = flare_heliopause.NativeExportStage(
+                Path(export_staging or ".") / f"rank-{rank}-{secrets.token_hex(8)}.json", export_staging)
             try:
-                from .package_snapshot import export_options
-                path = directory / f"rank-{rank}.json"
+                path = Path(native_stage.path) / f"rank-{rank}.json"
                 if progress is not None:
                     progress(f"exporting rank {rank}")
-                # The peer retains its own prepared blobs; rank zero requests only missing files.
-                with export_options(package_cache or Path.home() / '.cache/flare/packages'):
+                with export_options(package_cache or Path.home() / ".cache/flare/packages"):
                     package = export_model(model, recorder, storage, path, options=options,
                                            bundle_only=True, sources=True)
-                send_export_sources(control, path, package.memory_inventory,
-                                    channels=[channel for channel, _ in source.channel_stats] or None)
+                send_export_sources(control, package, package.memory_inventory,
+                                    channels=[channel for channel, _ in source.channel_stats])
                 source.close_transport()
             finally:
-                shutil.rmtree(directory, ignore_errors=True)
+                native_stage.close()
             command = receive_object(control)
         source.close_transport()
         if fabric is not None:

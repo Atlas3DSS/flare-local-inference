@@ -625,7 +625,7 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
         "state_row_bytes": pool.backing.nbytes // max(1, state_rows + 1)}
     if scoring is not None:
         memory.update(scoring.memory_report())
-    assets = {role: {"path": str(snapshot / filename), "sha256": hashlib.sha256((snapshot / filename).read_bytes()).hexdigest()}
+    assets = {role: {"path": str(snapshot / filename)}
         for role, filename in (("tokenizer", "tokenizer.json"),)}
     assets["chat_template"] = annotated_template_asset(
         (snapshot / "chat_template.jinja").read_bytes(), Path(__file__).with_name("assets") / "chat_template.jinja")

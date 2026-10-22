@@ -62,6 +62,9 @@ Build dependencies include a C/C++ compiler, CMake, Ninja, pkg-config, Protobuf'
 sudo apt-get install build-essential cmake ninja-build pkg-config protobuf-compiler libssl-dev python3-dev liburing-dev
 ```
 
+Windows native builds also require Perl for the bundled static OpenSSL build,
+alongside the C/C++ toolchain. The resulting binaries do not require OpenSSL DLLs.
+
 The JPEG decoder builds its bundled libjpeg-turbo source. Preparation requires
 the CUDA toolkit, including `nvcc` and CUPTI; configure `[paths] cuda` when it
 is not supplied by the Python environment.

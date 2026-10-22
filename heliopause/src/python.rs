@@ -523,6 +523,7 @@ impl Drop for PreparedGraphExecutor {
 
 #[pymodule]
 fn flare_heliopause(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    crate::export::binding::register(module)?;
     #[cfg(feature = "qualification")]
     {
         module.add_class::<GraphReplayWorker>()?;

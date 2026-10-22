@@ -22,10 +22,19 @@ mod model;
 mod payload;
 mod protection;
 mod protobuf;
+pub use protobuf::wire;
+pub fn validate_sampling_defaults(value: &wire::DefaultSamplingParameters) -> crate::Result<()> {
+    protobuf::sampling_defaults(value.clone()).map(|_| ())
+}
+pub const WIRE_DESCRIPTOR: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/runtime_package_descriptor.bin"));
 mod publishers;
 #[cfg(any(test, feature = "test-tools"))]
 pub mod test_support;
-pub use protection::{AuthorizedPackage, PackageClaim, PackageLicense, Publisher, VerifiedPackage};
+pub use protection::{
+    verify_package_metadata, AuthorizedPackage, PackageClaim, PackageLicense, Publisher,
+    VerifiedPackage,
+};
 mod selection;
 mod serving;
 #[cfg(test)]

@@ -34,3 +34,9 @@ def template_asset(snapshot):
         raise ValueError("Step-5 chat template must contain one assistant generation span")
     source = source.replace(opening, b"{%- if true %}").replace(closing, b"{%- endif %}")
     return annotated_template_asset(source, Path(__file__).with_name("assets") / "chat_template.jinja")
+
+
+def runtime_assets(snapshot):
+    """Describe the checkpoint vocabulary and validated annotated template for native export."""
+    return {"tokenizer": {"path": str(Path(snapshot) / "tokenizer.json")},
+            "chat_template": template_asset(snapshot)}

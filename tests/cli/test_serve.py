@@ -78,7 +78,11 @@ def host(monkeypatch, tmp_path):
     class OutOfMemoryError(RuntimeError):
         pass
 
-    monkeypatch.setitem(sys.modules, "flare_heliopause", types.SimpleNamespace(CliSignals=CliSignals, Server=object))
+    import flare_heliopause
+    monkeypatch.setitem(sys.modules, "flare_heliopause", types.SimpleNamespace(
+        CliSignals=CliSignals, Server=object,
+        export_source_identity=flare_heliopause.export_source_identity,
+        export_development_publisher=flare_heliopause.export_development_publisher))
     monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(
         cuda=types.SimpleNamespace(set_device=lambda _: None), OutOfMemoryError=OutOfMemoryError))
     monkeypatch.setattr(module_images, "ModuleImages", Scope)
@@ -137,17 +141,16 @@ def test_export_records_rebuild_settings_and_closes_preparation(host):
     assert host["plan"].speculation == host["plan"].recipe.speculation
     assert not host["plan"].mixed_prefill and host["plan"].mixed_shapes == ()
     assert host["prepared"].closed and host["prepared"].started is None
-    from ignition.preparation.runtime_package_pb2 import RebuildManifest
-    rebuild = RebuildManifest.FromString(host['options']['rebuild_manifest'])
+    rebuild = types.SimpleNamespace(**host['options']['rebuild_manifest'])
     assert rebuild.version == 1 and rebuild.recipe == host['plan'].recipe.name
     assert rebuild.checkpoint_revision == host['plan'].checkpoint.revision
     assert rebuild.tensor_parallel == 1 and len(rebuild.source_identity) == 64
     assert rebuild.prefill_chunk == host['plan'].prefill_chunk
-    assert rebuild.speculation.draft_tokens == host['plan'].speculation.draft_tokens
+    assert rebuild.speculation['draft_tokens'] == host['plan'].speculation.draft_tokens
     assert not rebuild.compiled_forwards and not rebuild.local_checkpoint
     from ignition.preparation.rebuild_manifest import from_plan
     local = ResolvedModel(host['plan'].recipe, host['plan'].checkpoint, Path('/local/checkpoint'))
-    local_manifest = RebuildManifest.FromString(from_plan(local, host['plan'], compiled_forwards=True))
+    local_manifest = types.SimpleNamespace(**from_plan(local, host['plan'], compiled_forwards=True))
     assert local_manifest.local_checkpoint and not local_manifest.checkpoint_revision
 
 

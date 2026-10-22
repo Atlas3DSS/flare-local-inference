@@ -61,7 +61,7 @@ def test_rebuild_metadata_records_prefix_selection(monkeypatch):
     selected = Speculation(5, packed_verification=True, draft_prefix_selection="gpu")
     encoded = rebuild_manifest.from_plan(SimpleNamespace(directory=None), derive(speculation=selected),
         compiled_forwards=True)
-    assert p.RebuildManifest.FromString(encoded).speculation.draft_prefix_selection == "gpu"
+    assert encoded["speculation"]["draft_prefix_selection"] == "gpu"
     legacy = p.RebuildSpeculation.FromString(b"\x08\x05\x10\x01\x1a\x03mtp\x30\x01")
     assert legacy.draft_prefix_selection == ""
     assert legacy.draft_tokens == 5 and legacy.packed_verification

@@ -177,11 +177,11 @@ def test_runtime_config_blobs_and_partial_sampling_defaults_are_rejected():
             serving(ModelIndex(), source)
     source = server()
     del source["sampling_defaults"]["top_k"]
-    with pytest.raises(ValueError, match="every parameter"):
+    with pytest.raises(ValueError, match="sampling defaults"):
         serving(ModelIndex(), source)
     source = server()
     source["frontend"]["tokenizer"]["unused"] = True
-    with pytest.raises(ParseError, match="has no field"):
+    with pytest.raises(ValueError, match="unused"):
         serving(ModelIndex(), source)
 
 

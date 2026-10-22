@@ -7,8 +7,9 @@ import sys
 from types import SimpleNamespace
 
 from ignition.preparation.runtime_package import (
-    Allocation, Argument, Kernel, Reference, Relocation, RuntimePackage, _Cuda, _KernelParams,
+    Allocation, Argument, Kernel, Reference, Relocation, RuntimePackage, _Cuda,
 )
+from cuda_graph_fixture import KernelParams
 from signing import publisher
 
 
@@ -48,7 +49,7 @@ extern "C" __global__ void shared_requirement(int *out, int bytes) {
         arguments = (C.c_void_p * 2)(C.addressof(output), C.addressof(count))
         graph, node, executable = C.c_void_p(), C.c_void_p(), C.c_void_p()
         cuda.call("cuGraphCreate", C.byref(graph), C.c_uint(0))
-        params = _KernelParams(func=function.value, grid=(C.c_uint * 3)(1, 1, 1),
+        params = KernelParams(func=function.value, grid=(C.c_uint * 3)(1, 1, 1),
             block=(C.c_uint * 3)(128, 1, 1), shared=shared, params=arguments)
         cuda.call("cuGraphAddKernelNode_v2", C.byref(node), graph, None, C.c_size_t(0), C.byref(params))
         cuda.call("cuGraphInstantiateWithFlags", C.byref(executable), graph, C.c_uint64(0))
@@ -57,7 +58,7 @@ extern "C" __global__ void shared_requirement(int *out, int bytes) {
     # A function attribute can change after capture while the graph nodes keep their launch sizes.
     cuda.call("cuFuncSetAttribute", function, C.c_int(8), C.c_int(48 << 10))
     package = RuntimePackage(allocations=[Allocation("output", output.value, 4, initialize="zero")],
-        modules={"shared": cubin.read_bytes()}, kernels=[Kernel(function.value, "shared", (
+        modules={"shared": cubin}, kernels=[Kernel(function.value, "shared", (
             Argument(8, (Relocation(0, Reference("output")),)), Argument(4)))])
     package.write(root / "package", graphs, publisher=publisher())
     cuda.call("cuCtxDestroy_v2", context)

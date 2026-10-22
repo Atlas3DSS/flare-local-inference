@@ -3,7 +3,7 @@
 use super::format::*;
 use crate::Result;
 
-pub(super) mod wire {
+pub mod wire {
     include!(concat!(env!("OUT_DIR"), "/flare.runtime.rs"));
 }
 

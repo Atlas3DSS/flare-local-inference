@@ -303,10 +303,8 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
     pool.clear_for_preparation()
     torch.cuda.synchronize(device)
     release_unused()
-    from .frontend import template_asset
-    assets = {role: {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
-              for role, path in (("tokenizer", snapshot / "tokenizer.json"),)}
-    assets["chat_template"] = template_asset(snapshot)
+    from .frontend import runtime_assets
+    assets = runtime_assets(snapshot)
     frontend = prepare_frontend(snapshot, eos_token_ids=weights.config.text["eos_token_id"])
     frontend["image"] = {"step": {}}
     server_config = {"identity": identity, "model_id": snapshot.name, "max_sequence_tokens": config.context,

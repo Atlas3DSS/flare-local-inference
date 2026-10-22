@@ -65,7 +65,7 @@ class _Phase:
 
 
 @contextmanager
-def phase(progress, label, *, total=None):
+def phase(progress, label, *, total=None, live=True):
     """Display completed work and elapsed time without estimating unknown progress."""
     stage = _Phase(progress, label, total)
     display = progress if isinstance(progress, StartupProgress) else None
@@ -74,7 +74,7 @@ def phase(progress, label, *, total=None):
         from rich.live import Live
 
         display.active = stage
-        if display.console.is_terminal:
+        if live and display.console.is_terminal:
             stage.live = Live(stage, console=display.console, refresh_per_second=8,
                               redirect_stdout=False, redirect_stderr=False)
             stage.live.start()

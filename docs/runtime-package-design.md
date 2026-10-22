@@ -17,14 +17,17 @@ how the prepared state leaves the Python process and how it is reconstructed.
 | Component | Role | Implementation |
 |---|---|---|
 | ignition | Internal preparation command: plans, exports, and prepares cached packages for native serving | The Python command line under `ignition/cli/` |
-| heliopause | CPython extension imported by Ignition. It supplies the native preparation allocator and resource lifetime hooks | The `heliopause/` Rust crate; Python distribution `flare-heliopause`, import `flare_heliopause` |
+| heliopause | CPython extension imported by Ignition. It owns preparation storage, export recording, graph serialization, payload transfer, and signed package publication | The `heliopause/` Rust crate; Python distribution `flare-heliopause`, import `flare_heliopause` |
 | Helios | Rust runtime library. It rebuilds a package into a live CUDA context and serves it | The `helios/` crate, including `src/runtime_package/` and the server |
 | flare | Public serving command. It links Helios to load a package and run the server | The `flare/` Rust crate; section 5 |
 
 Preparation knowledge, recipes, planning, hub access, the kernel cache,
 compilation, tuning, and capture stay on the preparation host. Ignition imports
-`flare_heliopause` and exports through `ignition/preparation/runtime_package.py`
-in its own Python process. `ignition export` writes the package, closes the
+`flare_heliopause` and passes graph handles, allocation declarations, tensor-view
+metadata, and resource owners through `ignition/preparation/runtime_package.py`.
+The Rust exporter in `heliopause/src/export/` reads the graph and storage,
+records the package resources, and publishes the files while releasing the GIL.
+`ignition export` writes the package, closes the
 prepared model, and exits. `flare run PACKAGE` loads it in a separate Rust
 process. Graph handles and Python resource owners do not cross the process boundary. Helios has no CPython dependency;
 heliopause owns the CPython hooks and preparation allocator and uses Helios's
@@ -53,6 +56,18 @@ verification-profile section.
 
 Ignition records four things while preparing a model, and refuses to
 write a package when any of them is incomplete.
+
+Ignition supplies captured graph handles, allocation and cache declarations,
+tensor shapes, strides and numeric roles, compiler parameter signatures,
+frontend metadata, and resource owners. File-backed embedding tables supply
+checkpoint ranges; generated tokenizer and template assets supply text.
+Heliopause owns CUPTI callbacks, graph introspection, pointer reachability,
+device-to-host transfers, graph and package serialization, asset materialization,
+cubin redaction, hashing, encryption, signing, conversion, rank payload channels,
+and publication. Export retains graph templates, storage, contexts, and their
+Python owners until native CUDA work has drained. A failed drain retains those
+owners. Final assembly consumes rank indexes and open source file ranges
+independently of the prepared model.
 
 **Storage.** PyTorch's persistent device allocations come from one address range
 reserved before model loading: 1 TiB per rank from `0x0800_0000_0000` on Linux or
@@ -92,8 +107,10 @@ numeric by their execution contract. These spans are leaves in the traversal:
 their storage is retained when referenced, but their values are not interpreted
 as addresses.
 
-Numeric-span discovery skips zero-initialized allocations, which have no
-payload to scan, and deduplicates identical live tensor views. Strided layouts
+Numeric-span discovery merges overlapping allocation coverage, excludes
+zero-initialized storage, and deduplicates identical live tensor views. Integer
+aliases crossing coverage boundaries still suppress floating-view inference in
+their covered bytes. Strided layouts
 retain their holes; fragmented persistent views without bounded span metadata
 remain conservative rather than expanding an unbounded interval catalog.
 
@@ -253,6 +270,54 @@ and their indexes. N-gram table payloads are appended directly from checkpoint
 file ranges during rank export, without materializing their contents in
 preparation memory.
 
+### Native export transfers and progress
+
+The exporter in `heliopause/src/export/` performs bulk I/O while the GIL is
+released. CUDA downloads and storage commits each use a two-slot pinned ring
+with 8 MiB per slot, reserving 32 MiB per preparation rank.
+File transfer workers share bounded pools of 8 MiB buffers with 4 KiB alignment
+padding, including a reserved scratch pool for unaligned source ranges.
+Each transfer pool budget starts from the smaller of 1 GiB and one sixteenth
+of available host RAM. Capture divides this budget across preparation ranks and
+reserves both pinned rings before sizing file buffers. Capture releases its
+storage-transfer pool and pinned rings before materializing frontend assets.
+Publication after model closure uses the full file-transfer budget. Concurrent
+preparation and rank-transfer processes budget their pools independently.
+Metadata and cubin images occupy separate retained storage.
+
+Rank transfers borrow established control and fabric sockets. The binding retains
+their Python owners until all native workers have joined, including cancellation
+and error paths. Callers lend these sockets exclusively: they must not close them
+or perform other reads and writes until the transfer returns. Native export
+returns authenticated channel sequence counters for Python to restore before
+resuming use.
+
+Linux bulk reads and writes use `O_DIRECT` with `io_uring`; Windows uses
+unbuffered overlapped I/O. Aligned bulk transfers bypass the filesystem page
+cache. Unaligned source ranges use aligned scratch reads, and small headers,
+leading bytes, and trailing bytes use positioned I/O where needed. Output files
+retain their exact declared lengths. Direct-I/O errors fail the operation.
+
+A blob's complete safetensors bytes are hashed before opening a temporary output
+for it. An existing cache entry is pinned and verified before reuse. A cache miss
+streams the bytes to a temporary file and hashes them again; changed content
+fails publication. Synchronized immutable blobs are installed without replacing
+existing entries, then hardlinked beside the primary. `--no-weights` requires
+both captured allocation blobs and final stored-data shards to exist with their
+exact contents. It still scans and hashes source bytes, creates no missing
+stored-data blob, and publishes no primary if any required blob is absent.
+Executable resources may produce additional blobs.
+
+Native stderr rows omit the Flare banner and report disposable-storage
+clearing, graph inspection and serialization, module and global capture,
+reachable-storage scanning, frontend assets, executable hashing and encryption,
+blob publication, and metadata signing. Capture and frontend rows render only on
+rank zero; coordinators report aggregate rank-transfer receive progress. Ignition
+pauses its enclosing export activity while native rows animate and retains the
+elapsed result. Byte counters distinguish source reads, hashes, copies, installed
+bytes, and cache reuse. Rank transfers report send and receive bytes; conversion reports
+source verification, relocation, and publication separately.
+
 ### File placement and addressing
 
 `ignition export`, `ignition sign`, and `ignition convert` pack
@@ -279,9 +344,9 @@ rejects resources spanning multiple blobs or padding. Hosts need sufficient open
 file descriptors for their selected blobs and runtime resources.
 
 Ignition stores blobs under `paths.package_cache/blobs` and hardlinks them into
-snapshot directories. Existing blobs are checked before reuse; new blobs are
-hashed while written, synchronized, installed without overwriting, and made
-read-only. Snapshot and cache must share a filesystem. Publication installs all
+snapshot directories. Existing blobs are checked before reuse; missing blobs
+are hashed before writing and again while written, synchronized, installed
+without overwriting, and made read-only. Snapshot and cache must share a filesystem. Publication installs all
 payload links before atomically publishing the metadata primary. A failed export
 can leave reusable blobs and links, but never a primary naming incomplete payloads.
 
@@ -468,7 +533,8 @@ owner paths, packing-owner types, dtypes, shapes, element strides, and
 allocation-relative byte offsets. The containing bundle identifies the rank.
 Allocation resource spans and the package layout locate those bytes in the
 payload shards; repacking and re-signing preserve the references. Aliased views
-share storage. Catalog creation reads tensor metadata and creates no weight copy.
+share storage. Ignition describes live tensor metadata; Heliopause resolves its
+addresses against retained allocations and creates no weight copy.
 Meta tensors, discarded storage, and disposable scratch are listed as
 unavailable rather than treated as recoverable weights.
 

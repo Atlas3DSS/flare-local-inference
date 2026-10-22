@@ -475,7 +475,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         torch.distributed.barrier(group=group)
     free, total = torch.cuda.mem_get_info(device)
     assets = {
-        role: {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+        role: {"path": str(path)}
         for role, path in (
             ("tokenizer", snapshot / "tokenizer.json"),
         )

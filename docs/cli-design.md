@@ -77,10 +77,14 @@ preparation progress without a banner. The Rust Flare executable displays the
 Flare banner on a terminal and reports model loading through Helios.
 
 `export` imports the `flare_heliopause` CPython extension in Ignition's process.
-Ignition performs weight loading, tuning, compilation, warmup, and capture. It writes compiled CUDA modules,
-allocation contents, graph descriptions, and frontend assets to content-addressed
-payload blobs with a metadata-only `.safetensors` primary. Every destination must
-be unused. It then exits without opening a listener. Launch the exported package
+Ignition performs weight loading, tuning, compilation, warmup, and capture,
+then hands graph handles, metadata, and retained resource owners to Heliopause.
+The native exporter writes compiled CUDA modules, allocation contents, graph
+descriptions, and frontend assets to content-addressed payload blobs with a
+metadata-only `.safetensors` primary. Native stderr phases report scanning,
+hashing, copying, cache reuse, encryption, and publication progress. Every
+destination must be unused. Ignition exits without opening a listener after
+publication. Launch the exported package
 with `flare run PACKAGE`. Qwen, GLM, and DeepSeek provide native package storage support.
 Tensor-parallel packages contain one resource bundle per selected GPU and load
 in one process with one execution thread per rank. API keys are excluded from
@@ -1035,9 +1039,11 @@ graph capture, and package export.
 After export, launch `flare run PACKAGE` to display the banner and native
 loading stages without preparation.
 
-Preparation phases come from `ignition.progress.phase`; on a terminal each shows an activity
-bar while it runs. `Select GPUs.` names the GPUs by index, followed by
-`of CUDA_VISIBLE_DEVICES=...` when the caller restricted them, and reads
+Python-owned preparation phases come from `ignition.progress.phase`; on a
+terminal they show an activity bar while running. The enclosing export phase
+prints initial and final summaries while native subphase rows animate, with
+its Python activity bar paused. `Select GPUs.` names the GPUs by index, followed
+by `of CUDA_VISIBLE_DEVICES=...` when the caller restricted them, and reads
 `speculation off` under `--no-mtp`. `Allocate KV cache.` reports the pages
 allocated. A console too narrow for a row shortens its detail text and keeps
 the status and elapsed time. `--verbose` adds each phase's detail lines.

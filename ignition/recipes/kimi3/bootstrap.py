@@ -4,7 +4,6 @@ import contextlib
 from dataclasses import dataclass, replace
 import hashlib
 import json
-from tempfile import TemporaryDirectory
 from pathlib import Path
 
 import torch
@@ -404,14 +403,8 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
     pool.clear_for_preparation()
     torch.cuda.synchronize(device)
     release_unused()
-    from .tokenizer import convert
-    frontend_assets = TemporaryDirectory(prefix="flare-kimi3-frontend-")
-    assets_path = Path(frontend_assets.name)
-    convert(snapshot).save(str(assets_path / "tokenizer.json"))
-    template = Path(__file__).with_name("assets") / "chat_template.jinja"
-    (assets_path / "chat_template.jinja").write_bytes(template.read_bytes())
-    assets = {role: {"path": str(assets_path / file), "sha256": hashlib.sha256((assets_path / file).read_bytes()).hexdigest()}
-              for role, file in (("tokenizer", "tokenizer.json"), ("chat_template", "chat_template.jinja"))}
+    from .tokenizer import convert, runtime_assets
+    assets = runtime_assets(convert(snapshot))
     eos = weights.config.text["eos_token_id"]
     eos_ids = list(dict.fromkeys([*(eos if isinstance(eos, list) else [eos]), 163586]))
     frontend = prepare_frontend(snapshot, eos_token_ids=eos_ids, image_profile="moonvit" if patches else None)
@@ -453,6 +446,6 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                                            decoder_buffers.scratch_tensors(), *draft_disposable]), *completion.zero_ranges()),
         resources=(scoring, weights, pool, requests, inputs, admission, commands, arena, forwards, prefill_storage, context,
                    decode_storage, metadata, compiled, stream, graph_pool, session, coordinator, collective,
-                   vocabulary_collective, embedding_collective, router_collective, route_collective, frontend_assets,
+                   vocabulary_collective, embedding_collective, router_collective, route_collective,
                    vision_inputs, vision_prefill, vision_state, vision_storage, scratch_pool, shared_scratch, graph_buffers,
                    speculation, context_collective, draft_argmax, latent_runtimes))

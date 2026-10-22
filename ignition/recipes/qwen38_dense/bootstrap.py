@@ -175,7 +175,7 @@ def prepare(snapshot, config, *, progress=None, package_storage):
     pool.clear_for_preparation()
     torch.cuda.synchronize(device)
     release_unused()
-    assets = {role: {"path": str(snapshot / file), "sha256": hashlib.sha256((snapshot / file).read_bytes()).hexdigest()}
+    assets = {role: {"path": str(snapshot / file)}
               for role, file in (("tokenizer", "tokenizer.json"),)}
     assets["chat_template"] = annotated_template_asset(
         (snapshot / "chat_template.jinja").read_bytes(), Path(__file__).parents[1] / "qwen38" / "assets" / "chat_template.jinja")

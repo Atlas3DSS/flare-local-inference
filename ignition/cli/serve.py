@@ -206,7 +206,7 @@ def _export_hosts(args, *, export_path) -> int:
                     kernel_cache=configuration.directory("kernel_cache"), progress=progress,
                     retain_graphs=True, package_storage=storage, ranks=rendezvous)
         with prepared:
-            with phase(progress, "Export native packages") as stage:
+            with phase(progress, "Export native packages", live=False) as stage:
                 from ignition.preparation.rebuild_manifest import from_plan
 
                 options['rebuild_manifest'] = from_plan(model, plan, compiled_forwards=not args.no_compile)
@@ -320,7 +320,7 @@ def _prepare(args, *, export_path) -> int:
             from ignition.preparation.model_package import export_package
 
             publisher = _publisher(configuration, args, model, hub_cache)
-            with phase(progress, "Export native package") as stage:
+            with phase(progress, "Export native package", live=False) as stage:
                 try:
                     options.pop("api_key")
                     from ignition.preparation.rebuild_manifest import from_plan
