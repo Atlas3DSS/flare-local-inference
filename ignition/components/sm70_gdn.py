@@ -187,7 +187,7 @@ def _norm(Hidden, Gate, Weight, Output, NumTokens, gate_stride,
 
 
 @triton.jit
-def _replay(Operands, Backing, Offsets, Rows, Counts, Starts, Fresh, operand_layer_stride,
+def _replay(Operands, Backing, OffsetBlocks, Rows, Counts, Starts, Fresh, operand_layer_stride,
             STRIDE: tl.constexpr, KEY_HEADS: tl.constexpr, VALUE_HEADS: tl.constexpr, ROWS: tl.constexpr):
     """Replay ``Counts[request]`` stored verification steps from the committed row ``Rows[request]`` in place.
 
@@ -206,7 +206,13 @@ def _replay(Operands, Backing, Offsets, Rows, Counts, Starts, Fresh, operand_lay
         rows = tile * ROWS + tl.arange(0, ROWS)
         keys = tl.arange(0, 128)
         elements = head * (128 * 128) + rows[:, None] * 128 + keys[None, :]
-        base = Backing + row * STRIDE + tl.load(Offsets + layer)
+        # The layer's recurrent offset arrives in 16-float blocks: multiplying by the constant keeps the base address
+        # provably 16-byte aligned (STRIDE is a 16-divisible constexpr, Backing an aligned argument), so the tile loads
+        # and stores vectorise exactly like the decode recurrence's `State + initial * state_stride + elements` and the
+        # compiler assigns the same [8 x 128] layout (four keys per thread, one row per warp). The key sum therefore
+        # lowers to the same intra-thread chain and 32-lane butterfly; a runtime-loaded offset of unknown alignment
+        # gave _replay a one-key-per-thread layout whose sum tree differed from the verification's by 1-2 ulp.
+        base = Backing + row * STRIDE + tl.load(OffsetBlocks + layer).to(tl.int64) * 16
         state = tl.load(base + elements, mask=~fresh, other=0.0)
         layer_operands = Operands + layer.to(tl.int64) * operand_layer_stride
         for step in range(0, count):
@@ -537,7 +543,8 @@ class PreparedSM70ConvolutionCommit:
 class PreparedSM70ReplayCommit:
     """Replay accepted verification prefixes into the committed recurrent rows of every layer, in one launch.
 
-    ``recurrents`` maps layer IDs to the FP32 recurrent views ``[slots, value_heads, 128, 128]`` of ``backing``;
+    ``recurrents`` maps layer IDs to the FP32 recurrent views ``[slots, value_heads, 128, 128]`` of ``backing``
+    (each at a 16-float aligned offset inside the row, passed to the kernel in 16-float blocks);
     ``operands`` is the ``[layers, tokens, operand_floats]`` buffer the verification sequences of those layers
     filled (layer order = mapping order); ``rows`` names each request's committed pool row, ``counts`` its accepted
     input count, ``starts`` the packed query boundaries and ``fresh`` whether the request began with no history
@@ -579,10 +586,12 @@ class PreparedSM70ReplayCommit:
             offset = recurrent.storage_offset() - floats.storage_offset()
             if offset < 0 or offset + value_heads * 16384 > floats.shape[1]:
                 raise ValueError("SM70 replay commit recurrent crosses a pool row boundary")
-            offsets.append(offset)
+            if offset % 16 or floats.stride(0) % 16 or floats.data_ptr() % 64:
+                raise ValueError("SM70 replay commit requires 16-float aligned recurrent offsets and pool rows")
+            offsets.append(offset // 16)
         if not offsets:
             raise ValueError("SM70 replay commit requires at least one layer")
-        self.offsets = torch.tensor(offsets, dtype=torch.int64, device=device)
+        self.offsets = torch.tensor(offsets, dtype=torch.int64, device=device)      # 16-float blocks
         self.operands, self.rows, self.counts, self.starts, self.fresh = operands, rows, counts, starts, fresh
         self.operation = prepare_triton(_replay,
             (operands, floats, self.offsets, rows, counts, starts, fresh, operands.stride(0)),
