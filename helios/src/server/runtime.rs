@@ -69,13 +69,15 @@ pub enum GenerationEvent {
 pub struct Generation {
     pub events: async_mpsc::Receiver<GenerationEvent>,
     admission: oneshot::Receiver<Result<()>>,
+    /// Completes before stop matching or decoding can hide the first token.
+    first_token: oneshot::Receiver<Result<()>>,
     cancelled: Arc<AtomicBool>,
     failure: Arc<Mutex<Option<Error>>>,
     pub(super) enqueue_ns: Option<u64>,
 }
 
-/// A grouped response can start when one choice is admitted. Waiting for every
-/// choice would leave admitted choices' bounded output queues undrained.
+/// A buffered group waits for one admission. Waiting for every choice would
+/// leave admitted choices' bounded output queues undrained.
 pub(super) async fn await_admission(generations: &mut [Generation]) -> Result<()> {
     use std::{future::Future, pin::Pin, task::Poll};
     std::future::poll_fn(|cx| {
@@ -106,6 +108,12 @@ pub(super) async fn await_admission(generations: &mut [Generation]) -> Result<()
 }
 
 impl Generation {
+    pub(super) async fn wait_for_first_token(&mut self) -> Result<()> {
+        (&mut self.first_token)
+            .await
+            .unwrap_or_else(|_| Err(self.failure()))
+    }
+
     pub fn failure(&self) -> Error {
         self.failure
             .lock()
@@ -132,6 +140,7 @@ struct Incoming {
     prompt: Prompt,
     events: async_mpsc::Sender<GenerationEvent>,
     admission: Mutex<Option<oneshot::Sender<Result<()>>>>,
+    first_token: std::cell::Cell<Option<oneshot::Sender<Result<()>>>>,
     cancelled: Arc<AtomicBool>,
     failure: Arc<Mutex<Option<Error>>>,
     metrics: Arc<super::metrics::Metrics>,
@@ -174,6 +183,9 @@ impl Incoming {
         }
         *failure = Some(error.clone());
         self.notify_admission(Err(error.clone()));
+        if let Some(sender) = self.first_token.take() {
+            let _ = sender.send(Err(error.clone()));
+        }
         self.metrics.failed.fetch_add(1, Ordering::Relaxed);
         let _ = self.events.try_send(event(error));
     }
@@ -181,6 +193,9 @@ impl Incoming {
         self.emit(GenerationEvent::Token(token));
     }
     fn observe_token(&self, token: u32) {
+        if let Some(sender) = self.first_token.take() {
+            let _ = sender.send(Ok(()));
+        }
         if let Some(timestamps) = self.observation {
             let timestamp_ns = timestamps.then(super::observation::monotonic_ns);
             self.emit(GenerationEvent::ObservedToken {
@@ -443,7 +458,7 @@ impl ModelRuntime {
                                 .filter(|graph| {
                                     matches!(
                                         graph.kind,
-                                        GraphKind::Speculative | GraphKind::Verification
+                                        GraphKind::Speculative | GraphKind::Verification | GraphKind::PackedSpeculative
                                     )
                                 })
                                 .flat_map(|graph| {
@@ -460,7 +475,7 @@ impl ModelRuntime {
                             .manifest()
                             .graphs
                             .iter()
-                            .filter(|g| g.kind == GraphKind::Proposal)
+                            .filter(|g| matches!(g.kind, GraphKind::Proposal | GraphKind::PackedSpeculative))
                             .map(|g| g.token_capacity)
                             .max()
                         {
@@ -667,6 +682,7 @@ impl ModelRuntime {
                 .map_err(|error| error.admission_context(AdmissionError::Invalid))?;
             let (events, receiver) = async_mpsc::channel(self.event_capacity);
             let (admission, admitted) = oneshot::channel();
+            let (first_token, first_token_ready) = oneshot::channel();
             let cancelled = Arc::new(AtomicBool::new(false));
             let failure = Arc::new(Mutex::new(None));
             let incoming = Incoming {
@@ -678,6 +694,7 @@ impl ModelRuntime {
                 prompt,
                 events,
                 admission: Mutex::new(Some(admission)),
+                first_token: std::cell::Cell::new(Some(first_token)),
                 cancelled: cancelled.clone(),
                 failure: failure.clone(),
                 metrics: self.metrics.clone(),
@@ -693,6 +710,7 @@ impl ModelRuntime {
             generations.push(Generation {
                 events: receiver,
                 admission: admitted,
+                first_token: first_token_ready,
                 cancelled,
                 failure,
                 enqueue_ns,
@@ -1296,6 +1314,7 @@ impl<'a> Worker<'a> {
                 | GraphKind::ScoredPrefill
                 | GraphKind::Speculative
                 | GraphKind::Verification
+                | GraphKind::PackedSpeculative
                 | GraphKind::Mixed
         ) {
             let step = self.scheduler.submitted_step(completion.fence)?;
@@ -1335,9 +1354,16 @@ impl<'a> Worker<'a> {
                 completion.timing,
                 &confidence[..measured_step.batch_capacity],
             )?
+        } else if kind == GraphKind::PackedSpeculative {
+            let confidence = completion.proposal_confidence.as_ref()
+                .ok_or("packed combined completion lacks confidence")?;
+            self.scheduler.complete_packed_round_with_survival(completion.fence, &completion.records,
+                completion.timing, &confidence[..measured_step.batch_capacity],
+                completion.speculative_survival.as_ref().map(|rows| rows.as_slice()))?
         } else {
             self.scheduler
-                .complete(completion.fence, &completion.records, completion.timing)?
+                .complete_with_survival(completion.fence, &completion.records, completion.timing,
+                    completion.speculative_survival.as_ref().map(|rows| rows.as_slice()))?
         };
         self.metrics
             .progress(prefill, generated.len(), accepted, draft_rounds);
@@ -1352,13 +1378,15 @@ impl<'a> Worker<'a> {
             &measured_step,
             completion.timing,
             selection,
-            self.scheduler.refresh_credit_ns(),
+            if matches!(selection.origin, crate::scheduler::TimingOrigin::Acceptance) {
+                self.scheduler.acceptance_credit_ns()
+            } else { self.scheduler.refresh_credit_ns() },
         );
         if kind == GraphKind::Proposal {
             self.metrics.proposal_completed(measured_step.batch_capacity, measured_step.token_capacity,
                 completion.timing.gpu_ns.into_iter().flatten().max().unwrap_or(0));
         }
-        if matches!(kind, GraphKind::Speculative | GraphKind::Verification) {
+        if matches!(kind, GraphKind::Speculative | GraphKind::Verification | GraphKind::PackedSpeculative) {
             let nanos = completion
                 .timing
                 .gpu_ns
@@ -1367,13 +1395,16 @@ impl<'a> Worker<'a> {
                 .max()
                 .unwrap_or(0);
             let step = &measured_step;
-            self.metrics.speculative_completed(
+            if kind == GraphKind::PackedSpeculative {
+                self.metrics.packed_speculative_completed(step.batch_capacity, step.token_capacity,
+                    step.draft_tokens, nanos, &completion.records);
+            } else { self.metrics.speculative_completed(
                 kind,
                 step.batch_capacity,
                 step.token_capacity,
                 nanos,
                 &completion.records,
-            );
+            ); }
         }
         if kind == GraphKind::ScoredPrefill {
             let lane = &measured_step.lanes[0];
@@ -1810,7 +1841,7 @@ impl<'a> Worker<'a> {
             return Ok(false);
         }
         validate_sampling_admissions(step, &self.admissions)?;
-        let graph = crate::model::catalog::select_shape(
+        let graph = crate::model::catalog::select_shape_with_drafts(
             self.config,
             executor.manifest(),
             step.kind,
@@ -1818,6 +1849,7 @@ impl<'a> Worker<'a> {
             step.token_capacity,
             step.prefill_capacity(),
             step.packed_token_capacity,
+            step.draft_tokens,
             SamplingMode::General,
         )?;
         let fence = executor.next_fence()?;
@@ -2158,7 +2190,7 @@ mod tests {
             GraphKind::Resume,
             GraphKind::Speculative,
         ] {
-            let mut step = ScheduledStep { packed_token_capacity: 0,
+            let mut step = ScheduledStep { draft_tokens: 0, packed_token_capacity: 0,
                 kind,
                 batch_capacity: 4,
                 token_capacity: 1,
@@ -2180,7 +2212,7 @@ mod tests {
                 Error::Execution(ExecutionError::State(_))
             ));
         }
-        let mut step = ScheduledStep { packed_token_capacity: 0,
+        let mut step = ScheduledStep { draft_tokens: 0, packed_token_capacity: 0,
             kind: GraphKind::Decode,
             batch_capacity: 1,
             token_capacity: 1,
@@ -2370,6 +2402,7 @@ mod tests {
     fn stream(capacity: usize) -> (Incoming, Generation) {
         let (events, receiver) = async_mpsc::channel(capacity);
         let (admission, admitted) = oneshot::channel();
+        let (first_token, first_token_ready) = oneshot::channel();
         let cancelled = Arc::new(AtomicBool::new(false));
         let failure = Arc::new(Mutex::new(None));
         let incoming = Incoming {
@@ -2397,6 +2430,7 @@ mod tests {
             },
             events,
             admission: Mutex::new(Some(admission)),
+            first_token: std::cell::Cell::new(Some(first_token)),
             cancelled: cancelled.clone(),
             failure: failure.clone(),
             metrics: Arc::new(super::super::metrics::Metrics::default()),
@@ -2412,6 +2446,7 @@ mod tests {
             Generation {
                 events: receiver,
                 admission: admitted,
+                first_token: first_token_ready,
                 cancelled,
                 failure,
                 enqueue_ns: None,

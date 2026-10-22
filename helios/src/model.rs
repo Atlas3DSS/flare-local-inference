@@ -353,7 +353,7 @@ pub fn validate_completion(
                 || v.tokens
                     .iter()
                     .any(|id| *id >= config.contract.vocabulary as i64)
-                || (matches!(kind, GraphKind::Speculative | GraphKind::Verification)
+                || (matches!(kind, GraphKind::Speculative | GraphKind::Verification | GraphKind::PackedSpeculative)
                     && record.status != 3
                     && v.draft_cache_consumed
                         != contract.draft_cursor.as_ref().map_or(-1, |cursor| {

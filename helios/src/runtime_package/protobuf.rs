@@ -661,4 +661,40 @@ mod tests {
             .unwrap();
         }
     }
+    #[test]
+    fn serialized_scored_prefill_preserves_operation_and_prompt_target_values() {
+        // GraphContract(kind=12) and ValueBinding(source=39) predate packed rounds.
+        let graph = wire::GraphContract::decode(b"\x0a\x05score\x12\x0d\x0a\x07targets\x10\x27\x18\x04\x40\x0c".as_slice()).unwrap();
+        let contract: crate::model::contract::GraphContract =
+            serde_json::from_value(serde_json::to_value(graph).unwrap()).unwrap();
+        assert_eq!(contract.kind, crate::model::contract::GraphOperation::ScoredPrefill);
+        assert_eq!(contract.inputs[0].source, crate::model::contract::ValueSource::PromptTargetToken);
+        assert_eq!(contract.inputs[0].indexing, crate::model::contract::InputIndexing::PackedToken);
+        let execution = wire::ExecutionGraph::decode(b"\x12\x0escored_prefill\x20\x01\x28\x40".as_slice()).unwrap();
+        assert_eq!(crate::execution::GraphKind::try_from(execution.kind.as_str()).unwrap(),
+            crate::execution::GraphKind::ScoredPrefill);
+        assert_eq!(execution.draft_tokens, None);
+        assert_eq!(execution.packed_tokens(), 64);
+    }
+
+    #[test]
+    fn packed_combined_metadata_is_additive_and_unknown_operations_are_rejected() {
+        let legacy = wire::ExecutionGraph::decode(b"\x12\x0cverification\x20\x08\x28\x06".as_slice()).unwrap();
+        assert_eq!(legacy.draft_tokens, None);
+        assert_eq!(legacy.verify_tokens, None);
+        assert_eq!(legacy.packed_token_capacity, 0);
+        assert_eq!(crate::model::contract::GraphOperation::try_from(11).unwrap(),
+            crate::model::contract::GraphOperation::Verification);
+        assert_eq!(crate::model::contract::ValueSource::try_from(5).unwrap(),
+            crate::model::contract::ValueSource::QueryLength);
+        assert!(crate::model::contract::GraphOperation::try_from(99).is_err());
+        assert!(crate::model::contract::ValueSource::try_from(99).is_err());
+        let graph = wire::ExecutionGraph { kind: "packed_speculative".into(),
+            batch_capacity: 32, token_capacity: 6, draft_tokens: Some(1), verify_tokens: Some(6),
+            packed_token_capacity: 128, draft_source: 1, ..Default::default() };
+        let restored = wire::ExecutionGraph::decode(graph.encode_to_vec().as_slice()).unwrap();
+        assert_eq!((restored.draft_tokens, restored.verify_tokens, restored.packed_token_capacity),
+            (Some(1), Some(6), 128));
+    }
+
 }

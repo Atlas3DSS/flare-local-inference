@@ -298,6 +298,7 @@ class Plan:
             "speculation": None if self.speculation is None else {
                 "draft_tokens": self.speculation.draft_tokens, "adaptive": self.speculation.adaptive,
                 "packed_verification": self.speculation.packed_verification,
+                "draft_prefix_selection": self.speculation.draft_prefix_selection,
                 "proposal_source": self.speculation.proposal_source,
                 "history_drafts": self.speculation.history_drafts},
             "context": self.context, "checkpoint_context": self.recipe.context,

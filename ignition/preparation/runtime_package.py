@@ -960,7 +960,12 @@ def export_model(prepared, images, storage, path, *, options, progress=None, pub
         buffer["reference"] = package._reference(buffer.pop("address"), buffer["nbytes"])
     for graph in execution["graphs"]:
         graph.pop("handle")
-        if graph["kind"] == "speculative" or (graph["kind"] == "mixed" and graph["speculation_enabled"]):
+        if graph["kind"] == "packed_speculative":
+            # Proposal depth is independent of the verifier's logical width.
+            # The manifest retains it explicitly rather than deriving W - 1.
+            graph["verify_tokens"] = graph["token_capacity"]
+            graph["draft_source"] = "MTP"
+        elif graph["kind"] == "speculative" or (graph["kind"] == "mixed" and graph["speculation_enabled"]):
             graph["draft_tokens"] = graph["token_capacity"] - 1
             graph["verify_tokens"] = graph["token_capacity"]
             graph["draft_source"] = "COPY_DRAFT" if prepared.server_config.get("speculative_proposal_source") == "copy" else "MTP"

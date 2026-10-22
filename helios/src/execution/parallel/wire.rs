@@ -109,6 +109,29 @@ impl Channel {
         message?.ok_or_else(|| invalid("tensor-parallel control deadline expired"))
     }
 
+    /// Poll without blocking for up to `limit` before a caller's blocking wait.
+    pub fn spin(&mut self, limit: std::time::Duration) -> Result<Option<(u8, Vec<u8>)>> {
+        self.nonblocking(true)?;
+        let started = std::time::Instant::now();
+        let result = loop {
+            match self.poll() {
+                Ok(None) if started.elapsed() < limit => std::hint::spin_loop(),
+                other => break other,
+            }
+        };
+        self.nonblocking(false)?;
+        result
+    }
+
+    /// Receive `expected`, polling briefly before blocking.
+    pub fn handoff(&mut self, expected: u8, limit: std::time::Duration) -> Result<Vec<u8>> {
+        match self.spin(limit)? {
+            Some((tag, data)) if tag == expected => Ok(data),
+            Some((tag, _)) => Err(invalid(format!("expected rank message {expected}, received {tag}"))),
+            None => self.receive(expected),
+        }
+    }
+
     pub fn receive(&mut self, expected: u8) -> Result<Vec<u8>> {
         let (tag, data) = self.wait(false)?;
         if tag != expected {
@@ -189,6 +212,9 @@ pub(super) fn layout(manifest: &ExecutionManifest) -> Vec<u8> {
         ] {
             number(&mut bytes, value);
         }
+        if graph.kind == super::super::GraphKind::PackedSpeculative {
+            number(&mut bytes, graph.draft_tokens);
+        }
         for binding in &graph.input_bindings {
             string(&mut bytes, &binding.buffer_name);
             number(&mut bytes, binding.host_offset);
@@ -255,6 +281,12 @@ pub(super) fn completion(value: &FrameCompletion) -> Vec<u8> {
             bytes.extend_from_slice(&value.to_le_bytes());
         }
     }
+    number(&mut bytes, usize::from(value.speculative_survival.is_some()));
+    if let Some(rows) = &value.speculative_survival {
+        for value in rows.iter().flatten() {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+    }
     for record in value.records.iter() {
         for field in record.fields() {
             bytes.extend_from_slice(&field.to_le_bytes());
@@ -274,6 +306,20 @@ pub(super) fn proposal_confidence(reader: &mut Reader<'_>) -> Result<Option<[[f3
             Ok(Some(rows))
         }
         _ => Err(invalid("invalid proposal confidence presence")),
+    }
+}
+
+pub(super) fn speculative_survival(reader: &mut Reader<'_>) -> Result<Option<[[f32; 7]; 64]>> {
+    match reader.number()? {
+        0 => Ok(None),
+        1 => {
+            let mut rows = [[-1.0; 7]; 64];
+            for value in rows.iter_mut().flatten() {
+                *value = f32::from_le_bytes(reader.bytes(4)?.try_into().unwrap());
+            }
+            Ok(Some(rows))
+        }
+        _ => Err(invalid("invalid speculative survival presence")),
     }
 }
 

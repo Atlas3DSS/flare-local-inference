@@ -118,7 +118,7 @@ impl Fixture {
                 GraphKind::Prefill,
             ] {
                 for width in 1..=if kind == GraphKind::Speculative { 8 } else { 1 } {
-                    graphs.push(crate::execution::GraphDescriptor {
+                    graphs.push(crate::execution::GraphDescriptor { draft_tokens: 0,
                         packed_token_capacity: 0,
                         name: format!("{kind:?}-{batch}-{width}"),
                         kind,
@@ -175,6 +175,7 @@ impl Fixture {
     ) -> (Incoming, Generation) {
         let (events, receiver) = async_mpsc::channel(64);
         let (admission, admitted) = oneshot::channel();
+        let (first_token, first_token_ready) = oneshot::channel();
         let cancelled = Arc::new(AtomicBool::new(false));
         let failure = Arc::new(Mutex::new(None));
         (
@@ -199,6 +200,7 @@ impl Fixture {
                 },
                 events,
                 admission: Mutex::new(Some(admission)),
+                first_token: std::cell::Cell::new(Some(first_token)),
                 cancelled: cancelled.clone(),
                 failure: failure.clone(),
                 metrics: self.metrics.clone(),
@@ -212,6 +214,7 @@ impl Fixture {
             Generation {
                 events: receiver,
                 admission: admitted,
+                first_token: first_token_ready,
                 cancelled,
                 failure,
                 enqueue_ns: None,
@@ -335,6 +338,7 @@ fn completion(
         logprobs: None,
         prompt_logprobs: None,
         proposal_confidence: None,
+        speculative_survival: None,
         fence: Fence(sequence),
         graph_index: 0,
         timing: Default::default(),
@@ -770,8 +774,17 @@ fn disabled_host_store_preserves_decode_prefix_reuse_and_cancellation() {
         (request.phase, request.reused_prompt_tokens()),
         (RequestPhase::Restore, 13)
     );
+    assert!(matches!(
+        generation.first_token.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
     advance(&mut worker, GraphKind::Restore, 4, None);
+    assert!(matches!(
+        generation.first_token.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
     advance(&mut worker, GraphKind::Resume, 5, Some(2));
+    assert!(generation.first_token.try_recv().unwrap().is_ok());
     assert!(matches!(
         generation.events.try_recv().unwrap(),
         GenerationEvent::ObservedToken { token: 2, .. }
@@ -877,6 +890,7 @@ fn speculative_dashboard_counts_live_rounds_and_batched_forward_passes() {
                         logprobs: None,
                         prompt_logprobs: None,
                         proposal_confidence: None,
+                        speculative_survival: None,
                         records: invalid,
                         ..frame
                     }
@@ -891,8 +905,8 @@ fn speculative_dashboard_counts_live_rounds_and_batched_forward_passes() {
             .unwrap()
             .acceptance();
         let source = fixture.config.speculative_proposal_source;
-        assert!(profile.probability(source, 0).unwrap() > 0.5);
-        assert!(profile.probability(source, 2).unwrap() < 0.5);
+        assert!(profile.prefix_probability(source, 0).unwrap() > 0.5);
+        assert!(profile.prefix_probability(source, 2).unwrap() < 0.125);
         assert_eq!(worker.scheduler.estimated_duration_ns(&step), Some(1063));
         let metrics = fixture.metrics.snapshot(!copy);
         assert_eq!((metrics.prefill_tokens, metrics.generated_tokens), (13, 4));
@@ -1745,6 +1759,23 @@ async fn http_generation(
     tokio::task::JoinHandle<axum::response::Response>,
     Vec<Incoming>,
 ) {
+    http_generation_request(
+        "/v1/completions",
+        serde_json::json!({
+            "model": "qwen-worker-phases", "prompt": "a", "max_tokens": 2,
+            "stream": stream, "n": choices,
+        }),
+    )
+    .await
+}
+
+async fn http_generation_request(
+    path: &str,
+    body: serde_json::Value,
+) -> (
+    tokio::task::JoinHandle<axum::response::Response>,
+    Vec<Incoming>,
+) {
     use super::super::http;
     use axum::{Extension, extract::State};
     let (sender, receiver) = mpsc::sync_channel(4);
@@ -1752,15 +1783,9 @@ async fn http_generation(
     let ingress = Arc::new(state.ingress_slots.clone().acquire_owned().await.unwrap());
     let request = axum::http::Request::builder()
         .method("POST")
-        .uri("/v1/completions")
+        .uri(path)
         .header("content-type", "application/json")
-        .body(axum::body::Body::from(
-            serde_json::json!({
-                "model": "qwen-worker-phases", "prompt": "a", "max_tokens": 2,
-                "stream": stream, "n": choices,
-            })
-            .to_string(),
-        ))
+        .body(axum::body::Body::from(body.to_string()))
         .unwrap();
     let response = tokio::spawn(http::generate(State(state), Extension(ingress), request));
     let incoming = tokio::task::spawn_blocking(move || {
@@ -1774,7 +1799,7 @@ async fn http_generation(
 }
 
 #[tokio::test]
-async fn http_waits_for_admission_and_rejects_before_stream_headers() {
+async fn http_admission_rejections_use_json_or_terminal_stream_errors() {
     use axum::http::StatusCode;
     for stream in [false, true] {
         for (error, status, code) in [
@@ -1795,11 +1820,34 @@ async fn http_waits_for_admission_and_rejects_before_stream_headers() {
             ),
         ] {
             let (mut response, incoming) = http_generation(stream, 1).await;
-            assert!(futures_util::poll!(&mut response).is_pending());
+            let streaming_response = if stream {
+                Some(
+                    tokio::time::timeout(std::time::Duration::from_secs(5), &mut response)
+                        .await
+                        .unwrap()
+                        .unwrap(),
+                )
+            } else {
+                assert!(futures_util::poll!(&mut response).is_pending());
+                None
+            };
             incoming[0].reject_admission(error);
-            let response = response.await.unwrap();
-            assert_eq!(response.status(), status);
-            assert_eq!(response.headers()["content-type"], "application/json");
+            let response = match streaming_response {
+                Some(response) => response,
+                None => response.await.unwrap(),
+            };
+            assert_eq!(
+                response.status(),
+                if stream { StatusCode::OK } else { status }
+            );
+            assert_eq!(
+                response.headers()["content-type"],
+                if stream {
+                    "text/event-stream"
+                } else {
+                    "application/json"
+                }
+            );
             assert!(
                 response.headers()["x-request-id"]
                     .to_str()
@@ -1809,7 +1857,18 @@ async fn http_waits_for_admission_and_rejects_before_stream_headers() {
             let bytes = axum::body::to_bytes(response.into_body(), 65536)
                 .await
                 .unwrap();
-            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            let body = std::str::from_utf8(&bytes).unwrap();
+            let body: serde_json::Value = if stream {
+                assert!(!body.contains("[DONE]"), "{body}");
+                serde_json::from_str(
+                    body.lines()
+                        .find_map(|line| line.strip_prefix("data: "))
+                        .unwrap(),
+                )
+                .unwrap()
+            } else {
+                serde_json::from_str(body).unwrap()
+            };
             assert_eq!(body["error"]["code"], code);
             assert!(body["error"]["param"].is_null());
             assert!(incoming[0].cancelled.load(Ordering::Acquire));
@@ -1818,9 +1877,8 @@ async fn http_waits_for_admission_and_rejects_before_stream_headers() {
 }
 
 #[tokio::test]
-async fn http_stream_starts_on_one_admission_and_late_failure_has_no_success_terminal() {
+async fn http_stream_headers_precede_admission_and_late_failure_has_no_success_terminal() {
     let (response, incoming) = http_generation(true, 2).await;
-    incoming[0].notify_admission(Ok(()));
     let response = tokio::time::timeout(std::time::Duration::from_secs(5), response)
         .await
         .unwrap()
@@ -1828,6 +1886,7 @@ async fn http_stream_starts_on_one_admission_and_late_failure_has_no_success_ter
     assert_eq!(response.status(), axum::http::StatusCode::OK);
     assert_eq!(response.headers()["content-type"], "text/event-stream");
     assert!(!incoming[1].cancelled.load(Ordering::Acquire));
+    incoming[0].notify_admission(Ok(()));
     incoming[0].emit_token(1);
     incoming[1].reject_admission(Error::admission(
         AdmissionError::Unavailable,
@@ -1845,10 +1904,212 @@ async fn http_stream_starts_on_one_admission_and_late_failure_has_no_success_ter
 }
 
 #[tokio::test]
+async fn chat_stream_role_waits_for_final_prefill_even_when_stop_matching_hides_tokens() {
+    use futures_util::StreamExt;
+    for (hidden, eos) in [(false, false), (true, false), (false, true)] {
+        let mut request = serde_json::json!({
+            "messages": [{"role": "user", "content": "a".repeat(70)}],
+            "max_tokens": 4, "stream": true,
+        });
+        if hidden {
+            request["stop_token_sequences"] = serde_json::json!([[1, 2]]);
+        }
+        let (response, mut incoming) = http_generation_request("/v1/chat/completions", request).await;
+        let response = tokio::time::timeout(std::time::Duration::from_secs(5), response)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let mut body = response.into_body().into_data_stream();
+        assert!(futures_util::poll!(body.next()).is_pending());
+
+        let fixture = Fixture::new();
+        // The fixture's graph bindings include an image-index view for text rows.
+        incoming[0].prompt.data.vision_token_indices = vec![-1; incoming[0].prompt.tokens.len()];
+        let (sender, receiver) = mpsc::channel();
+        sender.send(incoming).unwrap();
+        let mut worker = fixture.worker(receiver);
+        assert_eq!(worker.admit().unwrap(), ControlFlow::Continue(true));
+        assert!(futures_util::poll!(body.next()).is_pending());
+        advance(&mut worker, GraphKind::Init, 1, None);
+        advance(&mut worker, GraphKind::Prefill, 2, None);
+        assert!(futures_util::poll!(body.next()).is_pending());
+        let step = planned(&mut worker, GraphKind::Prefill, 3);
+        let mut frame = completion(&worker, &step, 3, Some(if eos { 5 } else { 1 }));
+        if eos {
+            frame.records[0].status = 2;
+        }
+        worker.complete(GraphKind::Prefill, frame).unwrap();
+
+        let role = tokio::time::timeout(std::time::Duration::from_secs(5), body.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let role: serde_json::Value = serde_json::from_str(
+            std::str::from_utf8(&role)
+                .unwrap()
+                .trim()
+                .strip_prefix("data: ")
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            role["choices"][0]["delta"],
+            serde_json::json!({"role":"assistant","content":""})
+        );
+        if hidden || eos {
+            assert!(futures_util::poll!(body.next()).is_pending());
+        } else {
+            let text = body.next().await.unwrap().unwrap();
+            assert!(
+                std::str::from_utf8(&text)
+                    .unwrap()
+                    .contains("\"content\":\"b\"")
+            );
+        }
+        let cancelled = worker.active[0]
+            .as_ref()
+            .unwrap()
+            .incoming
+            .cancelled
+            .clone();
+        drop(body);
+        assert!(cancelled.load(Ordering::Acquire));
+    }
+}
+
+#[tokio::test]
+async fn chat_stream_failure_before_first_token_emits_only_error() {
+    for admission in [false, true] {
+        let (response, incoming) = http_generation_request(
+            "/v1/chat/completions",
+            serde_json::json!({
+                "messages": [{"role": "user", "content": "a"}],
+                "max_tokens": 2, "stream": true,
+            }),
+        )
+        .await;
+        let response = response.await.unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        if admission {
+            incoming[0].reject_admission(Error::admission(
+                AdmissionError::Unavailable,
+                "worker stopped",
+            ));
+        } else {
+            incoming[0].notify_admission(Ok(()));
+            incoming[0].fail(Error::execution(ExecutionError::Worker, "worker stopped"));
+        }
+        let bytes = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            axum::body::to_bytes(response.into_body(), 65536),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let body = std::str::from_utf8(&bytes).unwrap();
+        assert!(body.contains("worker stopped"), "{body}");
+        assert_eq!(
+            body.lines()
+                .filter(|line| line.starts_with("data:"))
+                .count(),
+            1
+        );
+        assert!(!body.contains("\"role\""), "{body}");
+        assert!(!body.contains("[DONE]"), "{body}");
+        assert!(incoming[0].cancelled.load(Ordering::Acquire));
+    }
+}
+
+#[tokio::test]
+async fn chat_stream_disconnect_before_first_token_cancels_generation() {
+    use futures_util::StreamExt;
+    let (response, incoming) = http_generation_request(
+        "/v1/chat/completions",
+        serde_json::json!({
+            "messages": [{"role": "user", "content": "a"}], "max_tokens": 2, "stream": true,
+        }),
+    )
+    .await;
+    let mut body = response.await.unwrap().into_body().into_data_stream();
+    assert!(futures_util::poll!(body.next()).is_pending());
+    drop(body);
+    assert!(incoming[0].cancelled.load(Ordering::Acquire));
+}
+
+#[tokio::test]
+async fn chat_stream_flushes_headers_over_tcp_before_admission_or_tokens() {
+    use std::io::{Read, Write};
+    let (sender, receiver) = mpsc::sync_channel(4);
+    let state = http_state(sender, None);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let router = super::super::router(state, &[], 65536);
+    let server = tokio::spawn(async move { axum::serve(listener, router).await });
+    let client = tokio::task::spawn_blocking(move || {
+        let mut socket = std::net::TcpStream::connect(address).unwrap();
+        socket
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let body = serde_json::json!({
+            "messages": [{"role": "user", "content": "a"}], "max_tokens": 2, "stream": true,
+        })
+        .to_string();
+        write!(socket, "POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+        let mut headers = Vec::new();
+        while !headers.ends_with(b"\r\n\r\n") {
+            let mut byte = [0];
+            socket.read_exact(&mut byte).unwrap();
+            headers.push(byte[0]);
+        }
+        let headers = std::str::from_utf8(&headers).unwrap();
+        assert!(headers.starts_with("HTTP/1.1 200 OK\r\n"), "{headers}");
+        assert!(headers.contains("text/event-stream"), "{headers}");
+        socket
+            .set_read_timeout(Some(std::time::Duration::from_millis(100)))
+            .unwrap();
+        let error = socket.read(&mut [0]).unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        ));
+        socket
+    });
+    let incoming = tokio::task::spawn_blocking(move || {
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    let mut socket = client.await.unwrap();
+    incoming[0].notify_admission(Ok(()));
+    incoming[0].observe_token(1);
+    incoming[0].emit_token(1);
+    tokio::task::spawn_blocking(move || {
+        socket
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let mut body = String::new();
+        while !body.contains("\"content\":\"b\"") {
+            let mut bytes = [0; 4096];
+            let length = socket.read(&mut bytes).unwrap();
+            assert_ne!(length, 0, "{body}");
+            body.push_str(std::str::from_utf8(&bytes[..length]).unwrap());
+        }
+        let role = body.find("\"role\":\"assistant\"").unwrap();
+        assert!(role < body.find("\"content\":\"b\"").unwrap(), "{body}");
+    })
+    .await
+    .unwrap();
+    server.abort();
+}
+
+#[tokio::test]
 async fn http_disconnect_while_waiting_cancels_queued_generation() {
     let (response, incoming) = http_generation(true, 1).await;
-    response.abort();
-    assert!(response.await.unwrap_err().is_cancelled());
+    drop(response.await.unwrap());
     assert!(incoming[0].cancelled.load(Ordering::Acquire));
 }
 
@@ -2277,7 +2538,7 @@ fn worker_restores_conditioned_windows_with_fresh_generation_and_unchanged_sampl
         embedding_tables: vec![],
         pending_token: None,
     });
-    manifest.graphs.push(GraphDescriptor {
+    manifest.graphs.push(GraphDescriptor { draft_tokens: 0,
         name: "Vision-1-256".into(),
         kind: GraphKind::Vision,
         handle: 1,

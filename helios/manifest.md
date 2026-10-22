@@ -146,7 +146,31 @@ one token and reports width one. Maintenance and non-sampling prefill emit
 zero tokens. Every graph in an ABI3 catalog writes the 24-field layout.
 The executor validates vector bounds, padding, epochs and transport-reserved
 fields before delivering records. The model contract validates field 12 before
-request state advances.
+request state advances. A speculative or verification completion requires a
+token vector whose verification width (field 15) equals the submitted graph's
+`token_capacity`, and its record's consumed-token increase since submission
+must equal its emitted count; such a completion without a token vector is
+invalid. Each speculative or verification graph declares one fixed
+`token_capacity`, so a finalizer writes that value into field 15 of every
+record it emits.
+
+ABI3 optionally declares `completion_speculative_survival`, a contiguous
+`float32[2,capacity,7]` output indexed by completion frame, physical request
+slot, and draft-prefix depth. Each value is the cumulative product of
+`min(1, p(token)/q(token))` through that prefix, using the distributions used
+for stochastic verification. Observed values must be finite, within `[0,1]`,
+and nonincreasing. Unobserved suffixes and inactive/error slots contain `-1`.
+Output/context limits bound logical draft depth; termination inside an accepted
+prefix censors later positions. Prefill rows in mixed graphs contain `-1`.
+The buffer cannot be an input binding.
+
+Transport reads this output only for speculative, verification, packed speculative,
+and mixed graphs with width greater than one, using the existing completion stream and
+fence. Every rank validates its values; rank zero supplies the scheduling
+observations without numeric consensus or an additional collective. Absent
+buffers preserve binary completion feedback for previously exported packages.
+The probabilities affect future scheduling only, never token sampling or the
+acceptance decision producing the completion.
 
 The lane index is the physical request slot within the configured capacity. A captured finalizer scatters
 packed model rows through the request-slot mapping. Every launch writes the

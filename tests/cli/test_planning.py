@@ -193,7 +193,7 @@ def test_speculation_settings_are_validated_and_described():
     assert Speculation(0).widths == (1,) and Speculation(0, adaptive=False).fixed_width == 1
     record = derive(speculation=Speculation(5, history_drafts=True)).to_dict()["speculation"]
     assert record == {"draft_tokens": 5, "adaptive": True, "proposal_source": "mtp", "history_drafts": True,
-                      "packed_verification": False}
+                      "packed_verification": False, "draft_prefix_selection": "cpu"}
     assert derive(speculation=Speculation(5, packed_verification=True)).to_dict()["speculation"]["packed_verification"]
     assert display.speculation(None) == "off"
     assert display.speculation(DRAFTING) == "up to 3 draft tokens per round · MTP module"

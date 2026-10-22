@@ -40,6 +40,7 @@ class CompletionOutputs:
     requested: torch.Tensor
     scratch: GraphBufferPool
     private_storage: GraphBufferPool
+    speculative_survival: torch.Tensor | None = None
 
     @classmethod
     def allocate(cls, shape, *, device):
@@ -49,11 +50,16 @@ class CompletionOutputs:
         return cls(torch.zeros(shape, dtype=torch.int64, device=device),
             torch.zeros((frames, slots, MAX_OUTPUT_TOKENS, LOGPROB_FIELDS), dtype=torch.int32, device=device),
             torch.zeros(slots, dtype=torch.int32, device=device), GraphBufferPool(device, chunk_bytes=_POOL_CHUNK_BYTES),
-            GraphBufferPool(device, chunk_bytes=_POOL_CHUNK_BYTES))
+            GraphBufferPool(device, chunk_bytes=_POOL_CHUNK_BYTES),
+            torch.full((frames, slots, MAX_OUTPUT_TOKENS - 1), -1., dtype=torch.float32, device=device)
+            if fields == VECTOR_RECORD_FIELDS else None)
 
     def buffers(self):
-        return dict(completion_records=self.records, completion_logprobs=self.logprobs,
-                    logprob_requested=self.requested)
+        result = dict(completion_records=self.records, completion_logprobs=self.logprobs,
+                      logprob_requested=self.requested)
+        if self.speculative_survival is not None:
+            result["completion_speculative_survival"] = self.speculative_survival
+        return result
 
     @property
     def nbytes(self):
@@ -65,19 +71,29 @@ class CompletionOutputs:
     def private(self, buffers):
         """Mixed roles share flags but retain disjoint outputs until their merge."""
         return CompletionOutputs(buffers.zeros(self.records.shape, torch.int64),
-            buffers.zeros(self.logprobs.shape, torch.int32), self.requested, self.scratch, self.private_storage)
+            buffers.zeros(self.logprobs.shape, torch.int32), self.requested, self.scratch, self.private_storage,
+            buffers.zeros(self.speculative_survival.shape, torch.float32).fill_(-1.)
+            if self.speculative_survival is not None else None)
 
     def merge(self, prompt, decode, prompt_slot, frame):
         slots = torch.arange(self.records.shape[1], device=self.records.device)
         role = slots == prompt_slot
         index = frame.long()
         for output, a, b in ((self.records, prompt.records, decode.records),
-                             (self.logprobs, prompt.logprobs, decode.logprobs)):
+                             (self.logprobs, prompt.logprobs, decode.logprobs),
+                             (self.speculative_survival, prompt.speculative_survival, decode.speculative_survival)):
+            if output is None:
+                continue
             mask = role.view(1, -1, *([1] * (output.ndim - 2)))
-            output.index_copy_(0, index, torch.where(mask, a.index_select(0, index), b.index_select(0, index)))
+            output.index_copy_(0, index, torch.where(mask,
+                -1. if output is self.speculative_survival else a.index_select(0, index), b.index_select(0, index)))
 
 
 def validate_completion_buffers(buffers, capacity):
+    if (survival := buffers.get("completion_speculative_survival")) is not None:
+        shape = (COMPLETION_FRAMES, capacity, MAX_OUTPUT_TOKENS - 1)
+        if tuple(survival.shape) != shape or str(survival.dtype) != "torch.float32":
+            raise ValueError(f"completion_speculative_survival: expected shape {shape}, dtype torch.float32")
     names = ("completion_logprobs", "logprob_requested")
     present = [name in buffers for name in names]
     if not any(present):

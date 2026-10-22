@@ -145,9 +145,11 @@ DSpark uses the shared token-vector completion and adaptive verification contrac
 Ignition captures verification widths one through six by default for every batch capacity;
 Flare can reduce draft count and concurrency when loading. Helios schedules and
 replays the selected graphs without interpreting DSpark layers or proposals.
-Adaptive selection uses observed acceptance and measured GPU round cost. The
-DSpark confidence head is computed inside the graph but does not drive the
-native controller.
+Adaptive proposal selection uses historical joint prefix survival from the
+DSpark confidence head and measured proposal-plus-verification cost. After
+proposal completion, fresh confidence drives causal prefix selection using
+costs, service prices, and historical continuations frozen before submission.
+Verification outcomes remain separate from these confidence forecasts.
 
 ## A speculative round is a state transaction
 
@@ -316,8 +318,13 @@ capture.
 | Acceptance/cost statistics and bounded exploration policy | Rust, using completed-round records |
 | Grammar advancement, stop sequences, output presentation | Rust with ordered token-vector completions |
 
-Rust adapts among prepared widths from completed-round acceptance and measured full-round
-costs. The fixed-width catalog gives each active row the same maximum draft
+Rust adapts among prepared widths from request-local prefix survival and measured
+full-round costs. Combined graphs learn from emitted/offered/accepted records,
+or optional verification probabilities supplied by prepared graphs. Split graphs
+use proposal-confidence forecasts. A separate funded exploration budget can
+probe beyond the ordinary choice without replacing its historical mean;
+see [the scheduling policy](scheduling-runtime-design.md#funded-acceptance-learning).
+The fixed-width catalog gives each active row the same maximum draft
 count. Different logical counts under a shared row budget require matching
 verification and acceptance contracts; the selected graph's real padded cost
 is what the controller prices.

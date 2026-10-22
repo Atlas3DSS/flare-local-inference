@@ -17,6 +17,31 @@ fn optional_readiness_output_preserves_uninstrumented_manifests_and_rejects_inva
 }
 
 #[test]
+fn optional_speculative_survival_preserves_legacy_packages_and_validates_layout() {
+    let mut value = manifest();
+    value.abi_version = SPECULATIVE_ABI_VERSION;
+    value.buffers[2].shape = vec![2, 4, 24];
+    value.buffers[2].strides = vec![96, 24, 1];
+    value.buffers[2].nbytes = 1536;
+    value.validate().unwrap();
+    value.buffers.push(BufferDescriptor { name: "completion_speculative_survival".into(),
+        address: 0x10000, nbytes: 224, dtype: Dtype::Float32,
+        shape: vec![2, 4, 7], strides: vec![28, 7, 1] });
+    value.validate().unwrap();
+    for (shape, dtype) in [(vec![1, 8, 7], Dtype::Float32), (vec![2, 2, 14], Dtype::Float32),
+        (vec![2, 4, 7], Dtype::Int32)] {
+        let mut invalid = value.clone();
+        let buffer = invalid.buffers.last_mut().unwrap();
+        buffer.shape = shape;
+        buffer.dtype = dtype;
+        assert!(invalid.validate().is_err());
+    }
+    value.graphs[0].input_bindings.push(InputBinding {
+        buffer_name: "completion_speculative_survival".into(), host_offset: 0, nbytes: 224 });
+    assert!(value.validate().is_err());
+}
+
+#[test]
 fn fp8_cache_buffers_use_single_byte_elements() {
     let mut value = manifest();
     let dtype = Dtype::try_from("float8_e4m3fn").unwrap();
@@ -130,7 +155,7 @@ pub(super) fn manifest() -> ExecutionManifest {
             strides: vec![1],
         },
     ];
-    let graph = GraphDescriptor { packed_token_capacity: 0,
+    let graph = GraphDescriptor { draft_tokens: 0, packed_token_capacity: 0,
         name: "decode4".into(),
         kind: GraphKind::Decode,
         sampling_mode: SamplingMode::General,
@@ -963,4 +988,53 @@ fn prompt_catalog_storage_and_bindings_are_validated_together() {
     let mut ordinary = value;
     ordinary.graphs[0].kind = GraphKind::Prefill;
     assert!(ordinary.validate().is_err());
+}
+
+#[test]
+fn packed_combined_peer_agreement_checks_the_complete_committed_vector() {
+    let mut vector = TokenVector { verification_width: 6, ..Default::default() };
+    vector.offered_drafts = 1;
+    let record = CompletionRecord { generation: 1, submission_sequence: 1, consumed_tokens: 65,
+        token_id: -1, status: 1, vector: Some(vector), ..Default::default() };
+    let completion = || FrameCompletion { speculative_survival: None, prompt_logprobs: None, fence: crate::cache::Fence(1), graph_index: 0,
+        records: [record; 4].into(), timing: Default::default(), logprobs: None, proposal_confidence: None };
+    for mutation in 0..5 {
+        let root = completion(); let mut peer = completion();
+        match mutation {
+            0 => peer.records[3].vector.as_mut().unwrap().offered_drafts = 2,
+            1 => peer.records[3].vector.as_mut().unwrap().accepted_drafts = 1,
+            2 => peer.records[3].vector.as_mut().unwrap().verification_width = 5,
+            3 => peer.records[3].generated_tokens = 1,
+            _ => peer.records[3].token_id = 100,
+        }
+        assert!(parallel::agree(&root, &peer).is_ok(), "legacy agreement contract remains unchanged");
+        assert!(parallel::agree_packed(&root, &peer).is_err());
+    }
+    parallel::agree_packed(&completion(), &completion()).unwrap();
+}
+
+#[test]
+fn packed_combined_peer_agreement_ignores_only_undefined_inactive_vector_payload() {
+    let active = CompletionRecord { generation: 1, submission_sequence: 1, consumed_tokens: 65,
+        token_id: -1, status: 1, vector: Some(TokenVector { verification_width: 6, ..Default::default() }),
+        ..Default::default() };
+    let mut root = FrameCompletion { speculative_survival: None, prompt_logprobs: None, fence: crate::cache::Fence(1), graph_index: 0,
+        records: [active; 4].into(), timing: Default::default(), logprobs: None, proposal_confidence: None };
+    root.records[3].status = 0;
+    let mut peer_records = root.records;
+    peer_records[3].generated_tokens = 17;
+    peer_records[3].token_id = 400;
+    peer_records[3].vector.as_mut().unwrap().offered_drafts = 6;
+    peer_records[3].vector.as_mut().unwrap().verification_width = 7;
+    peer_records[3].vector.as_mut().unwrap().tokens[7] = 999;
+    // Both byte images satisfy the transport ABI; inactive payload is not state.
+    for records in [&root.records, &peer_records] {
+        let bytes: Vec<_> = records.iter().flat_map(|r| r.fields()).flat_map(i64::to_le_bytes).collect();
+        transport::decode_records(&bytes, crate::cache::Fence(1), 4, 24).unwrap();
+    }
+    let mut peer = FrameCompletion { speculative_survival: None, prompt_logprobs: None, records: peer_records, fence: root.fence, graph_index: root.graph_index,
+        timing: Default::default(), logprobs: None, proposal_confidence: None };
+    parallel::agree_packed(&root, &peer).unwrap();
+    peer.records[3].generation += 1;
+    assert!(parallel::agree_packed(&root, &peer).is_err(), "base epoch checks remain unchanged");
 }

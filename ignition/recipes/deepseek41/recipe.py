@@ -14,7 +14,8 @@ def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress, retain_
     speculation = plan.speculation
     drafting = {} if speculation is None else {
         "speculative_widths": speculation.widths, "speculative_token_capacity": plan.speculative_token_capacity,
-        "speculative_fixed_width": speculation.fixed_width, "packed_verification": speculation.packed_verification}
+        "speculative_fixed_width": speculation.fixed_width, "packed_verification": speculation.packed_verification,
+        "draft_prefix_selection": speculation.draft_prefix_selection}
     config = PreparationConfig(prompt_logprobs=plan.prompt_logprobs,
         compile_workers=plan.compile_workers, tuning_replica=plan.tuning_replica,
         image_concurrency=plan.image_concurrency,

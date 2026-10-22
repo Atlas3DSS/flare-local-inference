@@ -262,6 +262,21 @@ DSpark is its learned draft method, defaulting to five draft tokens per round
 with separate proposal and verification graphs, using native conditional
 confidence and measured execution cost for adaptive verification. Image preprocessing
 preserves the checkpoint's row-major patch layout and 1024-token image limit.
+During preparation, `--packed-verification` shares physical target rows between
+requests while retaining separate proposal and verification graphs.
+The advanced option `--draft-prefix-selection gpu` additionally captures
+proposal/allocation/verification as one round alongside separate proposal,
+verification, and joined speculative graphs. Its default is `cpu`. GPU selection requires
+`--packed-verification` and adaptive learned speculation.
+`--speculative-token-capacity` bounds physical target rows; for example,
+`--max-concurrency 32 --mtp-draft-tokens 5 --packed-verification --speculative-token-capacity 128 --draft-prefix-selection gpu`
+prepares target capacities through 128 rows and proposal depths through five.
+The host still owns admission and cache reservations. The captured round chooses
+actual prefixes on the GPU, then returns one target completion. The scheduler
+compares each captured round's complete measured cost and expected emitted-token
+value against joined, split, and target-only execution. Prefix limits include
+output and context budgets, grammar constraints, and host-stop barriers. Physical
+target padding executes at the captured row capacity.
 Its 188.8 GiB of Engram tables are stored once in the package, partitioned by
 hash head across TP ranks. Heads are assigned round-robin, so each TP4 rank
 owns two bigram, two trigram, and two four-gram heads, with their projection

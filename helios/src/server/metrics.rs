@@ -211,7 +211,7 @@ pub(super) struct Metrics {
     replay_gpu_ns: AtomicU64,
     replay_readiness_wait_ns: AtomicU64,
     replay_readiness_samples: AtomicU64,
-    launches: [AtomicU64; 11],
+    launches: [AtomicU64; 12],
     sampling_launches: [AtomicU64; 5],
     speculative: [[RoundMetrics; 8]; 7],
     proposals: [[ProposalMetrics; 7]; 7],
@@ -341,13 +341,14 @@ impl Metrics {
             GraphKind::Mixed => 8,
             GraphKind::Proposal => 9,
             GraphKind::Verification => 10,
+            GraphKind::PackedSpeculative => 11,
         };
         self.launches[index].fetch_add(1, Ordering::Relaxed);
         let sampling_index = match kind {
             GraphKind::Prefill | GraphKind::ScoredPrefill => 0,
             GraphKind::Decode => 1,
             GraphKind::Resume => 2,
-            GraphKind::Speculative | GraphKind::Verification => 3,
+            GraphKind::Speculative | GraphKind::Verification | GraphKind::PackedSpeculative => 3,
             GraphKind::Mixed => 4,
             _ => return,
         };
@@ -389,6 +390,12 @@ impl Metrics {
                 }
             }
         }
+    }
+
+    pub fn packed_speculative_completed(&self, batch: usize, width: usize, drafts: usize,
+        elapsed_ns: u64, records: &[CompletionRecord]) {
+        self.learned_draft_steps.fetch_add(drafts as u64, Ordering::Relaxed);
+        self.speculative_completed(GraphKind::PackedSpeculative, batch, width, elapsed_ns, records);
     }
 
     pub fn proposal_completed(&self, batch: usize, width: usize, elapsed_ns: u64) {
@@ -477,6 +484,15 @@ impl Metrics {
 
     pub fn render(&self) -> String {
         let mut text = String::with_capacity(4096);
+        for (name, help, counts) in [
+            ("execution_nanoseconds_total", "Raw execution time by scheduler selection reason, including readiness stalls and isolated host handoff.", &self.scheduler_trace.execution_ns),
+            ("executions_total", "Completed physical executions by scheduler selection reason; split proposal and verification each count once.", &self.scheduler_trace.executions),
+        ] {
+            let _ = writeln!(text, "# HELP flare_scheduler_{name} {help}\n# TYPE flare_scheduler_{name} counter");
+            for (reason, count) in ["ordinary", "discovery", "timing_refresh", "acceptance_learning"].into_iter().zip(counts) {
+                let _ = writeln!(text, "flare_scheduler_{name}{{reason=\"{reason}\"}} {}", count.load(Ordering::Relaxed));
+            }
+        }
         for (name, help, count) in [
             ("replay_gpu_nanoseconds_total", "Sum of maximum rank-local CUDA durations of completed graphs, including readiness waits.", &self.replay_gpu_ns),
             ("replay_readiness_wait_nanoseconds_total", "Exposed embedding readiness delay measured across ranks; includes RAM and disk delivery.", &self.replay_readiness_wait_ns),
@@ -753,6 +769,7 @@ impl Metrics {
             "mixed",
             "proposal",
             "verification",
+            "packed_speculative",
         ]
         .into_iter()
         .zip(&self.launches)
@@ -1151,7 +1168,7 @@ mod tests {
             text.lines()
                 .filter(|line| line.starts_with("flare_graph_launches_total{"))
                 .count(),
-            11
+            12
         );
     }
 }

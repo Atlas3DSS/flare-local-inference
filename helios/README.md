@@ -328,7 +328,13 @@ This bounds aggregate refresh expense, not individual stalls; see
 [funded timing refresh](../docs/scheduling-runtime-design.md#funded-timing-refresh).
 
 Speculative width selection combines this cost with request-local expected
-acceptance. Each request accrues equal entitlement while GPU work is outstanding;
+prefix survival. Combined graphs learn from completed verification; split
+graphs keep proposal-confidence forecasts separate. Ordinary selection uses
+historical means, while a separate 1% raw-time budget funds optimistic
+acceptance probes. Observational weight ages without changing unobserved means;
+width-one rounds still measure cost. See
+[funded acceptance learning](../docs/scheduling-runtime-design.md#funded-acceptance-learning).
+Each request accrues equal entitlement while GPU work is outstanding;
 completion earns useful-progress credit at frozen reference rates. Unknown
 reference rates initialize from runtime observations and credit accumulated
 progress once. Timing freshness does not alter those accounting units.

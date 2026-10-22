@@ -1,4 +1,5 @@
 use std::io::Write;
+use std::time::Duration;
 
 use super::*;
 use crate::execution::{CompletionRecord, Dtype};
@@ -99,6 +100,80 @@ fn packet_bounds_and_peer_errors_are_reported() {
     );
 }
 
+#[cfg(unix)]
+fn assert_blocking(channel: &Channel) {
+    use std::os::fd::AsRawFd;
+    let fd = match &channel.stream {
+        RankStream::Unix(stream) => stream.as_raw_fd(),
+        RankStream::Tcp(stream) => stream.as_raw_fd(),
+    };
+    // SAFETY: F_GETFL reads flags from the live socket without retaining its descriptor.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    assert!(flags >= 0);
+    assert_eq!(flags & libc::O_NONBLOCK, 0);
+}
+
+#[test]
+fn handoff_receives_ready_commit_prepare_and_drain_on_both_transports() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (server, _) = listener.accept().unwrap();
+    for (sender, receiver) in [crate::execution::rank_stream::test_pair().unwrap(),
+                               (client.into(), server.into())] {
+        let mut sender = Channel::new(sender).unwrap();
+        let mut receiver = Channel::new(receiver).unwrap();
+        for tag in [READY, COMMIT, PREPARE, DRAIN] {
+            sender.send(tag, &[tag]).unwrap();
+            assert_eq!(receiver.handoff(tag, HANDOFF_SPIN).unwrap(), vec![tag]);
+            #[cfg(unix)]
+            assert_blocking(&receiver);
+        }
+    }
+}
+
+#[test]
+fn spin_timeout_preserves_fragment_for_blocking_handoff_and_idle_wait() {
+    let (mut sender, receiver) = crate::execution::rank_stream::test_pair().unwrap();
+    let mut receiver = Channel::new(receiver).unwrap();
+    sender.write_all(&[PREPARE, 3, 0]).unwrap();
+    let started = Instant::now();
+    assert!(receiver.spin(HANDOFF_SPIN).unwrap().is_none());
+    assert!(started.elapsed() >= HANDOFF_SPIN);
+    #[cfg(unix)]
+    assert_blocking(&receiver);
+    let writer = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(10));
+        sender.write_all(&[0, 0, 10, 11, 12]).unwrap();
+        let mut sender = Channel::new(sender).unwrap();
+        sender.send(DRAIN, &[]).unwrap();
+    });
+    assert_eq!(receiver.handoff(PREPARE, Duration::ZERO).unwrap(), vec![10, 11, 12]);
+    assert_eq!(receiver.wait(true).unwrap(), (DRAIN, vec![]));
+    #[cfg(unix)]
+    assert_blocking(&receiver);
+    writer.join().unwrap();
+}
+
+#[test]
+fn handoff_reports_wrong_tags_peer_errors_and_disconnects() {
+    for tag in [COMMIT, FAILED] {
+        let (sender, receiver) = crate::execution::rank_stream::test_pair().unwrap();
+        let mut sender = Channel::new(sender).unwrap();
+        let mut receiver = Channel::new(receiver).unwrap();
+        sender.send(tag, b"rank failed").unwrap();
+        let error = receiver.handoff(READY, HANDOFF_SPIN).unwrap_err().to_string();
+        assert!(error.contains(if tag == FAILED { "rank failed" } else { "received 4" }), "{error}");
+        #[cfg(unix)]
+        assert_blocking(&receiver);
+    }
+    let (sender, receiver) = crate::execution::rank_stream::test_pair().unwrap();
+    let mut receiver = Channel::new(receiver).unwrap();
+    drop(sender);
+    assert!(receiver.handoff(READY, HANDOFF_SPIN).unwrap_err().to_string().contains("disconnected"));
+    #[cfg(unix)]
+    assert_blocking(&receiver);
+}
+
 #[test]
 fn upload_decoder_rejects_unbounded_or_truncated_fragments() {
     let manifest = super::super::tests::manifest();
@@ -133,6 +208,7 @@ fn completed(status: i64) -> FrameCompletion {
         logprobs: None,
         prompt_logprobs: None,
         proposal_confidence: None,
+        speculative_survival: None,
         fence: Fence(3),
         graph_index: 2,
         timing: Default::default(),
@@ -176,9 +252,48 @@ fn completion_wire_preserves_the_execution_abi() {
     assert_eq!(reader.number().unwrap(), 2);
     assert_eq!(timing(&mut reader).unwrap(), root.timing);
     assert_eq!(proposal_confidence(&mut reader).unwrap(), root.proposal_confidence);
+    assert_eq!(speculative_survival(&mut reader).unwrap(), root.speculative_survival);
     let records = super::super::transport::decode_records(reader.0, Fence(3), 4, 8).unwrap();
     for (expected, actual) in root.records.iter().zip(records.iter()) {
         assert_eq!(expected.fields(), actual.fields());
+    }
+}
+
+#[test]
+fn speculative_survival_is_optional_and_validated_per_rank_without_numeric_consensus() {
+    let mut root = completed(1);
+    for record in root.records.iter_mut() {
+        record.vector = Some(crate::execution::TokenVector {
+            emitted_count: 1, offered_drafts: 3, accepted_drafts: 0, verification_width: 4,
+            ..Default::default()
+        });
+    }
+    let mut values = [[-1.; 7]; 64];
+    values[..4].fill([0.75, 0.5, 0.25, -1., -1., -1., -1.]);
+    root.speculative_survival = Some(values);
+    let mut peer = completed(1);
+    peer.records = root.records.clone();
+    assert!(agree(&root, &peer).is_err());
+    peer.speculative_survival = Some(values);
+    peer.speculative_survival.as_mut().unwrap()[1][1] = 0.6;
+    agree(&root, &peer).unwrap();
+    assert_eq!(root.speculative_survival, Some(values));
+    for (slot, depth, invalid) in [(0, 0, f32::NAN), (0, 0, 1.1), (0, 0, -0.1),
+        (0, 1, 0.8), (0, 1, -1.), (0, 2, -1.), (0, 3, 0.1), (4, 0, 0.1)] {
+        peer.speculative_survival = Some(values);
+        peer.speculative_survival.as_mut().unwrap()[slot][depth] = invalid;
+        assert!(agree(&root, &peer).is_err(), "slot {slot}, depth {depth}, value {invalid}");
+    }
+    let bytes = completion(&root);
+    let mut reader = Reader(&bytes);
+    reader.number().unwrap();
+    reader.number().unwrap();
+    timing(&mut reader).unwrap();
+    proposal_confidence(&mut reader).unwrap();
+    let offset = bytes.len() - reader.0.len();
+    assert_eq!(speculative_survival(&mut reader).unwrap(), Some(values));
+    for length in [0, 1, 7, 8, 9, 8 + 64 * 7 * 4 - 1] {
+        assert!(speculative_survival(&mut Reader(&bytes[offset..offset + length])).is_err());
     }
 }
 
@@ -225,6 +340,7 @@ fn proposal_confidence_survives_rank_transport_without_numeric_consensus() {
     reader.number().unwrap();
     timing(&mut reader).unwrap();
     assert_eq!(proposal_confidence(&mut reader).unwrap(), root.proposal_confidence);
+    assert_eq!(speculative_survival(&mut reader).unwrap(), root.speculative_survival);
     assert_eq!(reader.0.len(), 4 * 8 * 8);
 }
 
@@ -265,4 +381,18 @@ fn rank_zero_confidence_is_authoritative_without_relaxing_request_agreement() {
     assert_eq!(root.proposal_confidence, authoritative);
     peer.records[0].consumed_tokens += 1;
     assert!(agree(&root, &peer).is_err());
+}
+
+#[test]
+fn packed_combined_process_schema_rejects_a_different_proposal_depth() {
+    let mut root = crate::execution::tests::manifest();
+    let graph = &mut root.graphs[0];
+    graph.kind = crate::execution::GraphKind::PackedSpeculative;
+    graph.token_capacity = 6;
+    graph.packed_token_capacity = 8;
+    graph.draft_tokens = 1;
+    let mut peer = root.clone();
+    assert_eq!(layout(&root), layout(&peer));
+    peer.graphs[0].draft_tokens = 3;
+    assert_ne!(layout(&root), layout(&peer), "different proposal contracts must fail before any rank launch");
 }

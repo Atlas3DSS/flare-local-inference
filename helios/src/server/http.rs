@@ -313,7 +313,9 @@ pub(super) async fn generate(
         Ok(g) => g,
         Err(e) => return rejection(&state, protocol, &id, "admission", e),
     };
-    if let Err(e) = runtime::await_admission(&mut generation).await {
+    if !decoded.stream
+        && let Err(e) = runtime::await_admission(&mut generation).await
+    {
         return rejection(&state, protocol, &id, "admission", e);
     }
     let enqueue_ns = generation.first().and_then(|g| g.enqueue_ns);
@@ -365,6 +367,17 @@ pub(super) async fn generate(
         let mut raw_tokens = Vec::new();
         let mut timestamps = Vec::new();
         let mut reused_total = 0;
+        if streaming && protocol == Protocol::Chat {
+            // Chat has one choice and rejects streamed prompt logprobs, so no
+            // output queue needs draining before the first raw token is ready.
+            if let Some(generation) = generations[0].as_mut()
+                && let Err(error) = generation.wait_for_first_token().await
+            {
+                let frame = encoder.failure(&error);
+                yield Delivery::Failed(error, frame);
+                return;
+            }
+        }
         for mut frame in encoder.start() {
             if let Some(ids) = &prompt_ids {
                 frame.data["prompt_token_ids"] = json!(ids);

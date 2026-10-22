@@ -250,8 +250,10 @@ def test_mixed_output_merge_preserves_the_inactive_frame_during_capture(compiled
     prompt, decode = outputs.private(cursor), outputs.private(cursor)
     prompt.records.fill_(11)
     prompt.logprobs.fill_(12)
+    prompt.speculative_survival.fill_(.875)
     decode.records.fill_(21)
     decode.logprobs.fill_(22)
+    decode.speculative_survival.fill_(.5)
     frame = torch.tensor([1], dtype=torch.int32, device='cuda')
     slot = torch.tensor(2, device='cuda')
     def run():
@@ -263,12 +265,16 @@ def test_mixed_output_merge_preserves_the_inactive_frame_during_capture(compiled
     for _ in range(3):
         outputs.records[0].fill_(-7)
         outputs.logprobs[0].fill_(-8)
+        outputs.speculative_survival[0].fill_(.25)
         graph.replay()
         assert torch.all(outputs.records[0] == -7)
         assert torch.all(outputs.logprobs[0] == -8)
+        assert torch.all(outputs.speculative_survival[0] == .25)
         assert torch.all(outputs.records[1, 2] == 11)
         assert torch.all(outputs.logprobs[1, 2] == 12)
         assert torch.all(outputs.logprobs[1, [0, 1, 3]] == 22)
+        assert torch.all(outputs.speculative_survival[1, 2] == -1)
+        assert torch.all(outputs.speculative_survival[1, [0, 1, 3]] == .5)
 
 
 def _tp_logprob_rank(rank, sockets):

@@ -167,6 +167,35 @@ pub struct FrameCompletion {
     pub prompt_logprobs: Option<Vec<Option<PromptLogprobs>>>,
     /// Confidence by proposal batch row; rows and columns outside the graph shape are zero.
     pub proposal_confidence: Option<[[f32; MAX_OUTPUT_TOKENS - 1]; REQUEST_LANES]>,
+    /// Verification prefix survival by physical slot; -1 marks an unobserved prefix.
+    pub speculative_survival: Option<[[f32; MAX_OUTPUT_TOKENS - 1]; REQUEST_LANES]>,
+}
+
+pub(crate) fn validate_speculative_survival(rows: &[[f32; 7]], records: &[CompletionRecord]) -> Result<()> {
+    if rows.len() < records.len() || rows.len() > REQUEST_LANES {
+        return Err("speculative survival does not cover completion slots".into());
+    }
+    for (slot, row) in rows.iter().enumerate() {
+        let offered = records.get(slot).filter(|record| matches!(record.status, 1 | 2))
+            .and_then(|record| record.vector).map_or(0, |vector| {
+                if vector.emitted_count > vector.accepted_drafts { vector.offered_drafts }
+                else { vector.accepted_drafts.min(vector.offered_drafts) }
+            }).clamp(0, 7) as usize;
+        let mut bound = 1.0;
+        let mut missing = false;
+        for (depth, &value) in row.iter().enumerate() {
+            missing |= value == -1.0;
+            if value != -1.0 && (missing || depth >= offered || !value.is_finite() || !(0.0..=bound).contains(&value)) {
+                return Err(format!("invalid speculative survival at slot {slot}, depth {depth}: value {value}, preceding bound {bound}, observed extent {offered}, row {row:?}").into());
+            }
+            bound = value;
+        }
+    }
+    Ok(())
+}
+
+fn reads_speculative_survival(graph: &super::GraphDescriptor) -> bool {
+    graph.token_capacity > 1 && matches!(graph.kind, GraphKind::Speculative | GraphKind::Verification | GraphKind::PackedSpeculative | GraphKind::Mixed)
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -208,6 +237,7 @@ struct Frame {
     input: PinnedHost,
     output: PinnedHost,
     confidence: Option<Readback>,
+    survival: Option<Readback>,
     readiness: Option<Readback>,
     logprobs: Option<Readback>,
     prompt_logprobs: Option<Readback>,
@@ -372,11 +402,14 @@ impl GraphExecutor {
                 confidence: manifest
                     .graphs
                     .iter()
-                    .any(|g| g.kind == GraphKind::Proposal)
+                    .any(|g| matches!(g.kind, GraphKind::Proposal | GraphKind::PackedSpeculative))
                     .then(|| {
                         let buffer = manifest.buffer("proposal_confidence")?;
                         Readback::new(&model, buffer.address, buffer.nbytes)
                     })
+                    .transpose()?,
+                survival: manifest.buffers.iter().find(|buffer| buffer.name == "completion_speculative_survival")
+                    .map(|buffer| Readback::new(&model, buffer.address + index * buffer.nbytes / 2, buffer.nbytes / 2))
                     .transpose()?,
                 readiness: manifest.buffers.iter().find(|buffer| buffer.name == "readiness_timestamps")
                     .map(|buffer| Readback::new(&model, buffer.address + index * buffer.nbytes / 2, buffer.nbytes / 2))
@@ -481,7 +514,7 @@ impl GraphExecutor {
                 grammar
                     || matches!(
                         self.manifest.graphs[graph].kind,
-                        GraphKind::Speculative | GraphKind::Proposal | GraphKind::Verification
+                        GraphKind::Speculative | GraphKind::Proposal | GraphKind::Verification | GraphKind::PackedSpeculative
                     ),
             )
             .then_some(fence))
@@ -525,7 +558,7 @@ impl GraphExecutor {
         let grammar_constrained = grammar_constrained
             || matches!(
                 graph.kind,
-                GraphKind::Speculative | GraphKind::Proposal | GraphKind::Verification
+                GraphKind::Speculative | GraphKind::Proposal | GraphKind::Verification | GraphKind::PackedSpeculative
             )
             || resources.engram.is_some();
         let resolved = validate_uploads(
@@ -631,11 +664,18 @@ impl GraphExecutor {
                     frame.prompt_logprobs.as_ref().unwrap().enqueue_copy(&resources.copy,
                         b.address + index * b.nbytes / 2, prompt_rows * super::PROMPT_FIELDS * 4)?;
                 }
-                if graph.kind == GraphKind::Proposal {
+                if matches!(graph.kind, GraphKind::Proposal | GraphKind::PackedSpeculative) {
                     let confidence = self.manifest.buffer("proposal_confidence")?;
                     frame.confidence.as_ref().unwrap().enqueue_copy(
                         &resources.copy, confidence.address, confidence.nbytes,
                     )?;
+                }
+                if reads_speculative_survival(graph) {
+                    if let Some(readback) = &frame.survival {
+                        let buffer = self.manifest.buffer("completion_speculative_survival")?;
+                        readback.enqueue_copy(&resources.copy, buffer.address + index * buffer.nbytes / 2,
+                                              buffer.nbytes / 2)?;
+                    }
                 }
                 if crate::engram::consumes(graph.kind) {
                     if let Some(readback) = &frame.readiness {
@@ -754,6 +794,24 @@ impl GraphExecutor {
                 return Err(error);
             }
         };
+        let speculative_survival = if reads_speculative_survival(&self.manifest.graphs[pending.graph_index]) {
+            frame.survival.as_ref().map(|readback| {
+                let mut rows = [[-1.0; MAX_OUTPUT_TOKENS - 1]; REQUEST_LANES];
+                // SAFETY: The completion transfer protects this frame's retained feedback bytes.
+                for (row, bytes) in rows.iter_mut().zip(unsafe { readback.bytes() }.chunks_exact(7 * 4)) {
+                    for (value, bytes) in row.iter_mut().zip(bytes.chunks_exact(4)) {
+                        *value = f32::from_ne_bytes(bytes.try_into().unwrap());
+                    }
+                }
+                rows
+            })
+        } else { None };
+        if let Some(rows) = &speculative_survival {
+            if let Err(error) = validate_speculative_survival(rows, &records) {
+                self.poison = Some(error.clone());
+                return Err(error);
+            }
+        }
         Ok(Some(FrameCompletion {
             fence: pending.fence,
             graph_index: pending.graph_index,
@@ -787,8 +845,9 @@ impl GraphExecutor {
             records,
             logprobs,
             prompt_logprobs,
-            proposal_confidence: if self.manifest.graphs[pending.graph_index].kind
-                == GraphKind::Proposal
+            speculative_survival,
+            proposal_confidence: if matches!(self.manifest.graphs[pending.graph_index].kind,
+                GraphKind::Proposal | GraphKind::PackedSpeculative)
             {
                 let mut confidence = [[0.0; MAX_OUTPUT_TOKENS - 1]; REQUEST_LANES];
                 let graph = &self.manifest.graphs[pending.graph_index];
@@ -800,7 +859,7 @@ impl GraphExecutor {
                     .zip(unsafe { frame.confidence.as_ref().unwrap().bytes() }
                         .chunks_exact(4 * self.manifest.buffer("proposal_confidence")?.shape[1]))
                 {
-                    for (value, bytes) in row.iter_mut().take(graph.token_capacity - 1).zip(bytes.chunks_exact(4)) {
+                    for (value, bytes) in row.iter_mut().take(if graph.kind == GraphKind::PackedSpeculative { graph.draft_tokens } else { graph.token_capacity - 1 }).zip(bytes.chunks_exact(4)) {
                         *value = f32::from_ne_bytes(bytes.try_into().unwrap());
                     }
                 }

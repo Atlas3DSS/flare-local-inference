@@ -110,6 +110,15 @@ class Speculation:
     history_drafts: bool = False
     token_capacity: int | None = None
     packed_verification: bool = False
+    draft_prefix_selection: str = "cpu"
+
+    def __post_init__(self):
+        if self.draft_prefix_selection not in ("cpu", "gpu"):
+            raise ValueError("draft prefix selection must be cpu or gpu")
+        if self.draft_prefix_selection == "gpu" and (
+                not self.packed_verification or not self.adaptive or self.draft_tokens < 1
+                or self.proposal_source != "mtp" or self.history_drafts):
+            raise ValueError("GPU draft prefix selection requires packed adaptive learned speculation")
 
     @property
     def learned(self) -> bool:

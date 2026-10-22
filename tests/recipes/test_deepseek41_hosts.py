@@ -69,5 +69,5 @@ def test_remote_channels_cover_vocab_and_sampling_results_without_pcie(monkeypat
         from ignition.components.speculation import SpeculativeAcceptance
 
         layouts = (PreparedDraftDistribution.broadcast_layout(16),
-                   SpeculativeAcceptance.storage_layout(16, draft_tokens + 1))
+                   SpeculativeAcceptance.broadcast_layout(16, draft_tokens + 1))
         assert calls[0]["gather_bytes"] >= max(packed_broadcast_layout(layout.values())[1] for layout in layouts)

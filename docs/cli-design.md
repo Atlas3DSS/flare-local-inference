@@ -220,6 +220,7 @@ explicit flags take precedence.
 | `--mtp-proposal-source {mtp,copy}` | Where drafts come from: the checkpoint's MTP module, or `copy` for continuations of the request's own history, which loads no draft model. Qwen only. | `mtp` |
 | `--history-drafts` | Also draft continuations copied from the request's own history. Qwen only. | off |
 | `--packed-verification` | Prepare a shared target-row capacity across retained request prefixes. DeepSeek V4.1 only; requires adaptive learned proposals. | Disabled |
+| `--draft-prefix-selection cpu\|gpu` | With `--packed-verification`, `gpu` adds captured proposal/allocation/verification rounds alongside split and joined graphs. Helios compares complete measured round costs and expected emitted-token value. | `cpu` |
 | `--mla-compute-mode {auto,bf16}` | Constrain DeepSeek V4.1 MLA arithmetic while preserving packed KV storage and autotuning among compatible kernels. Selects a separate cached package. | `auto` |
 | `--no-stream-overlap` | Run every concurrent branch (shared experts, projection chains, query chains) serially on the main stream with the same kernels, to diagnose scheduling-dependent faults. Slower. Recipes that run no branches concurrently reject it. | Overlap |
 | `--compile-workers N` | CPU compiler process budget per host, divided among local preparation ranks and bounded by available RAM and device memory. Applies to b12x kernel compilation and complete-forward compilation. Overrides `[preparation] compile_workers`. | Automatic |
