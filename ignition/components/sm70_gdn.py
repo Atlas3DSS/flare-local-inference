@@ -209,9 +209,10 @@ def _replay(Operands, Backing, OffsetBlocks, Rows, Counts, Starts, Fresh, operan
         # The layer's recurrent offset arrives in 16-float blocks: multiplying by the constant keeps the base address
         # provably 16-byte aligned (STRIDE is a 16-divisible constexpr, Backing an aligned argument), so the tile loads
         # and stores vectorise exactly like the decode recurrence's `State + initial * state_stride + elements` and the
-        # compiler assigns the same [8 x 128] layout (four keys per thread, one row per warp). The key sum therefore
-        # lowers to the same intra-thread chain and 32-lane butterfly; a runtime-loaded offset of unknown alignment
-        # gave _replay a one-key-per-thread layout whose sum tree differed from the verification's by 1-2 ulp.
+        # compiler assigns the same [8 x 128] layout (four consecutive keys per thread, one row per warp). The key sum
+        # therefore lowers to the same association: a balanced tree over each thread's four products, then the
+        # 32-lane butterfly. A runtime-loaded offset of unknown alignment gave _replay a one-key-per-thread layout
+        # whose sum tree differed from the verification's by 1-2 ulp.
         base = Backing + row * STRIDE + tl.load(OffsetBlocks + layer).to(tl.int64) * 16
         state = tl.load(base + elements, mask=~fresh, other=0.0)
         layer_operands = Operands + layer.to(tl.int64) * operand_layer_stride

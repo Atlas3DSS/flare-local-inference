@@ -10,6 +10,7 @@ outputs as the candidate-column sequence, and the replay commit reproduces every
 
 import math
 import os
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -161,6 +162,8 @@ def test_cpu_replay_of_stored_operands_equals_every_candidate_column(width, fres
 # CUDA (V100) tests
 # --------------------------------------------------------------------------------------------------------------------
 
+_LAYOUT = re.compile(r"#[a-z_]*[0-9]* = #ttg\.[a-z_]*<\{[^>]*\}>")
+
 cuda = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
                           reason="requires FLARE_RUN_CUDA_TESTS=1 and an assigned V100")
 
@@ -299,6 +302,19 @@ def test_replay_commit_matches_candidate_columns_byte_for_byte(device, width):
                                       operands, torch.tensor(canonical_new, dtype=torch.int64, device=device), counts,
                                       meta_new.query_start_loc, meta_new.fresh, key_heads=KEYS, value_heads=VALUES)
     assert commit.operation.compiled.asm["cubin"] and ".target sm_70" in commit.operation.compiled.asm["ptx"]
+    # The programs that actually run (Triton's launch specialization on alignment/divisibility, not a synthetic
+    # compile) must share one tile layout, so the per-row key sum lowers to the same association in the verification
+    # and in the replay: four consecutive keys per thread, 32 threads per row, one row per warp. A runtime-loaded,
+    # unaligned replay base once gave _replay a one-key-per-thread layout and a different sum tree (1-2 ulp).
+    expected = "sizePerThread = [1, 4], threadsPerWarp = [1, 32], warpsPerCTA = [4, 1], order = [1, 0]"
+    layouts = {}
+    for name, program in (("candidate", sequences[0][0].prepared.programs[1]),
+                          ("replay_mode", sequences[0][1].prepared.programs[1]), ("replay", commit.operation.compiled)):
+        assert program.metadata.name in ("_recurrence", "_replay"), (name, program.metadata.name)
+        layouts[name] = sorted(set(_LAYOUT.findall(program.asm["ttgir"])))
+    assert layouts["candidate"] == layouts["replay_mode"] == layouts["replay"], layouts
+    assert any(expected in layout for layout in layouts["replay"]), layouts["replay"]
+    assert not re.search(r"^\s*(fma|mad)\.", commit.operation.compiled.asm["ptx"], re.M), "replay commit must not fuse"
 
     lengths, fresh = (width, 0, width, width), (False, False, True, False)      # request 1 inactive this round
     columns = [[canonical_old[request] + column for column in range(width)] for request in range(requests)]
@@ -411,3 +427,20 @@ def test_replay_rejections(device):
     with pytest.raises(ValueError, match="views of the supplied pool"):
         PreparedSM70ReplayCommit(pool.backing, {0: pool.states[0].recurrent.clone()}, operands, rows, counts, starts,
                                  fresh, key_heads=KEYS, value_heads=VALUES)
+    # The replay base must be provably 16-float aligned (that alignment is what gives _replay the verification's
+    # tile layout): a recurrent view at an unaligned offset, a pool whose row stride is not a multiple of 16 floats,
+    # and a pool whose base address is not 64-byte aligned are all refused.
+    rec = VALUES * DIM * DIM
+    floats = torch.zeros((6, rec + 32), device=device)
+    with pytest.raises(ValueError, match="aligned"):
+        PreparedSM70ReplayCommit(floats.view(torch.uint8), {0: floats[:, 1:1 + rec].view(6, VALUES, DIM, DIM)}, operands,
+                                 rows, counts, starts, fresh, key_heads=KEYS, value_heads=VALUES)
+    odd = torch.zeros((6, rec + 4), device=device)
+    with pytest.raises(ValueError, match="aligned"):
+        PreparedSM70ReplayCommit(odd.view(torch.uint8), {0: odd[:, :rec].view(6, VALUES, DIM, DIM)}, operands,
+                                 rows, counts, starts, fresh, key_heads=KEYS, value_heads=VALUES)
+    shifted = torch.zeros(6 * (rec + 16) * 4 + 16, dtype=torch.uint8, device=device)[16:].view(6, (rec + 16) * 4)
+    assert shifted.data_ptr() % 64 == 16
+    with pytest.raises(ValueError, match="aligned"):
+        PreparedSM70ReplayCommit(shifted, {0: shifted.view(torch.float32)[:, :rec].view(6, VALUES, DIM, DIM)}, operands,
+                                 rows, counts, starts, fresh, key_heads=KEYS, value_heads=VALUES)
