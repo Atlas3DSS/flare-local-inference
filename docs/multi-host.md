@@ -17,6 +17,14 @@ All three modes use the same native package receiver and CX7 transport. Orbit
 adds placement, saved groups, detached operation, and monitoring. Its controller
 needs no model GPU and can have a different CPU architecture from the nodes.
 
+Graph input uploads use rank-control packets of at most 64 MiB. Larger input
+sets are split on tensor-element boundaries, with the total bytes bounded by
+the prepared input-frame extent. Each peer validates the complete upload set
+before acknowledging readiness; graph replay begins only after every rank is
+ready. Small input sets use one packet. Serving builds must agree on the rank
+control protocol version; changing packet framing does not require package
+re-export.
+
 This guide covers setup and operation. The [Orbit reference](orbit.md) defines
 placement, persistent groups, caching, and the protocol. To create a package,
 use [Ignition preparation](#prepare-the-package); serving an existing package

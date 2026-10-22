@@ -132,27 +132,15 @@ impl TensorParallelExecutor {
         fence: Fence,
     ) -> Result<Fence> {
         let dispatched = Instant::now();
-        let mut payload = Vec::new();
-        for value in [fence.0 as usize, graph, usize::from(grammar), uploads.len()] {
-            number(&mut payload, value);
-        }
-        for upload in uploads {
-            let index = self
-                .local
-                .manifest()
-                .buffers
-                .iter()
-                .position(|buffer| buffer.name == upload.buffer)
-                .ok_or_else(|| invalid("rank upload buffer is absent"))?;
-            for value in [index, upload.offset, upload.bytes.len()] {
-                number(&mut payload, value);
-            }
-            payload.extend_from_slice(upload.bytes);
-        }
         for peer in &mut self.peers {
             peer.channel.nonblocking(false)?;
-            peer.channel.send(PREPARE, &payload)?;
         }
+        wire::prepare(self.local.manifest(), fence, graph, grammar, uploads, |tag, bytes| {
+            for peer in &mut self.peers {
+                peer.channel.send(tag, bytes)?;
+            }
+            Ok(())
+        })?;
         for peer in &mut self.peers {
             if !peer.channel.handoff(READY, HANDOFF_SPIN)?.is_empty() {
                 return Err(invalid("unexpected rank readiness payload"));
@@ -434,19 +422,11 @@ pub unsafe fn serve_rank(
                     }
                     return Ok(());
                 }
-                if tag != PREPARE {
+                if ![PREPARE, PREPARE_MORE].contains(&tag) {
                     return Err(invalid("expected rank prepare or drain"));
                 }
-                let mut reader = Reader(&bytes);
-                let fence = Fence(reader.number()? as u64);
-                let graph = reader.number()?;
-                let grammar = match reader.number()? {
-                    0 => false,
-                    1 => true,
-                    _ => return Err(invalid("invalid grammar flag")),
-                };
-                let owned = uploads(executor.manifest(), &mut reader)?;
-                reader.end()?;
+                let (fence, graph, grammar, owned) =
+                    receive_prepare(&mut channel, executor.manifest(), tag, bytes)?;
                 let uploads: Vec<_> = owned
                     .iter()
                     .map(|upload| Upload {

@@ -179,17 +179,142 @@ fn upload_decoder_rejects_unbounded_or_truncated_fragments() {
     let manifest = super::super::tests::manifest();
     let mut bytes = Vec::new();
     number(&mut bytes, usize::MAX);
-    assert!(uploads(&manifest, &mut Reader(&bytes)).is_err());
+    let mut remaining = manifest.input_frame_bytes;
+    assert!(uploads(&manifest, &mut Reader(&bytes), &mut remaining).is_err());
     bytes.clear();
     for number_value in [1, 3, 8, 8] {
         number(&mut bytes, number_value);
     }
     bytes.extend_from_slice(&7_i64.to_le_bytes());
-    let decoded = uploads(&manifest, &mut Reader(&bytes)).unwrap();
+    let mut remaining = manifest.input_frame_bytes;
+    let decoded = uploads(&manifest, &mut Reader(&bytes), &mut remaining).unwrap();
     assert_eq!(decoded[0].buffer, "tokens");
     assert_eq!(decoded[0].offset, 8);
     assert_eq!(decoded[0].bytes, 7_i64.to_le_bytes());
-    assert!(uploads(&manifest, &mut Reader(&bytes[..bytes.len() - 1])).is_err());
+    let mut remaining = manifest.input_frame_bytes;
+    assert!(uploads(&manifest, &mut Reader(&bytes[..bytes.len() - 1]), &mut remaining).is_err());
+}
+
+#[test]
+fn prepare_packets_preserve_large_and_partial_uploads_on_both_transports() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (server, _) = listener.accept().unwrap();
+    let mut bytes = vec![0x5a; 80 * 1024 * 1024];
+    bytes[..8].copy_from_slice(&1u64.to_le_bytes());
+    let end = bytes.len();
+    bytes[end - 8..].copy_from_slice(&2u64.to_le_bytes());
+    let mut manifest = super::super::tests::manifest();
+    let buffer = &mut manifest.buffers[3];
+    buffer.nbytes = bytes.len() + 16;
+    buffer.shape = vec![buffer.nbytes / 8];
+    manifest.graphs[0].input_bindings[2].nbytes = buffer.nbytes;
+    manifest.input_frame_bytes = 16 + buffer.nbytes;
+    manifest.validate().unwrap();
+    assert_eq!(u64::from_le_bytes(layout(&manifest)[..8].try_into().unwrap()), 4);
+    for (sender, receiver) in [crate::execution::rank_stream::test_pair().unwrap(),
+                               (client.into(), server.into())] {
+        let mut sender = Channel::new(sender).unwrap();
+        let mut receiver = Channel::new(receiver).unwrap();
+        for parts in [1, 2] {
+            std::thread::scope(|scope| {
+                let writer = scope.spawn(|| {
+                    let uploads: Vec<_> = bytes.chunks(bytes.len() / parts).enumerate()
+                        .map(|(index, bytes)| Upload {
+                            buffer: "tokens", offset: 8 + index * 80 * 1024 * 1024 / parts, bytes,
+                        }).collect();
+                    let mut packets = 0;
+                    wire::prepare(&manifest, Fence(7), 0, true, &uploads, |tag, data| {
+                        assert!(data.len() <= 64 * 1024 * 1024);
+                        assert_eq!(tag, if packets == 0 { PREPARE_MORE } else { PREPARE });
+                        packets += 1;
+                        sender.send(tag, data)
+                    }).unwrap();
+                    assert_eq!(packets, 2);
+                    sender.send(DRAIN, &[]).unwrap();
+                });
+                let (tag, packet) = receiver.wait(false).unwrap();
+                let (fence, graph, grammar, owned) =
+                    receive_prepare(&mut receiver, &manifest, tag, packet).unwrap();
+                assert_eq!((fence, graph, grammar), (Fence(7), 0, true));
+                assert!(owned.len() > parts);
+                let mut offset = 8;
+                for upload in &owned {
+                    assert_eq!(upload.buffer, "tokens");
+                    assert_eq!(upload.offset, offset);
+                    assert_eq!(upload.bytes.len() % 8, 0);
+                    assert_eq!(upload.bytes, bytes[offset - 8..offset - 8 + upload.bytes.len()]);
+                    offset += upload.bytes.len();
+                }
+                assert_eq!(offset, bytes.len() + 8);
+                let borrowed: Vec<_> = owned.iter().map(|upload| Upload {
+                    buffer: &upload.buffer, offset: upload.offset, bytes: &upload.bytes,
+                }).collect();
+                super::super::transport::validate_uploads(&manifest, graph, &borrowed, &mut Vec::new()).unwrap();
+                assert!(receiver.receive(DRAIN).unwrap().is_empty());
+                writer.join().unwrap();
+            });
+        }
+    }
+}
+
+#[test]
+fn small_prepare_preserves_one_packet_and_upload_extents() {
+    let manifest = super::super::tests::manifest();
+    let bytes = 7_i64.to_le_bytes();
+    let input = [Upload { buffer: "tokens", offset: 8, bytes: &bytes }];
+    let (sender, receiver) = crate::execution::rank_stream::test_pair().unwrap();
+    let mut sender = Channel::new(sender).unwrap();
+    let mut receiver = Channel::new(receiver).unwrap();
+    wire::prepare(&manifest, Fence(3), 0, false, &input, |tag, data| {
+        assert_eq!(tag, PREPARE);
+        sender.send(tag, data)
+    }).unwrap();
+    let (tag, packet) = receiver.wait(false).unwrap();
+    let (fence, graph, grammar, owned) = receive_prepare(&mut receiver, &manifest, tag, packet).unwrap();
+    assert_eq!((fence, graph, grammar), (Fence(3), 0, false));
+    assert_eq!(owned.len(), 1);
+    assert_eq!(owned[0].offset, 8);
+    assert_eq!(owned[0].bytes, bytes);
+}
+
+#[test]
+fn prepare_continuations_reject_identity_changes_wrong_tags_and_frame_overflow() {
+    let manifest = super::super::tests::manifest();
+    let packet = |fence, graph, grammar, size: usize| {
+        let mut bytes = Vec::new();
+        for value in [fence, graph, grammar, 1, 3, 0, size] {
+            number(&mut bytes, value);
+        }
+        bytes.resize(bytes.len() + size, 0);
+        bytes
+    };
+    for (tag, next, expected) in [
+        (PREPARE, packet(8, 0, 0, 8), "identity differs"),
+        (PREPARE, packet(7, 1, 0, 8), "identity differs"),
+        (PREPARE, packet(7, 0, 1, 8), "identity differs"),
+        (PREPARE, packet(7, 0, 2, 8), "invalid grammar"),
+        (COMMIT, vec![], "expected rank prepare"),
+        (PREPARE, packet(7, 0, 0, 32), "input-frame extent"),
+    ] {
+        let (sender, receiver) = crate::execution::rank_stream::test_pair().unwrap();
+        let mut sender = Channel::new(sender).unwrap();
+        let mut receiver = Channel::new(receiver).unwrap();
+        sender.send(tag, &next).unwrap();
+        let error = receive_prepare(&mut receiver, &manifest, PREPARE_MORE, packet(7, 0, 0, 24))
+            .err().unwrap().to_string();
+        assert!(error.contains(expected), "{error}");
+    }
+    let (sender, receiver) = crate::execution::rank_stream::test_pair().unwrap();
+    let mut receiver = Channel::new(receiver).unwrap();
+    drop(sender);
+    let error = receive_prepare(&mut receiver, &manifest, PREPARE_MORE, packet(7, 0, 0, 8))
+        .err().unwrap().to_string();
+    assert!(error.contains("disconnected"), "{error}");
+    let mut empty = Vec::new();
+    for value in [7, 0, 0, 0] { number(&mut empty, value); }
+    let error = receive_prepare(&mut receiver, &manifest, PREPARE_MORE, empty).err().unwrap().to_string();
+    assert!(error.contains("empty rank prepare"), "{error}");
 }
 
 fn completed(status: i64) -> FrameCompletion {
