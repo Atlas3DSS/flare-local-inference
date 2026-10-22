@@ -1,7 +1,6 @@
-"""The `ignition` preparation command line and development package launcher."""
+"""The `ignition` preparation and development serving command line."""
 
 import argparse
-import re
 from pathlib import Path
 
 from ignition.errors import FlareError
@@ -23,14 +22,13 @@ def _parser() -> argparse.ArgumentParser:
             name, help=summary, description=summary, allow_abbrev=False, add_help=False,
             formatter_class=argparse.RawDescriptionHelpFormatter)
         subparser.add_argument("-h", "--help",
-                               action=RecipeHelp if name in ("run", "export", "serve") else "help",
+                               action=RecipeHelp if name in ("export", "serve") else "help",
                                help="show this help message and exit")
         subparser.set_defaults(handler=handler)
         subparser.add_argument("--config", type=Path, metavar="PATH",
                                help="configuration file (default: ~/.config/flare/config.toml)")
         return subparser
 
-    running = command("run", serve.run, "cache a runtime package and launch Flare")
     exporting = command("export", serve.export, "prepare a native model package")
     exporting.add_argument("--output", type=Path, metavar="FILE",
                            help="destination .safetensors file (default: a snapshot in the package cache)")
@@ -38,41 +36,10 @@ def _parser() -> argparse.ArgumentParser:
                            help="require cached stored-data blobs; export execution resources and metadata")
     exporting.add_argument("--repo-id", metavar="NAMESPACE/REPOSITORY",
                            help="Hugging Face target used to organize local exports (default: recipe target)")
-    for preparing in (running, exporting):
-        _preparation_arguments(preparing)
-    running.add_argument("--publisher-keys", type=Path, action="append", default=[], metavar="PATH",
-                         help="additional publisher profiles passed to Flare; repeatable")
-    running.add_argument("--trust-store", type=Path, metavar="PATH",
-                         help="remembered execution trust passed to Flare (default: ~/.config/flare/trust.toml)")
-    running.add_argument("--verify-weights", action="store_true",
-                         help="verify stored allocation and table contents when Flare loads the package")
-
-    def served_model_name(value):
-        if not value.strip():
-            raise argparse.ArgumentTypeError("served model name must not be empty")
-        return value
-
-    running.add_argument("--served-model-name", type=served_model_name, metavar="ALIAS",
-                         help="replace the package's serving alias; the canonical model ID remains accepted")
-    from .config import parse_memory_limit
-
-    def memory_limit(value):
-        try:
-            return parse_memory_limit(value)
-        except FlareError as error:
-            raise argparse.ArgumentTypeError(str(error)) from error
-
-    # argparse normally recognizes only negative numbers as values. Signed sizes are values
-    # too, so `--memory-limit -30G` accepts the same syntax as `--memory-limit=-30G`.
-    running._negative_number_matcher = re.compile(r"^-\d+(?:\.\d+)?(?:[KMGT](?:iB|B)?)?$", re.IGNORECASE)
-    running.add_argument("--kv-cache-limit", choices=("concurrency", "context", "memory"), default="memory",
-                         help="limit shared KV storage by context times concurrency, one context, or available memory (default: memory)")
-    running.add_argument("--memory-limit", type=memory_limit, metavar="LIMIT",
-                         help="per-GPU serving memory: occupied size (30G), free reserve (-30G), or total fraction (0.8)")
+    _preparation_arguments(exporting)
     serving = command("serve", serve.serve, "prepare in this process and serve over HTTP, with peer ranks on other hosts")
-    for listening in (running, serving):
-        listening.add_argument("--host", metavar="ADDR", help="listening address (default: server.host, else 127.0.0.1)")
-        listening.add_argument("--port", type=int, metavar="N", help="listening port (default: server.port, else 8000)")
+    serving.add_argument("--host", metavar="ADDR", help="listening address (default: server.host, else 127.0.0.1)")
+    serving.add_argument("--port", type=int, metavar="N", help="listening port (default: server.port, else 8000)")
     _preparation_arguments(serving)
     for spanning in (serving, exporting):
         hosts = spanning.add_argument_group("multi-host tensor parallelism")
@@ -130,7 +97,7 @@ def _parser() -> argparse.ArgumentParser:
             raise argparse.ArgumentTypeError(str(error)) from error
         return value
 
-    for publishing in (running, exporting, signing, converting):
+    for publishing in (exporting, signing, converting):
         publishing.add_argument("--shard-size", type=shard_size, metavar="SIZE",
                                 help="maximum payload file size including its header; at most 64G (default: 64G)")
     return parser

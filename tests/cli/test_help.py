@@ -11,7 +11,7 @@ from ignition.errors import UsageError
 from ignition.recipes import aliases, recipes, resolve
 
 
-@pytest.mark.parametrize("command", ["run", "export", "serve"])
+@pytest.mark.parametrize("command", ["export", "serve"])
 def test_mla_arithmetic_flag_defaults_and_override(command):
     arguments = [command, "deepseek-v4.1-flash", *(["--output", "model.safetensors"] if command == "export" else [])]
     default = _parser().parse_args(arguments)
@@ -20,7 +20,7 @@ def test_mla_arithmetic_flag_defaults_and_override(command):
     assert explicit.mla_compute_mode == "bf16"
 
 
-@pytest.mark.parametrize("command", [[], ["run"], ["export"], ["serve"]])
+@pytest.mark.parametrize("command", [[], ["export"], ["serve"]])
 def test_help_lists_every_recipe(command, capsys):
     with pytest.raises(SystemExit) as error:
         main([*command, "--help"])
@@ -33,7 +33,7 @@ def test_help_lists_every_recipe(command, capsys):
     assert "Drafts (default/max)" in output
 
 
-@pytest.mark.parametrize("command", ["run", "export", "serve"])
+@pytest.mark.parametrize("command", ["export", "serve"])
 def test_model_help_explains_step5_limits_and_compression(command, capsys):
     with pytest.raises(SystemExit) as error:
         main([command, "step5-preview-nvfp4", "--help"])
@@ -94,7 +94,7 @@ def test_export_command_accepts_bare_and_explicit_compression(flag):
     assert args.expert_scale_compression == "csf"
     assert (args.prefill_chunk_size, args.mtp_draft_tokens, args.speculative_token_capacity,
             args.max_concurrency) == (4096, 3, 16, 16)
-    assert _parser().parse_args(["run", "step5-preview-nvfp4"]).expert_scale_compression is None
+    assert _parser().parse_args(["export", "step5-preview-nvfp4"]).expert_scale_compression is None
 
 
 def test_invalid_compression_is_rejected_with_the_supported_encoding(capsys):
@@ -109,7 +109,7 @@ def test_mistyped_alias_suggests_step5():
         resolve("step4-preview-nvfp4")
 
 
-@pytest.mark.parametrize("command", ["run", "export", "serve"])
+@pytest.mark.parametrize("command", ["export", "serve"])
 @pytest.mark.parametrize("effort", ["off", "low", "medium", "high", "max"])
 def test_autotune_effort_flag(command, effort):
     args = [command, "deepseek-v4.1-flash"]

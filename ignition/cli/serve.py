@@ -2,13 +2,10 @@
 
 import ipaddress
 import json
-import os
 import socket
 import sys
-import tempfile
 import traceback
 from dataclasses import replace
-from pathlib import Path
 
 from ignition import planning
 from ignition.errors import CapacityError, FlareError, PreparationError, UsageError
@@ -107,73 +104,6 @@ def _publisher(configuration, args, model=None, hub_cache=None):
     except ValueError as error:
         raise UsageError(str(error)) from error
     return replace(signer, license=license)
-
-
-def run(args) -> int:
-    from .runtime import binary, cached_package
-
-    configuration = Configuration.load(args.config)
-    publisher = _publisher(configuration, args)
-    model = resolve_model(configuration, args.model)
-    concurrency = configuration.max_concurrency(model.checkpoint.alias, model.recipe.concurrency,
-                                                args.max_concurrency)
-    plan = derive(configuration, model, Host.discover(), gpus=args.gpus, concurrency=concurrency,
-                  compile_workers=args.compile_workers, tuning_gpus=args.tuning_gpus, autotune_effort=args.autotune_effort,
-                  image_concurrency=args.image_concurrency,
-                  speculation=speculation(args, model, configuration), prefill_chunk=args.prefill_chunk_size,
-                  context_parallel=context_parallel(args, model), stream_overlap=stream_overlap(args, model),
-                  roce_ring=args.roce_ring,
-                  mixed_prefill=args.mixed_prefill, prompt_logprobs=args.prompt_logprobs,
-                  expert_scale_compression=args.expert_scale_compression,
-                  online_mxfp8=args.online_mxfp8, language_model_only=args.language_model_only,
-                  mla_compute_mode=args.mla_compute_mode)
-    runtime = binary()
-    host = configuration.get("server.host", args.host).value
-    port = configuration.get("server.port", args.port).value
-    _address(host, port)
-    with cached_package(configuration, model, plan, args.no_compile, publisher,
-                        configuration.shard_size(getattr(args, "shard_size", None))) as package:
-        if not package.exists():
-            _prepare(args, export_path=package)
-        else:
-            print(f"Load cached runtime package. {package}", flush=True)
-    environment.apply(configuration, plan.gpus, plan.recipe.b12x_environment)
-    command = [str(runtime), "run", str(package), "--gpus", ",".join(str(rank) for rank in range(plan.world_size)),
-               "--host", host, "--port", str(port)]
-    command += configuration.prefix_cache_flags()
-    if args.served_model_name is not None:
-        command += ["--served-model-name", args.served_model_name]
-    if args.kv_cache_limit != "memory":
-        command += ["--kv-cache-limit", args.kv_cache_limit]
-    if args.memory_limit is not None:
-        command += [f"--memory-limit={args.memory_limit}"]
-    for path in args.publisher_keys:
-        command += ["--publisher-keys", str(path)]
-    if publisher.development:
-        from ignition.development import profile
-        command += ["--publisher-keys", str(profile(configuration, publisher))]
-    else:
-        # Before the key is published at the official source, the profile keygen wrote beside the
-        # signing key lets Flare verify the signatures; Flare reports the identity as unverified.
-        profile = Path(configuration.values["publishing"]["signing_key"]).expanduser().parent / "publisher.json"
-        if profile.is_file():
-            command += ["--publisher-keys", str(profile)]
-    command += ["--dangerously-approve-key", publisher.fingerprint.hex(),
-                "--dangerously-accept-publisher", publisher.namespace]
-    if args.trust_store is not None:
-        command += ["--trust-store", str(args.trust_store)]
-    if args.verify_weights:
-        command += ["--verify-weights"]
-    key = configuration.get("server.api_key").value
-    if key:
-        key_file = tempfile.TemporaryFile()
-        key_file.write(key.encode())
-        key_file.flush()
-        descriptor = key_file.fileno()
-        os.set_inheritable(descriptor, True)
-        command += ["--api-key-file", f"/proc/self/fd/{descriptor}"]
-    os.execv(command[0], command)
-    raise AssertionError("execv returned")
 
 
 def export(args) -> int:
@@ -455,7 +385,7 @@ def serve(args) -> int:
     hub_cache = configuration.directory("hub_cache")
     model = resolve_model(configuration, args.model)
     if not model.cached(hub_cache):
-        raise UsageError(f"{model.checkpoint.alias} is not cached; ignition export or run downloads it")
+        raise UsageError(f"{model.checkpoint.alias} is not cached; ignition export downloads it")
     concurrency = configuration.max_concurrency(model.checkpoint.alias, model.recipe.concurrency,
                                                 args.max_concurrency)
     host = Host.discover()

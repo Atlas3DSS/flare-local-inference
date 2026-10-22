@@ -30,9 +30,8 @@ snapshot directory under that repository's local cache namespace. See
 Tensor-parallel packages contain one resource bundle per rank.
 Final packages use a format-4 signed envelope and encrypted cubins and graph
 records. Ignition creates a per-user development signing key when `[publishing]`
-is absent. `ignition run` passes the exact export key and publisher to Flare for
-unattended approval; direct `flare run` needs the corresponding publisher profile
-and first-use acceptance. See [signing and development](cli-design.md#signing-and-local-development).
+is absent. `flare run` needs the corresponding publisher profile and first-use
+acceptance. See [signing and development](cli-design.md#signing-and-local-development).
 Unsigned rank staging is private to preparation and cannot load in Helios.
 
 Flare loads the package files without Python. Helios is a Rust library;
@@ -589,8 +588,8 @@ KV pool by one prepared context; `concurrency` uses one context per selected
 active request, and the default `memory` fills the available budget. Runtime
 `--memory-limit` accepts an occupied size (`30G`), free reserve (`-30G`), or
 fraction of total device memory (`0.8`). It replaces the exported serving
-reserve and includes model resources as well as caches. `ignition run` forwards
-both flags without selecting a different prepared package. See
+reserve and includes model resources as well as caches. Both flags apply at
+package load time without another export. See
 [runtime memory limits](cli-design.md#runtime-memory-limits) for rounding,
 minimum capacities, and integrated-memory accounting. Preparation retains its
 own existing memory policy.
@@ -685,24 +684,21 @@ starting every rank through its host's `flare agent`. See
 [serving across DGX Sparks](multi-host.md) for agent installation, pairing,
 and failures.
 
-## Cached and development serving
+## Package and development serving
 
-For preparation followed immediately by serving, use the cached workflow:
+Export a package, then launch the native server:
 
 ```sh
-.venv/bin/ignition run qwen3.8-flash --gpus 0,1 --port 8001 --verbose
+.venv/bin/ignition export qwen3.8-flash --gpus 0,1 --output qwen.safetensors --verbose
+flare/target/release/flare run qwen.safetensors --gpus 0,1 --port 8001
 ```
 
-`ignition run` caches packages under `paths.package_cache` (default
-`~/.cache/flare/packages`) and replaces its process with Flare via `execv`.
-It finds `flare` on `PATH` first, then `flare/target/release/flare`; check for
-stale installed executables when testing a local build. Changes to preparation
-inputs select a different cache entry. To test a serving-only Rust change,
-rebuild Flare and load an existing compatible package directly. Re-export when
-changing prepared kernels, capacities, or the package format.
+To test a serving-only Rust change, rebuild Flare and load an existing compatible
+package. Re-export when changing prepared kernels, capacities, or the package
+format. Export destinations must not already exist.
 
-Use `.venv/bin/ignition export --help` and `.venv/bin/ignition run --help` for
-preparation flags. See [the runtime package design](runtime-package-design.md)
+Use `.venv/bin/ignition export --help` for preparation flags and
+`flare/target/release/flare run --help` for serving flags. See [the runtime package design](runtime-package-design.md)
 for resource ownership and [the CLI design](cli-design.md) for configuration.
 
 For model development, `ignition serve` hands prepared graphs directly to Helios

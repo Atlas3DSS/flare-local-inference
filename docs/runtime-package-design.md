@@ -24,11 +24,9 @@ how the prepared state leaves the Python process and how it is reconstructed.
 Preparation knowledge, recipes, planning, hub access, the kernel cache,
 compilation, tuning, and capture stay on the preparation host. Ignition imports
 `flare_heliopause` and exports through `ignition/preparation/runtime_package.py`
-in its own Python process. `ignition run` exports a cached package when needed,
-closes the prepared model, and calls `execv` to replace its entire address space
-with the Rust `flare` executable. A cache hit goes directly to `execv`.
-`ignition export` writes the package and exits. Graphs and Python resource owners
-do not cross the executable boundary. Helios has no CPython dependency;
+in its own Python process. `ignition export` writes the package, closes the
+prepared model, and exits. `flare run PACKAGE` loads it in a separate Rust
+process. Graph handles and Python resource owners do not cross the process boundary. Helios has no CPython dependency;
 heliopause owns the CPython hooks and preparation allocator and uses Helios's
 CUDA interfaces. Heliopause has no executable or embedded interpreter. `flare` and Helios are
 the public deployment surface. Ignition and heliopause are internal preparation
@@ -257,11 +255,11 @@ preparation memory.
 
 ### File placement and addressing
 
-`ignition export`, `ignition run`, `ignition sign`, and `ignition convert` pack
+`ignition export`, `ignition sign`, and `ignition convert` pack
 published payloads to at most 64 GB (64,000,000,000 bytes), including the
 4096-byte header. The reader retains its 64 GiB limit for existing packages. The
 `[publishing] shard_size` setting or `--shard-size SIZE` can select a smaller limit.
-Zero is invalid. The package cache key includes the resolved byte count. An
+Zero is invalid. An
 indivisible resource exceeding the limit fails publication; no oversized file is
 published. All model payloads reside outside the primary.
 
@@ -457,7 +455,7 @@ them and relies on identical addresses instead.
 
 ### Preparation rebuild metadata
 
-Exports through `ignition export` and `ignition run` record an optional
+Exports through `ignition export` record an optional
 `ModelIndex.rebuild` manifest in the signed metadata of the primary shard.
 It identifies the recipe, preparation source identity, qualified checkpoint
 repository and revision, tensor-parallel size, concurrency, chunk size,

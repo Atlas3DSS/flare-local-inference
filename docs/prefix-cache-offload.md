@@ -547,8 +547,7 @@ Offload limits interference through bounded work and explicit ownership:
 
 ### 2.11 Configuration and defaults
 
-- Memory size: `[prefix_cache] memory` in `config.toml` and
-  `--prefix-cache-memory SIZE` on `flare run` set it; zero selects no memory
+- Memory size: `flare run --prefix-cache-memory SIZE` sets it; zero selects no memory
   retention, and a nonzero size below the package's checkpoint minimum fails startup.
   Packages with image inputs reserve an ordinary-memory share of
   `min(memory / 8, memory - checkpoint_minimum)`, rounded down to 4 KiB.
@@ -563,20 +562,17 @@ Offload limits interference through bounded work and explicit ownership:
   the default is relied on there.
 - Disk directory: `--prefix-cache-disk DIR` names the directory under which
   the model's record directory, `<identity prefix>-<layout fingerprint>`, is
-  created; `ignition run` passes `[paths] prefix_cache` when it is set. An
-  unwritable directory selects no disk store and says so on the startup line.
-  Until step 13, an unset directory selects no disk store and the built-in
-  value of `[paths] prefix_cache` is empty; the derived defaults are
-  `~/.cache/flare/prefix-cache` for `ignition run` and, for standalone
-  `flare run`, a directory beside the package file named after it with the
+  created. An unwritable directory selects no disk store and says so on the startup line.
+  Until step 13, an unset directory selects no disk store. The derived default
+  for `flare run` is a directory beside the package file named after it with the
   `.safetensors` extension replaced by `.prefix-cache`.
 - Disk limit: one tenth of the free space on the directory's filesystem at
-  startup. `[prefix_cache] disk_limit` and `--prefix-cache-disk-limit SIZE`
-  override; zero selects no disk store and does not create its directory.
+  startup. `--prefix-cache-disk-limit SIZE` overrides it; zero selects no disk
+  store and does not create its directory.
   Checkpoint and CPU input records share this limit and the model's locked
   record directory.
-- Disk transport: staged. `[prefix_cache] disk_transport` and
-  `--prefix-cache-disk-transport` accept `staged` and `direct`; `direct` fails
+- Disk transport: staged. `--prefix-cache-disk-transport` accepts `staged` and
+  `direct`; `direct` fails
   startup until the direct transport exists, and afterwards when the cuFile
   probe rejects the direct path. Once the probe exists, the default becomes
   direct where the probe accepts it.
@@ -792,10 +788,8 @@ on the file format fixed in step 5.
     token count equals the terminal endpoint, and generated tokens agree with
     the no-offload run under the retrieval check in `qualify/host_cache.py`.
 
-12. **Disk configurations.** Directory resolution for `ignition run` and
-    standalone `flare run`, the `[prefix_cache]` and `[paths] prefix_cache`
-    settings in `ignition/cli/config.py`, and forwarding in
-    `ignition/cli/serve.py`. Acceptance: restart the server with the same
+12. **Disk configurations.** Directory resolution and host-retention flags
+    for `flare run`. Acceptance: restart the server with the same
     package and directory, replay the conversation, and observe a disk hit,
     prefill launches limited to the new tokens through `prefill_launches` in
     `qualify/server.py`, and the retrieval check, with the composite and with the

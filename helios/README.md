@@ -9,8 +9,8 @@ or the internal preparation tools.
 The internal `ignition` command imports the `flare_heliopause` CPython extension
 to prepare and export a model in its own process. Heliopause depends on Helios;
 its crate owns the Python bindings and export allocator and builds no executable.
-`ignition run` caches the package, closes the prepared model, and replaces itself
-with `flare` through `execv`. See
+`ignition export` writes the package and closes the prepared model.
+`flare run PACKAGE` loads it in a separate serving process. See
 [runtime packages](../docs/runtime-package-design.md) for the resource contract.
 
 The `server` feature supplies HTTP/SSE and model scheduling. Native package

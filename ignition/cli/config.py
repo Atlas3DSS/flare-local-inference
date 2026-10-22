@@ -5,7 +5,6 @@ resolved setting carries the source that supplied it.
 """
 
 import re
-import math
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -51,24 +50,6 @@ def parse_size(text: str, what: str = "memory size") -> int:
     if match is None:
         raise UsageError(f'{what} {text!r} must be a number with an optional K, M, G, or T suffix, such as "16G"')
     return int(float(match[1]) * (1 << 10 * " KMGT".index((match[2] or " ").upper())))
-
-
-def parse_memory_limit(text: str) -> str:
-    """Validate a native serving limit without importing preparation dependencies."""
-    value = text.strip()
-    number = value.removeprefix("-").strip()
-    size = _SIZE.fullmatch(number)
-    if size and size[2] and size[1].isascii():
-        amount = float(size[1]) * (1 << 10 * " KMGT".index(size[2].upper()))
-        valid = math.isfinite(amount) and 1 <= amount < 1 << 64
-    else:
-        valid = False
-        if not value.startswith("-") and re.fullmatch(r"(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)", value):
-            valid = 0 < float(value) <= 1
-    if not valid:
-        raise UsageError("memory limit must be a positive size (30G), a reserve (-30G),"
-                         " or a fraction greater than zero and at most one (0.8)")
-    return value
 
 
 @dataclass(frozen=True)
@@ -164,19 +145,6 @@ class Configuration:
     def reserve_bytes(self) -> int:
         return parse_size(self.get("memory.reserve").value)
 
-    def prefix_cache_flags(self) -> list[str]:
-        """The `flare run` flags carrying the host prefix cache settings that are set."""
-        flags = []
-        directory = self.directory("prefix_cache")
-        if directory is not None:
-            flags += ["--prefix-cache-disk", str(directory)]
-        for key, flag in (("memory", "--prefix-cache-memory"), ("disk_limit", "--prefix-cache-disk-limit"),
-                          ("disk_transport", "--prefix-cache-disk-transport")):
-            value = self.get(f"prefix_cache.{key}").value
-            if value:
-                flags += [flag, value]
-        return flags
-
     def directory(self, name: str) -> Path | None:
         """Return a `[paths]` entry with the home directory expanded, or None when it is empty."""
         value = self.get(f"paths.{name}").value
@@ -203,16 +171,11 @@ class Configuration:
             "", "[memory]",
             f'# reserve = "{self.get("memory.reserve").value}"'
             "                   # GPU memory left untouched for processes that start later",
-            "", "[prefix_cache]",
-            '# memory = "16G"                 # host RAM for checkpoints and prepared inputs; 0 disables retention',
-            '# disk_limit = "200G"            # record files kept under paths.prefix_cache; 0 disables the disk tier',
-            '# disk_transport = "staged"      # staged, or direct for GPUDirect Storage',
             "", "[paths]",
             f'# hub_cache = "{self.get("paths.hub_cache").value}"',
             f'# kernel_cache = "{self.get("paths.kernel_cache").value}"',
             f'# package_cache = "{self.get("paths.package_cache").value}"',
             '# export_staging = ""            # rank files an export assembles from; empty: beside the package',
-            '# prefix_cache = "~/.cache/flare/prefix-cache"   # checkpoint and input records; empty: no disk tier',
             '# cuda = "/opt/cuda"              # used only when the toolkit is not found in installed packages',
         ]
         self.path.parent.mkdir(parents=True, exist_ok=True)

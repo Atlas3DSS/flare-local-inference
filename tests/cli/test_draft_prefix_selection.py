@@ -9,7 +9,7 @@ from ignition.recipes.declaration import Speculation
 
 
 def settings(*flags):
-    args = _parser().parse_args(["run", "deepseek-v4.1-flash", *flags])
+    args = _parser().parse_args(["export", "deepseek-v4.1-flash", *flags])
     return preparation.speculation(args, resolve("deepseek-v4.1-flash"))
 
 
@@ -65,19 +65,3 @@ def test_rebuild_metadata_records_prefix_selection(monkeypatch):
     legacy = p.RebuildSpeculation.FromString(b"\x08\x05\x10\x01\x1a\x03mtp\x30\x01")
     assert legacy.draft_prefix_selection == ""
     assert legacy.draft_tokens == 5 and legacy.packed_verification
-
-
-def test_gpu_prefix_catalog_selects_a_distinct_package_cache_entry(monkeypatch, tmp_path):
-    from dataclasses import replace
-    from pathlib import Path
-    from types import SimpleNamespace
-    from ignition.cli import runtime
-    from tests.cli.test_planning import derive, SOLO
-
-    cpu = derive(speculation=Speculation(5, packed_verification=True))
-    gpu = replace(cpu, speculation=replace(cpu.speculation, draft_prefix_selection="gpu"))
-    model = SimpleNamespace(checkpoint=SOLO.checkpoints[0], directory=None)
-    monkeypatch.setattr(runtime.metadata, "version", lambda _: "test-version")
-    monkeypatch.setattr(runtime.util, "find_spec", lambda _: SimpleNamespace(origin=str(tmp_path / "__init__.py")))
-    monkeypatch.setattr(Path, "rglob", lambda *args: ())
-    assert runtime.package_key(model, cpu, False) != runtime.package_key(model, gpu, False)

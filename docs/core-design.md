@@ -382,8 +382,8 @@ its b12x operators and FlashInfer sampling supply the prepared GPU computation.
 - Preparation resolves kernels, allocates storage, warms execution paths, and
   captures every supported graph variant.
 - Ignition performs bootstrap, model loading, preparation, and capture, then
-  exports a runtime package. `ignition run` closes the prepared model and replaces
-  its Python process with the Rust Flare executable through `execv`.
+  exports a runtime package and closes the prepared model. `flare run PACKAGE`
+  loads it in a separate Rust serving process.
 - Rust owns all runtime sockets, HTTP/SSE, queues, tokenization, chat-template
   rendering, image preprocessing, grammar advancement, sampling control,
   output decoding, cancellation, and health reporting.
@@ -921,7 +921,7 @@ Preparation proceeds in this order:
    mutations, aliases, forks, and joins. Freeze storage and retain compiled
    kernel owners through native drain.
 8. Validate the catalog and frontend assets, export the runtime package, and
-   close the prepared model. `ignition run` replaces Python with Flare.
+   close the prepared model. `flare run PACKAGE` loads the exported package.
 
 `--no-compile` skips forward compilation for development; b12x preparation,
 tuning, warmup, and graph capture still run. Unresolved selections, failed
@@ -941,9 +941,9 @@ CPython extension used by Ignition. Helios has no dependency on either caller.
 
 ### Process and ownership model
 
-Ignition prepares and exports a model in its own Python process. `ignition run`
-caches the package and calls `execv` to replace Python with the Rust Flare
-executable. Flare loads the package through `NativeResources`, binds listening
+Ignition prepares and exports a model in its own Python process.
+`flare run PACKAGE` starts a separate Rust process, loads the package through
+`NativeResources`, binds listening
 sockets, and owns the server lifetime and request paths. The
 [runtime-package design](runtime-package-design.md) specifies storage, kernel,
 graph, and frontend reconstruction.

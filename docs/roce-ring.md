@@ -156,8 +156,8 @@ Run the corresponding command on each peer from its checkout root:
 .venv/bin/ignition join maxwell:29630 --rank 3 --ranks 4
 ```
 
-Rank zero sends the `--roce-ring` setting to peers. The plan records `roce_ring`,
-and the package cache key includes it. `ignition serve` also accepts the option
+Rank zero sends the `--roce-ring` setting to peers. The plan records `roce_ring`.
+`ignition serve` also accepts the option
 with `--ranks` for development without package export.
 
 Provision the shared preparation token described in the multi-host guide.

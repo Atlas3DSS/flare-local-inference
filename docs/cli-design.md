@@ -36,7 +36,7 @@ Anthropic Messages, stateless Responses, authentication, and client configuratio
 - **Estimate roughly, allocate from the device.** Before weights load, Flare
   estimates memory from the recipe's declared sizes, only to choose GPUs and to
   refuse a model that cannot fit. Allocation follows the memory the device has
-  free during preparation, and `run` prints what it allocated. An estimate that
+  free during preparation, and `flare run` prints what it allocated. An estimate that
   does not fit fails before any socket opens, with the numbers and the settings
   that would make it fit.
 - **No environment variables.** Flare reads none, with one exception:
@@ -55,14 +55,13 @@ preparation environment with `uv sync --locked --extra prepare --extra test`,
 then use `.venv/bin/ignition` or `.venv/bin/python -m ignition`.
 
 ```
-ignition run     [MODEL] [flags]     cache a runtime package and launch Flare
 ignition export  [MODEL] [--output FILE] [flags]  prepare a native model package
 ignition convert FILE [--output FILE] [flags]   convert a package to shared blobs
 ```
 
 Every command has exactly one name. `MODEL` is a recipe alias, a Hugging Face
 repository id with an optional `@revision`, or a local checkpoint directory;
-with no `MODEL`, `run` and `export` use `defaults.model` from the configuration file and
+with no `MODEL`, `export` and `serve` use `defaults.model` from the configuration file and
 fail with a usage error if it is unset.
 
 `ignition --help` and preparation-command help list every declared model alias,
@@ -81,12 +80,8 @@ Flare banner on a terminal and reports model loading through Helios.
 Ignition performs weight loading, tuning, compilation, warmup, and capture. It writes compiled CUDA modules,
 allocation contents, graph descriptions, and frontend assets to content-addressed
 payload blobs with a metadata-only `.safetensors` primary. Every destination must
-be unused. It
-then exits without opening a listener. `run` caches the resulting package in
-`paths.package_cache` and replaces its Python process with the Rust `flare` executable. Cache keys
-include checkpoint identity, preparation settings, dependency versions, and
-preparation source contents, signing-key fingerprint, publisher namespace,
-source URL, and the resolved shard size. Qwen, GLM, and DeepSeek provide native package storage support.
+be unused. It then exits without opening a listener. Launch the exported package
+with `flare run PACKAGE`. Qwen, GLM, and DeepSeek provide native package storage support.
 Tensor-parallel packages contain one resource bundle per selected GPU and load
 in one process with one execution thread per rank. API keys are excluded from
 the package.
@@ -181,28 +176,23 @@ storage according to those selections and available GPU memory.
 
 ### 3.1 Ignition command-line flags
 
-`run` accepts the following flags. `export` accepts the same preparation flags,
-accepts `--output FILE` and defaults to a local snapshot; it excludes `--host` and `--port`.
+`export` and `serve` accept the preparation flags below. `export` also accepts
+`--output FILE` and defaults to a local snapshot. Listener flags apply only to
+`serve`; native package serving uses `flare run` flags.
 
 | Flag | Meaning | Default |
 |---|---|---|
 | `MODEL` | Alias such as `qwen3.8-flash`, Hugging Face repository id such as `org/name` or `org/name@revision`, or checkpoint directory | `defaults.model` |
 | `--gpus LIST` | GPU indices as NVML enumerates them: `0`, `0,1`, `0-3`. The count is the tensor-parallel size and must be one the recipe supports. | First GPUs that fit |
 | `--max-concurrency N` | Maximum simultaneously active requests, 1 through the recipe's limit | `defaults.max_concurrency`, else the recipe default |
-| `--host ADDR` | Listening address. `run` only. | `server.host`, else `127.0.0.1` |
-| `--port N` | Listening port. `run` only. | `server.port`, else `8000` |
-| `--served-model-name ALIAS` | `run` only: replace the serving alias when Flare loads the package | Package alias |
+| `--host ADDR` | Listening address. `serve` only. | `server.host`, else `127.0.0.1` |
+| `--port N` | Listening port. `serve` only. | `server.port`, else `8000` |
 | `--verbose` | Per-phase detail on stderr | off |
-| `--kv-cache-limit concurrency\|context\|memory` | `run` only: pass the shared KV-pool ceiling to Flare without changing preparation | `memory` |
-| `--memory-limit LIMIT` | `run` only: pass an occupied size (`30G`), free reserve (`-30G`), or total-memory fraction (`0.8`) to Flare | Package serving reserve |
 | `--config PATH` | Configuration file | `~/.config/flare/config.toml` |
-| `--shard-size SIZE` | Hard payload-file limit for export/run/sign/convert, at most 64 GiB | `[publishing] shard_size`, else `64G` |
+| `--shard-size SIZE` | Hard payload-file limit for export/sign/convert, at most 64 GiB | `[publishing] shard_size`, else `64G` |
 | `--no-weights` | Export only when exact stored-data blobs are cached | Off |
 | `--repo-id NAMESPACE/REPOSITORY` | Export repository namespace for the default local snapshot path | Recipe `export_repository` |
 | `--official-source URL` | Published repository URL under the configured publisher namespace | `[publishing] official_source` |
-| `--publisher-keys PATH` | Additional publisher profiles passed to Flare; repeatable, `run` only | Embedded keys plus the local development profile when applicable |
-| `--trust-store PATH` | Remembered execution trust passed to Flare; `run` only | `~/.config/flare/trust.toml` |
-| `--verify-weights` | Check the stored allocation and table ranges of the ranks served; `run` only | off |
 
 Preparation flags are grouped by capacity/compression, speculative decoding,
 and advanced options in `--help`. Recipe values apply when flags are omitted;
@@ -212,7 +202,7 @@ explicit flags take precedence.
 |---|---|---|
 | `--prefill-chunk-size N` | Most prompt tokens processed in one prefill step, a multiple of 64. A larger chunk reaches a long prompt's first token sooner; while it runs, other active requests wait for their next token. Command line only. | The recipe's chunk |
 | `--mixed-prefill` | Capture mixed prompt/decode graphs alongside separate graphs. Supported by Qwen with concurrency of at least two, with or without speculation. Command line only; existing packages retain their captured catalog. | Disabled |
-| `--expert-scale-compression [MODE]` | Losslessly compress routed-expert scales: DeepSeek V4.1 backbone and DSpark MXFP4 scales, or Step-5 NVFP4 scales including BF16 experts converted to W4A16. `csf` is a compressed scale encoding expanded during execution. Estimated resident GPU weight savings are 3% for DeepSeek V4.1 and 6% for Step-5; actual savings depend on encoded scales. A bare flag selects `csf`; `--expert-scale-compression csf` also works. Retain compressed scales and share expansion scratch across serial layers. Selects a separate cached package. | Native scales |
+| `--expert-scale-compression [MODE]` | Losslessly compress routed-expert scales: DeepSeek V4.1 backbone and DSpark MXFP4 scales, or Step-5 NVFP4 scales including BF16 experts converted to W4A16. `csf` is a compressed scale encoding expanded during execution. Estimated resident GPU weight savings are 3% for DeepSeek V4.1 and 6% for Step-5; actual savings depend on encoded scales. A bare flag selects `csf`; `--expert-scale-compression csf` also works. Retain compressed scales and share expansion scratch across serial layers. | Native scales |
 | `--no-mtp` | Disable multi-token speculation: load no draft model, keep no verification rows, and decode one token per step. | Speculation on |
 | `--mtp-draft-tokens N` | Most draft tokens verified in one round; see `MODEL --help` for its limit. Verification capacities cover counts from 0 through `N` within the speculative token capacity. Retained and packed proposal producers execute the full configured block; verification adapts using measured cost and historical acceptance or native proposal confidence. Zero retains draft state with width-one execution; `--no-mtp` excludes draft weights and state. | Recipe declaration |
 | `--speculative-token-capacity N` | Maximum target-token rows in wider speculative graphs; width one covers every request bucket. Applies to every speculative recipe. | Larger of padded concurrency and maximum verification width |
@@ -221,20 +211,20 @@ explicit flags take precedence.
 | `--history-drafts` | Also draft continuations copied from the request's own history. Qwen only. | off |
 | `--packed-verification` | Prepare a shared target-row capacity across retained request prefixes. DeepSeek V4.1 only; requires adaptive learned proposals. | Disabled |
 | `--draft-prefix-selection cpu\|gpu` | With `--packed-verification`, `gpu` adds captured proposal/allocation/verification rounds alongside split and joined graphs. Helios compares complete measured round costs and expected emitted-token value. | `cpu` |
-| `--mla-compute-mode {auto,bf16}` | Constrain DeepSeek V4.1 MLA arithmetic while preserving packed KV storage and autotuning among compatible kernels. Selects a separate cached package. | `auto` |
+| `--mla-compute-mode {auto,bf16}` | Constrain DeepSeek V4.1 MLA arithmetic while preserving packed KV storage and autotuning among compatible kernels. | `auto` |
 | `--no-stream-overlap` | Run every concurrent branch (shared experts, projection chains, query chains) serially on the main stream with the same kernels, to diagnose scheduling-dependent faults. Slower. Recipes that run no branches concurrently reject it. | Overlap |
 | `--autotune-effort off\|low\|medium\|high\|max` | Kernel search effort. Off uses heuristics; low applies broad exclusions; medium balances search cost; high retains only conservative exclusions; max enumerates every declared legal candidate. Overrides `[preparation] autotune_effort`. | Medium |
 | `--compile-workers N` | CPU compiler process budget per host, divided among local preparation ranks and bounded by available RAM and device memory. Applies to b12x kernel compilation and complete-forward compilation. Overrides `[preparation] compile_workers`. | Automatic |
 | `--tuning-gpus LIST` | Local kernel-tuning GPUs. Start with the serving GPU list, then append complete replicas of that TP group on matching hardware. Serving TP size stays fixed. Command line only; cannot be combined with multi-host `--ranks`. | Serving GPUs |
 | `--no-compile` | Development only: capture graphs without compiling forwards. A recipe never sets it. | off |
-| `--online-mxfp8` | Store the recipe's eligible BF16 projections as MXFP8 while loading (Kimi K3: KDA projections, MLA latent/gate, query and output projections, shared experts, MoE latent down/up projections, and DSpark draft context, outputs and MLPs), trading checkpoint precision for decode bandwidth. MLA's batched key/value projections retain BF16. Recipes that name no such projections reject it. Selects a separate cached package. | Checkpoint precision |
-| `--language-model-only` | Prepare no vision encoder and serve text only, as vLLM's flag of the same name; requests with images are rejected and the encoder's weights, scratch, and graphs become KV pages. Recipes without a separable encoder reject it. Selects a separate cached package. | The recipe's image support |
+| `--online-mxfp8` | Store the recipe's eligible BF16 projections as MXFP8 while loading (Kimi K3: KDA projections, MLA latent/gate, query and output projections, shared experts, MoE latent down/up projections, and DSpark draft context, outputs and MLPs), trading checkpoint precision for decode bandwidth. MLA's batched key/value projections retain BF16. Recipes that name no such projections reject it. | Checkpoint precision |
+| `--language-model-only` | Prepare no vision encoder and serve text only, as vLLM's flag of the same name; requests with images are rejected and the encoder's weights, scratch, and graphs become KV pages. Recipes without a separable encoder reject it. | The recipe's image support |
 
 The speculation flags exist on the command line only. `--no-mtp` excludes the
 others. The `Select GPUs.` startup line states the settings in effect: `up to
 N draft tokens` while verification adapts, `exactly N draft tokens` when it is
 fixed, and `branches serialized` under `--no-stream-overlap`. That flag is also
-recorded in the plan and the package cache key; it changes graph scheduling,
+recorded in the plan and the exported graph catalog; it changes graph scheduling,
 not kernel selection, so its packages share tuned kernels with overlapped ones.
 
 DeepSeek V4.1 can share verification rows between requests with
@@ -480,8 +470,7 @@ embedded aliases.
 `--served-model-name` changes the name advertised by `/v1/models` and accepted
 for requests. It replaces the package aliases; the canonical model ID remains
 accepted and appears as the model card's `root`. The override does not modify
-the package, change its identity, or select a different cached package in
-`ignition run`. Both launchers accept numeric IPv4 and IPv6 addresses through
+the package or change its identity. `flare run` accepts numeric IPv4 and IPv6 addresses through
 `--host`; use an unbracketed IPv6 address such as `--host ::1 --port 8001`.
 The combined `--bind` flag has been removed.
 
@@ -541,7 +530,7 @@ Startup reports the requested policies, loaded footprint, per-rank cache
 budgets, allocated KV tokens, and whether memory, the selected KV ceiling, or
 prepared virtual extents limited the pool. TP ranks agree on a capacity each
 can back. Runtime memory flags reuse the same prepared package and do not
-alter preparation, captured graphs, or the package cache key. They are absent
+alter preparation or captured graphs. They are absent
 from `ignition export` and the diagnostic `ignition serve` commands.
 
 ### Downloading published packages
@@ -702,7 +691,7 @@ accepted. Runtime publisher profiles contain only the verification key.
 identity field requires all three identity fields. `[publishing] shard_size` may
 be configured independently and does not select a production identity.
 
-`shard_size = "64G"` is the hard payload-file limit; export/run/sign/convert
+`shard_size = "64G"` is the hard payload-file limit; export/sign/convert
 accept `--shard-size SIZE` up to 64 GiB, including each file's header. Zero and
 limits at or below 4096 bytes are invalid. A resource larger than the limit fails
 export. The primary contains metadata only; all resources reside in immutable
@@ -725,12 +714,7 @@ this lookup, and `--trust-store` does not relocate it. A missing default profile
 leaves verification to embedded or remembered keys; an invalid profile is an
 error. The key must match the package's signer and pass signature verification.
 
-`ignition run` supplies Flare with the development profile when applicable and
-automatically passes the exact fingerprint and namespace from its export
-credentials through Flare's two dangerous-approval arguments. It does not infer
-approval from the cached package's claimed publisher. An unrecognized key still
-prints its first-use warning; subsequent loads remember that exact pair. There
-is no unsigned runtime mode and no blanket approval for development keys.
+There is no unsigned runtime mode and no blanket approval for development keys.
 
 Publisher identity, key, source, license, and verification disclosures appear
 only on first acceptance of a signing-key fingerprint and publisher namespace.
@@ -775,14 +759,14 @@ namespace. `flare trust revoke FINGERPRINT --trust-store PATH` removes acceptanc
 omitting the path uses the default trust store. No official release key is
 required for independent preparation and signing: a publisher is verified by
 the `publisher.json` at its official source, as [production signing](signing.md)
-describes. `ignition run` with a production key also passes the `publisher.json`
-beside the signing key when present, so a package loads for testing before the
-key is published.
+describes. To test a production-signed package before publishing its key, pass
+the `publisher.json` beside the signing key to `flare run --publisher-keys PATH`.
 
 ### 3.3 Configuration file
 
-`~/.config/flare/config.toml`. All keys optional. Written on first `run` with
+`~/.config/flare/config.toml`. All keys optional. Written on first export with
 the resolved values present as comments.
+`[server]` configures `ignition serve`; pass native serving options to `flare run`.
 
 ```toml
 [server]
@@ -906,43 +890,20 @@ decoded-source windows are accounted for separately at startup.
 
 ## 5. Command behavior
 
-### 5.1 `ignition run`
+### 5.1 `ignition export`
 
-1. Resolve `MODEL`, discover GPUs through NVML, and derive the memory plan.
-   Validate the requested listener address. The selected GPU count determines
-   the number of rank bundles.
-2. Select a package cache entry from the checkpoint, preparation settings,
-   dependencies, and preparation sources, holding a lock through publication.
-3. On a cache miss, import `flare_heliopause`, download missing weights, prepare
-   the model, export all resources, and close the prepared model. These steps
-   run in one Python process per rank. Preparation failures leave no published package.
-   A cache hit skips preparation entirely.
-4. Apply the selected GPU visibility and replace ignition with `flare run PACKAGE`.
-   Pass the listener address and an anonymous file descriptor for the API key.
-5. Flare loads the model through Helios and starts HTTP. The completed
-   `Start server.` row reports the listening URL.
-
-Preparation records cache layouts and maximum virtual extents. Helios sizes
-physical row and page counts from selected execution capacities and free
-memory after graph upload. Insufficient memory or a recorded-address collision
-fails native startup.
-
-Serving prints no per-request output. SIGINT and SIGTERM stop admission,
-give active responses five seconds to finish, drain GPU work, and exit 0.
-During preparation either signal ends Ignition immediately.
-
-Preparation exit codes: 0 success, 2 usage, 3 fetch, 4 capacity, 5 preparation.
-Native startup and runtime failures exit 1.
-
-### 5.2 `ignition export`
-
-Resolve the model and preparation settings as for `run`, then prepare and write
-a runtime package in a unique local snapshot under the recipe's export repository.
+Resolve `MODEL`, discover GPUs through NVML, and derive the preparation plan.
+Download missing checkpoint weights, then prepare and write a runtime package
+in a unique local snapshot under the recipe's export repository.
 `--output FILE` selects another destination, appending `.safetensors` if needed;
 the destination must not exist. `--no-weights` requires exact cached stored-data
 blobs. Export closes the prepared model and exits without starting a listener.
+Preparation failures leave no published package.
 
-### 5.3 `flare run`
+SIGINT and SIGTERM end preparation immediately. Preparation exit codes are
+0 for success, 2 for usage, 3 for fetch, 4 for capacity, and 5 for preparation.
+
+### 5.2 `flare run`
 
 Animate the Flare banner during loading on a terminal. Validate the package,
 initialize GPUs, allocate model memory, load weights and compiled kernels,
@@ -964,7 +925,7 @@ Redirected output contains plain start and completion lines without animation.
 After startup, a usable terminal switches to the live metrics dashboard.
 Shutdown restores the terminal after draining active execution.
 
-### 5.4 `flare inspect`
+### 5.3 `flare inspect`
 
 Print a compact model summary: identity and publisher verification, architecture,
 served names, context and execution capacities, cache history kinds, speculation,
@@ -1015,7 +976,7 @@ Inspection supports model index versions 4 and 5 without re-export.
 
 ## 6. Capacity errors
 
-An estimate that does not fit fails `run` before loading weights with the
+An estimate that does not fit fails `ignition export` before loading weights with the
 requirement, what is available, and the options that satisfy it:
 
 ```
@@ -1033,7 +994,7 @@ a `reserve`, another process on the GPU, or a model that does not fit at all,
 because pages and the prefix cache otherwise shrink to supply.
 
 The estimate is rough. A model near the limit can pass it and exhaust GPU
-memory during preparation; `run` reports that as a capacity error too, quoting
+memory during preparation; `ignition export` reports that as a capacity error too, quoting
 the failed allocation.
 
 The same form applies to GPU selection, "needs 2 GPUs with 95 GiB; 1
@@ -1044,8 +1005,8 @@ it.
 ## 7. Caches and the first run
 
 Compiled kernels and tuning selections live under `[paths].kernel_cache`,
-keyed by checkpoint revision, recipe version, GPU, and settings. A second
-`run` with the same settings neither compiles nor tunes. Changing
+keyed by checkpoint revision, recipe version, GPU, and settings. Repeating
+`ignition export` reuses compatible tuning selections and compilation artifacts. Changing
 `--max-concurrency`, `--gpus`, or the speculation flags can add graph shapes
 and incur partial tuning.
 
@@ -1058,13 +1019,13 @@ Set `kernel_cache = "/data/flare-kernels"` in the configuration's `[paths]` tabl
 to move preparation caches together. Keep the default unless another storage
 location is needed.
 
-`run` prints checkpoint resolution, selected GPUs, preparation settings, and
+`ignition export` prints checkpoint resolution, selected GPUs, preparation settings, and
 each phase's counts and elapsed time. The phases include weight loading,
 `Prepare embedding tables`, kernel tuning, forward compilation, KV allocation,
-graph capture, and package export. A package cache hit skips preparation.
+graph capture, and package export.
 
-After export, `run` replaces Ignition with Flare, which displays its banner
-and native loading stages.
+After export, launch `flare run PACKAGE` to display the banner and native
+loading stages without preparation.
 
 Preparation phases come from `ignition.progress.phase`; on a terminal each shows an activity
 bar while it runs. `Select GPUs.` names the GPUs by index, followed by
@@ -1166,7 +1127,7 @@ identities, encrypted sessions, and signed grants without additional
 configuration. Serving distribution uses plain TCP and normal package trust.
 See [multi-host serving](multi-host.md) and [RoCE ring transport](roce-ring.md).
 
-`--prompt-logprobs` is an opt-in preparation flag for `run`, `export`, and
+`--prompt-logprobs` is an opt-in preparation flag for `export` and
 development `serve`. It captures separate scored prefill graphs; default exports
 contain no prompt scoring storage or graphs. See [the logprob contract](logprobs-design.md#prompt-scoring).
 

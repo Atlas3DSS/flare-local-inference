@@ -97,21 +97,6 @@ def test_mla_arithmetic_is_explicit_plan_metadata_without_changing_capacity():
         planning.fit(SOLO, SOLO.checkpoints[0], (gpu(0, 95),), mla_compute_mode="bf16", **options)
 
 
-def test_explicit_mla_arithmetic_selects_a_distinct_package_cache_entry(monkeypatch, tmp_path):
-    from types import SimpleNamespace
-    from pathlib import Path
-    from ignition.cli import runtime
-
-    auto = derive()
-    bf16 = replace(auto, mla_compute_mode="bf16")
-    model = SimpleNamespace(checkpoint=SOLO.checkpoints[0], directory=None)
-    monkeypatch.setattr(runtime.metadata, "version", lambda _: "test-version")
-    monkeypatch.setattr(runtime.util, "find_spec", lambda _: SimpleNamespace(origin=str(tmp_path / "__init__.py")))
-    monkeypatch.setattr(Path, "rglob", lambda *args: ())
-    assert runtime.package_key(model, auto, False) == runtime.package_key(model, replace(auto), False)
-    assert runtime.package_key(model, auto, False) != runtime.package_key(model, bf16, False)
-
-
 def test_image_concurrency_defaults_and_explicit_capacity():
     vision = replace(SOLO, max_images=4)
     settings = dict(concurrency=32, reserve_bytes=0, speculation=None, selected=None)

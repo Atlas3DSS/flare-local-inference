@@ -60,12 +60,10 @@ speculative_token_capacity = 8
     assert configuration.model_setting("qwen3.8-flash", "speculative_token_capacity", None, 16).value == 16
 
 
-def test_prefix_cache_settings_validate_and_forward(tmp_path):
+def test_prefix_cache_settings_validate(tmp_path):
     configuration = load(tmp_path, "[prefix_cache]\nmemory = \"4G\"\ndisk_transport = \"direct\"\n")
     assert configuration.get("prefix_cache.memory") == Setting("4G", "[prefix_cache]")
     assert configuration.directory("prefix_cache") is None
-    assert configuration.prefix_cache_flags() == ["--prefix-cache-memory", "4G", "--prefix-cache-disk-transport", "direct"]
-    assert load(tmp_path, "").prefix_cache_flags() == []
     with pytest.raises(UsageError, match="prefix_cache disk_limit"):
         load(tmp_path, "[prefix_cache]\ndisk_limit = \"lots\"\n")
     with pytest.raises(UsageError, match="disk_transport"):
