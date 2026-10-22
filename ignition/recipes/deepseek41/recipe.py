@@ -46,8 +46,10 @@ RECIPE = Recipe(
         stored_bytes=510_286_023_000, device_bytes=306_557_453_640, draft_bytes=7_932_874_632,
         # Estimate half of backbone scale bytes saved; retain the full draft budget.
         scale_compressed_device_bytes={"csf": 298_063_988_040}),),
-    context=1048576, page_tokens=128, concurrency=4, max_concurrency=64, prefill_chunk=4096,
-    speculation=Speculation(draft_tokens=5), max_draft_tokens=7, max_images=4, image_bytes=32 << 20,
+    context=1048576, page_tokens=128, concurrency=32, max_concurrency=64, prefill_chunk=4096,
+    speculation=Speculation(draft_tokens=5, token_capacity=128, packed_verification=True,
+                            draft_prefix_selection="gpu"),
+    max_draft_tokens=7, max_images=4, image_bytes=32 << 20,
     # Single-row decode runs the shared expert on an auxiliary stream.
     stream_overlap=True,
     ranks=MappingProxyType({4: RankCosts(3_043_840, 113_920, 8 << 30)}),

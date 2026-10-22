@@ -107,7 +107,3 @@
 [ ] Investigate DeepSeek V4.1 grouped MoE CSF plan selection with representative
     routes: compare inline reconstruction and separate expansion in complete
     graphs before adding a preparation override. See performance-work.md.
-
-[ ] Preserve packed verification token budgets in ignition/direct/scheduler.py
-    graph keys. Equal batch and verification widths can have different token
-    capacities; selecting one must bound the sum of packed query lengths.

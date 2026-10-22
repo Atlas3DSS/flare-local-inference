@@ -195,7 +195,8 @@ fn validate_inner(config: &ModelConfig, manifest: &ExecutionManifest) -> Result<
             }
             if packed_round && !split {
                 select(config, manifest, GraphKind::Speculative, batch, 1, 0, SamplingMode::General)?;
-                if !manifest.graphs.iter().any(|g| g.kind == GraphKind::PackedSpeculative && g.batch_capacity == batch) {
+                if batch * 2 <= config.speculative_token_capacity
+                    && !manifest.graphs.iter().any(|g| g.kind == GraphKind::PackedSpeculative && g.batch_capacity == batch) {
                     return Err(format!("packed speculative catalog lacks batch {batch}").into());
                 }
                 continue;
@@ -210,9 +211,12 @@ fn validate_inner(config: &ModelConfig, manifest: &ExecutionManifest) -> Result<
     }
     if !config.speculative_widths.is_empty() {
         for batch in batches(config) {
+            if packed_round && !split {
+                continue;
+            }
             if !manifest.graphs.iter().any(|graph| {
                 graph.kind
-                    == if packed_round && !split { GraphKind::PackedSpeculative } else if split {
+                    == if split {
                         GraphKind::Verification
                     } else {
                         GraphKind::Speculative

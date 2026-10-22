@@ -293,25 +293,43 @@ MXFP4 expert scales during loading. Compressed scales stay resident, with shared
 expansion buffers reused by serial expert layers. Planning conservatively estimates
 3% less resident weight storage; loading measures the actual allocation. Omitting
 the flag preserves native scales.
-DSpark is its learned draft method, defaulting to five draft tokens per round
-with separate proposal and verification graphs, using native conditional
-confidence and measured execution cost for adaptive verification. Image preprocessing
-preserves the checkpoint's row-major patch layout and 1024-token image limit.
-During preparation, `--packed-verification` shares physical target rows between
-requests while retaining separate proposal and verification graphs.
-The advanced option `--draft-prefix-selection gpu` additionally captures
-proposal/allocation/verification as one round alongside separate proposal,
-verification, and joined speculative graphs. Its default is `cpu`. GPU selection requires
-`--packed-verification` and adaptive learned speculation.
-`--speculative-token-capacity` bounds physical target rows; for example,
-`--max-concurrency 32 --mtp-draft-tokens 5 --packed-verification --speculative-token-capacity 128 --draft-prefix-selection gpu`
-prepares target capacities through 128 rows and one five-draft producer per batch.
-The host still owns admission and cache reservations. The captured round chooses
-actual prefixes on the GPU, then returns one target completion. The scheduler
-compares each captured round's complete measured cost and expected emitted-token
-value against joined, split, and target-only execution. Prefix limits include
-output and context budgets, grammar constraints, and host-stop barriers. Physical
-target padding executes at the captured row capacity.
+DSpark is its learned draft method. Preparation defaults to five draft tokens,
+32 concurrent requests, a 4096-token prefill chunk, and a 128-row physical target
+capacity. Positive-depth DSpark uses packed GPU prefix selection automatically.
+Each captured round contains proposal generation, GPU prefix allocation, target
+verification, and accepted-state commit. Width-one graphs retain draft context
+without generating proposals. Ordinary graphs remain available for native
+`--mtp-draft-tokens 0`; `--no-mtp` omits draft weights during preparation.
+Standalone proposal, verification, and joined wider speculative graphs are not
+registered in the packed catalog. Image preprocessing preserves the checkpoint's
+row-major patch layout and 1024-token image limit.
+
+`--speculative-token-capacity` bounds physical target rows. At the default draft
+depth, packed rounds retain a logical verification width of six tokens per
+request, including its pending input. Their physical target capacities are:
+
+| Captured request capacity | Physical target rows |
+|---|---|
+| 1 | 2, 3, 4, 5, 6 |
+| 2 | 4, 6, 8, 10, 12 |
+| 4 | 8, 12, 16, 20, 24 |
+| 8 | 16, 24, 32, 40, 48 |
+| 16 | 32, 48, 64, 80, 96 |
+| 32 | 64, 96, 128 |
+
+The default catalog contains 28 combined packed rounds and six width-one
+rounds. A physical capacity equal to request capacity uses the width-one graph.
+The 128-row cap limits captured target work and storage; at batch 32 it permits
+four target rows per request on average, while proposal generation still produces
+five drafts per request. Raising the cap permits longer aggregate verification
+prefixes and increases preparation and graph resources.
+
+The host owns admission, cohort membership, and cache reservations. The captured
+round assigns prefixes from native proposal confidence and reports one terminal
+completion. Native scheduling compares complete measured round cost and expected
+emitted-token value across the packed and width-one candidates. Prefix limits
+include output and context budgets, grammar constraints, and host-stop barriers.
+Physical target padding executes at the captured row capacity.
 Its 188.8 GiB of Engram tables are stored once in the package, partitioned by
 hash head across TP ranks. Heads are assigned round-robin, so each TP4 rank
 owns two bigram, two trigram, and two four-gram heads, with their projection
@@ -333,12 +351,12 @@ Select four available GPUs explicitly:
 
 ```sh
 .venv/bin/python -m ignition export deepseek-v4.1-flash --gpus 0,4,6,8 \
-  --max-concurrency 4 --mtp-draft-tokens 5 --prefill-chunk-size 4096 \
-  --expert-scale-compression csf \
-  --output /data/flare-runtime/deepseek-v41-flash-1017-csf-tp4-c4-dspark5.safetensors --verbose
+  --max-concurrency 32 --mtp-draft-tokens 5 --prefill-chunk-size 4096 \
+  --speculative-token-capacity 128 --expert-scale-compression csf \
+  --output /data/flare-runtime/deepseek-v41-flash-1017-csf-tp4-c32-dspark5.safetensors --verbose
 
 ./flare/target/release/flare run \
-  /data/flare-runtime/deepseek-v41-flash-1017-csf-tp4-c4-dspark5.safetensors \
+  /data/flare-runtime/deepseek-v41-flash-1017-csf-tp4-c32-dspark5.safetensors \
   --gpus 0,4,6,8 --host 127.0.0.1 --port 8001
 ```
 
@@ -346,7 +364,7 @@ For four DGX Sparks with one GPU per host, replace `--gpus 0,4,6,8` during
 export with `--gpus 0 --ranks 4 --rendezvous 10.200.0.12:29630` and start an
 `ignition join` process on each peer. Rank zero retains the checkpoint; peers
 request their weight ranges during preparation. From a paired controller, use
-`flare orbit run maxwell:/data/flare-runtime/deepseek-v41-flash-1017-csf-tp4-c4-dspark5.safetensors --cluster sparks --gpus 0`
+`flare orbit run maxwell:/data/flare-runtime/deepseek-v41-flash-1017-csf-tp4-c32-dspark5.safetensors --cluster sparks --gpus 0`
 with a four-node `sparks` cluster. The prepared model uses RoCEnante collectives
 across hosts. See [multi-host preparation and serving](multi-host.md) for
 preparation authentication, orbit setup, and rank placement.
@@ -613,12 +631,16 @@ minimum capacities, and integrated-memory accounting. Preparation retains its
 own existing memory policy.
 Ignition captures power-of-two
 batch capacities through the concurrency limit
-and width one at every bucket. Wider speculative and verification shapes require
-`batch * width <= speculative_token_capacity`; the preparation flag
+and width one at every bucket. Rectangular speculative and verification shapes
+require `batch * width <= speculative_token_capacity`; the preparation flag
 `--speculative-token-capacity` defaults to the larger of padded concurrency and
-maximum verification width. Separate proposal catalogs cover every bucket and
-load-time draft depth independently of that limit. Flare can reduce
-concurrency and draft tokens at load time; prefill capacity stays prepared.
+maximum verification width, except DeepSeek V4.1, whose packed catalog defaults
+to 128 physical target rows. Its packed capacities follow the table above rather
+than rectangular `batch * width` shapes. Previously exported separate-proposal
+catalogs cover every bucket and load-time draft depth independently of that limit.
+Flare can reduce concurrency at load time. Rectangular catalogs permit smaller
+positive draft limits; packed catalogs require their captured positive depth or
+zero. Prefill capacity stays prepared.
 With `--mixed-prefill`, Qwen also captures mixed prompt/decode graphs: every
 prompt bucket at width one and one balanced prompt bucket at each wider
 verification depth, for each batch capacity of at least two. The ordinary and

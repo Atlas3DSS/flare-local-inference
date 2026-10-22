@@ -209,12 +209,10 @@ explicit flags take precedence.
 | `--expert-scale-compression [MODE]` | Losslessly compress routed-expert scales: DeepSeek V4.1 backbone and DSpark MXFP4 scales, or Step-5 NVFP4 scales including BF16 experts converted to W4A16. `csf` is a compressed scale encoding expanded during execution. Estimated resident GPU weight savings are 3% for DeepSeek V4.1 and 6% for Step-5; actual savings depend on encoded scales. A bare flag selects `csf`; `--expert-scale-compression csf` also works. Retain compressed scales and share expansion scratch across serial layers. | Native scales |
 | `--no-mtp` | Disable multi-token speculation: load no draft model, keep no verification rows, and decode one token per step. | Speculation on |
 | `--mtp-draft-tokens N` | Most draft tokens verified in one round; see `MODEL --help` for its limit. Verification capacities cover counts from 0 through `N` within the speculative token capacity. Retained and packed proposal producers execute the full configured block; verification adapts using measured cost and historical acceptance or native proposal confidence. Zero retains draft state with width-one execution; `--no-mtp` excludes draft weights and state. | Recipe declaration |
-| `--speculative-token-capacity N` | Maximum target-token rows in wider speculative graphs; width one covers every request bucket. Applies to every speculative recipe. | Larger of padded concurrency and maximum verification width |
-| `--no-mtp-adaptive-verification` | Default to fixed-width serving. Capture includes every smaller width within the speculative token capacity. | Adaptive |
+| `--speculative-token-capacity N` | Maximum physical target-token rows in wider speculative graphs; width one covers every request bucket. Applies to every speculative recipe. | 128 for DeepSeek V4.1; otherwise larger of padded concurrency and maximum verification width |
+| `--no-mtp-adaptive-verification` | Default to fixed-width serving. Capture includes every smaller width within the speculative token capacity. Positive-depth DeepSeek V4.1 DSpark requires adaptive verification. | Adaptive |
 | `--mtp-proposal-source {mtp,copy}` | Where drafts come from: the checkpoint's MTP module, or `copy` for continuations of the request's own history, which loads no draft model. Qwen only. | `mtp` |
 | `--history-drafts` | Also draft continuations copied from the request's own history. Qwen only. | off |
-| `--packed-verification` | Prepare a shared target-row capacity across retained request prefixes. DeepSeek V4.1 only; requires adaptive learned proposals. | Disabled |
-| `--draft-prefix-selection cpu\|gpu` | With `--packed-verification`, `gpu` adds captured proposal/allocation/verification rounds alongside split and joined graphs. Helios compares complete measured round costs and expected emitted-token value. | `cpu` |
 | `--mla-compute-mode {auto,bf16}` | Constrain DeepSeek V4.1 MLA arithmetic while preserving packed KV storage and autotuning among compatible kernels. | `auto` |
 | `--no-stream-overlap` | Run every concurrent branch (shared experts, projection chains, query chains) serially on the main stream with the same kernels, to diagnose scheduling-dependent faults. Slower. Recipes that run no branches concurrently reject it. | Overlap |
 | `--autotune-effort off\|low\|medium\|high\|max` | Kernel search effort. Off uses heuristics; low applies broad exclusions; medium balances search cost; high retains only conservative exclusions; max enumerates every declared legal candidate. Overrides `[preparation] autotune_effort`. | Medium |
@@ -231,15 +229,20 @@ fixed, and `branches serialized` under `--no-stream-overlap`. That flag is also
 recorded in the plan and the exported graph catalog; it changes graph scheduling,
 not kernel selection, so its packages share tuned kernels with overlapped ones.
 
-DeepSeek V4.1 can share verification rows between requests with
-`--packed-verification`. Keep the rectangular default unless preparing a packed
-catalog intentionally. For eight requests with up to five drafts each, this
-example captures target graphs with at most 24 physical rows while retaining
-six-token per-request prefixes:
+Each recipe selects its proposal and prefix-allocation mode.
+DeepSeek V4.1 defaults to five draft tokens, concurrency 32, a 4096-token
+prefill chunk, and 128 physical target rows, with packed GPU prefix selection.
+Its catalog contains combined proposal/allocation/verification rounds and
+width-one graphs; ordinary graphs remain available for `--mtp-draft-tokens 0`.
+The [model preparation guide](model-preparation.md#deepseek-v41-flash) lists the
+28 packed capacities. The 128-row cap bounds target work and graph resources;
+raising it permits longer aggregate prefixes at larger batches.
+For eight requests with five drafts each, this example instead limits physical
+target capacity to 24 rows while retaining six-token per-request prefixes:
 
 ```sh
 .venv/bin/ignition export deepseek-v4.1-flash --gpus 0,1,2,3 \
-  --max-concurrency 8 --mtp-draft-tokens 5 --packed-verification \
+  --max-concurrency 8 --mtp-draft-tokens 5 \
   --speculative-token-capacity 24 --prefill-chunk-size 4096 \
   --output /data/flare-runtime/deepseek41-tp4-c8-packed24.safetensors --verbose
 ```
@@ -259,10 +262,21 @@ retain every captured capacity at or below a ceiling; for example:
 For a controlled comparison, replace the maximum flag with
 `--mtp-verification-token-budget 24` to select one exact captured capacity per
 batch, bounded by that batch's full prefix extent. The exact and maximum flags
-are mutually exclusive and require a packed adaptive catalog. Each budget must
-cover the selected padded batch capacity; a maximum budget must also cover the
-captured per-request verification width. Missing required graphs fail before
-GPU initialization.
+are mutually exclusive and require a packed adaptive catalog.
+
+A catalog containing only combined packed rounds and width-one continuations
+allows a runtime row budget below the selected padded batch capacity. Batches
+without a retained combined round use their width-one graphs. For the default
+DeepSeek V4.1 catalog, concurrency 32 with an exact budget of eight retains
+batch 1 at six rows, batch 2 at eight rows, and batch 4 at eight rows; batches
+8, 16, and 32 retain width-one execution. A maximum budget of eight retains every
+captured combined capacity at or below eight instead. At least one combined
+round must remain, and an uncaptured exact capacity fails selection.
+
+Catalogs containing separate proposal and verification graphs require the
+budget to cover the selected padded batch capacity. A maximum budget must cover
+the captured per-request verification width for either catalog. Missing required
+graphs fail before GPU initialization.
 
 For DeepSeek V4.1, `--mla-compute-mode auto` lets b12x choose arithmetic
 and is the default. Use `bf16` when BF16 MLA arithmetic is required; packed KV
@@ -271,7 +285,7 @@ FlashInfer dependency supplies the required preparation API. For example:
 
 ```sh
 .venv/bin/ignition export deepseek-v4.1-flash --gpus 0,1,2,3 \
-  --max-concurrency 8 --mtp-draft-tokens 5 --packed-verification \
+  --max-concurrency 8 --mtp-draft-tokens 5 \
   --speculative-token-capacity 24 --prefill-chunk-size 4096 \
   --mla-compute-mode bf16 \
   --output /data/flare-runtime/deepseek41-tp4-c8-packed24-bf16.safetensors --verbose
@@ -366,8 +380,8 @@ With four serving GPUs, run:
 
 ```sh
 .venv/bin/ignition serve deepseek-v4.1-flash --gpus 0,1,2,3 \
-  --max-concurrency 1 --mtp-draft-tokens 7 --prefill-chunk-size 4096 \
-  --host 0.0.0.0 --port 8001 --verbose
+  --max-concurrency 32 --mtp-draft-tokens 5 --prefill-chunk-size 4096 \
+  --speculative-token-capacity 128 --host 0.0.0.0 --port 8001 --verbose
 ```
 
 The command prepares and captures graphs, loads the RAM tables once, and starts
@@ -378,22 +392,21 @@ for final native performance validation: development ranks run in separate
 processes with separate delivery staging, while the native CLI shares staging
 between its rank threads.
 
-DeepSeek V4.1 uses separate proposal and verification graphs in exported packages
-and native serving. A batch-four package with up to seven drafts and eight target
-token rows is prepared with:
+DeepSeek V4.1 exports combined packed rounds with GPU prefix allocation by
+default. This command uses the recipe's concurrency 32, five draft tokens,
+4096-token prefill chunk, and 128 physical target rows:
 
 ```sh
 .venv/bin/ignition export deepseek-v4.1-flash --gpus 0,1,2,3 \
-  --max-concurrency 4 --mtp-draft-tokens 7 --speculative-token-capacity 8 \
-  --prefill-chunk-size 4096 --output /data/flare-runtime/ds41-tp4-c4-d7-r8.safetensors
+  --output /data/flare-runtime/ds41-tp4-c32-d5-p128.safetensors
 ```
 
-Proposal captures cover batches 1, 2, and 4 at the full seven-draft depth.
-Verification captures cover widths 1–8 at batch one, 1–4 at batch two, and 1–2
-at batch four. Native scheduling uses conditional confidence, measured costs,
-and shared fairness prices to finalize logical verification prefixes and group them into
-verification calls. Proposal-free width-one graphs serve every batch bucket.
-See [retained proposals](scheduling-runtime-design.md#retained-proposals-and-confidence).
+The default catalog contains 28 packed rounds with logical width six and six
+proposal-free width-one rounds. Packed execution generates the five-draft block,
+then allocates actual prefixes on the GPU within each request's immutable limit
+and the captured aggregate row capacity. It reports one terminal completion.
+Ordinary prefill, decode, and maintenance graphs remain available when native
+serving selects `--mtp-draft-tokens 0`.
 
 ### 3.2 Native serving flags
 
@@ -810,8 +823,9 @@ cuda = "/opt/cuda"                # Used when installed packages provide no tool
 
 `[models.<alias>]` overrides `[defaults]`; flags override both.
 Both sections accept `speculative_token_capacity`, overridden during preparation
-by `--speculative-token-capacity`. Omitting it derives the capacity from the
-prepared concurrency and draft depth.
+by `--speculative-token-capacity`. Omitting it uses the recipe declaration when
+supplied: DeepSeek V4.1 declares 128 target rows. Other recipes derive the
+capacity from prepared concurrency and draft depth.
 
 Default request parameters, meaning the values a request receives for fields
 it does not set, such as thinking, reasoning effort, sampling, and output

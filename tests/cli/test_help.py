@@ -31,6 +31,8 @@ def test_help_lists_every_recipe(command, capsys):
     for alias in aliases():
         assert alias in output
     assert "Drafts (default/max)" in output
+    assert "--packed-verification" not in output
+    assert "--draft-prefix-selection" not in output
 
 
 @pytest.mark.parametrize("command", ["export", "serve"])
@@ -70,6 +72,23 @@ assert not {'torch', 'transformers', 'flare_heliopause', 'huggingface_hub', 'pyn
     result = subprocess.run([sys.executable, "-c", script], cwd=Path(__file__).resolve().parents[2],
                             capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("command", ["export", "serve"])
+def test_deepseek41_help_reports_packed_gpu_recipe_defaults(command, capsys):
+    with pytest.raises(SystemExit) as error:
+        main([command, "deepseek-v4.1-flash", "--help"])
+    assert error.value.code == 0
+    output = capsys.readouterr().out
+    assert "--max-concurrency: 1..64; recipe default 32" in output
+    assert "--prefill-chunk-size: 64..1048576, multiple of 64; default 4096" in output
+    assert "--mtp-draft-tokens: 0..7; default 5" in output
+    assert "--speculative-token-capacity: at least drafts + 1; default 128" in output
+    assert "Prepared verification: packed rows with GPU prefix selection" in output
+    assert "--packed-verification" not in output
+    assert "--draft-prefix-selection" not in output
+    assert "Target rows are shared across retained request prefixes" in output
+    assert "Packed rounds need more target rows than active requests" in output
 
 
 def test_optional_features_follow_the_selected_recipe(capsys):

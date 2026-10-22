@@ -58,6 +58,48 @@ fn packed_combined_contract_separates_immutable_ceilings_from_device_query_lengt
 }
 
 #[test]
+fn packed_combined_budget_keeps_width_one_batches_without_a_useful_packed_shape() {
+    let mut config = config();
+    let mut value = packed_round_manifest(&mut config);
+    config.speculative_widths = (1..=6).collect();
+    config.speculative_token_capacity = 6;
+    for graph in &mut value.graphs {
+        if graph.kind == GraphKind::PackedSpeculative {
+            graph.token_capacity = 6;
+            graph.draft_tokens = 5;
+        }
+    }
+    value.graphs.retain(|g| g.kind != GraphKind::PackedSpeculative || g.packed_token_capacity <= 6);
+    let names: std::collections::HashSet<_> = value.graphs.iter().map(|g| g.name.clone()).collect();
+    config.contract.graphs.retain(|g| names.contains(&g.graph));
+    catalog::validate(&config, &value).unwrap();
+    Inputs::new(&config, &value).unwrap();
+    assert!(!value.graphs.iter().any(|g| g.kind == GraphKind::PackedSpeculative && g.batch_capacity == 4));
+    let mut partial = value.clone();
+    let mut partial_config = config.clone();
+    let template = partial.graphs.iter().find(|g| g.kind == GraphKind::PackedSpeculative && g.batch_capacity == 2).unwrap().clone();
+    let mut graph = template.clone();
+    graph.name = "packed-partial-four".into();
+    graph.batch_capacity = 4;
+    graph.packed_token_capacity = 5;
+    graph.handle = partial.graphs.len() + 1;
+    let mut semantics = partial_config.contract.graph(&template.name).unwrap().clone();
+    semantics.graph = graph.name.clone();
+    partial_config.contract.graphs.push(semantics);
+    partial.graphs.push(graph);
+    catalog::validate(&partial_config, &partial).unwrap();
+    Inputs::new(&partial_config, &partial).unwrap();
+    for (kind, batch) in [(GraphKind::PackedSpeculative, 2), (GraphKind::Speculative, 4)] {
+        let mut invalid = value.clone();
+        let omitted = invalid.graphs.iter().find(|g| g.kind == kind && g.batch_capacity == batch).unwrap().name.clone();
+        invalid.graphs.retain(|g| g.name != omitted);
+        let mut invalid_config = config.clone();
+        invalid_config.contract.graphs.retain(|g| g.graph != omitted);
+        assert!(catalog::validate(&invalid_config, &invalid).is_err(), "missing {kind:?} batch {batch}");
+    }
+}
+
+#[test]
 fn packed_combined_packing_preserves_sparse_slot_keys_and_ceiling_padding() {
     let mut config = config();
     let manifest = packed_round_manifest(&mut config);

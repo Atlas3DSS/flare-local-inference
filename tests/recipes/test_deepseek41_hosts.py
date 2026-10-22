@@ -25,7 +25,8 @@ def test_recipe_dispatches_the_complete_plan_to_the_rank_group(monkeypatch, remo
 
     gpus = tuple(planning.Gpu(i, "GB10", f"GPU-{i}", 128 << 30, 120 << 30, (12, 1)) for i in range(4))
     plan = planning.fit(recipe.RECIPE, recipe.RECIPE.checkpoints[0], gpus, concurrency=16,
-        reserve_bytes=6 << 30, speculation=Speculation(draft_tokens=draft_tokens, token_capacity=128),
+        reserve_bytes=6 << 30, speculation=Speculation(draft_tokens=draft_tokens, token_capacity=128,
+            packed_verification=True, draft_prefix_selection="gpu"),
         expert_scale_compression="csf")
     ranks = SimpleNamespace(hosts=("hertz", "faraday", "ampere", "maxwell")) if remote else None
     calls, result, storage = [], object(), object()

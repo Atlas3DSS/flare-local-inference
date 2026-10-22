@@ -6,6 +6,7 @@ import pytest
 
 from ignition import planning
 from ignition.cli import _parser, main, preparation
+from ignition.errors import UsageError
 from ignition.recipes import resolve
 
 GIB = 1 << 30
@@ -173,9 +174,12 @@ def test_deepseek_defaults_to_five_adaptive_drafts_and_accepts_explicit_override
     default = speculation(model="deepseek-v4.1-flash")
     assert (default.draft_tokens, default.adaptive, default.fixed_width) == (5, True, None)
     assert default.widths == tuple(range(1, 7))
-    reduced = speculation("--mtp-draft-tokens", "3", "--no-mtp-adaptive-verification",
-                          model="deepseek-v4.1-flash")
-    assert (reduced.draft_tokens, reduced.adaptive, reduced.fixed_width) == (3, False, 4)
+    reduced = speculation("--mtp-draft-tokens", "3", model="deepseek-v4.1-flash")
+    assert (reduced.draft_tokens, reduced.adaptive, reduced.fixed_width) == (3, True, None)
+    assert reduced.packed_verification and reduced.draft_prefix_selection == "gpu"
+    with pytest.raises(UsageError, match="requires adaptive verification"):
+        speculation("--mtp-draft-tokens", "3", "--no-mtp-adaptive-verification",
+                    model="deepseek-v4.1-flash")
     extended = speculation("--mtp-draft-tokens", "7", model="deepseek-v4.1-flash")
     assert extended.draft_tokens == 7 and extended.widths == tuple(range(1, 9))
     assert speculation("--mtp-draft-tokens", "0", model="deepseek-v4.1-flash").widths == (1,)

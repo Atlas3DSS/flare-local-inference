@@ -184,7 +184,7 @@ impl LoadOptions {
             if !(split || packed_round) || packed_width.is_none() {
                 return Err(invalid("verification token budget requires captured packed verification graphs"));
             }
-            if budget < active.next_power_of_two() {
+            if budget < active.next_power_of_two() && !(packed_round && !split) {
                 return Err(invalid(format!(
                     "verification token budget must cover the selected batch capacity {}",
                     active.next_power_of_two()
@@ -370,6 +370,9 @@ impl LoadOptions {
                     )] == drafts
                 })
             });
+            if enabled && packed_round && !execution.graphs.iter().any(|g| g.kind == "packed_speculative") {
+                return Err(invalid(format!("rank {rank} has no packed combined graphs within the selected proposal and row limits")));
+            }
             let mut selected_variants = HashSet::new();
             for graph in &execution.graphs {
                 if !selected_variants.insert((
@@ -404,7 +407,8 @@ impl LoadOptions {
                     if !execution
                         .graphs
                         .iter()
-                        .any(|g| g.kind == kind && g.batch_capacity == batch as u64)
+                        .any(|g| g.kind == kind && g.batch_capacity == batch as u64
+                            && (kind != "speculative" || !packed_round || g.token_capacity == 1))
                     {
                         return Err(invalid(format!(
                             "rank {rank} has no captured {kind} graph for batch {batch} within the requested verification limits; export the required capacity range"
@@ -412,7 +416,8 @@ impl LoadOptions {
                     }
                 }
                 if enabled && packed_round {
-                    if !execution.graphs.iter().any(|g| g.kind == "packed_speculative"
+                    if batch as u64 * 2 <= selected_token_capacity
+                        && !execution.graphs.iter().any(|g| g.kind == "packed_speculative"
                         && g.batch_capacity == batch as u64) {
                         return Err(invalid(format!("rank {rank} lacks packed combined batch {batch} within the selected proposal and row limits")));
                     }
@@ -1651,6 +1656,115 @@ mod tests {
         p.graphs = e.graphs.iter().map(|g| Graph { name: g.name.clone(), flags: 0,
             resource: g.name.clone(), node_count: 1, edge_count: 0, functions: vec![0] }).collect();
         p
+    }
+
+    fn combined_only_package(active: usize, budget: usize) -> Package {
+        let mut p = packed_package(active, budget);
+        let execution = p.execution.as_mut().unwrap();
+        execution.graphs.retain(|g| match g.kind.as_str() {
+            "proposal" => false,
+            "speculative" => g.token_capacity == 1,
+            "verification" => g.packed_token_capacity > g.batch_capacity
+                && g.packed_token_capacity <= g.batch_capacity * 6,
+            _ => true,
+        });
+        for graph in &mut execution.graphs {
+            if graph.kind == "verification" {
+                graph.kind = "packed_speculative".into();
+                graph.token_capacity = 6;
+                graph.verify_tokens = Some(6);
+                graph.draft_tokens = Some(5);
+                graph.draft_source = 1;
+            }
+        }
+        let names: HashSet<_> = execution.graphs.iter().map(|g| g.name.clone()).collect();
+        p.graphs.retain(|g| names.contains(&g.name));
+        p
+    }
+
+    #[test]
+    fn combined_only_low_budgets_preserve_width_one_at_full_concurrency() {
+        for prepared_budget in [8usize, 128] {
+            for options in [LoadOptions::default(),
+                LoadOptions { mtp_verification_token_budget: Some(8), ..Default::default() },
+                LoadOptions { mtp_max_verification_token_budget: Some(8), ..Default::default() }] {
+                let mut ranks = [combined_only_package(32, prepared_budget), combined_only_package(32, prepared_budget)];
+                let mut config = packed_draft_five_config();
+                config["speculative_token_capacity"] = prepared_budget.into();
+                options.select(&mut ranks, &mut config).unwrap();
+                let selected_budget = if options.mtp_verification_token_budget.is_some()
+                    || options.mtp_max_verification_token_budget.is_some() { 8 } else { prepared_budget };
+                for package in &ranks {
+                    let graphs = &package.execution.as_ref().unwrap().graphs;
+                    let rounds: Vec<_> = graphs.iter().filter(|g| g.kind == "packed_speculative").collect();
+                    assert_eq!(rounds.len(), if options.mtp_verification_token_budget.is_some() { 3 }
+                        else if selected_budget == 8 { 9 } else { 28 });
+                    assert!(rounds.iter().all(|g| g.draft_tokens == Some(5) && g.token_capacity == 6
+                        && g.packed_token_capacity > g.batch_capacity && g.packed_token_capacity <= selected_budget as u64));
+                    assert!(!graphs.iter().any(|g| matches!(g.kind.as_str(), "proposal" | "verification")));
+                    for batch in [1u64, 2, 4, 8, 16, 32] {
+                        assert!(graphs.iter().any(|g| g.kind == "speculative" && g.batch_capacity == batch && g.token_capacity == 1));
+                        assert_eq!(rounds.iter().any(|g| g.batch_capacity == batch), batch * 2 <= selected_budget as u64);
+                    }
+                }
+                assert_eq!(config["speculative_token_capacity"], selected_budget);
+            }
+        }
+    }
+
+    #[test]
+    fn combined_only_budgets_reject_missing_useful_rounds_and_width_one() {
+        for rank in [0usize, 1] {
+            for (kind, batch) in [("packed_speculative", 4u64), ("speculative", 32)] {
+                let mut ranks = [combined_only_package(32, 8), combined_only_package(32, 8)];
+                let package = &mut ranks[rank];
+                let omitted = package.execution.as_ref().unwrap().graphs.iter()
+                    .find(|g| g.kind == kind && g.batch_capacity == batch).unwrap().name.clone();
+                package.execution.as_mut().unwrap().graphs.retain(|g| g.name != omitted);
+                package.graphs.retain(|g| g.name != omitted);
+                let mut config = packed_draft_five_config();
+                config["speculative_token_capacity"] = 8.into();
+                let error = LoadOptions::default().select(&mut ranks, &mut config).unwrap_err().to_string();
+                assert!(error.contains(&format!("rank {rank}")) && error.contains(&format!("batch {batch}")), "{error}");
+            }
+        }
+        for budget in [1usize, 7] {
+            let mut config = packed_draft_five_config();
+            config["speculative_token_capacity"] = 128.into();
+            assert!(LoadOptions { mtp_verification_token_budget: Some(budget), ..Default::default() }
+                .select(&mut [combined_only_package(32, 128)], &mut config).is_err());
+        }
+    }
+
+    #[test]
+    fn combined_only_partial_batch_capacity_remains_loadable() {
+        let mut package = combined_only_package(32, 9);
+        let mut graph = package.execution.as_ref().unwrap().graphs.iter()
+            .find(|g| g.kind == "packed_speculative" && g.batch_capacity == 4).unwrap().clone();
+        graph.name = "packed-partial-eight".into();
+        graph.batch_capacity = 8;
+        graph.packed_token_capacity = 9;
+        package.graphs.push(Graph { name: graph.name.clone(), flags: 0,
+            resource: graph.name.clone(), node_count: 1, edge_count: 0, functions: vec![0] });
+        package.execution.as_mut().unwrap().graphs.push(graph);
+        let mut config = packed_draft_five_config();
+        config["speculative_token_capacity"] = 9.into();
+        LoadOptions::default().select(std::slice::from_mut(&mut package), &mut config).unwrap();
+        assert!(package.execution.as_ref().unwrap().graphs.iter().any(|g|
+            g.kind == "packed_speculative" && g.batch_capacity == 8 && g.packed_token_capacity == 9));
+    }
+
+    #[test]
+    fn exact_combined_budget_equal_to_batch_preserves_pending_only_captures() {
+        for pending_only in [false, true] {
+            let mut package = if pending_only { combined_package() } else { combined_only_package(8, 48) };
+            LoadOptions { mtp_verification_token_budget: Some(8), ..Default::default() }
+                .select(std::slice::from_mut(&mut package), &mut packed_draft_five_config()).unwrap();
+            let graphs = &package.execution.as_ref().unwrap().graphs;
+            assert!(graphs.iter().any(|g| g.kind == "speculative" && g.batch_capacity == 8 && g.token_capacity == 1));
+            assert_eq!(graphs.iter().any(|g| g.kind == "packed_speculative"
+                && g.batch_capacity == 8 && g.packed_token_capacity == 8), pending_only);
+        }
     }
 
     #[test]
