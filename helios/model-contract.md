@@ -107,9 +107,10 @@ completion dependency from these concrete inputs.
 `PACKED_SPECULATIVE` declares one captured proposal, causal prefix allocation,
 target verification, and accepted-state commit. Its execution descriptor carries
 the request capacity, `draft_tokens`, logical `verify_tokens`, and
-`packed_token_capacity`. Proposal depth and physical target capacity are
-independent catalog dimensions. The host chooses both before generating the
-round's proposals, using completed observations rather than current draft values.
+`packed_token_capacity`. The configured proposal depth is fixed across dispatches.
+The host chooses physical target capacity before generating the round's proposals,
+using completed observations rather than current draft values. The graph generates
+the complete proposal block before allocating verification prefixes.
 
 The `SPECULATIVE_PREFIX_LIMIT` input contains each submitted lane's immutable
 upper bound, including its pending token. The graph initializes proposal

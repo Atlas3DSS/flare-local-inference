@@ -27,14 +27,20 @@ model-specific concurrency cutoff. The scheduler chooses among the resulting
 physical graphs using measured costs and useful output. Fixed mode uses its
 loaded width where captured; larger buckets retain width-one execution.
 
-A retained proposal catalog captures every request bucket at every selectable
-depth from one through `D`. Adaptive serving can select these depths at each
-proposal dispatch. Proposal depth is independent of target
+A retained proposal catalog captures every request bucket at the full configured
+depth `D`. Every proposal dispatch executes that complete block; only verification
+prefixes and target-row budgets adapt. Proposal depth is independent of target
 verification width and is not capped by `R`. Separate width-one speculative
 graphs execute without producing a proposal and maintain draft context. With
-`C=4`, `D=7`, and `R=8`, the catalog has 21 proposal graphs, 14 verification
+`C=4`, `D=7`, and `R=8`, the catalog has three proposal graphs, 14 verification
 graphs (eight at batch one, four at batch two, two at batch four), and three
 proposal-free width-one graphs, alongside ordinary execution and maintenance.
+
+Packed verification planning excludes budgets larger than the smallest captured
+budget covering every offered token in the selected cohort. Such padding adds no
+useful verification work and would otherwise leave discovery waiting for a graph
+that verification dispatch prunes. Explicit funded refresh targets retain their
+physical budget.
 
 Packed joined graphs capture a fixed request bucket `B`, proposal depth `D`,
 logical verification width `W`, and physical target-row budget `P`. Before
@@ -121,8 +127,9 @@ the loaded depth, limited by output, context, and sampling restrictions.
 Finalized widths are never shortened to make a cheaper batch. A dynamic program
 over requests sorted by width minimizes the cost of physical verification
 calls, including padding. Proposal planning evaluates bounded request counts,
-the available draft depths covering each planned prefix, and the complete
-remaining proposal-plus-verification cost. Once proposals are
+expected verification prefixes, and the complete cost of the full proposal block
+plus verification. Producer depth remains fixed for ordinary work, timing refresh,
+and acceptance learning. Once proposals are
 retained, their elapsed time has already entered service accounting and only
 remaining work is priced. Proposal completion earns no output or delivery credit.
 The dispatcher executes one operation and replans, allowing several proposal
@@ -278,6 +285,11 @@ estimates start at zero, including descriptors supplied with a nonzero value.
 Zero means indeterminate. Physical graph kind, batch capacity, token capacity,
 proposal depth, mixed prefill capacity, and packed verification capacity identify
 a cost entry; active row count does not change its identity.
+
+Only full-block proposal producers enter the cost catalog. Shorter producers
+present in a package have no estimates, discovery candidates, timing-refresh
+targets, or acceptance probes. Candidate storage is sized from this filtered
+catalog. Verification widths and packed row budgets remain independent choices.
 
 The first positive device observation sets the estimate. Further valid samples
 while fresh use the median of the last nine replay observations, averaging the

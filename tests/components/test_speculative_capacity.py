@@ -32,10 +32,10 @@ def test_recipes_share_bounded_target_coverage(concurrency, drafts, override):
     assert all((b, 1) in expected for b in batch_capacities(concurrency))
 
 
-def test_proposals_keep_every_depth_independently_of_target_coverage():
-    assert len(proposal_shapes(4, 7)) == 21
+def test_proposals_keep_full_depth_independently_of_target_coverage():
+    assert len(proposal_shapes(4, 7)) == 3
     assert len(speculative_shapes(4, tuple(range(1, 9)), 8)) == 14
-    assert set(proposal_shapes(4, 7)) == {(b, d) for b in (1, 2, 4) for d in range(1, 8)}
+    assert set(proposal_shapes(4, 7)) == {(b, 7) for b in (1, 2, 4)}
     assert {w for b, w in speculative_shapes(4, tuple(range(1, 9)), 8) if b == 4} == {1, 2}
 
 

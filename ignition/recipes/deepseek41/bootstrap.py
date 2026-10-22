@@ -324,9 +324,9 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                            + 4 * len(config.batch_capacities))
              + len(config.speculative_shapes) + len(config.batch_capacities))
     if config.split_speculation:
-        count += len(config.batch_capacities) * (config.draft_tokens + 1)
+        count += 2 * len(config.batch_capacities)
         if config.draft_prefix_selection == "gpu":
-            count += len(config.speculative_shapes) * config.draft_tokens
+            count += len(config.speculative_shapes)
         if config.speculation_reference_graphs:
             count += len(config.speculative_shapes)
         elif config.draft_prefix_selection == "gpu":
@@ -383,7 +383,6 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
             from ignition.components.parallel_draft import PreparedParallelDraftRound
             speculation.sampling_buffers = graph_buffers
             if config.split_speculation:
-                from copy import copy
                 from ignition.components.capacity import proposal_shapes
                 from ignition.components.split_draft import (
                     PreparedCombinedDraftRound, PreparedDraftProposal, PreparedDraftVerification, PreparedProposalStorage)
@@ -400,14 +399,12 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                     packed_inputs += ("speculative_prefix_limits",)
                 proposals = {}
                 for batch, depth in sorted(proposal_shapes(config.max_active, config.draft_tokens), reverse=True):
-                    owner = copy(speculation)
-                    owner.block_size = depth
                     name = f"proposal{batch}x{depth + 1}"
-                    source = PreparedParallelDraftRound(owner, batch, depth + 1, name,
+                    source = PreparedParallelDraftRound(speculation, batch, depth + 1, name,
                         buffers=speculation.sampling_buffers.cursor(), proposal_only=True)
                     source.prepare()
                     proposal = PreparedDraftProposal(source, confidence.device_view, split)
-                    proposals[batch, depth] = proposal
+                    proposals[batch] = proposal
                     add(name, proposal, "proposal", batch, depth + 1, forward_inputs, enabled=True)
                 for batch, width in sorted(config.speculative_shapes, key=lambda shape: shape[0] * shape[1], reverse=True):
                     name = f"verification{batch}x{width}"
@@ -423,12 +420,11 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                     if config.draft_prefix_selection == "gpu":
                         from ignition.components.packed_speculation import PreparedPackedSpeculativeRound
 
-                        for depth in range(1, config.draft_tokens + 1):
-                            round_name = f"packed-speculative{batch}x{logical_width}-drafts{depth}-tokens{packed_tokens}"
-                            forward = PreparedPackedSpeculativeRound(proposals[batch, depth], verification,
-                                prefix_limits, name=round_name, buffers=graph_buffers.cursor())
-                            add(round_name, forward, "packed_speculative", batch, logical_width, packed_inputs,
-                                enabled=True, packed_tokens=packed_tokens, draft_tokens=depth)
+                        round_name = f"packed-speculative{batch}x{logical_width}-drafts{config.draft_tokens}-tokens{packed_tokens}"
+                        forward = PreparedPackedSpeculativeRound(proposals[batch], verification,
+                            prefix_limits, name=round_name, buffers=graph_buffers.cursor())
+                        add(round_name, forward, "packed_speculative", batch, logical_width, packed_inputs,
+                            enabled=True, packed_tokens=packed_tokens, draft_tokens=config.draft_tokens)
                     add(name, verification, "verification", batch, logical_width, forward_inputs, enabled=True,
                         packed_tokens=packed_tokens)
                     if width == 1:
@@ -445,7 +441,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                         add(joined_name, joined, "speculative", batch, width, forward_inputs, enabled=True)
                     elif config.speculation_reference_graphs:
                         add(f"combined{batch}x{width}", PreparedCombinedDraftRound(
-                            proposals[batch, config.draft_tokens], verification),
+                            proposals[batch], verification),
                             "speculative", batch, width, forward_inputs, enabled=True)
             else:
                 for batch, width in sorted(config.speculative_shapes, key=lambda shape: shape[0] * shape[1], reverse=True):

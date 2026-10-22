@@ -214,7 +214,7 @@ explicit flags take precedence.
 | `--mixed-prefill` | Capture mixed prompt/decode graphs alongside separate graphs. Supported by Qwen with concurrency of at least two, with or without speculation. Command line only; existing packages retain their captured catalog. | Disabled |
 | `--expert-scale-compression [MODE]` | Losslessly compress routed-expert scales: DeepSeek V4.1 backbone and DSpark MXFP4 scales, or Step-5 NVFP4 scales including BF16 experts converted to W4A16. `csf` is a compressed scale encoding expanded during execution. Estimated resident GPU weight savings are 3% for DeepSeek V4.1 and 6% for Step-5; actual savings depend on encoded scales. A bare flag selects `csf`; `--expert-scale-compression csf` also works. Retain compressed scales and share expansion scratch across serial layers. Selects a separate cached package. | Native scales |
 | `--no-mtp` | Disable multi-token speculation: load no draft model, keep no verification rows, and decode one token per step. | Speculation on |
-| `--mtp-draft-tokens N` | Most draft tokens verified in one round; see `MODEL --help` for its limit. Graphs are captured for every count from 0 through `N` within the speculative token capacity, and verification adapts using measured cost and historical acceptance or native proposal confidence. Zero retains draft state with width-one execution; `--no-mtp` excludes draft weights and state. | Recipe declaration |
+| `--mtp-draft-tokens N` | Most draft tokens verified in one round; see `MODEL --help` for its limit. Verification capacities cover counts from 0 through `N` within the speculative token capacity. Retained and packed proposal producers execute the full configured block; verification adapts using measured cost and historical acceptance or native proposal confidence. Zero retains draft state with width-one execution; `--no-mtp` excludes draft weights and state. | Recipe declaration |
 | `--speculative-token-capacity N` | Maximum target-token rows in wider speculative graphs; width one covers every request bucket. Applies to every speculative recipe. | Larger of padded concurrency and maximum verification width |
 | `--no-mtp-adaptive-verification` | Default to fixed-width serving. Capture includes every smaller width within the speculative token capacity. | Adaptive |
 | `--mtp-proposal-source {mtp,copy}` | Where drafts come from: the checkpoint's MTP module, or `copy` for continuations of the request's own history, which loads no draft model. Qwen only. | `mtp` |
@@ -394,10 +394,10 @@ token rows is prepared with:
   --prefill-chunk-size 4096 --output /data/flare-runtime/ds41-tp4-c4-d7-r8.safetensors
 ```
 
-Proposal captures cover batches 1, 2, and 4 at each draft depth 1 through 7.
+Proposal captures cover batches 1, 2, and 4 at the full seven-draft depth.
 Verification captures cover widths 1–8 at batch one, 1–4 at batch two, and 1–2
 at batch four. Native scheduling uses conditional confidence, measured costs,
-and shared fairness prices to choose proposal depth, finalize logical prefixes, and group them into
+and shared fairness prices to finalize logical verification prefixes and group them into
 verification calls. Proposal-free width-one graphs serve every batch bucket.
 See [retained proposals](scheduling-runtime-design.md#retained-proposals-and-confidence).
 

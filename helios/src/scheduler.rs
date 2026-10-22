@@ -905,7 +905,7 @@ impl RequestScheduler {
         self.costs
             .advance_to(self.now_ns, self.policy.estimate_ttl_ns);
         // Each graph contributes at most one candidate per request slot.
-        self.candidates = std::cell::RefCell::new(Vec::with_capacity(graphs.len() * REQUEST_LANES));
+        self.candidates = std::cell::RefCell::new(Vec::with_capacity(self.costs.len() * REQUEST_LANES));
         Ok(())
     }
 
@@ -1939,6 +1939,10 @@ impl RequestScheduler {
         }
         let step = &plan.step;
         step.validate_mixed()?;
+        if (step.kind == GraphKind::Proposal && Some(step.token_capacity) != self.costs.proposal_width)
+            || (step.kind == GraphKind::PackedSpeculative && Some(step.draft_tokens + 1) != self.costs.proposal_width) {
+            return Err("proposal execution requires the full configured draft block".into());
+        }
         if step.kind == GraphKind::Verification {
             if step.lanes.iter().any(|lane| {
                 !self.request(lane.request).ok()

@@ -35,7 +35,7 @@ impl RequestScheduler {
         }).collect();
         let mut forecasts = HashMap::new();
         for shape in self.costs.packed_round_shapes() {
-            let scores = forecasts.entry((shape.drafts, shape.width)).or_insert_with(|| {
+            let scores = forecasts.entry(shape.width).or_insert_with(|| {
                 let mut scores = Vec::new();
                 for &slot in &available {
                     let request = self.slots[slot].request.as_ref().unwrap();

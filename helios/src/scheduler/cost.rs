@@ -93,6 +93,7 @@ impl Estimate {
 pub(super) struct ActionCosts {
     entries: Vec<(Key, Estimate)>,
     index: std::collections::HashMap<Key, usize>,
+    pub proposal_width: Option<usize>,
     packed_round_durations: [[Option<u64>; 9]; 7],
     packed_verification_durations: [[Option<u64>; 9]; 7],
     now_ns: u64,
@@ -100,6 +101,10 @@ pub(super) struct ActionCosts {
 }
 
 impl ActionCosts {
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
     #[cfg(test)]
     pub fn set_measured(&mut self, step: &ScheduledStep, nanos: u64) {
         let key = Key {
@@ -144,7 +149,19 @@ impl ActionCosts {
                 },
             ));
         }
-        let mut costs = Self { entries, index,
+        let proposal_width = entries.iter().filter_map(|(key, _)| match key.kind {
+            GraphKind::Proposal => Some(key.tokens),
+            GraphKind::PackedSpeculative => Some(key.drafts + 1),
+            _ => None,
+        }).max();
+        // Only the full producer participates in scheduling, including timing and acceptance probes.
+        entries.retain(|(key, _)| match key.kind {
+            GraphKind::Proposal => Some(key.tokens) == proposal_width,
+            GraphKind::PackedSpeculative => Some(key.drafts + 1) == proposal_width,
+            _ => true,
+        });
+        let index = entries.iter().enumerate().map(|(index, (key, _))| (*key, index)).collect();
+        let mut costs = Self { entries, index, proposal_width,
             ttl_ns: super::PolicyConfig::default().estimate_ttl_ns, ..Default::default() };
         costs.refresh_packed_durations();
         Ok(costs)

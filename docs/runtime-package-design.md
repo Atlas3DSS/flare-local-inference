@@ -642,7 +642,7 @@ every power-of-two request bucket through the padded concurrency maximum.
 Width one covers every bucket; wider speculative and verification graphs require
 `batch_capacity * token_capacity <= speculative_token_capacity`. The capacity
 defaults to the larger of padded concurrency and maximum verification width.
-Proposal graphs independently cover every bucket and selectable draft depth. Mixed graph coverage is sparse over prompt capacity
+Proposal graphs independently cover every bucket at the configured draft depth. Mixed graph coverage is sparse over prompt capacity
 and verification width; see [mixed execution](scheduling-runtime-design.md).
 Execution metadata
 identifies graph kind, sampling mode, batch capacity, token capacity, draft
@@ -655,11 +655,11 @@ intermediate capacities are optional and need not follow a generated sequence.
 Draft count and verification count are independent declaration fields.
 Verification count includes the pending input token. Proposal graphs declare
 only draft count and source; verification graphs declare only verification count.
-A split catalog in adaptive mode retains every captured proposal depth up to the
-loaded limit. The scheduler chooses the cheapest available proposal shape that
-covers its planned verification prefix and reuses verification graphs across
-depths. Packages containing only the maximum proposal depth remain supported.
-Fixed mode retains the selected proposal depth. Combined graphs declare both
+A split catalog retains one configured proposal depth in both adaptive and fixed
+verification modes. Packages containing several producer depths load only the
+selected depth; shorter producers never enter scheduling or probe selection.
+Verification prefixes and packed target capacities remain adaptive. Packages
+containing only the maximum proposal depth remain supported. Combined graphs declare both
 counts. For a selected combined batch and width, the loader chooses one permitted draft count;
 it never loads duplicate MTP alternatives for that shape. The index lists
 each graph's function dependencies, so kernel selection also precedes graph

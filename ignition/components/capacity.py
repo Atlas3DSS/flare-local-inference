@@ -66,11 +66,10 @@ def speculative_shapes(concurrency, widths, token_capacity=None):
 
 
 def proposal_shapes(concurrency, drafts):
-    """Proposal blocks cover every request batch and selectable draft depth."""
+    """Full configured proposal blocks cover every request batch."""
     if type(drafts) is not int or not 1 <= drafts <= 7:
         raise ValueError("proposal depth must be in [1, 7]")
-    return tuple((batch, depth) for batch in batch_capacities(concurrency)
-                 for depth in range(drafts, 0, -1))
+    return tuple((batch, drafts) for batch in batch_capacities(concurrency))
 
 
 def mixed_shapes(concurrency, chunk_size, widths=(1,), token_capacity=None):

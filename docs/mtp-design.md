@@ -145,8 +145,9 @@ DSpark uses the shared token-vector completion and adaptive verification contrac
 Ignition captures verification widths one through six by default for every batch capacity;
 Flare can reduce draft count and concurrency when loading. Helios schedules and
 replays the selected graphs without interpreting DSpark layers or proposals.
-Adaptive proposal selection uses historical joint prefix survival from the
-DSpark confidence head and measured proposal-plus-verification cost. After
+Every retained or packed proposal producer executes the full configured draft
+block. Cohort and verification-budget selection use historical joint prefix survival
+from the DSpark confidence head and measured proposal-plus-verification cost. After
 proposal completion, fresh confidence drives causal prefix selection using
 costs, service prices, and historical continuations frozen before submission.
 Verification outcomes remain separate from these confidence forecasts.

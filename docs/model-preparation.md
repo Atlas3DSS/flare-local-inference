@@ -283,7 +283,7 @@ verification, and joined speculative graphs. Its default is `cpu`. GPU selection
 `--packed-verification` and adaptive learned speculation.
 `--speculative-token-capacity` bounds physical target rows; for example,
 `--max-concurrency 32 --mtp-draft-tokens 5 --packed-verification --speculative-token-capacity 128 --draft-prefix-selection gpu`
-prepares target capacities through 128 rows and proposal depths through five.
+prepares target capacities through 128 rows and one five-draft producer per batch.
 The host still owns admission and cache reservations. The captured round chooses
 actual prefixes on the GPU, then returns one target completion. The scheduler
 compares each captured round's complete measured cost and expected emitted-token

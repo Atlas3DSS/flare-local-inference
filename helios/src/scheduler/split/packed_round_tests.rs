@@ -20,14 +20,12 @@ fn combined_graphs(active: usize) -> Vec<GraphDescriptor> {
     for batch in crate::execution::BATCH_CAPACITIES.into_iter().take_while(|b| *b <= active.next_power_of_two()) {
         let mut capacities = vec![batch, batch * 2, batch * 4, (batch * 6).min(128), (batch * 8).min(128)];
         capacities.sort_unstable(); capacities.dedup();
-        for depth in 1..=7 {
-            for &tokens in &capacities {
-                graphs.push(GraphDescriptor { name: format!("combined-{batch}-{depth}-{tokens}"),
-                    kind: GraphKind::PackedSpeculative, draft_tokens: depth,
-                    sampling_mode: SamplingMode::General, handle: 1, batch_capacity: batch,
-                    token_capacity: 8, packed_token_capacity: tokens, prefill_capacity: 0,
-                    estimated_duration_ns: 0, input_bindings: vec![] });
-            }
+        for &tokens in &capacities {
+            graphs.push(GraphDescriptor { name: format!("combined-{batch}-7-{tokens}"),
+                kind: GraphKind::PackedSpeculative, draft_tokens: 7,
+                sampling_mode: SamplingMode::General, handle: 1, batch_capacity: batch,
+                token_capacity: 8, packed_token_capacity: tokens, prefill_capacity: 0,
+                estimated_duration_ns: 0, input_bindings: vec![] });
         }
     }
     graphs
@@ -64,25 +62,134 @@ fn combined_records(s: &RequestScheduler, plan: &ScheduledPlan, offered: &[i64])
 }
 
 #[test]
-fn packed_combined_selects_captured_depth_and_budget_before_sampling() {
+fn packed_combined_keeps_full_proposals_when_selecting_target_budget() {
     for active in [1, 8, 32] {
         let mut s = combined_engine(active);
         let handles: Vec<_> = (0..active).map(|_| ready(&mut s)).collect();
         let plan = s.plan().unwrap();
         assert_eq!(plan.kind, GraphKind::PackedSpeculative);
         assert_eq!(plan.lanes.len(), active);
-        assert!((1..=7).contains(&plan.draft_tokens));
+        assert_eq!(plan.draft_tokens, 7);
         assert_eq!(plan.token_capacity, 8);
         assert!(plan.packed_token_capacity >= active && plan.packed_token_capacity <= 128);
         assert!(plan.lanes.iter().all(|lane| lane.tokens == plan.draft_tokens + 1));
         assert!(handles.iter().all(|h| !s.owns_proposal(s.request(*h).unwrap())));
-        // Distinct depth costs cannot collapse into the same B/W/P key.
-        let shape = s.costs.packed_round_shapes().find(|g| g.batch == active && g.drafts == 1).unwrap();
-        let step = ScheduledStep { kind: GraphKind::PackedSpeculative, draft_tokens: 1,
-            batch_capacity: active, token_capacity: 8, packed_token_capacity: shape.tokens,
-            mixed: None, lanes: vec![], requires_feedback: true };
-        s.costs.set_measured(&step, 1);
-        assert_eq!(s.plan().unwrap().draft_tokens, 1);
+
+    }
+}
+
+#[test]
+fn legacy_short_packed_producers_cannot_compete_or_receive_probes() {
+    let mut s = engine(4);
+    s.configure_policy(PolicyConfig::throughput()).unwrap();
+    let mut graphs = combined_graphs(4);
+    for graph in graphs.iter_mut() {
+        graph.estimated_duration_ns = if graph.kind == GraphKind::PackedSpeculative { 1_000_000 } else { 10_000_000 };
+    }
+    let short: Vec<_> = graphs.iter().filter(|g| g.kind == GraphKind::PackedSpeculative)
+        .flat_map(|graph| (1..7).map(move |drafts| GraphDescriptor {
+            name: format!("{}-drafts{drafts}", graph.name), draft_tokens: drafts,
+            estimated_duration_ns: 1, ..graph.clone()
+        })).collect();
+    graphs.extend(short);
+    s.measured_graph_durations(&graphs).unwrap();
+    for _ in 0..3 { ready(&mut s); }
+    let plan = s.plan().unwrap();
+    assert_eq!((plan.kind, plan.draft_tokens), (GraphKind::PackedSpeculative, 7));
+    assert!(s.costs.packed_round_shapes().all(|shape| shape.drafts == 7));
+    let short = ScheduledPlan { step: ScheduledStep { draft_tokens: 1, ..plan.step.clone() }, ..plan.clone() };
+    assert!(s.commit(&short, Fence(1)).is_err());
+    assert!(s.submissions.is_empty());
+
+    s.advance_to(s.policy.estimate_ttl_ns).unwrap();
+    assert!(s.costs.stale_keys().filter(|key| key.kind == GraphKind::PackedSpeculative)
+        .all(|key| key.drafts == 7));
+    s.refresh.credit_ns = refresh::CREDIT_CAP_NS;
+    let probe = s.plan().unwrap();
+    assert!(matches!(probe.origin, PlanOrigin::RefreshStart(_)));
+    if probe.kind == GraphKind::PackedSpeculative { assert_eq!(probe.draft_tokens, 7); }
+    let (values, age, _) = s.lane_values(0);
+    let mut learning = Vec::new();
+    s.packed_round_candidates(&mut learning, &values, age, true);
+    assert!(!learning.is_empty());
+    assert!(learning.iter().all(|candidate| candidate.draft_tokens == 7));
+}
+
+#[test]
+fn packed_discovery_finishes_with_ragged_cohorts_and_legacy_producers() {
+    for active in [1usize, 3, 4, 8] {
+        let mut reference = None;
+        for legacy in [false, true] {
+            let mut s = engine(active.next_power_of_two());
+            s.configure_policy(PolicyConfig::throughput()).unwrap();
+            let mut graphs = combined_graphs(active);
+            for batch in crate::execution::BATCH_CAPACITIES.into_iter()
+                .take_while(|b| *b <= active.next_power_of_two()) {
+                for width in if legacy { 2..=8 } else { 8..=8 } {
+                    graphs.push(GraphDescriptor { name: format!("proposal-{batch}-{width}"),
+                        kind: GraphKind::Proposal, token_capacity: width,
+                        batch_capacity: batch, draft_tokens: 0, packed_token_capacity: 0,
+                        sampling_mode: SamplingMode::General, handle: 1,
+                        prefill_capacity: 0, estimated_duration_ns: 0, input_bindings: vec![] });
+                }
+            }
+            let verifiers: Vec<_> = graphs.iter().filter(|g| g.kind == GraphKind::PackedSpeculative)
+                .map(|graph| GraphDescriptor { name: format!("verify-{}", graph.name),
+                    kind: GraphKind::Verification, draft_tokens: 0, ..graph.clone() }).collect();
+            graphs.extend(verifiers);
+            if legacy {
+                let short: Vec<_> = graphs.iter().filter(|g| g.kind == GraphKind::PackedSpeculative)
+                    .flat_map(|graph| (1..7).map(move |drafts| GraphDescriptor {
+                        name: format!("{}-drafts{drafts}", graph.name), draft_tokens: drafts, ..graph.clone()
+                    })).collect();
+                graphs.extend(short);
+            }
+            s.graph_durations(&graphs).unwrap();
+            for _ in 0..active {
+                let handle = ready(&mut s);
+                s.request_mut(handle).unwrap().max_new_tokens = 1024;
+            }
+            let mut discoveries = 0;
+            let mut finished = false;
+            for sequence in 1..=2 * s.costs.len() as u64 {
+                let plan = s.plan().unwrap();
+                if plan.origin == PlanOrigin::Ordinary && plan.kind != GraphKind::Verification {
+                    finished = true;
+                    break;
+                }
+                if plan.kind == GraphKind::Proposal { assert_eq!(plan.token_capacity, 8); }
+                if plan.kind == GraphKind::PackedSpeculative { assert_eq!(plan.draft_tokens, 7); }
+                let fence = Fence(sequence);
+                s.commit(&plan, fence).unwrap();
+                let mut records = combined_records(&s, &plan, &vec![0; plan.lanes.len()]);
+                for lane in &plan.lanes {
+                    let record = &mut records[lane.request.slot as usize];
+                    record.submission_sequence = sequence as i64;
+                    record.vector.as_mut().unwrap().verification_width = plan.token_capacity as i64;
+                    if plan.kind == GraphKind::Proposal {
+                        record.consumed_tokens -= 1;
+                        record.generated_tokens -= 1;
+                        record.token_id = -1;
+                        record.vector = Some(TokenVector::default());
+                    } else if plan.kind == GraphKind::Verification {
+                        record.vector.as_mut().unwrap().offered_drafts = lane.tokens as i64 - 1;
+                    }
+                }
+                let timing = crate::execution::ExecutionTiming { gpu_ns: [Some(1_000_000); 16], ..Default::default() };
+                match plan.kind {
+                    GraphKind::Proposal => { s.complete_proposal(fence, &records, timing, &vec![[0.9; 7]; plan.batch_capacity]).unwrap(); }
+                    GraphKind::PackedSpeculative => { s.complete_packed_round(fence, &records, timing, &vec![[0.9; 7]; plan.batch_capacity]).unwrap(); }
+                    _ => { s.complete(fence, &records, timing).unwrap(); }
+                }
+                discoveries += usize::from(plan.origin == PlanOrigin::Discovery);
+            }
+            assert!(finished, "active={active}, legacy={legacy}: discovery did not finish");
+            assert!(s.split.as_ref().unwrap().retained.iter().all(Option::is_none));
+            assert_eq!(s.plan().unwrap().origin, PlanOrigin::Ordinary);
+            let counts = (discoveries, s.costs.len(), s.candidates.borrow().capacity());
+            if let Some(reference) = reference { assert_eq!(counts, reference); }
+            else { reference = Some(counts); }
+        }
     }
 }
 
@@ -179,22 +286,18 @@ fn matched_c32_planner(gpu: bool) -> RequestScheduler {
     let mut graphs = super::super::tests::duration_graphs(32);
     graphs.retain(|g| g.kind != GraphKind::Speculative || g.token_capacity == 1);
     for batch in [1, 2, 4, 8, 16, 32] {
-        for depth in 1..=5 {
-            if !gpu {
-                graphs.push(GraphDescriptor { name: format!("proposal-{batch}-{depth}"),
-                    kind: GraphKind::Proposal, draft_tokens: 0, sampling_mode: SamplingMode::General,
-                    handle: 1, batch_capacity: batch, token_capacity: depth + 1,
-                    packed_token_capacity: 0, prefill_capacity: 0, estimated_duration_ns: 0, input_bindings: vec![] });
-            }
-            for tokens in (1..=6).map(|n| batch * n).filter(|n| *n <= 128) {
-                if gpu || depth == 1 {
-                    graphs.push(GraphDescriptor { name: format!("target-{batch}-{depth}-{tokens}"),
-                        kind: if gpu { GraphKind::PackedSpeculative } else { GraphKind::Verification },
-                        draft_tokens: if gpu { depth } else { 0 }, sampling_mode: SamplingMode::General,
-                        handle: 1, batch_capacity: batch, token_capacity: 6, packed_token_capacity: tokens,
-                        prefill_capacity: 0, estimated_duration_ns: 0, input_bindings: vec![] });
-                }
-            }
+        if !gpu {
+            graphs.push(GraphDescriptor { name: format!("proposal-{batch}-5"),
+                kind: GraphKind::Proposal, draft_tokens: 0, sampling_mode: SamplingMode::General,
+                handle: 1, batch_capacity: batch, token_capacity: 6,
+                packed_token_capacity: 0, prefill_capacity: 0, estimated_duration_ns: 0, input_bindings: vec![] });
+        }
+        for tokens in (1..=6).map(|n| batch * n).filter(|n| *n <= 128) {
+            graphs.push(GraphDescriptor { name: format!("target-{batch}-5-{tokens}"),
+                kind: if gpu { GraphKind::PackedSpeculative } else { GraphKind::Verification },
+                draft_tokens: if gpu { 5 } else { 0 }, sampling_mode: SamplingMode::General,
+                handle: 1, batch_capacity: batch, token_capacity: 6, packed_token_capacity: tokens,
+                prefill_capacity: 0, estimated_duration_ns: 0, input_bindings: vec![] });
         }
     }
     s.graph_durations(&graphs).unwrap();
@@ -270,7 +373,7 @@ fn packed_cohort_selection_prices_long_prefixes_and_includes_width_one_rows() {
     for &h in &handles { values[h.slot as usize].output_token = 1.; }
     let mut candidates = Vec::new();
     s.packed_round_candidates(&mut candidates, &values, 0., false);
-    let best = candidates.iter().filter(|c| c.batch == 2 && c.draft_tokens == 5
+    let best = candidates.iter().filter(|c| c.batch == 2 && c.draft_tokens == 7
         && c.packed_token_capacity == 12).max_by(|a,b| a.rate.compare(b.rate)).unwrap();
     assert_eq!(best.mask, (1 << handles[1].slot) | (1 << handles[2].slot));
     assert_eq!(best.rate.score, ValueRate::new(best.duration_ns, 12., 0.).score);
@@ -279,7 +382,7 @@ fn packed_cohort_selection_prices_long_prefixes_and_includes_width_one_rows() {
     values[h.slot as usize].output_token = 100.;
     candidates.clear();
     s.packed_round_candidates(&mut candidates, &values, 0., false);
-    let best = candidates.iter().filter(|c| c.batch == 2 && c.draft_tokens == 5
+    let best = candidates.iter().filter(|c| c.batch == 2 && c.draft_tokens == 7
         && c.packed_token_capacity == 12).max_by(|a,b| a.rate.compare(b.rate)).unwrap();
     assert_ne!(best.mask & (1 << h.slot), 0);
     assert_eq!(best.rate.score, ValueRate::new(best.duration_ns, 106., 0.).score);
@@ -290,7 +393,7 @@ fn packed_cohort_selection_prices_long_prefixes_and_includes_width_one_rows() {
     values[h.slot as usize].reference_delivery_ms = 10.;
     candidates.clear();
     s.packed_round_candidates(&mut candidates, &values, 0., false);
-    let best = candidates.iter().filter(|c| c.batch == 2 && c.draft_tokens == 5
+    let best = candidates.iter().filter(|c| c.batch == 2 && c.draft_tokens == 7
         && c.packed_token_capacity == 12).max_by(|a,b| a.rate.compare(b.rate)).unwrap();
     assert_ne!(best.mask & (1 << h.slot), 0, "aged width-one rows retain delivery utility");
 }
@@ -324,6 +427,7 @@ fn packed_planning_latency_at_concurrency() {
             for batch in crate::execution::BATCH_CAPACITIES.into_iter().take_while(|b| *b <= active) {
                 for width in 2..=8 {
                     for kind in [GraphKind::Proposal, GraphKind::Verification, GraphKind::Speculative] {
+                        if kind == GraphKind::Proposal && width != 8 { continue; }
                         if kind != GraphKind::Proposal && batch * width > 128 { continue; }
                         graphs.push(GraphDescriptor { draft_tokens: 0, packed_token_capacity: 0,
                             name: format!("{kind:?}-{batch}-{width}"), kind, sampling_mode: SamplingMode::General,
@@ -417,7 +521,7 @@ fn packed_planning_latency_c8_p32() {
         let mut shapes = Vec::new();
         for batch in [1, 2, 4, 8] {
             for width in 1..=6 {
-                if width > 1 {
+                if width == 6 {
                     graphs.push(GraphDescriptor { draft_tokens: 0, packed_token_capacity: 0,
                         name: format!("proposal-{batch}-{width}"), kind: GraphKind::Proposal,
                         sampling_mode: SamplingMode::General, handle: 1, batch_capacity: batch,
@@ -434,12 +538,10 @@ fn packed_planning_latency_c8_p32() {
                         prefill_capacity: 0, estimated_duration_ns: 0, input_bindings: vec![] });
                 }
                 if packed {
-                    for depth in 1..=5 {
-                        graphs.push(GraphDescriptor { draft_tokens: depth, packed_token_capacity: batch * width,
-                            name: format!("packed-{batch}-{depth}-{width}"), kind: GraphKind::PackedSpeculative,
-                            sampling_mode: SamplingMode::General, handle: 1, batch_capacity: batch,
-                            token_capacity: 6, prefill_capacity: 0, estimated_duration_ns: 0, input_bindings: vec![] });
-                    }
+                    graphs.push(GraphDescriptor { draft_tokens: 5, packed_token_capacity: batch * width,
+                        name: format!("packed-{batch}-5-{width}"), kind: GraphKind::PackedSpeculative,
+                        sampling_mode: SamplingMode::General, handle: 1, batch_capacity: batch,
+                        token_capacity: 6, prefill_capacity: 0, estimated_duration_ns: 0, input_bindings: vec![] });
                 }
             }
         }
@@ -531,9 +633,12 @@ fn packed_survival_is_optional_and_invalid_last_lane_feedback_is_atomic() {
 }
 
 #[test]
-fn packed_only_funded_learning_uses_draft_extent_and_debits_one_complete_graph() {
+fn legacy_fixed_packed_producer_learning_uses_its_declared_extent() {
     let mut s = combined_engine(2);
     let mut graphs = combined_graphs(2);
+    for graph in graphs.iter_mut().filter(|g| g.kind == GraphKind::PackedSpeculative) {
+        graph.draft_tokens = 2;
+    }
     graphs.retain(|g| g.kind != GraphKind::PackedSpeculative
         || (g.batch_capacity == 2 && g.draft_tokens == 2 && g.packed_token_capacity == 4));
     assert!(!graphs.iter().any(|g| g.kind == GraphKind::Proposal));

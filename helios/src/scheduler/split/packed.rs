@@ -42,11 +42,17 @@ impl RequestScheduler {
             uncached = frontier()?;
             &uncached
         };
-        self.costs.packed_shapes().filter(|shape| {
+        let matches = |shape: &PackedShape| {
             let matching = target.map_or(shape.batch == batch && shape.width >= width, |target|
                 shape.batch == target.batch && shape.width == target.tokens && shape.tokens == target.packed);
             matching && shape.batch >= offers.len() && shape.tokens >= offers.len()
-        }).map(|shape| {
+        };
+        let useful_tokens: usize = offers.iter().map(|(_, limit)| limit).sum();
+        // A padded budget cannot be discovered when verification dispatch always chooses its smaller equivalent.
+        let full_budget = target.is_none().then(|| self.costs.packed_shapes().filter(matches)
+            .filter(|shape| shape.tokens >= useful_tokens).map(|shape| shape.tokens).min()).flatten();
+        self.costs.packed_shapes().filter(matches)
+            .filter(|shape| full_budget.is_none_or(|budget| shape.tokens <= budget)).map(|shape| {
             let nanos = horizon(proposal_ns, shape.nanos);
             let mut expected = [0.0; REQUEST_LANES];
             for &(slot, _) in offers { expected[slot] = 1.0; }
@@ -125,19 +131,17 @@ impl RequestScheduler {
                     rate: ValueRate::new(nanos,value,age), feedback: true });
             }
         }
-        let maximum = self.split.as_ref().unwrap().width;
-        available.retain(|&slot| self.speculative_tokens(self.slots[slot].request.as_ref().unwrap(),maximum)>1);
+        let Some(width) = self.costs.proposal_width else { return; };
+        available.retain(|&slot| self.speculative_tokens(self.slots[slot].request.as_ref().unwrap(),width)>1);
         available.sort_unstable_by(|&a,&b| values[b].output_token.total_cmp(&values[a].output_token).then(a.cmp(&b)));
         for count in 1..=available.len() {
             let batch = count.next_power_of_two();
-            for width in 2..=maximum {
-                let offers: Vec<_> = available[..count].iter().map(|&slot|
-                    (slot,self.speculative_tokens(self.slots[slot].request.as_ref().unwrap(),width))).collect();
-                if let Some((shape,rate)) = self.budget_choice(&offers,batch,width,values,age,optimistic) {
-                    output.push(Candidate { draft_tokens: 0, kind: GraphKind::Proposal, mask: offers.iter().fold(0,|mask,(slot,_)|mask|(1<<slot)),
-                        batch, capacity: width, packed_token_capacity: 0, prefill_capacity: 0, prefill_slot: None,
-                        work: 0, duration_ns: rate.duration_ns, rate, feedback: true, verification_budget: Some(shape.tokens) });
-                }
+            let offers: Vec<_> = available[..count].iter().map(|&slot|
+                (slot,self.speculative_tokens(self.slots[slot].request.as_ref().unwrap(),width))).collect();
+            if let Some((shape,rate)) = self.budget_choice(&offers,batch,width,values,age,optimistic) {
+                output.push(Candidate { draft_tokens: 0, kind: GraphKind::Proposal, mask: offers.iter().fold(0,|mask,(slot,_)|mask|(1<<slot)),
+                    batch, capacity: width, packed_token_capacity: 0, prefill_capacity: 0, prefill_slot: None,
+                    work: 0, duration_ns: rate.duration_ns, rate, feedback: true, verification_budget: Some(shape.tokens) });
             }
         }
     }

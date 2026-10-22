@@ -323,10 +323,9 @@ impl LoadOptions {
                     && (graph.kind != "speculative" || graph.token_capacity == 1
                         || graph.batch_capacity * graph.token_capacity <= selected_token_capacity)
                     && (graph.kind != "proposal" || (enabled
-                        && graph.draft_tokens.is_some_and(|n| n as usize <= drafts
-                            && (fixed.is_none() || n as usize == drafts))))
+                        && graph.draft_tokens == Some(drafts as u32)))
                     && (graph.kind != "packed_speculative" || (enabled
-                        && graph.draft_tokens.is_some_and(|n| n as usize <= drafts)
+                        && graph.draft_tokens == Some(drafts as u32)
                         && widths.contains(&(graph.token_capacity as usize))
                         && self.mtp_verification_token_budget.is_none_or(|budget| graph.packed_token_capacity == (budget as u64).min(graph.batch_capacity * graph.token_capacity))
                         && self.mtp_max_verification_token_budget.is_none_or(|budget| graph.packed_token_capacity <= budget as u64)))
@@ -1279,7 +1278,7 @@ mod tests {
     }
 
     #[test]
-    fn split_catalog_selects_proposal_depth_independently_of_ragged_verification() {
+    fn split_catalog_selects_one_configured_producer_and_ragged_verification() {
         for prepared in [1usize, 3, 4, 9, 33, 64] {
             let budget = prepared.next_power_of_two().max(8);
             for active in [1, prepared] {
@@ -1293,8 +1292,8 @@ mod tests {
                             .select(std::slice::from_mut(&mut p), &mut c).unwrap();
                         let graphs = &p.execution.as_ref().unwrap().graphs;
                         let proposals: Vec<_> = graphs.iter().filter(|g| g.kind == "proposal").collect();
-                        assert_eq!(proposals.len(), if depth == 0 { 0 } else { (active.next_power_of_two().ilog2() as usize + 1) * if adaptive { depth } else { 1 } });
-                        assert!(proposals.iter().all(|g| g.draft_tokens.is_some_and(|n| n > 0 && n as usize <= depth && (adaptive || n as usize == depth)) && g.verify_tokens.is_none()));
+                        assert_eq!(proposals.len(), if depth == 0 { 0 } else { active.next_power_of_two().ilog2() as usize + 1 });
+                        assert!(proposals.iter().all(|g| g.draft_tokens == Some(depth as u32) && g.verify_tokens.is_none()));
                         for b in BATCH_CAPACITIES.into_iter().filter(|b| *b <= active.next_power_of_two()) {
                             for w in 1..=8 {
                                 let present = graphs.iter().any(|g| g.kind == "verification" && g.batch_capacity == b as u64 && g.token_capacity == w as u64);
@@ -1655,7 +1654,7 @@ mod tests {
     }
 
     #[test]
-    fn packed_combined_selection_preserves_depth_variants_and_exact_row_limits() {
+    fn packed_combined_selection_keeps_one_producer_and_exact_row_limits() {
         for budget in [24usize, 32] {
             let mut ranks = [combined_package(), combined_package()];
             let mut config = packed_draft_five_config();
@@ -1667,12 +1666,11 @@ mod tests {
                 for batch in [1u64, 2, 4, 8] {
                     let rounds: Vec<_> = graphs.iter().filter(|g| g.kind == "packed_speculative"
                         && g.batch_capacity == batch).collect();
-                    assert_eq!(rounds.len(), 5);
-                    for depth in 1..=5 {
-                        assert!(rounds.iter().any(|g| g.draft_tokens == Some(depth)
-                            && g.token_capacity == 6 && g.verify_tokens == Some(6)
-                            && g.packed_token_capacity == (budget as u64).min(batch * 6)));
-                    }
+                    assert_eq!(rounds.len(), 1);
+                    assert_eq!(rounds[0].draft_tokens, Some(5));
+                    assert_eq!(rounds[0].token_capacity, 6);
+                    assert_eq!(rounds[0].verify_tokens, Some(6));
+                    assert_eq!(rounds[0].packed_token_capacity, (budget as u64).min(batch * 6));
                 }
             }
         }
@@ -1696,7 +1694,7 @@ mod tests {
         }
         let mut ranks = [combined_package(), combined_package()];
         let e = ranks[1].execution.as_mut().unwrap();
-        let name = e.graphs.iter().find(|g| g.kind == "packed_speculative").unwrap().name.clone();
+        let name = e.graphs.iter().find(|g| g.kind == "packed_speculative" && g.draft_tokens == Some(5)).unwrap().name.clone();
         e.graphs.retain(|g| g.name != name);
         ranks[1].graphs.retain(|g| g.name != name);
         assert!(LoadOptions::default().select(&mut ranks, &mut packed_draft_five_config()).is_err());
