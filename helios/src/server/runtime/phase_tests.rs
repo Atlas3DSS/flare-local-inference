@@ -996,6 +996,7 @@ struct FakeStore {
     fetched: Vec<(crate::offload::HostHit, crate::offload::InboundTicket)>,
     events: VecDeque<crate::offload::StoreEvent>,
     close_error: Option<Error>,
+    poll_error: Option<Error>,
     close_panics: bool,
     close_calls: Arc<AtomicUsize>,
     drops: Arc<AtomicUsize>,
@@ -1010,6 +1011,7 @@ impl FakeStore {
             fetched: Vec::new(),
             events: VecDeque::new(),
             close_error: None,
+            poll_error: None,
             close_panics: false,
             close_calls: Arc::new(AtomicUsize::new(0)),
             drops: Arc::new(AtomicUsize::new(0)),
@@ -1042,8 +1044,12 @@ impl crate::offload::PrefixStore for FakeStore {
         self.fetched.push((hit, ticket));
         Ok(())
     }
-    fn poll(&mut self, events: &mut Vec<crate::offload::StoreEvent>) {
+    fn poll(&mut self, events: &mut Vec<crate::offload::StoreEvent>) -> Result<()> {
+        if let Some(error) = &self.poll_error {
+            return Err(error.clone());
+        }
         events.extend(self.events.drain(..));
+        Ok(())
     }
     fn stats(&self) -> crate::offload::StoreStats {
         crate::offload::StoreStats::default()
@@ -1162,6 +1168,27 @@ fn shutdown_retains_the_store_when_its_drain_panics() {
     drop(worker);
     assert_eq!(close_calls.load(Ordering::Relaxed), 1);
     assert_eq!(drops.load(Ordering::Relaxed), 0);
+}
+
+/// A store that cannot account for its transfers stops the worker, so ids and
+/// pins held by those transfers are never reused or released.
+#[test]
+fn a_store_that_cannot_report_completions_stops_the_worker() {
+    let fixture = Fixture::new();
+    let (_sender, receiver) = mpsc::channel();
+    let mut worker = fixture.worker(receiver);
+    let mut store = FakeStore::new(None);
+    store.poll_error = Some("rank 1's prefix record connection failed".into());
+    worker.attach_store(Some(Box::new(store)));
+    let error = worker.service_store().unwrap_err();
+    assert!(
+        error.to_string().contains("prefix record connection"),
+        "{error}"
+    );
+    assert!(
+        worker.store.is_some(),
+        "the worker keeps the store it cannot drain"
+    );
 }
 
 fn host_hit(history: &crate::cache::PrefixHistory, consumed: u64) -> crate::offload::HostHit {

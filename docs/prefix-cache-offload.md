@@ -462,7 +462,9 @@ requests sharing a prefix share one transfer.
 `ModelRuntime::start` constructs the configured store on the model thread
 after the executor exists, from the per-rank contexts, devices, and cache
 geometry in the local and peer manifests and from the pools and indexes the
-loader created. Process-peer tensor parallelism rejects the option.
+loader created. Process-peer tensor parallelism accepts the option only for a
+disk-only store whose ranks each keep their own records; see
+[section 2.14](#214-ranks-on-separate-hosts).
 
 The worker loop order is: admit, poll and complete executor frames, publish
 finished requests, drain publications into `store` calls, `poll` the store and
@@ -619,7 +621,10 @@ Offload limits interference through bounded work and explicit ownership:
   writes in flight, and memory evicts only durable records.
 - Slab allocation never blocks; an unsatisfiable request fails its job.
 - The model worker thread never waits for offload work, and the model stream
-  never waits on an offload stream.
+  never waits on an offload stream. A peer connection that stops accepting
+  frames fails the job; it never delays the worker.
+- A transfer whose completion can no longer be reported stops the store and the
+  worker, so its ids and pins are neither reused nor released.
 - Offload copies are bounded per issue, and offload threads run below the
   serving threads' priority.
 - Steady-state serving allocates no device memory, no pinned memory, and no
@@ -699,7 +704,8 @@ and length. The layout fingerprint covers that rank's geometry, its rank, and
 the world size, so a host never restores records another rank wrote.
 
 Rank zero's `DiskStore` indexes, sizes, evicts, and plans every record as on a
-single host, with the disk limit applying to each host's directory. Its
+single host. The disk limit is the smallest limit among the ranks, because a
+record every host must hold is bounded by the host with the least room. Its
 transport, `shard::Sharded`, runs every store, fetch, truncate, and unlink on
 rank zero's `Staged` transport and sends the same job, with the same file names,
 GPU ids, and state slot, to each peer over a dedicated TCP connection. Each peer
@@ -708,24 +714,43 @@ zero reports a job only after every rank finished it, so a fetch completes only
 once every rank's GPU holds its pages and row, and a checkpoint stays pinned
 until every rank has copied it out. When some ranks wrote a record and another
 failed, rank zero unlinks the file from the ranks that wrote it before
-reporting the failure, so no host keeps a record the index lacks.
+reporting the failure, so no host keeps a record the index lacks. A cleanup
+unlink that fails is reported with that failure rather than discarded.
+
+Sends are queued to a writer thread per connection, so the model worker never
+waits for a peer. A peer that stops reading fills a bounded queue and fails the
+job instead of stalling the worker. A connection that fails while a job is
+outstanding stops the transport: it reports no completion for that job and
+accepts no new one, and the worker stops with it. The peer may still be copying
+into the ids of the job it already received, so reporting the job as failed
+would return those ids to the scheduler's free lists while the copy runs. A job
+that no rank completes within the job timeout stops the transport the same way.
 
 The ranks join their stores after connecting their RoCE transport and before
 the execution protocol starts. Every rank must have a disk store, or none:
-startup fails when the settings differ. Each peer connects to a listener rank
-zero opens on the address of its rendezvous connection and presents a nonce
-rank zero sent over that connection. Peers then send rank zero a summary of the
-records their scan kept. Rank zero keeps a record only when every rank holds a
-file with the same header, ignoring the layout fingerprint and row checksum,
-keeps its row only when every rank holds the row, and drops records whose
-parent it drops. Every rank deletes or truncates its files to that agreement
-before rank zero builds its index.
+startup fails when the settings differ. Rank zero opens one listener on a
+wildcard address and tells each peer the local address that peer's rendezvous
+connection uses, so a multi-homed rank zero is reachable on the interface each
+peer already selected. A peer presents the nonce rank zero sent over that
+connection, its rank, and its layout fingerprint, and rank zero requires the
+connecting address to be that rank's rendezvous peer. Peers then send rank zero
+a summary of the records their scan kept. Rank zero keeps a record only when
+every rank holds a file with the same header, ignoring the layout fingerprint
+and row checksum, keeps its row only when every rank holds the row, and drops
+records whose parent it drops. Every rank deletes or truncates its files to
+that agreement before rank zero builds its index. Rank zero and each peer also
+compare the layout fingerprint of their own rank's geometry at join, so a
+package whose ranks have different plane or row sizes fails startup instead of
+silently never matching.
 
 A memory tier keeps every rank's bytes in one process, so a multi-host package
 supports disk-only retention; startup rejects a nonzero
 `--prefix-cache-memory`. A peer's record service holds its staging pool and
 transfer threads until rank zero closes its store after draining every rank,
-or until rank zero's connection ends.
+or until rank zero's connection ends. When the peer's own drain is not
+confirmed, the peer retains its transport, transfer threads, disk thread, and
+registered staging together and exits with the error, rather than releasing
+memory its transfers may still use.
 
 ## 3. Implementation sequence
 

@@ -100,7 +100,10 @@ pub trait DiskTransport {
     ) -> Result<()>;
     fn truncate(&mut self, id: super::JobId, path: PathBuf, length: u64) -> Result<()>;
     fn unlink(&mut self, id: super::JobId, path: PathBuf) -> Result<()>;
-    fn poll(&mut self, events: &mut Vec<TransportEvent>);
+    /// Report completed jobs. `Err` means this transport can no longer report
+    /// them: a job it accepted may still run, so the caller must stop rather
+    /// than reuse the ids that job holds.
+    fn poll(&mut self, events: &mut Vec<TransportEvent>) -> Result<()>;
     fn close(&mut self) -> Result<()>;
     /// The staged transport behind this handle, for the composite store's
     /// transfers between files and its memory slabs.
@@ -1341,11 +1344,12 @@ impl DiskTransport for Staged {
         Ok(())
     }
 
-    fn poll(&mut self, events: &mut Vec<TransportEvent>) {
+    fn poll(&mut self, events: &mut Vec<TransportEvent>) -> Result<()> {
         if !self.closed {
             self.step();
         }
         events.append(&mut self.events);
+        Ok(())
     }
 
     /// Finish outstanding pipelines within [`transfer::CLOSE_TIMEOUT`], then
@@ -1596,9 +1600,9 @@ impl DiskStore {
 
     /// Drain the transport's completions without applying them, for a
     /// composite store that drives the transport directly.
-    pub(crate) fn poll_transport(&mut self, events: &mut Vec<TransportEvent>) {
+    pub(crate) fn poll_transport(&mut self, events: &mut Vec<TransportEvent>) -> Result<()> {
         self.reclaim_inputs();
-        self.transport.poll(events);
+        self.transport.poll(events)
     }
 
     /// The record shape for a published checkpoint: a child of its parent when
@@ -1938,7 +1942,18 @@ impl DiskStore {
                         self.stats.reused_tokens += job.tokens;
                         self.inbound_rate.observe(*bytes, job.started.elapsed());
                     }
-                    Err(_) => self.stats.fetch_failed += 1,
+                    Err(_) => {
+                        self.stats.fetch_failed += 1;
+                        // A record that could not be restored is not offered
+                        // again. Its pages stay in the index for descendants
+                        // that hold it as an ancestor; only its row, which
+                        // makes it a lookup match, is dropped.
+                        if let Some(endpoint) = job.nodes.last()
+                            && let Some(node) = self.index.node_mut(endpoint)
+                        {
+                            node.row = false;
+                        }
+                    }
                 }
                 events.push(StoreEvent::Fetched {
                     key: job.key,
@@ -2060,13 +2075,14 @@ impl PrefixStore for DiskStore {
         Ok(())
     }
 
-    fn poll(&mut self, events: &mut Vec<StoreEvent>) {
+    fn poll(&mut self, events: &mut Vec<StoreEvent>) -> Result<()> {
         self.reclaim_inputs();
         let mut completed = Vec::new();
-        self.transport.poll(&mut completed);
+        let polled = self.transport.poll(&mut completed);
         for event in completed {
             self.apply(event, events);
         }
+        polled
     }
 
     fn stats(&self) -> StoreStats {
@@ -2084,7 +2100,7 @@ impl PrefixStore for DiskStore {
     fn close(&mut self) -> Result<()> {
         let closed = self.transport.close();
         let mut completed = Vec::new();
-        self.transport.poll(&mut completed);
+        let _ = self.transport.poll(&mut completed);
         let mut events = Vec::new();
         for event in completed {
             self.apply(event, &mut events);
@@ -2333,8 +2349,9 @@ mod tests {
             Ok(())
         }
 
-        fn poll(&mut self, events: &mut Vec<TransportEvent>) {
+        fn poll(&mut self, events: &mut Vec<TransportEvent>) -> Result<()> {
             events.append(&mut self.0.borrow_mut().events);
+            Ok(())
         }
 
         fn close(&mut self) -> Result<()> {
@@ -2835,6 +2852,47 @@ mod tests {
         assert!(store.index().node(&child.key).is_none());
         assert_eq!(store.used(), reserved.length_with_row());
         assert_eq!(store.index().len(), 1);
+    }
+
+    #[test]
+    fn a_failed_restore_is_not_offered_again() {
+        let geometry = geometry();
+        let directory = directory();
+        let full = history(2000);
+        let root = header(&geometry, &full, 700, None);
+        let leaf = header(&geometry, &full, 1990, Some(700));
+        let records = vec![
+            scanned(&directory, root.clone(), 0, true),
+            scanned(&directory, leaf.clone(), 1, true),
+        ];
+        let total: u64 = records.iter().map(|record| record.bytes).sum();
+        let (mut store, log) = store_with(records, 2 * total);
+
+        let hit = store.lookup(&full, 0).unwrap();
+        assert_eq!(hit.key, leaf.key);
+        let ticket = InboundTicket {
+            key: hit.key,
+            pages: (100..100 + hit.pages as u32).map(PageId).collect(),
+            slot: StateSlotId(2),
+        };
+        store.fetch(hit, ticket).unwrap();
+        log.borrow_mut().events.push(TransportEvent::Fetched {
+            id: JobId(1),
+            result: Err(invalid("page checksum mismatch")),
+        });
+        let mut events = Vec::new();
+        store.poll(&mut events).unwrap();
+        assert!(matches!(
+            events.as_slice(),
+            [StoreEvent::Fetched { result: Err(_), .. }]
+        ));
+
+        // A record whose bytes could not be restored is not offered again, so
+        // every later admission does not repeat the same failing transfer. Its
+        // ancestor stays available, because only the failed endpoint's row was
+        // dropped.
+        assert_eq!(store.lookup(&full, 0).unwrap().key, root.key);
+        assert!(store.lookup(&full, 700).is_none());
     }
 
     #[test]
