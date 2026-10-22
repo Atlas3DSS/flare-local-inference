@@ -1,4 +1,4 @@
-"""Reviewed Sol-10 projections with fixed reductions and prepared, bounded storage."""
+"""Reviewed Sol-14 projections (M <= 24, one pinned tuple per shape) with fixed reductions and prepared, bounded storage."""
 from dataclasses import dataclass
 from functools import lru_cache
 import ctypes as C
@@ -30,26 +30,33 @@ class RepackedFP8(TensorFP8LinearWeight):
     member_gains: tuple = ()
 
 
-# Reviewed M=16 tuple (BK, warps, split, path), fixed across all row counts.
+# Reviewed Sol-14 tuple (BK, warps, split, path) per shape, fixed across every row count 1..24 (row invariance):
+# sm70_projection_plan14.json (sol-14/plan14.json). Fused members carry the fused shape's tuple. Shapes whose split
+# changed against Sol-10 (tensor_fp8 5120->14336 and its q/k/v members, 4 -> 2) produce new FP32 bits; every other
+# served projection is bit-identical to the Sol-10 build (sol-14/final-bit-reference.json, astra-8/bit-identity.json).
 PINNED = {
     ('nvfp4', 5120, 34816): (256, 4, 2, 60),
-    ('tensor_fp8', 5120, 16384): (64, 2, 2, 60),
-    ('tensor_fp8', 5120, 14336): (64, 2, 4, 60),
-    ('tensor_fp8', 6144, 5120): (64, 1, 8, 60),
-    ('tensor_fp8', 5120, 10240): (128, 4, 4, 51),
-    ('tensor_fp8', 5120, 6144): (128, 4, 4, 51),
-    ('nvfp4', 5120, 17408): (256, 8, 2, 51),
+    ('tensor_fp8', 5120, 16384): (256, 4, 2, 60),
+    ('tensor_fp8', 5120, 14336): (128, 2, 2, 60),
+    ('tensor_fp8', 6144, 5120): (64, 2, 8, 60),
+    ('tensor_fp8', 5120, 10240): (256, 4, 2, 60),
+    ('tensor_fp8', 5120, 6144): (256, 4, 2, 60),
+    ('nvfp4', 5120, 17408): (256, 4, 2, 60),
     ('nvfp4', 17408, 5120): (128, 4, 8, 51),
-    ('tensor_fp8', 5120, 12288): (128, 4, 4, 47),
-    ('tensor_fp8', 5120, 1024): (128, 4, 8, 51),
-    ('nvfp4', 5120, 248320): (256, 4, 1, 47),
-    # Draft-only shapes use the same admitted body and fixed reductions.
+    ('tensor_fp8', 5120, 12288): (128, 2, 2, 60),
+    ('tensor_fp8', 5120, 1024): (128, 2, 2, 60),
+    ('nvfp4', 5120, 248320): (128, 4, 1, 47),
+    # Draft-only NVFP4 overlay shapes (not in plan14.json): the compiled path-51 instance at the Sol-10 split, so
+    # their bits are unchanged; the former 47/128/4/4 q shape moves to path 51 at the same split (same per-row
+    # HMMA sequence and fixed-order finish; sol-14 admits path 47 only at split 1).
     ('nvfp4', 10240, 5120): (128, 4, 8, 51),
     ('nvfp4', 6144, 5120): (128, 4, 4, 51),
-    ('nvfp4', 5120, 12288): (128, 4, 4, 47),
+    ('nvfp4', 5120, 12288): (128, 4, 4, 51),
     ('nvfp4', 5120, 1024): (128, 4, 8, 51),
 }
-ROWS = (1, 2, 4, 8, 12, 16)
+# Rows per launch: the R=20 instances serve every decode/speculative row count (4 agents x depth 4 = 20) in one
+# call with the real M; longer row counts (draft prefill) run in 20-row chunks. R=24 is admitted but not used.
+MAX_ROWS = 20
 ADMISSIONS = []
 
 
@@ -70,7 +77,8 @@ def compile_library(kernel_cache=None):
     if CUDA_HOME is None:
         raise RuntimeError('SM70 projection preparation requires the configured CUDA toolkit')
     directory = Path(__file__).parent
-    sources = [directory / name for name in ('sm70_projection_tc.cu', 'repacked.cu', 'repacked_kernel.cuh', 'fast_kernel.cuh', 'deep_kernel.cuh', 'local_kernel.cuh')]
+    sources = [directory / name for name in ('sm70_projection_tc.cu', 'kernels14.cuh', 'local14_kernel.cuh',
+        'deep14_kernel.cuh', 'fast14_kernel.cuh', 'step14.cuh', 'stage14.cuh', 'sm70_projection_tuples.inc')]
     digest = hashlib.sha256(b''.join(p.read_bytes() for p in sources) + Path(__file__).read_bytes()).hexdigest()
     cache = Path(DEFAULT_CACHE_ROOT if kernel_cache is None else kernel_cache).expanduser().resolve()
     cache.mkdir(parents=True, exist_ok=True)
@@ -82,7 +90,8 @@ def compile_library(kernel_cache=None):
             command = [str(nvcc), '--threads', str(len(os.sched_getaffinity(0))),
                 '--split-compile=' + str(len(os.sched_getaffinity(0))), '-std=c++17', '-O3',
                 '-arch=compute_70', '-code=sm_70', '-Xcompiler=-fPIC', '--shared',
-                '--fmad=false', '-DSOL_STAGE=1', str(sources[0]), '-o', str(output)]
+                '--fmad=false', '-DSOL14_PIPE2=0', '-DSOL14_STAGER=1', '-DSOL14_LDS128=1',
+                str(sources[0]), '-o', str(output)]
             subprocess.run(command, check=True)
     return str(output)
 
@@ -92,11 +101,15 @@ def library(kernel_cache=None):
     if torch.cuda.is_current_stream_capturing():
         raise RuntimeError('SM70 projection library must be loaded before capture')
     lib = C.CDLL(compile_library(kernel_cache))
+    lib.atlas_init.argtypes = []
+    lib.atlas_tuple_status.argtypes = [C.c_int] * 6
     lib.atlas_produce.argtypes = [C.c_void_p] * 3 + [C.c_int] * 3 + [C.c_float, C.c_void_p]
     lib.atlas_project.argtypes = [C.c_void_p] * 4 + [C.c_float, C.c_int] + [C.c_void_p] * 3 + [C.c_int] * 9 + [C.c_void_p] * 2
     lib.atlas_repack.argtypes = [C.c_void_p] * 4 + [C.c_int] * 4 + [C.c_void_p]
     lib.atlas_position_exact.argtypes = [C.c_void_p, C.c_int, C.c_int, C.c_void_p]
     lib.atlas_fp8_exact.argtypes = [C.c_void_p] * 3
+    # Once per process, before any capture: dynamic shared-memory opt-in for the >48 KiB R=24 instances.
+    checked(lib.atlas_init())
     return lib
 
 
@@ -141,6 +154,10 @@ def _load_weight(loader, prefix, *, storage, kernel_cache):
     bk, warps, split, path = PINNED[(kind, k, n)]
     if n % (warps * 32) or k % (split * bk) or n * (k // 16) > 2**31 - 1:
         raise ValueError(f'{prefix}: aligned reviewed projection admission failed')
+    lib = library(kernel_cache)
+    # The pinned tuple must be a compiled, feasible instance at every padded row count (sol-10 C3, sol-14 step 3).
+    if any(lib.atlas_tuple_status(fp4, path, bk, warps, split, m) for m in (1, 16, 20, 24)):
+        raise ValueError(f'{prefix}: pinned tuple {(bk, warps, split, path)} is not compiled or infeasible for M <= 24')
     scales = loader.load_tensor(prefix + '.weight_scale')
     input_scale = loader.load_tensor(prefix + '.input_scale').float()
     if fp4:
@@ -170,7 +187,6 @@ def _load_weight(loader, prefix, *, storage, kernel_cache):
     inverse = torch.empty_like(raw)
     inverse_scales = torch.empty_like(native_scales) if fp4 else None
     stream = C.c_void_p(torch.cuda.current_stream(values.device).cuda_stream)
-    lib = library(kernel_cache)
     checked(lib.atlas_repack(ptr(raw), ptr(native_scales), ptr(packed), ptr(packed_scales), n, k, fp4, 0, stream))
     checked(lib.atlas_repack(ptr(packed), ptr(packed_scales), ptr(inverse), ptr(inverse_scales), n, k, fp4, 1, stream))
     if not torch.equal(inverse, raw):
@@ -195,7 +211,7 @@ def workspace_layout(query, selected):
     if selected[0] == 'prefill_tc':
         from .sm70_prefill import workspace_layout
         return workspace_layout(query)
-    m = min(16, next((m for m in ROWS if m >= query.rows), 16))
+    m = min(MAX_ROWS, query.rows)
     k, n, split = query.in_features, query.out_features, selected[3]
     return ((torch.float32, (m, k)), (torch.float16, (m, k)), (torch.float32, (m,)),
             (torch.float32, (split if selected[4] != 60 and split > 1 else 0, m, n)), (torch.float32, (m, n)))
@@ -223,26 +239,25 @@ def run(query, selected, source, values, scales, output, workspace, bias, gain=N
     lib = library(kernel_cache)
     stream = C.c_void_p(torch.cuda.current_stream(source.device).cuda_stream)
     bk, warps, split, path = selected[1:]
-    for begin in range(0, query.rows, 16):
-        live = min(16, query.rows - begin)
-        m = next(m for m in ROWS if m >= live)
-        if m != live:
-            staging[:m].zero_()
+    for begin in range(0, query.rows, MAX_ROWS):
+        # The real row count is passed as M (never host-padded to R): row invariance makes every row's bits
+        # independent of M, and produce/stores touch only rows [0, M).
+        live = min(MAX_ROWS, query.rows - begin)
         x = source[begin:begin + live]
-        if m != live or not x.is_contiguous():
+        if not x.is_contiguous():
             staging[:live].copy_(x)
-            x = staging[:m]
+            x = staging[:live]
         destination = output[begin:begin + live]
-        direct = live == m and destination.is_contiguous()
-        y = destination if direct else result[:m]
-        checked(lib.atlas_produce(ptr(x), ptr(half), ptr(inverse), m, query.in_features,
+        direct = destination.is_contiguous()
+        y = destination if direct else result[:live]
+        checked(lib.atlas_produce(ptr(x), ptr(half), ptr(inverse), live, query.in_features,
             query.kind == 'tensor_fp8', query.input_scale_value, stream))
         checked(lib.atlas_project(ptr(half), ptr(values), ptr(scales), ptr(inverse), query.gain_value,
-            query.global_scale_kind == 'reciprocal', ptr(bias), ptr(y), ptr(partial), m,
+            query.global_scale_kind == 'reciprocal', ptr(bias), ptr(y), ptr(partial) if partial.numel() else None, live,
             query.out_features, query.in_features, query.padded_in_features, split,
             query.kind == 'nvfp4', bk, warps, path, ptr(gain) if query.column_gains else None, stream))
         if not direct:
-            destination.copy_(y[:live])
+            destination.copy_(y)
     return output
 
 

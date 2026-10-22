@@ -59,7 +59,8 @@ class BuildPathsTest(unittest.TestCase):
             subprocess=SimpleNamespace(run=self.build), C=SimpleNamespace(
                 CDLL=lambda path: SimpleNamespace(**{symbol: (lambda *args: 0) for symbol in
                     ('sol9_dense', 'sol12_commit', 'atlas_prefill', 'atlas_prefill_init', 'atlas_produce',
-                     'atlas_project', 'atlas_repack', 'atlas_position_exact', 'atlas_fp8_exact')}),
+                     'atlas_project', 'atlas_repack', 'atlas_position_exact', 'atlas_fp8_exact', 'atlas_init',
+                     'atlas_tuple_status')}),
                 c_void_p=ctypes.c_void_p, c_int=ctypes.c_int, c_float=ctypes.c_float))
         patch.dict(sys.modules, {module.__name__: module}).start()
         exec(compile(tree, str(path), 'exec'), module.__dict__)
