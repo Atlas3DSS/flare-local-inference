@@ -179,6 +179,7 @@ class Plan:
     mla_compute_mode: str = "auto"
     roce_ring: bool = False
     compile_workers: int | None = None
+    autotune_effort: str = "medium"
     hub_cache: Path | None = None
     tuning_gpus: tuple[Gpu, ...] = ()
     tuning_replica: TuningReplica | None = None
@@ -292,6 +293,7 @@ class Plan:
             "expert_scale_compression": self.expert_scale_compression,
             "mla_compute_mode": self.mla_compute_mode,
             "compile_workers": self.compile_workers,
+            "autotune_effort": self.autotune_effort,
             "tuning_gpus": [gpu.index for gpu in self.tuning_gpus],
             "speculative_token_capacity": self.speculative_token_capacity,
             "online_mxfp8": self.online_mxfp8, "language_model_only": self.language_model_only,

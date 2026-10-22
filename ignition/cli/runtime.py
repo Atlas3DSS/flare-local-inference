@@ -33,6 +33,7 @@ def package_key(model, plan, no_compile):
               "mixed_prefill": plan.mixed_prefill, "roce_ring": plan.roce_ring,
               "expert_scale_compression": plan.expert_scale_compression, "online_mxfp8": plan.online_mxfp8,
               "language_model_only": plan.language_model_only,
+              "autotune_effort": plan.autotune_effort,
               "cache_states": plan.cache_states, "reserve_bytes": plan.reserve_bytes,
               "gpus": [(gpu.name, gpu.total_bytes) for gpu in plan.gpus],
               "speculation": None if plan.speculation is None else asdict(plan.speculation)}

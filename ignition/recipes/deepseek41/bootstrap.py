@@ -31,7 +31,7 @@ from ignition.preparation.host_memory import virtual_device_memory, release_unus
 from ignition.preparation.frontend import PromptEncoder, prepare_frontend
 from ignition.preparation.model import PreparedModel
 from ignition.preparation.scratch import GraphBufferPool, ScratchArena
-from ignition.preparation.tuning import RecordedPreparationSession
+from ignition.preparation.tuning import RecordedPreparationSession, with_autotune_effort
 from ignition.preparation.tuning_replicas import TuningReplica
 from ignition.progress import phase
 
@@ -64,6 +64,7 @@ class PreparationConfig:
     prompt_logprobs: bool = False
     image_concurrency: int | None = None
     compile_workers: int | None = None
+    autotune_effort: str = "medium"
     tuning_replica: TuningReplica | None = None
     devices: tuple[int, ...] = (0, 1, 2, 3)
     # Device ordinals are host-local when each rank runs on its own Spark.
@@ -202,6 +203,7 @@ def _collective_runtimes(config, group, device, *, coordinator, package_storage,
 
 
 @torch.no_grad()
+@with_autotune_effort
 def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storage=None):
     if package_storage is None:
         raise ValueError("DeepSeek preparation requires package storage")
@@ -257,7 +259,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
             "headers": [s.header_sha256 for s in manifest.shards], "world_size": shard.world_size,
             "contract": "deepseek41.graph-inputs.v1"}, sort_keys=True).encode()).hexdigest()
         session = RecordedPreparationSession(
-            compile_workers=config.compile_workers, tuning_replica=config.tuning_replica,
+            compile_workers=config.compile_workers, autotune_effort=config.autotune_effort, tuning_replica=config.tuning_replica,
             device=device, checkpoint=identity,
             workload_schema="deepseek41-text", numerical_policy="default", coordinator=coordinator,
             headroom_bytes=config.headroom_bytes, benchmark_storage=package_storage)

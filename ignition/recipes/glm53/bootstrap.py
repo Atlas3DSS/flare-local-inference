@@ -39,7 +39,7 @@ from ignition.preparation.model import PreparedModel
 from ignition.preparation.rank_group import minimum_across_ranks
 from ignition.preparation.scratch import ScratchArena
 from ignition.progress import phase
-from ignition.preparation.tuning import RecordedPreparationSession
+from ignition.preparation.tuning import RecordedPreparationSession, with_autotune_effort
 from ignition.preparation.tuning_replicas import TuningReplica
 
 from .recipe import RECIPE
@@ -67,6 +67,7 @@ _KV_ALLOCATION_MARGIN = 64 << 20
 class PreparationConfig:
     prompt_logprobs: bool = False
     compile_workers: int | None = None
+    autotune_effort: str = "medium"
     tuning_replica: TuningReplica | None = None
     devices: tuple[int, ...] = (0, 1)
     # Each rank's host when ranks run on separate hosts; devices are then host-local ordinals.
@@ -223,6 +224,7 @@ def _memory_breakdown(device, *, weights, continuation, kv, operator_scratch, de
 
 
 @torch.no_grad()
+@with_autotune_effort
 def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, progress=None, package_storage=None) -> PreparedModel:
     """Load, tune and capture vision and text variants on one supervised TP rank.
 
@@ -347,7 +349,7 @@ def prepare_rank(snapshot: Path, config: PreparationConfig, *, rank, group, prog
             "headers": [s.header_sha256 for s in manifest.shards], "world_size": shard.world_size,
             "contract": "glm5next.graph-inputs.v3", "vision": not config.language_model_only}, sort_keys=True).encode()).hexdigest()
         session = RecordedPreparationSession(
-            compile_workers=config.compile_workers, tuning_replica=config.tuning_replica,
+            compile_workers=config.compile_workers, autotune_effort=config.autotune_effort, tuning_replica=config.tuning_replica,
             device=device, checkpoint=identity, workload_schema="glm-text-stack-tp-v1",
             numerical_policy="default", coordinator=coordinator,
             headroom_bytes=config.headroom_bytes, benchmark_storage=package_storage)

@@ -12,7 +12,7 @@ def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress, retain_
     if plan.world_size != 1 or ranks is not None or plan.speculation is not None:
         raise ValueError("Qwen dense preparation supports one local GPU and ordinary text generation")
     config = PreparationConfig(prompt_logprobs=plan.prompt_logprobs,
-        compile_workers=plan.compile_workers, tuning_replica=plan.tuning_replica,
+        compile_workers=plan.compile_workers, autotune_effort=plan.autotune_effort, tuning_replica=plan.tuning_replica,
         max_active=plan.concurrency, context=plan.recipe.context,
         prefill_chunk_size=plan.prefill_chunk,
         snapshot_budget_bytes=plan.snapshots * plan.costs.state_row_bytes,

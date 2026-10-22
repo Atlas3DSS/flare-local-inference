@@ -15,7 +15,7 @@ from ignition.errors import CapacityError, FlareError, PreparationError, UsageEr
 
 from . import display, environment
 from .preparation import (Host, compiler_workers, context_parallel, derive, fetch, image_capacity_setting, resolve_model, speculation,
-                          stream_overlap, tuning_devices)
+                          stream_overlap, tuning_devices, tuning_effort)
 from .config import Configuration
 
 # Request bytes allowed per context token: JSON-escaped text (a \uXXXX escape takes six bytes per
@@ -118,7 +118,7 @@ def run(args) -> int:
     concurrency = configuration.max_concurrency(model.checkpoint.alias, model.recipe.concurrency,
                                                 args.max_concurrency)
     plan = derive(configuration, model, Host.discover(), gpus=args.gpus, concurrency=concurrency,
-                  compile_workers=args.compile_workers, tuning_gpus=args.tuning_gpus,
+                  compile_workers=args.compile_workers, tuning_gpus=args.tuning_gpus, autotune_effort=args.autotune_effort,
                   image_concurrency=args.image_concurrency,
                   speculation=speculation(args, model, configuration), prefill_chunk=args.prefill_chunk_size,
                   context_parallel=context_parallel(args, model), stream_overlap=stream_overlap(args, model),
@@ -250,7 +250,8 @@ def _export_hosts(args, *, export_path) -> int:
                          expert_scale_compression=args.expert_scale_compression,
                          online_mxfp8=args.online_mxfp8, language_model_only=args.language_model_only,
                          mla_compute_mode=args.mla_compute_mode)
-    plan = replace(plan, compile_workers=compiler_workers(configuration, args.compile_workers), hub_cache=hub_cache)
+    plan = replace(plan, compile_workers=compiler_workers(configuration, args.compile_workers), hub_cache=hub_cache,
+                   autotune_effort=tuning_effort(configuration, args.autotune_effort))
     environment.apply(configuration, local, plan.recipe.b12x_environment)
     options = _server_options(configuration, model, plan)
     options.pop("api_key")
@@ -313,7 +314,7 @@ def _prepare(args, *, export_path) -> int:
                                                     args.max_concurrency)
         host = Host.discover()
         plan = derive(configuration, model, host, gpus=args.gpus, concurrency=concurrency,
-                      compile_workers=args.compile_workers, tuning_gpus=args.tuning_gpus,
+                      compile_workers=args.compile_workers, tuning_gpus=args.tuning_gpus, autotune_effort=args.autotune_effort,
                       image_concurrency=args.image_concurrency,
                       speculation=speculation(args, model, configuration), prefill_chunk=args.prefill_chunk_size,
                       context_parallel=context_parallel(args, model), stream_overlap=stream_overlap(args, model),
@@ -337,7 +338,8 @@ def _prepare(args, *, export_path) -> int:
                      f" · expert scales {plan.expert_scale_compression or 'native'}"
                      f"{' · online MXFP8' if plan.online_mxfp8 else ''}"
                      f"{' · language model only' if plan.language_model_only else ''}"
-                     f" · compile workers {plan.compile_workers or 'auto'} per host{tuning}")
+                     f" · compile workers {plan.compile_workers or 'auto'} per host{tuning}"
+                     f" · autotune effort {plan.autotune_effort}")
     if args.config is None and not configuration.exists:
         configuration.write_initial(model.checkpoint.alias, concurrency.value)
     if not cached:
@@ -489,7 +491,8 @@ def serve(args) -> int:
                          cache_states=args.prefix_cache_states, mixed_prefill=args.mixed_prefill, prompt_logprobs=args.prompt_logprobs,
                          expert_scale_compression=args.expert_scale_compression, online_mxfp8=args.online_mxfp8,
                          language_model_only=args.language_model_only, mla_compute_mode=args.mla_compute_mode)
-    plan = replace(plan, compile_workers=compiler_workers(configuration, args.compile_workers), hub_cache=hub_cache)
+    plan = replace(plan, compile_workers=compiler_workers(configuration, args.compile_workers), hub_cache=hub_cache,
+                   autotune_effort=tuning_effort(configuration, args.autotune_effort))
     if rendezvous is None:
         plan = tuning_devices(plan, host, args.tuning_gpus)
         local = plan.gpus

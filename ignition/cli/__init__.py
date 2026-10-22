@@ -194,6 +194,12 @@ def _preparation_arguments(running):
     advanced.add_argument("--mla-compute-mode", choices=("auto", "bf16"), default="auto",
                           help="constrain MLA arithmetic while retaining packed KV storage and compatible"
                                " kernel tuning (default: auto; bf16 requires the preparation API)")
+    from .config import AUTOTUNE_EFFORTS
+
+    advanced.add_argument("--autotune-effort", choices=AUTOTUNE_EFFORTS,
+                          help="kernel search effort: off uses heuristics; low applies broad exclusions;"
+                               " medium balances search cost; high keeps conservative exclusions;"
+                               " max searches all legal candidates (default: medium)")
     advanced.add_argument("--compile-workers", type=int, metavar="N",
                           help="CPU compiler process budget per host, shared by local preparation ranks;"
                                " bounded by available RAM and device memory (default: automatic)")

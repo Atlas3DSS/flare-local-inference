@@ -19,7 +19,7 @@ _SECTIONS = {
     "server": {"host": str, "port": int, "api_key": str},
     "defaults": {"model": str, "max_concurrency": int, "image_concurrency": int, "speculative_token_capacity": int},
     "memory": {"reserve": str},
-    "preparation": {"compile_workers": int, "checkpoint_token_file": str},
+    "preparation": {"compile_workers": int, "autotune_effort": str, "checkpoint_token_file": str},
     "prefix_cache": {"memory": str, "disk_limit": str, "disk_transport": str},
     "paths": {"hub_cache": str, "kernel_cache": str, "package_cache": str, "export_staging": str,
               "prefix_cache": str, "cuda": str},
@@ -31,6 +31,7 @@ _BUILT_IN = {
     "server.host": "127.0.0.1", "server.port": 8000, "server.api_key": "",
     "memory.reserve": "0",
     "preparation.compile_workers": 0,
+    "preparation.autotune_effort": "medium",
     "preparation.checkpoint_token_file": "~/.config/flare/agent.token",
     "prefix_cache.memory": "", "prefix_cache.disk_limit": "", "prefix_cache.disk_transport": "",
     "paths.hub_cache": "~/.cache/huggingface/hub", "paths.kernel_cache": "~/.cache/flare/kernels",
@@ -39,6 +40,7 @@ _BUILT_IN = {
     "paths.prefix_cache": "",
     "paths.cuda": "",
 }
+AUTOTUNE_EFFORTS = ("off", "low", "medium", "high", "max")
 _TRANSPORTS = ("staged", "direct")
 _SIZE = re.compile(r"(\d+(?:\.\d+)?)\s*(?:([KMGT])(?:iB|B)?)?", re.IGNORECASE)
 
@@ -120,6 +122,8 @@ class Configuration:
                 raise UsageError(f"{path}: unknown key {key} in [{section}]")
             if type(value) is not schema[key]:
                 raise UsageError(f"{path}: {key} in [{section}] must be {schema[key].__name__}")
+            if key == "autotune_effort" and value not in AUTOTUNE_EFFORTS:
+                raise UsageError(f"{path}: autotune_effort must be one of {', '.join(AUTOTUNE_EFFORTS)}")
             if key == "port" and not 1 <= value <= 65535:
                 raise UsageError(f"{path}: port in [{section}] must be 1 through 65535")
             if key in ("max_concurrency", "image_concurrency", "speculative_token_capacity", "compile_workers") and value < 1:
@@ -195,6 +199,7 @@ class Configuration:
             '# speculative_token_capacity = 8  # wider target graphs require batch * width within this limit',
             "", "[preparation]",
             '# compile_workers = 24           # CPU processes per host; default: automatic, bounded by memory',
+            '# autotune_effort = "medium"     # off, low, medium, high, max',
             "", "[memory]",
             f'# reserve = "{self.get("memory.reserve").value}"'
             "                   # GPU memory left untouched for processes that start later",

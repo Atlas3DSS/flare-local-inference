@@ -63,7 +63,8 @@ def backend(monkeypatch):
     controls = SimpleNamespace(cancel=False, skip_prime=set(), close_error=False)
 
     def initialize(self, *, device, namespace, **kwargs):
-        assert kwargs["autotune"] is True and kwargs["compile_workers"] == 0
+        assert type(kwargs["autotune"]) is bool and kwargs["compile_workers"] == 0
+        self.autotune = kwargs["autotune"]
         self.device = SimpleNamespace(ordinal=0)
         self.namespace = FrozenMapping(namespace)
         self._stop = Event()
@@ -1234,3 +1235,75 @@ def test_discrete_gpu_tuning_bounds_races_without_reducing_compiler_pool(backend
     expected = 5 * GIB // 4 if race_budget is None else race_budget
     assert session.race_budget == report["race_budget_bytes"] == expected
     assert [event for event in events if event[0] == "workers"] == [("workers", None)]
+
+
+
+def test_off_prepares_defaults_warms_and_finalizes_without_benchmarks(backend):
+    events, _ = backend
+    session = make_session(device=0, checkpoint="revision", autotune_effort="off")
+    arena = ScratchArena("cpu")
+    session.register_scratch(arena)
+    calls = []
+    session.declare((declaration("op", size=1024, selected_size=512,
+                                prepare=lambda state: calls.append("warmup"),
+                                benchmark=lambda state: pytest.fail("OFF benchmarked")),))
+    session.register_finalizer(lambda: calls.append("bind"))
+    report = session.tune()
+    assert not session.autotune
+    assert report["autotune_effort"] == "off"
+    assert report["selection_counts"] == {"default": 1}
+    assert report["cache_hits"] == report["benchmarked_candidates"] == 0
+    assert calls == ["warmup", "bind"]
+    assert ("prepare", False, ("op",)) in events
+    assert report["scratch_arena"]["selected_scratch_bytes"] == 512
+    assert arena.frozen and arena.nbytes == 512
+
+
+def test_bootstrap_effort_scope_captures_real_contract_and_restores():
+    from b12x.gemm._tuning import DenseGemmQuery
+    from b12x.preparation import autotune_effort
+    from b12x.preparation._efficiency import capture_autotune_effort
+
+    from ignition.preparation.tuning import with_autotune_effort
+
+    @with_autotune_effort
+    def prepare(snapshot, config, *, fail=False):
+        query = DenseGemmQuery(recipe="mxfp8", entry_point="gemm.mm", weight_storage="native",
+                              output_dtype="bfloat16", batch=1, max_rows=8,
+                              in_features=1280, out_features=32768)
+        if fail:
+            raise RuntimeError("bootstrap failed")
+        return query
+
+    config = SimpleNamespace(autotune_effort="high")
+    with autotune_effort("low"):
+        query = prepare("snapshot", config)
+        assert query.autotune_effort == "high"
+        assert capture_autotune_effort() == "low"
+        with pytest.raises(RuntimeError, match="bootstrap failed"):
+            prepare("snapshot", config, fail=True)
+        assert capture_autotune_effort() == "low"
+    assert query.autotune_effort == "high"
+
+
+
+def test_off_multihost_keeps_coordinator_warmup_without_tuning_cache(backend, monkeypatch):
+    events, _ = backend
+    agreed = []
+    coordinator = SimpleNamespace(spans_hosts=True, ranks=(0,), local_ranks=1, group=None,
+        barrier=lambda *args: None,
+        same_on_every_rank=lambda *args: pytest.fail("OFF configured tuning shards"),
+        share_selections=lambda *args: pytest.fail("OFF shared tuning cache"),
+        agree_selections=lambda selections: agreed.append(selections),
+        prepare=lambda session, requests, **kwargs: PreparationSession.prepare(session, requests, **kwargs))
+    session = make_session(device=0, checkpoint="revision", autotune_effort="off", coordinator=coordinator)
+    monkeypatch.setattr(session, "_selection_cache", lambda: pytest.fail("OFF accessed tuning cache"))
+    request = declaration("collective")
+    request.collective = object()
+    calls = []
+    request.prepare_call = lambda state: calls.append("warmup")
+    session.declare((request,))
+    assert session.tune()["selection_counts"] == {"default": 1}
+    assert calls == ["warmup"]
+    assert len(agreed) == 1 and agreed[0][0]["source"] == "default"
+    assert ("prepare", False, ("collective",)) in events

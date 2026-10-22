@@ -151,3 +151,16 @@ def test_shard_size_uses_binary_units_and_flags_override_configuration(tmp_path)
     assert config.shard_size('16M') == 16 << 20
     with pytest.raises(UsageError, match='shard size'):
         load(tmp_path, '[publishing]\nshard_size = "-1G"\n')
+
+
+@pytest.mark.parametrize("effort", ["off", "low", "medium", "high", "max"])
+def test_autotune_effort_configuration_and_flag_precedence(tmp_path, effort):
+    from ignition.cli.preparation import tuning_effort
+
+    assert tuning_effort(load(tmp_path, "")) == "medium"
+    config = load(tmp_path, f'[preparation]\nautotune_effort = "{effort}"\n')
+    assert tuning_effort(config) == effort
+    assert tuning_effort(config, "off") == "off"
+    assert tuning_effort(config, "max") == "max"
+    with pytest.raises(UsageError, match="autotune_effort"):
+        load(tmp_path, '[preparation]\nautotune_effort = "exhaustive"\n')

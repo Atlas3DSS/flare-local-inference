@@ -92,6 +92,19 @@ GLM TP4 have been exercised end to end; Qwen TP4 still requires model validation
 
 ## Preparation resources
 
+`--autotune-effort off|low|medium|high|max` controls b12x candidate filtering.
+`off` prepares heuristic choices without tuning races or tuned-selection cache
+lookups. `low` applies the broadest performance exclusions; `medium` is the
+default search policy; `high` keeps only conservative performance exclusions;
+`max` enumerates every declared candidate satisfying correctness, resource,
+and explicit configuration constraints. Each searched level includes the
+lower levels' candidates. Kernel families retain their declared tuning axes.
+
+Set `[preparation] autotune_effort = "high"` for a persistent default; an
+explicit flag wins. The plan carries the setting to every preparation rank
+and tuning replica. Effort separates cached selections and prepared packages;
+identical kernel programs share compilation artifacts across efforts.
+
 `--compile-workers N` sets a positive CPU compiler process budget per host for
 b12x kernel compilation and complete-forward compilation. Available RAM and
 device memory can reduce it; local preparation ranks share the budget. Set

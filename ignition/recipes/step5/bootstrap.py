@@ -47,7 +47,7 @@ from ignition.preparation.host_memory import release_unused
 from ignition.preparation.model import PreparedModel
 from ignition.preparation.rank_group import minimum_across_ranks
 from ignition.preparation.scratch import GraphBufferPool, ScratchArena
-from ignition.preparation.tuning import RecordedPreparationSession
+from ignition.preparation.tuning import RecordedPreparationSession, with_autotune_effort
 from ignition.preparation.tuning_replicas import TuningReplica
 from ignition.progress import phase
 
@@ -74,6 +74,7 @@ class PreparationConfig:
     prompt_logprobs: bool = False
     image_concurrency: int | None = None
     compile_workers: int | None = None
+    autotune_effort: str = "medium"
     tuning_replica: TuningReplica | None = None
     devices: tuple[int, ...] = tuple(range(8))
     context: int = 1048576
@@ -120,6 +121,7 @@ class PreparationConfig:
 
 
 @torch.no_grad()
+@with_autotune_effort
 def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storage):
     from .recipe import RECIPE
 
@@ -174,7 +176,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
             "quantization": weights.config.quantization, "headers": headers, "world_size": shard.world_size,
             "contract": "step5.graph-inputs.v1"}, sort_keys=True).encode()).hexdigest()
         session = RecordedPreparationSession(
-            compile_workers=config.compile_workers, tuning_replica=config.tuning_replica,
+            compile_workers=config.compile_workers, autotune_effort=config.autotune_effort, tuning_replica=config.tuning_replica,
             device=device, checkpoint=identity, workload_schema="step5",
             numerical_policy="default", coordinator=coordinator, headroom_bytes=config.headroom_bytes,
             benchmark_storage=package_storage)

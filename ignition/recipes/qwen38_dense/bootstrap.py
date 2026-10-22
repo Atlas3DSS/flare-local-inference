@@ -29,7 +29,7 @@ from ignition.preparation.fixtures.recurrent import register_benchmark_state
 from ignition.preparation.host_memory import release_unused
 from ignition.preparation.model import PreparedModel
 from ignition.preparation.scratch import ScratchArena
-from ignition.preparation.tuning import RecordedPreparationSession
+from ignition.preparation.tuning import RecordedPreparationSession, with_autotune_effort
 from ignition.preparation.tuning_replicas import TuningReplica
 from ignition.progress import phase
 
@@ -44,6 +44,7 @@ from .weights import ModelWeights
 class PreparationConfig:
     prompt_logprobs: bool = False
     compile_workers: int | None = None
+    autotune_effort: str = "medium"
     tuning_replica: TuningReplica | None = None
     device: int = 0
     context: int = 262144
@@ -66,6 +67,7 @@ class PreparationConfig:
 
 
 @torch.no_grad()
+@with_autotune_effort
 def prepare(snapshot, config, *, progress=None, package_storage):
     from .recipe import RECIPE
 
@@ -103,7 +105,7 @@ def prepare(snapshot, config, *, progress=None, package_storage):
             "config": weights.config.text, "headers": [s.header_sha256 for s in manifest.shards],
             "contract": "qwen38-dense.graph-inputs.v1"}, sort_keys=True).encode()).hexdigest()
         session = RecordedPreparationSession(
-            compile_workers=config.compile_workers, tuning_replica=config.tuning_replica,
+            compile_workers=config.compile_workers, autotune_effort=config.autotune_effort, tuning_replica=config.tuning_replica,
             device=device, checkpoint=identity,
             workload_schema="qwen38-dense", numerical_policy="default", coordinator=coordinator,
             headroom_bytes=config.headroom_bytes, benchmark_storage=package_storage)

@@ -107,3 +107,13 @@ def test_invalid_compression_is_rejected_with_the_supported_encoding(capsys):
 def test_mistyped_alias_suggests_step5():
     with pytest.raises(UsageError, match="did you mean 'step5-preview-nvfp4'"):
         resolve("step4-preview-nvfp4")
+
+
+@pytest.mark.parametrize("command", ["run", "export", "serve"])
+@pytest.mark.parametrize("effort", ["off", "low", "medium", "high", "max"])
+def test_autotune_effort_flag(command, effort):
+    args = [command, "deepseek-v4.1-flash"]
+    assert _parser().parse_args(args).autotune_effort is None
+    assert _parser().parse_args([*args, "--autotune-effort", effort]).autotune_effort == effort
+    with pytest.raises(SystemExit):
+        _parser().parse_args([*args, "--autotune-effort", "exhaustive"])

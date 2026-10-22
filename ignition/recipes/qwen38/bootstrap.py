@@ -16,6 +16,7 @@ from ignition.components.prompt_logprobs import (
 )
 
 from ignition.preparation.tuning_replicas import TuningReplica
+from ignition.preparation.tuning import with_autotune_effort
 
 from ignition.components.parallel import TensorParallelShard
 from ignition.preparation.collectives import (
@@ -67,6 +68,7 @@ class PreparationConfig:
     prompt_logprobs: bool = False
     image_concurrency: int | None = None
     compile_workers: int | None = None
+    autotune_effort: str = "medium"
     tuning_replica: TuningReplica | None = None
     device: int = 0
     devices: tuple[int, ...] | None = None
@@ -205,6 +207,7 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
 @torch.no_grad()
 def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, progress=None,
                   compile_decoder: bool = True, rank: int = 0, group=None, package_storage=None) -> PreparedModel:
+    config = PreparationConfig() if config is None else config
     transient = contextlib.ExitStack()
     try:
         prepared = _prepare_model(snapshot, config, progress=progress, compile_decoder=compile_decoder,
@@ -220,6 +223,7 @@ def prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, pr
         return prepared
 
 
+@with_autotune_effort
 def _prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, transient,
                    progress=None, compile_decoder: bool = True, rank: int = 0,
                    group=None, package_storage=None) -> PreparedModel:
@@ -280,7 +284,7 @@ def _prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, t
         vocabulary_collective = create_all_gather_runtime(group, device, max_rows=sample_rows, columns=248320, ipc=ipc)
     collectives = dict(runtime=collective, vocabulary_runtime=vocabulary_collective, coordinator=coordinator)
     session = preparation_session(
-        compile_workers=config.compile_workers, tuning_replica=config.tuning_replica,
+        compile_workers=config.compile_workers, autotune_effort=config.autotune_effort, tuning_replica=config.tuning_replica,
         device=device, checkpoint=REVISION, coordinator=coordinator,
         namespace={"config": manifest.metadata_sha256["config.json"], "headers": manifest.headers_sha256, "world_size": shard.world_size},
         headroom_bytes=config.headroom_bytes, benchmark_storage=package_storage)

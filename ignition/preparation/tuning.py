@@ -7,10 +7,14 @@ from collections import Counter
 from collections.abc import Hashable
 from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import replace
+from functools import wraps
 from threading import get_ident
 
 import torch
-from b12x.preparation import MemoryRequirements, PreparationDisplay, PreparationSession
+from b12x.preparation import (
+    AutotuneEffort, MemoryRequirements, PreparationDisplay, PreparationSession,
+    autotune_effort as b12x_autotune_effort,
+)
 from b12x.preparation.session import _declaration_key
 
 from .scratch import ScratchArena
@@ -21,6 +25,16 @@ from .host_memory import cpu_workers, tuning_limits
 # otherwise all requests. Each job's compiler processes then stay within about a gigabyte.
 _COLLECTIVES_PER_JOB = 96
 _REQUESTS_PER_JOB = 192
+
+
+def with_autotune_effort(prepare):
+    """Apply the preparation config's effort throughout bootstrap declarations."""
+    @wraps(prepare)
+    def scoped(snapshot, config, *args, **kwargs):
+        with b12x_autotune_effort(config.autotune_effort):
+            return prepare(snapshot, config, *args, **kwargs)
+
+    return scoped
 
 
 class RecordedPreparationSession(PreparationSession):
@@ -35,7 +49,7 @@ class RecordedPreparationSession(PreparationSession):
     def __init__(self, *, device, checkpoint: str, workload_schema: str,
                  numerical_policy: str, search_limits=None, namespace=None, race_budget=None,
                  coordinator=None, headroom_bytes=0, benchmark_storage=None, compile_workers=None,
-                 tuning_replica=None):
+                 tuning_replica=None, autotune_effort="medium"):
         if not isinstance(checkpoint, str) or not checkpoint:
             raise ValueError("tuning requires an exact checkpoint revision")
         if any(not isinstance(value, str) or not value for value in (workload_schema, numerical_policy)):
@@ -46,9 +60,11 @@ class RecordedPreparationSession(PreparationSession):
             raise ValueError("tuning namespace cannot override its workload identity")
         identity.update(checkpoint=checkpoint, workload_schema=workload_schema,
                         numerical_policy=numerical_policy)
-        super().__init__(device=device, autotune=True, compile_workers=0,
-                         namespace=identity, race_budget=race_budget,
-                         collective_barrier=None if coordinator is None else coordinator.barrier)
+        self.autotune_effort = AutotuneEffort(autotune_effort).value
+        with b12x_autotune_effort(self.autotune_effort):
+            super().__init__(device=device, autotune=self.autotune_effort != "off", compile_workers=0,
+                             namespace=identity, race_budget=race_budget,
+                             collective_barrier=None if coordinator is None else coordinator.barrier)
         if type(headroom_bytes) is not int or headroom_bytes < 0:
             raise ValueError("headroom_bytes must be a nonnegative byte count")
         self.headroom_bytes = headroom_bytes
@@ -132,6 +148,7 @@ class RecordedPreparationSession(PreparationSession):
         return tuple(tuple(job) for job in jobs if job)
 
     def _prepare_job(self, requests, *, progress, autotune):
+        autotune = autotune and self.autotune
         if self._replica_coordinator is not None:
             return self._replica_coordinator.prepare(self, requests, progress=progress, autotune=autotune)
         if self._coordinator is None or not self._sharded and not any(
@@ -257,8 +274,9 @@ class RecordedPreparationSession(PreparationSession):
                 corresponding = identities[rank::self.tuning_replica.tensor_parallel]
                 if any(identity != corresponding[0] for identity in corresponding[1:]):
                     raise ValueError("corresponding tuning GPUs must have identical hardware geometry")
-                self.configure_tuning_shard(self.tuning_replica.index, tuple(range(self.tuning_replica.replicas)))
-            if self._coordinator is not None and self._coordinator.spans_hosts:
+                if self.autotune:
+                    self.configure_tuning_shard(self.tuning_replica.index, tuple(range(self.tuning_replica.replicas)))
+            if self.autotune and self._coordinator is not None and self._coordinator.spans_hosts:
                 import torch.distributed as dist
 
                 # Ranks on identical GPUs split each race's candidates and adopt its fastest result,
@@ -298,14 +316,14 @@ class RecordedPreparationSession(PreparationSession):
                             progress(status)
 
                 for job in self._jobs(requests):
-                    results.append(self._prepare_job(job, progress=update, autotune=True))
+                    results.append(self._prepare_job(job, progress=update, autotune=self.autotune))
             if self._stop.is_set():
                 raise RuntimeError("b12x tuning was cancelled before serving preparation completed")
             selections = []
             coverage = {name: value for result in results for name, value in result.coverage.items()}
             for request in requests:
                 selection = request.plan.selection
-                if selection is None or selection.source == "default":
+                if selection is None or (self.autotune and selection.source == "default"):
                     raise RuntimeError(f"request {request.name!r} has no completed tuning selection")
                 selections.append({"name": request.name, "component": request.plan.component_id,
                     "source": selection.source,
@@ -335,6 +353,7 @@ class RecordedPreparationSession(PreparationSession):
             self._synchronize()
             self.tuning_report = {
                 "workload_schema": self._workload_schema, "namespace": self.namespace.to_dict(),
+                "autotune_effort": self.autotune_effort,
                 "requests": len(requests), "compile_workers": self.compile_workers,
                 "tuning_replicas": 1 if self.tuning_replica is None else self.tuning_replica.replicas,
                 "race_budget_bytes": self.race_budget, "headroom_bytes": self.headroom_bytes,

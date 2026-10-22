@@ -8,7 +8,7 @@ from ignition.errors import FetchError, UsageError
 from ignition.recipes import ResolvedModel, resolve
 from ignition.recipes.declaration import Speculation
 
-from .config import Configuration, Setting
+from .config import AUTOTUNE_EFFORTS, Configuration, Setting
 
 
 @dataclass(frozen=True)
@@ -43,7 +43,7 @@ def derive(configuration: Configuration, model: ResolvedModel, host: Host, *, gp
            context_parallel: bool = True, stream_overlap: bool = True, roce_ring: bool = False,
            mixed_prefill: bool = False, prompt_logprobs: bool = False, expert_scale_compression: str | None = None,
            online_mxfp8: bool = False, language_model_only: bool = False,
-           compile_workers: int | None = None, tuning_gpus: str | None = None,
+           compile_workers: int | None = None, tuning_gpus: str | None = None, autotune_effort: str | None = None,
            image_concurrency: int | None = None, mla_compute_mode: str = "auto") -> planning.Plan:
     """Select GPUs and estimate memory for one checkpoint from the configuration and command-line intent."""
     workers = compiler_workers(configuration, compile_workers)
@@ -54,7 +54,8 @@ def derive(configuration: Configuration, model: ResolvedModel, host: Host, *, gp
         mixed_prefill=mixed_prefill, prompt_logprobs=prompt_logprobs, expert_scale_compression=expert_scale_compression,
         image_concurrency=image_capacity_setting(configuration, model, image_concurrency),
         online_mxfp8=online_mxfp8, language_model_only=language_model_only, mla_compute_mode=mla_compute_mode)
-    result = replace(result, compile_workers=workers, hub_cache=configuration.directory("hub_cache"))
+    result = replace(result, compile_workers=workers, hub_cache=configuration.directory("hub_cache"),
+                     autotune_effort=tuning_effort(configuration, autotune_effort))
     return tuning_devices(result, host, tuning_gpus)
 
 
@@ -62,6 +63,13 @@ def image_capacity_setting(configuration, model, flag=None):
     if not model.recipe.max_images and flag is None:
         return None
     return configuration.model_setting(model.checkpoint.alias, "image_concurrency", None, flag).value
+
+
+def tuning_effort(configuration, flag=None):
+    value = configuration.get("preparation.autotune_effort", flag).value
+    if value not in AUTOTUNE_EFFORTS:
+        raise UsageError(f"--autotune-effort must be one of {', '.join(AUTOTUNE_EFFORTS)}")
+    return value
 
 
 def compiler_workers(configuration, flag=None):

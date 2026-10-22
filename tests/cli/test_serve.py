@@ -635,3 +635,22 @@ def test_no_weights_requires_cache_before_preparation(host, tmp_path, capsys):
     assert 'existing blob cache' in capsys.readouterr().err
     assert main(['export', 'qwen3.8-flash', '--repo-id', '../escape', '--output', str(tmp_path / 'output')]) == 2
     assert host['exports'] == 0
+
+
+@pytest.mark.parametrize("effort", ["off", "low", "medium", "high", "max"])
+def test_autotune_effort_reaches_plan_and_startup_line(host, capsys, monkeypatch, effort):
+    monkeypatch.setenv("COLUMNS", "400")
+    assert run("qwen3.8-flash", "--autotune-effort", effort) == 0
+    assert host["plan"].autotune_effort == effort
+    assert host["plan"].to_dict()["autotune_effort"] == effort
+    assert f"autotune effort {effort}" in capsys.readouterr().err
+
+
+def test_package_cache_key_distinguishes_autotune_effort():
+    model = resolve("qwen3.8-flash")
+    gpu = planning.Gpu(0, "NVIDIA RTX PRO 6000 Blackwell", "GPU-test", 96 * GIB, FREE, (12, 0))
+    plan = planning.fit(model.recipe, model.checkpoint, (gpu,), concurrency=4,
+                        reserve_bytes=0, speculation=model.recipe.speculation)
+    keys = {runtime.package_key(model, replace(plan, autotune_effort=effort), False)
+            for effort in ("off", "low", "medium", "high", "max")}
+    assert len(keys) == 5
