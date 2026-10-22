@@ -1162,42 +1162,7 @@ impl Peer {
     }
 }
 
-fn serve(prepared: Prepared, link: Link) -> Result<()> {
-    let Prepared {
-        resolved,
-        fingerprint,
-        geometry,
-        contexts,
-        staging_pool,
-        directory_lock,
-        ..
-    } = prepared;
-    let directory = resolved
-        .directory
-        .ok_or_else(|| invalid("a peer's prefix record service needs a record directory"))?;
-    let lock = directory_lock
-        .ok_or_else(|| invalid("a peer's prefix record service needs its directory lock"))?;
-    let pool = staging_pool
-        .as_ref()
-        .ok_or_else(|| invalid("a peer's prefix record service needs a staging pool"))?;
-    let transfers = Arc::new(Mutex::new(Transfers::start(
-        &contexts,
-        geometry.clone(),
-        pool,
-    )?));
-    let staged = Staged::new(
-        staging_pool,
-        transfers,
-        DiskThread::start("flare-offload-disk")?,
-    );
-    let mut peer = Peer {
-        staged,
-        directory,
-        fingerprint,
-        geometry,
-        link,
-        _lock: lock,
-    };
+fn serve(mut peer: Peer) -> Result<()> {
     let outcome = peer.run();
     // Rank zero's CLOSE and a failed link both end the service, and both need
     // the transport drained before its staging can be released.
@@ -1635,6 +1600,24 @@ pub fn join_peer(
         prepared.resolved.disk_limit = limit;
         prepared.disk_budget.set_limit(limit);
     }
+    // Start this rank's record transport before reporting the scan. A failure
+    // to open the transfer threads, the disk thread, or the record directory
+    // then fails the join instead of interrupting serving, when rank zero has
+    // already treated this rank as joined.
+    let pool = prepared
+        .staging_pool
+        .as_ref()
+        .ok_or_else(|| invalid("a peer's prefix record service needs a staging pool"))?;
+    let transfers = Arc::new(Mutex::new(Transfers::start(
+        &prepared.contexts,
+        prepared.geometry.clone(),
+        pool,
+    )?));
+    let staged = Staged::new(
+        prepared.staging_pool.take(),
+        transfers,
+        DiskThread::start("flare-offload-disk")?,
+    );
     link.send(&summary(&prepared.scanned)?)?;
     let agreed = decode_agreed(&link.expect(AGREED, REPLY_TIMEOUT)?)?;
     retain(&mut prepared, &agreed)?;
@@ -1642,11 +1625,28 @@ pub fn join_peer(
         "serving rank zero, limit {}",
         super::gibibytes(prepared.resolved.disk_limit)
     );
+    let directory = prepared
+        .resolved
+        .directory
+        .clone()
+        .ok_or_else(|| invalid("a peer's prefix record service needs a record directory"))?;
+    let lock = prepared
+        .directory_lock
+        .take()
+        .ok_or_else(|| invalid("a peer's prefix record service needs its directory lock"))?;
+    let peer = Peer {
+        staged,
+        directory,
+        fingerprint: prepared.fingerprint,
+        geometry: prepared.geometry,
+        link,
+        _lock: lock,
+    };
     let (finished, outcome) = std::sync::mpsc::channel();
     let thread = std::thread::Builder::new()
         .name("flare-offload-peer".into())
         .spawn(move || {
-            let result = serve(prepared, link);
+            let result = serve(peer);
             let _ = finished.send(result.clone());
             result
         })
