@@ -215,16 +215,19 @@ Export Qwen with up to five MTP draft tokens per round:
 
 ```sh
 .venv/bin/ignition export qwen3.8-flash --gpus 2 \
-  --mtp-draft-tokens 5 --max-concurrency 4 \
+  --mtp-draft-tokens 5 --max-concurrency 32 \
   --output /data/flare-runtime/qwen38-tp1-mtp5.safetensors --verbose
 
 .venv/bin/ignition export qwen3.8-flash --gpus 0,1 \
-  --mtp-draft-tokens 5 --max-concurrency 4 \
+  --mtp-draft-tokens 5 --max-concurrency 32 \
   --output /data/flare-runtime/qwen38-tp2-mtp5.safetensors --verbose
 ```
 
-Qwen defaults to five MTP draft tokens, with explicit flags taking precedence.
-Changing this default does not change an already exported package.
+Qwen defaults to 32 concurrent requests, five MTP draft tokens, and 128 target-token
+rows, with explicit flags and configuration taking precedence. Verification is
+rectangular: the default catalog covers five drafts per request through batch 16
+and three drafts at batch 32. Already exported packages retain their captured
+capacities.
 
 Vision recipes accept `--image-concurrency N`, independently of
 `--max-concurrency`. It defaults to `min(4, max_concurrency)` and can also be set
@@ -657,9 +660,9 @@ batch capacities through the concurrency limit
 and width one at every bucket. Rectangular speculative and verification shapes
 require `batch * width <= speculative_token_capacity`; the preparation flag
 `--speculative-token-capacity` defaults to the larger of padded concurrency and
-maximum verification width, except DeepSeek V4.1, whose packed catalog defaults
-to 128 physical target rows. Its packed capacities follow the table above rather
-than rectangular `batch * width` shapes. Previously exported separate-proposal
+maximum verification width, except Qwen Flash and DeepSeek V4.1, which default
+to 128 physical target rows. DeepSeek V4.1's packed capacities follow the table
+above rather than rectangular `batch * width` shapes. Previously exported separate-proposal
 catalogs cover every bucket and load-time draft depth independently of that limit.
 Flare can reduce concurrency at load time. Rectangular catalogs permit smaller
 positive draft limits; packed catalogs require their captured positive depth or

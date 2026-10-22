@@ -25,7 +25,7 @@ def test_qwen_state_rows_and_pages_match_the_prepared_layouts(world_size):
     from ignition.recipes.qwen38.state import HybridStateLayout
 
     recipe = QWEN.recipe
-    assert recipe.speculation == Speculation(draft_tokens=5) and recipe.max_draft_tokens == 7
+    assert recipe.speculation == Speculation(draft_tokens=5, token_capacity=128) and recipe.max_draft_tokens == 7
     assert recipe.speculation.adaptive and recipe.history_copy
 
     def layer(speculative_tokens):
@@ -178,7 +178,7 @@ def fitted(model, gpus, **settings):
 
 
 @pytest.mark.parametrize("compile_forwards", [False, True])
-@pytest.mark.parametrize("concurrency", [1, 5, 64])
+@pytest.mark.parametrize("concurrency", [1, 5, 32, 64])
 def test_qwen_adapter_configures_the_bootstrap_from_a_plan(monkeypatch, tmp_path, compile_forwards, concurrency):
     from ignition.recipes.qwen38.state import HybridStateLayout
 
@@ -196,6 +196,10 @@ def test_qwen_adapter_configures_the_bootstrap_from_a_plan(monkeypatch, tmp_path
     assert seen["compile_decoder"] is compile_forwards and config.compile_decoder is compile_forwards
     assert config.devices == (0,) and config.max_active == concurrency and config.mtp
     assert (config.speculative_widths, config.speculative_fixed_width) == ((1, 2, 3, 4, 5, 6), None)
+    assert config.speculative_token_capacity == 128
+    assert (min(config.request_capacity, 16), 6) in config.speculative_shapes
+    if concurrency >= 32:
+        assert (32, 4) in config.speculative_shapes and (32, 5) not in config.speculative_shapes
     assert (config.speculative_proposal_source, config.history_drafts) == (
         "mtp", False)
     assert config.pages is None and config.context == plan.recipe.context
