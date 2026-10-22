@@ -79,7 +79,7 @@ def test_two_gpus_share_candidates_and_replay_the_selected_plan(tmp_path):
             connection.close()
 
 
-def _tp_worker(directory, member, connection):
+def _tp_worker(directory, member, connection, replicas=2, tensor_parallel=2):
     from datetime import timedelta
     import torch
     import torch.distributed as dist
@@ -88,27 +88,37 @@ def _tp_worker(directory, member, connection):
     from ignition.preparation.collectives import CollectivePreparation, create_all_reduce_runtime
     from ignition.preparation.tuning import RecordedPreparationSession
     from ignition.preparation.tuning_replicas import TuningComplete, TuningReplica
+    from b12x.preparation.session import PreparationJob
 
-    replica, rank = divmod(member, 2)
+    replica, rank = divmod(member, tensor_parallel)
     torch.cuda.set_device(member)
     device = torch.device('cuda', member)
     dist.init_process_group('gloo', init_method=(Path(directory) / f'tp-{replica}').as_uri(),
-                            rank=rank, world_size=2, timeout=timedelta(seconds=90))
+                            rank=rank, world_size=tensor_parallel, timeout=timedelta(seconds=90))
     coordinator = CollectivePreparation(dist.group.WORLD)
     runtime = create_all_reduce_runtime(dist.group.WORLD, device, max_tokens=4, hidden_size=768)
-    role = TuningReplica(str(Path(directory) / 'replicas'), replica, 2, 2)
+    role = (TuningReplica(str(Path(directory) / 'replicas'), replica, replicas, tensor_parallel)
+            if replicas > 1 else None)
     session = RecordedPreparationSession(device=device, checkpoint='replica-tp-test',
         workload_schema='projection-reduction', numerical_policy='bf16', compile_workers=4,
         namespace={'case': directory}, tuning_replica=role, coordinator=coordinator)
     source = torch.full((4, 768), rank + 1, device=device, dtype=torch.bfloat16)
     output = torch.empty_like(source)
     projection = None
-    if rank == 0:
+    if rank == 0 or replicas == 1:
         weight = torch.ones((512, 768), device=device, dtype=torch.bfloat16)
         projected = torch.empty((4, 512), device=device, dtype=torch.bfloat16)
         projection = UnquantizedProjection(source, weight, projected, session=session, name='projection')
     reduction = PreparedAllReduce(source, output, runtime=runtime, session=session,
                                   coordinator=coordinator, name='reduce')
+    candidates = []
+    trial = PreparationJob._trial
+
+    def record_trial(job, obligation, index, assignment, config):
+        candidates.append((obligation.request.name, index))
+        return (yield from trial(job, obligation, index, assignment, config))
+
+    PreparationJob._trial = record_trial
     try:
         session.tune()
     except TuningComplete:
@@ -116,7 +126,8 @@ def _tp_worker(directory, member, connection):
     else:
         assert replica == 0
         reduction(source)
-        torch.testing.assert_close(output, torch.full_like(output, 3), rtol=0, atol=0)
+        expected_sum = tensor_parallel * (tensor_parallel + 1) // 2
+        torch.testing.assert_close(output, torch.full_like(output, expected_sum), rtol=0, atol=0)
         stream = torch.cuda.Stream(device=device)
         stream.wait_stream(torch.cuda.current_stream(device))
         graph = torch.cuda.CUDAGraph()
@@ -129,10 +140,11 @@ def _tp_worker(directory, member, connection):
             output.fill_(float('nan'))
             dist.barrier()
             graph.replay()
-            torch.testing.assert_close(output, torch.full_like(output, 3), rtol=0, atol=0)
+            torch.testing.assert_close(output, torch.full_like(output, expected_sum), rtol=0, atol=0)
             if projection is not None:
-                torch.testing.assert_close(projected, torch.full_like(projected, 768), rtol=0, atol=0)
-    connection.send(session.tuning_report['selections'])
+                torch.testing.assert_close(projected, torch.full_like(projected, 768 * (rank + 1)), rtol=0, atol=0)
+    connection.send({'selections': session.tuning_report['selections'], 'candidates': candidates,
+                     'shard': (session._tuning_rank, session._tuning_ranks)})
     connection.close()
     dist.barrier()
     session.close()
@@ -156,10 +168,49 @@ def test_tp_replicas_preserve_uneven_rank_work_and_collectives(tmp_path):
         for process in processes:
             process.join(timeout=180)
         assert [process.exitcode for process in processes] == [0] * 4
-        selections = [connection.recv() for connection in connections]
+        selections = [connection.recv()['selections'] for connection in connections]
         for rank in range(2):
             assert [(item['name'], item['config']) for item in selections[rank]] == [
                 (item['name'], item['config']) for item in selections[rank + 2]]
+    finally:
+        for process in processes:
+            if process.is_alive():
+                process.kill()
+            process.join()
+        for connection in connections:
+            connection.close()
+
+
+@pytest.mark.skipif(os.environ.get('FLARE_RUN_TP_CUDA_TESTS') != '1',
+                    reason='requires four explicitly selected CUDA GPUs')
+def test_local_tp_ranks_measure_disjoint_candidates_and_replay_collectives(tmp_path):
+    context = multiprocessing.get_context('spawn')
+    processes, connections = [], []
+    try:
+        for rank in range(4):
+            root, peer = context.Pipe(duplex=False)
+            process = context.Process(target=_tp_worker, args=(str(tmp_path), rank, peer, 1, 4))
+            process.start()
+            peer.close()
+            processes.append(process)
+            connections.append(root)
+        for process in processes:
+            process.join(timeout=180)
+        assert [process.exitcode for process in processes] == [0] * 4
+        reports = [connection.recv() for connection in connections]
+        all_candidates = [item for report in reports for item in report['candidates']]
+        assert len(set(all_candidates)) == len(all_candidates)
+        selections = []
+        for rank, report in enumerate(reports):
+            assert report['shard'] == (rank, (0, 1, 2, 3))
+            assert report['candidates']
+            assert all(index % 4 == rank for _, index in report['candidates'])
+            selected = next(item for item in report['selections'] if item['name'] == 'projection')
+            assert selected['source'] == 'tuned'
+            assert selected['coverage']['measured_count'] == len(all_candidates)
+            assert selected['coverage']['effective_count'] == len(all_candidates)
+            selections.append(selected['config'])
+        assert all(config == selections[0] for config in selections)
     finally:
         for process in processes:
             if process.is_alive():

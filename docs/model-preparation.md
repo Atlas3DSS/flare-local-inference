@@ -100,6 +100,11 @@ default search policy; `high` keeps only conservative performance exclusions;
 and explicit configuration constraints. Each searched level includes the
 lower levels' candidates. Kernel families retain their declared tuning axes.
 
+Without extra tuning replicas, tensor-parallel ranks on identical GPUs divide
+each kernel race's candidates and adopt the fastest measured configuration.
+This applies within one host as well as across hosts. Fixed collective kernels
+still prepare on every participating rank.
+
 Set `[preparation] autotune_effort = "high"` for a persistent default; an
 explicit flag wins. The plan carries the setting to every preparation rank
 and tuning replica. Effort separates cached selections and prepared packages;

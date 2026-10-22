@@ -276,17 +276,15 @@ class RecordedPreparationSession(PreparationSession):
                     raise ValueError("corresponding tuning GPUs must have identical hardware geometry")
                 if self.autotune:
                     self.configure_tuning_shard(self.tuning_replica.index, tuple(range(self.tuning_replica.replicas)))
-            if self.autotune and self._coordinator is not None and self._coordinator.spans_hosts:
+            elif self.autotune and self._coordinator is not None:
                 import torch.distributed as dist
 
-                # Ranks on identical GPUs split each race's candidates and adopt its fastest result,
-                # so no rank repeats another's measurements. Otherwise every rank tunes and adopts
-                # rank zero's cached selections.
+                # Identical TP GPUs split candidate races regardless of host placement.
                 self._sharded = self._coordinator.same_on_every_rank(
                     torch.cuda.get_device_properties(self.device.ordinal).name)
                 if self._sharded:
                     self.configure_tuning_shard(dist.get_rank(), self._coordinator.ranks)
-                else:
+                elif self._coordinator.spans_hosts:
                     self._coordinator.share_selections(self._selection_cache())
             scratch_arena = self._reserve_scratch(requests)
             # Compiler pools share the memory and CPUs of ranks on this host only.
@@ -329,7 +327,7 @@ class RecordedPreparationSession(PreparationSession):
                     "source": selection.source,
                     "config": request.plan.contract.config_payload(selection.config).to_dict(),
                     "coverage": dict(coverage.get(request.name, {}))})
-            if self._coordinator is not None and self._coordinator.spans_hosts:
+            if self._coordinator is not None and (self._sharded or self._coordinator.spans_hosts):
                 self._coordinator.agree_selections(selections)
             self._tune_status = "finalizing"
             if self._scratch_arena is not None:
