@@ -176,7 +176,11 @@ impl Worker {
     fn pass(&mut self) -> Pass {
         let s = &mut self.s;
         let mut progress = false;
+        let mut attempts = 0;
         while s.has_available_slot() {
+            // A refused attempt may change the key only by evicting; it must settle.
+            attempts += 1;
+            assert!(attempts < 1000, "admission attempts did not settle within one pass");
             let key = s.admission_key();
             let (mut waiting, position, parked) =
                 match self.parked.iter().position(|w| w.blocked != Some(key)) {
@@ -389,7 +393,10 @@ fn replay(pages: u32, width: usize, agents: usize, turns: usize, seed: u64, copy
         worker.submit(index, agent.request());
     }
     let mut completed = 0;
+    let mut passes = 0usize;
     let stalled = loop {
+        passes += 1;
+        assert!(passes < 5_000_000, "replay neither finished nor stalled");
         match worker.pass() {
             Pass::Progress(finished) => {
                 for (agent, generated) in finished {
@@ -467,6 +474,89 @@ fn idle_admission_retries_once_host_copies_release_their_checkpoints() {
     }
     assert_eq!(finished, 2);
     assert!(w.idle_refusals >= 2);
+}
+
+#[test]
+fn an_idle_request_whose_cached_prefix_leaves_too_few_pages_is_admitted_without_it() {
+    // A pool barely above the context: four 20-page snapshot rows on top of 260 pages.
+    let template = served_scheduler(760, 5);
+    let mut s = RequestScheduler::new(
+        [9; 32],
+        SchedulerLimits { pages: 260, snapshots: 4, ..template.limits },
+        template.capabilities.clone(),
+    )
+    .unwrap();
+    s.measured_graph_durations(&super::tests::duration_graphs(4)).unwrap();
+    s.enable_speculation(&[1, 2, 3, 4, 5]).unwrap();
+    s.fixed_speculative_width(Some(5)).unwrap();
+    s.share_snapshot_pages(&[240..260, 220..240, 200..220, 180..200]).unwrap();
+    s.enable_publications();
+    let mut w = Worker::new(s, 1.0);
+    let first = long_request(0, 30_000);
+    w.submit(0, first.clone());
+    while w.waiting() + w.running() > 0 {
+        assert!(matches!(w.pass(), Pass::Progress(_)));
+    }
+    // Only the system endpoint found a free row (the others alias the first turn's pages), so
+    // the next turn hits that checkpoint. Its 257 pages fit the pool, but not beside the
+    // checkpoint's 20-page row: retaining the hit leaves at most 260 - 33 - 20 pages.
+    let mut next = long_request(0, 32_700);
+    next.prompt[..29_995].copy_from_slice(&first.prompt[..29_995]);
+    next.message_boundaries = vec![SYSTEM, 29_995, 32_695];
+    let mut history = PrefixHistory::new([9; 32]);
+    history.append(&next.prompt, &[]).unwrap();
+    assert_eq!(w.s.cache.lookup(&history).unwrap().consumed_tokens, SYSTEM as u64);
+    w.submit(0, next);
+    let mut finished = 0;
+    for _ in 0..20_000 {
+        match w.pass() {
+            Pass::Progress(done) => finished += done.len(),
+            Pass::Stalled => panic!(
+                "no progress: {} free pages, {} cached pages, {} idle refusals",
+                w.s.stats().free_pages,
+                w.s.stats().cached_pages,
+                w.idle_refusals
+            ),
+            Pass::Idle => break,
+        }
+    }
+    assert_eq!(finished, 1);
+    // Admitted as a miss: nothing of the first turn was restored.
+    assert_eq!(w.s.stats().reused_tokens, 0);
+}
+
+#[test]
+fn restore_outcomes_reopen_admission_or_run_the_waiter() {
+    let mut s = served_scheduler(760, 5);
+    let spec = long_request(0, 20_000);
+    let mut history = PrefixHistory::new([9; 32]);
+    history.append(&spec.prompt, &[]).unwrap();
+    let inbound = InboundRequest {
+        key: history.key_at(8192).unwrap(),
+        consumed_tokens: 8192,
+        pages: 64,
+    };
+    for success in [false, true] {
+        let before = s.admission_key();
+        let plan = s.plan_admission(&spec).unwrap();
+        let admitted = s.admit_planned(spec.clone(), plan, Some(inbound.clone())).unwrap();
+        let ticket = admitted.ticket.expect("a new restore");
+        assert_eq!(s.request(admitted.handle).unwrap().phase, RequestPhase::Inbound);
+        let requeued = s.finish_inbound(ticket.key, success).unwrap();
+        if success {
+            // The waiter restores the published checkpoint and is the next step.
+            assert!(requeued.is_empty());
+            assert_eq!(s.request(admitted.handle).unwrap().phase, RequestPhase::Restore);
+            assert_eq!(s.plan().unwrap().kind, GraphKind::Restore);
+        } else {
+            // A failed restore retires its waiter at once and returns everything it held,
+            // so the requeued request finds the admission key as before its admission.
+            assert_eq!(requeued, vec![admitted.handle]);
+            assert!(s.request(admitted.handle).is_err());
+            assert_eq!(s.admission_key(), before);
+            assert!(s.has_available_slot());
+        }
+    }
 }
 
 #[test]

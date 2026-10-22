@@ -38,6 +38,11 @@ impl RequestScheduler {
         })
     }
 
+    /// KV pages a retained snapshot keeps from requests.
+    pub(super) fn snapshot_alias_pages(&self, id: SnapshotId) -> usize {
+        self.snapshot_pages.get(id.0 as usize).map_or(0, |range| range.len())
+    }
+
     pub(super) fn reserve_snapshot(&mut self, keep_pages: usize) -> Option<SnapshotId> {
         let id = self.available_snapshot(keep_pages)?;
         self.free_snapshots.remove(&id);

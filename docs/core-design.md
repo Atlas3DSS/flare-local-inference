@@ -470,8 +470,10 @@ first; admission waits while pages are short. A waiting request is retried when 
 GPU fence completes, when pages, snapshots or request slots are freed, or when the
 worker releases a checkpoint pin (a finished host-store copy-out or a readmission
 pin): a released pin makes cached pages evictable without changing any free count,
-and with nothing running it is the only event that can reopen admission. When a
-running request still cannot continue, the newest eligible decoder publishes its
+and with nothing running it is the only event that can reopen admission. A cached
+prefix is not restored when its retained snapshot row and the request's pages would
+exceed the pool; the request prefills from the start instead of waiting for room
+that cannot appear. When a running request still cannot continue, the newest eligible decoder publishes its
 terminal checkpoint when backing allows and is readmitted with its history and
 remaining output budget.
 The checkpoint restores all declared continuation state; eviction can instead

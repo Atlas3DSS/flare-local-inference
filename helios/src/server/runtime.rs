@@ -259,6 +259,55 @@ impl Parked<'_> {
         incoming.blocked = None;
         Ok(())
     }
+
+    /// Drops a parked request that leaves without readmission; nothing else would release
+    /// its readmission pin.
+    fn abandon(mut self, scheduler: &mut RequestScheduler) -> Result<()> {
+        match self.pinned.take() {
+            Some(id) => scheduler.release_readmission(id),
+            None => Ok(()),
+        }
+    }
+}
+
+/// The next waiting request `Worker::admit` tries.
+enum Eligible<'a> {
+    /// The request, its parked state when it is a readmission, and its queue position.
+    Next(Incoming, Option<Parked<'a>>, usize),
+    /// A request cancelled after the cancellation scan was counted and dropped.
+    Cancelled,
+    None,
+}
+
+/// Removes the first waiting request whose admission key differs from `key`: parked
+/// readmissions first, then the queue in arrival order.
+fn take_eligible<'a>(
+    parked: &mut VecDeque<(Incoming, Parked<'a>)>,
+    pending: &mut VecDeque<Incoming>,
+    key: crate::scheduler::AdmissionKey,
+    scheduler: &mut RequestScheduler,
+    metrics: &super::metrics::Metrics,
+) -> Result<Eligible<'a>> {
+    let eligible = |incoming: &Incoming| incoming.blocked != Some(key);
+    let (incoming, parked, position) =
+        match parked.iter().position(|(incoming, _)| eligible(incoming)) {
+            Some(index) => {
+                let (incoming, parked) = parked.remove(index).unwrap();
+                (incoming, Some(parked), index)
+            }
+            None => match pending.iter().position(eligible) {
+                Some(index) => (pending.remove(index).unwrap(), None, index),
+                None => return Ok(Eligible::None),
+            },
+        };
+    if incoming.cancelled.load(Ordering::Acquire) {
+        metrics.cancelled.fetch_add(1, Ordering::Relaxed);
+        if let Some(parked) = parked {
+            parked.abandon(scheduler)?;
+        }
+        return Ok(Eligible::Cancelled);
+    }
+    Ok(Eligible::Next(incoming, parked, position))
 }
 
 /// Appends a replayed pending token back to a readmission's prompt, as for any preempted
@@ -1099,28 +1148,24 @@ impl<'a> Worker<'a> {
         }
         while self.scheduler.has_available_slot() {
             let resources = self.scheduler.admission_key();
-            let eligible = |incoming: &Incoming| incoming.blocked != Some(resources);
-            let parked = self
-                .parked
-                .iter()
-                .position(|(incoming, _)| eligible(incoming));
-            let (mut incoming, parked, position) = match parked {
-                Some(index) => {
-                    let (incoming, parked) = self.parked.remove(index).unwrap();
-                    (incoming, Some(parked), index)
+            let (mut incoming, parked, position) = match take_eligible(
+                &mut self.parked,
+                &mut self.pending,
+                resources,
+                &mut self.scheduler,
+                self.metrics,
+            )? {
+                Eligible::Next(incoming, parked, position) => (incoming, parked, position),
+                Eligible::Cancelled => {
+                    progress = true;
+                    continue;
                 }
-                None => {
-                    let Some(index) = self.pending.iter().position(eligible) else {
-                        break;
-                    };
-                    (self.pending.remove(index).unwrap(), None, index)
-                }
+                Eligible::None => break,
             };
-            if incoming.cancelled.load(Ordering::Acquire) {
-                self.metrics.cancelled.fetch_add(1, Ordering::Relaxed);
-                continue;
-            }
             if incoming.prompt.logprobs && self.config.max_top_logprobs == 0 {
+                if let Some(parked) = parked {
+                    parked.abandon(&mut self.scheduler)?;
+                }
                 incoming.reject_admission("logprobs are not available in this model package".into());
                 continue;
             }
@@ -1171,6 +1216,9 @@ impl<'a> Worker<'a> {
                     continue;
                 }
                 Err(error) => {
+                    if let Some(parked) = parked {
+                        parked.abandon(&mut self.scheduler)?;
+                    }
                     incoming.reject_admission(error);
                     continue;
                 }
@@ -2562,6 +2610,42 @@ mod tests {
             .measured_graph_durations(&crate::scheduler::tests::duration_graphs(2))
             .unwrap();
         scheduler
+    }
+
+    #[test]
+    fn a_parked_request_cancelled_after_the_scan_releases_its_readmission_pin() {
+        let (mut scheduler, checkpoint) = crate::scheduler::tests::readmission_pinned();
+        let metrics = super::super::metrics::Metrics::default();
+        let (incoming, _generation) = stream(2);
+        // The client cancels after the worker's cancellation scan, before the pick.
+        incoming.cancelled.store(true, Ordering::Release);
+        let mut parked = VecDeque::from([(
+            incoming,
+            Parked {
+                last_token: None,
+                stops: super::super::stops::TokenStops::new(vec![], 248320).unwrap(),
+                text_stops: None,
+                carried: Carried::default(),
+                held_logprobs: VecDeque::new(),
+                pinned: Some(checkpoint),
+                replay: None,
+            },
+        )]);
+        let mut pending = VecDeque::new();
+        let key = scheduler.admission_key();
+        assert!(matches!(
+            take_eligible(&mut parked, &mut pending, key, &mut scheduler, &metrics).unwrap(),
+            Eligible::Cancelled
+        ));
+        assert!(parked.is_empty());
+        assert_eq!(metrics.cancelled.load(Ordering::Relaxed), 1);
+        assert!(!scheduler.holds_readmission(checkpoint));
+        // The released pin reopens admission for requests blocked on the old key.
+        assert_ne!(scheduler.admission_key(), key);
+        assert!(matches!(
+            take_eligible(&mut parked, &mut pending, key, &mut scheduler, &metrics).unwrap(),
+            Eligible::None
+        ));
     }
 
     #[test]

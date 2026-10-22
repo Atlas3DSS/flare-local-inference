@@ -965,10 +965,10 @@ impl RequestScheduler {
     /// GPU work; free pages, snapshots and request slots; and checkpoint pins the worker
     /// released (`unpin_checkpoint`, `release_readmission`). A released pin makes cached pages
     /// evictable without changing any free count; once nothing runs, no fence completes, so
-    /// without it a refused request would wait forever. The scheduler's own releases
-    /// (conversation pins, retiring prefixes, readmission pins under page pressure, restore
-    /// tickets) happen in transitions that complete a fence or free pages, snapshots or
-    /// slots, or in an admission attempt that evicts everything they stop protecting.
+    /// without it a refused request would wait forever. The scheduler's own releases come with
+    /// a completed fence or freed pages, snapshots or slots (retiring prefixes, readmission pins
+    /// under page pressure), with an admission attempt that evicts what they stop protecting
+    /// (conversation pins), or with a restore whose waiters run next (a ticket's parent pin).
     pub fn admission_key(&self) -> AdmissionKey {
         let stats = self.stats();
         AdmissionKey {
@@ -1325,7 +1325,41 @@ impl RequestScheduler {
         plan: AdmissionPlan,
         inbound: Option<InboundRequest>,
     ) -> Result<Admitted> {
-        let AdmissionPlan { history, lookup } = plan;
+        let AdmissionPlan { history, mut lookup } = plan;
+        let extra = self.speculative_widths.last().copied().unwrap_or(1) - 1;
+        let execution_limit = (spec.prompt.len() + spec.max_new_tokens as usize)
+            .saturating_add(extra)
+            .min(self.limits.max_sequence_tokens);
+        let draft_page = if !self.speculative_widths.is_empty()
+            && self.proposal_source == speculation::ProposalSource::Mtp
+        {
+            self.capabilities.draft_pages_per_request
+        } else {
+            0
+        };
+        // A growable request reserves its prompt and one page of output; decoding grows it.
+        let admission_limit = if spec.growable_output {
+            execution_limit.min(spec.prompt.len() + self.capabilities.page_tokens)
+        } else {
+            execution_limit
+        };
+        let admission_pages = admission_limit.div_ceil(self.capabilities.page_tokens) + draft_page;
+        // Restoring a GPU hit retains its snapshot row, whose alias pages no request can use.
+        // When those pages and the request's own exceed the pool, the hit could never be
+        // admitted, even with nothing else cached or running: admit the request as a miss,
+        // which prefills the same chunks from the start.
+        if inbound.is_none()
+            && lookup.snapshot.is_some_and(|snapshot| {
+                admission_pages + self.snapshot_alias_pages(snapshot) > self.limits.pages as usize
+            })
+        {
+            lookup = Lookup {
+                checkpoint: None,
+                consumed_tokens: 0,
+                pages: Vec::new(),
+                snapshot: None,
+            };
+        }
         // Lookups count once per admitted request, not per attempt of a waiting one.
         let (hit, reused) = (lookup.checkpoint.is_some(), lookup.consumed_tokens);
         let page_tokens = self.capabilities.page_tokens as u64;
@@ -1358,29 +1392,8 @@ impl RequestScheduler {
         if let Some(id) = pinned {
             self.cache.pin(id)?;
         }
-        let extra = self.speculative_widths.last().copied().unwrap_or(1) - 1;
-        let execution_limit = (spec.prompt.len() + spec.max_new_tokens as usize)
-            .saturating_add(extra)
-            .min(self.limits.max_sequence_tokens);
-        let draft_page = if !self.speculative_widths.is_empty()
-            && self.proposal_source == speculation::ProposalSource::Mtp
-        {
-            self.capabilities.draft_pages_per_request
-        } else {
-            0
-        };
-        // A growable request reserves its prompt and one page of output; decoding grows it.
-        let admission_limit = if spec.growable_output {
-            execution_limit.min(spec.prompt.len() + self.capabilities.page_tokens)
-        } else {
-            execution_limit
-        };
-        let reserved_count = admission_limit.div_ceil(self.capabilities.page_tokens)
-            - (consumed / page_tokens) as usize
-            + draft_page;
-        if admission_limit.div_ceil(self.capabilities.page_tokens) + draft_page
-            > self.limits.pages as usize
-        {
+        let reserved_count = admission_pages - (consumed / page_tokens) as usize;
+        if admission_pages > self.limits.pages as usize {
             if let Some(id) = pinned {
                 self.cache.unpin(id)?;
             }

@@ -3187,6 +3187,26 @@ fn a_starved_decoder_releases_a_readmission_pin_before_another_preemption() {
     assert_eq!(scheduler.stats().preemptions, 1);
 }
 
+/// A scheduler holding one readmission pin and nothing else live, as after a preempted
+/// request published its terminal checkpoint, the runtime parked it and the other request
+/// was cancelled.
+pub(crate) fn readmission_pinned() -> (RequestScheduler, CheckpointId) {
+    let mut scheduler = scheduler(2, 6, 4);
+    let older = scheduler.admit(growable(60, 400)).unwrap();
+    let newer = scheduler.admit(growable(60, 400)).unwrap();
+    let mut fence = 1;
+    while !scheduler.request(newer).unwrap().preempted() {
+        sample_round(&mut scheduler, fence);
+        fence += 1;
+        assert!(fence < 1000, "no request ran out of pages");
+    }
+    scheduler.cancel(older).unwrap();
+    freeze(&mut scheduler, newer, fence);
+    let checkpoint = scheduler.finish(newer).unwrap().unwrap();
+    assert!(scheduler.holds_readmission(checkpoint));
+    (scheduler, checkpoint)
+}
+
 #[test]
 fn a_parked_request_keeps_its_checkpoint_pinned_until_readmission() {
     let mut scheduler = scheduler(2, 6, 4);
