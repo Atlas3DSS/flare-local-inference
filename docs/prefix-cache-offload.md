@@ -727,7 +727,10 @@ would return those ids to the scheduler's free lists while the copy runs. A job
 that no rank completes within the job timeout stops the transport the same way.
 
 The ranks join their stores after connecting their RoCE transport and before
-the execution protocol starts. Every rank must have a disk store, or none:
+the execution protocol starts. A peer starts its own transport before it
+reports its scan, so a rank that cannot open its transfer threads, disk thread,
+or record directory fails the join instead of interrupting serving after rank
+zero has treated it as joined. Every rank must have a disk store, or none:
 startup fails when the settings differ. Rank zero opens one listener on a
 wildcard address and tells each peer the local address that peer's rendezvous
 connection uses, so a multi-homed rank zero is reachable on the interface each
@@ -966,6 +969,22 @@ restores alike. Sampled continuations are evaluated by their factual answers;
 generated tokens are not compared verbatim. The memory scenario
 sizes its pool so that its row slabs outnumber the GPU's cached rows, because
 the filler prompts that evict the GPU cache publish a checkpoint each.
+
+`qualify/multihost_cache.py` covers the ranks-on-separate-hosts configuration.
+It starts one `flare run` process per rank on this host, each on its own GPU
+with its own record directory, so the sharded transport runs between processes
+as it does between hosts:
+
+```sh
+python3 -m qualify.multihost_cache --package /data/model.safetensors \
+  --gpus 0,1,2,3 --artifacts /data/multihost-cache-qualification
+```
+
+The package's rank count must equal the number of GPUs. The scenario requires a
+GPU-cache hit without a host hit, a host restore after evicting the GPU copies,
+and a restore after restarting every rank. After each phase it checks that
+every rank holds the same record files, because a record that one rank lacks is
+unusable everywhere.
 
 Isolation measurements gate the defaults. Each is run without offload as the
 baseline and then with the composite under the same package, flags, and GPU,
