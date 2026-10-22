@@ -163,6 +163,24 @@ def test_cpu_replay_of_stored_operands_equals_every_candidate_column(width, fres
 # --------------------------------------------------------------------------------------------------------------------
 
 _LAYOUT = re.compile(r"#[a-z_]*[0-9]* = #ttg\.[a-z_]*<\{[^>]*\}>")
+# A floating-point fused multiply-add in PTX, with or without a guard predicate, scalar or packed, any rounding /
+# ftz / sat modifiers; integer mad (mad.lo / mad.wide / mad.hi on s/u types, address arithmetic) does not match.
+_FP_FUSED = re.compile(r"^\s*(?:@!?%p\d+\s+)?(?:fma|mad)(?:\.[a-z0-9]+)*\.(?:f16|f16x2|bf16|bf16x2|f32|f64)\b.*$", re.M)
+
+
+def test_fp_fusion_pattern_cases():
+    caught = ["\tfma.rn.f32 \t%r1, %r2, %r3, %r4;", "\t@%p1 fma.rn.f32 \t%r1, %r2, %r3, %r4;",
+              "\t@!%p12 fma.rn.ftz.f32 \t%r1, %r2, %r3, %r4;", "\tfma.rn.f16x2 \t%r1, %r2, %r3, %r4;",
+              "\tfma.rn.bf16 \t%rs1, %rs2, %rs3, %rs4;", "\tmad.f32 \t%r1, %r2, %r3, %r4;", "\tmad.rn.f64 \t%fd1, %fd2, %fd3, %fd4;",
+              "\tfma.rn.sat.f32 \t%r1, %r2, %r3, %r4;"]
+    ignored = ["\tmad.lo.s64 \t%rd1, %rd2, 16, %rd3;", "\tmad.wide.u32 \t%rd4, %r1, 4, %rd5;",
+               "\t@%p3 mad.wide.s32 \t%rd4, %r1, 4, %rd5;", "\tmad.hi.u16 \t%rs1, %rs2, %rs3, %rs4;",
+               "\tmul.rn.f32 \t%r1, %r2, %r3;", "\tadd.rn.f32 \t%r1, %r2, %r3;", "\t// fma.rn.f32 in a comment is still a line: see below"]
+    for line in caught:
+        assert _FP_FUSED.search(line), line
+    for line in ignored[:-1]:
+        assert not _FP_FUSED.search(line), line
+    assert len(_FP_FUSED.findall("\n".join(caught + ignored[:-1]))) == len(caught)
 
 cuda = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
                           reason="requires FLARE_RUN_CUDA_TESTS=1 and an assigned V100")
@@ -314,8 +332,9 @@ def test_replay_commit_matches_candidate_columns_byte_for_byte(device, width):
         layouts[name] = sorted(set(_LAYOUT.findall(program.asm["ttgir"])))
     assert layouts["candidate"] == layouts["replay_mode"] == layouts["replay"], layouts
     assert any(expected in layout for layout in layouts["replay"]), layouts["replay"]
-    # No floating-point fused multiply-add in the replay commit (integer mad.lo/mad.wide are address arithmetic).
-    fused = re.findall(r"^\s*(?:fma|mad)(?:\.[a-z0-9]+)*\.f(?:16|32|64)\b.*$", commit.operation.compiled.asm["ptx"], re.M)
+    # No floating-point fused multiply-add in the replay commit, predicated or not, scalar or packed (integer
+    # mad.lo/mad.wide are address arithmetic; see _FP_FUSED and test_fp_fusion_pattern_cases).
+    fused = _FP_FUSED.findall(commit.operation.compiled.asm["ptx"])
     assert not fused, ("replay commit must not fuse floating-point multiply-adds", fused[:4])
 
     lengths, fresh = (width, 0, width, width), (False, False, True, False)      # request 1 inactive this round
