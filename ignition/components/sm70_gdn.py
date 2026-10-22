@@ -151,7 +151,7 @@ def _recurrence(Mixed, A, B, ALog, DtBias, State, Starts, Indices, Accepted, Ini
                     elif REPLAY:
                         # Replay-commit: keep exactly the operands this step consumed (one k per key
                         # head, this tile's value rows, the scalar gates); write no candidate state.
-                        operand = Operands + token * ((KEY_HEADS + VALUE_HEADS) * 128 + 2 * VALUE_HEADS)
+                        operand = Operands + token.to(tl.int64) * ((KEY_HEADS + VALUE_HEADS) * 128 + 2 * VALUE_HEADS)
                         tl.store(operand + key_head * 128 + keys, k,
                                  (tile == 0) & (head % (VALUE_HEADS // KEY_HEADS) == 0))
                         tl.store(operand + KEY_HEADS * 128 + head * 128 + rows, value)

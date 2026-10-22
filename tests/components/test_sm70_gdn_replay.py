@@ -27,6 +27,14 @@ def _round(value):
     return value.to(torch.bfloat16).float()
 
 
+def _same_bits(actual, expected):
+    """Bit-for-bit equality. torch.equal on floats accepts +0.0 == -0.0 (and would hide a sign-of-zero difference
+    between the candidate path and the replay), so every comparison goes through uint8 views of the same shape/dtype."""
+    actual, expected = actual.detach().contiguous(), expected.detach().contiguous()
+    return (actual.shape == expected.shape and actual.dtype == expected.dtype
+            and torch.equal(actual.view(torch.uint8), expected.view(torch.uint8)))
+
+
 def _step(state, k, value, decay, beta):
     """One recurrence update of one value head's [rows x keys] tile: the kernel's expressions in the kernel's order."""
     state = state * decay
@@ -65,6 +73,26 @@ def test_cpu_replay_of_stored_operands_equals_every_candidate_column(width, fres
     a_log = torch.randn(layers, VALUES) * .2
     dt_bias = torch.randn(layers, VALUES) * .1
     initial = torch.randn(layers, slots, VALUES, DIM, DIM) * .025
+    # Signed-zero fixtures: a head tile of -0.0, a head tile of alternating +0.0/-0.0 (state*decay keeps the sign, the
+    # products with k produce both zero signs, and sums of mixed zero signs round to +0.0).
+    initial[:, rows[0], 3] = -0.0
+    initial[:, rows[0], 4, :, ::2], initial[:, rows[0], 4, :, 1::2] = 0.0, -0.0
+    initial[:, rows[3], 9] = 0.0
+    initial[:, rows[3], 9, :, 0] = torch.randn(layers, DIM) * .05            # one-hot rows: sum = state[:, 0] * k[0]
+    # Cancellation fixture (widths > 1): request 2 is fresh in both patterns, so after its first token the state is
+    # delta[:, None] * k[None, :]. Its second token uses a one-hot k for key head 0 and a value equal, by the same
+    # expression, to the dot product the update computes: value - sum is exactly 0.0 and delta is a signed zero.
+    if width > 1:
+        second = starts[2] + 1
+        for layer in range(layers):
+            convolved[layer, second, KEYS * DIM:KEYS * DIM + DIM] = 0.0
+            convolved[layer, second, KEYS * DIM] = 1.0
+            k1, v1, decay1, beta1 = _operands(convolved[layer], a[layer], b[layer], a_log[layer], dt_bias[layer], starts[2])
+            k2, _, _, _ = _operands(convolved[layer], a[layer], b[layer], a_log[layer], dt_bias[layer], second)
+            for head in range(VALUES // KEYS):                              # the value heads of key head 0
+                state1 = _step(torch.zeros(DIM, DIM), k1[0], v1[head], decay1[head], beta1[head])
+                convolved[layer, second, 2 * KEYS * DIM + head * DIM:2 * KEYS * DIM + (head + 1) * DIM] = state1[:, 0] * k2[0, 0]
+        convolved[:, second, 2 * KEYS * DIM + 5 * DIM:2 * KEYS * DIM + 5 * DIM + 8] = -0.0      # signed-zero values
 
     # Path 1: today's verification, candidate j of request r = sequential state after inputs 0..j from the row.
     candidates = {}
@@ -120,13 +148,13 @@ def test_cpu_replay_of_stored_operands_equals_every_candidate_column(width, fres
         for layer in range(layers):
             for request in range(requests):
                 if lengths[request]:
-                    assert torch.equal(pool[layer, rows[request]], candidates[layer, request, accepted - 1])
+                    assert _same_bits(pool[layer, rows[request]], candidates[layer, request, accepted - 1])
                 else:
-                    assert torch.equal(pool[layer, rows[request]], initial[layer, rows[request]])
-            assert torch.equal(pool[layer, 0], initial[layer, 0]) and torch.equal(pool[layer, 5], initial[layer, 5])
+                    assert _same_bits(pool[layer, rows[request]], initial[layer, rows[request]])
+            assert _same_bits(pool[layer, 0], initial[layer, 0]) and _same_bits(pool[layer, 5], initial[layer, 5])
     pool = initial.clone()
     replay(pool, [0] * requests)
-    assert torch.equal(pool, initial), "zero counts leave every row untouched"
+    assert _same_bits(pool, initial), "zero counts leave every row untouched"
 
 
 # --------------------------------------------------------------------------------------------------------------------
@@ -232,6 +260,25 @@ def test_replay_commit_matches_candidate_columns_byte_for_byte(device, width):
     new = _Pool(generator, device, 2 + requests, width + 2)
     canonical_old = [1 + request * width for request in range(requests)]
     canonical_new = [1 + request for request in range(requests)]
+    # Signed-zero and cancellation fixtures alongside the random inputs (the comparisons below are bit-for-bit, so a
+    # +0.0/-0.0 difference between the candidate path and the replay would fail them):
+    #  - request 0: head 3 state tile all -0.0, head 4 alternating +0.0/-0.0, head 9 one-hot rows;
+    #  - request 0, key head 2 (value heads 6..8): the k inputs (conv window and this round's channels) are exact zeros
+    #    with a -0.0 sprinkled in, so k normalises to signed zeros, state*k products carry both zero signs and the
+    #    reduction cancels to a signed zero before the subtraction;
+    #  - request 3: a value-head tile of exact zeros (state*decay = 0, delta*k is the whole update).
+    key2 = slice(KEYS * DIM + 2 * DIM, KEYS * DIM + 3 * DIM)
+    for layer in range(layers):
+        tile = old.states[layer].recurrent[canonical_old[0]]
+        tile[3] = -0.0
+        tile[4, :, ::2], tile[4, :, 1::2] = 0.0, -0.0
+        tile[9] = 0.0
+        tile[9, :, 0] = torch.randn(DIM, generator=generator).to(device) * .05
+        old.states[layer].recurrent[canonical_old[3]][11] = 0.0
+        old.states[layer].convolution[canonical_old[0], key2] = 0.0
+        old.states[layer].convolution[canonical_old[0], key2.start, :] = -0.0
+    scratch.projected_qkv[:width, key2] = 0.0                          # request 0 packs first: tokens 0..width-1
+    scratch.projected_qkv[:width, key2.start + 1] = -0.0
     for layer in range(layers):
         for request in range(requests):
             new.states[layer].recurrent[canonical_new[request]].copy_(old.states[layer].recurrent[canonical_old[request]])
@@ -267,11 +314,11 @@ def test_replay_commit_matches_candidate_columns_byte_for_byte(device, width):
         torch.cuda.synchronize()
         # Same convolution, recurrence outputs and gated outputs; no recurrent state written; conv windows identical.
         for name, expected in zip(("convolved_qkv", "recurrence", "gated"), outputs[layer], strict=True):
-            assert torch.equal(getattr(scratch, name), expected), (layer, name)
-        assert torch.equal(new.states[layer].recurrent, initial[layer])
+            assert _same_bits(getattr(scratch, name), expected), (layer, name)
+        assert _same_bits(new.states[layer].recurrent, initial[layer]), "verification wrote recurrent state"
         for request in range(requests):
-            assert torch.equal(new.states[layer].convolution[canonical_new[request]],
-                               old.states[layer].convolution[canonical_old[request]])
+            assert _same_bits(new.states[layer].convolution[canonical_new[request]],
+                              old.states[layer].convolution[canonical_old[request]])
     packed = sum(lengths)
     assert not operands[:, :packed].isnan().any(), "every packed live token stored all of its operands"
     assert operands[:, packed:].isnan().all(), "no token beyond the packed count was touched"
@@ -286,12 +333,12 @@ def test_replay_commit_matches_candidate_columns_byte_for_byte(device, width):
             for request in range(requests):
                 row = canonical_new[request]
                 if lengths[request]:
-                    assert torch.equal(new.states[layer].recurrent[row],
-                                       old.states[layer].recurrent[columns[request][accepted - 1]]), (accepted, layer, request)
+                    assert _same_bits(new.states[layer].recurrent[row],
+                                      old.states[layer].recurrent[columns[request][accepted - 1]]), (accepted, layer, request)
                 else:
-                    assert torch.equal(new.states[layer].recurrent[row], initial[layer][row])
-            assert torch.equal(new.states[layer].recurrent[0], initial[layer][0])
-            assert torch.equal(new.states[layer].recurrent[-1], initial[layer][-1])
+                    assert _same_bits(new.states[layer].recurrent[row], initial[layer][row])
+            assert _same_bits(new.states[layer].recurrent[0], initial[layer][0])
+            assert _same_bits(new.states[layer].recurrent[-1], initial[layer][-1])
     assert torch.all(new.pad == 23) and torch.all(old.pad == 23)
 
 
@@ -318,7 +365,7 @@ def test_replay_commit_captures_without_allocation_and_skips_zero_counts(device)
     graph.replay()
     torch.cuda.synchronize()
     assert torch.cuda.memory_stats()["allocation.all.allocated"] == allocations
-    assert torch.equal(pool.floats, before), "zero counts leave the pool untouched"
+    assert _same_bits(pool.floats, before), "zero counts leave the pool untouched"
     counts.copy_(torch.tensor([1, 0, 5, 3], dtype=torch.int32, device=device))
     graph.replay()
     torch.cuda.synchronize()
