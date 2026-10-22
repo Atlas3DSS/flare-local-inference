@@ -119,15 +119,24 @@ fn now_millis() -> u64 {
         .unwrap_or(0)
 }
 
-/// The URL of rank zero's metrics endpoint for its `--host` and `--port` options; a wildcard
-/// bind is reached through the loopback address.
+/// The URL of rank zero's metrics endpoint for its last `--host` and `--port` options;
+/// a wildcard bind is reached through the loopback address.
 pub fn metrics_url(rank_zero: &[String]) -> String {
     let option = |name: &str| {
         rank_zero
             .iter()
-            .position(|a| a == name)
-            .and_then(|i| rank_zero.get(i + 1))
-            .cloned()
+            .enumerate()
+            .rev()
+            .find_map(|(i, argument)| {
+                if argument == name {
+                    rank_zero.get(i + 1).cloned()
+                } else {
+                    argument
+                        .strip_prefix(name)?
+                        .strip_prefix('=')
+                        .map(str::to_owned)
+                }
+            })
     };
     let host = match option("--host").as_deref() {
         None | Some("0.0.0.0") | Some("::") => "127.0.0.1".to_owned(),
@@ -2647,6 +2656,39 @@ pub mod tests {
     }
 
     #[test]
+    fn metrics_urls_honor_bind_overrides() {
+        let cases: &[(&[&str], &str)] = &[
+            (
+                &[
+                    "--host", "127.0.0.1", "--port", "8001", "--host", "0.0.0.0", "--port",
+                    "8000", "--host", "0.0.0.0", "--port", "8000",
+                ],
+                "http://127.0.0.1:8000/metrics?format=json",
+            ),
+            (
+                &[
+                    "--host", "10.1.2.3", "--port", "8001", "--host=::1", "--port=9000",
+                ],
+                "http://[::1]:9000/metrics?format=json",
+            ),
+            (
+                &[
+                    "--host=10.1.2.3", "--port=8001", "--host", "0.0.0.0", "--port", "8000",
+                ],
+                "http://127.0.0.1:8000/metrics?format=json",
+            ),
+            (
+                &["--host=::", "--port=9000"],
+                "http://127.0.0.1:9000/metrics?format=json",
+            ),
+        ];
+        for (options, expected) in cases {
+            let options = options.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+            assert_eq!(metrics_url(&options), *expected, "{options:?}");
+        }
+    }
+
+    #[test]
     fn the_sampler_scrapes_rank_zero_metrics_and_reports_gpus_with_holders() {
         let harness = harness(9);
         let mut session = pair_accept_first(&harness);
@@ -2701,6 +2743,10 @@ pub mod tests {
                 rendezvous: "127.0.0.1:29800".into(),
                 serving: vec![],
                 rank_zero: vec![
+                    "--host".into(),
+                    "127.0.0.2".into(),
+                    "--port".into(),
+                    "0".into(),
                     "--host".into(),
                     "0.0.0.0".into(),
                     "--port".into(),
