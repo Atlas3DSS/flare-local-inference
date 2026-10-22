@@ -5,6 +5,15 @@ history. Recurrence remains FP32, value by key. Decode writes one state column
 per candidate; packed prefill supports distinct initial, final and checkpoint slots.
 Metadata retains DeltaMetadata's scheduler-owned bounds and unique-slot rules.
 No projection or model scheduling is implemented here.
+
+Replay-commit (speculative verification): a decode sequence prepared with a
+``replay`` operand buffer stores, per token and layer, the FP32 operands its
+recurrence step consumed (normalized k, value, decay, beta) and writes no
+candidate state at all; the committed row stays the untouched initial state.
+``PreparedSM70ReplayCommit`` then replays each request's accepted prefix from
+that row with the same sequential arithmetic (same tile, warps, expression
+order, no FP contraction), for all layers in one launch, so the committed row
+equals the state of ``count`` ordinary single-token decodes byte for byte.
 """
 
 from dataclasses import dataclass
@@ -82,12 +91,17 @@ def _convolution(X, Weight, History, Starts, Slots, Fresh, Accepted, NumSeqs, Nu
                     tl.store(Output + token.to(tl.int64) * CHANNELS + channels, 0.0, mask)
 
 
+def operand_floats(key_heads, value_heads):
+    """FP32 words one token's replay operands occupy for one layer: k per key head, value per value head, decay, beta."""
+    return (key_heads + value_heads) * 128 + 2 * value_heads
+
+
 @triton.jit
 def _recurrence(Mixed, A, B, ALog, DtBias, State, Starts, Indices, Accepted, Initial, Final,
-                Checkpoints, CheckpointOffsets, Fresh, NumSeqs, NumTokens, Output,
+                Checkpoints, CheckpointOffsets, Fresh, NumSeqs, NumTokens, Output, Operands,
                 mixed_stride, a_stride, b_stride, state_stride, index_stride,
                 KEY_HEADS: tl.constexpr, VALUE_HEADS: tl.constexpr, PREFILL: tl.constexpr,
-                ROWS: tl.constexpr):
+                REPLAY: tl.constexpr, ROWS: tl.constexpr):
     tile, request_head = tl.program_id(0), tl.program_id(1)
     request, head = request_head // VALUE_HEADS, request_head % VALUE_HEADS
     key_head = head // (VALUE_HEADS // KEY_HEADS)
@@ -134,6 +148,15 @@ def _recurrence(Mixed, A, B, ALog, DtBias, State, Starts, Indices, Accepted, Ini
                     if PREFILL:
                         if (checkpoint > 0) & (token - start + 1 == boundary):
                             tl.store(State + checkpoint * state_stride + elements, state)
+                    elif REPLAY:
+                        # Replay-commit: keep exactly the operands this step consumed (one k per key
+                        # head, this tile's value rows, the scalar gates); write no candidate state.
+                        operand = Operands + token * ((KEY_HEADS + VALUE_HEADS) * 128 + 2 * VALUE_HEADS)
+                        tl.store(operand + key_head * 128 + keys, k,
+                                 (tile == 0) & (head % (VALUE_HEADS // KEY_HEADS) == 0))
+                        tl.store(operand + KEY_HEADS * 128 + head * 128 + rows, value)
+                        tl.store(operand + (KEY_HEADS + VALUE_HEADS) * 128 + head, decay, tile == 0)
+                        tl.store(operand + (KEY_HEADS + VALUE_HEADS) * 128 + VALUE_HEADS + head, beta, tile == 0)
                     else:
                         destination = tl.load(Indices + request * index_stride + position - start).to(tl.int64)
                         tl.store(State + destination * state_stride + elements, state, destination != 0)
@@ -163,6 +186,41 @@ def _norm(Hidden, Gate, Weight, Output, NumTokens, gate_stride,
     tl.store(Output + offsets, tl.where(live, value, 0.0))
 
 
+@triton.jit
+def _replay(Operands, Backing, Offsets, Rows, Counts, Starts, Fresh, operand_layer_stride,
+            STRIDE: tl.constexpr, KEY_HEADS: tl.constexpr, VALUE_HEADS: tl.constexpr, ROWS: tl.constexpr):
+    """Replay ``Counts[request]`` stored verification steps from the committed row ``Rows[request]`` in place.
+
+    One program per (key tile, request x value head, layer) carries the same [ROWS x 128] state tile as the decode
+    recurrence and applies the same update expressions in the same order to the stored FP32 operands, so the result
+    equals the decode recurrence's state after those steps bit for bit. A zero count or null row leaves the row alone.
+    """
+    tile, request_head, layer = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    request, head = request_head // VALUE_HEADS, request_head % VALUE_HEADS
+    key_head = head // (VALUE_HEADS // KEY_HEADS)
+    count = tl.load(Counts + request)
+    row = tl.load(Rows + request).to(tl.int64)
+    if (count > 0) & (row > 0):
+        start = tl.load(Starts + request)
+        fresh = tl.load(Fresh + request)
+        rows = tile * ROWS + tl.arange(0, ROWS)
+        keys = tl.arange(0, 128)
+        elements = head * (128 * 128) + rows[:, None] * 128 + keys[None, :]
+        base = Backing + row * STRIDE + tl.load(Offsets + layer)
+        state = tl.load(base + elements, mask=~fresh, other=0.0)
+        layer_operands = Operands + layer.to(tl.int64) * operand_layer_stride
+        for step in range(0, count):
+            operand = layer_operands + (start + step).to(tl.int64) * ((KEY_HEADS + VALUE_HEADS) * 128 + 2 * VALUE_HEADS)
+            k = tl.load(operand + key_head * 128 + keys)
+            value = tl.load(operand + KEY_HEADS * 128 + head * 128 + rows)
+            decay = tl.load(operand + (KEY_HEADS + VALUE_HEADS) * 128 + head)
+            beta = tl.load(operand + (KEY_HEADS + VALUE_HEADS) * 128 + VALUE_HEADS + head)
+            state = state * decay
+            delta = (value - tl.sum(state * k[None, :], 1)) * beta
+            state = state + delta[:, None] * k[None, :]
+        tl.store(base + elements, state)
+
+
 @dataclass(frozen=True)
 class Query:
     operands: tuple
@@ -172,12 +230,15 @@ class Query:
     epsilon: float
     activation: str
     norm_weight_bf16: bool
+    replay: bool = False
 
 
 def _launches(tensors, query):
     (x, a, b, z, weight, a_log, bias, norm_weight, starts, slots, fresh, accepted, indices,
      initial, final, checkpoints, offsets, sequences, tokens, history, state,
-     convolved, recurrence, gated) = tensors
+     convolved, recurrence, gated, *rest) = tensors
+    # Without a replay operand buffer the recurrence never dereferences the pointer (REPLAY is false).
+    operands = rest[0] if query.replay else state
     requests = starts.numel() - 1
     channels = (2 * query.key_heads + query.value_heads) * 128
     common = {"num_warps": 4, "num_stages": 1, "enable_fp_fusion": False}
@@ -186,10 +247,11 @@ def _launches(tensors, query):
            (requests, triton.cdiv(channels, 128), 1), {**common, "CHANNELS": channels,
             "HISTORY": history.shape[2], "PREFILL": query.mode == "prefill", "BLOCK": 128})
     yield (_recurrence, (convolved, a, b, a_log, bias, state, starts, indices, accepted, initial, final,
-                        checkpoints, offsets, fresh, sequences, tokens, recurrence,
+                        checkpoints, offsets, fresh, sequences, tokens, recurrence, operands,
                         convolved.stride(0), a.stride(0), b.stride(0), state.stride(0), indices.stride(0)),
            (16, requests * query.value_heads, 1), {**common, "KEY_HEADS": query.key_heads,
-            "VALUE_HEADS": query.value_heads, "PREFILL": query.mode == "prefill", "ROWS": 8})
+            "VALUE_HEADS": query.value_heads, "PREFILL": query.mode == "prefill", "REPLAY": query.replay,
+            "ROWS": 8})
     yield (_norm, (recurrence, z, norm_weight, gated, tokens, z.stride(0)),
            (x.shape[0], query.value_heads, 1), {**common, "HEADS": query.value_heads,
             "EPS": query.epsilon, "SILU": query.activation == "silu", "BF16_WEIGHT": query.norm_weight_bf16})
@@ -232,7 +294,7 @@ def _fake(inputs, state, outputs, handle):
 
 @dataclass(frozen=True)
 class ValidatedSequence:
-    """Operand tuples of one validated GDN sequence, in ``_launches`` order (inputs, state, outputs)."""
+    """Operand tuples of one validated GDN sequence, in ``_launches`` order (inputs, state, outputs, replay)."""
     inputs: tuple
     state: tuple
     outputs: tuple
@@ -240,19 +302,26 @@ class ValidatedSequence:
     values: int
     epsilon: float
     history: int
+    replay: tuple = ()
 
     @property
     def tensors(self):
-        return (*self.inputs, *self.state, *self.outputs)
+        return (*self.inputs, *self.state, *self.outputs, *self.replay)
 
 
-def validate_sequence(module, scratch, state, metadata, *, mode, norm_weight_bf16, checkpoint_export):
-    """Admit the FP32 token-major operands, state pools and metadata of one prefill or decode sequence."""
+def validate_sequence(module, scratch, state, metadata, *, mode, norm_weight_bf16, checkpoint_export, replay=None):
+    """Admit the FP32 token-major operands, state pools and metadata of one prefill or decode sequence.
+
+    ``replay`` (decode only) is this layer's replay operand buffer, one row of ``operand_floats`` FP32 words per
+    token of the scratch capacity; the sequence then stores its operands there and writes no candidate state.
+    """
     if (mode not in ("decode", "prefill") or type(norm_weight_bf16) is not bool
             or type(checkpoint_export) is not bool):
         raise ValueError("SM70 GDN requires an ordinary decode/prefill mode and explicit norm precision")
     if checkpoint_export and mode != "prefill":
         raise ValueError("SM70 GDN checkpoint export is a prefill operation")
+    if replay is not None and mode != "decode":
+        raise ValueError("SM70 GDN replay operands are stored by decode (verification) sequences only")
     keys, values = module.num_k_heads, module.num_v_heads
     channels = (2 * keys + values) * 128
     if (keys <= 0 or values <= 0 or values % keys or module.head_k_dim != 128 or module.head_v_dim != 128
@@ -301,8 +370,13 @@ def validate_sequence(module, scratch, state, metadata, *, mode, norm_weight_bf1
                 "initial_state_indices": ((requests,), torch.int64), "final_state_indices": ((requests,), torch.int64),
                 "checkpoint_state_indices": ((requests,), torch.int64), "checkpoint_offsets": ((requests,), torch.int32),
                 "num_seqs": ((1,), torch.int32), "num_tokens": ((1,), torch.int32)}
-    if requests <= 0 or (mode == "decode" and capacity > requests * columns):
+    if requests <= 0 or (mode == "decode" and replay is None and capacity > requests * columns):
         raise ValueError("SM70 GDN decode token capacity exceeds its state_indices columns")
+    if replay is not None and (columns != 1 or replay.shape != (capacity, operand_floats(keys, values))
+                               or replay.dtype != torch.float32 or replay.device != device
+                               or not replay.is_contiguous()):
+        raise ValueError("SM70 GDN replay requires one committed state column and a contiguous FP32 operand row "
+                         "per scratch token")
     for field, (shape, dtype) in expected.items():
         tensor = getattr(metadata, field)
         if tensor.shape != shape or tensor.dtype != dtype or tensor.device != device or not tensor.is_contiguous():
@@ -317,7 +391,8 @@ def validate_sequence(module, scratch, state, metadata, *, mode, norm_weight_bf1
               metadata.state_indices, metadata.initial_state_indices, metadata.final_state_indices,
               metadata.checkpoint_state_indices, metadata.checkpoint_offsets, metadata.num_seqs, metadata.num_tokens)
     return ValidatedSequence(inputs, (state.convolution, state.recurrent),
-                             (scratch.convolved_qkv, scratch.recurrence, scratch.gated), keys, values, epsilon, history)
+                             (scratch.convolved_qkv, scratch.recurrence, scratch.gated), keys, values, epsilon, history,
+                             () if replay is None else (replay,))
 
 
 class PreparedSM70GDNSequence:
@@ -328,20 +403,24 @@ class PreparedSM70GDNSequence:
     storage to FP32 must not erase that arithmetic distinction. Runtime metadata
     must obey DeltaMetadata's bounds/unique-owner rules. Decode resumes from
     ``state_indices[:, accepted_tokens - 1]`` and writes every candidate's FP32
-    checkpoint. A candidate's convolution window starts at its zero-based index.
+    checkpoint, or, given ``replay`` operand storage, stores each step's operands
+    for ``PreparedSM70ReplayCommit`` and writes no state (replay-commit).
+    A candidate's convolution window starts at its zero-based index.
     A supplied preparation session declares compilation jobs and warms only
     after its compile phase. Without a session, kernels compile for direct tests.
     """
 
     def __init__(self, module, scratch, state, metadata, *, mode, norm_weight_bf16,
-                 session=None, name=None, checkpoint_export=False):
+                 session=None, name=None, checkpoint_export=False, replay=None):
         validated = validate_sequence(module, scratch, state, metadata, mode=mode, norm_weight_bf16=norm_weight_bf16,
-                                      checkpoint_export=checkpoint_export)
+                                      checkpoint_export=checkpoint_export, replay=replay)
         device = validated.inputs[0].device
         self.inputs, self.state, self.outputs = validated.inputs, validated.state, validated.outputs
+        self.replay = validated.replay
         self.tensors = validated.tensors
         query = Query(tuple((tuple(t.shape), tuple(t.stride()), str(t.dtype).removeprefix("torch.")) for t in self.tensors),
-                      validated.keys, validated.values, mode, validated.epsilon, module.norm.activation, norm_weight_bf16)
+                      validated.keys, validated.values, mode, validated.epsilon, module.norm.activation, norm_weight_bf16,
+                      replay is not None)
         self.plan = None
         if session is None:
             programs = tuple(warmup_triton(kernel, args, grid, **options)
@@ -357,7 +436,7 @@ class PreparedSM70GDNSequence:
             from .native_operator import native_contract, native_plan
 
             contract = native_contract(component_id="flare.sm70_gdn_sequence", query_type=Query,
-                                       tactics=lambda query: ("sequential",), semantic_version=2)
+                                       tactics=lambda query: ("sequential",), semantic_version=3)
             payload = contract.encode_query(query)
 
             def materialize(tactic):
@@ -376,7 +455,7 @@ class PreparedSM70GDNSequence:
         if self.plan is None:
             self.prepared.run(self.tensors)
         else:
-            _execute(list(self.inputs), list(self.state), list(self.outputs), self.plan._handle)
+            _execute(list(self.inputs), list(self.state), [*self.outputs, *self.replay], self.plan._handle)
         return self.outputs[2]
 
     run_sequence = __call__
@@ -450,6 +529,66 @@ class PreparedSM70ConvolutionCommit:
             (len(offsets), rows.numel(), triton.cdiv(channels, 128)),
             STRIDE=floats.stride(0), ROW_STRIDE=rows.stride(0), CHANNELS=channels,
             COLUMNS=columns, BLOCK=128, num_warps=4, num_stages=1)
+
+    def __call__(self):
+        self.operation()
+
+
+class PreparedSM70ReplayCommit:
+    """Replay accepted verification prefixes into the committed recurrent rows of every layer, in one launch.
+
+    ``recurrents`` maps layer IDs to the FP32 recurrent views ``[slots, value_heads, 128, 128]`` of ``backing``;
+    ``operands`` is the ``[layers, tokens, operand_floats]`` buffer the verification sequences of those layers
+    filled (layer order = mapping order); ``rows`` names each request's committed pool row, ``counts`` its accepted
+    input count, ``starts`` the packed query boundaries and ``fresh`` whether the request began with no history
+    (zero initial state), exactly as the verification decode read them. Zero counts and null rows leave their
+    rows untouched. Callers validate rows against ``memory_capacity[0]`` before execution, as the dense round's
+    batch validator does; this kernel has no bound of its own, like the convolution commit.
+    """
+
+    def __init__(self, backing, recurrents, operands, rows, counts, starts, fresh, *, key_heads, value_heads):
+        from ignition.preparation.triton import prepare_triton
+
+        if (backing.ndim != 2 or backing.dtype != torch.uint8 or not backing.is_contiguous()
+                or backing.shape[1] % 4 or backing.device.type != "cuda"
+                or torch.cuda.get_device_capability(backing.device) != (7, 0)):
+            raise ValueError("SM70 replay commit requires contiguous CUDA byte-pool rows")
+        device = backing.device
+        if (rows.ndim != 1 or rows.numel() == 0 or rows.dtype != torch.int64 or counts.shape != rows.shape
+                or counts.dtype != torch.int32 or starts.shape != (rows.numel() + 1,) or starts.dtype != torch.int32
+                or fresh.shape != rows.shape or fresh.dtype != torch.bool
+                or any(t.device != device or not t.is_contiguous() for t in (rows, counts, starts, fresh))):
+            raise ValueError("SM70 replay commit requires contiguous committed rows, accepted counts, query boundaries "
+                             "and fresh flags")
+        if (type(key_heads) is not int or type(value_heads) is not int or key_heads <= 0
+                or value_heads <= 0 or value_heads % key_heads):
+            raise ValueError("SM70 replay commit requires grouped key/value heads")
+        width = operand_floats(key_heads, value_heads)
+        if (operands.ndim != 3 or operands.dtype != torch.float32 or operands.device != device
+                or operands.shape[0] != len(recurrents) or operands.shape[1] <= 0 or operands.shape[2] != width
+                or operands.stride(2) != 1 or operands.stride(1) != width
+                or operands.stride(0) < operands.shape[1] * width):
+            raise ValueError("SM70 replay commit requires one contiguous FP32 operand row per token for every layer")
+        floats = backing.view(torch.float32)
+        offsets = []
+        for recurrent in recurrents.values():
+            if (recurrent.shape != (backing.shape[0], value_heads, 128, 128) or recurrent.dtype != torch.float32
+                    or recurrent.device != device or recurrent.stride() != (floats.stride(0), 16384, 128, 1)
+                    or recurrent.untyped_storage().data_ptr() != backing.untyped_storage().data_ptr()):
+                raise ValueError("SM70 replay commit recurrents must be FP32 views of the supplied pool")
+            offset = recurrent.storage_offset() - floats.storage_offset()
+            if offset < 0 or offset + value_heads * 16384 > floats.shape[1]:
+                raise ValueError("SM70 replay commit recurrent crosses a pool row boundary")
+            offsets.append(offset)
+        if not offsets:
+            raise ValueError("SM70 replay commit requires at least one layer")
+        self.offsets = torch.tensor(offsets, dtype=torch.int64, device=device)
+        self.operands, self.rows, self.counts, self.starts, self.fresh = operands, rows, counts, starts, fresh
+        self.operation = prepare_triton(_replay,
+            (operands, floats, self.offsets, rows, counts, starts, fresh, operands.stride(0)),
+            (16, rows.numel() * value_heads, len(offsets)),
+            STRIDE=floats.stride(0), KEY_HEADS=key_heads, VALUE_HEADS=value_heads, ROWS=8,
+            num_warps=4, num_stages=1, enable_fp_fusion=False)
 
     def __call__(self):
         self.operation()

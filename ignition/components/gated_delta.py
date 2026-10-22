@@ -155,6 +155,7 @@ class PreparedGDN:
         partitions=None,
         prepare_projections: bool = True,
         row_invariant: bool = False,
+        replay: torch.Tensor | None = None,
     ) -> None:
         self.world_size = 48 // module.num_v_heads
         self.key_heads, self.value_heads = module.num_k_heads, module.num_v_heads
@@ -275,6 +276,8 @@ class PreparedGDN:
                     self.projections["in_proj_qkvz"], self.projections["in_proj_ba"],
                     session=session, workspace=projection_workspace)
         self.partitions = partitions
+        if replay is not None and not self.sm70:
+            raise ValueError("GDN replay-commit operand storage is an SM70 decode feature")
         if self.sm70:
             if partitions is not None or records is not None or in_place:
                 raise ValueError("SM70 GDN requires unpartitioned execution with explicit checkpoint columns")
@@ -292,7 +295,7 @@ class PreparedGDN:
             from .sm70_gdn import PreparedSM70GDNSequence
             self.sm70_sequence = PreparedSM70GDNSequence(module, scratch, state, metadata,
                 mode=mode, norm_weight_bf16=module.norm_weight_bf16, session=session,
-                name=name + ".sequence", checkpoint_export=checkpoint_export)
+                name=name + ".sequence", checkpoint_export=checkpoint_export, replay=replay)
             return
         if partitions is not None:
             self.sequences_by_role = tuple(

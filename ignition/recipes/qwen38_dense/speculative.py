@@ -165,6 +165,16 @@ class SpeculativePreparation:
         self.completion, self.frame, self.sequence = completion, frame, sequence
         device = pool.backing.device
         self.rng = SpeculativeRngState.allocate(device, capacity=requests.capacity)
+        # Replay-commit: every verification round stores the FP32 recurrence operands of its packed tokens here (one
+        # plane per linear-attention layer, shared by all round shapes, which never run concurrently) and the commit
+        # replays the accepted prefix from the request's single committed row. 33,152 B per token and layer.
+        from ignition.components.sm70_gdn import operand_floats
+        first = next(layer.linear_attn for layer in weights.tree.layers if layer.block_type == "linear_attention")
+        self.key_heads, self.value_heads = first.num_k_heads, first.num_v_heads
+        linear_layers = sum(kind == "linear_attention" for kind in weights.config.layers)
+        self.replay_operands = torch.zeros((linear_layers, requests.capacity * width,
+                                            operand_floats(self.key_heads, self.value_heads)),
+                                           dtype=torch.float32, device=device)
         self.draft_tables = torch.full_like(inputs.page_tables, -1)
         self.generation = torch.zeros_like(requests.generation)
         self.offset = torch.zeros_like(requests.generation)
@@ -227,7 +237,11 @@ class PreparedPrefill:
 
 
 class PreparedRound:
-    """Draft, packed target verification, acceptance, exact checkpoint commit, absorption."""
+    """Draft, packed target verification, acceptance, exact replay commit, absorption.
+
+    Each request owns one committed continuation row. Verification reads it as the initial state, writes no state
+    and stores every step's recurrence operands; the commit replays the accepted prefix into the row.
+    """
 
     def __init__(self, owner, batch, width, name):
         o, b, w = owner, batch, width
@@ -237,12 +251,14 @@ class PreparedRound:
         self.columns = torch.arange(w, device=device)
         self.slot_ids = torch.arange(o.requests.capacity, device=device)
         self.metadata = Metadata.allocate(b * w, b, blocks, device, samples=b * w)
-        self.delta = DeltaMetadata.allocate(b, device, verification_columns=w)
+        self.delta = DeltaMetadata.allocate(b, device)
+        self.replay_operands = o.replay_operands[:, :b * w]
         self.validator = PreparedBatch(o.inputs, o.requests, Metadata.allocate(b, b, blocks, device),
             mode="decode", shard=o.weights.shard, pool=o.pool)
         self.decoder = PreparedDecoder(o.weights, o.scratch.rows(b * w, b * w), self.metadata,
             o.pool, mode="decode", delta=self.delta, vocabulary_runtime=None, coordinator=None,
-            session=o.session, name=name + ".target", workspace=o.workspace, row_invariant=True)
+            session=o.session, name=name + ".target", workspace=o.workspace, row_invariant=True,
+            replay=self.replay_operands)
         self.before = torch.zeros(b, dtype=torch.int64, device=device)
         self.active = torch.zeros(b, dtype=torch.bool, device=device)
         self.previous = torch.zeros((b, o.weights.config.hidden), dtype=torch.float32, device=device)
@@ -260,27 +276,22 @@ class PreparedRound:
         self.sampling_scratch = prepare_sampling_scratch(b, w, o.requests.vocab_size, device, buffers=buffers)
         self.probabilities = buffers.zeros((b, w - 1, o.requests.vocab_size), torch.float32)
         self.valid = torch.zeros((b, w - 1), dtype=torch.bool, device=device)
-        from ignition.components.sm70_commit import PreparedSM70RecurrentCommit
-        self.commit_sources = torch.zeros(b, dtype=torch.int64, device=device)
-        self.commit_active = torch.zeros(b, dtype=torch.uint8, device=device)
-        self.recurrent_commit = PreparedSM70RecurrentCommit(
-            o.pool.reserved_backing,
-            (o.pool.recurrent(i).recurrent.flatten(1) for i, kind in enumerate(o.weights.config.layers)
-             if kind == "linear_attention"), self.commit_sources, self.metadata.state_rows,
-            self.commit_active, o.pool.memory_capacity, kernel_cache=getattr(o.session, 'kernel_cache', None))
-        from ignition.components.sm70_gdn import PreparedSM70ConvolutionCommit
+        from ignition.components.sm70_gdn import PreparedSM70ConvolutionCommit, PreparedSM70ReplayCommit
         self.commit_counts = torch.zeros(b, dtype=torch.int32, device=device)
+        linear = {i: o.pool.recurrent(i) for i, kind in enumerate(o.weights.config.layers) if kind == "linear_attention"}
+        self.replay_commit = PreparedSM70ReplayCommit(
+            o.pool.reserved_backing, {i: state.recurrent for i, state in linear.items()}, self.replay_operands,
+            self.metadata.state_rows, self.commit_counts, self.delta.query_start_loc, self.delta.fresh,
+            key_heads=o.key_heads, value_heads=o.value_heads)
         self.convolution_commit = PreparedSM70ConvolutionCommit(
-            o.pool.reserved_backing,
-            {i: o.pool.recurrent(i).convolution for i, kind in enumerate(o.weights.config.layers)
-             if kind == "linear_attention"}, self.metadata.state_rows, self.commit_counts)
+            o.pool.reserved_backing, {i: state.convolution for i, state in linear.items()},
+            self.metadata.state_rows, self.commit_counts)
         self.operations = None
 
     def prepare(self):
         if self.operations is not None:
             return
         o, b, w = self.owner, self.batch, self.width
-        self.recurrent_commit.prepare()
         args = (o.requests, o.inputs.row_slot_ids[:b], o.inputs.row_generations[:b], o.inputs.live_rows)
         target = PreparedSpeculativeDistributions(self.decoder.scratch.logits.view(b, w, -1),
             *args, self.drafts, workspace=self.sampling_scratch["target"])
@@ -308,7 +319,7 @@ class PreparedRound:
         safe = slots.clamp(0, o.requests.capacity - 1)
         limits = o.inputs.query_lengths[:b]
         self.validator.validate()
-        states = o.inputs.request_state_rows[safe, :w]
+        states = o.inputs.request_state_rows[safe, 0]
         end = o.requests.consumed_tokens[safe] + limits
         pages, draft_pages = o.inputs.page_tables[safe], o.draft_tables[safe]
         needed = self.validator.block_ids < (end[:, None] + PAGE_TOKENS - 1) // PAGE_TOKENS
@@ -316,29 +327,28 @@ class PreparedRound:
         bad = (limits < 1) | (limits > w) | (end > pages.shape[1] * PAGE_TOKENS)
         bad |= (needed & ((pages < 0) | (pages >= o.pool.memory_capacity[1]))).any(1)
         bad |= (draft_needed & ((draft_pages < 0) | (draft_pages >= o.pool.memory_capacity[1]))).any(1)
-        bad |= ((states <= 0) | (states >= o.pool.memory_capacity[0])).any(1)
-        # Every write column is private, even between two packed requests.
-        flat = states.reshape(-1)
+        bad |= (states <= 0) | (states >= o.pool.memory_capacity[0])
+        # Every committed row is private, even between two packed requests.
         resident = ((self.rows < o.inputs.live_rows) & (slots >= 0) & (slots < o.requests.capacity)
                     & (o.inputs.row_generations[:b] == o.requests.generation[safe]))
-        matches = (flat[:, None] == flat[None, :]) & resident.repeat_interleave(w)[None, :]
-        bad |= (matches.sum(1).view(b, w) > 1).any(1)
+        matches = (states[:, None] == states[None, :]) & resident[None, :]
+        bad |= matches.sum(1) > 1
         bad_slots = ((self.slot_ids[:, None] == slots[None, :]) & (bad & resident)[None, :]).any(1)
         self.validator.validation_input[0, :o.requests.capacity].add_(bad_slots)
         self.validator.begin(self.validator.validation_input)
         self.active.copy_(self.validator.token_state.active.bool()
             & (o.requests.generated_tokens[safe] < o.requests.max_new_tokens[safe]))
-        states = torch.where(self.active[:, None], states, 0)
+        states = torch.where(self.active, states, 0)
         self.before.copy_(o.requests.consumed_tokens[safe])
         self.candidates[:, 0].copy_(o.requests.pending_token[safe])
-        gather_rows(o.pool.last_hidden, states[:, 0], self.previous)
+        gather_rows(o.pool.last_hidden, states, self.previous)
         self.base_offset.copy_(torch.where(o.generation[safe] == o.requests.generation[safe], o.offset[safe], 0))
         self.seed.copy_(o.requests.seed.view(torch.int64)[safe] ^ DRAFT_RNG_DOMAIN)
         for i, proposal in enumerate(proposals):
             hidden = self.previous if i == 0 else self.draft.hidden[self.draft_metadata.sample_indices]
             token = self.candidates[:, 0] if i == 0 else self.drafts[:, i - 1]
             live = self.active & (i < limits - 1)
-            self.draft_metadata.set(self.before - 1 + i, live.int(), states[:, 0], draft_pages,
+            self.draft_metadata.set(self.before - 1 + i, live.int(), states, draft_pages,
                                     token[:, None], o.inputs.live_rows)
             self.draft_feedback.copy_(hidden[self.draft_metadata.requests])
             self.draft()
@@ -354,13 +364,14 @@ class PreparedRound:
         o.generation.copy_(torch.where(matches.any(1), o.requests.generation, o.generation))
         self.candidates[:, 1:].copy_(self.drafts)
         lengths = torch.where(self.active, limits, 0)
-        self.metadata.set(self.before, lengths, states[:, 0], pages, self.candidates, o.inputs.live_rows)
+        self.metadata.set(self.before, lengths, states, pages, self.candidates, o.inputs.live_rows)
         d, m = self.delta, self.metadata
         d.query_start_loc.copy_(m.query_start_loc)
-        d.convolution_slots.copy_(torch.where(self.active, states[:, 0], -1))
+        d.convolution_slots.copy_(torch.where(self.active, states, -1))
         d.fresh.copy_(self.before == 0)
         d.accepted_tokens.fill_(1)
-        d.state_indices.copy_(torch.where(self.active[:, None], states, 0))
+        # The committed row is the initial state of every verification position and is never written by it.
+        d.state_indices[:, 0].copy_(states)
         d.num_seqs.copy_(m.live_counts[1:])
         d.num_tokens.copy_(m.live_counts[:1])
         self.decoder()
@@ -368,17 +379,16 @@ class PreparedRound:
         verify()
         commit()
         counts = commit.emitted_count
-        selected = states.gather(1, (counts - 1).long().clamp_min(0)[:, None])[:, 0]
-        self.commit_sources.copy_(selected)
-        self.commit_active.copy_(counts > 0)
-        self.recurrent_commit()
+        # Replay the accepted prefix (stored operands, same sequential arithmetic) into the committed row of every
+        # linear-attention layer, then normalize the convolution windows.
         self.commit_counts.copy_(counts)
+        self.replay_commit()
         self.convolution_commit()
         # Repair all accepted MTP pairs from true target feedback. Proposal KV
         # outside this logical prefix remains unreachable and will be overwritten.
         hidden = self.decoder.scratch.hidden.view(b, w, -1)
         feedback = torch.cat((self.previous[:, None, :], hidden[:, :-1]), dim=1)
-        self.absorb_metadata.set((self.before - 1).clamp_min(0), counts, states[:, 0], draft_pages,
+        self.absorb_metadata.set((self.before - 1).clamp_min(0), counts, states, draft_pages,
                                  self.candidates, o.inputs.live_rows)
         request = self.absorb_metadata.requests
         starts = self.absorb_metadata.query_start_loc[:-1]

@@ -58,11 +58,12 @@ def test_native_contract_requires_all_state_columns_and_trailing_draft_pages():
                                                dict(buffer='draft_page_tables', page_offset=1)]
     for graph in contract['graphs']:
         if graph['kind'] == p.SPECULATIVE:
-            assert graph['state_rows_per_request'] == int(graph['graph'][-1])
+            # Replay-commit: one committed continuation row per request whatever the verification width.
+            assert graph['state_rows_per_request'] == 1
             assert graph['draft_cursor']['lag_tokens'] == 1
             assert graph['pending_token']['buffer'] == 'request_pending_token'
         else:
             assert graph['state_rows_per_request'] == 1
             assert graph['draft_cursor'] is None
-    assert RECIPE.max_draft_tokens == 3
-    assert RECIPE.live_rows(4, RECIPE.speculation) == 17
+    assert RECIPE.max_draft_tokens == 4
+    assert RECIPE.verification_rows == 0 and RECIPE.live_rows(4, RECIPE.speculation) == 1 + 4

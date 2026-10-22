@@ -226,10 +226,18 @@ class FullAttention(torch.nn.Module):
 
 
 class PreparedDecoder:
+    """``replay`` (SM70 speculative verification only) is the ``[linear layers, tokens, operand_floats]`` replay
+    operand buffer; each linear-attention layer stores its recurrence operands in its own plane and writes no state."""
+
     def __init__(self, weights, scratch, metadata, pool, *, mode, vocabulary_runtime,
                  coordinator, session, name, workspace, delta=None, feedback_output=None, row_invariant=False,
-                 prefill_errors=None):
+                 prefill_errors=None, replay=None):
         self.weights, self.scratch, self.metadata, self.pool = weights, scratch, metadata, pool
+        if replay is not None and (delta is None or mode != "decode"):
+            raise ValueError("replay-commit operand storage belongs to an SM70 verification decoder with external delta metadata")
+        linear_layers = sum(kind == "linear_attention" for kind in weights.config.layers)
+        if replay is not None and (replay.ndim != 3 or replay.shape[0] != linear_layers):
+            raise ValueError("replay operand buffer needs one plane per linear-attention layer")
         from ignition.components.sm70_projection import is_sm70
         self.sm70 = is_sm70(scratch.activations.device)
         # SM70 prefill graphs: the reviewed tensor-core attention reports an inadmissible chunk through a sticky status
@@ -271,7 +279,7 @@ class PreparedDecoder:
                 dtype=source.dtype, device=source.device)
         mlp_input = torch.zeros_like(mlp_buffers["gate_proj"])
         norm_buffers = [torch.zeros_like(source) for _ in range(2)] if self.sm70 and row_invariant else None
-        self.layers = []
+        self.layers, ordinal = [], 0
         for index, original in enumerate(weights.tree.layers):
             layer = module_copy(original)
             prefix = f"layers.{index}."
@@ -281,7 +289,9 @@ class PreparedDecoder:
                                              ("in_proj_qkv", "in_proj_z", "in_proj_ba", "out_proj"))}
                 layer.linear_attn = RecurrentAttention(PreparedGDN(original.linear_attn, projections, source,
                     scratch.gdn, pool.recurrent(index), self.delta, mode=mode, session=session,
-                    name=name + "." + prefix + "gdn", workspace=workspace, projection_workspace=workspace, row_invariant=row_invariant))
+                    name=name + "." + prefix + "gdn", workspace=workspace, projection_workspace=workspace, row_invariant=row_invariant,
+                    replay=None if replay is None else replay[ordinal]))
+                ordinal += 1
             else:
                 layer.self_attn = FullAttention(original.self_attn, weights, source, metadata, pool, index,
                     mode=mode, session=session, workspace=workspace, name=name + "." + prefix + "attention",
