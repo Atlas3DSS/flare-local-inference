@@ -531,7 +531,7 @@ fn render_overview(frame: &mut Frame, history: &History, area: Rect) {
     let rows = Layout::vertical([
         Constraint::Min(8),
         Constraint::Min(8),
-        Constraint::Length(5),
+        Constraint::Length(4),
     ])
     .split(area);
     let top =
@@ -580,16 +580,6 @@ fn render_overview(frame: &mut Frame, history: &History, area: Rect) {
                 s.prefill_tokens, s.generated_tokens, s.reused_tokens
             ))
             .style(Style::default().fg(MUTED)),
-            Line::from(format!(
-                " WEIGHTS {}   {} per decode step",
-                weight_bandwidth(s, r),
-                if s.decode_weight_bytes == 0 {
-                    "undeclared bytes".to_owned()
-                } else {
-                    gibibytes(s.decode_weight_bytes)
-                }
-            ))
-            .style(Style::default().fg(MUTED)),
             kv_tokens,
             Line::from(format!(
                 " HOST CACHE {} hits   {} reused   {} in memory / {} on disk   {} out / {} in",
@@ -629,6 +619,11 @@ pub fn plot(frame: &mut Frame, area: Rect, title: &str, history: &History, serie
         .flatten()
         .map(|(_, value)| *value)
         .fold(0.0, f64::max);
+    // Borders, the x-axis and its labels occupy four rows outside the plot.
+    let label_rows = area.height.saturating_sub(4).max(2) as usize;
+    let mut labels = vec![Line::default(); label_rows];
+    labels[label_rows - 1] = rate(peak).into();
+    labels[label_rows - 2] = "max".into();
     let datasets = series
         .iter()
         .zip(&points)
@@ -664,7 +659,7 @@ pub fn plot(frame: &mut Frame, area: Rect, title: &str, history: &History, serie
             .y_axis(
                 Axis::default()
                     .bounds([0.0, peak.max(1.0) * 1.15])
-                    .labels(["0".to_owned(), format!("max {}", rate(peak))])
+                    .labels(labels)
                     .style(Style::default().fg(MUTED)),
             ),
         area,
