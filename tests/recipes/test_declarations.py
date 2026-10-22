@@ -327,15 +327,22 @@ def test_deepseek41_native_checkpoint_and_scale_compression(monkeypatch, tmp_pat
         PreparationConfig(expert_scale_compression="zip")
 
 
-def test_deepseek41_recipe_defaults_and_adapter_preserve_packed_gpu_planning(monkeypatch, tmp_path):
+@pytest.mark.parametrize("graph_budget", [64, 32])
+def test_deepseek41_recipe_defaults_and_adapter_preserve_packed_gpu_planning(monkeypatch, tmp_path, graph_budget):
+    from ignition.cli import _parser, preparation
+
     model = resolve("deepseek-v4.1-flash")
     assert (model.recipe.concurrency, model.recipe.max_concurrency, model.recipe.prefill_chunk) == (32, 64, 4096)
     assert model.recipe.speculation == Speculation(5, token_capacity=128, packed_verification=True,
-                                                  draft_prefix_selection="gpu")
-    plan = fitted(model, 4, concurrency=model.recipe.concurrency)
+                                                  draft_prefix_selection="gpu", graph_budget=64)
+    flags = [] if graph_budget == 64 else ["--speculative-graph-budget", str(graph_budget)]
+    args = _parser().parse_args(["export", model.checkpoint.alias, *flags])
+    plan = fitted(model, 4, concurrency=model.recipe.concurrency,
+                  speculation=preparation.speculation(args, model))
     monkeypatch.setattr("ignition.preparation.rank_group.prepare_group",
                         lambda snapshot, config, prepare, **options: config)
     config = model.recipe.prepare(tmp_path, plan, compile_forwards=True, kernel_cache=None, progress=None)
     assert (config.max_active, config.prefill_chunk_size, config.speculative_token_capacity) == (32, 4096, 128)
     assert config.dspark and config.split_speculation
     assert config.packed_verification and config.draft_prefix_selection == "gpu"
+    assert config.speculative_graph_budget == graph_budget

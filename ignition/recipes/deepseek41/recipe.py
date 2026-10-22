@@ -14,6 +14,7 @@ def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress, retain_
     speculation = plan.speculation
     drafting = {} if speculation is None else {
         "speculative_widths": speculation.widths, "speculative_token_capacity": plan.speculative_token_capacity,
+        "speculative_graph_budget": speculation.graph_budget,
         "speculative_fixed_width": speculation.fixed_width, "packed_verification": speculation.packed_verification,
         "draft_prefix_selection": speculation.draft_prefix_selection}
     config = PreparationConfig(prompt_logprobs=plan.prompt_logprobs,
@@ -48,7 +49,7 @@ RECIPE = Recipe(
         scale_compressed_device_bytes={"csf": 298_063_988_040}),),
     context=1048576, page_tokens=128, concurrency=32, max_concurrency=64, prefill_chunk=4096,
     speculation=Speculation(draft_tokens=5, token_capacity=128, packed_verification=True,
-                            draft_prefix_selection="gpu"),
+                            draft_prefix_selection="gpu", graph_budget=64),
     max_draft_tokens=7, max_images=4, image_bytes=32 << 20,
     # Single-row decode runs the shared expert on an auxiliary stream.
     stream_overlap=True,

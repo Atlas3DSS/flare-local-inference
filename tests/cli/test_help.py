@@ -84,6 +84,8 @@ def test_deepseek41_help_reports_packed_gpu_recipe_defaults(command, capsys):
     assert "--prefill-chunk-size: 64..1048576, multiple of 64; default 4096" in output
     assert "--mtp-draft-tokens: 0..7; default 5" in output
     assert "--speculative-token-capacity: at least drafts + 1; default 128" in output
+    assert "--speculative-graph-budget: positive integer; default 64" in output
+    assert "excludes mandatory width-one and ordinary graphs" in output
     assert "Prepared verification: packed rows with GPU prefix selection" in output
     assert "--packed-verification" not in output
     assert "--draft-prefix-selection" not in output

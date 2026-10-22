@@ -130,12 +130,21 @@ def speculation(args, model: ResolvedModel, configuration: Configuration | None 
     """Apply the command line's speculation overrides to the recipe's settings; None disables speculation."""
     recipe, alias = model.recipe, model.checkpoint.alias
     default, limit = recipe.speculation, recipe.max_draft_tokens
+    graph_budget = Setting(args.speculative_graph_budget, "flag")
+    if configuration is not None:
+        graph_budget = configuration.model_setting(alias, "speculative_graph_budget",
+            None if default is None else default.graph_budget, args.speculative_graph_budget)
+    elif graph_budget.value is None:
+        graph_budget = Setting(None if default is None else default.graph_budget, "recipe")
+    explicit_graph_budget = graph_budget.value is not None and graph_budget.source not in ("recipe", "[defaults]")
     given = [flag for flag, value in (
         ("--mtp-draft-tokens", args.mtp_draft_tokens),
         ("--speculative-token-capacity", args.speculative_token_capacity),
         ("--no-mtp-adaptive-verification", args.no_mtp_adaptive_verification or None),
         ("--mtp-proposal-source", args.mtp_proposal_source),
         ("--history-drafts", args.history_drafts or None)) if value is not None]
+    if explicit_graph_budget:
+        given.append("--speculative-graph-budget")
     if default is None:
         if args.no_mtp or given:
             raise UsageError(f"{alias} has no multi-token speculation; {(given or ['--no-mtp'])[0]} does not apply")
@@ -167,7 +176,12 @@ def speculation(args, model: ResolvedModel, configuration: Configuration | None 
         raise UsageError(f"{alias} requires adaptive verification; --no-mtp-adaptive-verification does not apply")
     if packed and (source != "mtp" or history):
         raise UsageError(f"{alias} requires verification of retained learned proposals")
-    return Speculation(drafts, adaptive, source, history, capacity, packed, prefix_selection)
+    if explicit_graph_budget and not (packed and adaptive and source == "mtp" and not history):
+        raise UsageError("--speculative-graph-budget requires packed adaptive learned speculation with positive draft depth")
+    budget = graph_budget.value if packed else None
+    if budget is not None and (type(budget) is not int or budget < 1):
+        raise UsageError("--speculative-graph-budget must be a positive integer")
+    return Speculation(drafts, adaptive, source, history, capacity, packed, prefix_selection, budget)
 
 
 def fetch(model: ResolvedModel, hub_cache, *, progress_bars: bool = True) -> str:

@@ -95,27 +95,38 @@ def deepseek_catalog(monkeypatch):
             signatures.extend(GraphSignature(kind, batch, 1, speculation_enabled=enabled)
                               for batch in config.batch_capacities)
     signatures.extend(GraphSignature("vision", 1, capacity) for capacity in PATCH_CAPACITIES)
-    assert len(signatures) == 113
+    assert len(signatures) == 149
     return signatures
 
 
 def test_complete_deepseek_catalog_is_rendered_without_losing_shapes(deepseek_catalog):
+    import re
     from ignition.progress import graph_catalog
 
     messages = []
     graph_catalog(messages.append, deepseek_catalog)
     output = "\n".join(messages)
-    assert "Graph catalog: 113 graphs (before compilation/capture)" in output
-    packed = [line.split() for line in messages if line.strip().startswith("packed_speculative")]
-    assert packed == [
-        ["packed_speculative", "on", "32", "6", "64,96,128", "5", "-", "3"],
-        ["packed_speculative", "on", "16", "6", "32,48,64,80,96", "5", "-", "5"],
-        ["packed_speculative", "on", "8", "6", "16,24,32,40,48", "5", "-", "5"],
-        ["packed_speculative", "on", "4", "6", "8,12,16,20,24", "5", "-", "5"],
-        ["packed_speculative", "on", "2", "6", "4,6,8,10,12", "5", "-", "5"],
-        ["packed_speculative", "on", "1", "6", "2,3,4,5,6", "5", "-", "5"],
-    ]
+    assert "Graph catalog: 149 graphs (before compilation/capture)" in output
     kinds = {signature.kind for signature in deepseek_catalog}
-    rows = [line.split() for line in messages if line.split() and line.split()[0] in kinds]
-    assert sum(int(row[-1]) for row in rows) == 113
+    header = next(line for line in messages if line.strip().startswith("Kind"))
+    columns = [match.start() for match in re.finditer(r"\S+", header)]
+    rows = []
+    for line in messages:
+        cells = [line[start:end].strip() for start, end in zip(columns, [*columns[1:], None])]
+        if cells[0] in kinds:
+            rows.append(cells)
+        elif not cells[0] and rows:
+            for index, value in enumerate(cells):
+                rows[-1][index] += value
+    packed = [row for row in rows if row[0] == "packed_speculative"]
+    assert {int(row[2]) for row in packed} == {1, 2, 4, 8, 16, 32}
+    for row in packed:
+        _, mode, batch, width, tokens, drafts, prompt, count = row
+        expected = sorted(s.packed_token_capacity for s in deepseek_catalog
+            if s.kind == "packed_speculative" and s.batch_capacity == int(batch))
+        assert (mode, width, drafts, prompt) == ("on", "6", "5", "-")
+        assert [int(value) for value in tokens.split(",")] == expected
+        assert int(count) == len(expected)
+    assert sum(int(row[-1]) for row in packed) == 64
+    assert sum(int(row[-1]) for row in rows) == 149
     assert {row[0] for row in rows} == kinds

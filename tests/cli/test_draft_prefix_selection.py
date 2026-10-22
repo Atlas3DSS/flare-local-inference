@@ -11,7 +11,7 @@ from ignition.recipes import resolve
 from ignition.recipes.declaration import Speculation
 
 
-DEFAULT = Speculation(5, token_capacity=128, packed_verification=True, draft_prefix_selection="gpu")
+DEFAULT = Speculation(5, token_capacity=128, packed_verification=True, draft_prefix_selection="gpu", graph_budget=64)
 
 
 def settings(*flags, alias="deepseek-v4.1-flash", configuration=None):

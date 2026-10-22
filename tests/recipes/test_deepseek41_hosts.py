@@ -38,7 +38,7 @@ def test_recipe_dispatches_the_complete_plan_to_the_rank_group(monkeypatch, remo
     assert config.devices == ((0,) * 4 if remote else (0, 1, 2, 3))
     assert config.hosts == (ranks.hosts if remote else None)
     assert config.max_active == 16 and config.draft_tokens == draft_tokens
-    assert (16, draft_tokens + 1) in config.speculative_shapes
+    assert (16, 16 * (draft_tokens + 1)) in config.packed_speculative_shapes
     assert config.expert_scale_compression == "csf" and config.split_speculation
     assert kwargs["ranks"] is ranks and kwargs["checkpoint"] is plan.checkpoint
     assert kwargs["package_storage"] is storage

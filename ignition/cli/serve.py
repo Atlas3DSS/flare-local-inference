@@ -258,6 +258,8 @@ def _prepare(args, *, export_path) -> int:
         restricted = "" if host.restriction is None else f" of CUDA_VISIBLE_DEVICES={host.restriction}"
         serial = "" if plan.stream_overlap or not plan.recipe.stream_overlap else " · branches serialized"
         capacity = "" if plan.speculation is None else f" · speculative token capacity {plan.speculative_token_capacity}"
+        if plan.speculation is not None and plan.speculation.graph_budget is not None:
+            capacity += f" · packed graph budget {plan.speculation.graph_budget}"
         tuning = "" if not plan.tuning_gpus else " · tuning GPUs " + planning.format_gpus(gpu.index for gpu in plan.tuning_gpus)
         if plan.roce_ring:
             serial += " · experimental RoCE ring (native neighbor relays)"

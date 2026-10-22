@@ -111,8 +111,15 @@ class Speculation:
     token_capacity: int | None = None
     packed_verification: bool = False
     draft_prefix_selection: str = "cpu"
+    graph_budget: int | None = None
 
     def __post_init__(self):
+        if self.graph_budget is not None:
+            if type(self.graph_budget) is not int or self.graph_budget < 1:
+                raise ValueError("speculative graph budget must be a positive integer")
+            if (not self.packed_verification or not self.adaptive or self.draft_tokens < 1
+                    or self.proposal_source != "mtp" or self.history_drafts):
+                raise ValueError("speculative graph budget requires packed adaptive learned speculation")
         if self.draft_prefix_selection not in ("cpu", "gpu"):
             raise ValueError("draft prefix selection must be cpu or gpu")
         if self.draft_prefix_selection == "gpu" and (

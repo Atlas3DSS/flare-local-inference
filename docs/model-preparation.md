@@ -294,8 +294,9 @@ expansion buffers reused by serial expert layers. Planning conservatively estima
 3% less resident weight storage; loading measures the actual allocation. Omitting
 the flag preserves native scales.
 DSpark is its learned draft method. Preparation defaults to five draft tokens,
-32 concurrent requests, a 4096-token prefill chunk, and a 128-row physical target
-capacity. Positive-depth DSpark uses packed GPU prefix selection automatically.
+32 concurrent requests, a 4096-token prefill chunk, a 128-row physical target
+capacity, and a budget of 64 packed round graphs. Positive-depth DSpark uses
+packed GPU prefix selection automatically.
 Each captured round contains proposal generation, GPU prefix allocation, target
 verification, and accepted-state commit. Width-one graphs retain draft context
 without generating proposals. Ordinary graphs remain available for native
@@ -304,25 +305,43 @@ Standalone proposal, verification, and joined wider speculative graphs are not
 registered in the packed catalog. Image preprocessing preserves the checkpoint's
 row-major patch layout and 1024-token image limit.
 
-`--speculative-token-capacity` bounds physical target rows. At the default draft
-depth, packed rounds retain a logical verification width of six tokens per
-request, including its pending input. Their physical target capacities are:
+`--speculative-token-capacity` bounds physical target rows;
+`--speculative-graph-budget` independently controls the number of packed rounds.
+For each power-of-two request bucket `B`, the catalog retains capacities
+`B + 1` and `min(token_capacity, B * (draft_tokens + 1))` when that interval is
+nonempty. These endpoints preserve the smallest positive aggregate draft budget
+and full-width verification wherever it fits. Width-one continuations cover
+every request bucket independently and do not consume the packed graph budget.
 
-| Captured request capacity | Physical target rows |
-|---|---|
-| 1 | 2, 3, 4, 5, 6 |
-| 2 | 4, 6, 8, 10, 12 |
-| 4 | 8, 12, 16, 20, 24 |
-| 8 | 16, 24, 32, 40, 48 |
-| 16 | 32, 48, 64, 80, 96 |
-| 32 | 64, 96, 128 |
+Additional graphs refine the largest ratio between adjacent capacities across
+all buckets. Each refinement inserts the integer nearest the geometric midpoint
+that minimizes the larger resulting ratio. Equal ratios prefer smaller batches,
+then smaller capacities. Comparing ratios gives each batch the same relative
+resolution rather than assigning all graphs to the largest absolute row range.
+At a fixed row cap, increasing the graph budget adds one distinct graph at a
+time and preserves every graph already selected. Integer row capacities limit
+the available resolution: larger budgets saturate at every valid capacity.
+Budgets below the endpoint count fail before preparation; the default request
+and token capacities require at least 12 packed graphs.
 
-The default catalog contains 28 combined packed rounds and six width-one
-rounds. A physical capacity equal to request capacity uses the width-one graph.
-The 128-row cap limits captured target work and storage; at batch 32 it permits
-four target rows per request on average, while proposal generation still produces
-five drafts per request. Raising the cap permits longer aggregate verification
-prefixes and increases preparation and graph resources.
+With five drafts, 128 target rows, and a 64-graph budget, the catalog contains:
+
+| Captured request capacity | Packed graphs | Minimum / maximum target rows |
+|---|---:|---:|
+| 1 | 5 | 2 / 6 |
+| 2 | 9 | 3 / 12 |
+| 4 | 12 | 5 / 24 |
+| 8 | 13 | 9 / 48 |
+| 16 | 16 | 17 / 96 |
+| 32 | 9 | 33 / 128 |
+
+These 64 combined packed rounds and six width-one continuations are separate
+from ordinary decode, prefill, maintenance, and vision graphs. The persistent
+preparation catalog prints every selected capacity. At batch 32, the 128-row
+cap permits four target rows per request on average, while proposal generation
+still produces five drafts per request. Raising the row cap permits longer
+aggregate verification prefixes; raising the graph budget improves resolution
+within that cap and increases capture and retained graph resources.
 
 The host owns admission, cohort membership, and cache reservations. The captured
 round assigns prefixes from native proposal confidence and reports one terminal
@@ -352,7 +371,7 @@ Select four available GPUs explicitly:
 ```sh
 .venv/bin/python -m ignition export deepseek-v4.1-flash --gpus 0,4,6,8 \
   --max-concurrency 32 --mtp-draft-tokens 5 --prefill-chunk-size 4096 \
-  --speculative-token-capacity 128 --expert-scale-compression csf \
+  --speculative-token-capacity 128 --speculative-graph-budget 64 --expert-scale-compression csf \
   --output /data/flare-runtime/deepseek-v41-flash-1017-csf-tp4-c32-dspark5.safetensors --verbose
 
 ./flare/target/release/flare run \

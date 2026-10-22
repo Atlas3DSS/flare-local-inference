@@ -89,7 +89,7 @@ class _VerificationTarget(SimpleNamespace):
         self.commit()
 
 
-def _fixture(depth, *, rank=0, world=1, runtime=None, broadcast=None, coordinator=None, session=None):
+def _fixture(depth, *, token_capacity=12, rank=0, world=1, runtime=None, broadcast=None, coordinator=None, session=None):
     batch, width, vocab, device = 4, 8, 256, "cuda"
     state = DeviceRequestState.allocate(device, vocab_size=vocab, capacity=batch)
     for slot in range(batch):
@@ -124,7 +124,7 @@ def _fixture(depth, *, rank=0, world=1, runtime=None, broadcast=None, coordinato
     proposal = SimpleNamespace(source=source, storage=retained, confidence=confidence,
         allowed=torch.empty_like(source.active), depth=torch.full_like(source.before, depth))
     target_cursor = pool.cursor()
-    target = _VerificationTarget(owner=owner, batch=batch, width=width, target_token_capacity=12,
+    target = _VerificationTarget(owner=owner, batch=batch, width=width, target_token_capacity=token_capacity,
         buffers=target_cursor, active=target_cursor.zeros((batch,), torch.bool),
         before=target_cursor.zeros((batch,), torch.int64), base_offset=target_cursor.zeros((batch,), torch.int64),
         candidates=target_cursor.zeros((batch, width), torch.int64), drafts=target_cursor.zeros((batch, width - 1), torch.int64),
@@ -166,10 +166,13 @@ def _publish(f, admitted):
         scatter_rows(value, slots, destination, s.active)
 
 
-@pytest.mark.parametrize("depth,compiled", [(1, False), (3, False), (5, False), (3, True)])
+@pytest.mark.parametrize("depth,compiled,token_capacity", [
+    (1, False, 12), (3, False, 12), (5, False, 12), (3, True, 12),
+    (3, False, 5), (3, True, 7), (5, False, 13), (5, True, 13),
+])
 @torch.no_grad()
-def test_captured_packed_round_matches_split_oracle_state_rng_and_poison(depth, compiled):
-    f = _fixture(depth)
+def test_captured_packed_round_matches_split_oracle_state_rng_and_poison(depth, compiled, token_capacity):
+    f = _fixture(depth, token_capacity=token_capacity)
     state, inputs, owner = f.state, f.inputs, f.owner
     originals = {name: value.clone() for name, value in vars(state).items()}
     rng_originals = {name: value.clone() for name, value in vars(f.rng).items()}
@@ -242,7 +245,7 @@ def test_captured_packed_round_matches_split_oracle_state_rng_and_poison(depth, 
                 f.confidence()
                 submitted = (f.source.rows < inputs.live_rows).tolist()
                 lengths, admitted = allocate(f.confidence.output.tolist(), inputs.row_slot_ids.tolist(),
-                    submitted, f.source.active.tolist(), f.prefix_limits.tolist(), 12, 4)
+                    submitted, f.source.active.tolist(), f.prefix_limits.tolist(), token_capacity, 4)
                 inputs.query_lengths.copy_(torch.tensor(lengths, dtype=torch.int32, device="cuda"))
                 _publish(f, torch.tensor(admitted, dtype=torch.bool, device="cuda"))
                 f.verification(same_graph=True)
@@ -258,7 +261,8 @@ def test_captured_packed_round_matches_split_oracle_state_rng_and_poison(depth, 
                 assert torch.equal(f.prefix_limits, frozen_limits)
                 assert torch.equal(inputs.row_slot_ids, frozen_slots)
                 for left, right in zip(expected, result(), strict=True):
-                    assert torch.equal(left, right), (depth, case, poison, left.shape, left.dtype)
+                    assert torch.equal(left, right), (depth, token_capacity, case, poison, left.shape, left.dtype)
+                assert inputs.query_lengths.sum().item() <= token_capacity
                 if case == "accept":
                     assert torch.equal(f.commit.emitted_count, inputs.query_lengths)
                 if case == "confidence":

@@ -302,7 +302,9 @@ class Plan:
                 "packed_verification": self.speculation.packed_verification,
                 "draft_prefix_selection": self.speculation.draft_prefix_selection,
                 "proposal_source": self.speculation.proposal_source,
-                "history_drafts": self.speculation.history_drafts},
+                "history_drafts": self.speculation.history_drafts,
+                **({"graph_budget": self.speculation.graph_budget}
+                   if self.speculation.graph_budget is not None else {})},
             "context": self.context, "checkpoint_context": self.recipe.context,
             "weights_bytes": self.weights_bytes, "mapped_host_bytes": self.checkpoint.mapped_host_bytes,
             "graph_bytes": self.graph_bytes,
@@ -336,6 +338,18 @@ def fit(recipe: Recipe, checkpoint: Checkpoint, gpus: tuple[Gpu, ...], *, concur
     if expert_scale_compression is not None and expert_scale_compression not in checkpoint.scale_compressed_device_bytes:
         raise UsageError(f"--expert-scale-compression {expert_scale_compression}: {checkpoint.alias}"
                          " does not prepare this scale encoding")
+    if (speculation is not None and speculation.packed_verification and speculation.adaptive
+            and speculation.draft_tokens > 0 and speculation.learned and not speculation.history_drafts
+            and speculation.graph_budget is None and recipe.speculation is not None):
+        speculation = replace(speculation, graph_budget=recipe.speculation.graph_budget)
+    if speculation is not None and speculation.graph_budget is not None:
+        from ignition.components.capacity import packed_speculative_shapes
+
+        try:
+            packed_speculative_shapes(concurrency, speculation.draft_tokens + 1,
+                                      speculation.token_capacity, speculation.graph_budget)
+        except ValueError as error:
+            raise UsageError(f"--speculative-graph-budget: {error}") from error
     costs = recipe.costs(len(gpus), speculation, checkpoint)
     plan = Plan(recipe, checkpoint, gpus, concurrency, recipe.prefill_chunk if prefill_chunk is None else prefill_chunk,
                 speculation, 0, 0, 0, reserve_bytes,

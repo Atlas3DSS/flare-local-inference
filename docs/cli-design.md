@@ -210,6 +210,7 @@ explicit flags take precedence.
 | `--no-mtp` | Disable multi-token speculation: load no draft model, keep no verification rows, and decode one token per step. | Speculation on |
 | `--mtp-draft-tokens N` | Most draft tokens verified in one round; see `MODEL --help` for its limit. Verification capacities cover counts from 0 through `N` within the speculative token capacity. Retained and packed proposal producers execute the full configured block; verification adapts using measured cost and historical acceptance or native proposal confidence. Zero retains draft state with width-one execution; `--no-mtp` excludes draft weights and state. | Recipe declaration |
 | `--speculative-token-capacity N` | Maximum physical target-token rows in wider speculative graphs; width one covers every request bucket. Applies to every speculative recipe. | 128 for DeepSeek V4.1; otherwise larger of padded concurrency and maximum verification width |
+| `--speculative-graph-budget N` | Maximum packed round graphs to capture, independently of physical target-token rows. Excludes mandatory width-one and ordinary graphs; requires packed adaptive learned speculation at positive draft depth. Must cover both physical-row endpoints for every eligible request bucket. | 64 for DeepSeek V4.1 |
 | `--no-mtp-adaptive-verification` | Default to fixed-width serving. Capture includes every smaller width within the speculative token capacity. Positive-depth DeepSeek V4.1 DSpark requires adaptive verification. | Adaptive |
 | `--mtp-proposal-source {mtp,copy}` | Where drafts come from: the checkpoint's MTP module, or `copy` for continuations of the request's own history, which loads no draft model. Qwen only. | `mtp` |
 | `--history-drafts` | Also draft continuations copied from the request's own history. Qwen only. | off |
@@ -222,8 +223,10 @@ explicit flags take precedence.
 | `--online-mxfp8` | Store the recipe's eligible BF16 projections as MXFP8 while loading (Kimi K3: KDA projections, MLA latent/gate, query and output projections, shared experts, MoE latent down/up projections, and DSpark draft context, outputs and MLPs), trading checkpoint precision for decode bandwidth. MLA's batched key/value projections retain BF16. Recipes that name no such projections reject it. | Checkpoint precision |
 | `--language-model-only` | Prepare no vision encoder and serve text only, as vLLM's flag of the same name; requests with images are rejected and the encoder's weights, scratch, and graphs become KV pages. Recipes without a separable encoder reject it. | The recipe's image support |
 
-The speculation flags exist on the command line only. `--no-mtp` excludes the
-others. The `Select GPUs.` startup line states the settings in effect: `up to
+Speculative token capacity and packed graph budget also accept configuration-file
+defaults and model overrides. The remaining speculation settings are command-line
+only. `--no-mtp` excludes explicit speculation flags and model-specific packed
+graph budgets. The `Select GPUs.` startup line states the settings in effect: `up to
 N draft tokens` while verification adapts, `exactly N draft tokens` when it is
 fixed, and `branches serialized` under `--no-stream-overlap`. That flag is also
 recorded in the plan and the exported graph catalog; it changes graph scheduling,
@@ -231,12 +234,17 @@ not kernel selection, so its packages share tuned kernels with overlapped ones.
 
 Each recipe selects its proposal and prefix-allocation mode.
 DeepSeek V4.1 defaults to five draft tokens, concurrency 32, a 4096-token
-prefill chunk, and 128 physical target rows, with packed GPU prefix selection.
+prefill chunk, 128 physical target rows, and at most 64 packed round graphs,
+with packed GPU prefix selection.
 Its catalog contains combined proposal/allocation/verification rounds and
 width-one graphs; ordinary graphs remain available for `--mtp-draft-tokens 0`.
-The [model preparation guide](model-preparation.md#deepseek-v41-flash) lists the
-28 packed capacities. The 128-row cap bounds target work and graph resources;
-raising it permits longer aggregate prefixes at larger batches.
+The [model preparation guide](model-preparation.md#deepseek-v41-flash) defines
+the packed capacity selection. The row cap bounds target work and storage;
+raising it permits longer aggregate prefixes at larger batches. The independent
+graph budget controls catalog density between each batch's smallest wider round
+and its maximum physical extent. Width-one and ordinary graphs do not consume
+that budget. Budgets below the required endpoint count fail during planning;
+budgets above the number of distinct valid capacities capture every capacity.
 For eight requests with five drafts each, this example instead limits physical
 target capacity to 24 rows while retaining six-token per-request prefixes:
 
@@ -401,7 +409,7 @@ default. This command uses the recipe's concurrency 32, five draft tokens,
   --output /data/flare-runtime/ds41-tp4-c32-d5-p128.safetensors
 ```
 
-The default catalog contains 28 packed rounds with logical width six and six
+The default catalog contains 64 packed rounds with logical width six and six
 proposal-free width-one rounds. Packed execution generates the five-draft block,
 then allocates actual prefixes on the GPU within each request's immutable limit
 and the captured aggregate row capacity. It reports one terminal completion.
@@ -826,6 +834,13 @@ Both sections accept `speculative_token_capacity`, overridden during preparation
 by `--speculative-token-capacity`. Omitting it uses the recipe declaration when
 supplied: DeepSeek V4.1 declares 128 target rows. Other recipes derive the
 capacity from prepared concurrency and draft depth.
+Both sections also accept positive integer `speculative_graph_budget`, overridden
+by `--speculative-graph-budget`. DeepSeek V4.1 declares 64 packed round graphs.
+The `[defaults]` graph budget applies only to active packed adaptive learned
+speculation; unsupported recipes, `--no-mtp`, and zero draft depth ignore it.
+An explicit flag or model-specific graph budget rejects those incompatible modes.
+Neither capacity setting changes the graphs in an already exported package;
+native exact and maximum verification budgets select only captured capacities.
 
 Default request parameters, meaning the values a request receives for fields
 it does not set, such as thinking, reasoning effort, sampling, and output

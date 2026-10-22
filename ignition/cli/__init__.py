@@ -153,6 +153,10 @@ def _preparation_arguments(running):
                                " request batch. Rectangular graphs require batch * width <= N, where width is"
                                " drafts + 1; packed rounds share N rows across request prefixes"
                                " (default: see MODEL --help)")
+    speculative.add_argument("--speculative-graph-budget", type=int, metavar="N",
+                          help="maximum captured packed round graphs, independently of target-token rows;"
+                               " excludes mandatory width-one and ordinary graphs. Requires packed adaptive"
+                               " learned speculation (default: see MODEL --help)")
     speculative.add_argument("--mtp-proposal-source", choices=("mtp", "copy"),
                           help="where drafts come from: the learned draft model, or copy for continuations"
                                " of the request's own history, which loads no draft model (default: mtp)")

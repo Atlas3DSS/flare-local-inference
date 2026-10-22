@@ -102,11 +102,16 @@ def test_default_catalog_contains_only_packed_rounds_and_width_one_continuations
             assert signature.kind == "speculative" and signature.token_capacity == 1
             assert "query_lengths" in signature.inputs
             assert signature.packed_token_capacity == 0
-    assert {batch: sorted(values) for batch, values in capacities.items()} == {
-        1: [2, 3, 4, 5, 6], 2: [4, 6, 8, 10, 12], 4: [8, 12, 16, 20, 24],
-        8: [16, 24, 32, 40, 48], 16: [32, 48, 64, 80, 96], 32: [64, 96, 128],
-    }
-    assert len(records) == 34
+    assert {(batch, tokens) for batch, values in capacities.items() for tokens in values} == set(config.packed_speculative_shapes)
+    assert sum(map(len, capacities.values())) == 64
+    assert sorted(capacities[1]) == [2, 3, 4, 5, 6]
+    for batch, physical in capacities.items():
+        assert min(physical) == batch + 1
+        assert max(physical) == min(128, batch * 6)
+    assert len(records) == 70
+    assert len({name for name, _, _ in records}) == len(records)
+    targets = [round for round in constructed if not round.options.get("generate_proposals", True)]
+    assert {(round.batch, round.options["target_token_capacity"]) for round in targets} == set(config.packed_speculative_shapes)
     assert {s.batch_capacity for _, _, s in records if s.kind == "speculative"} == {1, 2, 4, 8, 16, 32}
     assert all(not name.startswith(("proposal", "verification")) for name, _, _ in records)
     proposals = [round for round in constructed if round.options.get("proposal_only")]
@@ -119,10 +124,11 @@ def test_small_physical_budget_keeps_every_width_one_batch(register_catalog):
     records, _, _, constructed, _ = register_catalog(PreparationConfig(speculative_token_capacity=6))
     packed = [s for _, _, s in records if s.kind == "packed_speculative"]
     assert {(s.batch_capacity, s.packed_token_capacity) for s in packed} == {
-        (1, 2), (1, 3), (1, 4), (1, 5), (1, 6), (2, 4), (2, 6),
+        (1, 2), (1, 3), (1, 4), (1, 5), (1, 6),
+        (2, 3), (2, 4), (2, 5), (2, 6), (4, 5), (4, 6),
     }
     assert {s.batch_capacity for _, _, s in records if s.kind == "speculative"} == {1, 2, 4, 8, 16, 32}
-    assert {round.batch for round in constructed if round.options.get("proposal_only")} == {1, 2}
+    assert {round.batch for round in constructed if round.options.get("proposal_only")} == {1, 2, 4}
 
 
 @pytest.mark.parametrize("fixed", [None, 1])

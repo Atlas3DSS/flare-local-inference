@@ -43,6 +43,9 @@ def recipe_help(model=None):
         if speculation.packed_verification:
             lines.extend(("    Target rows are shared across retained request prefixes.",
                           "    Packed rounds need more target rows than active requests."))
+            if speculation.graph_budget is not None:
+                lines.extend((f"  --speculative-graph-budget: positive integer; default {speculation.graph_budget}.",
+                              "    Bounds packed round graphs; excludes mandatory width-one and ordinary graphs."))
         else:
             lines.append("    Wider graphs require batch * width <= capacity (width = draft count + 1).")
         layout = "packed" if speculation.packed_verification else "rectangular"

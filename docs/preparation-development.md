@@ -132,6 +132,14 @@ for the transfer budget and progress contract.
 
 ## Shape and graph-transition validation
 
+Packed verification catalogs declare physical row capacities independently of
+logical per-request widths. Use `packed_speculative_shapes` to distribute a
+graph-count budget across the request buckets while preserving each bucket's
+physical endpoints. Size target workspaces from the largest physical capacity
+and sampling/state workspaces from their declared logical widths. Validate
+capacities that are not multiples of batch size, including a single aggregate
+draft row, inactive lanes, and replay transitions between physical capacities.
+
 - **Prepare the whole serving shape range.** Include batch-one decode, packed
   decode, partial/inactive rows, and configurable chunked prefill through at
   least 4096 tokens. Test alternating graph variants with shared scratch and
