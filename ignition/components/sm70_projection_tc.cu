@@ -1,50 +1,33 @@
-// Reviewed Sol-7 paths 47/51 share one helper translation unit.
-// Stream-aware launch wrappers and the reviewed Sol-5 row-local producer.
-#include "repacked.cu"
-#include "local_kernel.cuh"
-__global__ void produce(const float* x,half* y,float* inverse,int M,int K) {
-  __shared__ float maxima[256];
-  int row=blockIdx.x,t=threadIdx.x;
-  float a=0;
-  for(int k=t;k<K;k+=256) a=fmaxf(a,fabsf(x[(int64_t)row*K+k]));
-  maxima[t]=a;__syncthreads();
-  for(int s=128;s;s>>=1) {if(t<s) maxima[t]=fmaxf(maxima[t],maxima[t+s]);__syncthreads();}
-  int e=maxima[0]>0 && isfinite(maxima[0]) ? ilogbf(maxima[0]) : 14;
-  // Cap the exponent at +/-126 so both the scale and inverse are normal FP32.
-  int shift=max(-126,min(126,14-e));
-  if(t==0) inverse[row]=scalbnf(1.f,-shift);
-  for(int k=t;k<K;k+=256) y[(int64_t)row*K+k]=__float2half_rn(scalbnf(x[(int64_t)row*K+k],shift));
-}
-// E4M3 rounding by integer significand arithmetic, ties-to-even, finite clamp.
-__device__ __forceinline__ uint8_t encode_fp8(float x) {
-  uint32_t b=__float_as_uint(x), sign=(b>>24)&128;
-  if((b&0x7fffffffu)>0x7f800000u) return sign|127;
-  float v=fminf(fabsf(x),448.f);
-  if(v==0) return sign;
-  int e=ilogbf(v),step=max(-9,e-3);
-  int q=__float2int_rn(scalbnf(v,-step));
-  float rounded=scalbnf((float)q,step);
-  if(rounded<0x1p-6f) return sign|q;
-  e=ilogbf(rounded);
-  int m=__float2int_rn(scalbnf(rounded,3-e))-8;
-  return sign|((e+7)<<3)|m;
-}
-__global__ void produce_fp8(const float* x,half* y,float* inverse,int M,int K,float input_scale) {
-  int i=blockIdx.x*blockDim.x+threadIdx.x;
-  if(i<M) inverse[i]=1;
-  if(i<M*K) {
-    uint32_t h=fp8pair(encode_fp8(__fdiv_rn(x[i],input_scale)));
-    y[i]=__ushort_as_half(h&65535);
-  }
-}
+// Reviewed Sol-14 projections (M <= 24, one pinned tuple per shape, padded row
+// count R in {8,16,20,24} selects the kernel instance, real M at run time) behind
+// the stream-aware atlas_* ABI. kernels14.cuh, local14_kernel.cuh,
+// deep14_kernel.cuh, fast14_kernel.cuh, step14.cuh and stage14.cuh are verbatim
+// sol-14 sources (Argon-approved); sm70_projection_tuples.inc is sol-14's
+// tuples-selected.inc, generated from plan14.json (sm70_projection_plan14.json).
+// Everything below is Flare-side wrapping: admission (a host replica of
+// sol14_project), the dispatch table, stream placement of the reviewed launches,
+// the one-time dynamic shared-memory opt-in, and the C3/C7 layout probes.
+#include "kernels14.cuh"
+#include "local14_kernel.cuh"
+#include "deep14_kernel.cuh"
+#include "fast14_kernel.cuh"
+#ifndef SOL14_TUPLES
+#define SOL14_TUPLES "sm70_projection_tuples.inc"
+#endif
+#define ATLAS_MAX_M 24
 
+// The producers are row-independent (one CTA per row / one thread per element) and also feed the prefill GEMM
+// (sm70_prefill.py) at up to 512 rows, so m is bounded by the int32 product only, as in the Sol-10 component; the
+// projection kernels below admit m <= 24 (sol14_project).
 extern "C" int atlas_produce(const float*x,half*h,float*i,int m,int k,int fp8,float scale,cudaStream_t stream) {
+  if(!x||!h||!i||m<1||k<1||k%64||(int64_t)m*k>2147483647LL)return cudaErrorInvalidValue;
   if(fp8)produce_fp8<<<(m*k+255)/256,256,0,stream>>>(x,h,i,m,k,scale);
   else produce<<<m,256,0,stream>>>(x,h,i,m,k);
   return cudaGetLastError();
 }
 extern "C" int atlas_repack(const uint8_t*w,const uint8_t*s,uint8_t*rw,uint8_t*rs,int n,int pk,int fp4,int inv,cudaStream_t stream) {
-  if(n<1||n%128||pk%64||(int64_t)n*(pk/16)>2147483647LL)return cudaErrorInvalidValue;
+  if(!w||!rw||(fp4&&(!s||!rs))||n<1||n%128||pk<64||pk%64||(int64_t)n*(pk/16)>2147483647LL||
+     (int64_t)((n+31)/32)*(pk/(fp4?32:16))*32>2147483647LL)return cudaErrorInvalidValue;
   int64_t count=(int64_t)((n+31)/32)*(pk/(fp4?32:16))*32;
   #define R(F,I) repack_weights<F,I><<<(count+255)/256,256,0,stream>>>(w,rw,n,pk)
   if(fp4){if(inv){R(true,true);}else{R(true,false);}}
@@ -56,55 +39,127 @@ extern "C" int atlas_repack(const uint8_t*w,const uint8_t*s,uint8_t*rw,uint8_t*r
   }
   return cudaGetLastError();
 }
-template<int M,bool F,int BK,int W> void atlas_launch(const half*x,const uint8_t*w,const uint8_t*s,const float*i,
- float g,int rec,const float*b,float*y,float*p,int n,int k,int pk,int split,int path,cudaStream_t stream) {
-  if(path==47)projection_fast<M,F,BK,W,(W==4?4:2)><<<dim3(n/(W*32),split),W*32,0,stream>>>(
-    x,(const uint4*)w,(const uint32_t*)s,i,g,rec,b,y,p,n,k,pk,split,0);
-  else projection_deep<M,F,BK,W,(W==4?4:2)><<<dim3(n/(W*32),split),W*32,0,stream>>>(
-    x,(const uint4*)w,(const uint32_t*)s,i,g,rec,b,y,p,n,k,pk,split,0);
+
+// Host replica of LocalShape::smem_bytes (local14_kernel.cuh), as in sol-14's api14.cuh.
+static int local_smem_bytes(int R,int bk,int warps,int split) {
+  int rows=R+((R%8)?1:0);
+  int act=split*2*rows*(bk+SOL14_PAD)*2, part=split*R*warps*32*4;
+  return act>part?act:part;
 }
-template<int M,bool F>void atlas_dispatch(const half*x,const uint8_t*w,const uint8_t*s,const float*i,
- float g,int rec,const float*b,float*y,float*p,int n,int k,int pk,int split,int bk,int warps,int path,cudaStream_t stream) {
- #define GO(B,W) atlas_launch<M,F,B,W>(x,w,s,i,g,rec,b,y,p,n,k,pk,split,path,stream)
- if(warps==4){if(bk==128)GO(128,4);else GO(256,4);}
- else {if(bk==128)GO(128,8);else GO(256,8);}
- #undef GO
+static int padded_rows(int m){return m<=8?8:m<=16?16:m<=20?20:24;}
+
+struct Call {
+  const half*x;const uint8_t*w;const uint8_t*s;const float*inverse;float gain;int rec;const float*bias;
+  float*y;float*partial;int m,n,k,pk,split,bk,warps,path;const float*column_gains;cudaStream_t stream;
+};
+// The reviewed kernels, launched on the caller's stream (sol-14's launch_* helpers
+// use the per-thread default stream, so they are not used here). Dynamic shared
+// memory above 48 KiB (R=24 instances only) is opted in once by atlas_init.
+template<int R,bool F,int BK,int W,int S> int run_local(const Call&c) {
+  using Sh=LocalShape<R,F,BK,W,S>;
+  if constexpr(Sh::feasible) {
+    projection_local<R,F,BK,W,S><<<c.n/(W*32),W*S*32,Sh::smem_bytes,c.stream>>>(
+      c.x,(const uint4*)c.w,(const uint32_t*)c.s,c.inverse,c.gain,c.rec,c.bias,c.y,c.m,c.n,c.k,c.pk,0,c.column_gains);
+    return 0;
+  } else return 2;
 }
-template<int M,bool F,int BK,int W,int S> void atlas_local(const half*x,const uint8_t*w,const uint8_t*s,const float*i,
- float g,int rec,const float*b,float*y,int n,int k,int pk,const float*cg,cudaStream_t stream) {
- static_assert(S*2*((M+7)/8)*8*(BK+4)*2<=49152 && S*((M+7)/8)*8*W*32*4<=49152 && W*S<=32);
- projection_local<M,F,BK,W,S><<<n/(W*32),W*S*32,0,stream>>>(x,(const uint4*)w,(const uint32_t*)s,i,g,rec,b,y,nullptr,n,k,pk,S,0,cg);
+template<int R,bool F,int BK,int W> void run_deep(const Call&c) {
+  projection_deep<R,F,BK,W,(W==4?4:2)><<<dim3(c.n/(W*32),c.split),W*32,0,c.stream>>>(
+    c.x,(const uint4*)c.w,(const uint32_t*)c.s,c.inverse,c.gain,c.rec,c.bias,c.y,c.partial,c.m,c.n,c.k,c.pk,c.split,0);
 }
-template<int M> void atlas_dispatch_local(const half*x,const uint8_t*w,const uint8_t*s,const float*i,
- float g,int rec,const float*b,float*y,int n,int k,int pk,int fp4,int split,const float*cg,cudaStream_t stream) {
- #define LOCAL(F,B,W,S) atlas_local<M,F,B,W,S>(x,w,s,i,g,rec,b,y,n,k,pk,cg,stream)
- if(fp4){LOCAL(true,256,4,2);}
- else if(split==8){LOCAL(false,64,1,8);}
- else if(split==2){LOCAL(false,64,2,2);}
- else {LOCAL(false,64,2,4);}
- #undef LOCAL
+template<int R,bool F,int BK,int W> void run_fast(const Call&c) {
+  projection_fast<R,F,BK,W,(W==4?4:2)><<<dim3(c.n/(W*32),c.split),W*32,0,c.stream>>>(
+    c.x,(const uint4*)c.w,(const uint32_t*)c.s,c.inverse,c.gain,c.rec,c.bias,c.y,c.partial,c.m,c.n,c.k,c.pk,c.split,0);
+}
+// 0 launched, 1 tuple not compiled, 2 compiled but infeasible at this R (sol-10 C3: never a silent non-launch).
+template<int R,bool F> int dispatch(const Call&c) {
+  #define T60(FF,BK,W,S) if constexpr(F==(FF!=0)){if(c.path==60&&c.bk==BK&&c.warps==W&&c.split==S)return run_local<R,F,BK,W,S>(c);}
+  #define T51(FF,BK,W) if constexpr(F==(FF!=0)){if(c.path==51&&c.bk==BK&&c.warps==W){run_deep<R,F,BK,W>(c);return 0;}}
+  #define T47(FF,BK,W) if constexpr(F==(FF!=0)){if(c.path==47&&c.bk==BK&&c.warps==W){run_fast<R,F,BK,W>(c);return 0;}}
+  #include SOL14_TUPLES
+  #undef T60
+  #undef T51
+  #undef T47
+  return 1;
+}
+template<int R> int prepare() {
+  int e=0;
+  #define T60(FF,BK,W,S) if(!e)e=prepare_local<R,(FF!=0),BK,W,S>();
+  #define T51(FF,BK,W)
+  #define T47(FF,BK,W)
+  #include SOL14_TUPLES
+  #undef T60
+  #undef T51
+  #undef T47
+  return e;
+}
+static bool initialized=false;
+// Once per process, before any stream capture: opts every compiled >48 KiB
+// path-60 instance into dynamic shared memory (sol-14 integration step 2).
+extern "C" int atlas_init() {
+  int e=prepare<8>();
+  if(!e)e=prepare<16>();
+  if(!e)e=prepare<20>();
+  if(!e)e=prepare<24>();
+  if(!e)initialized=true;
+  return e;
 }
 extern "C" int atlas_project(const half*x,const uint8_t*w,const uint8_t*s,const float*i,float g,int rec,
  const float*b,float*y,float*p,int m,int n,int k,int pk,int split,int fp4,int bk,int warps,int path,const float*cg,cudaStream_t stream) {
- if(path==60) {
-  bool tuple=fp4 ? bk==256&&warps==4&&split==2 : bk==64&&((warps==1&&split==8)||(warps==2&&(split==2||split==4)));
-  int padded=(m+7)/8*8;
-  if(!tuple||m<1||m>16||n<1||k<64||pk<k||pk%64||n%(warps*32)||k%(split*bk)||
-     (int64_t)n*(pk/(fp4?2:1))>2147483647LL||(int64_t)n*(pk/16)>2147483647LL||
-     (int64_t)m*n*split>2147483647LL||split*2*padded*(bk+4)*2>49152||split*padded*warps*32*4>49152) return cudaErrorInvalidValue;
-  #define LOCAL_RUN(M) atlas_dispatch_local<M>(x,w,s,i,g,rec,b,y,n,k,pk,fp4,split,cg,stream)
-  switch(m){case 1:{LOCAL_RUN(1);break;}case 2:{LOCAL_RUN(2);break;}case 4:{LOCAL_RUN(4);break;}case 8:{LOCAL_RUN(8);break;}case 12:{LOCAL_RUN(12);break;}case 16:{LOCAL_RUN(16);break;}default:return cudaErrorInvalidValue;}
-  #undef LOCAL_RUN
-  return cudaGetLastError();
- }
- if(cg)return cudaErrorInvalidValue;
- if(n<1||n%128||k<1||pk<k||k%64||pk%64||(bk!=128&&bk!=256)||(warps!=4&&warps!=8)||split<1||n%(warps*32)||k%(split*bk)||(path!=47&&path!=51)||
-   (int64_t)((n+31)/32)*(pk/(fp4?32:16))*32>2147483647LL||(int64_t)m*n*split>2147483647LL)return cudaErrorInvalidValue;
- #define RUN(M) if(fp4)atlas_dispatch<M,true>(x,w,s,i,g,rec,b,y,p,n,k,pk,split,bk,warps,path,stream);else atlas_dispatch<M,false>(x,w,s,i,g,rec,b,y,p,n,k,pk,split,bk,warps,path,stream)
- switch(m){case 1:{RUN(1);break;}case 2:{RUN(2);break;}case 4:{RUN(4);break;}case 8:{RUN(8);break;}case 12:{RUN(12);break;}case 16:{RUN(16);break;}default:return cudaErrorInvalidValue;}
- #undef RUN
- if(split>1)finish_repacked<<<(m*n+255)/256,256,0,stream>>>(p,i,b,y,m,n,split,g,rec,0);
+ if(!initialized)return cudaErrorInitializationError;
+ // Admission: sol-14's sol14_project checks, plus non-null operands, k % 64, column gains only on path 60 and
+ // partial planes required wherever the fixed-order finish reads them (paths 51/47 with split > 1).
+ if(!x||!w||!i||!y||(fp4&&!s))return cudaErrorInvalidValue;
+ if(m<1||m>ATLAS_MAX_M||n<1||n>2147483616||k<64||k%64||pk<k||pk%64||
+    split<1||split>32||(int64_t)m*n*split>2147483647LL||
+    (int64_t)((n+31)/32)*(pk/(fp4?32:16))*32>2147483647LL||
+    (fp4&&(int64_t)n*(pk/16)>2147483647LL)||(bk!=64&&bk!=128&&bk!=256)||
+    (warps!=1&&warps!=2&&warps!=4&&warps!=8)||n%(warps*32)||k%(split*bk)||
+    (path!=47&&path!=51&&path!=60)||(path==60&&(split!=2&&split!=4&&split!=8))||(path==60&&warps>4)||
+    (path!=60&&(warps<4||bk<128))||(path==47&&split!=1))return cudaErrorInvalidValue;
+ if(k/split<4*(fp4?32:16))return cudaErrorInvalidValue;
+ if(cg&&path!=60)return cudaErrorInvalidValue;
+ if(path!=60&&split>1&&!p)return cudaErrorInvalidValue;
+ int R=padded_rows(m);
+ if(path==60&&(local_smem_bytes(R,bk,warps,split)>98304||warps*split>32))return cudaErrorInvalidValue;
+ Call c{x,w,s,i,g,rec,b,y,p,m,n,k,pk,split,bk,warps,path,cg,stream};
+ int status;
+ #define RT(RR) status=fp4?dispatch<RR,true>(c):dispatch<RR,false>(c)
+ switch(R){case 8:{RT(8);break;}case 16:{RT(16);break;}case 20:{RT(20);break;}case 24:{RT(24);break;}default:return cudaErrorInvalidValue;}
+ #undef RT
+ if(status)return cudaErrorInvalidValue;
+ if(split>1&&path!=60)finish_deep<<<(m*n+255)/256,256,0,stream>>>(p,i,b,y,m,n,split,g,rec,0);
  return cudaGetLastError();
+}
+// Feasibility/compile probe (sol-14's sol14_tuple_status): 0 compiled and feasible at this m, 1 not compiled,
+// 2 infeasible, 3 m out of range.
+template<int R> int probe(int fp4,int path,int bk,int warps,int split) {
+  #define T60(FF,BK,W,S) if(fp4==FF&&path==60&&bk==BK&&warps==W&&split==S)return LocalShape<R,(FF!=0),BK,W,S>::feasible?0:2;
+  #define T51(FF,BK,W) if(fp4==FF&&path==51&&bk==BK&&warps==W)return 0;
+  #define T47(FF,BK,W) if(fp4==FF&&path==47&&bk==BK&&warps==W)return 0;
+  #include SOL14_TUPLES
+  #undef T60
+  #undef T51
+  #undef T47
+  return 1;
+}
+extern "C" int atlas_tuple_status(int fp4,int path,int bk,int warps,int split,int m) {
+  if(m<1||m>ATLAS_MAX_M)return 3;
+  int R=padded_rows(m);fp4=fp4?1:0;
+  if(path==60&&(local_smem_bytes(R,bk,warps,split)>98304||warps*split>32))return 2;
+  switch(R){case 8:return probe<8>(fp4,path,bk,warps,split);case 16:return probe<16>(fp4,path,bk,warps,split);
+    case 20:return probe<20>(fp4,path,bk,warps,split);default:return probe<24>(fp4,path,bk,warps,split);}
+}
+
+// Fable sol-10 C3/C7 layout probes (unchanged from the sol-10 component). decode8 is the
+// reviewed four-code NVFP4 decoder from repacked_kernel.cuh, copied verbatim because the
+// sol-14 kernels fold the same bit operations into step14.cuh/fast14_kernel.cuh instead.
+__device__ __forceinline__ void decode8(uint32_t w,uint32_t sc,uint32_t (&b)[4]) {
+  uint32_t v0=w&0x8e008e00u,v1=(w<<3)&0x8e008e00u;
+  uint32_t s2=(w<<1)&0x80008000u,s3=(w<<2)&0x80008000u,v2,v3;
+  asm("lop3.b32 %0, %1, %2, 0x0e000e00, 0xec;":"=r"(v2):"r"(w<<6),"r"(s2));
+  asm("lop3.b32 %0, %1, %2, 0x0e000e00, 0xec;":"=r"(v3):"r"(w<<9),"r"(s3));
+  b[0]=h2mul(v0,sc);b[1]=h2mul(v1,sc);b[2]=h2mul(v2,sc);b[3]=h2mul(v3,sc);
 }
 // C3: independent low/high halves, all interleaved patterns and finite scales.
 __global__ void atlas_position_decode(half*out,int first) {
@@ -116,7 +171,6 @@ __global__ void atlas_position_decode(half*out,int first) {
 extern "C" int atlas_position_exact(half*out,int first,int count,cudaStream_t stream) {
  atlas_position_decode<<<dim3(256,count),256,0,stream>>>(out,first);return cudaGetLastError();
 }
-
 // C7: independently mixed halves for both FP8 placement and inverse proof.
 __global__ void atlas_fp8_decode(half*out,uint32_t*inverse) {
  int i=blockIdx.x*blockDim.x+threadIdx.x;

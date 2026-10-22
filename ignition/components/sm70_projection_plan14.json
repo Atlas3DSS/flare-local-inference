@@ -1,0 +1,759 @@
+{
+  "row_invariant_policy": true,
+  "selection_M": 20,
+  "projection_count": 401,
+  "source": "tune_graph.py M=20 single-shape sweep over trial14.so",
+  "shapes": [
+    {
+      "kind": "tensor_fp8",
+      "N": 5120,
+      "K": 6144,
+      "count": 64,
+      "name": "model.language_model.layers.0.linear_attn.out_proj",
+      "gain": 9.722369577502832e-05,
+      "input_scale": 0.0322265625,
+      "weight_bytes": 31457280,
+      "rows": [
+        {
+          "M": 1,
+          "direct": 60,
+          "BK": 64,
+          "warps": 2,
+          "split": 8
+        },
+        {
+          "M": 2,
+          "direct": 60,
+          "BK": 64,
+          "warps": 2,
+          "split": 8
+        },
+        {
+          "M": 4,
+          "direct": 60,
+          "BK": 64,
+          "warps": 2,
+          "split": 8
+        },
+        {
+          "M": 8,
+          "direct": 60,
+          "BK": 64,
+          "warps": 2,
+          "split": 8
+        },
+        {
+          "M": 12,
+          "direct": 60,
+          "BK": 64,
+          "warps": 2,
+          "split": 8
+        },
+        {
+          "M": 16,
+          "direct": 60,
+          "BK": 64,
+          "warps": 2,
+          "split": 8
+        },
+        {
+          "M": 20,
+          "direct": 60,
+          "BK": 64,
+          "warps": 2,
+          "split": 8
+        },
+        {
+          "M": 24,
+          "direct": 60,
+          "BK": 64,
+          "warps": 2,
+          "split": 8
+        }
+      ]
+    },
+    {
+      "kind": "tensor_fp8",
+      "N": 10240,
+      "K": 5120,
+      "count": 48,
+      "name": "model.language_model.layers.0.linear_attn.in_proj_qkv",
+      "gain": 0.00010904730879701674,
+      "input_scale": 0.1121651828289032,
+      "weight_bytes": 52428800,
+      "rows": [
+        {
+          "M": 1,
+          "direct": 60,
+          "BK": 256,
+          "warps": 4,
+          "split": 2
+        },
+        {
+          "M": 2,
+          "direct": 60,
+          "BK": 256,
+          "warps": 4,
+          "split": 2
+        },
+        {
+          "M": 4,
+          "direct": 60,
+          "BK": 256,
+          "warps": 4,
+          "split": 2
+        },
+        {
+          "M": 8,
+          "direct": 60,
+          "BK": 256,
+          "warps": 4,
+          "split": 2
+        },
+        {
+          "M": 12,
+          "direct": 60,
+          "BK": 256,
+          "warps": 4,
+          "split": 2
+        },
+        {
+          "M": 16,
+          "direct": 60,
+          "BK": 256,
+          "warps": 4,
+          "split": 2
+        },
+        {
+          "M": 20,
+          "direct": 60,
+          "BK": 256,
+          "warps": 4,
+          "split": 2
+        },
+        {
+          "M": 24,
+          "direct": 60,
+          "BK": 256,
+          "warps": 4,
+          "split": 2
+        }
+      ]
+    },
+    {
+      "kind": "tensor_fp8",
+      "N": 6144,
+      "K": 5120,
+      "count": 48,
+      "name": "model.language_model.layers.0.linear_attn.in_proj_z",
+      "gain": 5.9658170357579365e-05,
+      "input_scale": 0.1121651828289032,
+      "weight_bytes": 31457280,
+      "rows": [
+        {
+          "M": 1,
+          "direct": 60,
+          "BK": 256,
+          "warps": 4,
+          "split": 2
+        },
+        {
+          "M": 2,
+          "direct": 60,
+          "BK": 256,
+          "warps": 4,
+          "split": 2
+        },
+        {
+          "M": 4,
+          "direct": 60,
+          "BK": 256,
+          "warps": 4,
+          "split": 2
+        },
+        {
+          "M": 8,
+          "direct": 60,
+          "BK": 256,
+          "warps": 4,
+          "split": 2
+        },
+        {
+          "M": 12,
+          "direct": 60,
+          "BK": 256,
+          "warps": 4,
+          "split": 2
+        },
+        {
+          "M": 16,
+          "direct": 60,
+          "BK": 256,
+          "warps": 4,
+          "split": 2
+        },
+        {
+          "M": 20,
+          "direct": 60,
+          "BK": 256,
+          "warps": 4,
+          "split": 2
+        },
+        {
+          "M": 24,
+          "direct": 60,
+          "BK": 256,
+          "warps": 4,
+          "split": 2
+        }
+      ]
+    },
+    {
+      "kind": "nvfp4",
+      "N": 17408,
+      "K": 5120,
+      "count": 128,
+      "name": "model.language_model.layers.0.mlp.gate_proj",
+      "gain": 0.0001569475425640121,
+      "input_scale": 1.0,
+      "weight_bytes": 50135040,
+      "rows": [
+        {
+          "M": 1,
+          "direct": 60,
+          "BK": 256,
+          "warps": 4,
+          "split": 2
+        },
+        {
+          "M": 2,
+          "direct": 60,
+          "BK": 256,
+          "warps": 4,
+          "split": 2
+        },
+        {
+          "M": 4,
+          "direct": 60,
+          "BK": 256,
+          "warps": 4,
+          "split": 2
+        },
+        {
+          "M": 8,
+          "direct": 60,
+          "BK": 256,
+          "warps": 4,
+          "split": 2
+        },
+        {
+          "M": 12,
+          "direct": 60,
+          "BK": 256,
+          "warps": 4,
+          "split": 2
+        },
+        {
+          "M": 16,
+          "direct": 60,
+          "BK": 256,
+          "warps": 4,
+          "split": 2
+        },
+        {
+          "M": 20,
+          "direct": 60,
+          "BK": 256,
+          "warps": 4,
+          "split": 2
+        },
+        {
+          "M": 24,
+          "direct": 60,
+          "BK": 256,
+          "warps": 4,
+          "split": 2
+        }
+      ]
+    },
+    {
+      "kind": "nvfp4",
+      "N": 5120,
+      "K": 17408,
+      "count": 64,
+      "name": "model.language_model.layers.0.mlp.down_proj",
+      "gain": 0.00036475772503763437,
+      "input_scale": 1.0,
+      "weight_bytes": 50135040,
+      "rows": [
+        {
+          "M": 1,
+          "direct": 51,
+          "BK": 128,
+          "warps": 4,
+          "split": 8
+        },
+        {
+          "M": 2,
+          "direct": 51,
+          "BK": 128,
+          "warps": 4,
+          "split": 8
+        },
+        {
+          "M": 4,
+          "direct": 51,
+          "BK": 128,
+          "warps": 4,
+          "split": 8
+        },
+        {
+          "M": 8,
+          "direct": 51,
+          "BK": 128,
+          "warps": 4,
+          "split": 8
+        },
+        {
+          "M": 12,
+          "direct": 51,
+          "BK": 128,
+          "warps": 4,
+          "split": 8
+        },
+        {
+          "M": 16,
+          "direct": 51,
+          "BK": 128,
+          "warps": 4,
+          "split": 8
+        },
+        {
+          "M": 20,
+          "direct": 51,
+          "BK": 128,
+          "warps": 4,
+          "split": 8
+        },
+        {
+          "M": 24,
+          "direct": 51,
+          "BK": 128,
+          "warps": 4,
+          "split": 8
+        }
+      ]
+    },
+    {
+      "kind": "tensor_fp8",
+      "N": 12288,
+      "K": 5120,
+      "count": 16,
+      "name": "model.language_model.layers.3.self_attn.q_proj",
+      "gain": 0.00014762490172870457,
+      "input_scale": 0.2064732164144516,
+      "weight_bytes": 62914560,
+      "rows": [
+        {
+          "M": 1,
+          "direct": 60,
+          "BK": 128,
+          "warps": 2,
+          "split": 2
+        },
+        {
+          "M": 2,
+          "direct": 60,
+          "BK": 128,
+          "warps": 2,
+          "split": 2
+        },
+        {
+          "M": 4,
+          "direct": 60,
+          "BK": 128,
+          "warps": 2,
+          "split": 2
+        },
+        {
+          "M": 8,
+          "direct": 60,
+          "BK": 128,
+          "warps": 2,
+          "split": 2
+        },
+        {
+          "M": 12,
+          "direct": 60,
+          "BK": 128,
+          "warps": 2,
+          "split": 2
+        },
+        {
+          "M": 16,
+          "direct": 60,
+          "BK": 128,
+          "warps": 2,
+          "split": 2
+        },
+        {
+          "M": 20,
+          "direct": 60,
+          "BK": 128,
+          "warps": 2,
+          "split": 2
+        },
+        {
+          "M": 24,
+          "direct": 60,
+          "BK": 128,
+          "warps": 2,
+          "split": 2
+        }
+      ]
+    },
+    {
+      "kind": "tensor_fp8",
+      "N": 1024,
+      "K": 5120,
+      "count": 32,
+      "name": "model.language_model.layers.3.self_attn.k_proj",
+      "gain": 9.676632180344313e-05,
+      "input_scale": 0.2064732164144516,
+      "weight_bytes": 5242880,
+      "rows": [
+        {
+          "M": 1,
+          "direct": 60,
+          "BK": 128,
+          "warps": 2,
+          "split": 2
+        },
+        {
+          "M": 2,
+          "direct": 60,
+          "BK": 128,
+          "warps": 2,
+          "split": 2
+        },
+        {
+          "M": 4,
+          "direct": 60,
+          "BK": 128,
+          "warps": 2,
+          "split": 2
+        },
+        {
+          "M": 8,
+          "direct": 60,
+          "BK": 128,
+          "warps": 2,
+          "split": 2
+        },
+        {
+          "M": 12,
+          "direct": 60,
+          "BK": 128,
+          "warps": 2,
+          "split": 2
+        },
+        {
+          "M": 16,
+          "direct": 60,
+          "BK": 128,
+          "warps": 2,
+          "split": 2
+        },
+        {
+          "M": 20,
+          "direct": 60,
+          "BK": 128,
+          "warps": 2,
+          "split": 2
+        },
+        {
+          "M": 24,
+          "direct": 60,
+          "BK": 128,
+          "warps": 2,
+          "split": 2
+        }
+      ]
+    },
+    {
+      "kind": "nvfp4",
+      "N": 248320,
+      "K": 5120,
+      "count": 1,
+      "name": "lm_head",
+      "gain": 0.00012715657067019492,
+      "input_scale": 1.0,
+      "weight_bytes": 715161600,
+      "rows": [
+        {
+          "M": 1,
+          "direct": 47,
+          "BK": 128,
+          "warps": 4,
+          "split": 1
+        },
+        {
+          "M": 2,
+          "direct": 47,
+          "BK": 128,
+          "warps": 4,
+          "split": 1
+        },
+        {
+          "M": 4,
+          "direct": 47,
+          "BK": 128,
+          "warps": 4,
+          "split": 1
+        },
+        {
+          "M": 8,
+          "direct": 47,
+          "BK": 128,
+          "warps": 4,
+          "split": 1
+        },
+        {
+          "M": 12,
+          "direct": 47,
+          "BK": 128,
+          "warps": 4,
+          "split": 1
+        },
+        {
+          "M": 16,
+          "direct": 47,
+          "BK": 128,
+          "warps": 4,
+          "split": 1
+        },
+        {
+          "M": 20,
+          "direct": 47,
+          "BK": 128,
+          "warps": 4,
+          "split": 1
+        },
+        {
+          "M": 24,
+          "direct": 47,
+          "BK": 128,
+          "warps": 4,
+          "split": 1
+        }
+      ]
+    }
+  ],
+  "fused_shapes": [
+    {
+      "kind": "nvfp4",
+      "N": 34816,
+      "K": 5120,
+      "count": 64,
+      "name": "fused_nvfp4_34816_5120",
+      "gain": 0.0001569475425640121,
+      "input_scale": 1.0,
+      "weight_bytes": 100270080.0,
+      "rows": [
+        {
+          "M": 1,
+          "direct": 60,
+          "BK": 256,
+          "warps": 4,
+          "split": 2
+        },
+        {
+          "M": 2,
+          "direct": 60,
+          "BK": 256,
+          "warps": 4,
+          "split": 2
+        },
+        {
+          "M": 4,
+          "direct": 60,
+          "BK": 256,
+          "warps": 4,
+          "split": 2
+        },
+        {
+          "M": 8,
+          "direct": 60,
+          "BK": 256,
+          "warps": 4,
+          "split": 2
+        },
+        {
+          "M": 12,
+          "direct": 60,
+          "BK": 256,
+          "warps": 4,
+          "split": 2
+        },
+        {
+          "M": 16,
+          "direct": 60,
+          "BK": 256,
+          "warps": 4,
+          "split": 2
+        },
+        {
+          "M": 20,
+          "direct": 60,
+          "BK": 256,
+          "warps": 4,
+          "split": 2
+        },
+        {
+          "M": 24,
+          "direct": 60,
+          "BK": 256,
+          "warps": 4,
+          "split": 2
+        }
+      ]
+    },
+    {
+      "kind": "tensor_fp8",
+      "N": 16384,
+      "K": 5120,
+      "count": 48,
+      "name": "fused_tensor_fp8_16384_5120",
+      "gain": 0.00010904730879701674,
+      "input_scale": 0.1121651828289032,
+      "weight_bytes": 83886080,
+      "rows": [
+        {
+          "M": 1,
+          "direct": 60,
+          "BK": 256,
+          "warps": 4,
+          "split": 2
+        },
+        {
+          "M": 2,
+          "direct": 60,
+          "BK": 256,
+          "warps": 4,
+          "split": 2
+        },
+        {
+          "M": 4,
+          "direct": 60,
+          "BK": 256,
+          "warps": 4,
+          "split": 2
+        },
+        {
+          "M": 8,
+          "direct": 60,
+          "BK": 256,
+          "warps": 4,
+          "split": 2
+        },
+        {
+          "M": 12,
+          "direct": 60,
+          "BK": 256,
+          "warps": 4,
+          "split": 2
+        },
+        {
+          "M": 16,
+          "direct": 60,
+          "BK": 256,
+          "warps": 4,
+          "split": 2
+        },
+        {
+          "M": 20,
+          "direct": 60,
+          "BK": 256,
+          "warps": 4,
+          "split": 2
+        },
+        {
+          "M": 24,
+          "direct": 60,
+          "BK": 256,
+          "warps": 4,
+          "split": 2
+        }
+      ]
+    },
+    {
+      "kind": "tensor_fp8",
+      "N": 14336,
+      "K": 5120,
+      "count": 16,
+      "name": "fused_tensor_fp8_14336_5120",
+      "gain": 0.00010904730879701674,
+      "input_scale": 0.1121651828289032,
+      "weight_bytes": 73400320,
+      "rows": [
+        {
+          "M": 1,
+          "direct": 60,
+          "BK": 128,
+          "warps": 2,
+          "split": 2
+        },
+        {
+          "M": 2,
+          "direct": 60,
+          "BK": 128,
+          "warps": 2,
+          "split": 2
+        },
+        {
+          "M": 4,
+          "direct": 60,
+          "BK": 128,
+          "warps": 2,
+          "split": 2
+        },
+        {
+          "M": 8,
+          "direct": 60,
+          "BK": 128,
+          "warps": 2,
+          "split": 2
+        },
+        {
+          "M": 12,
+          "direct": 60,
+          "BK": 128,
+          "warps": 2,
+          "split": 2
+        },
+        {
+          "M": 16,
+          "direct": 60,
+          "BK": 128,
+          "warps": 2,
+          "split": 2
+        },
+        {
+          "M": 20,
+          "direct": 60,
+          "BK": 128,
+          "warps": 2,
+          "split": 2
+        },
+        {
+          "M": 24,
+          "direct": 60,
+          "BK": 128,
+          "warps": 2,
+          "split": 2
+        }
+      ]
+    }
+  ],
+  "fused_projection_count": 257
+}
