@@ -50,7 +50,8 @@ class BuildPathsTest(unittest.TestCase):
         path = ROOT / 'ignition/components' / (name + '.py')
         tree = ast.parse(path.read_text())
         tree.body = [node for node in tree.body
-            if isinstance(node, ast.FunctionDef) and node.name in ('compile_library', 'library', '_cutlass_headers')
+            if isinstance(node, ast.FunctionDef) and node.name in ('compile_library', 'library', '_cutlass_headers', '_sol20')
+            or isinstance(node, ast.Assign) and any(getattr(target, 'id', None) == 'TILES' for target in node.targets)
             or isinstance(node, ast.ClassDef) and node.name in classes]
         module = ModuleType('_sm70_build_test_' + name)
         module.__package__ = 'ignition.components'
@@ -60,7 +61,7 @@ class BuildPathsTest(unittest.TestCase):
                 CDLL=lambda path: SimpleNamespace(**{symbol: (lambda *args: 0) for symbol in
                     ('sol9_dense', 'sol12_commit', 'atlas_prefill', 'atlas_prefill_init', 'atlas_produce',
                      'atlas_project', 'atlas_repack', 'atlas_position_exact', 'atlas_fp8_exact', 'atlas_init',
-                     'atlas_tuple_status')}),
+                     'atlas_tuple_status', 'atlas_pgemm_init', 'atlas_pgemm4', 'atlas_pgemm4_describe')}),
                 c_void_p=ctypes.c_void_p, c_int=ctypes.c_int, c_float=ctypes.c_float))
         patch.dict(sys.modules, {module.__name__: module}).start()
         exec(compile(tree, str(path), 'exec'), module.__dict__)
@@ -121,6 +122,38 @@ class BuildPathsTest(unittest.TestCase):
         module.library(self.cache, root)
         self.assertNotEqual(first, self.commands[-1][-1])
 
+    def test_served_sol20_tiles_are_compiled_reviewed_instantiations(self):
+        # astra-18: every served (capacity, shape) id is one of the pgemm4 instantiations compiled into the library
+        # (sm70_pgemm_configs.inc), of the right format, inside the reviewed r4 template space, and the kernel header
+        # is byte-identical to the reviewed sol-20/kernel/pgemm.cuh (r4).
+        module = self.load('sm70_prefill')
+        directory = ROOT / 'ignition/components'
+        self.assertEqual(hashlib.sha256((directory / 'sm70_pgemm.cuh').read_bytes()).hexdigest(),
+                         '60a4ed9fe3af17cebddf6ae47c44c1d8d1f234c57a1a27a894a2ff81ebb23e02')
+        configs = (directory / 'sm70_pgemm_configs.inc').read_text()
+        self.assertRegex(configs, r'#define SOL20_CONFIGS\(X\)\n')
+        self.assertRegex(configs, r'#define SOL20_CONFIGS2\(X\)\n')
+        compiled = set()
+        for fp4, mt, ng, w, bk, pf, minb in re.findall(
+                r'X\((true|false),(\d+),(\d+),(\d+),(\d+),(\d+),(\d+)\)', configs):
+            mt, ng, w, bk, pf, minb = map(int, (mt, ng, w, bk, pf, minb))
+            self.assertTrue(1 <= mt <= 8 and ng in (1, 2) and 1 <= w <= 8 and bk in (32, 64, 128)
+                            and pf in (1, 2) and 1 <= minb <= 8)
+            compiled.add((fp4 == 'true', module._sol20(mt, ng, w, bk, pf, minb)))
+        shapes = {('tensor_fp8', 6144, 5120), ('tensor_fp8', 5120, 10240), ('tensor_fp8', 5120, 6144),
+                  ('tensor_fp8', 5120, 12288), ('tensor_fp8', 5120, 1024), ('nvfp4', 5120, 17408),
+                  ('nvfp4', 17408, 5120), ('nvfp4', 5120, 248320)}
+        self.assertEqual(set(module.TILES), {128, 256})
+        used = set()
+        for capacity, choices in module.TILES.items():
+            self.assertEqual(set(choices), shapes)
+            for (kind, _, _), config in choices.items():
+                self.assertIn((kind == 'nvfp4', config), compiled)
+                used.add((kind == 'nvfp4', config))
+        self.assertEqual(used, compiled)
+        self.assertEqual(module._sol20(4, 1, 4, 64, 1, 4), 0x10412414)
+        self.assertEqual(module._sol20(8, 2, 8, 64, 2, 1), 0x10122828)
+
     def test_prepared_projection_serializes_paths_and_routes_both_backends(self):
         module = self.load('sm70_projection', classes=('ProjectionQuery', 'PreparedProjection'))
         query = module.ProjectionQuery('dense', 1, 5120, 5120, 1024)
@@ -140,6 +173,10 @@ class BuildPathsTest(unittest.TestCase):
             self.assertEqual(calls[-1]['kernel_cache'], str(self.cache))
             if tactic[0] != 'row_dense':
                 self.assertEqual(calls[-1]['cutlass_include'], '/configured/cutlass/include')
+                self.assertIsNone(calls[-1]['live_count'])
+                # The device live count reaches the tensor-core backend (which only the prefill tactic consumes).
+                restored.run(None, None, None, None, None, None, None, None, 'count')
+                self.assertEqual(calls[-1]['live_count'], 'count')
 
 
 if __name__ == '__main__':

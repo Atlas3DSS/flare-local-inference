@@ -133,9 +133,13 @@ class FullAttention(torch.nn.Module):
         self.key = empty("key", self.kv_heads * self.dim).view(tokens, self.kv_heads, self.dim)
         self.attended, self.output = empty("attended", self.heads * self.dim), empty("output", config.hidden)
         prefix = f"layers.{layer}.self_attn."
+        from ignition.components.sm70_projection import is_sm70
+        # SM70 prefill graphs: projections read the device live-row count (rows >= it are written +0.0; sm70_prefill).
+        live_count = metadata.live_counts[:1] if mode == "prefill" and is_sm70(device) else None
         self.projections = {
             field: TensorFP8Projection(inputs, weights.projections[prefix + field], output,
-                                       session=session, workspace=workspace, name=name + "." + field, row_invariant=row_invariant)
+                                       session=session, workspace=workspace, name=name + "." + field, row_invariant=row_invariant,
+                                       live_count=live_count)
             for field, inputs, output in (
                 (("qkv_proj", source, self.qkv), ("o_proj", self.attended, self.output)) if self.fused_qkv else
                 (("q_proj", source, self.qg), ("k_proj", source, self.k),
@@ -144,7 +148,6 @@ class FullAttention(torch.nn.Module):
         self.slots = torch.full((tokens,), -1, dtype=torch.int64, device=device)
         self.lengths = torch.zeros_like(metadata.lengths)
         key_cache, value_cache = pool.attention(layer, config)
-        from ignition.components.sm70_projection import is_sm70
         self.sm70 = is_sm70(device)
         writer, attention = PreparedPagedKVWriter, PreparedPagedAttention
         options = dict(mode=mode, workspace=workspace)
@@ -262,6 +265,10 @@ class PreparedDecoder:
         config, source = weights.config, scratch.activations
         attention_buffers = {}
         fused_projections = "layers.0.mlp.gate_up_proj" in weights.projections
+        # SM70 prefill graphs: every quantized projection reads the device live-row count; padded rows are +0.0.
+        # Nothing reads a padded row into a live row (embedding zeroes them; attention, GDN conv/recurrence and the
+        # sampled/feedback rows are bounded by query_start_loc / sample_indices / positions >= 0).
+        live_count = metadata.live_counts[:1] if self.sm70 and mode == "prefill" else None
         mlp_buffers = {field: torch.zeros((source.shape[0], width), dtype=source.dtype, device=source.device)
                        for field, width in (("gate_proj", config.text["intermediate_size"]),
                                             ("up_proj", config.text["intermediate_size"]),
@@ -281,7 +288,8 @@ class PreparedDecoder:
                                              ("in_proj_qkv", "in_proj_z", "in_proj_ba", "out_proj"))}
                 layer.linear_attn = RecurrentAttention(PreparedGDN(original.linear_attn, projections, source,
                     scratch.gdn, pool.recurrent(index), self.delta, mode=mode, session=session,
-                    name=name + "." + prefix + "gdn", workspace=workspace, projection_workspace=workspace, row_invariant=row_invariant))
+                    name=name + "." + prefix + "gdn", workspace=workspace, projection_workspace=workspace, row_invariant=row_invariant,
+                    live_count=live_count))
             else:
                 layer.self_attn = FullAttention(original.self_attn, weights, source, metadata, pool, index,
                     mode=mode, session=session, workspace=workspace, name=name + "." + prefix + "attention",
@@ -293,7 +301,8 @@ class PreparedDecoder:
                 inputs = source if field != "down_proj" else mlp_input
                 output = mlp_buffers[field]
                 setattr(layer.mlp, field, Projection(QuantizedProjection(inputs, weight, output,
-                    activation_mode="auto", session=session, workspace=workspace, name=name + "." + prefix + field, row_invariant=row_invariant)))
+                    activation_mode="auto", session=session, workspace=workspace, name=name + "." + prefix + field, row_invariant=row_invariant,
+                    live_count=live_count)))
             norms = None
             if norm_buffers is not None:
                 from ignition.components.sm70_norm import PreparedRMSNorm

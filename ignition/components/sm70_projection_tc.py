@@ -223,12 +223,14 @@ def workspace_bytes(query, selected):
                for dtype, shape in workspace_layout(query, selected))
 
 
-def run(query, selected, source, values, scales, output, workspace, bias, gain=None, *,
+def run(query, selected, source, values, scales, output, workspace, bias, gain=None, *, live_count=None,
         kernel_cache=None, cutlass_include=None):
     if selected[0] == 'prefill_tc':
         from .sm70_prefill import run
-        return run(query, source, values, scales, output, workspace, bias,
+        return run(query, source, values, scales, output, workspace, bias, live_count=live_count,
                    kernel_cache=kernel_cache, cutlass_include=cutlass_include)
+    # Row tactics compute every row (their bits never depend on other rows); a device live count only lets the
+    # prefill tactic skip padded rows, so it is not forwarded here.
     import math
     views, offset = [], 0
     for dtype, shape in workspace_layout(query, selected):
