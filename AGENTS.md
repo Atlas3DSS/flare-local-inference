@@ -261,19 +261,15 @@ architectural boundary before committing the change.
   checkpoints, such as `FLARE_RUN_CUDA_TESTS`. A test variable must not change
   what the code under test does.
 
-## CUDA kernel and model optimization authorship
+## CUDA kernel and model optimization review
 
-Claude Opus 5.5 has repeatedly produced defective low-level kernel changes in
-this project. Do not use it to design or implement low-level CUDA kernels or
-changes to existing model fusion and GPU execution optimizations. This includes
-CUDA C++, PTX, CuTe DSL, and Triton kernels, and changes to projection packing,
-fused arithmetic, stream overlap, or scratch aliasing in optimized model paths.
-Do not incorporate its generated changes to these mechanisms through another
-contributor or agent.
-
-General PyTorch modeling, recipe integration, checkpoint loading, frontend
-processing, preparation orchestration, CLI/runtime work, tests, and documentation
-are permitted when they do not design or change the restricted mechanisms above.
+Low-level CUDA kernels (CUDA C++, PTX, CuTe DSL, Triton) and changes to model
+fusion and GPU execution optimizations (projection packing, fused arithmetic,
+stream overlap, scratch aliasing in optimized model paths) authored by Claude
+Opus 5.5 must always be reviewed and cleared by Astra (gpt-6-astra), Claude
+Fable, or Argon (gemini-4-argon) before they run on a GPU or are merged. The
+author never reviews its own change; record the clearing review next to the
+change.
 
 ## Validation and performance
 

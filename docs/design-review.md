@@ -102,17 +102,14 @@ before committing; a design acknowledgment cannot authorize them.
     consumer. Wire-format compatibility alone is insufficient. Require regression
     tests for older serialized metadata and validation of affected loading and
     serving paths. Compatibility must apply across all affected model contracts.
-14. **Restrict Claude Opus 5.5 authorship of CUDA kernels and model optimizations.**
-    Claude Opus 5.5 has repeatedly produced defective low-level kernel changes
-    in this project. It must not design or implement low-level CUDA kernels
-    (CUDA C++, PTX, CuTe DSL, or Triton) or changes to existing model fusion and
-    GPU execution optimizations, including projection packing, fused arithmetic,
-    stream overlap, and scratch aliasing in optimized model paths. Do not
-    incorporate its generated changes to these mechanisms through another
-    contributor or agent. General PyTorch modeling, recipe integration,
-    checkpoint loading, frontend processing, preparation orchestration,
-    CLI/runtime work, tests, and documentation are permitted when they do not
-    design or change those restricted mechanisms.
+14. **Require independent review of Claude Opus 5.5 kernel and model-optimization changes.**
+    Any low-level CUDA kernel (CUDA C++, PTX, CuTe DSL, or Triton) or change to
+    model fusion and GPU execution optimizations (projection packing, fused
+    arithmetic, stream overlap, scratch aliasing in optimized model paths)
+    authored by Claude Opus 5.5 must be reviewed and cleared by Astra
+    (gpt-6-astra), Claude Fable, or Argon (gemini-4-argon) before it runs on a
+    GPU or is merged. The author never reviews its own change, and the clearing
+    review is recorded next to the change.
 15. **Reject scope expansion and weakened constraints.** Apply the
     [contribution rejection criteria](../AGENTS.md#contribution-scope-and-rejection-criteria)
     to code, tests, and documentation. Single-host and cross-node preparation
