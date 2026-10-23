@@ -41,9 +41,15 @@ def test_compacted_prefill_feedback_transitions_to_accepted_verification_under_n
             shard=TensorParallelShard(0, 4), prefixes=prefixes, dspark=True) as loader:
         config = loader.config
         draft = SimpleNamespace(main_projection=loader.load_linear("mtp.0.main_proj"),
+            context_kv=loader.load_linear_group(tuple(f"mtp.{i}.attn.wkv" for i in range(3))),
             main_norm=loader.load_tensor("mtp.0.main_norm.weight"), layers=tuple(
-                SimpleNamespace(attention={"main_kv": loader.load_linear(f"mtp.{i}.attn.wkv"),
-                    "kv_norm": loader.load_tensor(f"mtp.{i}.attn.kv_norm.weight")}) for i in range(3)))
+                SimpleNamespace(attention={"kv_norm": loader.load_tensor(f"mtp.{i}.attn.kv_norm.weight")}) for i in range(3)))
+        separate = [loader.load_linear(f"mtp.{i}.attn.wkv").weight for i in range(3)]
+        packed = draft.context_kv.weight
+        assert torch.equal(packed.values.view(torch.uint8),
+                           torch.cat([weight.values.view(torch.uint8) for weight in separate]))
+        assert torch.equal(packed.scale_rows[0].view(torch.uint8),
+                           torch.cat([weight.scale_rows[0].view(torch.uint8) for weight in separate]))
     weights = SimpleNamespace(config=config, draft=draft)
     pool = ContinuationPool.allocate(config, 4, 2, device, dspark=True)
     metadata = Metadata.allocate(4096, 1, 1, device)

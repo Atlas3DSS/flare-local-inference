@@ -8,7 +8,7 @@ import torch
 from ignition.recipes.deepseek41 import decoder
 
 
-@pytest.mark.parametrize("rows", [33, 48, 64, 96, 128, 129])
+@pytest.mark.parametrize("rows", [1, 2, 3, 4, 5, 8, 33, 48, 64, 96, 128, 129])
 @pytest.mark.parametrize("mode", ["decode", "verify", "draft", "prefill"])
 @pytest.mark.parametrize("overlap", [False, True])
 def test_layer_overlap_uses_physical_capacity_and_enabled_workspace(monkeypatch, rows, mode, overlap):
@@ -44,5 +44,5 @@ def test_layer_overlap_uses_physical_capacity_and_enabled_workspace(monkeypatch,
         shared, options = calls.pop()
         assert shared is layer.shared
         assert options == dict(parallel_plans=(layer.router_projection.plan, layer.router.plan,
-            layer.experts.plan), session=session, workspace=workspace, defer_launch=True)
+            layer.experts.plan), session=session, workspace=workspace, defer_launch=rows > 4)
     assert not calls

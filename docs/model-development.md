@@ -234,6 +234,9 @@ Keep ordinary tests and measurements; do not add development audit artifacts.
   Q/K/V, beta, and forget-gate input projections. Preserve each output's model
   semantics and calibrated scales. Inspect the full dependency chain rather
   than reproducing one kernel call per canonical module.
+  DeepSeek V4 and V4.1 pack all draft layers' context KV projections into one
+  projection of the normalized target feedback. Per-layer normalization, rotary
+  embedding, and accepted-token cache writes consume slices of the packed output.
 - **Respect layouts after fusion.** A column slice of a fused output can be
   contiguous for batch one and strided for multiple rows. Check downstream b12x
   input, output, stride, and alignment contracts for every graph capacity.
@@ -249,6 +252,11 @@ Keep ordinary tests and measurements; do not add development audit artifacts.
   order also affects scheduling. `ConcurrentSharedExpert(..., defer_launch=True)`
   records routed kernels before shared kernels while preserving the fork and
   join dependencies; measure this ordering in the complete model graph.
+  DeepSeek V4.1 records shared kernels first at capacities of one through four
+  rows, and routed kernels first at larger overlapping decode, verification,
+  and draft capacities. Other recipes retain their shape- and kernel-dependent
+  ordering; a crossover measured for one expert geometry does not establish
+  another geometry's crossover.
 - **Make overlap safe through compilation.** Declare every concurrently live
   plan with [ScratchArena.register_parallel](../ignition/preparation/scratch.py).
   Sequential work reuses storage; concurrent work gets disjoint storage sized

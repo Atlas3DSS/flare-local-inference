@@ -17,32 +17,33 @@ from ignition.preparation.scratch import ScratchArena
 from ignition.preparation.tuning import RecordedPreparationSession
 from ignition.recipes.deepseek41.weights import DeepSeekWeightLoader
 from ignition.recipes.deepseek41.decoder import Scratch
+from ignition.recipes.deepseek41.recipe import RECIPE
 
 
 pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
                               reason="requires an explicitly assigned CUDA device")
 
 
-@pytest.fixture(scope="module")
-def expert_weights():
+@pytest.fixture(scope="module", params=tuple(RECIPE.ranks), ids=lambda world: f"tp{world}")
+def expert_weights(request):
     snapshot = os.environ.get("FLARE_DS41_SNAPSHOT")
     if snapshot is None:
         pytest.skip("FLARE_DS41_SNAPSHOT must identify the checkpoint")
     with DeepSeekWeightLoader(inspect_indexed_checkpoint(Path(snapshot)), "cuda:0",
-            shard=TensorParallelShard(0, 4), prefixes=("layers.3.",)) as loader:
+            shard=TensorParallelShard(0, request.param), prefixes=("layers.3.",)) as loader:
         weights = loader.load_layer(3).experts
         config = loader.config.text
-    return weights, config
+    return weights, config, request.param
 
 
-@pytest.mark.parametrize("rows", [16, 24, 32, 33, 48, 64, 96, 128])
+@pytest.mark.parametrize("rows", [1, 2, 3, 4, 5, 8, 16, 24, 32, 33, 48, 64, 96, 128])
 @torch.no_grad()
 def test_shared_expert_join_precedes_input_and_scratch_reuse(expert_weights, rows):
-    weights, config = expert_weights
+    weights, config, world = expert_weights
     device = torch.device("cuda:0")
     arena = ScratchArena(device, overlap=True)
     source = torch.randn((rows, 5120), device=device, dtype=torch.bfloat16)
-    storage = Scratch.allocate(rows, rows, 4, device)
+    storage = Scratch.allocate(rows, rows, world, device)
     live, logits = storage.ffn_hc.normalized, storage.router_logits
     route, shared_buffers, routed = storage.router, storage.shared, storage.routed
     output, shared_output = torch.empty_like(source), torch.empty_like(source)
@@ -59,7 +60,7 @@ def test_shared_expert_join_precedes_input_and_scratch_reuse(expert_weights, row
             shared_buffers.output, session=session, name="shared", workspace=arena,
             swiglu_limit=config["swiglu_limit"], round_silu=False, activation_mode="auto")
         concurrent = ConcurrentSharedExpert(shared, parallel_plans=(projection.plan, router.plan, experts.plan),
-            session=session, workspace=arena, defer_launch=True)
+            session=session, workspace=arena, defer_launch=rows > 4)
         session.tune(show_progress=False)
 
         def forward():

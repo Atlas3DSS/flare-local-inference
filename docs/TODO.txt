@@ -107,3 +107,7 @@
 [ ] Investigate DeepSeek V4.1 grouped MoE CSF plan selection with representative
     routes: compare inline reconstruction and separate expansion in complete
     graphs before adding a preparation override. See performance-work.md.
+
+[ ] Run DeepSeek V4 packed-context native replay with its checkpoint and measure
+    exported V4/V4.1 packages with packed context projections. Compare GLM's
+    shared-expert launch order when the configured checkpoint shards are available.

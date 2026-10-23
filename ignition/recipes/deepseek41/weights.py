@@ -31,6 +31,7 @@ class LayerWeights:
 class DSparkWeights:
     layers: tuple[LayerWeights, ...]
     main_projection: object
+    context_kv: object
     main_norm: torch.Tensor
     norm: torch.Tensor
     markov_embedding: torch.Tensor
@@ -42,7 +43,9 @@ class DSparkWeights:
         config = loader.config.draft
         last = f"mtp.{config.layers - 1}"
         return cls(tuple(loader.load_layer(i, draft=True) for i in range(config.layers)),
-            loader.load_linear("mtp.0.main_proj"), loader.load_tensor("mtp.0.main_norm.weight"),
+            loader.load_linear("mtp.0.main_proj"),
+            loader.load_linear_group(tuple(f"mtp.{i}.attn.wkv" for i in range(config.layers))),
+            loader.load_tensor("mtp.0.main_norm.weight"),
             loader.load_tensor(last + ".norm.weight"), loader.load_tensor(last + ".markov_head.embed.weight"),
             loader.load_tensor(last + ".markov_head.head.weight"),
             loader.load_tensor(last + ".confidence_head.proj.weight") if confidence else None)
@@ -118,8 +121,6 @@ class DeepSeekWeightLoader(BlockFP8WeightLoader):
             "kv_norm": self.load_tensor(attn + ".kv_norm.weight"),
             "sink": self.load_tensor(attn + ".attn_sink", extent=slice(*shard.partition(64))),
         }
-        if draft:
-            result["main_kv"] = self.load_linear(attn + ".wkv")
         if not draft and layer in text["kv_source_layer_ids"]:
             ratio = text["compress_ratios"][layer]
             result["compressor"] = {

@@ -27,6 +27,7 @@ pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
 def test_prefill_context_tail_preserves_window_bytes_under_native_replay():
     snapshot = Path.home() / (
         ".cache/huggingface/hub/models--deepseek-ai--DeepSeek-V4-Flash-Vision-Exp/snapshots/" + REVISION)
+    snapshot = Path(os.environ.get("FLARE_DS4_SNAPSHOT", snapshot))
     if not (snapshot / "model.safetensors.index.json").is_file():
         pytest.skip("DeepSeek V4 Flash Vision checkpoint is unavailable")
     device = torch.device("cuda", 0)
@@ -37,9 +38,15 @@ def test_prefill_context_tail_preserves_window_bytes_under_native_replay():
             shard=TensorParallelShard(0, 2), prefixes=prefixes) as loader:
         config = loader.config
         draft = SimpleNamespace(main_projection=loader.load_linear("mtp.0.main_proj"),
+            context_kv=loader.load_linear_group(tuple(f"mtp.{i}.attn.wkv" for i in range(3))),
             main_norm=loader.load_tensor("mtp.0.main_norm.weight"), layers=tuple(
-                SimpleNamespace(attention={"main_kv": loader.load_linear(f"mtp.{i}.attn.wkv"),
-                    "kv_norm": loader.load_tensor(f"mtp.{i}.attn.kv_norm.weight")}) for i in range(3)))
+                SimpleNamespace(attention={"kv_norm": loader.load_tensor(f"mtp.{i}.attn.kv_norm.weight")}) for i in range(3)))
+        separate = [loader.load_linear(f"mtp.{i}.attn.wkv").weight for i in range(3)]
+        packed = draft.context_kv.weight
+        assert torch.equal(packed.values.view(torch.uint8),
+                           torch.cat([weight.values.view(torch.uint8) for weight in separate]))
+        assert torch.equal(packed.scale_rows[0].view(torch.uint8),
+                           torch.cat([weight.scale_rows[0].view(torch.uint8) for weight in separate]))
     weights = SimpleNamespace(config=config, draft=draft)
     pool = ContinuationPool.allocate(config, 3, 2, device)
     source = torch.randn((8192, len(config.draft.target_layers) * 4096), device=device, dtype=torch.bfloat16)

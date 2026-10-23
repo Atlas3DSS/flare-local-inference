@@ -31,6 +31,7 @@ class LayerWeights:
 class DSparkWeights:
     layers: tuple[LayerWeights, ...]
     main_projection: object
+    context_kv: object
     main_norm: torch.Tensor
     norm: torch.Tensor
     head_mix: dict
@@ -44,6 +45,7 @@ class DSparkWeights:
         return cls(
             tuple(loader.load_layer(i, draft=True) for i in range(c.layers)),
             loader.load_linear("mtp.0.main_proj"),
+            loader.load_linear_group(tuple(f"mtp.{i}.attn.wkv" for i in range(c.layers))),
             loader.load_tensor("mtp.0.main_norm.weight"),
             loader.load_tensor(last + ".norm.weight"),
             loader.load_head_mix(last + "."),
@@ -134,9 +136,7 @@ class DeepSeekWeightLoader(BlockFP8WeightLoader):
             "kv_norm": self.load_tensor(attn + ".kv_norm.weight"),
             "sink": self.load_tensor(attn + ".attn_sink", extent=slice(*shard.partition(64))),
         }
-        if draft:
-            attention["main_kv"] = self.load_linear(attn + ".wkv")
-        else:
+        if not draft:
             ratio = text["compress_ratios"][layer]
             if ratio:
                 attention["compressor"] = self.load_compressor(attn + ".compressor")

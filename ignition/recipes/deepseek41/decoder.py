@@ -173,7 +173,8 @@ class PreparedLayer:
         if mode in ("decode", "verify", "draft") and s.ffn_hc.normalized.shape[0] <= 128 and workspace.overlap:
             self.concurrent_shared = ConcurrentSharedExpert(self.shared,
                 parallel_plans=(self.router_projection.plan, self.router.plan, self.experts.plan),
-                session=session, workspace=workspace, defer_launch=True)
+                session=session, workspace=workspace,
+                defer_launch=s.ffn_hc.normalized.shape[0] > 4)
         self.mlp_reduce = PreparedAllReduce(s.mlp_partial, s.mlp_output, runtime=runtime,
             coordinator=coordinator, session=session, name=name + ".mlp_reduce")
         self.post = None if defer_post else PreparedMHCPost(s.mlp_output, s.ffn_hc.residual,

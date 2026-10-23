@@ -142,8 +142,8 @@ class PreparedContext:
             (tokens, weights.config.text["hidden_size"]), dtype=torch.bfloat16, device=device
         )
         self.main = torch.zeros_like(self.projected)
-        self.kv = torch.zeros((tokens, 512), dtype=torch.bfloat16, device=device)
-        self.normalized = torch.zeros_like(self.kv)
+        self.kv = torch.zeros((tokens, 512 * len(draft.layers)), dtype=torch.bfloat16, device=device)
+        self.normalized = torch.zeros((tokens, 512), dtype=torch.bfloat16, device=device)
         self.slots = torch.full((tokens,), -1, dtype=torch.int64, device=device)
         self.project = QuantizedProjection(
             auxiliary,
@@ -162,20 +162,21 @@ class PreparedContext:
             session=session,
             name=name + ".main_norm",
         )
+        self.context_projection = QuantizedProjection(
+            self.main,
+            draft.context_kv,
+            self.kv,
+            session=session,
+            name=name + ".kv",
+            workspace=workspace,
+            activation_mode="auto",
+        )
         self.rotary = Rotary(weights.config, device)
         self.stages = []
         for index, layer in enumerate(draft.layers):
-            projection = QuantizedProjection(
-                self.main,
-                layer.attention["main_kv"],
-                self.kv,
-                session=session,
-                name=f"{name}.{index}.kv",
-                workspace=workspace,
-                activation_mode="auto",
-            )
+            part = self.kv[:, index * 512:(index + 1) * 512]
             norm = PreparedRMSNorm(
-                self.kv,
+                part,
                 layer.attention["kv_norm"],
                 self.normalized,
                 eps=weights.config.text["rms_norm_eps"],
@@ -192,7 +193,7 @@ class PreparedContext:
                 name=f"{name}.{index}.write",
                 cache_format=cache_format,
             )
-            self.stages.append((projection, norm, writer))
+            self.stages.append((part, norm, writer))
 
     def __call__(self, auxiliary, counts):
         m = self.metadata
@@ -212,8 +213,9 @@ class PreparedContext:
             live = (positions >= 0) & (offset < count) & (offset >= (count - 128).clamp_min(0))
             self.slots.copy_(torch.where(live, m.state_rows[m.requests] * 128 + positions % 128, -1))
         self.norm(self.project(auxiliary))
-        for projection, norm, writer in self.stages:
-            norm(projection(self.main))
+        self.context_projection(self.main)
+        for part, norm, writer in self.stages:
+            norm(part)
             self.rotary.apply(self.normalized, positions.clamp_min(0), compressed=False)
             writer(self.normalized)
 
