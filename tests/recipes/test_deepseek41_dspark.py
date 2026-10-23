@@ -16,7 +16,7 @@ def test_dspark_defaults_to_five_drafts_with_adaptive_verification():
     assert config.split_speculation and config.packed_verification
     assert config.draft_prefix_selection == "gpu"
     assert RECIPE.speculation.draft_tokens == 5 and RECIPE.max_draft_tokens == 7
-    assert RECIPE.speculation.adaptive and not RECIPE.history_copy
+    assert RECIPE.speculation.adaptive
     assert PreparationConfig(dspark=False).speculative_shapes == ()
     assert PreparationConfig(dspark=False).draft_tokens == 0
     with pytest.raises(ValueError):

@@ -141,7 +141,7 @@ def kv_pressure_geometry(memory: dict, metrics: dict, context: int) -> dict:
         raise ValueError("KV pressure requires the reported snapshot capacity and four idle request slots")
     if context <= 0 or context % 64:
         raise ValueError("prepared context must be positive and 64-token aligned")
-    draft_pages = int(memory.get("speculative_proposal_source") == "mtp")
+    draft_pages = int(memory.get("mtp_weights_bytes", 0) > 0)
     reservation = context // 64 + draft_pages
     holders = pages // reservation
     if not 1 <= holders < totals["slots"]:

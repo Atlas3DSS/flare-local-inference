@@ -147,6 +147,13 @@ def test_export_records_rebuild_settings_and_closes_preparation(host):
     assert rebuild.tensor_parallel == 1 and len(rebuild.source_identity) == 64
     assert rebuild.prefill_chunk == host['plan'].prefill_chunk
     assert rebuild.speculation['draft_tokens'] == host['plan'].speculation.draft_tokens
+    assert 'history_drafts' not in host['options']
+    assert 'history_drafts' not in rebuild.speculation
+    from google.protobuf.json_format import ParseDict
+    from ignition.preparation.runtime_package_pb2 import RebuildManifest
+    encoded = ParseDict(host['options']['rebuild_manifest'], RebuildManifest()).SerializeToString()
+    decoded = RebuildManifest.FromString(encoded)
+    assert 'history_drafts' not in {field.name for field, _ in decoded.speculation.ListFields()}
     assert not rebuild.compiled_forwards and not rebuild.local_checkpoint
     from ignition.preparation.rebuild_manifest import from_plan
     local = ResolvedModel(host['plan'].recipe, host['plan'].checkpoint, Path('/local/checkpoint'))
@@ -284,12 +291,32 @@ def test_diagnostic_admission_rejects_insufficient_execution_backing():
 
 def test_preparation_flags_reach_the_exported_plan(host):
     assert export("qwen3.8-flash", "--max-concurrency", "2", "--prefill-chunk-size", "1024",
-               "--mtp-draft-tokens", "2", "--no-mtp-adaptive-verification", "--history-drafts") == 0
+               "--mtp-draft-tokens", "2", "--no-mtp-adaptive-verification") == 0
     plan = host["plan"]
     assert (plan.concurrency, plan.prefill_chunk) == (2, 1024)
-    assert (plan.speculation.draft_tokens, plan.speculation.adaptive, plan.speculation.history_drafts) == (2, False, True)
+    assert (plan.speculation.draft_tokens, plan.speculation.adaptive) == (2, False)
     assert export("qwen3.8-flash", "--no-mtp") == 0
     assert host["exports"] == 2 and host["plan"].speculation is None
+
+
+@pytest.mark.parametrize('flags,enabled', [
+    ([], None), (['--history-drafts'], True), (['--no-history-drafts'], False),
+    (['--history-drafts', '--no-history-drafts'], False),
+])
+def test_history_drafts_reach_serving_without_changing_preparation(host, monkeypatch, flags, enabled):
+    received = []
+    monkeypatch.setattr(serve, '_serve_prepared', lambda prepared, bind, options: received.append(options) or 0)
+    assert main(['serve', 'qwen3.8-flash', '--port', str(free_port()), *flags]) == 0
+    assert host['plan'].speculation == resolve('qwen3.8-flash').recipe.speculation
+    assert received[0].get('history_drafts') is enabled
+    assert host['exports'] == 0
+
+
+@pytest.mark.parametrize('flags', [['--no-mtp'], ['--mtp-draft-tokens', '0'], ['--direct']])
+def test_history_drafts_reject_disabled_or_direct_execution(host, capsys, flags):
+    assert main(['serve', 'qwen3.8-flash', '--port', str(free_port()), '--history-drafts', *flags]) == 2
+    assert '--history-drafts requires' in capsys.readouterr().err
+    assert 'prepared' not in host
 
 
 @pytest.mark.parametrize("overlap", [False, True])

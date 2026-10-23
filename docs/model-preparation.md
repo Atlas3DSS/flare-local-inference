@@ -231,6 +231,10 @@ retain draft context so adaptive verification can resume wider rounds.
 
 ## Qwen3.8 Flash
 
+Enable hybrid history drafting at serving startup with
+`flare run PACKAGE --history-drafts`; disable it with `--no-history-drafts`.
+These options use the package's existing MTP graphs and are not export settings.
+
 Export Qwen with up to five MTP draft tokens per round:
 
 ```sh

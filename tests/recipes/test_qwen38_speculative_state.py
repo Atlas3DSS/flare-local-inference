@@ -143,7 +143,6 @@ def test_recursive_draft_reorders_residuals_and_physical_copy_hints(temperature,
     owner.copy_ids[3, 0] = 27
     operation = PreparedSpeculativeRound.__new__(PreparedSpeculativeRound)
     operation.owner, operation.batch, operation.width = owner, batch, width
-    operation.copy_only = False
     operation.token_limits = None
     operation.state = SimpleNamespace(_validate=lambda: None, token_ids=torch.zeros(batch * width, dtype=torch.int64),
         qsa=SimpleNamespace(rope_positions=torch.zeros((batch * width, 3), dtype=torch.int64)))

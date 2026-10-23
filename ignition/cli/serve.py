@@ -382,6 +382,8 @@ def serve(args) -> int:
         raise UsageError("--graph-times applies only to --direct execution")
     if args.eager and args.graph_times is not None and not args.graph_times.is_file():
         raise UsageError(f"--graph-times {args.graph_times} does not exist; graph replay with --graph-times saves it")
+    if args.direct and args.history_drafts:
+        raise UsageError("--history-drafts requires native serving; it does not apply to --direct")
     if not args.direct:
         requirement = ("ignition serve requires Heliopause's qualification Cargo feature; rebuild ./heliopause "
                        "with --config-settings 'build-args=--features=qualification'")
@@ -440,6 +442,10 @@ def serve(args) -> int:
     environment.apply(configuration, local, plan.recipe.b12x_environment)
     options = _server_options(configuration, model, plan)
     print(json.dumps({"plan": plan.to_dict()}), file=sys.stderr, flush=True)
+    if args.history_drafts is not None:
+        if args.history_drafts and (plan.speculation is None or plan.speculation.draft_tokens == 0):
+            raise UsageError("--history-drafts requires enabled learned speculation")
+        options["history_drafts"] = args.history_drafts
     preparation_options = {} if args.direct else {"retain_graphs": True}
     storage = None
     if rendezvous is None:

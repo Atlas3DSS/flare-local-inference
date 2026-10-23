@@ -1,4 +1,4 @@
-"""Captured MTP or copied proposals, target verification, and commit rounds."""
+"""Captured MTP proposals with optional history augmentation, target verification, and commit rounds."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from .draft_state import DRAFT_RAW_FIELDS, DraftMetadata
 from ignition.components.gdn_recovery import GDNLayerRecords, PreparedGDNCommit
 from .mtp import MTPScratch, PreparedMTP
 from ignition.components.speculation import (
-    DRAFT_RNG_DOMAIN, PreparedCopyProposals, PreparedSpeculativeCommit,
+    DRAFT_RNG_DOMAIN, PreparedSpeculativeCommit,
     PreparedSpeculativeDistributions, PreparedStochasticVerification, SpeculativeRngState,
 )
 from .speculative_state import PreparedVerificationState
@@ -24,13 +24,10 @@ class SpeculativePreparation:
 
     def __init__(self, *, weights, mtp_weights, pool, requests, inputs, scratch,
                  workspaces, rotary, cache, table, session, completion, frame, sequence,
-                 context, prefill_capacity, max_cache_pages, proposal_source="mtp",
+                 context, prefill_capacity, max_cache_pages,
                  runtime=None, vocabulary_runtime=None, coordinator=None, verification_width=8,
                  sampling_workspace=None, graph_buffers=None):
-        if proposal_source not in ("mtp", "copy"):
-            raise ValueError("speculative proposal source must be mtp or copy")
         self.collectives = dict(runtime=runtime, vocabulary_runtime=vocabulary_runtime, coordinator=coordinator)
-        self.proposal_source = proposal_source
         self.weights, self.mtp_weights, self.pool, self.requests = weights, mtp_weights, pool, requests
         self.inputs, self.scratch, self.workspaces, self.rotary = inputs, scratch, workspaces, rotary
         self.cache, self.table, self.session = cache, table, session
@@ -45,24 +42,18 @@ class SpeculativePreparation:
         self.sampling_buffers = GraphBufferPool(device, chunk_bytes=2 << 20)
         self.verification_residual = torch.zeros((b * w, 10240), dtype=torch.bfloat16, device=device)
         self.mtp_scratch = MTPScratch.allocate(prefill_capacity, requests.capacity, device, world_size=weights.shard.world_size,
-            buffers=None if graph_buffers is None else graph_buffers.cursor()) if proposal_source == "mtp" else None
+            buffers=None if graph_buffers is None else graph_buffers.cursor())
         # Feedback is consumed before the MTP mixer writes normalized activations.
-        self.feedback_hidden = (self.mtp_scratch.hyperconnection.normalized
-                                if self.mtp_scratch is not None else None)
-        self.prefill_residual = scratch.residual if self.mtp_scratch is not None else None
-        self.raw_backup = ({} if proposal_source == "copy" else
-            {name: torch.empty_like(getattr(cache[48], name)) for name in DRAFT_RAW_FIELDS})
+        self.feedback_hidden = self.mtp_scratch.hyperconnection.normalized
+        self.prefill_residual = scratch.residual
+        self.raw_backup = {name: torch.empty_like(getattr(cache[48], name)) for name in DRAFT_RAW_FIELDS}
         self.previous_accepted = torch.ones(requests.capacity, dtype=torch.int32, device=device)
         self.candidates = torch.zeros((requests.capacity, 8), dtype=torch.int64, device=device)
-        self.draft_tables = (torch.full((requests.capacity, context // 64), -1, dtype=torch.int32, device=device)
-                             if proposal_source == "mtp" else None)
+        self.draft_tables = torch.full((requests.capacity, context // 64), -1, dtype=torch.int32, device=device)
         self.copy_ids = torch.full((requests.capacity, 7), -1, dtype=torch.int64, device=device)
         self.copy_count = torch.zeros(requests.capacity, dtype=torch.int32, device=device)
         self.copy_expected = torch.full((requests.capacity,), -1, dtype=torch.int64, device=device)
         self.copy_generation = torch.zeros(requests.capacity, dtype=torch.int64, device=device)
-        self.copy_grammar_mask = torch.zeros((requests.capacity, 8, (requests.vocab_size + 31) // 32), dtype=torch.int32, device=device)
-        self.copy_grammar_mask_count = torch.zeros(requests.capacity, dtype=torch.int32, device=device)
-        self.accepted_generation = torch.zeros(requests.capacity, dtype=torch.int64, device=device)
         self.rng = SpeculativeRngState.allocate(device, capacity=requests.capacity)
         self.draft_rng_generation = torch.zeros(requests.capacity, dtype=torch.int64, device=device)
         self.draft_rng_offset = torch.zeros(requests.capacity, dtype=torch.int64, device=device)
@@ -80,15 +71,10 @@ class SpeculativePreparation:
     def buffers(self):
         buffers = {"copy_token_ids": self.copy_ids, "copy_token_count": self.copy_count,
                    "copy_expected_consumed": self.copy_expected, "copy_generation": self.copy_generation,
-                   "copy_grammar_mask": self.copy_grammar_mask,
-                   "copy_grammar_mask_count": self.copy_grammar_mask_count}
-        if self.draft_tables is not None:
-            buffers["draft_page_tables"] = self.draft_tables
+                   "draft_page_tables": self.draft_tables}
         return buffers
 
     def mtp(self, metadata, name, *, cache_only=False):
-        if self.proposal_source != "mtp":
-            raise RuntimeError("copy proposals do not construct an MTP module")
         module = PreparedMTP(self.mtp_weights, self.mtp_scratch.rows(metadata.tokens, metadata.rows),
             metadata.token_ids, metadata.hidden, self.cache[48], metadata.qsa, self.rotary,
             self.workspaces, output_indices=metadata.output_indices, session=self.session,
@@ -97,8 +83,6 @@ class SpeculativePreparation:
         return module
 
     def prefill(self, decoder, name):
-        if self.proposal_source == "copy":
-            return decoder
         operation = PreparedPrefillAbsorption(self, decoder, name)
         self.owners.append(operation)
         return operation
@@ -186,13 +170,10 @@ class PreparedSpeculativeRound:
             gdn_records=owner.gdn_records if width > 1 else None,
             gdn_in_place=width == 1 and owner.gdn_records is not None, **owner.collectives)
         owner.decoders.append(getattr(self.decoder, "forward", self.decoder))
-        self.copy_only = owner.proposal_source == "copy"
-        self.draft_metadata = (owner.draft_metadata(batch, batch)
-                               if not self.copy_only else None)
-        self.draft = owner.mtp(self.draft_metadata, f"{name}.draft") if width > 1 and not self.copy_only else None
-        self.absorb_metadata = (owner.draft_metadata(batch * width, batch)
-                                if not self.copy_only else None)
-        self.absorb = owner.mtp(self.absorb_metadata, f"{name}.absorb", cache_only=True) if not self.copy_only else None
+        self.draft_metadata = owner.draft_metadata(batch, batch)
+        self.draft = owner.mtp(self.draft_metadata, f"{name}.draft") if width > 1 else None
+        self.absorb_metadata = owner.draft_metadata(batch * width, batch)
+        self.absorb = owner.mtp(self.absorb_metadata, f"{name}.absorb", cache_only=True)
         self.before = torch.zeros(batch, dtype=torch.int64, device=device)
         self.pending = torch.zeros(batch, dtype=torch.int64, device=device)
         self.previous = torch.zeros((batch, 10240), dtype=torch.bfloat16, device=device)
@@ -204,7 +185,7 @@ class PreparedSpeculativeRound:
 
         buffers = owner.sampling_buffers.cursor()
         self.sampling_scratch = prepare_sampling_scratch(batch, width, owner.requests.vocab_size, device,
-                                                         buffers=buffers, proposal=not self.copy_only)
+                                                         buffers=buffers, proposal=True)
         self.draft_probabilities = buffers.zeros((batch, width - 1, owner.requests.vocab_size), torch.float32)
         self.draft_valid = torch.zeros((batch, width - 1), dtype=torch.bool, device=device)
         self.offered = torch.full((batch,), width - 1, dtype=torch.int32, device=device)
@@ -216,13 +197,6 @@ class PreparedSpeculativeRound:
         self.offset = torch.zeros(batch, dtype=torch.int64, device=device)
         self.base_offset = torch.zeros(batch, dtype=torch.int64, device=device)
         self.sampled = torch.zeros(batch, dtype=torch.int64, device=device)
-        self.copy_proposals = (PreparedCopyProposals(owner.requests, owner.inputs.row_slot_ids[:batch],
-            owner.inputs.row_generations[:batch], owner.inputs.live_rows,
-            copy_ids=owner.copy_ids, copy_count=owner.copy_count, copy_expected=owner.copy_expected,
-            copy_generation=owner.copy_generation, grammar_mask_count=owner.copy_grammar_mask_count,
-            draft_ids=self.drafts, draft_probabilities=self.draft_probabilities, draft_valid=self.draft_valid,
-            copy_mask=self.copy_mask, previous_accepted=owner.previous_accepted,
-            accepted_generation=owner.accepted_generation, token_limits=self.token_limits) if self.copy_only else None)
         self.broadcast_buffers, self.name = buffers, name
         self.operations = None
 
@@ -233,14 +207,11 @@ class PreparedSpeculativeRound:
         slots, epochs = o.inputs.row_slot_ids[:b], o.inputs.row_generations[:b]
         target = PreparedSpeculativeDistributions(self.decoder.scratch.logits.view(b, w, -1),
             o.requests, slots, epochs, o.inputs.live_rows, self.drafts,
-            grammar_masks=o.copy_grammar_mask if self.copy_only else None,
-            grammar_mask_count=o.copy_grammar_mask_count if self.copy_only else None,
             workspace=self.sampling_scratch["target"])
-        proposals = (() if self.copy_only else
-            tuple(PreparedDraftDistribution(self.draft.scratch.logits.view(b, 1, -1),
+        proposals = tuple(PreparedDraftDistribution(self.draft.scratch.logits.view(b, 1, -1),
             o.requests, slots, epochs, o.inputs.live_rows, self.drafts, prefix_offset=index,
             seed=self.seed, offset=self.offset, sampled=self.sampled,
-            workspace=self.sampling_scratch["proposal"]) for index in range(w - 1)))
+            workspace=self.sampling_scratch["proposal"]) for index in range(w - 1))
         target.prepare()
         for proposal in proposals:
             proposal.prepare()
@@ -255,7 +226,7 @@ class PreparedSpeculativeRound:
         commit = PreparedSpeculativeCommit(o.requests, verify.output,
             self.state.token_ids.view(b, w), slots, epochs, o.inputs.live_rows,
             o.completion, o.frame, o.sequence, logits=self.decoder.scratch.logits.view(b, w, -1), rng=o.rng, copy_offered_mask=self.copy_mask,
-            draft_context_lag=None if self.copy_only else 1, token_limits=self.token_limits)
+            draft_context_lag=1, token_limits=self.token_limits)
         commit.prepare()
         self.state.prepare_commit(commit.emitted_count, commit.consumed_before,
                                   self.target_residual, self.decoder.scratch.sample_hidden)
@@ -274,8 +245,6 @@ class PreparedSpeculativeRound:
         target, proposals, verify, commit, model_commit = self.operations
         slots = o.inputs.row_slot_ids[:b]
         self.state._validate()
-        if self.copy_only:
-            self.copy_proposals()
         safe = slots.long().clamp(0, o.requests.capacity - 1)
         self.active.copy_((self.rows < o.inputs.live_rows[0]) & (slots >= 0) & (slots < o.requests.capacity)
             & (o.requests.generation[safe] == o.inputs.row_generations[:b]) & (o.requests.status[safe] == 1))
@@ -285,10 +254,9 @@ class PreparedSpeculativeRound:
         gather_rows(o.pool.region("target_residual_position"), o.inputs.request_state_rows[safe, 0], self.previous_rope)
         for name, backup in self.raw_backup.items():
             backup.copy_(getattr(o.cache[48], name))
-        if not self.copy_only:
-            self.copy_mask.zero_()
-            self.drafts.zero_()
-            self.draft_valid.zero_()
+        self.copy_mask.zero_()
+        self.drafts.zero_()
+        self.draft_valid.zero_()
         self.base_offset.copy_(torch.where(o.draft_rng_generation[safe] == o.requests.generation[safe],
                                           o.draft_rng_offset[safe], 0))
         self.seed.copy_(o.requests.seed.view(torch.int64)[safe] ^ DRAFT_RNG_DOMAIN)
@@ -316,7 +284,7 @@ class PreparedSpeculativeRound:
             self.copy_mask.bitwise_or_(copy.long() * (1 << index))
             self.drafts[:, index].copy_(self.sampled)
             self.draft_valid[:, index].copy_(copy | proposal.valid[:, 0])
-        if w > 1 and not self.copy_only:
+        if w > 1:
             # One masked update per tensor instead of one storage write per request slot.
             slot_ids = torch.arange(o.requests.capacity, device=slots.device)
             match = self.active[None, :] & (slots[None, :] == slot_ids[:, None])
@@ -334,8 +302,6 @@ class PreparedSpeculativeRound:
         commit()
         for operation in model_commit:
             operation()
-        if self.copy_only:
-            return
         for name, backup in self.raw_backup.items():
             getattr(o.cache[48], name).copy_(backup)
         residual = self.target_residual.view(b, w, 10240)

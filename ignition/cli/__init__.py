@@ -58,6 +58,9 @@ def _parser() -> argparse.ArgumentParser:
     serving.add_argument("--prefix-cache-states", type=int, metavar="N",
                          help="advanced: cached request states kept resident for prefix reuse; fewer leave more"
                               " memory for KV pages (default: sized from free memory)")
+    serving.add_argument("--history-drafts", action=argparse.BooleanOptionalAction, default=None,
+                         help="augment learned drafts with continuations from shared decoded history;"
+                              " requires prepared history inputs (default: off)")
     diagnostics = serving.add_argument_group(
         "diagnostics", "Ignition's direct execution reproduces model-level faults without Helios. It is a"
                        " diagnostic and qualification path, not production serving.")
@@ -160,11 +163,6 @@ def _preparation_arguments(running):
                           help="maximum captured packed round graphs, independently of target-token rows;"
                                " excludes mandatory width-one and ordinary graphs. Requires packed adaptive"
                                " learned speculation (default: see MODEL --help)")
-    speculative.add_argument("--mtp-proposal-source", choices=("mtp", "copy"),
-                          help="where drafts come from: the learned draft model, or copy for continuations"
-                               " from shared decoded history, which loads no draft model (default: mtp)")
-    speculative.add_argument("--history-drafts", action="store_true",
-                          help="also draft continuations copied from shared decoded history")
     advanced = running.add_argument_group("advanced options")
     advanced.add_argument("--mla-compute-mode", choices=("auto", "bf16"), default="auto",
                           help="constrain MLA arithmetic while retaining packed KV storage and compatible"

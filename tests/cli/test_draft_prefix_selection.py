@@ -58,8 +58,6 @@ def test_gpu_prefix_selection_is_printed():
 
 @pytest.mark.parametrize("flags,message", [
     (("--no-mtp-adaptive-verification",), "requires adaptive verification"),
-    (("--mtp-proposal-source", "copy"), "drafts only with its MTP module"),
-    (("--history-drafts",), "drafts only with its MTP module"),
 ])
 def test_incompatible_selection_fails_before_preparation(flags, message):
     with pytest.raises(UsageError, match=message):
@@ -75,7 +73,7 @@ def test_width_one_and_disabled_speculation_preserve_their_meaning():
 
 @pytest.mark.parametrize("flags", [
     ("--mtp-draft-tokens", "0"), ("--speculative-token-capacity", "128"),
-    ("--no-mtp-adaptive-verification",), ("--history-drafts",),
+    ("--no-mtp-adaptive-verification",),
 ])
 def test_no_mtp_rejects_explicit_speculation_flags(flags):
     with pytest.raises(UsageError, match="cannot accompany"):

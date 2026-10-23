@@ -47,7 +47,7 @@ class PreparedMixedRound:
         self.decode_completion = owner.completion.private(private)
         self.prompt_decoder = SimpleNamespace(state=self.prompt_state)
         self.absorb = None
-        if enabled and owner.proposal_source == "mtp":
+        if enabled:
             prompt_owner = copy(owner)
             prompt_owner.inputs = self.prompt_inputs
             self.absorb = PreparedPrefillAbsorption(prompt_owner, self.prompt_decoder, f"{name}.prompt",

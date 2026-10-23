@@ -7,10 +7,14 @@ Flare's speculative engine supports the embedded MTP modules in
 weights, kernels, storage and CUDA graphs; Rust schedules requests and launches
 graphs. Acceptance and token feedback remain on the device. Speculative serving uses a versioned token-vector completion contract.
 Ignition prepares the recipe's learned drafter unless `--no-mtp` is given. The advanced flags
-select the draft-token maximum, the default verification policy, and the
-proposal source. Qwen's `--mtp-proposal-source copy` drafts from shared decoded
-history without loading an MTP module. `--history-drafts` adds those proposals
-to the learned MTP source and is disabled by default.
+select the draft-token maximum and default verification policy.
+`flare run PACKAGE --history-drafts` augments Qwen's learned MTP proposals
+with continuations from shared decoded history. `--no-history-drafts` disables
+that augmentation. History drafting defaults to off and is selected at startup;
+Ignition exports no history preference. Both settings use the same captured
+MTP graphs and buffers. Development native `ignition serve` accepts the same
+options. Existing packages retain their recorded defaults unless overridden;
+existing copy-only packages remain loadable.
 
 With copying enabled, each loaded model retains the most recent 65,536 committed
 generated tokens across requests in a host-memory ring. Exact eight-token and four-token indexes
@@ -305,8 +309,6 @@ operation: prefill+mtp_absorb | resume+mtp_seed | speculative_round | maintenanc
 request_capacity: B
 verification_width: W
 sampling_mode: general
-proposal_source: mtp | copy
-history_drafts: boolean
 state_layout_version, arithmetic_policy, checkpoint_identity
 ```
 
@@ -449,10 +451,11 @@ PLE and QSA histories.
    timeline; use explicit timing instrumentation or correlated profiler traces.
 2. **Copy transaction and ABI.** Implement bounded vector completions,
    verification-row logits, state selection and persistent outputs using public
-   operators and host-supplied copied continuations. Qualify every accepted
-   count, prefix publication, and cloned per-candidate grammar states without
-   loading MTP weights. Stochastic copy verification uses a point-mass proposal
-   distribution at each copied token.
+   operators and host-supplied history continuations alongside learned MTP
+   proposals. Qualify every accepted count and prefix publication.
+   Stochastic history verification uses a point-mass proposal distribution
+   at each copied token. Requests requiring per-token host decisions use the
+   scheduler's existing constrained execution path.
 3. **MTP weights and arithmetic.** Load the exact W4A16 experts and BF16 tensors;
    qualify feedback, target-hidden alignment, draft attention, routed/shared
    experts and logits against component operator references. Match activation

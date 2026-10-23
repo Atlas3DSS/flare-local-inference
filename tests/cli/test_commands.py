@@ -152,7 +152,6 @@ def test_speculation_flags_override_the_recipe():
     assert default == resolve("qwen3.8-flash").recipe.speculation
     assert (default.draft_tokens, default.adaptive, default.widths, default.fixed_width) == (
         5, True, (1, 2, 3, 4, 5, 6), None)
-    assert (default.proposal_source, default.history_drafts) == ("mtp", False)
     assert speculation("--no-mtp") is None
     # Verification adapts among every count up to the draft-token setting unless it is fixed.
     reduced = speculation("--mtp-draft-tokens", "3")
@@ -163,9 +162,6 @@ def test_speculation_flags_override_the_recipe():
     assert speculation("--no-mtp-adaptive-verification").fixed_width == 6
     assert speculation("--mtp-draft-tokens", "0").widths == (1,)
     assert speculation("--mtp-draft-tokens", "7").draft_tokens == 7
-    copied = speculation("--mtp-proposal-source", "copy")
-    assert copied.proposal_source == "copy" and not copied.learned and not copied.history_drafts
-    assert speculation("--history-drafts").history_drafts
     assert speculation(model="glm-5.3-flash").draft_tokens == 5
     assert speculation("--no-mtp", model="glm-5.3-flash") is None
 
@@ -190,7 +186,6 @@ def test_deepseek_defaults_to_five_adaptive_drafts_and_accepts_explicit_override
     (["--no-mtp", "--mtp-draft-tokens", "2"], "--no-mtp disables speculation; --mtp-draft-tokens cannot"),
     (["--no-mtp", "--no-mtp-adaptive-verification"],
      "--no-mtp disables speculation; --no-mtp-adaptive-verification cannot accompany it"),
-    (["--no-mtp", "--history-drafts"], "--no-mtp disables speculation; --history-drafts cannot accompany it"),
     (["--mtp-draft-tokens", "8"], "--mtp-draft-tokens must be 0 through 7; --no-mtp disables speculation"),
     (["--mtp-draft-tokens", "-1"], "--mtp-draft-tokens must be 0 through 7"),
 ])
@@ -208,15 +203,6 @@ def test_speculation_flags_have_one_spelling(host, capsys):
     capsys.readouterr()
 
 
-def test_history_copy_flags_apply_only_to_recipes_that_support_them(host, capsys):
-    assert export("glm-5.3-flash", "--mtp-proposal-source", "copy") == 2
-    assert "glm-5.3-flash drafts only with its MTP module; --mtp-proposal-source copy does not apply" in (
-        failure(capsys)[0])
-    assert export("glm-5.3-flash", "--history-drafts") == 2
-    assert "--history-drafts does not apply" in failure(capsys)[0]
-    with pytest.raises(SystemExit):
-        main(["export", "qwen3.8-flash", "--mtp-proposal-source", "ngram"])
-    capsys.readouterr()
 
 
 def test_fetch_downloads_the_pinned_revision_into_the_hub_cache(host, tmp_path, monkeypatch):
@@ -249,10 +235,9 @@ def test_deepseek_v4_vision_uses_only_checkpoint_integrated_dspark():
 
     default = speculation(model="deepseek-v4-flash")
     assert default.draft_tokens == 5 and default.adaptive
-    assert default.proposal_source == "mtp" and default.history_drafts is False
     assert speculation("--mtp-draft-tokens", "0", model="deepseek-v4-flash").widths == (1,)
     assert speculation("--no-mtp", model="deepseek-v4-flash") is None
-    for flags in (("--mtp-draft-tokens", "6"), ("--mtp-proposal-source", "copy"), ("--history-drafts",)):
+    for flags in (("--mtp-draft-tokens", "6"),):
         with pytest.raises(UsageError):
             speculation(*flags, model="deepseek-v4-flash")
 

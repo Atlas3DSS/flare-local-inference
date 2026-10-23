@@ -13,7 +13,6 @@ from ignition.recipes.declaration import Speculation
 HUB = Path.home() / ".cache/huggingface/hub"
 QWEN = resolve("qwen3.8-flash")
 GLM = resolve("glm-5.3-flash")
-COPY = Speculation(3, proposal_source="copy")
 
 
 @pytest.mark.parametrize("alias,drafts,graphs,options", [
@@ -53,7 +52,7 @@ def test_qwen_state_rows_and_pages_match_the_prepared_layouts(world_size):
 
     recipe = QWEN.recipe
     assert recipe.speculation == Speculation(draft_tokens=5, token_capacity=128) and recipe.max_draft_tokens == 7
-    assert recipe.speculation.adaptive and recipe.history_copy
+    assert recipe.speculation.adaptive
 
     def layer(speculative_tokens):
         geometry = qsa.cache_requirements(main_page_size=recipe.page_tokens, position_axes=3,
@@ -65,7 +64,7 @@ def test_qwen_state_rows_and_pages_match_the_prepared_layouts(world_size):
 
     # Layers 3, 7, ..., 47 each own one page pool; learned drafts add the draft layer's.
     target = len(range(3, 48, 4))
-    for speculation, tokens, layers in ((recipe.speculation, 7, target + 1), (COPY, 7, target), (None, 0, target)):
+    for speculation, tokens, layers in ((recipe.speculation, 7, target + 1), (None, 0, target)):
         costs = recipe.costs(world_size, speculation)
         assert costs.state_row_bytes == HybridStateLayout.build(
             speculative_tokens=tokens, world_size=world_size).row_bytes
@@ -141,7 +140,7 @@ def test_glm_state_rows_and_pages_match_the_continuation_pool(world_size):
 
     recipe = GLM.recipe
     assert recipe.speculation == Speculation(draft_tokens=5, token_capacity=128) and recipe.max_draft_tokens == 7
-    assert not recipe.history_copy and recipe.page_tokens == 256
+    assert recipe.page_tokens == 256
     layer_types = tuple("indexed_attention" if index % 4 == 3 else "linear_attention" for index in range(45))
     target = layer_types.count("indexed_attention")
     # Learned drafts add the draft layer's latent and index pages to the target's.
@@ -161,7 +160,7 @@ def test_weights_exclude_the_draft_model_unless_drafts_are_learned(model):
     learned = recipe.weights_bytes(checkpoint, world, recipe.speculation)
     loaded = checkpoint.device_bytes + checkpoint.expansion_bytes
     assert learned == -(-loaded // world) and 0 < checkpoint.draft_bytes < checkpoint.device_bytes
-    for speculation in (None, COPY):
+    for speculation in (None,):
         assert recipe.weights_bytes(checkpoint, world, speculation) == -(
             -(loaded - checkpoint.draft_bytes) // world)
     # Both recipes commit verified tokens into one live recurrent row.
@@ -213,8 +212,6 @@ def test_qwen_adapter_configures_the_bootstrap_from_a_plan(monkeypatch, tmp_path
     assert (min(config.request_capacity, 16), 6) in config.speculative_shapes
     if concurrency >= 32:
         assert (32, 4) in config.speculative_shapes and (32, 5) not in config.speculative_shapes
-    assert (config.speculative_proposal_source, config.history_drafts) == (
-        "mtp", False)
     assert config.pages is None and config.context == plan.recipe.context
     assert config.preparation_pages == plan.prefill_chunk // 64 + 2 * config.request_capacity
     assert config.prefill_chunk_size == plan.prefill_chunk == 4096 and config.kernel_cache == tmp_path / "kernels"
@@ -237,11 +234,8 @@ def test_qwen_adapter_passes_speculation_overrides(monkeypatch, tmp_path):
         QWEN.recipe.prepare(tmp_path, plan, compile_forwards=True, kernel_cache=None, progress=None)
         return plan, seen.pop()
 
-    plan, config = configured(Speculation(2, adaptive=False, proposal_source="copy",
-                                          history_drafts=True))
+    plan, config = configured(Speculation(2, adaptive=False))
     assert config.mtp and (config.speculative_widths, config.speculative_fixed_width) == ((1, 2, 3), 3)
-    assert (config.speculative_proposal_source, config.history_drafts) == (
-        "copy", True)
     assert config.speculative_shapes == tuple((b, w) for b in (1, 2, 4) for w in (3, 2, 1) if w == 1 or b * w <= 4)
 
     plan, config = configured(None)

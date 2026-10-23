@@ -60,11 +60,6 @@ def test_capture_covers_every_runtime_reduction(concurrency, maximum):
                        if width == 1 or batch * width <= max(batch_capacities(concurrency)[-1], maximum))
 
 
-def test_copy_only_uses_the_verification_catalog_without_mtp_proposals():
-    config = PreparationConfig(mtp=True, speculative_proposal_source="copy")
-    assert config.speculative_shapes == PreparationConfig(mtp=True).speculative_shapes
-    with pytest.raises(ValueError, match="proposal source"):
-        PreparationConfig(mtp=True, speculative_proposal_source="unknown")
 
 
 @pytest.mark.parametrize("drafts", range(8))

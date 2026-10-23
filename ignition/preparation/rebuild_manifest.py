@@ -28,7 +28,7 @@ def from_plan(model, plan, *, compiled_forwards):
         result['expert_scale_compression'] = plan.expert_scale_compression
     if (s := plan.speculation) is not None:
         result['speculation'] = dict(draft_tokens=s.draft_tokens,
-            adaptive=s.adaptive, proposal_source=s.proposal_source, history_drafts=s.history_drafts,
+            adaptive=s.adaptive,
             token_capacity=plan.speculative_token_capacity, packed_verification=s.packed_verification,
             draft_prefix_selection=s.draft_prefix_selection)
     return result

@@ -72,9 +72,9 @@ draws again.
 
 For prefix-survival estimates `s_i`, expected output at width `W` is
 `1 + sum(s_1..s_(W-1))`. Each request tracks the complete configured proposal
-program, including any copy overrides; copy-only and trained-draft programs
-have separate curves. Accepted prefixes contribute one. A rejection contributes
-zero to every longer offered prefix. Termination inside an accepted prefix
+program, including history substitutions. Copy-only programs in existing
+packages and learned-draft programs have separate curves. Accepted prefixes
+contribute one. A rejection contributes zero to every longer offered prefix. Termination inside an accepted prefix
 censors the suffix. Width-one rounds update execution costs without supplying
 acceptance observations.
 

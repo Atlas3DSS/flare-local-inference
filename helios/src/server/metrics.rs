@@ -209,6 +209,7 @@ const HOST_TOKEN_BUCKETS: [u64; 8] = [64, 256, 1024, 4096, 16384, 65536, 262144,
 #[derive(Default)]
 pub(super) struct Metrics {
     pub scheduler_trace: scheduler::SchedulerMetrics,
+    pub history_drafts: bool,
     total_pages: u64,
     page_tokens: u64,
     decode_weight_bytes: u64,
@@ -641,6 +642,9 @@ impl Metrics {
             let _ = writeln!(text, "# HELP flare_{name} {help}\n# TYPE flare_{name} counter\nflare_{name} {}",
                              count.load(Ordering::Relaxed));
         }
+        let _ = writeln!(text,
+            "# HELP flare_history_drafts_enabled Shared decoded history augments learned proposals.\n# TYPE flare_history_drafts_enabled gauge\nflare_history_drafts_enabled {}",
+            u8::from(self.history_drafts));
         text.push_str("# HELP flare_http_requests_total HTTP generation or token-count requests by API, before request validation.\n# TYPE flare_http_requests_total counter\n");
         for (api, count) in [
             "chat",
@@ -1181,6 +1185,14 @@ mod tests {
                 .sum::<u64>(),
             6
         );
+    }
+
+    #[test]
+    fn history_metric_reports_the_serving_setting() {
+        for history_drafts in [false, true] {
+            let metrics = Metrics { history_drafts, ..Default::default() };
+            assert!(metrics.render().contains(&format!("flare_history_drafts_enabled {}\n", u8::from(history_drafts))));
+        }
     }
 
     #[test]

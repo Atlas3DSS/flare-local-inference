@@ -214,7 +214,8 @@ Counter and gauge names start with `flare_`, such as
 `flare_free_kv_pages`; there are no histograms. Beyond the JSON fields below, the
 text includes speculative and proposal counters by batch, width, or depth, graph
 launches by kind, embedding row-cache counters, HTTP admission gauges, and
-uptime.
+uptime. `flare_history_drafts_enabled` reports whether shared decoded history
+augments learned proposals in the serving process.
 
 The route returns one JSON object instead when the query contains `format=json`,
 or when the `Accept` header gives `application/json` a higher quality than

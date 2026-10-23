@@ -21,6 +21,7 @@ pub struct LoadOptions {
     pub embedding_table_workers: Option<usize>,
     pub max_concurrency: Option<usize>,
     pub mtp_draft_tokens: Option<usize>,
+    pub history_drafts: Option<bool>,
     /// Select one exact packed verification capacity per batch before proposal sampling.
     pub mtp_verification_token_budget: Option<usize>,
     /// Retain every captured packed verification capacity at or below this total-row ceiling.
@@ -179,6 +180,12 @@ impl LoadOptions {
             _ => return Err(invalid("unknown speculative proposal source")),
         };
         let split = execution.graphs.iter().any(|g| g.kind == "proposal");
+        if self.history_drafts == Some(true) && (!enabled || source != 1) {
+            return Err(invalid("--history-drafts requires enabled learned speculation"));
+        }
+        if self.history_drafts == Some(true) && (packed_round || split) {
+            return Err(invalid("--history-drafts requires graphs with history proposal inputs; retained and packed proposals cannot consume them"));
+        }
         if enabled && execution.graphs.iter().any(|g| g.packed_token_capacity != 0)
             && (fixed.is_some() || (!packed_round && drafts != maximum))
         {
@@ -508,7 +515,9 @@ impl LoadOptions {
         if verification_token_limit.is_some() {
             object.insert("speculative_token_capacity".into(), selected_token_capacity.into());
         }
-        if !enabled {
+        if let Some(history) = self.history_drafts {
+            object.insert("history_drafts".into(), history.into());
+        } else if !enabled {
             object.insert("history_drafts".into(), false.into());
         }
         Ok(active)
@@ -538,6 +547,7 @@ fn prune_kernels(package: &mut Package) -> Result<()> {
 mod tests {
     use super::*;
     use crate::runtime_package::{format::*, protobuf::wire};
+    use prost::Message;
 
     fn package() -> Package {
         let mut execution = wire::Execution {
@@ -640,6 +650,41 @@ mod tests {
 
     fn config() -> Value {
         serde_json::json!({"speculative_token_capacity": 24, "speculative_widths": [1,2,3,4,5,6], "speculative_fixed_width": null})
+    }
+
+    #[test]
+    fn history_override_preserves_the_selected_graphs() {
+        let mut baseline = [package()];
+        LoadOptions::default().select(&mut baseline, &mut config()).unwrap();
+        for stored in [None, Some(false), Some(true)] {
+            for selected in [None, Some(false), Some(true)] {
+                let mut configuration = config();
+                if let Some(stored) = stored {
+                    let bytes = [0x68, u8::from(stored)];
+                    let contract = wire::ServingContract::decode(bytes.as_slice()).unwrap();
+                    let decoded = super::super::protobuf::serving_contract(contract, 4).unwrap();
+                    configuration["history_drafts"] = decoded["history_drafts"].clone();
+                }
+                let mut packages = [package()];
+                LoadOptions { history_drafts: selected, ..Default::default() }
+                    .select(&mut packages, &mut configuration).unwrap();
+                assert_eq!(configuration.get("history_drafts").and_then(Value::as_bool), selected.or(stored));
+                assert_eq!(packages[0].execution.as_ref().unwrap().encode_to_vec(),
+                    baseline[0].execution.as_ref().unwrap().encode_to_vec());
+            }
+        }
+    }
+
+    #[test]
+    fn history_requires_enabled_learned_proposals() {
+        let mut configuration = config();
+        let error = LoadOptions { history_drafts: Some(true), mtp_draft_tokens: Some(0), ..Default::default() }
+            .select(&mut [package()], &mut configuration).unwrap_err();
+        assert!(error.to_string().contains("requires enabled learned speculation"));
+        configuration["speculative_proposal_source"] = "copy".into();
+        let error = LoadOptions { history_drafts: Some(true), ..Default::default() }
+            .select(&mut [package()], &mut configuration).unwrap_err();
+        assert!(error.to_string().contains("requires enabled learned speculation"));
     }
 
     #[test]

@@ -248,17 +248,6 @@ pub(crate) fn finish_rank(
         }
         phase.finish("");
     }
-    if request.proposal_source == "copy" {
-        if let Some(execution) = output.index.ranks[0].execution.as_mut() {
-            for graph in &mut execution.graphs {
-                if graph.kind == "speculative"
-                    || graph.kind == "mixed" && graph.speculation_enabled == Some(true)
-                {
-                    graph.draft_source = wire::DraftSource::CopyDraft as i32;
-                }
-            }
-        }
-    }
     if let Some(data) = request.package_data.as_ref() {
         let mut data = data.clone();
         if let Some(tables) = data.get_mut("tables").and_then(|v| v.as_array_mut()) {
@@ -572,6 +561,9 @@ pub(crate) fn serving_metadata(
         .as_object()
         .ok_or_else(|| super::invalid("serving metadata must be an object"))?
         .clone();
+    if server.contains_key("history_drafts") {
+        return Err(super::invalid("history_drafts is a runtime option and cannot be exported"));
+    }
     let assets = server
         .remove("assets")
         .ok_or_else(|| super::invalid("serving assets are required"))?;
@@ -624,6 +616,9 @@ pub(crate) fn serving_metadata(
     }
     index.frontend = Some(frontend);
     if let Some(rebuild) = server.remove("rebuild_manifest") {
+        if rebuild.get("speculation").and_then(|s| s.get("history_drafts")).is_some() {
+            return Err(super::invalid("history_drafts is a runtime option and cannot be exported"));
+        }
         index.rebuild = Some(message("RebuildManifest", &rebuild)?);
     }
     server
@@ -795,52 +790,13 @@ mod tests {
         );
     }
     #[test]
-    fn bundle_only_copy_proposals_retain_their_native_draft_source() {
-        let request:super::super::CaptureRequest=serde_json::from_value(serde_json::json!({"path":"unused","context":0,"graphs":[],"allocations":[],"proposal_source":"copy","execution":null,"server":null,"rebuild_weights":null,"package_data":null,"shard_size":67108864})).unwrap();
-        let graphs = [
-            ("speculative", None),
-            ("mixed", Some(true)),
-            ("mixed", Some(false)),
-            ("packed_speculative", None),
-        ]
-        .into_iter()
-        .map(
-            |(kind, speculation_enabled)| super::super::wire::ExecutionGraph {
-                kind: kind.into(),
-                speculation_enabled,
-                draft_source: 1,
-                ..Default::default()
-            },
-        )
-        .collect();
-        let mut output = super::super::RankOutput {
-            index: super::super::wire::ModelIndex {
-                version: 4,
-                ranks: vec![super::super::wire::BundleIndex {
-                    execution: Some(super::super::wire::Execution {
-                        graphs,
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                }],
-                ..Default::default()
-            },
-            payload: vec![],
-            allocations: vec![],
-            module_globals: vec![],
-            external: vec![],
-            staging: None,
-        };
-        finish_rank(&request, &mut output).unwrap();
-        let sources: Vec<_> = output.index.ranks[0]
-            .execution
-            .as_ref()
-            .unwrap()
-            .graphs
-            .iter()
-            .map(|g| g.draft_source)
-            .collect();
-        assert_eq!(sources, [2, 2, 1, 1]);
+    fn export_rejects_runtime_history_preferences() {
+        for enabled in [false, true] {
+            let mut index = super::super::wire::ModelIndex::default();
+            let error = serving_metadata(&mut index, &serde_json::json!({"history_drafts": enabled})).unwrap_err();
+            assert!(error.to_string().contains("runtime option and cannot be exported"));
+            assert!(index.contract.is_none());
+        }
     }
     #[test]
     fn execution_buffers_resolve_allocation_relative_offsets() {

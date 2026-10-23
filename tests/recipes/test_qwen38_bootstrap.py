@@ -293,8 +293,7 @@ def test_peer_resources_release_only_after_native_rank_drains(monkeypatch, fails
         assert weights() is None
 
 
-@pytest.mark.parametrize("proposal", ["mtp", "copy"])
-def test_snapshot_budget_covers_the_selected_speculative_layout(proposal):
+def test_snapshot_budget_covers_the_selected_speculative_layout():
     from ignition.recipes.qwen38.bootstrap import PreparationConfig
     from ignition.recipes.qwen38.state import HybridStateLayout
 
@@ -303,7 +302,7 @@ def test_snapshot_budget_covers_the_selected_speculative_layout(proposal):
     assert speculative > ordinary
     PreparationConfig(snapshot_budget_bytes=ordinary)
     with pytest.raises(ValueError, match="at least one state row"):
-        PreparationConfig(mtp=True, speculative_proposal_source=proposal, snapshot_budget_bytes=ordinary)
-    config = PreparationConfig(mtp=True, speculative_proposal_source=proposal,
+        PreparationConfig(mtp=True, snapshot_budget_bytes=ordinary)
+    config = PreparationConfig(mtp=True,
                                snapshot_budget_bytes=speculative)
     assert config.snapshot_budget_bytes == speculative

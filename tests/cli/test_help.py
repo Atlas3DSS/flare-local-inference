@@ -11,6 +11,13 @@ from ignition.errors import UsageError
 from ignition.recipes import aliases, recipes, resolve
 
 
+@pytest.mark.parametrize('flags', [['--history-drafts'], ['--no-history-drafts'], ['--mtp-proposal-source', 'copy']])
+def test_export_rejects_history_preferences_and_copy_only_preparation(flags):
+    with pytest.raises(SystemExit) as error:
+        _parser().parse_args(['export', 'qwen3.8-flash', *flags])
+    assert error.value.code == 2
+
+
 @pytest.mark.parametrize("command", ["export", "serve"])
 def test_mla_arithmetic_flag_defaults_and_override(command):
     arguments = [command, "deepseek-v4.1-flash", *(["--output", "model.safetensors"] if command == "export" else [])]
@@ -111,7 +118,7 @@ def test_optional_features_follow_the_selected_recipe(capsys):
             main(["export", checkpoint.alias, "--help"])
         details = capsys.readouterr().out.split("Optional features for this recipe:")[1]
         assert ("--mixed-prefill" in details) == recipe.mixed_prefill
-        assert ("--history-drafts" in details) == recipe.history_copy
+        assert "--history-drafts" not in details
         assert ("--no-stream-overlap" in details) == recipe.stream_overlap
         assert ("--expert-scale-compression" in details) == bool(checkpoint.scale_compressed_device_bytes)
 

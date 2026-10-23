@@ -44,6 +44,10 @@ context and prefill extents, prepared page and snapshot capacities, selected
 concurrency, speculative widths, and serving defaults. Load-time selection may
 reduce captured concurrency and speculative width. Physical cache capacities
 are chosen after graph loading and replace preparation's working-set counts.
+History drafting is a startup option that requires enabled learned speculation
+and concrete copied-token inputs in each selected wider graph. Export records
+no history preference. Existing packages' recorded defaults remain usable and
+explicit startup options take precedence.
 
 The optional package rebuild manifest and per-rank weight catalogs describe
 preparation inputs and stored tensor views. They do not select serving behavior.

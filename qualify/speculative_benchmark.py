@@ -373,7 +373,7 @@ def validate_arm(memory, arm):
     if actual != arm["mtp"]:
         raise ValueError("actual prepared speculative catalog differs from arm")
     if arm["mtp"]:
-        for key in ("speculative_proposal_source", "speculative_fixed_width", "history_drafts"):
+        for key in ("speculative_fixed_width",):
             if key not in memory or memory[key] != arm[key] or type(memory[key]) is not type(arm[key]):
                 raise ValueError(f"actual prepared {key} differs from arm")
         widths = memory["speculative_widths"]
@@ -493,6 +493,9 @@ def run(args):
     try:
         initial = idle_metrics(args.base_url, args.output, "initial", args.timeout)
         measurements["initial_metrics"] = initial
+        expected_history = int(arm.get("history_drafts", False))
+        if initial.get("flare_history_drafts_enabled") != expected_history:
+            raise ValueError("runtime history_drafts differs from the selected benchmark arm")
         if (initial.get("flare_cached_checkpoints") != 0 or initial.get("flare_cached_kv_pages") != 0
                 or initial.get("flare_requests_admitted_total") != 0):
             raise ValueError("paired workload requires a fresh unused server/cache for this arm/concurrency trial")

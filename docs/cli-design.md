@@ -172,8 +172,13 @@ The package records prepared concurrency, the available prefill and speculation
 graphs, and maximum virtual extents for cache storage. `--max-concurrency N`
 and `--mtp-draft-tokens N` select supported reductions at load time;
 `--mtp-adaptive-verification` and `--no-mtp-adaptive-verification` select the
-verification policy. Omitted flags use package defaults. Only selected graphs
-and required kernels load. Continuation rows and KV pages receive physical
+verification policy. `--history-drafts` enables host history tracking and feeds
+continuations into existing graph inputs; it does not change the captured graphs.
+`--no-history-drafts` disables those proposals. Packages exported by Ignition
+record no history preference. Existing packages retain their recorded defaults
+unless explicitly overridden, including copy-only packages whose prepared
+graphs remain loadable. Omitted capacity flags use package defaults. Only selected
+graphs and required kernels load. Continuation rows and KV pages receive physical
 storage according to those selections and available GPU memory.
 
 ## 3. Parameters
@@ -182,7 +187,9 @@ storage according to those selections and available GPU memory.
 
 `export` and `serve` accept the preparation flags below. `export` also accepts
 `--output FILE` and defaults to a local snapshot. Listener flags apply only to
-`serve`; native package serving uses `flare run` flags.
+`serve`; native package serving uses `flare run` flags. Development `serve` also
+accepts the runtime `--history-drafts` / `--no-history-drafts` options for native
+serving. `export` accepts neither option, and `--direct` rejects history drafting.
 
 | Flag | Meaning | Default |
 |---|---|---|
@@ -212,8 +219,6 @@ explicit flags take precedence.
 | `--speculative-token-capacity N` | Maximum physical target-token rows in wider speculative graphs; width one covers every request bucket. Applies to every speculative recipe. | 128 |
 | `--speculative-graph-budget N` | Maximum packed round graphs to capture, independently of physical target-token rows. Excludes mandatory width-one and ordinary graphs; requires packed adaptive learned speculation at positive draft depth. Must cover both physical-row endpoints for every eligible request bucket. | 64 for DeepSeek V4.1 |
 | `--no-mtp-adaptive-verification` | Default to fixed-width serving. Capture includes every smaller width within the speculative token capacity. Positive-depth DeepSeek V4.1 DSpark requires adaptive verification. | Adaptive |
-| `--mtp-proposal-source {mtp,copy}` | Where drafts come from: the checkpoint's MTP module, or `copy` for continuations from shared decoded history, which loads no draft model. Qwen only. | `mtp` |
-| `--history-drafts` | Also draft continuations copied from shared decoded history. Qwen only. | off |
 | `--mla-compute-mode {auto,bf16}` | Constrain DeepSeek V4.1 MLA arithmetic while preserving packed KV storage and autotuning among compatible kernels. | `auto` |
 | `--no-stream-overlap` | Run every concurrent branch (shared experts, projection chains, query chains) serially on the main stream with the same kernels, to diagnose scheduling-dependent faults. Slower. Recipes that run no branches concurrently reject it. | Overlap |
 | `--autotune-effort off\|low\|medium\|high\|max` | Kernel search effort. Off uses heuristics; low applies broad exclusions; medium balances search cost; high retains only conservative exclusions; max enumerates every declared legal candidate. Overrides `[preparation] autotune_effort`. | Medium |
@@ -457,6 +462,7 @@ Help exits with status 0; usage errors go to stderr with status 2. Its options a
 | `--memory-limit LIMIT` | Per-GPU occupied size (`30G`), free-memory reserve (`-30G`), or fraction of total memory (`0.8`) | Package serving reserve |
 | `--mtp-draft-tokens N` | Reduce the maximum draft count; zero selects ordinary execution without draft generation, absorption, or draft-state maintenance | Package default |
 | `--mtp-adaptive-verification` / `--no-mtp-adaptive-verification` | Adaptive or fixed selection among captured widths | Package default |
+| `--history-drafts` / `--no-history-drafts` | Augment learned drafts with shared decoded-history continuations; requires enabled speculation and captured history inputs, as Qwen Flash provides | Off; existing packages retain recorded defaults unless overridden |
 | `--mtp-adaptive-verification-alpha ALPHA` | Positive finite exponent on split-proposal prefix-survival scheduling scores; below 1 favors longer verification prefixes | `1.0` |
 | `--mtp-verification-token-budget N` | Select one exact captured packed verification capacity per batch | All captured capacities |
 | `--mtp-max-verification-token-budget N` | Retain all captured packed verification capacities at or below a total-row ceiling | All captured capacities |

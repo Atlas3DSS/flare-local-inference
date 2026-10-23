@@ -302,8 +302,6 @@ class Plan:
                 "draft_tokens": self.speculation.draft_tokens, "adaptive": self.speculation.adaptive,
                 "packed_verification": self.speculation.packed_verification,
                 "draft_prefix_selection": self.speculation.draft_prefix_selection,
-                "proposal_source": self.speculation.proposal_source,
-                "history_drafts": self.speculation.history_drafts,
                 **({"graph_budget": self.speculation.graph_budget}
                    if self.speculation.graph_budget is not None else {})},
             "context": self.context, "checkpoint_context": self.recipe.context,
@@ -341,7 +339,7 @@ def fit(recipe: Recipe, checkpoint: Checkpoint, gpus: tuple[Gpu, ...], *, concur
         raise UsageError(f"--expert-scale-compression {expert_scale_compression}: {checkpoint.alias}"
                          " does not prepare this scale encoding")
     if (speculation is not None and speculation.packed_verification and speculation.adaptive
-            and speculation.draft_tokens > 0 and speculation.learned and not speculation.history_drafts
+            and speculation.draft_tokens > 0
             and speculation.graph_budget is None and recipe.speculation is not None):
         speculation = replace(speculation, graph_budget=recipe.speculation.graph_budget)
     if speculation is not None and speculation.graph_budget is not None:

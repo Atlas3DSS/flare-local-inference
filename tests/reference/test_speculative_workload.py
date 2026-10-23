@@ -68,7 +68,7 @@ def test_every_context_runs_once_and_tool_turns_and_prefix_branches_are_ordered(
 def test_paired_arms_preserve_request_bytes_and_alternate_order(workload):
     before = sw.json_bytes(workload)
     plan = sw.execution_plan(workload)
-    assert len(plan["arms"]) == 12
+    assert len(plan["arms"]) == 11
     for concurrency in (1, 2, 4):
         first, second = [t for t in plan["trials"] if t["concurrency_ceiling"] == concurrency]
         assert first["arm_order"] == list(reversed(second["arm_order"]))

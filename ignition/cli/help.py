@@ -61,8 +61,6 @@ def recipe_help(model=None):
                         f" (estimated {saving:.0f}% less resident weight storage; actual savings vary)")
     if recipe.mixed_prefill:
         optional.append("--mixed-prefill (requires concurrency >= 2)")
-    if recipe.history_copy:
-        optional.extend(("--mtp-proposal-source copy", "--history-drafts"))
     if any(cost.page_tokens for cost in recipe.ranks.values()):
         optional.append("--no-context-parallel")
     if recipe.stream_overlap:

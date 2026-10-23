@@ -58,9 +58,6 @@ fn alignment() -> u64 {
 fn one() -> usize {
     1
 }
-fn mtp() -> String {
-    "mtp".into()
-}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct Allocation {
@@ -136,8 +133,6 @@ pub(crate) struct CaptureRequest {
     pub rank: usize,
     #[serde(default = "one")]
     pub world_size: usize,
-    #[serde(default = "mtp")]
-    pub proposal_source: String,
     /// Rank processes sharing this host's memory; omitted means the whole rank group.
     #[serde(default)]
     pub local_ranks: Option<usize>,

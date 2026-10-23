@@ -140,9 +140,7 @@ def speculation(args, model: ResolvedModel, configuration: Configuration | None 
     given = [flag for flag, value in (
         ("--mtp-draft-tokens", args.mtp_draft_tokens),
         ("--speculative-token-capacity", args.speculative_token_capacity),
-        ("--no-mtp-adaptive-verification", args.no_mtp_adaptive_verification or None),
-        ("--mtp-proposal-source", args.mtp_proposal_source),
-        ("--history-drafts", args.history_drafts or None)) if value is not None]
+        ("--no-mtp-adaptive-verification", args.no_mtp_adaptive_verification or None)) if value is not None]
     if explicit_graph_budget:
         given.append("--speculative-graph-budget")
     if default is None:
@@ -158,11 +156,6 @@ def speculation(args, model: ResolvedModel, configuration: Configuration | None 
     if not 0 <= drafts <= limit:
         raise UsageError(f"--mtp-draft-tokens must be 0 through {limit}; --no-mtp disables speculation")
     adaptive = default.adaptive and not args.no_mtp_adaptive_verification
-    source = default.proposal_source if args.mtp_proposal_source is None else args.mtp_proposal_source
-    history = default.history_drafts or args.history_drafts
-    if (source == "copy" or history) and not recipe.history_copy:
-        flag = "--history-drafts" if args.history_drafts else "--mtp-proposal-source copy"
-        raise UsageError(f"{alias} drafts only with its MTP module; {flag} does not apply")
     capacity = args.speculative_token_capacity
     if configuration is not None:
         capacity = configuration.model_setting(alias, "speculative_token_capacity", default.token_capacity, capacity).value
@@ -174,14 +167,13 @@ def speculation(args, model: ResolvedModel, configuration: Configuration | None 
     prefix_selection = default.draft_prefix_selection if drafts else "cpu"
     if packed and not adaptive:
         raise UsageError(f"{alias} requires adaptive verification; --no-mtp-adaptive-verification does not apply")
-    if packed and (source != "mtp" or history):
-        raise UsageError(f"{alias} requires verification of retained learned proposals")
-    if explicit_graph_budget and not (packed and adaptive and source == "mtp" and not history):
+    if explicit_graph_budget and not (packed and adaptive):
         raise UsageError("--speculative-graph-budget requires packed adaptive learned speculation with positive draft depth")
     budget = graph_budget.value if packed else None
     if budget is not None and (type(budget) is not int or budget < 1):
         raise UsageError("--speculative-graph-budget must be a positive integer")
-    return Speculation(drafts, adaptive, source, history, capacity, packed, prefix_selection, budget)
+    return Speculation(drafts, adaptive, token_capacity=capacity, packed_verification=packed,
+                       draft_prefix_selection=prefix_selection, graph_budget=budget)
 
 
 def fetch(model: ResolvedModel, hub_cache, *, progress_bars: bool = True) -> str:

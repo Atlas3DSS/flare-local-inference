@@ -15,8 +15,7 @@ _GRAPH_BYTES = {1: 7168 << 20, 2: 8000 << 20, 4: 8576 << 20}
 
 def _costs(state_row_bytes, page_layer_bytes, graph_bytes, *, speculating):
     layers = _TARGET_PAGE_LAYERS + int(speculating)
-    return RankCosts(state_row_bytes, layers * page_layer_bytes, graph_bytes,
-                     draft_page_bytes=page_layer_bytes if speculating else 0)
+    return RankCosts(state_row_bytes, layers * page_layer_bytes, graph_bytes)
 
 
 def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress, retain_graphs=False, package_storage=None,
@@ -30,8 +29,8 @@ def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress, retain_
 
     speculation = plan.speculation
     drafting = {} if speculation is None else {
-        "speculative_widths": speculation.widths, "speculative_token_capacity": plan.speculative_token_capacity, "speculative_fixed_width": speculation.fixed_width,
-        "speculative_proposal_source": speculation.proposal_source, "history_drafts": speculation.history_drafts}
+        "speculative_widths": speculation.widths, "speculative_token_capacity": plan.speculative_token_capacity,
+        "speculative_fixed_width": speculation.fixed_width}
     config = PreparationConfig(prompt_logprobs=plan.prompt_logprobs,
         compile_workers=plan.compile_workers, autotune_effort=plan.autotune_effort, tuning_replica=plan.tuning_replica,
         devices=tuple(range(plan.world_size)) if ranks is None else (0,) * plan.world_size,
@@ -76,7 +75,7 @@ RECIPE = Recipe(
     # Rounds adapt among zero through five drafts, up to seven. Verification records
     # corrections and commits accepted tokens into the live state row, so it keeps
     # no extra rows.
-    speculation=Speculation(draft_tokens=5, token_capacity=128), max_draft_tokens=7, verification_rows=0, history_copy=True,
+    speculation=Speculation(draft_tokens=5, token_capacity=128), max_draft_tokens=7, verification_rows=0,
     # Shared experts, small-batch attention projections and selection, and GDN input projections run
     # on an auxiliary stream.
     stream_overlap=True,

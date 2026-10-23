@@ -869,14 +869,9 @@ pub fn render(value: &Value, width: usize, color: bool) -> String {
                     thousands(u64_of(&speculation["token_capacity"]))
                 ),
             );
-            canvas.row(
-                "history drafts",
-                if speculation["history_drafts"].as_bool().unwrap_or(false) {
-                    "yes"
-                } else {
-                    "no"
-                },
-            );
+            if speculation["history_drafts"].as_bool().unwrap_or(false) {
+                canvas.row("recorded history default", "enabled; override with --no-history-drafts");
+            }
         }
         canvas.close();
     }

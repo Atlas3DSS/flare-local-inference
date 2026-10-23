@@ -87,11 +87,9 @@ class PreparationConfig:
     pages: int | None = None
     kernel_cache: Path | None = None
     mtp: bool = False
-    speculative_proposal_source: str = "mtp"
     speculative_widths: tuple[int, ...] = (1, 2, 3, 4, 5, 6)
     speculative_fixed_width: int | None = None
     speculative_token_capacity: int | None = None
-    history_drafts: bool = False
     # Run shared experts, small-batch attention projections and selection, and GDN input projections
     # on an auxiliary stream; without overlap every branch runs serially on the main stream.
     stream_overlap: bool = True
@@ -123,16 +121,14 @@ class PreparationConfig:
             raise ValueError("prefill chunk size must be 64-aligned in [64,context]")
         if self.pages is not None and (type(self.pages) is not int or self.pages <= 0):
             raise ValueError("explicit page capacity must be a positive integer")
-        if type(self.mtp) is not bool or type(self.history_drafts) is not bool or type(self.stream_overlap) is not bool:
-            raise TypeError("MTP, history draft, and stream overlap switches must be booleans")
+        if type(self.mtp) is not bool or type(self.stream_overlap) is not bool:
+            raise TypeError("MTP and stream overlap switches must be booleans")
         if type(self.mixed_prefill) is not bool:
             raise TypeError("mixed_prefill must be a boolean")
         minimum_snapshot = HybridStateLayout.build(speculative_tokens=7 if self.mtp else 0,
             world_size=1 if self.devices is None else len(self.devices)).row_bytes
         if self.snapshot_budget_bytes < minimum_snapshot or self.headroom_bytes < 0:
             raise ValueError("snapshot budget requires at least one state row; headroom must be nonnegative")
-        if self.speculative_proposal_source not in ("mtp", "copy"):
-            raise ValueError("speculative proposal source must be mtp or copy")
         widths = self.speculative_widths
         if (not isinstance(widths, tuple) or not widths or widths[0] != 1
                 or any(type(width) is not int or not 1 <= width <= 8 for width in widths)
@@ -263,7 +259,7 @@ def _prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, t
 
         release_page_cache(manifest.shard_paths)
     mtp_weights = None
-    has_mtp = config.mtp and config.speculative_proposal_source == "mtp"
+    has_mtp = config.mtp
     if has_mtp:
         from .mtp_weights import MTPWeights
 
@@ -351,7 +347,6 @@ def _prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, t
                     rotary=rotary, cache=cache, table=table, session=session, completion=completion,
                     frame=frame, sequence=sequence, context=config.context,
                     prefill_capacity=config.token_capacity, max_cache_pages=planned_pages,
-                    proposal_source=config.speculative_proposal_source,
                     sampling_workspace=sampling_workspace, graph_buffers=graph_buffers,
                     verification_width=max(config.speculative_widths), **collectives)
                 buffers.update(speculation.buffers())
@@ -560,10 +555,8 @@ def _prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, t
                 speculative_widths=config.speculative_widths,
             speculative_token_capacity=speculative_token_capacity(config.max_active, max(config.speculative_widths), config.speculative_token_capacity),
                 speculative_shapes=config.speculative_shapes,
-                speculative_proposal_source=config.speculative_proposal_source,
                 speculative_state_columns=8, draft_raw_ring_capacity=layout.draft_ring_capacity if has_mtp else 0,
-                speculative_fixed_width=config.speculative_fixed_width,
-                history_drafts=config.history_drafts)
+                speculative_fixed_width=config.speculative_fixed_width)
         hashes = {"tokenizer": ("tokenizer.json", FRONTEND_SHA256["tokenizer.json"])}
         cache_regions = [history_region(buffers, f"cache.{layer}.{name}", getattr(value, name), contract_proto.PAGED_KEY_VALUE,
             tokens_per_record=4 if name == "compressed_k_cache" else 1)
@@ -584,9 +577,7 @@ def _prepare_model(snapshot: Path, config: PreparationConfig | None = None, *, t
         if speculation is not None:
             server_config.update(speculative_widths=config.speculative_widths,
             speculative_token_capacity=speculative_token_capacity(config.max_active, max(config.speculative_widths), config.speculative_token_capacity),
-                speculative_proposal_source=config.speculative_proposal_source,
-                speculative_fixed_width=config.speculative_fixed_width,
-                history_drafts=config.history_drafts)
+                speculative_fixed_width=config.speculative_fixed_width)
         resources = (scoring, weights, table, session, state, requests, inputs, scratch, workspaces, rotary,
             cache, final_cache, admission, transfer, features, vision_inputs, vision_scratch, graph_buffers,
             functions, compiled_functions, decoders, owners, stream, graph_pool, speculation, mtp_weights, collective, vocabulary_collective, coordinator)

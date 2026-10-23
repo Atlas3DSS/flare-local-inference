@@ -99,15 +99,11 @@ class Speculation:
     within the target-token capacity. `adaptive` sets the serving default: choose
     widths from measured costs and conditional acceptance estimates when true, or use the fixed maximum when
     false. Flare can reduce both capacities when loading the package. Drafts
-    come from the checkpoint's MTP module or, with the `copy` source, from
-    continuations from shared decoded history; `history_drafts` adds those
-    continuations to MTP drafts.
+    come from the checkpoint's learned draft model.
     """
 
     draft_tokens: int
     adaptive: bool = True
-    proposal_source: str = "mtp"
-    history_drafts: bool = False
     token_capacity: int | None = None
     packed_verification: bool = False
     draft_prefix_selection: str = "cpu"
@@ -117,19 +113,13 @@ class Speculation:
         if self.graph_budget is not None:
             if type(self.graph_budget) is not int or self.graph_budget < 1:
                 raise ValueError("speculative graph budget must be a positive integer")
-            if (not self.packed_verification or not self.adaptive or self.draft_tokens < 1
-                    or self.proposal_source != "mtp" or self.history_drafts):
+            if (not self.packed_verification or not self.adaptive or self.draft_tokens < 1):
                 raise ValueError("speculative graph budget requires packed adaptive learned speculation")
         if self.draft_prefix_selection not in ("cpu", "gpu"):
             raise ValueError("draft prefix selection must be cpu or gpu")
         if self.draft_prefix_selection == "gpu" and (
-                not self.packed_verification or not self.adaptive or self.draft_tokens < 1
-                or self.proposal_source != "mtp" or self.history_drafts):
+                not self.packed_verification or not self.adaptive or self.draft_tokens < 1):
             raise ValueError("GPU draft prefix selection requires packed adaptive learned speculation")
-
-    @property
-    def learned(self) -> bool:
-        return self.proposal_source == "mtp"
 
     @property
     def widths(self) -> tuple[int, ...]:
@@ -148,8 +138,6 @@ class RankCosts:
     state_row_bytes: int
     page_bytes: int
     graph_bytes: int
-    # The share of `page_bytes` that stores the draft model's pages, present only with learned drafts.
-    draft_page_bytes: int = 0
     # Global positions per page when ranks share each page's context; the recipe's page size otherwise.
     page_tokens: int | None = None
 
@@ -177,7 +165,7 @@ class Recipe:
     unless a plan overrides them, and `plain_ranks` holds its costs with
     speculation disabled. Each active request has one execution state row per
     selected verification position unless `verification_rows` gives another count
-    of extra rows. `history_copy` states that drafts can be copied from shared decoded history.
+    of extra rows.
     `stream_overlap` states that captured graphs run independent branches on an
     auxiliary stream, which a plan can serialize onto the main stream.
     `online_mxfp8` states that the recipe names BF16 projections a plan may store as
@@ -210,7 +198,6 @@ class Recipe:
     image_bytes: int = 0
     speculation: Speculation | None = None
     plain_ranks: Mapping[int, RankCosts] = field(default_factory=lambda: MappingProxyType({}))
-    history_copy: bool = False
     verification_rows: int | None = None
     stream_overlap: bool = False
     mixed_prefill: bool = False
@@ -255,14 +242,12 @@ class Recipe:
         plain = self.plain_ranks if checkpoint is None or checkpoint.plain_ranks is None else checkpoint.plain_ranks
         if speculation is None:
             return (plain or ranks)[world_size]
-        costs = ranks[world_size]
-        return costs if speculation.learned else replace(
-            costs, page_bytes=costs.page_bytes - costs.draft_page_bytes, draft_page_bytes=0)
+        return ranks[world_size]
 
     def weights_bytes(self, checkpoint: Checkpoint, world_size: int, speculation: Speculation | None,
                       expert_scale_compression: str | None = None) -> int:
         """Estimate one rank's device weights from the checkpoint's stored tensors and their expansion."""
-        learned = speculation is not None and speculation.learned
+        learned = speculation is not None
         device_bytes = (checkpoint.device_bytes if expert_scale_compression is None else
                         checkpoint.scale_compressed_device_bytes[expert_scale_compression])
         return -(-(device_bytes + checkpoint.expansion_bytes

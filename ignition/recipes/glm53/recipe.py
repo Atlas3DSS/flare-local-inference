@@ -19,7 +19,7 @@ def _costs(state_row_bytes, graph_bytes, *, ranks, speculating):
     layers = _TARGET_PAGE_LAYERS + int(speculating)
     # Decode context parallelism shards each page's latent records over the ranks.
     return RankCosts(state_row_bytes, layers * _PAGE_LAYER_BYTES, graph_bytes,
-                     draft_page_bytes=_PAGE_LAYER_BYTES if speculating else 0, page_tokens=256 * ranks)
+                     page_tokens=256 * ranks)
 
 
 def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress, retain_graphs=False,

@@ -124,7 +124,6 @@ def test_speculation_declaration_validates_graph_budget_type_and_range(budget):
 
 @pytest.mark.parametrize("options", [
     {"packed_verification": False}, {"adaptive": False}, {"draft_tokens": 0},
-    {"proposal_source": "copy"}, {"history_drafts": True},
 ])
 def test_speculation_declaration_requires_packed_adaptive_learned_rounds(options):
     values = {"draft_tokens": 5, "packed_verification": True, "graph_budget": 64, **options}

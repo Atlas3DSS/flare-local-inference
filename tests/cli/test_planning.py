@@ -28,9 +28,8 @@ def recipe(name, device_gib, ranks, *, speculation=None, mapped_gib=0, draft_gib
                   context=262144, page_tokens=64, concurrency=4,
                   sampling_defaults=SamplingDefaults(temperature=1., top_p=1., top_k=-1),
                   max_concurrency=64, max_draft_tokens=7 if speculating else 0, prefill_chunk=4096, prepare=None,
-                  usage=None, mapped_host_name="lookup table", speculation=speculation, history_copy=speculating,
-                  ranks=MappingProxyType({size: RankCosts(100 * MIB // size, 2 * MIB // size, 4 * GIB,
-                                                          draft_page_bytes=MIB // (2 * size) if speculating else 0)
+                  usage=None, mapped_host_name="lookup table", speculation=speculation,
+                  ranks=MappingProxyType({size: RankCosts(100 * MIB // size, 2 * MIB // size, 4 * GIB)
                                           for size in ranks}),
                   plain_ranks=MappingProxyType({size: RankCosts(80 * MIB // size, 3 * MIB // (2 * size), 3 * GIB)
                                                 for size in ranks} if speculating else {}))
@@ -164,35 +163,25 @@ def test_speculation_settings_select_weights_rows_and_pages():
     assert plain.live_bytes == 5 * 80 * MIB and plain.cache_states == 32
     assert plain.pages == (91 * GIB - 61 * GIB - 5 * 80 * MIB) * 2 // (3 * MIB) == 20213
     assert plain.to_dict()["speculation"] is None
-    # Drafts copied from history keep the verification rows and load no draft model or draft pages.
-    copied = derive(speculation=Speculation(3, proposal_source="copy"))
-    assert (copied.weights_bytes, copied.live_rows, copied.costs.page_bytes) == (58 * GIB, 17, 3 * MIB // 2)
-    assert copied.costs.state_row_bytes == drafting.costs.state_row_bytes and copied.pages == 18664
     split = derive(gpus=(gpu(0, 50), gpu(1, 50)), speculation=None)
     assert split.world_size == 2 and split.weights_bytes == 29 * GIB and split.costs.state_row_bytes == 40 * MIB
 
 
 def test_speculation_settings_are_validated_and_described():
-    assert DRAFTING.widths == (1, 2, 3, 4) and DRAFTING.fixed_width is None and DRAFTING.learned
+    assert DRAFTING.widths == (1, 2, 3, 4) and DRAFTING.fixed_width is None
     fixed = Speculation(2, adaptive=False)
     assert fixed.widths == (1, 2, 3) and fixed.fixed_width == 3
     assert Speculation(0).widths == (1,) and Speculation(0, adaptive=False).fixed_width == 1
-    record = derive(speculation=Speculation(5, history_drafts=True)).to_dict()["speculation"]
-    assert record == {"draft_tokens": 5, "adaptive": True, "proposal_source": "mtp", "history_drafts": True,
+    record = derive(speculation=Speculation(5)).to_dict()["speculation"]
+    assert record == {"draft_tokens": 5, "adaptive": True,
                       "packed_verification": False, "draft_prefix_selection": "cpu"}
     assert derive(speculation=Speculation(5, packed_verification=True)).to_dict()["speculation"]["packed_verification"]
     assert display.speculation(None) == "off"
     assert display.speculation(DRAFTING) == "up to 3 draft tokens per round · MTP module"
     assert display.speculation(fixed) == "exactly 2 draft tokens per round · MTP module"
-    assert display.speculation(Speculation(4, history_drafts=True)) == (
-        "up to 4 draft tokens per round · MTP module and shared decoded history")
-    assert display.speculation(Speculation(1, proposal_source="copy")) == (
-        "up to 1 draft token per round · shared decoded history")
     assert display.speculation(None, brief=True) == "speculation off"
     assert display.speculation(DRAFTING, brief=True) == "up to 3 draft tokens"
     assert display.speculation(fixed, brief=True) == "exactly 2 draft tokens"
-    assert display.speculation(Speculation(1, proposal_source="copy"), brief=True) == (
-        "up to 1 draft token from history")
 
 
 def test_headroom_grows_with_prefill_chunk_tokens_past_4096():

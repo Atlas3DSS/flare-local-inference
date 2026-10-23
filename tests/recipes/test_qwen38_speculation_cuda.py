@@ -14,7 +14,6 @@ from ignition.preparation.graphs import PreparedGraphBundle
 from ignition.recipes.qwen38.sampling import DeviceRequestState, RequestAdmission
 from ignition.components.speculation import (
     TARGET_RNG_DOMAIN,
-    PreparedCopyProposals,
     PreparedSpeculativeCommit,
     PreparedSpeculativeDistributions,
     PreparedStochasticVerification,
@@ -96,85 +95,6 @@ def snapshot(state):
     return restore
 
 
-@pytest.mark.parametrize("temperature", [.7, 1.])
-@pytest.mark.parametrize("width", [1, 3, 8])
-def test_native_copy_conditional_grammar_and_stale_metadata(temperature, width):
-    args = tensors(2, width)
-    state, slots, epochs, live, inputs, records, frame, sequence = args
-    state.parameters[:, 0] = temperature
-    copy_ids = torch.arange(4, 11, device="cuda").expand(4, -1).clone()
-    copy_count = torch.full((4,), 7, dtype=torch.int32, device="cuda")
-    copy_expected = torch.full((4,), 2, dtype=torch.int64, device="cuda")
-    copy_generation = torch.full((4,), 7, dtype=torch.int64, device="cuda")
-    masks = torch.zeros((4, 8, VOCAB // 32), dtype=torch.int32, device="cuda")
-    mask_count = torch.zeros(4, dtype=torch.int32, device="cuda")
-    mask_count[3] = width
-    state.grammar_enabled[3] = 1
-    masks[3, :width, 0] = torch.tensor([1 << (4 + j) for j in range(width)], dtype=torch.int32, device="cuda")
-    drafts = torch.zeros((2, width - 1), dtype=torch.int64, device="cuda")
-    probabilities = torch.zeros((2, width - 1, VOCAB), dtype=torch.float32, device="cuda")
-    valid = torch.zeros((2, width - 1), dtype=torch.bool, device="cuda")
-    copy_mask = torch.zeros(2, dtype=torch.int64, device="cuda")
-    previous = torch.full((4,), 8, dtype=torch.int32, device="cuda")
-    accepted_generation = torch.zeros(4, dtype=torch.int64, device="cuda")
-    proposals = PreparedCopyProposals(state, slots, epochs, live, copy_ids=copy_ids,
-        copy_count=copy_count, copy_expected=copy_expected, copy_generation=copy_generation,
-        grammar_mask_count=mask_count, draft_ids=drafts, draft_probabilities=probabilities,
-        draft_valid=valid, copy_mask=copy_mask, previous_accepted=previous,
-        accepted_generation=accepted_generation)
-    logits = torch.zeros((2, width, VOCAB), dtype=torch.float32, device="cuda")
-    # Unconstrained lane one has a deterministic target; lane zero follows masks.
-    logits[1].fill_(-torch.inf)
-    for index in range(width):
-        logits[1, index, 4 + index] = 0
-    distribution = PreparedSpeculativeDistributions(logits, state, slots, epochs, live, drafts,
-        grammar_masks=masks, grammar_mask_count=mask_count)
-    rng = SpeculativeRngState.allocate("cuda")
-    distribution.prepare()
-    verify = PreparedStochasticVerification(probabilities, drafts, distribution.probabilities,
-        state, slots, epochs, live, rng=rng, draft_valid=valid, target_valid=distribution.valid)
-    verify.prepare()
-    logits = torch.zeros((*inputs.shape, state.vocab_size), device=inputs.device)
-    commit = PreparedSpeculativeCommit(state, verify.output, inputs, slots, epochs, live,
-        completion_outputs(records), frame, sequence, rng=rng, copy_offered_mask=copy_mask, draft_context_lag=None, logits=logits)
-    commit.prepare()
-    state_restore = snapshot(state)
-
-    def restore():
-        state_restore()
-        rng.target_offset.zero_(); rng.generation.zero_()
-        previous.fill_(8); accepted_generation.zero_()
-
-    def run():
-        proposals()
-        inputs[:, 0].copy_(state.pending_token[slots.long()])
-        inputs[:, 1:].copy_(drafts)
-        distribution()
-        verify(); commit()
-
-    with captured(run, (*args, proposals, distribution, verify, commit, rng),
-                  {"copy_ids": copy_ids, "masks": masks, "records": records}, restore) as replay:
-        replay()
-        assert records[0, 3, 16:16 + width].cpu().tolist() == list(range(4, 4 + width))
-        assert records[0, 3, 8:12].cpu().tolist() == [width, width - 1, width - 1, (1 << (width - 1)) - 1]
-        assert records[0, 3, 13] == -1 and previous[3] == 1
-        assert rng.target_offset[3] == verify.draw_reservation
-        restore()
-        masks[3, 0].zero_(); masks[3, 0, 1] = 1 << (42 - 32)
-        state.eos_count[3] = 1; state.eos_token_ids[3, 0] = 42
-        replay()
-        assert records[0, 3, 8] == 1 and records[0, 3, 16] == 42
-        assert state.status[3] == FINISHED
-        for fault in ("generation", "position", "mask_count"):
-            restore()
-            copy_generation.fill_(7); copy_expected.fill_(2); mask_count[3] = width
-            if fault == "generation": copy_generation[3] = 6
-            elif fault == "position": copy_expected[3] = 1
-            else: mask_count[3] = width - 1
-            replay()
-            assert records[0, 3, 5:9].cpu().tolist() == [3, 6, 0, 0]
-            assert state.consumed_tokens[3] == 2 and rng.target_offset[3] == 0
-            assert previous[3] == 8 and accepted_generation[3] == 0
 
 
 @contextmanager

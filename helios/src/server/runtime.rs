@@ -362,6 +362,7 @@ impl ModelRuntime {
                 config.contract.cache.page_tokens,
                 config.decode_weight_bytes,
             );
+        metrics.history_drafts = config.history_drafts;
         metrics.engram = manifest
             .engram
             .as_ref()

@@ -206,7 +206,7 @@ def export_model(prepared, images, storage, path, *, options, progress=None, pub
         from .package_snapshot import ExportOptions
         cache = ExportOptions(Path(path).parent / ".flare-cache")
     request = dict(path=str(path), context=context, rank=storage.rank, granularity=storage.granularity,
-        world_size=storage.world, local_ranks=storage.local_ranks, proposal_source=prepared.server_config.get("speculative_proposal_source", "mtp"),
+        world_size=storage.world, local_ranks=storage.local_ranks,
         publisher=_publisher_metadata(publisher),
         peer_addresses=[] if storage.peer_storage is None else list(storage.peer_storage.owned),
         peer_mappings=[] if storage.peer_storage is None else

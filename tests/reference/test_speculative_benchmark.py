@@ -175,14 +175,14 @@ def memory(arm):
     return value
 
 
-def test_actual_prepared_arm_must_match_source_fixed_width_copy_and_catalog():
+def test_actual_prepared_arm_must_match_fixed_width_and_catalog():
     for arm in sw.arms():
         actual = memory(arm)
         sb.validate_arm(actual, arm)
         if arm["mtp"]:
             wrong = deepcopy(actual)
-            wrong["history_drafts"] = not actual["history_drafts"]
-            with pytest.raises(ValueError, match="history_drafts"):
+            wrong["speculative_fixed_width"] = 9
+            with pytest.raises(ValueError, match="speculative_fixed_width"):
                 sb.validate_arm(wrong, arm)
             wrong = deepcopy(actual)
             wrong["speculative_shapes"].append([4, 8])

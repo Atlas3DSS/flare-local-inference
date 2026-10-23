@@ -22,7 +22,7 @@ def error(message: str) -> None:
 def speculation(settings, *, brief: bool = False) -> str:
     """Describe speculation settings: the drafts verified per round and where they come from.
 
-    The brief form fits a startup line and names the source only when it is not the MTP module alone.
+    The brief form fits a startup line.
     """
     if settings is None:
         return "speculation off" if brief else "off"
@@ -30,8 +30,5 @@ def speculation(settings, *, brief: bool = False) -> str:
     depth = f"{'up to' if settings.adaptive else 'exactly'} {drafts} draft token{'' if drafts == 1 else 's'}"
     selection = " · GPU prefix selection" if settings.draft_prefix_selection == "gpu" else ""
     if brief:
-        source = " from history" if not settings.learned else " with history drafts" if settings.history_drafts else ""
-        return depth + source + selection
-    source = ("shared decoded history" if not settings.learned
-              else "MTP module and shared decoded history" if settings.history_drafts else "MTP module")
-    return f"{depth} per round · {source}" + selection
+        return depth + selection
+    return f"{depth} per round · MTP module" + selection

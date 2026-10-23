@@ -69,7 +69,7 @@ def run(args, model, server):
     def complete(body):
         return http(base, "/v1/chat/completions", body)
 
-    _, before = idle(base)
+    idle(base)
     for concurrency in (1, 2, 4):
         requests = [literal_request(identity, text, seed=42 + lane) for lane in range(concurrency)]
         with ThreadPoolExecutor(max_workers=concurrency) as executor:
@@ -87,12 +87,7 @@ def run(args, model, server):
               actual=response["usage"]["completion_tokens"], expected=budget)
         check(f"budget-{budget}/length", choice["finish_reason"] == "length", actual=choice["finish_reason"])
         check(f"budget-{budget}/prefix", text.startswith(choice["message"]["content"]))
-    _, after = idle(base)
-    if args.source == "copy" and args.history_drafts and args.fixed_width != 1:
-        accepted_copy = sum(value - before.get(key, 0) for key, value in after.items()
-                            if key.startswith("flare_speculative_drafts_total{")
-                            and 'source="copy"' in key and 'outcome="accepted"' in key)
-        check("grammar-accepted-copy", accepted_copy > 0, accepted_drafts=accepted_copy)
+    idle(base)
     print(f"{checks} speculative HTTP checks passed", flush=True)
 
 
@@ -101,16 +96,14 @@ def main():
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--snapshot", type=Path, required=True)
-    parser.add_argument("--source", choices=("copy", "mtp"), default="copy")
     parser.add_argument("--bind", default="127.0.0.1:8000")
     parser.add_argument("--fixed-width", type=int, choices=range(1, 9))
     parser.add_argument("--history-drafts", action="store_true")
     parser.add_argument("--keep-serving", action="store_true")
     args = parser.parse_args()
-    config = PreparationConfig(mtp=True, speculative_proposal_source=args.source,
-        speculative_fixed_width=args.fixed_width, history_drafts=args.history_drafts)
+    config = PreparationConfig(mtp=True, speculative_fixed_width=args.fixed_width)
     with prepare_model(args.snapshot, config, progress=lambda text: print(text, flush=True)) as model:
-        server = model.start_server(bind=args.bind)
+        server = model.start_server(bind=args.bind, options={"history_drafts": args.history_drafts})
         print(f"Listening on {server.address}", flush=True)
         run(args, model, server)
         if args.keep_serving:

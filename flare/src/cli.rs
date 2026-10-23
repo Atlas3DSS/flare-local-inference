@@ -670,6 +670,14 @@ pub struct ServingOptions {
     #[arg(long, value_name = "N", help_heading = "Speculation options")]
     pub mtp_draft_tokens: Option<usize>,
 
+    /// Augment learned drafts with shared decoded history; requires prepared history inputs.
+    #[arg(long, overrides_with = "no_history_drafts", help_heading = "Speculation options")]
+    pub history_drafts: bool,
+
+    /// Disable shared decoded history proposals.
+    #[arg(long, overrides_with = "history_drafts", help_heading = "Speculation options")]
+    pub no_history_drafts: bool,
+
     /// Advanced: fix the total verification-row budget, including pending inputs, using
     /// one exact captured packed graph per batch [default: adaptive within captured capacities].
     /// Requires adaptive prefix selection at the captured draft depth.
@@ -795,6 +803,12 @@ impl ServingOptions {
         if let Some(n) = self.mtp_draft_tokens {
             options.extend(["--mtp-draft-tokens".into(), n.to_string()]);
         }
+        if self.history_drafts {
+            options.push("--history-drafts".into());
+        }
+        if self.no_history_drafts {
+            options.push("--no-history-drafts".into());
+        }
         if let Some(n) = self.mtp_verification_token_budget {
             options.extend(["--mtp-verification-token-budget".into(), n.to_string()]);
         }
@@ -867,6 +881,13 @@ impl ServingOptions {
             embedding_table_workers: self.embedding_table_workers,
             max_concurrency: self.max_concurrency.map(NonZeroUsize::get),
             mtp_draft_tokens: self.mtp_draft_tokens,
+            history_drafts: if self.history_drafts {
+                Some(true)
+            } else if self.no_history_drafts {
+                Some(false)
+            } else {
+                None
+            },
             mtp_verification_token_budget: self
                 .mtp_verification_token_budget
                 .map(NonZeroUsize::get),
@@ -1075,10 +1096,29 @@ mod tests {
         assert_eq!(options.kv_cache_limit, KvCacheLimit::Memory);
         assert_eq!(options.memory_limit, None);
         assert_eq!(options.mtp_draft_tokens, None);
+        assert_eq!(options.history_drafts, None);
         assert_eq!(options.mtp_verification_token_budget, None);
         assert_eq!(options.mtp_max_verification_token_budget, None);
         assert_eq!(options.adaptive_verification, None);
         assert_eq!(options.prefix_cache, PrefixCacheOffload::default());
+    }
+
+    #[test]
+    fn history_flags_override_and_reach_remote_ranks() {
+        for (flags, expected) in [
+            (vec!["--history-drafts"], true),
+            (vec!["--no-history-drafts"], false),
+            (vec!["--history-drafts", "--no-history-drafts"], false),
+            (vec!["--no-history-drafts", "--history-drafts"], true),
+        ] {
+            let mut command = vec!["flare", "run", "model.safetensors"];
+            command.extend(flags);
+            let args = run(&command);
+            assert_eq!(args.load_options().history_drafts, Some(expected));
+            let options = args.rank_options();
+            assert!(options.contains(&if expected { "--history-drafts" } else { "--no-history-drafts" }.to_owned()));
+            assert!(!options.contains(&if expected { "--no-history-drafts" } else { "--history-drafts" }.to_owned()));
+        }
     }
 
     #[test]

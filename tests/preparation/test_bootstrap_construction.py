@@ -559,7 +559,7 @@ def _install_boundaries(monkeypatch, checkpoint):
 
 
 @pytest.mark.parametrize("concurrency", [4, 9])
-@pytest.mark.parametrize("proposal,fixed", [("ordinary", None), ("copy", None), ("mtp", None), ("mtp", 4), ("copy", 4)])
+@pytest.mark.parametrize("proposal,fixed", [("ordinary", None), ("mtp", None), ("mtp", 4)])
 def test_prepare_model_constructs_real_catalog_on_meta(
     monkeypatch, checkpoint, proposal, fixed, concurrency
 ):
@@ -568,8 +568,6 @@ def test_prepare_model_constructs_real_catalog_on_meta(
         max_active=concurrency,
         mtp=proposal != "ordinary",
         speculative_fixed_width=fixed,
-        speculative_proposal_source="copy" if proposal == "copy" else "mtp",
-        history_drafts=proposal == "copy",
     )
     with (
         FakeTensorMode(allow_non_fake_inputs=True),
@@ -659,9 +657,6 @@ def test_prepare_model_constructs_real_catalog_on_meta(
         assert (owner.transfers.exact.draft is not None) == (proposal == "mtp" and owner.speculation is not None)
     assert len(constructors["PreparedStochasticVerification"]) == (
         0 if proposal == "ordinary" else len(config.speculative_shapes)
-    )
-    assert len(constructors["PreparedCopyProposals"]) == (
-        len(config.speculative_shapes) if proposal == "copy" else 0
     )
     for _, args in constructors["PreparedMTP"]:
         assert args["workspace"] is session.arena
