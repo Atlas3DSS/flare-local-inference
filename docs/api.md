@@ -491,11 +491,36 @@ are included in the system prompt as well as enforced by token masks.
 Anthropic thinking budgets are advisory effort hints, not independent token
 budgets. Budgets up to 5,000 map to low effort, up to 20,000 to high effort, and
 larger budgets to maximum effort. Responses and Anthropic named effort settings
-map into the same neutral levels. The frontend resolves those levels against the
-effort vocabulary accepted by the packaged template: for example Qwen uses
+(`reasoning.effort` and `output_config.effort`) accept named levels and map into
+the same neutral levels. They do not accept numeric scores. The frontend resolves
+those levels against the effort vocabulary accepted by the packaged template: for example Qwen uses
 `low/medium/xhigh`. Native DeepSeek V4 and V4.1 prompt encoders accept
-`low/high/xhigh/max` and default to thinking enabled and high effort. They reject numeric
-effort, `drop_thinking`, assistant continuation, and `add_generation_prompt=false`.
+`low/high/xhigh/max` and default to thinking enabled and high effort.
+DeepSeek V4 rejects numeric effort. DeepSeek V4.1 additionally accepts a JSON
+integer from **1 through 100** in the native `reasoning_effort` option, either
+at the request's top level or in `chat_template_kwargs`. Its named levels map
+to scores `low=50`, `high=75`, `xhigh=75`, and `max=100`.
+For `POST /v1/chat/completions`, for example:
+
+```json
+{
+  "model": "DeepSeek-V4.1-Flash",
+  "messages": [{"role": "user", "content": "Explain why this algorithm terminates."}],
+  "reasoning_effort": 80,
+  "max_tokens": 1024
+}
+```
+
+Alternatively, replace `"reasoning_effort": 80` with
+`"chat_template_kwargs": {"reasoning_effort": 80}`. Values outside 1–100,
+floating-point numbers such as `80.0`, booleans, and numeric strings such as
+`"80"` are rejected. Omitted values retain prepared defaults; explicit `null`
+selects the encoder's high default. Disabling thinking suppresses the effort
+prefix. The score is a prompt hint, not a token count or hard reasoning budget;
+Anthropic `thinking.budget_tokens` retains the threshold mapping described above.
+
+Both native DeepSeek encoders reject `drop_thinking`, assistant continuation,
+and `add_generation_prompt=false`.
 Explicit values are validated by the selected encoder. Packages exported with
 Jinja templates retain their packaged template semantics.
 Kimi K3 always uses thinking: its template ignores `enable_thinking=false` and
