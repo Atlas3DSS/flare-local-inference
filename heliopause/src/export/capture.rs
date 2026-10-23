@@ -1649,6 +1649,7 @@ pub(crate) fn capture_rank(
     if request.world_size == 0 {
         return Err(invalid("export rank count must be positive"));
     }
+    let local_ranks = request.local_rank_count()?;
     if request.path.exists() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::AlreadyExists,
@@ -2183,7 +2184,7 @@ pub(crate) fn capture_rank(
     let storage_download_start = downloader.downloaded;
     let mut scanned = 0u64;
     let mut stored_bytes = 0u64;
-    let budget = super::io::IoBudget::for_capture(request.world_size)?;
+    let budget = super::io::IoBudget::for_capture(local_ranks)?;
     let store = request
         .options
         .cache

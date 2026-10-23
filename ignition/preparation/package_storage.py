@@ -37,10 +37,13 @@ class PackageStorage:
     # Where sealing below the floor starts; a context's own storage lies above it.
     LOW_SCAN_START = 1 << 32
 
-    def __init__(self, *, rank=0, world=1, device=0):
+    def __init__(self, *, rank=0, world=1, device=0, local_ranks=None):
         import torch
 
         self.rank, self.world, self.device = rank, world, device
+        self.local_ranks = world if local_ranks is None else local_ranks
+        if type(self.local_ranks) is not int or not 1 <= self.local_ranks <= world:
+            raise ValueError("local preparation ranks must be positive and fit the rank group")
         self.integrated = torch.cuda.get_device_properties(device).is_integrated
         self.DEVICE_BASE += rank * self.RESERVATION_BYTES
         self.cuda = _Cuda()

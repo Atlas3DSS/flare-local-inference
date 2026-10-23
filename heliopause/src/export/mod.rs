@@ -138,6 +138,9 @@ pub(crate) struct CaptureRequest {
     pub world_size: usize,
     #[serde(default = "mtp")]
     pub proposal_source: String,
+    /// Rank processes sharing this host's memory; omitted means the whole rank group.
+    #[serde(default)]
+    pub local_ranks: Option<usize>,
     #[serde(default)]
     pub publisher: Option<serde_json::Value>,
     #[serde(default = "alignment")]
@@ -181,6 +184,16 @@ pub(crate) struct CaptureRequest {
     #[serde(default)]
     pub sources: bool,
     pub shard_size: u64,
+}
+
+impl CaptureRequest {
+    fn local_rank_count(&self) -> ExportResult<usize> {
+        let count = self.local_ranks.unwrap_or(self.world_size);
+        if count == 0 || count > self.world_size {
+            return Err(invalid("local preparation ranks must be positive and fit the rank group"));
+        }
+        Ok(count)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

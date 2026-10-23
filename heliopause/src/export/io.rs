@@ -1242,7 +1242,7 @@ mod tests {
     #[test]
     fn capture_and_publishing_buffers_fit_the_host_budget() {
         for available in [8u64 << 30, 16u64 << 30, 64u64 << 30, 1u64 << 40] {
-            for ranks in [1, 2, 4, 8] {
+            for ranks in [1, 2, 3, 4, 8] {
                 for capture in [false, true] {
                     let (main, scratch) = buffer_depths(ranks, available, capture).unwrap();
                     let reserved = if capture {
@@ -1258,6 +1258,25 @@ mod tests {
                     assert!(main > 0);
                 }
             }
+        }
+    }
+    #[test]
+    fn capture_buffers_count_rank_processes_sharing_host_memory() {
+        let mut request: super::super::CaptureRequest = serde_json::from_value(serde_json::json!({
+            "path": "capture.json", "context": 0, "world_size": 3,
+            "graphs": [], "allocations": [], "shard_size": 1 << 30
+        })).unwrap();
+        let available = 1u64 << 30;
+        assert_eq!(request.local_rank_count().unwrap(), 3);
+        assert!(buffer_depths(request.local_rank_count().unwrap(), available, true).is_err());
+        request.local_ranks = Some(1);
+        let local = request.local_rank_count().unwrap();
+        let (main, scratch) = buffer_depths(local, available, true).unwrap();
+        assert!(main > 0);
+        assert!(((main + scratch) * CAPACITY * local + 4 * BLOCK * local) as u64 <= available / 16);
+        for invalid in [0, 4] {
+            request.local_ranks = Some(invalid);
+            assert!(request.local_rank_count().is_err());
         }
     }
     #[test]

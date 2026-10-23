@@ -623,7 +623,7 @@ def serve_peer(control, executor, rank, world, *, hub_cache, progress=None, expo
             recorder = ModuleImages()
             with recorder:
                 torch.cuda.set_device(0)
-                storage = PackageStorage(rank=rank, world=world, device=0)
+                storage = PackageStorage(rank=rank, world=world, device=0, local_ranks=1)
                 with storage:
                     model = prepare(snapshot, config, rank=rank, group=dist.group.WORLD, progress=progress,
                                     package_storage=storage)

@@ -207,7 +207,7 @@ def _export_hosts(args, *, export_path) -> int:
         recorder = ModuleImages()
         with recorder:
             torch.cuda.set_device(0)
-            storage = PackageStorage(world=plan.world_size)
+            storage = PackageStorage(world=plan.world_size, local_ranks=1)
             with storage:
                 prepared = model.recipe.prepare(
                     model.snapshot(hub_cache), plan, compile_forwards=not args.no_compile,

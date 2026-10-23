@@ -11,6 +11,12 @@ import torch
 from ignition.preparation.package_storage import PackageStorage
 
 
+@pytest.mark.parametrize("local_ranks", [0, 4, True])
+def test_local_export_rank_count_must_fit_the_global_group(local_ranks):
+    with pytest.raises(ValueError, match="local preparation ranks"):
+        PackageStorage(world=3, local_ranks=local_ranks)
+
+
 def test_cuda_access_descriptor_array_matches_driver_abi():
     from ignition.preparation.package_storage import _Access, _Location
 
