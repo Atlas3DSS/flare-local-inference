@@ -43,11 +43,22 @@ def capture_forwards(functions, signatures, *, session, device, stream, pool,
             compiled = cache.prepare_many(forwards, signatures, progress=progress,
                                           coordinator=coordinator, materialize=materialize, warmup=warmup)
         stream.synchronize()
+        with phase(progress, "Release serialized compiler state", total=len(compiled)) as stage:
+            released = 0
+            for forward in compiled.values():
+                released += forward.prepare_capture()
+                stage.update(advance=1)
+            stage.update(f"{released >> 20} MiB; guards and kernel owners retained")
+        from .host_memory import release_unused
+
+        release_unused()
     elif materialize is not None:
         materialize()
     with phase(progress, label, total=len(names)) as stage:
         for name in names:
             function = functions[name]
+            if coordinator is not None:
+                coordinator.barrier(f"capture warmup {name}", coordinator.ranks)
             started = monotonic()
             stream.wait_stream(torch.cuda.current_stream(device))
             with warmup(), torch.cuda.stream(stream):

@@ -36,6 +36,8 @@ def test_capture_reports_catalog_once_before_compilation_and_on_recapture(captur
         calls.append("forward")
     class Cached:
         cache_hit = True
+        def prepare_capture(self):
+            return 0
         def __call__(self):
             calls.append("cached")
     class Cache:

@@ -4,6 +4,8 @@ import multiprocessing
 import os
 from pathlib import Path
 
+import pytest
+
 
 def _rank(rank, world, store, home, owned, outcome):
     import torch.distributed as dist
@@ -131,7 +133,7 @@ def _lending_rank(rank, world, store, root, outcome):
         variant = "sample" if rank == 0 else "consume"
         functions = {name: _Forward(variant) for name in "abcd"}
         coordinator = SimpleNamespace(group=dist.group.WORLD, ranks=tuple(range(world)), spans_hosts=False,
-                                      local_ranks=world)
+            local_ranks=world, barrier=lambda key, ranks: dist.monitored_barrier(group=dist.group.WORLD))
         selected = cache._prepare_ranks(functions, {name: name for name in functions}, coordinator, progress=None,
                                         materialize=lambda: None, warmup=nullcontext)
         outcome.put((rank, sorted(selected)))
@@ -160,3 +162,68 @@ def test_one_host_lends_a_ranks_missing_compilations_to_idle_ranks(tmp_path):
     assert compiled.count("sample compiled by rank 0") == 3
     assert compiled.count("sample compiled by rank 1") == 1
     assert len(compiled) == 8 and not list((root / "lent").iterdir())
+
+
+def _cached_rank(rank, world, store, root, deferred, outcome):
+    import gc
+    import weakref
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    import torch.distributed as dist
+
+    from ignition.preparation import aot, compile_pool
+
+    try:
+        compile_pool.CompilePool = _Pool
+        restored, warmed = [], []
+
+        def load(self, forward, path, required=False):
+            bound = aot.BoundForward(lambda owner: warmed.append(owner), forward, True)
+            if not required:
+                restored.append(weakref.ref(bound))
+            return bound
+
+        def materialize():
+            gc.collect()
+            assert restored and all(reference() is None for reference in restored)
+
+        aot.ForwardCache._load = load
+        dist.init_process_group("gloo", init_method=f"file://{store}", rank=rank, world_size=world)
+        cache = aot.ForwardCache.__new__(aot.ForwardCache)
+        cache.root, cache.device, cache.headroom_bytes, cache.options = root, "cpu", 0, aot.MappingProxyType({})
+        cache.compile_workers = None
+        functions = {name: _Forward("shared") for name in "abcd"}
+        signatures = {name: name for name in functions}
+        for name, forward in functions.items():
+            cache._path(forward, name=f"{name}.shared", signature=name).write_text("cached")
+        dist.barrier()
+        coordinator = SimpleNamespace(group=dist.group.WORLD, ranks=tuple(range(world)), spans_hosts=False,
+            local_ranks=world, barrier=lambda key, ranks: dist.monitored_barrier(group=dist.group.WORLD))
+        selected = cache._prepare_ranks(functions, signatures, coordinator, progress=None,
+            materialize=materialize if deferred else None, warmup=nullcontext)
+        assert set(warmed) == set(functions.values())
+        assert all(bound.cache_hit for bound in selected.values())
+        outcome.put((rank, sorted(selected)))
+        dist.destroy_process_group()
+    except Exception:
+        import traceback
+
+        outcome.put((rank, traceback.format_exc()))
+
+
+@pytest.mark.parametrize("deferred", [False, True])
+def test_cached_catalog_releases_restoration_owners_before_rebinding(tmp_path, deferred):
+    context = multiprocessing.get_context("fork")
+    root = tmp_path / "forwards"
+    root.mkdir()
+    outcome = context.Queue()
+    processes = [context.Process(target=_cached_rank,
+        args=(rank, 3, tmp_path / "store", root, deferred, outcome)) for rank in range(3)]
+    for process in processes:
+        process.start()
+    results = dict(outcome.get(timeout=120) for _ in processes)
+    for process in processes:
+        process.join(timeout=60)
+        assert process.exitcode == 0
+    assert results == {rank: list("abcd") for rank in range(3)}

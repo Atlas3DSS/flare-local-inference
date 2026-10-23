@@ -11,6 +11,7 @@ from ignition.preparation import capture
 def test_support_forward_is_neither_compiled_nor_captured(monkeypatch):
     calls = []
     selected = lambda: calls.append("verification")
+    selected.prepare_capture = lambda: 0
     support = lambda: calls.append("support")
     stream = SimpleNamespace(wait_stream=lambda value: None, synchronize=lambda: None)
 

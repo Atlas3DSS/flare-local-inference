@@ -388,6 +388,20 @@ def aot_forward(forward, *, options=None):
 
 
 @dataclass
+class _GuardedForwardCall:
+    function: object
+    guards: object
+    backend: StorageBackend
+
+    def __call__(self, owner):
+        arguments = {"forward": owner}
+        if not self.guards.check(arguments):
+            raise BindingMismatch(f"prepared forward no longer matches compiled guards: "
+                                  f"{self.guards.check_verbose(arguments)}")
+        return self.function(owner)
+
+
+@dataclass
 class BoundForward:
     artifact: object
     owner: object
@@ -396,6 +410,18 @@ class BoundForward:
 
     def __call__(self):
         return self.artifact(self.owner)
+
+    def prepare_capture(self):
+        """Retain execution guards and kernel owners after portable cache writes finish."""
+        state = self.artifact._artifacts
+        if (tuple(state.signature.parameters) != ("forward",) or state.runtime_env.closure
+                or state.guard_manager is None or not isinstance(state.compiled_fn, StorageBackend)):
+            raise RuntimeError("capture requires a storage-bound, closed compiled forward")
+        backend = state.compiled_fn
+        released = len(state.guards_state) + len(backend._serialized_artifact or b"")
+        backend._serialized_artifact = None
+        self.artifact = _GuardedForwardCall(self.artifact.fn, state.guard_manager, backend)
+        return released
 
 
 def _completed(pending):
@@ -754,6 +780,8 @@ class ForwardCache:
         failures = [(index, failure) for index, (_, failure) in zip(ranks, outcomes) if failure is not None]
         if failures:
             raise RuntimeError(f"forward compilation failed: {failures}")
+        restored.clear()
+        bound = None
         paths = {key: value for compiled, _ in outcomes for key, value in compiled.items()}
         # Ranks on one host compiled into its cache directory; only other hosts lack their shares.
         if coordinator.spans_hosts:
@@ -785,6 +813,7 @@ class ForwardCache:
         release_unused()
         with phase(progress, "Warm compiled forwards", total=len(functions)) as stage:
             for name in functions:
+                coordinator.barrier(f"compiled warmup {name}", ranks)
                 try:
                     with warmup():
                         selected[name]()
