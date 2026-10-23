@@ -107,9 +107,10 @@ def test_compiled_query_batches_match_independent_scores_with_candidate_reuse(
     keys = torch.randn((records, 128), device=device, dtype=torch.bfloat16) * .2
     cache = torch.zeros((page_count, page_size * 68), device=device, dtype=torch.uint8)
     permutation = torch.randperm(page_count, device=device, dtype=torch.int32)
-    table = permutation[None].expand(rows, -1).contiguous()
+    table = permutation[None].expand(rows, -1)
     logical_keys = torch.arange(records, device=device)[None].expand(rows, -1)
     if independent_pages:
+        table = table.clone()
         visible_pages = records // page_size
         page_order = (torch.arange(visible_pages, device=device)[None]
                       + 7 * torch.arange(rows, device=device)[:, None]) % visible_pages
