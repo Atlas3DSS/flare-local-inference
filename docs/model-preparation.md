@@ -529,9 +529,11 @@ through the shared cache and speculative execution contracts. The perception enc
 prepares 504-pixel local crops and a 728-pixel overview. Serving defaults follow
 the model card: temperature 1, top-p 0.95, no top-k filter, and neutral penalties.
 
-One-shot TP reductions with up to 36 rows fuse the residual update and
-zero-centered RMSNorm into the collective, preserving FP32 residual storage and
-BF16 normalized outputs. Attention and dense MLP projections enter the fused
+One-shot TP reductions within the channel's byte capacity fuse the residual
+update and zero-centered RMSNorm into the collective. A bounded resident grid
+retains row ownership across ranks while processing multiple rows per block.
+The collective preserves FP32 residual storage and BF16 normalized outputs.
+Attention and dense MLP projections enter the fused
 collective directly as BF16; routed MLP updates enter as FP32. Attention and dense
 MLP reductions round to BF16 before residual addition; routed MLP reductions retain
 FP32. MLP reductions consume the following layer's input-normalization weight.
@@ -605,6 +607,38 @@ temperature 1, top-p 1, no top-k filter, and neutral penalties. Reasoning is
 always enabled; requests to disable thinking are ignored without an error.
 Effort defaults to `max`; requests can select `low`, `high`, or `max` and
 override sampling defaults. Preserve assistant reasoning in conversation history.
+
+## MiniMax M3.1 Flash
+
+The `minimax-m3-1-flash` alias selects
+[`MiniMaxAI/MiniMax-M3.1-Flash`](https://huggingface.co/MiniMaxAI/MiniMax-M3.1-Flash)
+at revision `9e7ebacac350497ad4a1272a2e817639bf11561c`. Preparation uses four
+SM120/SM121 GPUs, MXFP8 projections, NVFP4 routed experts, and FP8 target,
+indexer, and DSpark caches. Sampling defaults are temperature 1.0 and top-p
+0.95, following the model card.
+
+DSpark defaults match DeepSeek V4.1: 32 concurrent requests, five draft tokens,
+a 128-row physical target capacity, a 64-graph packed budget, and GPU causal
+prefix allocation. Each packed graph generates proposals, allocates prefixes,
+verifies the admitted tokens, and commits accepted state. Width-one graphs
+preserve draft context. `--speculative-token-capacity` and
+`--speculative-graph-budget` control the same shared catalog geometry described
+under DeepSeek V4.1.
+
+The annotated template in `ignition/recipes/minimax_m3/assets/chat_template.jinja`
+preserves the pinned upstream template byte for byte after removing message
+marks. It retains the upstream adaptive-thinking behavior and XML tool syntax.
+Vision preparation includes temporal patch duplication and spatial patch
+merging; `--language-model-only` omits the vision encoder. Optional
+`--expert-scale-compression csf` losslessly compresses expert scales and shares
+their expansion scratch across routed layers. Planning retains the native
+weight budget for this encoding; loading reports its actual allocation.
+
+```sh
+ignition export minimax-m3-1-flash --gpus 0-3 --language-model-only \
+  --expert-scale-compression csf --output /data/flare-runtime/minimax-m3.1-flash-tp4.safetensors
+flare/target/release/flare run /data/flare-runtime/minimax-m3.1-flash-tp4.safetensors --gpus 0-3
+```
 
 ## Storage and graph capacities
 
