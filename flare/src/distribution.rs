@@ -704,6 +704,8 @@ fn serve_source(
     {
         return Err("invalid or duplicate package source channel".into());
     }
+    // Receivers hash and publish each file before reusing channels for the next request.
+    socket.set_read_timeout(Some(TIMEOUT))?;
     loop {
         // EOF between requests is normal: a receiver closes its channels before the final barrier.
         if socket.peek(&mut [0])? == 0 {
@@ -733,6 +735,44 @@ fn serve_source(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_waits_for_receiver_file_verification() {
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(b"payload").unwrap();
+        let files = vec![vec![Arc::new(file)]; 2];
+        let specs = vec![
+            vec![FileSpec {
+                name: "file".into(),
+                size: 7,
+                ranges: vec![(0, 7)],
+            }];
+            2
+        ];
+        let source = Source::start(files, specs, 1).unwrap();
+        let mut socket = TcpStream::connect(("127.0.0.1", source.port)).unwrap();
+        configure(&socket, IO_TIMEOUT).unwrap();
+        socket.write_all(&[1, 0, 0, 0, 0, 0, 0, 0]).unwrap();
+        for request in 0..2 {
+            if request == 1 {
+                thread::sleep(IO_TIMEOUT + Duration::from_secs(10));
+            }
+            write(
+                &mut socket,
+                &Request {
+                    file: 0,
+                    ranges: vec![(0, 7)],
+                },
+            )
+            .unwrap();
+            let mut bytes = [0; 15];
+            socket.read_exact(&mut bytes).unwrap();
+            assert_eq!(u64::from_le_bytes(bytes[..8].try_into().unwrap()), 7);
+            assert_eq!(&bytes[8..], b"payload");
+        }
+        socket.shutdown(Shutdown::Both).unwrap();
+        source.finish().unwrap();
+    }
 
     #[test]
     fn sparse_rank_distribution_reuses_channels_across_files_and_cached_launches() {

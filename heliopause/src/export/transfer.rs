@@ -19,12 +19,7 @@ use super::{RankOutput, Result, invalid};
 const BLOCK_BYTES: usize = 4 << 20;
 const METADATA_BYTES: usize = 256 << 20;
 const PROTOCOL: u32 = 1;
-/// Longest a channel may stay silent before its peer is treated as dead. Both
-/// ends have silent stretches that are legitimate work, not stalls: a sender
-/// hashes every payload source before sending its manifest, and a coordinator
-/// verifies each cached blob before answering it. The largest supported recipe
-/// hashes about 750 GB per rank at TP2, roughly 400 s on local NVMe at 1.9 GB/s.
-const SOCKET_QUIET_MILLIS: libc::c_int = 900_000;
+const EXPORT_IDLE_TIMEOUT_MS: i32 = 2 * 60 * 60 * 1000;
 
 #[derive(Clone, Copy)]
 enum FileDirection {
@@ -147,7 +142,8 @@ impl Socket {
             revents: 0,
         };
         loop {
-            let result = unsafe { libc::poll(&mut poll, 1, SOCKET_QUIET_MILLIS) };
+            // Peers may be hashing sources, verifying cache entries, or draining bounded disk writers.
+            let result = unsafe { libc::poll(&mut poll, 1, EXPORT_IDLE_TIMEOUT_MS) };
             if result > 0 {
                 return Ok(());
             }
@@ -1112,6 +1108,91 @@ mod tests {
         assert_eq!(received.channels[0].received, 20);
         assert_eq!(received.channels[0].sent, 18);
         assert!(directory.0.join("rank.json").exists());
+    }
+    #[test]
+    fn rank_export_waits_for_control_preparation() {
+        for delay_sender in [true, false] {
+            let directory = Directory::new();
+            let bytes = b"prepared rank payload";
+            let path = directory.0.join("resource");
+            fs::write(&path, bytes).unwrap();
+            let (control_root, control_peer) = sockets();
+            let (root, peer) = sockets();
+            std::thread::scope(|scope| {
+                let sender = scope.spawn(|| {
+                    if delay_sender {
+                        std::thread::sleep(std::time::Duration::from_secs(31));
+                    }
+                    send_rank(
+                        output(path.clone(), bytes.len() as u64),
+                        Value::Null,
+                        control_peer.as_raw_fd(),
+                        vec![state(&peer, false)],
+                    )
+                });
+                if !delay_sender {
+                    std::thread::sleep(std::time::Duration::from_secs(31));
+                }
+                let received = receive_ranks(
+                    vec![ReceiveRequest {
+                        control_fd: control_root.as_raw_fd(),
+                        channels: vec![state(&root, true)],
+                        destination: directory.0.join("rank.json"),
+                    }],
+                    &directory.0.join("cache"),
+                    false,
+                );
+                let sent = sender.join().unwrap();
+                let received = received.unwrap();
+                sent.unwrap();
+                assert_eq!(
+                    fs::read(&received[0].output.payload[0].source.path).unwrap(),
+                    bytes
+                );
+            });
+        }
+    }
+    #[test]
+    fn rank_export_waits_for_payload_completion() {
+        let directory = Directory::new();
+        let bytes = b"prepared rank payload";
+        let path = directory.0.join("resource");
+        fs::write(&path, bytes).unwrap();
+        let (control_root, control_peer) = sockets();
+        let (root, peer) = sockets();
+        std::thread::scope(|scope| {
+            let sender = scope.spawn(|| {
+                send_rank(
+                    output(path.clone(), bytes.len() as u64),
+                    Value::Null,
+                    control_peer.as_raw_fd(),
+                    vec![state(&peer, false)],
+                )
+            });
+            let mut control = Socket::borrow(control_root.as_raw_fd()).unwrap();
+            let manifest: Manifest = receive_control(&mut control).unwrap();
+            send_control(
+                &mut control,
+                &Request {
+                    version: PROTOCOL,
+                    files: manifest.files.keys().cloned().collect(),
+                },
+            )
+            .unwrap();
+            let mut channel = Channel::new(state(&root, true)).unwrap();
+            let (_, received) = channel.receive("export-data").unwrap();
+            assert_eq!(received, bytes);
+            let (finished, empty) = channel.receive("export-finished").unwrap();
+            assert!(empty.is_empty());
+            std::thread::sleep(std::time::Duration::from_secs(31));
+            channel
+                .send(
+                    json!({"kind":"export-finished", "stats":finished["stats"]}),
+                    &[],
+                )
+                .unwrap();
+            sender.join().unwrap().unwrap();
+        });
     }
     #[test]
     fn multiple_ranks_and_streams_share_cache_and_drain() {

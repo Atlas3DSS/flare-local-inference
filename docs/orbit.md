@@ -587,8 +587,9 @@ their combined connections. Higher counts increase CPU and I/O concurrency;
 benchmark the actual package and fabric before choosing a larger stream count. A saved group's
 `transfer_streams` value is reused by `orbit run`, and an explicit CLI value
 overrides it. This setting applies to direct and ring distribution and does not affect
-collectives. A transfer connection fails after 120 seconds without read or write
-progress.
+collectives. Active payload transfers fail after 120 seconds without read or write
+progress. Native serving distribution allows 30 minutes between requests on a reused
+source channel while receivers flush and verify completed files.
 
 Destinations reuse verified cached files without opening payload connections.
 Each receiving worker buffers at most 1 MiB of file data in addition to
