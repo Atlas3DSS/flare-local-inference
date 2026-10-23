@@ -72,7 +72,7 @@ fn conversation(
     frontend: &Frontend,
     messages: &[Json],
     options: &Map<String, Json>,
-) -> Result<Conversation> {
+) -> Result<(Conversation, Option<u8>)> {
     if messages.is_empty() {
         return Err(invalid("cannot encode an empty conversation"));
     }
@@ -166,23 +166,35 @@ fn conversation(
             _ => return Err(invalid("enable_thinking must be a boolean")),
         },
     };
-    let reasoning_effort = Some(
+    let effort_error = || {
+        invalid(if frontend.prompt_encoder == PromptEncoder::DeepseekV41 {
+            "reasoning_effort must be an integer from 1 through 100 or low, high, xhigh, or max"
+        } else {
+            "reasoning_effort must be low, high, xhigh, or max for DeepSeek V4"
+        })
+    };
+    let (reasoning_effort, reasoning_effort_score) =
         match options.get("reasoning_effort").filter(|v| !v.is_null()) {
-            None => ReasoningEffort::High,
-            Some(Json::String(value)) => match value.as_str() {
-                "low" => ReasoningEffort::Low,
-                "high" => ReasoningEffort::High,
-                "xhigh" => ReasoningEffort::Xhigh,
-                "max" => ReasoningEffort::Max,
-                _ => return Err(invalid("reasoning_effort must be low, high, xhigh, or max")),
-            },
-            _ => {
-                return Err(invalid(
-                    "numeric reasoning_effort is not supported by DeepSeek prompt encoding",
-                ));
+            None => (Some(ReasoningEffort::High), None),
+            Some(Json::String(value)) => (
+                Some(match value.as_str() {
+                    "low" => ReasoningEffort::Low,
+                    "high" => ReasoningEffort::High,
+                    "xhigh" => ReasoningEffort::Xhigh,
+                    "max" => ReasoningEffort::Max,
+                    _ => return Err(effort_error()),
+                }),
+                None,
+            ),
+            Some(Json::Number(value)) if frontend.prompt_encoder == PromptEncoder::DeepseekV41 => {
+                let score = value
+                    .as_u64()
+                    .filter(|score| (1..=100).contains(score))
+                    .ok_or_else(effort_error)?;
+                (None, Some(score as u8))
             }
-        },
-    );
+            _ => return Err(effort_error()),
+        };
     let tool_choice = match options
         .get("tool_choice")
         .filter(|v| !v.is_null())
@@ -340,14 +352,17 @@ fn conversation(
             _ => return Err(invalid("unsupported DeepSeek message role")),
         });
     }
-    Ok(Conversation {
-        messages: converted,
-        thinking_mode,
-        tools,
-        tool_choice,
-        reasoning_effort,
-        response_format,
-    })
+    Ok((
+        Conversation {
+            messages: converted,
+            thinking_mode,
+            tools,
+            tool_choice,
+            reasoning_effort,
+            response_format,
+        },
+        reasoning_effort_score,
+    ))
 }
 
 pub(super) fn validate_defaults(frontend: &Frontend) -> Result<()> {
@@ -362,12 +377,21 @@ pub(super) fn validate_defaults(frontend: &Frontend) -> Result<()> {
 fn official(
     encoder: PromptEncoder,
     conversation: &Conversation,
-) -> deepseek_recipe_encoding::RenderedPrompt {
-    match encoder {
+    reasoning_effort_score: Option<u8>,
+) -> Result<deepseek_recipe_encoding::RenderedPrompt> {
+    Ok(match encoder {
         PromptEncoder::DeepseekV4 => DeepseekV4Encoding::new().render_conversation(conversation),
-        PromptEncoder::DeepseekV41 => DeepseekV41Encoding::new().render_conversation(conversation),
+        PromptEncoder::DeepseekV41 => {
+            let mut encoder = DeepseekV41Encoding::new();
+            if let Some(score) = reasoning_effort_score {
+                encoder = encoder
+                    .with_reasoning_effort_score(score)
+                    .map_err(|error| invalid(error.to_string()))?;
+            }
+            encoder.render_conversation(conversation)
+        }
         PromptEncoder::Jinja => unreachable!(),
-    }
+    })
 }
 
 pub(super) fn render(
@@ -375,8 +399,8 @@ pub(super) fn render(
     messages: &[Json],
     options: &Map<String, Json>,
 ) -> Result<RenderedPrompt> {
-    let conversation = conversation(frontend, messages, options)?;
-    let rendered = official(frontend.prompt_encoder, &conversation);
+    let (conversation, reasoning_effort_score) = conversation(frontend, messages, options)?;
+    let rendered = official(frontend.prompt_encoder, &conversation, reasoning_effort_score)?;
     let image_sources = rendered
         .image_sources
         .into_iter()
