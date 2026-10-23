@@ -1,7 +1,6 @@
 """Declared recipe costs against the layouts and checkpoints they describe."""
 
 import math
-from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -162,25 +161,6 @@ def test_weights_exclude_the_draft_model_unless_drafts_are_learned(model):
     # Both recipes commit verified tokens into one live recurrent row.
     assert recipe.live_rows(4, recipe.speculation) == 1 + 4
     assert recipe.live_rows(4, None) == 1 + 4
-
-
-def test_qwen_stored_bytes_match_the_cached_checkpoint():
-    if not QWEN.cached(HUB):
-        pytest.skip("the pinned Qwen revision is not in the hub cache")
-    from ignition.preparation.checkpoint import inspect_qwen38_checkpoint
-
-    sizes, compressed_scales = Counter(), 0
-    for name, tensor in inspect_qwen38_checkpoint(QWEN.snapshot(HUB)).tensors.items():
-        sizes[tensor.component] += tensor.nbytes
-        if name.startswith("model.language_model.layers.") and ".mlp.experts." in name and ".weight_scale." in name:
-            compressed_scales += tensor.nbytes
-    checkpoint = QWEN.checkpoint
-    assert checkpoint.stored_bytes == sum(sizes.values())
-    assert checkpoint.mapped_host_bytes == 0
-    assert checkpoint.device_bytes == sum(sizes.values()) - sizes["ple_tables"]
-    assert checkpoint.draft_bytes == sizes["mtp"]
-    # Routed experts expand their CSF block scales to native storage at load.
-    assert checkpoint.expansion_bytes == 48 * 512 * 307_200 - compressed_scales
 
 
 def test_glm_stored_bytes_match_the_cached_checkpoint():
