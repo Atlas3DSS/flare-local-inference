@@ -46,14 +46,18 @@ def test_tokenizer_matches_byte_ranked_checkpoint(reference):
         assert ordinary.encode(text, add_special_tokens=False).ids == encoding.encode(text, disallowed_special=())
 
 
-def test_native_xtml_matches_checkpoint(reference, tmp_path):
+@pytest.mark.parametrize('annotated', [True, False])
+def test_native_xtml_matches_checkpoint(reference, tmp_path, annotated):
     module, tokenizer, encoding = reference
     binary = ROOT / 'helios/target/debug/test_frontend'
     if not binary.is_file():
         pytest.skip('build test_frontend with frontend,test-tools features')
     tokenizer.save(str(tmp_path / 'tokenizer.json'))
     shutil.copyfile(CHECKPOINT / 'tokenizer_config.json', tmp_path / 'tokenizer_config.json')
-    shutil.copyfile(ROOT / 'ignition/recipes/kimi3/assets/chat_template.jinja', tmp_path / 'chat_template.jinja')
+    template = (ROOT / 'ignition/recipes/kimi3/assets/chat_template.jinja').read_text()
+    if not annotated:
+        template = template.replace('{%- mark ns.segments | length -%}', '')
+    (tmp_path / 'chat_template.jinja').write_text(template)
     fixtures = dict(template_encoding=1, cases=[], encode_cases=[], decode_cases=[], assets={})
     for path in tmp_path.iterdir():
         fixtures['assets'][path.name] = hashlib.sha256(path.read_bytes()).hexdigest()

@@ -413,11 +413,13 @@ rendering. Marks are forbidden inside macros, captured assignments, and filter
 blocks; a root call site marks output after a macro returns. Generation headers
 remain outside completed messages. Annotations follow Jinja whitespace controls.
 
-The exact deployed Qwen3.8 and inference-transformed Step templates are replaced
-in memory with their annotated recipe assets. Other unannotated templates fail
-to load. Checkpoint-derived annotations must reproduce the source bytes when
-removed. Gemma 4 selects one of two annotated Google canonical templates by model
-size across all supported quantization publishers; see
+The exact deployed Qwen3.8, inference-transformed Step, and segmented Kimi K3
+templates are replaced in memory with their annotated recipe assets. Kimi K3
+uses segment-count marks at the preamble and complete-message endpoints.
+Other unannotated templates fail to load. Checkpoint-derived annotations must
+reproduce the source bytes when removed. Gemma 4 selects one of two annotated
+Google canonical templates by model size across all supported quantization
+publishers; see
 [recipe frontend metadata](../docs/model-development.md#sampling-and-frontend-metadata).
 Package files and metadata formats remain unchanged.
 

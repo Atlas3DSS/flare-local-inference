@@ -19,8 +19,9 @@ fn frontend_with_merges(template: &str, encoding: TemplateEncoding, merges: Vec<
         SERIAL.fetch_add(1, Ordering::Relaxed)
     ));
     std::fs::create_dir(&directory).unwrap();
-    let mut vocabulary = tokenizers::pre_tokenizers::byte_level::ByteLevel::alphabet()
-        .into_iter()
+    let mut alphabet: Vec<_> = tokenizers::pre_tokenizers::byte_level::ByteLevel::alphabet().into_iter().collect();
+    alphabet.sort_unstable();
+    let mut vocabulary = alphabet.into_iter()
         .enumerate()
         .map(|(i, c)| (c.to_string(), i as u32))
         .collect::<tokenizers::models::bpe::Vocab>();
@@ -239,8 +240,10 @@ fn gemma_templates_checkpoint_preamble_messages_and_tool_rounds() {
 
 #[test]
 fn segmented_xtml_preserves_boundaries_before_seeded_assistant_and_later_turns() {
-    let frontend = frontend(
-        include_str!("../../ignition/recipes/kimi3/assets/chat_template.jinja"),
+    let source = include_str!("../../ignition/recipes/kimi3/assets/chat_template.jinja");
+    let annotated = frontend(source, TemplateEncoding::TokenSegments);
+    let upgraded = frontend(
+        &source.replace("{%- mark ns.segments | length -%}", ""),
         TemplateEncoding::TokenSegments,
     );
     let messages = json!([
@@ -250,13 +253,17 @@ fn segmented_xtml_preserves_boundaries_before_seeded_assistant_and_later_turns()
         {"role":"assistant","reasoning_content":"Thinking", "content":"Answer"},
         {"role":"user","content":"Follow-up"}
     ]);
-    let (tokens, boundaries) = check_messages(&frontend, messages.as_array().unwrap());
-    assert_eq!(boundaries.len(), 6);
+    let expected = check_messages(&annotated, messages.as_array().unwrap());
     let mut changed = messages.as_array().unwrap().clone();
     changed[2]["content"] = "Different question".into();
-    let (other, other_boundaries) = check_messages(&frontend, &changed);
-    assert_eq!(boundaries[..3], other_boundaries[..3]);
-    assert_eq!(tokens[..boundaries[2]], other[..other_boundaries[2]]);
+    for frontend in [&annotated, &upgraded] {
+        let (tokens, boundaries) = check_messages(frontend, messages.as_array().unwrap());
+        assert_eq!((tokens.clone(), boundaries.clone()), expected);
+        assert_eq!(boundaries.len(), 6);
+        let (other, other_boundaries) = check_messages(frontend, &changed);
+        assert_eq!(boundaries[..3], other_boundaries[..3]);
+        assert_eq!(tokens[..boundaries[2]], other[..other_boundaries[2]]);
+    }
 }
 
 #[test]
