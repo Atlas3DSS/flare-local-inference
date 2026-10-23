@@ -30,6 +30,8 @@ def prepare(signatures, buffers, pool, *, vocabulary):
             *([dict(buffer="draft_page_tables", page_offset=1)] if cursor is not None else [])],
         regions=[dict(kind=p.CONTINUATION_STATE, storage=continuation, tokens_per_record=1, window_tokens=0),
                  *regions],
+        # Replay-commit: speculative rounds keep one committed continuation row per request (verification writes
+        # no candidate rows), so Helios plans and packs a single state row whatever the verification width.
         graphs=c.graph_contracts(signatures, inputs, continuation=continuation, pending=pending,
-                                cursor=cursor, rows=None),
+                                cursor=cursor, rows=1),
         frontend=FRONTEND)

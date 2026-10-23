@@ -118,7 +118,10 @@ def prepare(snapshot, config, *, progress=None, package_storage):
     if snapshots < 1:
         raise ValueError("snapshot budget must hold a complete Qwen dense continuation")
     slots, blocks = request_capacity(config.max_active), config.context // PAGE_TOKENS
-    execution_rows = slots * (config.draft_tokens + 1)
+    # Replay-commit: a request owns one continuation row whatever its verification width; the decode scratch still
+    # holds one token row per verification position.
+    execution_rows = slots
+    decode_tokens = slots * (config.draft_tokens + 1)
     state_rows = execution_rows + snapshots
     pages = config.prefill_chunk_size // PAGE_TOKENS + 2 * slots
     pages = max(pages, config.preparation_pages or 0)
@@ -132,7 +135,7 @@ def prepare(snapshot, config, *, progress=None, package_storage):
             backed_slots=min(state_rows + 1, 1 + execution_rows + slots))
         vocabulary = weights.config.vocabulary
         requests = DeviceRequestState.allocate(device, vocab_size=vocabulary, capacity=slots)
-        inputs = BatchInputs.allocate(max(config.prefill_chunk_size, execution_rows), blocks, device, capacity=slots)
+        inputs = BatchInputs.allocate(max(config.prefill_chunk_size, decode_tokens), blocks, device, capacity=slots)
         admission = AdmissionBuffers.allocate(device, vocab_size=vocabulary, capacity=slots)
         commands = StateCommands.allocate(device, capacity=slots)
         frame = torch.zeros(1, dtype=torch.int32, device=device)
@@ -155,7 +158,7 @@ def prepare(snapshot, config, *, progress=None, package_storage):
         arena = ScratchArena(device)
         session.register_scratch(arena)
         prefill_storage = Scratch.allocate(config.prefill_chunk_size, 1, weights.config, device)
-        decode_storage = Scratch.allocate(execution_rows, execution_rows, weights.config, device)
+        decode_storage = Scratch.allocate(decode_tokens, decode_tokens, weights.config, device)
         buffers = dict(inputs.buffers(), **commands.buffers(),
             **{name: getattr(admission, name) for name in admission.__dataclass_fields__},
             state_pool=pool.backing, memory_capacity=pool.memory_capacity,
@@ -280,13 +283,14 @@ def prepare(snapshot, config, *, progress=None, package_storage):
         model_contract=prepare_contract(signatures, buffers, pool, vocabulary=vocabulary))
     if speculation is not None:
         server_config.update(speculative_widths=config.speculative_widths,
-            speculative_token_capacity=execution_rows, speculative_proposal_source="mtp",
+            speculative_token_capacity=decode_tokens, speculative_proposal_source="mtp",
             speculative_fixed_width=config.speculative_fixed_width, history_drafts=False)
     free, total = torch.cuda.mem_get_info(device)
     memory = dict(rank=0, world_size=1, device=config.device, weights_bytes=weights.allocated_bytes,
         mtp_weights_bytes=0 if mtp_weights is None else mtp_weights.allocated_bytes,
         speculative_widths=config.speculative_widths if config.mtp else (),
-        speculative_state_columns=config.draft_tokens + 1,
+        speculative_state_columns=1,
+        replay_operand_bytes=0 if speculation is None else speculation.replay_operands.nbytes,
         mapped_host_bytes=0, offloaded_bytes=0, continuation_bytes=pool.backing.nbytes, state_rows=state_rows,
         preparation_state_rows=int(pool.memory_capacity[0].item()),
         preparation_state_bytes=int(pool.memory_capacity[0].item()) * layout.row_bytes,
@@ -296,6 +300,8 @@ def prepare(snapshot, config, *, progress=None, package_storage):
         headroom_bytes=config.headroom_bytes, tuning=tuning, compiled_decoder=config.compile_decoder)
     return PreparedModel(device=config.device, graphs=graphs, buffers=buffers, signatures=signatures,
         max_active=config.max_active, session=session, server_config=server_config, memory_report=memory,
-        export_zero_ranges=(*storage_ranges([prefill_storage, decode_storage, arena.tensor, metadata]), *completion.zero_ranges()),
+        export_zero_ranges=(*storage_ranges([prefill_storage, decode_storage, arena.tensor, metadata,
+                                             None if speculation is None else speculation.replay_operands]),
+                            *completion.zero_ranges()),
         resources=(weights, mtp_weights, speculation, pool, requests, inputs, admission, commands, arena, forwards, prefill_storage,
                    decode_storage, metadata, compiled, stream, graph_pool, session, coordinator))
