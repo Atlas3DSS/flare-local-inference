@@ -201,7 +201,8 @@ class PreparedMTP:
         else:
             from ignition.components.vocabulary import PreparedVocabularyProjection
 
-            self.lm_head = PreparedVocabularyProjection(scratch.selected_hidden, weights.lm_head,
+            head = weights.draft_head if weights.draft_head is not None else weights.lm_head
+            self.lm_head = PreparedVocabularyProjection(scratch.selected_hidden, head,
                 scratch.local_logits, scratch.logits, runtime=vocabulary_runtime, session=session,
                 coordinator=coordinator, name=f"{name}.lm_head")
 
