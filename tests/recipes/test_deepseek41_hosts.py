@@ -17,25 +17,26 @@ def test_four_hosts_may_each_use_their_own_gpu_zero():
         bootstrap.PreparationConfig(devices=(0,) * 4, hosts=("hertz",) * 4)
 
 
+@pytest.mark.parametrize("world", [3, 4])
 @pytest.mark.parametrize("draft_tokens", [5, 7])
 @pytest.mark.parametrize("remote", [False, True])
-def test_recipe_dispatches_the_complete_plan_to_the_rank_group(monkeypatch, remote, draft_tokens):
+def test_recipe_dispatches_the_complete_plan_to_the_rank_group(monkeypatch, remote, draft_tokens, world):
     from ignition.preparation import rank_group
     from ignition.recipes.declaration import Speculation
 
-    gpus = tuple(planning.Gpu(i, "GB10", f"GPU-{i}", 128 << 30, 120 << 30, (12, 1)) for i in range(4))
+    gpus = tuple(planning.Gpu(i, "GB10", f"GPU-{i}", 128 << 30, 120 << 30, (12, 1)) for i in range(world))
     plan = planning.fit(recipe.RECIPE, recipe.RECIPE.checkpoints[0], gpus, concurrency=16,
         reserve_bytes=6 << 30, speculation=Speculation(draft_tokens=draft_tokens, token_capacity=128,
             packed_verification=True, draft_prefix_selection="gpu"),
         expert_scale_compression="csf")
-    ranks = SimpleNamespace(hosts=("hertz", "faraday", "ampere", "maxwell")) if remote else None
+    ranks = SimpleNamespace(hosts=("hertz", "faraday", "ampere", "maxwell")[:world]) if remote else None
     calls, result, storage = [], object(), object()
     monkeypatch.setattr(rank_group, "prepare_group", lambda *args, **kwargs: calls.append((args, kwargs)) or result)
     assert recipe.prepare("checkpoint", plan, compile_forwards=True, kernel_cache=None, progress=None,
                           package_storage=storage, ranks=ranks) is result
     (snapshot, config, forward), kwargs = calls[0]
     assert snapshot == "checkpoint" and forward is bootstrap.prepare_rank
-    assert config.devices == ((0,) * 4 if remote else (0, 1, 2, 3))
+    assert config.devices == ((0,) * world if remote else tuple(range(world)))
     assert config.hosts == (ranks.hosts if remote else None)
     assert config.max_active == 16 and config.draft_tokens == draft_tokens
     assert (16, 16 * (draft_tokens + 1)) in config.packed_speculative_shapes

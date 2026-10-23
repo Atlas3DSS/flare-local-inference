@@ -76,3 +76,16 @@ def test_oneshot_capacity_excludes_prefills_assigned_to_dma(capacity, dspark, dr
 def test_short_prefill_still_fits_the_oneshot_channel():
     config = PreparationConfig(max_active=1, dspark=False, prefill_chunk_size=64)
     assert config.all_reduce_tokens == 64
+
+
+def test_three_rank_scratch_preserves_grouped_attention_and_unpadded_experts():
+    config = PreparationConfig(devices=(0, 1, 2), max_active=32,
+        speculative_widths=tuple(range(1, 9)), image_concurrency=4)
+    scratch = Scratch.allocate(128, 32, 3, "meta")
+    assert config.draft_tokens == 7
+    assert scratch.attention.query.shape == (128, 24, 512)
+    assert scratch.attention.attended.view(128, 3, 4096).shape == (128, 3, 4096)
+    assert scratch.local_logits.shape == (32, 43136)
+    assert scratch.logits.shape == (32, 129280)
+    assert scratch.shared.intermediate.shape == (128, 768)
+    assert scratch.engram.local.shape == (128, 2048)

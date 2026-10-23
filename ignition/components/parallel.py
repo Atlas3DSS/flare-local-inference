@@ -29,6 +29,13 @@ class TensorParallelShard:
             offset += extent
         return tuple(ranges)
 
+    def padded_partition(self, extent: int, *, alignment: int = 1) -> tuple[int, int]:
+        """Partition an axis into equal aligned widths, including a zero-filled tail."""
+        if (type(extent) is not int or extent <= 0 or type(alignment) is not int or alignment <= 0):
+            raise ValueError("padded tensor partitions require positive integer dimensions")
+        width = -(-extent // (self.world_size * alignment)) * alignment
+        return self.rank * width, (self.rank + 1) * width
+
     def replicated_partition(self, extent: int) -> tuple[int, int]:
         """Partition an axis, replicating each element when ranks outnumber it.
 

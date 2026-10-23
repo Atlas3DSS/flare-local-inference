@@ -71,7 +71,7 @@ class ModelWeights:
         with DeepSeekWeightLoader(manifest, device, shard=shard, progress=progress, dspark=dspark,
                                  expert_scale_compression=expert_scale_compression) as loader:
             embedding, norm = loader.load_tensors(("embed.weight", "norm.weight"))
-            head = loader.load_tensor("head.weight", extent=slice(*shard.partition(129280, alignment=64)))
+            head = loader.load_padded_tensor("head.weight", rows=shard.padded_partition(129280, alignment=64))
             layers = tuple(loader.load_layer(i) for i in range(config.layers))
             draft = DSparkWeights.load(loader, confidence=confidence) if dspark else None
             vision = ({name: loader.load_tensor(name) for name in loader._sources
@@ -111,15 +111,16 @@ class DeepSeekWeightLoader(BlockFP8WeightLoader):
         prefix = f"mtp.{layer}" if draft else f"layers.{layer}"
         text, shard = self.config.text, self.shard
         attn = prefix + ".attn"
-        heads = shard.partition(64 * 512, alignment=512)
-        groups = shard.partition(8 * 1024, alignment=1024)
+        first, last = shard.padded_partition(8)
+        heads = first * 8 * 512, last * 8 * 512
+        groups = first * 1024, last * 1024
         result = {
             "qkv_a": self.load_linear_group((attn + ".wq_a", attn + ".wkv")),
-            "q_b": self.load_linear(attn + ".wq_b", rows=heads),
-            "output": self.load_attention_output(attn, groups),
+            "q_b": self.load_linear_group((attn + ".wq_b",), row_ranges=(heads,), pad=True),
+            "output": self.load_attention_output(attn, groups, pad=True),
             "q_norm": self.load_tensor(attn + ".q_norm.weight"),
             "kv_norm": self.load_tensor(attn + ".kv_norm.weight"),
-            "sink": self.load_tensor(attn + ".attn_sink", extent=slice(*shard.partition(64))),
+            "sink": self.load_padded_tensor(attn + ".attn_sink", rows=(first * 8, last * 8)),
         }
         if not draft and layer in text["kv_source_layer_ids"]:
             ratio = text["compress_ratios"][layer]

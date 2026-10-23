@@ -16,11 +16,12 @@ pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
 
 
 @pytest.mark.parametrize("tokens", [1, 4, 17, 4096])
+@pytest.mark.parametrize("groups", [2, 3])
 @torch.no_grad()
-def test_grouped_output_compiled_replay(tokens):
+def test_grouped_output_compiled_replay(tokens, groups):
     device = torch.device("cuda:0")
     generator = torch.Generator(device=device).manual_seed(4123)
-    groups, width, rank, hidden = 2, 4096, 1024, 5120
+    width, rank, hidden = 4096, 1024, 5120
     def weight(shape):
         values = (torch.randn(shape, device=device, generator=generator) * 16).to(torch.float8_e4m3fn)
         scales = torch.full((shape[0] // 32, shape[1] // 32), 117, dtype=torch.uint8, device=device)

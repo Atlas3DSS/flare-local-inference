@@ -127,10 +127,11 @@ class PreparationConfig:
         if type(self.stream_overlap) is not bool:
             raise TypeError("stream_overlap must be a boolean")
         placements = tuple(zip(self.hosts or ("",) * len(self.devices), self.devices))
-        if (not isinstance(self.devices, tuple) or len(self.devices) != 4 or len(set(placements)) != 4
-                or self.hosts is not None and (not isinstance(self.hosts, tuple) or len(self.hosts) != 4)
+        if (not isinstance(self.devices, tuple) or len(self.devices) not in (3, 4)
+                or len(set(placements)) != len(self.devices)
+                or self.hosts is not None and (not isinstance(self.hosts, tuple) or len(self.hosts) != len(self.devices))
                 or any(type(d) is not int or d < 0 for d in self.devices)):
-            raise ValueError("DeepSeek V4.1 Flash preparation requires four distinct GPUs")
+            raise ValueError("DeepSeek V4.1 Flash preparation requires three or four distinct GPUs")
         from ignition.planning import host_shape_error
 
         error = host_shape_error(self.roce_ring, self.roce_chain, None if self.hosts is None else len(self.hosts))
@@ -263,7 +264,8 @@ def _collective_runtimes(config, group, device, *, coordinator, package_storage,
 
         # Vocabulary partitions and packed sampling results use the same serial gather channel.
         result_bytes = max((packed_broadcast_layout(layout.values())[1] for layout in layouts), default=0)
-        gather_bytes = max(sample_rows * (129280 // len(config.devices)) * 2,
+        _, local_vocab = TensorParallelShard(0, len(config.devices)).padded_partition(129280, alignment=64)
+        gather_bytes = max(sample_rows * local_vocab * 2,
                            (result_bytes + 15) // 16 * 16)
         decode_tokens = config.all_reduce_tokens
         runtime = create_roce_runtime(group, device, max_tokens=decode_tokens, pipe_tokens=tokens,
@@ -273,7 +275,9 @@ def _collective_runtimes(config, group, device, *, coordinator, package_storage,
     collective = create_all_reduce_runtime(group, device, max_tokens=config.all_reduce_tokens, hidden_size=5120, ipc=ipc)
     prefill = create_dma_all_reduce_runtime(group, device,
         max_tokens=config.prefill_chunk_size, hidden_size=5120, ipc=ipc)
-    vocabulary = create_all_gather_runtime(group, device, max_rows=sample_rows, columns=129280, ipc=ipc)
+    _, local_vocab = TensorParallelShard(0, len(config.devices)).padded_partition(129280, alignment=64)
+    vocabulary = create_all_gather_runtime(group, device, max_rows=sample_rows,
+        columns=local_vocab * len(config.devices), ipc=ipc)
     result = create_result_broadcast_runtime(group, device, layouts=layouts, ipc=ipc) if layouts else None
     return collective, prefill, vocabulary, result
 

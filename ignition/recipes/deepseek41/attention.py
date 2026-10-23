@@ -19,6 +19,7 @@ from ignition.components.window_indices import PreparedWindowIndices
 from ignition.preparation.tuning import declare, register_finalizer
 
 from ignition.components.rotary import CompressedRotary as Rotary
+from ignition.components.parallel import TensorParallelShard
 
 from .pool import PAGE_TOKENS
 
@@ -106,9 +107,11 @@ class AttentionScratch:
         def zeros(shape, dtype=torch.bfloat16):
             return (torch.zeros(shape, dtype=dtype, device=device) if buffers is None
                     else buffers.zeros(shape, dtype))
+        first, last = TensorParallelShard(0, world).padded_partition(8)
+        heads = (last - first) * 8
         return cls(zeros((tokens, 1792)),
-            zeros((tokens, 1280)), zeros((tokens, 64 // world, 512)),
-            zeros((tokens, 512)), zeros((tokens, 64 // world, 512)),
+            zeros((tokens, 1280)), zeros((tokens, heads, 512)),
+            zeros((tokens, 512)), zeros((tokens, heads, 512)),
             zeros((tokens, 5120)), zeros((tokens, 512), torch.int32).fill_(-1),
             zeros((candidate_tokens, 16384), torch.int32).fill_(-1), zeros(candidate_tokens, torch.int32),
             zeros((tokens, 32, 128)), zeros((tokens, 32)), zeros((tokens, 128)), zeros((tokens, 128)))
@@ -295,7 +298,7 @@ class PreparedAttention:
             eps=self.eps, session=session, name=name + ".q_norm")
         self.window_norm = PreparedRMSNorm(scratch.projected[:, 1280:], weights["kv_norm"], scratch.window_values,
             eps=self.eps, session=session, name=name + ".kv_norm")
-        self.output_projection = PreparedGroupedOutputProjection(scratch.attended.view(tokens, 8 // world, 4096),
+        self.output_projection = PreparedGroupedOutputProjection(scratch.attended.view(tokens, -1, 4096),
             weights["output"], scratch.output, session=session, name=name + ".output", workspace=workspace)
         self.window_writer = PreparedCompressedCacheWriter(scratch.window_values, self.window_cache,
             self.window_slots, page_size=self.window_page_size, kind="swa", session=session,

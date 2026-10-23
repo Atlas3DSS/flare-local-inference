@@ -13,11 +13,12 @@ class BlockFP8WeightLoader(DirectWeightLoader):
             raise ValueError("native FP8 loading requires square block-32 or block-128 scales")
         return shape[0]
 
-    def load_linear_group(self, prefixes, *, row_ranges=None, column_range=None):
+    def load_linear_group(self, prefixes, *, row_ranges=None, column_range=None, pad=False):
+        """Pack aligned checkpoint slices, optionally zero-padding beyond their source extents."""
         prefixes = tuple(prefixes)
         ranges = (None,) * len(prefixes) if row_ranges is None else row_ranges
         parts = [
-            self._dense_blocks(prefix, rows=rows, columns=column_range)
+            self._dense_blocks(prefix, rows=rows, columns=column_range, pad=pad)
             for prefix, rows in zip(prefixes, ranges, strict=True)
         ]
         return self._pack_blocks(parts, dim=0)
@@ -42,7 +43,7 @@ class BlockFP8WeightLoader(DirectWeightLoader):
         )
         return pack_weight(values, scales, recipe="mxfp8")
 
-    def _dense_blocks(self, prefix, *, rows=None, columns=None):
+    def _dense_blocks(self, prefix, *, rows=None, columns=None, pad=False):
         self._require_open()
         weight, scale = self._sources[f"{prefix}.weight"], self._sources[f"{prefix}.scale"]
         block = self.block_size
@@ -54,19 +55,26 @@ class BlockFP8WeightLoader(DirectWeightLoader):
             (k + block - 1) // block,
         ):
             raise ValueError(f"{prefix}: expected UE8M0 scales for {block}-by-{block} blocks")
-        r0, r1 = _aligned_range(rows, n, block)
-        c0, c1 = _aligned_range(columns, k, block)
+        r0, r1 = _aligned_range(rows, max(n, rows[1]) if pad and rows else n, block)
+        c0, c1 = _aligned_range(columns, max(k, columns[1]) if pad and columns else k, block)
         values = torch.empty((r1 - r0, c1 - c0), dtype=weight.dtype, device=self.device)
         scales = torch.empty(((r1 - r0) // block, (c1 - c0) // block), dtype=torch.uint8, device=self.device)
-        self._copy(values, weight[r0:r1, c0:c1])
-        self._copy(scales, scale[r0 // block : r1 // block, c0 // block : c1 // block].view(torch.uint8))
+        nr, nc = max(0, min(r1, n) - r0), max(0, min(c1, k) - c0)
+        if nr != r1 - r0 or nc != c1 - c0:
+            values.zero_()
+            scales.fill_(127)
+        if nr and nc:
+            sr, sc = -(-nr // block), -(-nc // block)
+            self._copy(values[:nr, :nc], weight[r0:r0 + nr, c0:c0 + nc])
+            self._copy(scales[:sr, :sc], scale[r0 // block:r0 // block + sr,
+                                             c0 // block:c0 // block + sc].view(torch.uint8))
         return values, scales
 
-    def load_attention_output(self, prefix, groups):
+    def load_attention_output(self, prefix, groups, *, pad=False):
         from b12x.gemm import wo_projection
 
-        a, sa = self._dense_blocks(prefix + ".wo_a", rows=groups)
-        b, sb = self._dense_blocks(prefix + ".wo_b", columns=groups)
+        a, sa = self._dense_blocks(prefix + ".wo_a", rows=groups, pad=pad)
+        b, sb = self._dense_blocks(prefix + ".wo_b", columns=groups, pad=pad)
         self._session.flush()
         c = self.config.text
         return wo_projection.pack_weights(
@@ -74,7 +82,7 @@ class BlockFP8WeightLoader(DirectWeightLoader):
             sa.view(torch.float8_e8m0fnu),
             b,
             sb.view(torch.float8_e8m0fnu),
-            groups=c["o_groups"] // self.shard.world_size,
+            groups=(groups[1] - groups[0]) // c["o_lora_rank"],
             group_width=c["num_attention_heads"] * c["head_dim"] // c["o_groups"],
             rank=c["o_lora_rank"],
             hidden=c["hidden_size"],

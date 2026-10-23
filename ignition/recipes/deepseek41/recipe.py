@@ -53,6 +53,6 @@ RECIPE = Recipe(
     max_draft_tokens=7, max_images=4, image_bytes=32 << 20,
     # Single-row decode runs the shared expert on an auxiliary stream.
     stream_overlap=True,
-    ranks=MappingProxyType({4: RankCosts(3_043_840, 113_920, 8 << 30)}),
-    plain_ranks=MappingProxyType({4: RankCosts(2_841_088, 113_920, 8 << 30)}),
+    ranks=MappingProxyType({world: RankCosts(3_043_840, 113_920, 8 << 30) for world in (3, 4)}),
+    plain_ranks=MappingProxyType({world: RankCosts(2_841_088, 113_920, 8 << 30) for world in (3, 4)}),
 )

@@ -303,8 +303,15 @@ concurrency. `--language-model-only` omits image weights and graphs.
 ## DeepSeek V4.1 Flash
 
 The `deepseek-v4.1-flash` alias selects `deepseek-ai/DeepSeek-V4.1-Flash-1017`
-and supports TP4 text generation, reasoning, DSML tool calls, and images
+and supports TP3 and TP4 text generation, reasoning, DSML tool calls, and images
 when the checkpoint contains its vision encoder.
+TP3 partitions the 2304-wide routed and shared experts into 768-wide shards
+without padding. Attention partitions whole output groups: padding eight groups
+to nine gives each rank three groups and 24 heads. The last rank's extra group
+has zero query and output weights; all checkpoint weights and scales remain
+unchanged. Vocabulary shards contain 43136 rows each; the 128 extra gathered
+logits are excluded before sampling. Engram's 24 heads divide evenly across
+three ranks.
 Exports use the native DeepSeek V4.1 prompt encoder and include only the tokenizer
 asset. Vision exports bind the atomic `<｜deepseek_image｜>` token as ID 129264,
 which must agree with checkpoint `image_token_id`. Packages without explicit
@@ -410,6 +417,18 @@ request their weight ranges during preparation. From a paired controller, use
 with a four-node `sparks` cluster. The prepared model uses RoCEnante collectives
 across hosts. See [multi-host preparation and serving](multi-host.md) for
 preparation authentication, orbit setup, and rank placement.
+
+For three Sparks, use `--ranks 3` and join peer ranks 1 and 2. Launch the TP3
+package with `flare orbit run NODE:PACKAGE --nodes NODE,PEER1,PEER2 --gpus 0`,
+listing hosts in preparation rank order.
+
+On GB10, a TP3 package with 32 concurrent requests, four image slots, seven
+DSpark drafts, BF16 MLA, and CSF expert scales occupies about 104.7 GiB per
+rank before physical cache backing. Use `--memory-limit=-1G` when launching
+this configuration to retain a 1 GiB reserve. The integrated-memory planner
+also preserves its separate 5% system allowance and 2 GiB host allowance.
+A 4 GiB reserve leaves insufficient memory for continuation rows. Disk-backed
+Engram tables retain the default 1 GiB row cache per host.
 
 `--image-concurrency` defaults to the smaller of four and `--max-concurrency`.
 For example, add `--max-concurrency 64 --image-concurrency 4` during export to

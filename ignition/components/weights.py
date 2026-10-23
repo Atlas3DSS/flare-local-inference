@@ -471,6 +471,20 @@ class DirectWeightLoader:
         self._session.flush()
         return targets
 
+    def load_padded_tensor(self, name: str, *, rows: tuple[int, int]) -> torch.Tensor:
+        """Load checkpoint rows unchanged and zero any partition tail beyond the source."""
+        import torch
+
+        self._require_open()
+        source = self._sources[name]
+        first, last = _aligned_range(rows, max(source.shape[0], rows[1]), 1)
+        target = torch.zeros((last - first, *source.shape[1:]), dtype=source.dtype, device=self.device)
+        count = max(0, min(last, source.shape[0]) - first)
+        if count:
+            self._copy(target[:count], source[first:first + count])
+        self._session.flush()
+        return target
+
     def _queue_tensor(self, name, *, dtype=None, extent=None):
         import torch
 
