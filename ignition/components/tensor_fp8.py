@@ -17,15 +17,19 @@ class TensorFP8Weight:
 
 
 class TensorFP8Projection:
-    def __init__(self, source, weight, output, *, session, name, workspace=None, row_invariant=False):
+    def __init__(self, source, weight, output, *, session, name, workspace=None, row_invariant=False,
+                 live_count=None):
         from . import sm70_projection
 
         self.sm70 = None
         if sm70_projection.is_sm70(source.device):
             self.sm70 = sm70_projection.TensorFP8Projection(
-                source, weight, output, session=session, name=name, workspace=workspace, row_invariant=row_invariant)
+                source, weight, output, session=session, name=name, workspace=workspace, row_invariant=row_invariant,
+                live_count=live_count)
             self.weight, self.output, self.plan = weight, output, self.sm70.plan
             return
+        if live_count is not None:
+            raise ValueError("a projection device live count is an SM70 prefill option")
         if (source.ndim != 2 or source.dtype != torch.bfloat16
                 or source.shape[1] != weight.packed.in_features
                 or output.shape != (source.shape[0], weight.packed.out_features)

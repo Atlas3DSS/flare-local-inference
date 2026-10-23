@@ -155,6 +155,7 @@ class PreparedGDN:
         partitions=None,
         prepare_projections: bool = True,
         row_invariant: bool = False,
+        live_count: torch.Tensor | None = None,
     ) -> None:
         self.world_size = 48 // module.num_v_heads
         self.key_heads, self.value_heads = module.num_k_heads, module.num_v_heads
@@ -252,11 +253,12 @@ class PreparedGDN:
             weight = projections[key]
             options = dict(session=session, name=f"{name}.{key}", row_invariant=row_invariant)
             if isinstance(weight, TensorFP8Weight):
-                return TensorFP8Projection(inputs, weight, output, workspace=projection_workspace, **options)
+                return TensorFP8Projection(inputs, weight, output, workspace=projection_workspace,
+                                           live_count=live_count, **options)
             if isinstance(weight, torch.Tensor):
                 return UnquantizedProjection(inputs, weight, output, workspace=projection_workspace, **options)
             return QuantizedProjection(inputs, weight, output, activation_mode="auto",
-                                       workspace=projection_workspace, **options)
+                                       workspace=projection_workspace, live_count=live_count, **options)
 
         if prepare_projections:
             inputs = (("in_proj_qkvz", scratch.projected_qkvz),) if self.fused_qkvz else (

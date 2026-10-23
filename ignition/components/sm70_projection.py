@@ -363,14 +363,14 @@ class PreparedProjection:
     def required_workspace(self):
         return workspace_bytes(self.query, self.tactic)
 
-    def run(self, source, values, scales, gain, input_scale, output, workspace, bias=None):
+    def run(self, source, values, scales, gain, input_scale, output, workspace, bias=None, live_count=None):
         if self.tactic[0] == 'row_dense':
             from .sm70_dense import run
             return run(self.query, self.tactic, source, values, output, bias, kernel_cache=self.kernel_cache)
         if self.tactic[0] in ("row_tc", "prefill_tc"):
             from .sm70_projection_tc import run
             return run(self.query, self.tactic, source, values, scales, output, workspace, bias, gain,
-                       kernel_cache=self.kernel_cache, cutlass_include=self.cutlass_include)
+                       live_count=live_count, kernel_cache=self.kernel_cache, cutlass_include=self.cutlass_include)
         if self.tactic[0] in ("gemv", "row_gemv"):
             if self.query.kind == "tensor_fp8":
                 inputs, = _scratch_views(self.query, self.tactic, workspace)
@@ -393,13 +393,13 @@ class PreparedProjection:
 def _projection_out(source: torch.Tensor, values: torch.Tensor, scales: torch.Tensor | None,
                     gain: torch.Tensor | None, input_scale: torch.Tensor | None,
                     output: torch.Tensor, workspace: torch.Tensor, bias: torch.Tensor | None,
-                    handle: int) -> None:
+                    live_count: torch.Tensor | None, handle: int) -> None:
     state = require_prepared(plan_from_handle(handle), COMPONENT, source.device)
-    state.run(source, values, scales, gain, input_scale, output, workspace, bias)
+    state.run(source, values, scales, gain, input_scale, output, workspace, bias, live_count)
 
 
 @_projection_out.register_fake
-def _fake_projection_out(source, values, scales, gain, input_scale, output, workspace, bias, handle):
+def _fake_projection_out(source, values, scales, gain, input_scale, output, workspace, bias, live_count, handle):
     pass
 
 
@@ -424,7 +424,7 @@ def _check_operands(source, values, output, bias, k, n):
 
 class _Projection:
     def _initialize(self, query, source, values, output, *, scales=None, gain=None, input_scale=None,
-                    bias=None, session, name, workspace):
+                    bias=None, session, name, workspace, live_count=None):
         query = replace(query, input_dtype=str(source.dtype).removeprefix("torch."),
                         output_dtype=str(output.dtype).removeprefix("torch."), has_bias=bias is not None)
         _check_operands(source, values, output, bias, query.in_features, query.out_features)
@@ -441,9 +441,16 @@ class _Projection:
                 raise ValueError("reviewed SM70 tensor-core preparation requires FP32 physical input/output")
             query = replace(query, gain_value=1.0 if gain is None or query.column_gains else float(gain),
                             input_scale_value=1.0 if input_scale is None else float(input_scale))
+        # Optional device live-row count of a prefill graph (metadata.live_counts[:1]): the prefill tactic writes +0.0
+        # to rows >= *live_count instead of computing them; live rows keep their bits. Row tactics ignore it.
+        if live_count is not None and (live_count.dtype != torch.int32 or live_count.numel() != 1
+                or live_count.device != source.device or not live_count.is_contiguous()
+                or live_count.data_ptr() % 4 or query.rows > 512):
+            raise ValueError("SM70 projection live count must be a device Int32 scalar of a <= 512-row graph")
         for tensor in (values, scales, gain, input_scale, bias):
             if tensor is not None:
                 record_numeric_tensor(tensor)
+        self.query, self.live_count = query, live_count
         self.output, self.values, self.scales = output, values, scales
         self.gain, self.input_scale, self.bias = gain, input_scale, bias
         payload = CONTRACT.encode_query(query)
@@ -521,8 +528,9 @@ class _Projection:
 
         def prepare(state):
             scratch = storage(state.required_workspace)
+            prime_count = None if live_count is None else torch.zeros_like(live_count)
             return PreparedCall(run=lambda: state.run(source, values, scales, gain, input_scale,
-                output, scratch, bias), owners=prime_owners(arena, scratch))
+                output, scratch, bias, prime_count), owners=(*prime_owners(arena, scratch), prime_count))
 
         acquire = input_factory(source, output, storage=getattr(session, "benchmark_storage", None))
 
@@ -551,7 +559,7 @@ class _Projection:
 
     def __call__(self, source):
         _projection_out(source, self.values, self.scales, self.gain, self.input_scale,
-                        self.output, self.workspace, self.bias, self.plan.handle)
+                        self.output, self.workspace, self.bias, self.live_count, self.plan.handle)
         return self.output
 
 
@@ -559,7 +567,7 @@ class PackedProjection(_Projection):
     """Checkpoint NVFP4 with legal W4A16 arithmetic; no activation requantization."""
 
     def __init__(self, source, weight, output, *, session, name, activation_mode="auto",
-                 bias=None, workspace=None, row_invariant=False):
+                 bias=None, workspace=None, row_invariant=False, live_count=None):
         from b12x.gemm.blockscaled._a16 import NVFP4LinearWeight, scale_storage
 
         if not isinstance(weight, NVFP4LinearWeight):
@@ -582,13 +590,14 @@ class PackedProjection(_Projection):
                                 member_widths=weight.member_widths if repacked else (),
                                 member_gains=weight.member_gains if repacked else ())
         self._initialize(query, source, weight.values, output, scales=scales, gain=weight.global_scale,
-                         bias=bias, session=session, name=name, workspace=workspace)
+                         bias=bias, session=session, name=name, workspace=workspace, live_count=live_count)
 
 
 class TensorFP8Projection(_Projection):
     """E4M3 activation rounding and the checkpoint's combined output scale."""
 
-    def __init__(self, source, weight, output, *, session, name, workspace=None, row_invariant=False):
+    def __init__(self, source, weight, output, *, session, name, workspace=None, row_invariant=False,
+                 live_count=None):
         from b12x.gemm.blockscaled._linear import TensorFP8LinearWeight
 
         packed = weight.packed
@@ -612,7 +621,8 @@ class TensorFP8Projection(_Projection):
         # functionalization pattern pass skips such nodes. The checkpoint's
         # bits cross the boundary as bytes; only the implementation views E4M3.
         self._initialize(query, source, packed.values.view(torch.uint8), output, gain=packed.output_scale,
-                         input_scale=weight.input_scale, session=session, name=name, workspace=workspace)
+                         input_scale=weight.input_scale, session=session, name=name, workspace=workspace,
+                         live_count=live_count)
 
 
 class UnquantizedProjection(_Projection):
