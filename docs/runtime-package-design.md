@@ -860,6 +860,9 @@ once. A grid that cannot fit by reducing one dimension rejects loading. Fitting
 cooperative grids and ordinary launches retain their captured dimensions without
 occupancy queries.
 
+The loader releases clean package file pages before CUDA context creation and
+after payload loading. On integrated GPUs, distribution and verification can fill
+shared DRAM with file cache that the CUDA driver does not count as free memory.
 Payload loading opens the package with `O_DIRECT`, bypassing the page cache.
 Each rank uses four file-reader threads and four pinned staging buffers of
 `4 MiB / rank_count`. Total staging is 16 MiB plus at most one 4 KiB alignment

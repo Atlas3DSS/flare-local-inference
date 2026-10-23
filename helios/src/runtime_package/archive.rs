@@ -789,11 +789,11 @@ impl Archive {
         }
         Ok(())
     }
-    /// Drop the archive's pages from the page cache once loading has copied them out.
+    /// Drop clean archive pages before CUDA initialization and after payload loading.
     ///
     /// Caches are sized from the free device memory the driver reports. An integrated GPU such as
     /// GB10 allocates from system memory, where the driver does not count cached file pages as free,
-    /// so weights read through the cache would otherwise leave no room for caches.
+    /// so distribution and verification reads can otherwise prevent context or cache allocation.
     pub fn release_page_cache(&self) {
         // SAFETY: an advisory call on an open descriptor; failure only leaves the pages cached.
         for file in self.files.values() {

@@ -298,7 +298,7 @@ fn capacities(
     }
     let mut cached = active * 8;
     let mut maximum_pages = page_limit.map_or(u64::MAX, |limit| limit.maximum);
-    for (package, &budget) in packages.iter().zip(available) {
+    for (rank, (package, &budget)) in packages.iter().zip(available).enumerate() {
         let rows: Vec<_> = package
             .allocations
             .iter()
@@ -316,9 +316,11 @@ fn capacities(
         }
         let fixed = bytes(package, 0, execution)?;
         if fixed > budget {
-            return Err(invalid(
-                "selected concurrency and verification width exceed available memory",
-            ));
+            return Err(invalid(format!(
+                "selected concurrency and verification width exceed available memory: \
+                 rank {rank} needs {fixed} bytes for {execution} continuation rows, \
+                 but only {budget} bytes are available"
+            )));
         }
         cached = cached.min((budget - fixed) / rows[0].unit_bytes);
         if rows[0].maximum < execution {

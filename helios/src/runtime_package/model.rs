@@ -496,6 +496,8 @@ impl NativeModel {
         }
         packages[0].reservations = merged;
         validate_peer_memory(&packages, &descriptor.peer_memory)?;
+        // Distribution and verification can fill shared DRAM before CUDA creates its context.
+        archive.release_page_cache();
         phase.finish(format!(
             "{} rank{}",
             devices.len(),
