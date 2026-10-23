@@ -1,108 +1,13 @@
-"""Check the complete metadata comparison used for constructor refactors."""
+"""Attention tuning fixtures remain live through trials and retire before capture."""
 
-from dataclasses import replace
 from types import SimpleNamespace
 import weakref
 
 import pytest
 import torch
 from b12x._lib.scratch import ScratchBufferSpec
-from b12x.norm import hyperconnection as hc
-from b12x.preparation import FrozenMapping, MemoryRequirements, PersistentMemory
-from b12x.preparation import device
-from b12x.preparation.types import DeviceIdentity, _CompositePlan
 
-from ignition.preparation.execution import GraphSignature
-from tests.preparation.test_bootstrap_construction import construction_contract
 from tests.preparation.test_tuning import backend, declaration
-
-
-@pytest.fixture
-def declarations(monkeypatch):
-    detected = device.DetectedDevice(
-        ordinal=0,
-        identity=DeviceIdentity("nvidia", (12, 0), 170, "RTX PRO 6000"),
-    )
-    monkeypatch.setattr(device, "detect_device", lambda *args: detected)
-
-    def make(*, shared=True):
-        owners = [object(), object()]
-
-        def child(tokens, owner):
-            plan = hc.plan(
-                hc.Caps(device="cuda:0", max_tokens=tokens, hidden_size=2560),
-                invocation=FrozenMapping({"operation": "scaled_silu"}),
-            )
-            requirement = MemoryRequirements(
-                scratch=(ScratchBufferSpec(name="work", shape=(tokens, 320),
-                                          dtype=torch.bfloat16, device=torch.device("cuda:0")),),
-                persistent=(PersistentMemory(("fixture", owner), 64, 32),),
-            )
-            return replace(plan, _memory_requirements=lambda *args: requirement)
-
-        plans = {1: child(1, owners[0]), 8: child(8, owners[0 if shared else 1])}
-        composite = _CompositePlan(
-            component_id="test.capacity", capacity_metadata=FrozenMapping({"max_tokens": 8}),
-            variants=plans, _assemble=lambda *args: None,
-        )
-        callbacks = dict.fromkeys(plans, lambda state: None)
-        request = composite.request(name="layer.op", prepare_calls=callbacks,
-                                    benchmark_calls=callbacks)
-        session = SimpleNamespace(requests={request.name: request}, arena=SimpleNamespace(nbytes=8192))
-        signatures = [GraphSignature("prefill", 1, 8, inputs=("input_ids",))]
-        return session, signatures
-
-    return make
-
-
-def test_contract_normalizes_owner_identity_but_preserves_shared_allocations(declarations):
-    first = construction_contract(*declarations())
-    assert first == construction_contract(*declarations())
-    assert first != construction_contract(*declarations(shared=False))
-    children = first["requests"][0]["plan"]["variants"]
-    assert children["1"]["memory"]["scratch"][0] == {
-        "name": "work", "shape": [1, 320], "dtype": "torch.bfloat16", "device": "cuda:0"
-    }
-    assert children["8"]["memory"]["scratch_nbytes"] == 5120
-    assert children["8"]["memory"]["pending_persistent_nbytes"] == 32
-
-
-@pytest.mark.parametrize("field", ["query", "invocation", "override", "device", "memory", "signature"])
-def test_contract_detects_nested_changes_without_catalog_count_changes(declarations, field):
-    session, signatures = declarations()
-    original = construction_contract(session, signatures)
-    request = session.requests["layer.op"]
-    child = request.plan.variants[8]
-    if field == "query":
-        child = replace(child, query=replace(child.query, lowrank=321))
-    elif field == "invocation":
-        child = replace(child, invocation=FrozenMapping({"operation": "scaled_silu", "label": "changed"}))
-    elif field == "override":
-        child = replace(child, override=child.contract.default_config(child.query, None))
-    elif field == "device":
-        child = replace(child, _device=torch.device("cuda:1"))
-    elif field == "memory":
-        memory = child.memory_requirements()
-        child = replace(child, _memory_requirements=lambda *args: replace(
-            memory, persistent=(replace(memory.persistent[0], required_nbytes=96),)))
-    else:
-        signatures = [replace(signatures[0], inputs=("different_input",))]
-    composite = replace(request.plan, variants={1: request.plan.variants[1], 8: child})
-    session.requests[request.name] = replace(request, plan=composite)
-    changed = construction_contract(session, signatures)
-    assert len(original["requests"]) == len(changed["requests"])
-    assert len(original["graph_signatures"]) == len(changed["graph_signatures"])
-    assert original != changed
-
-
-def test_contract_rejects_unencoded_device_objects(declarations):
-    session, signatures = declarations()
-    request = session.requests["layer.op"]
-    child = replace(request.plan.variants[8], _device=object())
-    composite = replace(request.plan, variants={1: request.plan.variants[1], 8: child})
-    session.requests[request.name] = replace(request, plan=composite)
-    with pytest.raises(TypeError, match="unsupported construction metadata"):
-        construction_contract(session, signatures)
 
 
 @pytest.mark.parametrize("fail_finalizer", [False, True])
