@@ -132,3 +132,68 @@ def test_sharded_vocabulary_expands_rows_after_gather_under_native_replay(tmp_pa
     if torch.cuda.device_count() < 4:
         pytest.skip("requires four assigned CUDA devices")
     mp.spawn(_rank, args=(4, (tmp_path / "rendezvous").as_uri(), 129280, True), nprocs=4, join=True)
+
+
+@pytest.mark.parametrize("world", [2, 4])
+@torch.no_grad()
+def test_quantized_draft_shards_preserve_logits_under_compiled_replay(world):
+    from b12x.preparation import PreparationSession
+    from ignition.components.vocabulary import PreparedVocabularyProjection, nvfp4_draft_head
+    from ignition.preparation.compilation import compile_forward
+
+    assert os.environ.get("CUDA_VISIBLE_DEVICES")
+    device = torch.device("cuda", 0)
+    capacity, vocab, hidden = 4, 768, 256
+    levels = torch.tensor([0., .5, 1., 1.5, 2., 3., 4., 6.,
+                           0., -.5, -1., -1.5, -2., -3., -4., -6.], device=device)
+    codes = (torch.arange(vocab, device=device)[:, None]
+             + 3 * torch.arange(hidden, device=device)[None, :]) % 16
+    # Every scale block contains +/-6, so NVFP4 represents these weights exactly.
+    weight = levels[codes].bfloat16()
+    original = weight.clone()
+    source = torch.zeros(capacity, hidden, dtype=torch.bfloat16, device=device)
+    output = torch.empty(capacity, vocab, dtype=torch.bfloat16, device=device)
+    shards = [nvfp4_draft_head(part.contiguous()) for part in weight.chunk(world)]
+    graphs, compiled, heads = {}, {}, {}
+    stream = torch.cuda.Stream(device=device)
+    try:
+        with PreparationSession(device=device, autotune=False, compile_workers=2) as session:
+            for rows in (1, capacity):
+                heads[rows] = []
+                width = vocab // world
+                for rank, shard in enumerate(shards):
+                    local = torch.empty(rows, width, dtype=source.dtype, device=device)
+                    heads[rows].append(PreparedVocabularyProjection(source[:rows], shard, local,
+                        output[:rows, rank * width:(rank + 1) * width], runtime=None,
+                        session=session, coordinator=None, name=f"draft{rows}.shard{rank}"))
+
+                def forward(rows=rows):
+                    for head in heads[rows]:
+                        head(source[:rows])
+
+                compiled[rows] = compile_forward(forward)
+                compiled[rows]()
+                torch.cuda.synchronize(device)
+                stream.wait_stream(torch.cuda.current_stream(device))
+                graph = torch.cuda.CUDAGraph()
+                with session.capture(), torch.cuda.graph(graph, stream=stream):
+                    compiled[rows]()
+                graphs[rows] = graph
+            session.freeze()
+            for turn, rows in enumerate((1, capacity, 1, capacity)):
+                source.copy_(torch.sin(torch.arange(source.numel(), device=device)
+                    .reshape_as(source).float() + turn).bfloat16())
+                expected = (source[:rows].float() @ weight.float().T).bfloat16()
+                output.fill_(float("nan"))
+                torch.cuda.synchronize(device)
+                before = torch.cuda.memory_stats(device)["allocation.all.allocated"]
+                graphs[rows].replay()
+                torch.cuda.synchronize(device)
+                assert torch.cuda.memory_stats(device)["allocation.all.allocated"] == before
+                torch.testing.assert_close(output[:rows], expected, rtol=.016, atol=.002)
+                assert output[rows:].isnan().all()
+            assert torch.equal(weight, original)
+    finally:
+        stream.synchronize()
+        for graph in graphs.values():
+            graph.reset()
