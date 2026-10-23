@@ -38,8 +38,11 @@ def _scores(query, keys, weights):
         dot = torch.einsum("rhd,kd->rhk", query, keys)
     finally:
         torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = reduction
-    # The index contract rounds the dot, weighted product, and head sum to BF16.
-    return (dot.relu() * weights[..., None]).sum(1).float()
+    products = (dot.relu() * weights[..., None]).float()
+    total = torch.zeros_like(products[:, 0])
+    for head in range(products.shape[1]):
+        total.add_(products[:, head])
+    return total.bfloat16().float()
 
 
 def _check_topk(indices, scores, *, allowed=None):

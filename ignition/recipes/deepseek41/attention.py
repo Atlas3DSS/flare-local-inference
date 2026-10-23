@@ -24,7 +24,7 @@ from ignition.components.parallel import TensorParallelShard
 from .pool import PAGE_TOKENS
 
 
-# Bound full-context score storage while amortizing prefill selection launches.
+# Bound indexer workspace while amortizing prefill selection launches.
 INDEXER_QUERY_ROWS = 128
 
 
