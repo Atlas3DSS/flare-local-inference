@@ -118,7 +118,7 @@ class _ForwardPickler(pickle.Pickler):
         if isinstance(value, CObject) or (not isinstance(value, type) and '<locals>' in type(value).__qualname__):
             # FlashInfer's TVM-FFI kernel libraries and its locally defined kernel runners are process-local.
             return _Unavailable, (f'{type(value).__module__}.{type(value).__qualname__}',)
-        if isinstance(value, (torch.cuda.Stream, torch.cuda.Event, torch.cuda.CUDAGraph,
+        if isinstance(value, (torch.cuda.Stream, torch.cuda.Event, torch.cuda.CUDAGraph, torch.cuda.MemPool,
                               torch.distributed.ProcessGroup, socket.socket, ctypes.CDLL, ctypes._Pointer,
                               ctypes._CFuncPtr, ctypes.Structure, ctypes.Array, ctypes._SimpleCData,
                               CompiledKernel, JitCompiledFunction, CompiledCuTeProgram, local,

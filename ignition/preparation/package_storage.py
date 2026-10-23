@@ -393,17 +393,27 @@ class ScratchPool:
 
         self.storage = storage
         self.pool = torch.cuda.MemPool(storage._allocator.allocator())
+        self.pool_id = self.pool.id
         self.unbacked = []
 
     def __enter__(self):
         import torch
 
+        if self.pool is None:
+            raise RuntimeError("scratch allocations are closed")
         self.scope = torch.cuda.use_mem_pool(self.pool, device=self.storage.device)
         self.scope.__enter__()
         return self
 
     def __exit__(self, *exc):
         self.scope.__exit__(*exc)
+
+    def retire(self):
+        """Close allocations and return cached segments after all allocation contexts have exited."""
+        import torch
+
+        self.pool = None
+        torch.cuda.empty_cache()
 
     def release_backing(self):
         """Discard scratch contents after all GPU users have completed."""
@@ -414,7 +424,7 @@ class ScratchPool:
         torch.cuda.synchronize(self.storage.device)
         mappings = self.storage.mappings
         try:
-            for segment in self.pool.snapshot(include_traces=False):
+            for segment in torch.cuda.memory_snapshot(self.pool_id, include_traces=False):
                 address = segment["address"]
                 size = mappings[address].nbytes
                 self.storage.cuda.call("cuMemUnmap", C.c_uint64(address), C.c_size_t(size))

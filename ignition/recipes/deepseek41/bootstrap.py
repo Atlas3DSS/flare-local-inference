@@ -294,12 +294,13 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
     with phase(progress, "Inspect checkpoint"):
         manifest = inspect_indexed_checkpoint(snapshot)
     metadata_path = manifest.metadata_path
+    with package_storage.transient():
+        weights = ModelWeights.load(manifest, device, shard=shard, progress=progress, dspark=config.dspark,
+                                    confidence=config.split_speculation,
+                                    expert_scale_compression=config.expert_scale_compression)
+        release_unused()
     transient = contextlib.ExitStack()
     transient.enter_context(package_storage.transient())
-    weights = ModelWeights.load(manifest, device, shard=shard, progress=progress, dspark=config.dspark,
-                                confidence=config.split_speculation,
-                                expert_scale_compression=config.expert_scale_compression)
-    release_unused()
     if progress is not None:
         progress(f"Resident model tensors: {weights.allocated_bytes / (1 << 30):.3f} GiB per rank")
     sequence = torch.zeros(1, dtype=torch.int64, device=device)
@@ -345,10 +346,11 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
             headroom_bytes=config.headroom_bytes, benchmark_storage=package_storage)
         session.__enter__()
         session.register_benchmark_resource("continuations", pool, restore=pool.clear_for_preparation)
-        arena = ScratchArena(device, overlap=config.stream_overlap)
+        scratch_pool = package_storage.scratch_pool()
+        arena = ScratchArena(device, overlap=config.stream_overlap, allocation_pool=scratch_pool.pool)
         session.register_scratch(arena)
-        graph_buffers = GraphBufferPool(device, chunk_bytes=2 << 20)
-        activation_buffers = GraphBufferPool(device, chunk_bytes=2 << 20)
+        graph_buffers = GraphBufferPool(device, chunk_bytes=2 << 20, allocation_pool=scratch_pool.pool)
+        activation_buffers = GraphBufferPool(device, chunk_bytes=2 << 20, allocation_pool=scratch_pool.pool)
         candidate_tokens = config.prefill_chunk_size
         if (weights.config.decoder_start is not None
                 and weights.config.text["candidate_source_layer_id"] >= weights.config.decoder_start):
@@ -365,13 +367,17 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         window_staging = (decoder_storage.buffers.zeros(
             (len(weights.layers), slots, (128 + max(config.speculative_widths)) * 528), torch.uint8)
             if config.dspark else None)
-        vision_state = vision_inputs = vision_prefill = vision_storage = None
+        vision_state = vision_inputs = vision_prefill = vision_storage = feature_pool = None
         if weights.vision is not None:
             vision_inputs = VisionInputs.allocate(device, patches=max(PATCH_CAPACITIES))
             vision_prefill = PrefillVisionInputs.allocate(config.prefill_chunk_size, device)
+            feature_pool = package_storage.scratch_pool()
+            with feature_pool:
+                feature_arena = torch.zeros((config.image_concurrency, 4096,
+                    weights.vision["image_start"].numel()), dtype=torch.bfloat16, device=device)
             vision_state = VisionState(weights.vision, inputs, vision_prefill, requests, features=4096,
                 token_base=129280, sentinel_names=("image_start", "image_start", "image_newline", "image_end"),
-                feature_type=1, image_slots=config.image_concurrency)
+                feature_type=1, image_slots=config.image_concurrency, arena=feature_arena)
             vision_storage = {}
         decoder_factory, draft_factory = _forward_factories(config.mla_compute_mode,
             window_staging=window_staging, suffix_scratch=suffix_storage, vision=vision_state)
@@ -480,18 +486,40 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
                         capacity=capacity, admission_buffers=admission, draft_state=enabled)
                     fields = row_inputs if mode == "snapshot" else ("request_state_rows", *admission.__dataclass_fields__)
                     add(name, forward, mode, capacity, 1, (*fields, "page_tables", *commands.buffers()), enabled=enabled)
+    transient.close()
+    release_unused()
     if progress is not None:
         progress(f"before tuning: {torch.cuda.memory_allocated(device) >> 20} MiB allocated, "
+                 f"{torch.cuda.memory_reserved(device) >> 20} MiB reserved, "
                  f"{torch.cuda.mem_get_info(device)[0] >> 20} MiB free")
         progress(f"Graph operand allocation by operation: {catalog_bytes}")
-    with phase(progress, "Prepare and tune kernels") as stage, transient:
-        tuning = session.tune(show_progress=progress is not None and rank == 0, console=stage.console)
-    stream, graph_pool = torch.cuda.Stream(device=device), package_storage.graph_pool.id
-    graphs, compiled = capture_forwards(forwards, signatures, session=session, device=device, stream=stream,
-        pool=graph_pool, collective=collective, coordinator=coordinator, compile_decoder=config.compile_decoder,
-        progress=progress, cache_root=config.kernel_cache, retain_graphs=config.retain_graphs,
-        materialize=pool.clear_for_preparation, warmup_storage=package_storage,
-        compile_kinds=("prefill", "scored_prefill", "decode", "resume", "speculative", "packed_speculative", "vision"))
+    def materialize():
+        scratch_pool.materialize()
+        if feature_pool is not None:
+            feature_pool.materialize()
+        pool.clear_for_preparation()
+
+    if feature_pool is not None:
+        feature_pool.release_backing()
+    try:
+        with phase(progress, "Prepare and tune kernels") as stage, package_storage.transient():
+            tuning = session.tune(show_progress=progress is not None and rank == 0, console=stage.console)
+        stream, graph_pool = torch.cuda.Stream(device=device), package_storage.graph_pool.id
+        arena.allocation_pool = graph_buffers.allocation_pool = activation_buffers.allocation_pool = None
+        scratch_pool.retire()
+        if config.compile_decoder:
+            scratch_pool.release_backing()
+            if progress is not None:
+                progress(f"released {sum(size for _, size in scratch_pool.unbacked) >> 20} MiB of scratch for compilation")
+        graphs, compiled = capture_forwards(forwards, signatures, session=session, device=device, stream=stream,
+            pool=graph_pool, collective=collective, coordinator=coordinator, compile_decoder=config.compile_decoder,
+            progress=progress, cache_root=config.kernel_cache, retain_graphs=config.retain_graphs,
+            materialize=materialize, warmup_storage=package_storage,
+            compile_kinds=("prefill", "scored_prefill", "decode", "resume", "speculative", "packed_speculative", "vision"))
+    finally:
+        scratch_pool.materialize()
+        if feature_pool is not None:
+            feature_pool.materialize()
     session.freeze()
     pool.clear_for_preparation()
     if split is not None:
@@ -566,7 +594,8 @@ def prepare_rank(snapshot, config, *, rank, group, progress=None, package_storag
         resources=(scoring, scored_storage, weights, tables, pool, requests, inputs, admission, commands, arena, forwards,
             prefill_storage, decoder_storage, scratch, metadata, compiled, stream, graph_pool, session,
             collective, prefill_collective, vocabulary_collective, result_collective, coordinator, speculation,
-            vision_state, vision_storage, vision_inputs, vision_prefill, graph_buffers, activation_buffers),
+            vision_state, vision_storage, vision_inputs, vision_prefill, graph_buffers, activation_buffers,
+            scratch_pool, feature_pool),
         close_resources=tuple(dict.fromkeys(c for c in
             (scoring, result_collective, prefill_collective, vocabulary_collective, collective) if c is not None)))
     if split is not None:

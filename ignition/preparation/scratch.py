@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from math import prod
 from weakref import finalize
 
@@ -38,10 +39,11 @@ class ScratchArena:
     the arena then creates no auxiliary stream and accepts no concurrent plans.
     """
 
-    def __init__(self, device, *, overlap=True):
+    def __init__(self, device, *, overlap=True, allocation_pool=None):
         if type(overlap) is not bool:
             raise TypeError("overlap must be a boolean")
         self.tensor = torch.empty(0, dtype=torch.uint8, device=device)
+        self.allocation_pool = allocation_pool
         self.overlap = overlap
         self.frozen = False
         self._finalizers = []
@@ -101,8 +103,10 @@ class ScratchArena:
         if nbytes > self.nbytes:
             if self.frozen:
                 raise RuntimeError(f"frozen scratch arena has {self.nbytes} bytes, requires {nbytes}")
-            self.tensor = torch.empty((nbytes + 255) // 256 * 256,
-                                      dtype=torch.uint8, device=self.device)
+            with (nullcontext() if self.allocation_pool is None else
+                  torch.cuda.use_mem_pool(self.allocation_pool, device=self.device.index)):
+                self.tensor = torch.empty((nbytes + 255) // 256 * 256,
+                                          dtype=torch.uint8, device=self.device)
         return self.tensor
 
     def freeze(self):
@@ -117,7 +121,9 @@ class ScratchArena:
         if capacity < self.nbytes:
             if self.frozen:
                 raise RuntimeError("cannot trim a frozen scratch arena")
-            self.tensor = torch.empty(capacity, dtype=torch.uint8, device=self.device)
+            with (nullcontext() if self.allocation_pool is None else
+                  torch.cuda.use_mem_pool(self.allocation_pool, device=self.device.index)):
+                self.tensor = torch.empty(capacity, dtype=torch.uint8, device=self.device)
 
     def views(self, *shapes_and_dtypes: tuple[tuple[int, ...], torch.dtype]) -> tuple[torch.Tensor, ...]:
         """Return disjoint views for simultaneous use within one serialized call.
@@ -328,10 +334,11 @@ class GraphBufferPool:
     Values retained across layers or until speculative acceptance need separate storage.
     """
 
-    def __init__(self, device, *, chunk_bytes=64 << 20):
+    def __init__(self, device, *, chunk_bytes=64 << 20, allocation_pool=None):
         if type(chunk_bytes) is not int or chunk_bytes <= 0 or chunk_bytes % 256:
             raise ValueError("graph buffer chunks must be a positive multiple of 256 bytes")
         self.device, self.chunk_bytes = torch.device(device), chunk_bytes
+        self.allocation_pool = allocation_pool
         self.chunks = {}
 
     @property
@@ -389,7 +396,9 @@ class GraphBuffers:
                 break
         else:
             index, offset = len(chunks), 0
-            chunks.append(torch.empty(max(aligned, self.pool.chunk_bytes) // dtype.itemsize, dtype=dtype,
-                                      device=self.pool.device))
+            with (nullcontext() if self.pool.allocation_pool is None else
+                  torch.cuda.use_mem_pool(self.pool.allocation_pool, device=self.pool.device.index)):
+                chunks.append(torch.empty(max(aligned, self.pool.chunk_bytes) // dtype.itemsize, dtype=dtype,
+                                          device=self.pool.device))
         offsets[index] = offset + aligned
         return chunks[index].narrow(0, offset // dtype.itemsize, count).view(shape)

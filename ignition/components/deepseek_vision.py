@@ -223,15 +223,20 @@ class PrefillVisionInputs:
 
 class VisionState:
     def __init__(self, weights, inputs, prefill, requests, *, features, token_base, sentinel_names, feature_type,
-                 image_slots=None):
+                 image_slots=None, arena=None):
         from ignition.components.capacity import image_capacity
 
         self.inputs, self.prefill, self.requests = inputs, prefill, requests
         self.token_base, self.feature_token = token_base, token_base + feature_type
         device = inputs.token_ids.device
         self.feature_slot = prefill.vision_feature_slot
-        self.arena = torch.zeros((image_capacity(requests.capacity, image_slots), features, weights["image_start"].numel()),
-                                 dtype=torch.bfloat16, device=device)
+        shape = (image_capacity(requests.capacity, image_slots), features, weights["image_start"].numel())
+        if arena is None:
+            arena = torch.zeros(shape, dtype=torch.bfloat16, device=device)
+        elif (arena.shape != shape or arena.dtype != torch.bfloat16 or arena.device != device
+              or not arena.is_contiguous()):
+            raise ValueError("image feature arena must be contiguous BF16 storage with the prepared shape and device")
+        self.arena = arena
         self.generation = torch.zeros(requests.capacity, dtype=torch.int64, device=device)
         self.count = torch.zeros(requests.capacity, dtype=torch.int32, device=device)
         self.sentinels = torch.stack(

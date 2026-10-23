@@ -199,7 +199,9 @@ def test_scratch_backing_released_for_compilation_and_restored():
     subprocess.run([sys.executable, "-c", """
 import torch
 from ignition.preparation.aot import aot_forward
+from ignition.preparation.forward_metadata import dumps, loads
 from ignition.preparation.package_storage import PackageStorage
+from ignition.preparation.scratch import GraphBufferPool, ScratchArena
 
 class Forward:
     def __init__(self, source, scratch):
@@ -213,21 +215,37 @@ class Forward:
 torch.cuda.set_device(0)
 with PackageStorage(device=0) as storage:
     source = torch.randn(256, 256, device='cuda')
-    with storage.scratch_pool() as pool:
-        backing = torch.ones(256 << 20, dtype=torch.uint8, device='cuda')
-        scratch = backing[:source.nbytes].view(torch.float32).view_as(source)
+    pool = storage.scratch_pool()
+    buffers = GraphBufferPool('cuda', chunk_bytes=64 << 20, allocation_pool=pool.pool)
+    cursor = buffers.cursor()
+    scratch = cursor.zeros(source.shape, torch.float32)
+    arena = ScratchArena('cuda', allocation_pool=pool.pool)
+    arena.reserve(128 << 20)
+    late = cursor.full((128 << 20,), 7, torch.uint8)
+    arena.reserve(256 << 20)
+    arena.trim(128 << 20)
+    arena.tensor.fill_(1)
+    tensors = (scratch, late, arena.tensor)
     forward = Forward(source, scratch)
-    addresses = backing.data_ptr(), scratch.data_ptr()
+    forward.buffers, forward.arena = buffers, arena
+    metadata = loads(dumps(forward))
+    assert metadata.scratch.shape == scratch.shape
+    buffers.allocation_pool = arena.allocation_pool = None
+    torch.cuda.synchronize()
+    cached = torch.cuda.mem_get_info()[0]
+    pool.retire()
+    assert torch.cuda.mem_get_info()[0] >= cached + (256 << 20)
+    addresses = tuple(t.data_ptr() for t in tensors)
     torch.cuda.synchronize()
     before = torch.cuda.mem_get_info()[0]
     pool.release_backing()
-    assert torch.cuda.mem_get_info()[0] >= before + backing.nbytes
+    assert torch.cuda.mem_get_info()[0] >= before + buffers.nbytes + arena.nbytes
     try:
         compiled = aot_forward(forward)
     finally:
         pool.materialize()
-    assert addresses == (backing.data_ptr(), scratch.data_ptr())
-    assert not backing.any()
+    assert addresses == tuple(t.data_ptr() for t in tensors)
+    assert all(not t.any() for t in tensors)
     compiled(forward)
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):

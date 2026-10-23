@@ -18,7 +18,7 @@ from b12x.preparation import (
 from b12x.preparation.session import _declaration_key
 
 from .scratch import ScratchArena
-from .host_memory import cpu_workers, tuning_limits
+from .host_memory import cpu_workers, release_unused, tuning_limits
 
 
 # Requests per tuning job on an integrated GPU: collective declarations with a coordinator,
@@ -287,6 +287,7 @@ class RecordedPreparationSession(PreparationSession):
                 elif self._coordinator.spans_hosts:
                     self._coordinator.share_selections(self._selection_cache())
             scratch_arena = self._reserve_scratch(requests)
+            release_unused()
             # Compiler pools share the memory and CPUs of ranks on this host only.
             pools = 1 if self._coordinator is None else self._coordinator.local_ranks
             if self.tuning_replica is not None:
