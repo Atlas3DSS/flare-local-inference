@@ -112,6 +112,13 @@
     exported V4/V4.1 packages with packed context projections. Compare GLM's
     shared-expert launch order when the configured checkpoint shards are available.
 
+[ ] Pack weight payloads by recipe-declared owner and group so rebuilt packages
+    rename only executable and state blobs. See weight-payload-stability.md.
+
+[ ] Combine per-size exports into one fat package whose derived tensor-parallel
+    sizes are affine derivations of the canonical blobs, with materialization in
+    `flare download --tp` and `flare run`. See package-resharding.md.
+
 [ ] Invalidate b12x preparation discovery's cached compiler context when
     Inductor selects a different libdevice in the same process. Repeated GPU
     test preparation can restore program keys for the preceding library.

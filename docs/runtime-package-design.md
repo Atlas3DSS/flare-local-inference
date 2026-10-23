@@ -957,3 +957,12 @@ restored image. The probes, orchestration, and measurements live under
 - The sm_120 TMA tile path links against driver-provided code and reserves
   about 3.6 GiB of device memory per context when loaded; the memory plan
   should account for it once b12x kernels that use the path are identified.
+- Weight payloads are packed by allocator segment in address order, so any
+  change in allocation order or size renames every later blob of a rank.
+  [Stable weight payloads](weight-payload-stability.md) specifies owner-ordered
+  packing whose blob names depend only on checkpoint bytes, recipe packing,
+  and rank.
+- Each tensor-parallel size stores a complete copy of the weights.
+  [Package resharding](package-resharding.md) specifies a fat package in which
+  derived sizes reference or derive the canonical size's blobs and Flare
+  materializes the selected size locally.
