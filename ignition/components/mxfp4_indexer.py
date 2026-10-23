@@ -66,11 +66,11 @@ class PreparedMXFP4Indexer:
             max_page_table_width=pages.shape[1], topk=512, page_size=page_size, cache_format="mxfp4", mode=mode,
             max_candidates=0 if candidates is None else candidates.shape[1],
             candidate_topk_blocks=0 if candidates_out is None else candidates_out.shape[1] // 8)
-        self.plan = dsa.plan(caps)
         self.arguments = dict(q_mxfp4=self.packed, q_scales=self.scales, query_weights=weights,
             index_k_cache=cache, page_table=pages, cache_lengths=lengths, active_width=active,
             output_indices=output, candidate_indices=candidates, candidate_lengths=counts,
             candidate_output=candidates_out, candidate_output_lengths=counts_out)
+        self.plan = dsa.plan(caps, invocation=dsa.invocation_from_tensors(caps, **self.arguments))
         self.workspace = workspace
 
         def prepare(state):
