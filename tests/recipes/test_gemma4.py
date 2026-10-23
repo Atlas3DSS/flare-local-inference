@@ -1,6 +1,7 @@
 """Unit tests for the Gemma 4 recipe, configuration, pool layout, and numerical kernels."""
 
 import json
+from pathlib import Path
 import struct
 
 import pytest
@@ -15,6 +16,7 @@ from ignition.recipes.gemma4.attention import (
     rms_norm,
     rms_norm_no_scale,
 )
+from ignition.recipes.gemma4.bootstrap import chat_template_asset
 from ignition.recipes.gemma4.config import PAGE_TOKENS, ModelConfig
 from ignition.recipes.gemma4.contract import FRONTEND, prepare as prepare_contract
 from ignition.recipes.gemma4.decoder import softcap_logits
@@ -497,6 +499,51 @@ def test_frontend_contract_and_cache_regions():
     assert contract["vocabulary"] == config.vocabulary
     assert contract["cache"]["page_tokens"] == PAGE_TOKENS
     assert len(contract["cache"]["regions"]) == 1 + len(pool.pages)
+
+
+@pytest.mark.parametrize(
+    "alias,raw_fn,filename",
+    [
+        ("gemma-4-e2b", _e2b_raw, "chat_template.google-e2b-e4b.jinja"),
+        ("gemma-4-e4b", _e4b_raw, "chat_template.google-e2b-e4b.jinja"),
+        ("gemma-4-e4b-nvfp4", _e4b_raw, "chat_template.google-e2b-e4b.jinja"),
+        ("gemma-4-12b", _gemma4_12b_raw, "chat_template.google.jinja"),
+        ("gemma-4-12b-nvfp4", _gemma4_12b_raw, "chat_template.google.jinja"),
+        ("gemma-4-26b-a4b", _moe_26b_raw, "chat_template.google.jinja"),
+        ("gemma-4-26b-a4b-nvfp4", _moe_26b_raw, "chat_template.google.jinja"),
+        ("gemma-4-31b", _dense_31b_raw, "chat_template.google.jinja"),
+        ("gemma-4-31b-nvfp4", _dense_31b_raw, "chat_template.google.jinja"),
+    ],
+)
+def test_model_sizes_select_canonical_chat_templates(alias, raw_fn, filename):
+    assert resolve(alias).recipe is RECIPE
+    config = ModelConfig.from_dict(raw_fn())
+    asset = chat_template_asset(config.hidden)
+    path = Path(asset["path"])
+    assert path.name == filename
+    assert path.read_bytes().count(b"{%- mark -%}") == 2
+
+
+@pytest.mark.parametrize(
+    "checkpoint",
+    [checkpoint for checkpoint in RECIPE.checkpoints if checkpoint.repository.startswith("google/")],
+    ids=lambda checkpoint: checkpoint.alias,
+)
+def test_canonical_chat_templates_match_pinned_google_sources(checkpoint):
+    snapshot = (Path.home() / ".cache/huggingface/hub" / ("models--" + checkpoint.repository.replace("/", "--"))
+                / "snapshots" / checkpoint.revision)
+    if not all((snapshot / name).exists() for name in ("config.json", "chat_template.jinja")):
+        pytest.skip("Google checkpoint configuration and chat template are not cached")
+    source = (snapshot / "chat_template.jinja").read_bytes()
+    config = ModelConfig.load(snapshot)
+    annotated = Path(chat_template_asset(config.hidden)["path"]).read_bytes()
+    assert annotated.replace(b"{%- mark -%}", b"") == source
+    assert annotated.count(b"{%- mark -%}") == 2
+
+
+def test_unknown_model_size_has_no_chat_template():
+    with pytest.raises(ValueError, match="unsupported Gemma 4 chat template hidden size"):
+        chat_template_asset(4096)
 
 
 @pytest.mark.parametrize(

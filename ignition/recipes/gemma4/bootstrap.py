@@ -59,6 +59,18 @@ from .speculative import PreparedContext, PreparedRound
 from .weights import ModelWeights
 
 
+def chat_template_asset(hidden_size: int):
+    """Use Google's canonical template for the model size across quantization publishers."""
+    if hidden_size in (1536, 2560):
+        filename = "chat_template.google-e2b-e4b.jinja"
+    elif hidden_size in (2816, 3840, 5376):
+        filename = "chat_template.google.jinja"
+    else:
+        raise ValueError(f"unsupported Gemma 4 chat template hidden size: {hidden_size}")
+    path = Path(__file__).with_name("assets").joinpath(filename).resolve()
+    return {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+
+
 @dataclass(frozen=True)
 class PreparationConfig:
     prompt_logprobs: bool = False
@@ -496,8 +508,11 @@ def prepare_rank(snapshot, config, *, rank=0, group=None, progress=None, package
     if group is not None:
         torch.distributed.barrier(group=group)
     assets = {
-        role: {"path": str(snapshot / file), "sha256": hashlib.sha256((snapshot / file).read_bytes()).hexdigest()}
-        for role, file in (("tokenizer", "tokenizer.json"), ("chat_template", "chat_template.jinja"))
+        "tokenizer": {
+            "path": str(snapshot / "tokenizer.json"),
+            "sha256": hashlib.sha256((snapshot / "tokenizer.json").read_bytes()).hexdigest(),
+        },
+        "chat_template": chat_template_asset(weights.config.hidden),
     }
     raw_eos = []
     gen_path = snapshot / "generation_config.json"
