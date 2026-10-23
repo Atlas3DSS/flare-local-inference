@@ -94,12 +94,12 @@ fn official(encoder: PromptEncoder, conversation: &Conversation) -> String {
     match encoder {
         PromptEncoder::DeepseekV4 => {
             DeepseekV4Encoding::new()
-                .render_conversation(conversation)
+                .render_conversation(conversation, &[])
                 .prompt
         }
         PromptEncoder::DeepseekV41 => {
             DeepseekV41Encoding::new()
-                .render_conversation(conversation)
+                .render_conversation(conversation, &[])
                 .prompt
         }
         _ => unreachable!(),
@@ -129,7 +129,7 @@ fn numeric_effort_scores_cover_the_interval_and_match_the_checked_encoder() {
     for score in 1u8..=100 {
         let expected = DeepseekV41Encoding::new()
             .with_reasoning_effort_score(score).unwrap()
-            .render_conversation(&conversation).prompt;
+            .render_conversation(&conversation, &[]).prompt;
         let actual = frontend.render_chat(&messages,
             json!({"reasoning_effort":score}).as_object().unwrap()).unwrap();
         assert_eq!(actual.text, expected, "score {score}");
@@ -146,6 +146,56 @@ fn numeric_effort_scores_cover_the_interval_and_match_the_checked_encoder() {
     for score in [0u8, 101, 255] {
         assert!(matches!(DeepseekV41Encoding::new().with_reasoning_effort_score(score),
             Err(EncodingError::InvalidReasoningEffortScore(value)) if value == score));
+    }
+}
+
+#[test]
+fn numeric_effort_preserves_content_block_checkpoint_hints() {
+    let frontend = frontend(PromptEncoder::DeepseekV41, json!({}));
+    for score in [1, 80, 100] {
+        for thinking in [false, true] {
+            let mut messages = [
+                json!({"role":"system","content":"Policy"}),
+                json!({
+                    "role":"user","content":[
+                        {"type":"text","text":"Stable earlier history"},
+                        {"type":"text","text":"Changing suffix"}]
+                }),
+            ];
+            let options = json!({"reasoning_effort":score,"enable_thinking":thinking});
+            let plain = frontend
+                .render_chat(&messages, options.as_object().unwrap())
+                .unwrap();
+            messages[1]["_checkpoint_hints"] = json!([1]);
+            let marked = frontend
+                .render_chat(&messages, options.as_object().unwrap())
+                .unwrap();
+            assert_eq!(marked.text, plain.text);
+            assert_eq!(marked.token_ids, plain.token_ids);
+            assert_eq!(
+                marked
+                    .text
+                    .contains(&format!("Reasoning Effort: {score} (range 1-100")),
+                thinking
+            );
+            let end = marked.text.find("Stable earlier history").unwrap()
+                + "Stable earlier history".len();
+            let encoding = frontend
+                .tokenizer()
+                .encode(marked.text.as_str(), false)
+                .unwrap();
+            let cut = encoding
+                .get_offsets()
+                .iter()
+                .take_while(|&&(_, end_byte)| end_byte <= end)
+                .count();
+            assert!(!plain.message_boundaries.contains(&cut));
+            assert!(marked.message_boundaries.contains(&cut));
+            assert_eq!(
+                marked.message_boundaries.len(),
+                plain.message_boundaries.len() + 1
+            );
+        }
     }
 }
 

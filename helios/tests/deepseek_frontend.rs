@@ -89,7 +89,7 @@ fn official_encoder_renders_and_initializes_native_output_state() {
     assert_eq!(
         prompt.text,
         DeepseekV41Encoding::new()
-            .render_conversation(&canonical)
+            .render_conversation(&canonical, &[])
             .prompt
     );
     assert!(prompt.text.contains("Reasoning Effort: 75"));
@@ -110,7 +110,7 @@ fn official_encoder_renders_and_initializes_native_output_state() {
     assert_eq!(
         prompt.text,
         DeepseekV41Encoding::new()
-            .render_conversation(&canonical)
+            .render_conversation(&canonical, &[])
             .prompt
     );
     assert!(!prompt.text.contains("Reasoning Effort:"));

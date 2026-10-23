@@ -691,8 +691,11 @@ fn prepare_questions(
             else {
                 unreachable!();
             };
-            let mut normalized =
-                inference::template_messages(conversation, decoded.request.tool_choice.clone())?;
+            let mut normalized = inference::template_messages(
+                conversation,
+                decoded.request.tool_choice.clone(),
+                &decoded.request.checkpoint_hints,
+            )?;
             state
                 .frontend
                 .normalize_inline_system_messages(&mut normalized)?;

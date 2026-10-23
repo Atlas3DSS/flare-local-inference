@@ -16,19 +16,25 @@ pub(super) fn invalid(message: impl Into<String>) -> Error {
     Error::frontend(FrontendError::Input(Failure::new(message.into())))
 }
 
-fn content(value: &Json) -> Result<(String, Vec<ImageSource>)> {
+fn content(value: &Json, hints: &[Json]) -> Result<(String, Vec<ImageSource>, Vec<usize>)> {
     if value.is_null() {
-        return Ok((String::new(), vec![]));
+        return Ok((String::new(), vec![], vec![]));
     }
     if let Some(text) = value.as_str() {
-        return Ok((text.to_owned(), vec![]));
+        return Ok((
+            text.to_owned(),
+            vec![],
+            hints.iter().map(|_| text.len()).collect(),
+        ));
     }
     let parts = value
         .as_array()
         .ok_or_else(|| invalid("message content must be text or content blocks"))?;
     let mut text = Vec::new();
     let mut images = Vec::new();
-    for part in parts {
+    let mut positions = Vec::new();
+    let mut end = 0;
+    for (index, part) in parts.iter().enumerate() {
         match part["type"].as_str() {
             Some("text") => text.push(
                 part["text"]
@@ -51,8 +57,17 @@ fn content(value: &Json) -> Result<(String, Vec<ImageSource>)> {
             }
             _ => return Err(invalid("unsupported DeepSeek content block")),
         }
+        if index != 0 {
+            end += 2;
+        }
+        end += text.last().unwrap().len();
+        if hints.contains(&Json::from(index + 1))
+            || (hints == [Json::from(0)] && index + 1 == parts.len())
+        {
+            positions.push(end);
+        }
     }
-    Ok((text.join("\n\n"), images))
+    Ok((text.join("\n\n"), images, positions))
 }
 
 fn tool_arguments(value: &Json) -> Result<String> {
@@ -72,7 +87,7 @@ fn conversation(
     frontend: &Frontend,
     messages: &[Json],
     options: &Map<String, Json>,
-) -> Result<(Conversation, Option<u8>)> {
+) -> Result<(Conversation, Vec<(usize, usize)>, Option<u8>)> {
     if messages.is_empty() {
         return Err(invalid("cannot encode an empty conversation"));
     }
@@ -283,13 +298,28 @@ fn conversation(
         ));
     }
     let mut converted = Vec::new();
+    let mut hints = Vec::new();
     for message in messages {
         if message.get("task").is_some() || message.get("prefix").is_some() {
             return Err(invalid(
                 "DeepSeek task and assistant-prefill fields are unsupported",
             ));
         }
-        let (text, image_sources) = content(&message["content"])?;
+        let block_hints = message["_checkpoint_hints"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let (text, image_sources, positions) = content(&message["content"], block_hints)?;
+        let suffix = if message["role"] == "tool" {
+            "</tool_result>".len()
+        } else {
+            0
+        };
+        hints.extend(
+            positions
+                .into_iter()
+                .map(|position| (converted.len(), position + suffix)),
+        );
         let role = message["role"]
             .as_str()
             .ok_or_else(|| invalid("message requires a role"))?;
@@ -361,6 +391,7 @@ fn conversation(
             reasoning_effort,
             response_format,
         },
+        hints,
         reasoning_effort_score,
     ))
 }
@@ -377,10 +408,13 @@ pub(super) fn validate_defaults(frontend: &Frontend) -> Result<()> {
 fn official(
     encoder: PromptEncoder,
     conversation: &Conversation,
+    hints: &[(usize, usize)],
     reasoning_effort_score: Option<u8>,
 ) -> Result<deepseek_recipe_encoding::RenderedPrompt> {
     Ok(match encoder {
-        PromptEncoder::DeepseekV4 => DeepseekV4Encoding::new().render_conversation(conversation),
+        PromptEncoder::DeepseekV4 => {
+            DeepseekV4Encoding::new().render_conversation(conversation, hints)
+        }
         PromptEncoder::DeepseekV41 => {
             let mut encoder = DeepseekV41Encoding::new();
             if let Some(score) = reasoning_effort_score {
@@ -388,7 +422,7 @@ fn official(
                     .with_reasoning_effort_score(score)
                     .map_err(|error| invalid(error.to_string()))?;
             }
-            encoder.render_conversation(conversation)
+            encoder.render_conversation(conversation, hints)
         }
         PromptEncoder::Jinja => unreachable!(),
     })
@@ -399,8 +433,8 @@ pub(super) fn render(
     messages: &[Json],
     options: &Map<String, Json>,
 ) -> Result<RenderedPrompt> {
-    let (conversation, reasoning_effort_score) = conversation(frontend, messages, options)?;
-    let rendered = official(frontend.prompt_encoder, &conversation, reasoning_effort_score)?;
+    let (conversation, hints, reasoning_effort_score) = conversation(frontend, messages, options)?;
+    let rendered = official(frontend.prompt_encoder, &conversation, &hints, reasoning_effort_score)?;
     let image_sources = rendered
         .image_sources
         .into_iter()
@@ -439,11 +473,17 @@ pub(super) fn render(
         offsets.extend(encoding.get_offsets().iter().map(|&(start,end)| (byte_start+start,byte_start+end)));
         byte_start += span.len();
     }
-    let message_boundaries = super::boundaries::token_ends(&rendered.message_boundaries, &offsets, rendered.prompt.len())?;
+    let message_boundaries = super::boundaries::token_ends(
+        &rendered.message_boundaries,
+        &rendered.checkpoint_hints,
+        &offsets,
+        rendered.prompt.len(),
+    )?;
     Ok(RenderedPrompt {
         text: rendered.prompt,
         token_ids,
         image_sources,
+        image_checkpoint_hints: Vec::new(),
         message_boundaries,
     })
 }

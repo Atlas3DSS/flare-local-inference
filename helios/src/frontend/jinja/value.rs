@@ -16,7 +16,7 @@ pub(super) enum Value<'a> {
     UInt(u64),
     Float(f64),
     Str(&'a str),
-    String(Rc<String>),
+    String(Rc<(String, Vec<usize>)>),
     Array(&'a [Json]),
     Object(&'a serde_json::Map<String, Json>),
     List(Rc<Vec<Value<'a>>>),
@@ -66,7 +66,21 @@ impl<'a> Value<'a> {
     }
 
     pub fn string(value: String) -> Self {
-        Self::String(Rc::new(value))
+        Self::marked(value, Vec::new())
+    }
+    pub fn marked(value: String, hints: Vec<usize>) -> Self {
+        Self::String(Rc::new((value, hints)))
+    }
+    pub fn hints(&self) -> &[usize] {
+        match self {
+            Self::String(s) => &s.1,
+            _ => &[],
+        }
+    }
+    pub fn append(&self, output: &mut String, hints: &mut Vec<usize>) {
+        let start = output.len();
+        hints.extend(self.hints().iter().map(|end| start + end));
+        self.write(output);
     }
     pub fn list(value: Vec<Self>) -> Self {
         Self::List(Rc::new(value))
@@ -74,7 +88,7 @@ impl<'a> Value<'a> {
     pub fn as_str(&self) -> Option<&str> {
         match self {
             Self::Str(s) => Some(s),
-            Self::String(s) => Some(s),
+            Self::String(s) => Some(&s.0),
             _ => None,
         }
     }
@@ -96,7 +110,7 @@ impl<'a> Value<'a> {
     pub fn len(&self) -> usize {
         match self {
             Self::Str(s) => s.chars().count(),
-            Self::String(s) => s.chars().count(),
+            Self::String(s) => s.0.chars().count(),
             Self::Array(v) => v.len(),
             Self::Object(v) => v.len(),
             Self::List(v) => v.len(),
@@ -231,7 +245,7 @@ impl<'a> Value<'a> {
             }
             Self::Float(v) => output.push_str(&super::super::json::python_float(*v)),
             Self::Str(s) => output.push_str(s),
-            Self::String(s) => output.push_str(s),
+            Self::String(s) => output.push_str(&s.0),
             _ => self.write_repr(output),
         }
     }
@@ -280,7 +294,7 @@ impl<'a> Value<'a> {
             Self::Float(v) => (*v).into(),
             Self::UInt(v) => (*v).into(),
             Self::Str(s) => (*s).into(),
-            Self::String(s) => s.as_str().into(),
+            Self::String(s) => s.0.as_str().into(),
             Self::Array(v) => Json::Array(v.to_vec()),
             Self::Object(v) => Json::Object((*v).clone()),
             Self::List(v) => Json::Array(v.iter().map(Self::to_json).collect::<Result<_>>()?),
@@ -292,6 +306,32 @@ impl<'a> Value<'a> {
             ),
             _ => return Err(Error::new("cannot serialize template object")),
         })
+    }
+
+    pub fn json_hints<'j>(&self, json: &'j Json, hints: &mut Vec<(&'j str, Vec<usize>)>) {
+        match (self, json) {
+            (Self::String(value), Json::String(text)) if !value.1.is_empty() => {
+                hints.push((text, value.1.clone()));
+            }
+            (Self::List(values), Json::Array(items)) => {
+                for (value, item) in values.iter().zip(items) {
+                    value.json_hints(item, hints);
+                }
+            }
+            (Self::Map(values), Json::Object(items)) => {
+                for (key, item) in items {
+                    if let Some((_, value)) = values.iter().rev().find(|(name, _)| name == key) {
+                        value.json_hints(item, hints);
+                    }
+                }
+            }
+            (Self::Namespace(values), Json::Object(items)) => {
+                for (key, value) in values.borrow().iter() {
+                    value.json_hints(&items[key], hints);
+                }
+            }
+            _ => {}
+        }
     }
 
     pub fn equals(&self, other: &Self) -> bool {
