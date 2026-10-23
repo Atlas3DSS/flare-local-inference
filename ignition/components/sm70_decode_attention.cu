@@ -1,3 +1,7 @@
+// Sol-21 r2: sol-13c with one change: load_block issues predicated loads (zero for positions >= len set by register moves
+// before the load) instead of loading and zero-filling with a select. The select made every warp wait for HBM at the
+// load site (ncu: 11 % of sol-13c's stall samples at those SELs), so neither the V load (meant to overlap QK) nor the
+// next tile's K load (meant to overlap softmax and PV) overlapped anything. Same words, same zeros: bit-identical.
 // Sol-13c: Sol-13b S1L with the Flare row contract: verify row j of a multi-row launch produces the SAME BITS as a
 // single-row launch (R = 1) with length ctx0 + j + 1 on the same Q row and K/V. Changes vs sol-13b (NUMERICS.md,
 // "Row semantics"): (1) row passes on boundary tiles: a token that the shared conversion flags (outside the window of
@@ -21,7 +25,7 @@
 //  * Blocks that fail admission (span > 2^30 within a 32x64 block, non-finite) and query slices whose
 //    two-half representation is off by more than 2^-20 componentwise take an FP32 SIMT path for that
 //    block / row only. No row ever selects another row's arithmetic.
-#include "sm70_decode_attention.h"   // = sol-13c/attention.h verbatim (astra-10: the only edit to attention.cu)
+#include "sm70_decode_attention.h"   // = sol-21/attention.h = sol-13c/attention.h verbatim (astra-19: the only edit to sol-21/attention.cu)
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <math_constants.h>
@@ -117,6 +121,15 @@ __device__ __forceinline__ uint4 ld_stream(const uint16_t* p) {
   asm volatile("ld.global.cs.v4.u32 {%0,%1,%2,%3}, [%4];" : "=r"(v.x), "=r"(v.y), "=r"(v.z), "=r"(v.w) : "l"(p));
   return v;
 }
+// sol-21: predicated streaming load: returns the 16 bytes at p if in, else zero; no select on the loaded value, so the
+// warp waits for the data at its first use, not here.
+__device__ __forceinline__ uint4 ld_stream_if(const uint16_t* p, bool in) {
+  uint4 v;
+  asm volatile("{\n\t.reg .pred q;\n\tsetp.ne.b32 q, %5, 0;\n\tmov.b32 %0, 0;\n\tmov.b32 %1, 0;\n\tmov.b32 %2, 0;\n\tmov.b32 %3, 0;\n\t"
+               "@q ld.global.cs.v4.u32 {%0,%1,%2,%3}, [%4];\n\t}"
+               : "=r"(v.x), "=r"(v.y), "=r"(v.z), "=r"(v.w) : "l"(p), "r"(int(in)));
+  return v;
+}
 __device__ __forceinline__ float bf2f(uint32_t bits16) { return __uint_as_float(bits16 << 16); }
 __device__ __forceinline__ uint32_t pack2(__half a, __half b) {
   return uint32_t(__half_as_ushort(a)) | (uint32_t(__half_as_ushort(b)) << 16);
@@ -133,19 +146,15 @@ struct Params {
 
 // Loads this warp's 32-token x 64-dim BF16 block (8 x 16 B per lane, 4 full 128-B lines per instruction).
 // Positions >= len are zero filled (never read from memory).
-// P2: branch-free. A 32-token tile never leaves its 128-slot page, so slots >= len are allocated memory; they are
-// loaded unconditionally and replaced by zero with a select (their bits never enter arithmetic).
+// sol-21: branch-free predicated loads (ld_stream_if): slots >= len are not loaded and read as zero (sol-13c loaded them
+// and zeroed them with a select, which stalled the warp on HBM right here). Same words, same zeros.
 // P1: the page id comes from the CTA's shared page table (no dependent global load per block).
 __device__ __forceinline__ void load_block(uint4 (&b)[8], const uint16_t* base, int page, int start, int len,
                                            int head, int warp, int lane) {
   const int slot0 = start & 127;
   const uint16_t* p0 = base + ((size_t(page) * 128 + slot0 + (lane >> 3)) * 4 + head) * 256 + 64 * warp + 8 * (lane & 7);
 #pragma unroll
-  for (int i = 0; i < 8; ++i) {
-    const uint4 x = ld_stream(p0 + size_t(4 * i) * 4 * 256);
-    const bool in = start + 4 * i + (lane >> 3) < len;
-    b[i] = make_uint4(in ? x.x : 0u, in ? x.y : 0u, in ? x.z : 0u, in ? x.w : 0u);
-  }
+  for (int i = 0; i < 8; ++i) b[i] = ld_stream_if(p0 + size_t(4 * i) * 4 * 256, start + 4 * i + (lane >> 3) < len);
 }
 __device__ __forceinline__ void load_block_page(uint4 (&b)[8], const uint16_t* base, int page, int start, int len,
                                                 int head, int warp, int lane) {

@@ -1,8 +1,9 @@
-"""Reviewed Sol-13c S1L tensor-core decode/verification attention for the 16 full-attention layers on SM70.
+"""Reviewed Sol-21 r2 S1L tensor-core decode/verification attention for the 16 full-attention layers on SM70.
 
-Sol-13c keeps Sol-13b's ABI (sol13b_* entry points, variants, workspace) and adds the Flare row contract: verification row j
-of an agent with R rows is bit-identical to the single-row launch at visible length ctx0 + j + 1 (per-row boundary-tile
-conversion, per-row ladder rung), so accepting k rows leaves the state of k ordinary greedy decodes (forced_prefix gate).
+Sol-21 r2 = Sol-13c with predicated K/V loads, bit-identical to Sol-13c on every gate. Sol-13c keeps Sol-13b's ABI
+(sol13b_* entry points, variants, workspace) and adds the Flare row contract: verification row j of an agent with R rows
+is bit-identical to the single-row launch at visible length ctx0 + j + 1 (per-row boundary-tile conversion, per-row
+ladder rung), so accepting k rows leaves the state of k ordinary greedy decodes (forced_prefix gate).
 The kernel sizes its own grid (gsplits grows at a ladder straddle) and workspace from max_length; the wrapper only asks
 sol13b_workspace_bytes and never derives a launch size itself.
 
@@ -61,7 +62,7 @@ def compile_library(kernel_cache=None):
         fcntl.flock(lock, fcntl.LOCK_EX)
         if not output.exists():
             workers = len(os.sched_getaffinity(0))
-            # Exactly sol-13c/build.sh (= sol-13b's flags; the qualified attention.so): the SASS must stay identical.
+            # Exactly sol-21/build.sh (= sol-13c/sol-13b flags; the qualified attention.so): the SASS must stay identical.
             subprocess.run([str(Path(CUDA_HOME) / "bin/nvcc"), "--threads", str(workers), "-std=c++17", "-O3",
                 "-arch=compute_70", "-code=sm_70", "-Xcompiler=-fPIC", "--shared", "-lineinfo", "--fmad=false",
                 str(source), "-o", str(output)], check=True)
