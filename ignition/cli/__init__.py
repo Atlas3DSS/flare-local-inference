@@ -129,10 +129,11 @@ def _preparation_arguments(running):
                          help="maximum active image requests; excess requests queue independently of text"
                               " (default: smaller of 4 and max concurrency)")
     capacity = running.add_argument_group("capacity and compression")
-    capacity.add_argument("--expert-scale-compression", choices=("csf",), nargs="?", const="csf", metavar="MODE",
+    capacity.add_argument("--expert-scale-compression", choices=("csf", "native"), nargs="?", const="csf", metavar="MODE",
                           help="losslessly compress routed-expert quantization scales to reduce GPU weight memory."
                                " MODE: csf, a compressed scale encoding expanded during execution."
-                               " With no MODE, selects csf; omitted flag preserves native scales."
+                               " With no MODE, selects csf; native disables compression."
+                               " Omitted flag uses the recipe default."
                                " See MODEL --help for recipe support and estimated savings")
     capacity.add_argument("--prefill-chunk-size", type=int, metavar="N",
                           help="most prompt tokens per prefill step; larger chunks reach a long prompt's first"
@@ -164,9 +165,9 @@ def _preparation_arguments(running):
                                " excludes mandatory width-one and ordinary graphs. Requires packed adaptive"
                                " learned speculation (default: see MODEL --help)")
     advanced = running.add_argument_group("advanced options")
-    advanced.add_argument("--mla-compute-mode", choices=("auto", "bf16"), default="auto",
+    advanced.add_argument("--mla-compute-mode", choices=("auto", "bf16"),
                           help="constrain MLA arithmetic while retaining packed KV storage and compatible"
-                               " kernel tuning (default: auto; bf16 requires the preparation API)")
+                               " kernel tuning (default: see MODEL --help)")
     from .config import AUTOTUNE_EFFORTS
 
     advanced.add_argument("--autotune-effort", choices=AUTOTUNE_EFFORTS,

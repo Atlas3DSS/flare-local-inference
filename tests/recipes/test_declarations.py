@@ -312,9 +312,9 @@ def test_adapters_carry_stream_overlap_into_the_preparation_config(monkeypatch, 
         assert seen.pop().stream_overlap is overlap
 
 
-@pytest.mark.parametrize("compression", [None, "csf"])
+@pytest.mark.parametrize("compression,expected", [(None, "csf"), ("csf", "csf"), ("native", None)])
 @pytest.mark.parametrize("drafting", [False, True])
-def test_deepseek41_native_checkpoint_and_scale_compression(monkeypatch, tmp_path, compression, drafting):
+def test_deepseek41_native_checkpoint_and_scale_compression(monkeypatch, tmp_path, compression, expected, drafting):
     from ignition.recipes.deepseek41.bootstrap import PreparationConfig
 
     model = resolve("deepseek-v4.1-flash")
@@ -324,36 +324,56 @@ def test_deepseek41_native_checkpoint_and_scale_compression(monkeypatch, tmp_pat
         "temperature": 1., "top_p": 1., "top_k": -1, "seed": 0, "min_p": 0.,
         "repetition_penalty": 1., "presence_penalty": 0., "frequency_penalty": 0.}
     speculation = model.recipe.speculation if drafting else None
-    native = fitted(model, 4, speculation=speculation)
+    native = fitted(model, 4, speculation=speculation, expert_scale_compression="native")
     plan = fitted(model, 4, speculation=speculation, expert_scale_compression=compression)
     assert plan.max_images == 4 and plan.image_concurrency == min(4, plan.concurrency)
-    assert plan.expert_scale_compression == compression
-    assert (plan.weights_bytes < native.weights_bytes) == (compression == "csf")
+    assert plan.expert_scale_compression == expected
+    assert (plan.weights_bytes < native.weights_bytes) == (expected == "csf")
     monkeypatch.setattr("ignition.preparation.rank_group.prepare_group",
                         lambda snapshot, config, prepare, **options: config)
     config = model.recipe.prepare(tmp_path, plan, compile_forwards=True, kernel_cache=None, progress=None)
-    assert config.expert_scale_compression == compression and config.dspark == drafting
+    assert config.expert_scale_compression == expected and config.dspark == drafting
     assert config.image_concurrency == plan.image_concurrency
     with pytest.raises(ValueError, match="scale compression"):
         PreparationConfig(expert_scale_compression="zip")
 
 
-@pytest.mark.parametrize("graph_budget", [64, 32])
-def test_deepseek41_recipe_defaults_and_adapter_preserve_packed_gpu_planning(monkeypatch, tmp_path, graph_budget):
+@pytest.mark.parametrize("flags,expected", [
+    ([], (32, 4, 7, 128, 64, "bf16", "csf")),
+    (["--max-concurrency", "8", "--image-concurrency", "2", "--mtp-draft-tokens", "3",
+      "--speculative-token-capacity", "64", "--speculative-graph-budget", "32",
+      "--mla-compute-mode", "auto", "--expert-scale-compression", "native"],
+     (8, 2, 3, 64, 32, "auto", None)),
+])
+@pytest.mark.parametrize("command", ["export", "serve"])
+def test_deepseek41_recipe_defaults_and_adapter_preserve_packed_gpu_planning(monkeypatch, tmp_path, flags, expected, command):
     from ignition.cli import _parser, preparation
+    from ignition.cli.config import Configuration
 
     model = resolve("deepseek-v4.1-flash")
     assert (model.recipe.concurrency, model.recipe.max_concurrency, model.recipe.prefill_chunk) == (32, 64, 4096)
-    assert model.recipe.speculation == Speculation(5, token_capacity=128, packed_verification=True,
+    assert model.recipe.speculation == Speculation(7, token_capacity=128, packed_verification=True,
                                                   draft_prefix_selection="gpu", graph_budget=64)
-    flags = [] if graph_budget == 64 else ["--speculative-graph-budget", str(graph_budget)]
-    args = _parser().parse_args(["export", model.checkpoint.alias, *flags])
-    plan = fitted(model, 4, concurrency=model.recipe.concurrency,
-                  speculation=preparation.speculation(args, model))
+    args = _parser().parse_args([command, model.checkpoint.alias, *flags])
+    config_path = tmp_path / "flare.toml"
+    config_path.write_text("")
+    configuration = Configuration.load(config_path)
+    concurrency = configuration.max_concurrency(model.checkpoint.alias, model.recipe.concurrency, args.max_concurrency)
+    devices = tuple(planning.Gpu(index, "NVIDIA RTX PRO 6000 Blackwell", f"GPU-{index}",
+                                 96 << 30, 95 << 30, (12, 0)) for index in range(4))
+    plan = preparation.derive(configuration, model, preparation.Host(devices, None), gpus="0,1,2,3",
+        concurrency=concurrency, speculation=preparation.speculation(args, model, configuration),
+        image_concurrency=args.image_concurrency, mla_compute_mode=args.mla_compute_mode,
+        expert_scale_compression=args.expert_scale_compression)
+    assert (plan.concurrency, plan.image_concurrency, plan.speculation.draft_tokens,
+            plan.speculative_token_capacity, plan.speculation.graph_budget,
+            plan.mla_compute_mode, plan.expert_scale_compression) == expected
     monkeypatch.setattr("ignition.preparation.rank_group.prepare_group",
                         lambda snapshot, config, prepare, **options: config)
     config = model.recipe.prepare(tmp_path, plan, compile_forwards=True, kernel_cache=None, progress=None)
-    assert (config.max_active, config.prefill_chunk_size, config.speculative_token_capacity) == (32, 4096, 128)
+    assert (config.max_active, config.image_concurrency, max(config.speculative_widths) - 1,
+            config.speculative_token_capacity, config.speculative_graph_budget,
+            config.mla_compute_mode, config.expert_scale_compression) == expected
+    assert config.prefill_chunk_size == 4096
     assert config.dspark and config.split_speculation
     assert config.packed_verification and config.draft_prefix_selection == "gpu"
-    assert config.speculative_graph_budget == graph_budget

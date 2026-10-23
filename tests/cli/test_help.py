@@ -23,7 +23,7 @@ def test_mla_arithmetic_flag_defaults_and_override(command):
     arguments = [command, "deepseek-v4.1-flash", *(["--output", "model.safetensors"] if command == "export" else [])]
     default = _parser().parse_args(arguments)
     explicit = _parser().parse_args([*arguments, "--mla-compute-mode", "bf16"])
-    assert default.mla_compute_mode == "auto"
+    assert default.mla_compute_mode is None
     assert explicit.mla_compute_mode == "bf16"
 
 
@@ -89,7 +89,10 @@ def test_deepseek41_help_reports_packed_gpu_recipe_defaults(command, capsys):
     output = capsys.readouterr().out
     assert "--max-concurrency: 1..64; recipe default 32" in output
     assert "--prefill-chunk-size: 64..1048576, multiple of 64; default 4096" in output
-    assert "--mtp-draft-tokens: 0..7; default 5" in output
+    assert "--mtp-draft-tokens: 0..7; default 7" in output
+    assert "--image-concurrency: 1..max concurrency; default 4" in output
+    assert "--mla-compute-mode: auto, bf16; default bf16" in output
+    assert "--expert-scale-compression: native, csf; default csf" in output
     assert "--speculative-token-capacity: at least drafts + 1; default 128" in output
     assert "--speculative-graph-budget: positive integer; default 64" in output
     assert "excludes mandatory width-one and ordinary graphs" in output
@@ -155,7 +158,7 @@ def test_invalid_compression_is_rejected_with_the_supported_encoding(capsys):
     with pytest.raises(SystemExit) as error:
         main(["export", "step5-preview-nvfp4", "--expert-scale-compression", "zip", "--output", "model"])
     assert error.value.code == 2
-    assert "invalid choice: 'zip' (choose from csf)" in capsys.readouterr().err
+    assert "invalid choice: 'zip' (choose from csf, native)" in capsys.readouterr().err
 
 
 def test_mistyped_alias_suggests_step5():

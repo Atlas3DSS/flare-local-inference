@@ -44,7 +44,7 @@ def derive(configuration: Configuration, model: ResolvedModel, host: Host, *, gp
            mixed_prefill: bool = False, prompt_logprobs: bool = False, expert_scale_compression: str | None = None,
            online_mxfp8: bool = False, language_model_only: bool = False,
            compile_workers: int | None = None, tuning_gpus: str | None = None, autotune_effort: str | None = None,
-           image_concurrency: int | None = None, mla_compute_mode: str = "auto") -> planning.Plan:
+           image_concurrency: int | None = None, mla_compute_mode: str | None = None) -> planning.Plan:
     """Select GPUs and estimate memory for one checkpoint from the configuration and command-line intent."""
     workers = compiler_workers(configuration, compile_workers)
     result = planning.plan(

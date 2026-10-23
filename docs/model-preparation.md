@@ -322,12 +322,14 @@ which must agree with checkpoint `image_token_id`. Packages without explicit
 prompt-encoder metadata continue to use their tokenizer and Jinja template.
 Sampling defaults are temperature 1.0 and top-p 1.0, following the
 [model card](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017#minimal-inference).
-Add `--expert-scale-compression csf` to losslessly compress backbone and DSpark
-MXFP4 expert scales during loading. Compressed scales stay resident, with shared
+Preparation losslessly compresses backbone and DSpark MXFP4 expert scales with
+CSF by default. Compressed scales stay resident, with shared
 expansion buffers reused by serial expert layers. Planning conservatively estimates
-3% less resident weight storage; loading measures the actual allocation. Omitting
-the flag preserves native scales.
-DSpark is its learned draft method. Preparation defaults to five draft tokens,
+3% less resident weight storage; loading measures the actual allocation.
+`--expert-scale-compression native` preserves native scales. MLA arithmetic defaults
+to BF16; `--mla-compute-mode auto` lets b12x select arithmetic while preserving
+packed KV storage.
+DSpark is its learned draft method. Preparation defaults to seven draft tokens,
 32 concurrent requests, a 4096-token prefill chunk, a 128-row physical target
 capacity, and a budget of 64 packed round graphs. Positive-depth DSpark uses
 packed GPU prefix selection automatically.
@@ -358,22 +360,22 @@ the available resolution: larger budgets saturate at every valid capacity.
 Budgets below the endpoint count fail before preparation; the default request
 and token capacities require at least 12 packed graphs.
 
-With five drafts, 128 target rows, and a 64-graph budget, the catalog contains:
+With seven drafts, 128 target rows, and a 64-graph budget, the catalog contains:
 
 | Captured request capacity | Packed graphs | Minimum / maximum target rows |
 |---|---:|---:|
-| 1 | 5 | 2 / 6 |
-| 2 | 9 | 3 / 12 |
-| 4 | 12 | 5 / 24 |
-| 8 | 13 | 9 / 48 |
-| 16 | 16 | 17 / 96 |
+| 1 | 7 | 2 / 8 |
+| 2 | 10 | 3 / 16 |
+| 4 | 12 | 5 / 32 |
+| 8 | 12 | 9 / 64 |
+| 16 | 14 | 17 / 128 |
 | 32 | 9 | 33 / 128 |
 
 These 64 combined packed rounds and six width-one continuations are separate
 from ordinary decode, prefill, maintenance, and vision graphs. The persistent
 preparation catalog prints every selected capacity. At batch 32, the 128-row
 cap permits four target rows per request on average, while proposal generation
-still produces five drafts per request. Raising the row cap permits longer
+still produces seven drafts per request. Raising the row cap permits longer
 aggregate verification prefixes; raising the graph budget improves resolution
 within that cap and increases capture and retained graph resources.
 
@@ -664,7 +666,7 @@ SM120/SM121 GPUs, MXFP8 projections, NVFP4 routed experts, and FP8 target,
 indexer, and DSpark caches. Sampling defaults are temperature 1.0 and top-p
 0.95, following the model card.
 
-DSpark defaults match DeepSeek V4.1: 32 concurrent requests, five draft tokens,
+DSpark defaults to 32 concurrent requests, five draft tokens,
 a 128-row physical target capacity, a 64-graph packed budget, and GPU causal
 prefix allocation. Each packed graph generates proposals, allocates prefixes,
 verifies the admitted tokens, and commits accepted state. Width-one graphs
@@ -700,7 +702,7 @@ selected GPUs.
 | Qwen3.8 Flash, Qwen3.8 27B, GLM 5.3, DeepSeek V4 | 5 | Rectangular | 34 | 3 |
 | Step-5 | 3 | Rectangular | 24 | 3 |
 | MiMo V2.6 Pro, Kimi K3, Nemotron Bolt | 7 | Rectangular | 44 | 3 |
-| DeepSeek V4.1 | 5 | Packed | 64 packed + 6 width-one | Up to 5, sharing 128 rows across requests |
+| DeepSeek V4.1 | 7 | Packed | 64 packed + 6 width-one | Up to 7, sharing 128 rows across requests |
 
 Rectangular catalogs cover full draft depth through batch 16. The counts include
 width-one speculative graphs and exclude ordinary decode, prefill, maintenance,

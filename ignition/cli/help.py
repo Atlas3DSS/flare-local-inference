@@ -28,6 +28,13 @@ def recipe_help(model=None):
              f"  --gpus: select {', '.join(map(str, recipe.tensor_parallel))} GPUs",
              f"  --max-concurrency: 1..{recipe.max_concurrency}; recipe default {recipe.concurrency}",
              f"  --prefill-chunk-size: 64..{recipe.context}, multiple of 64; default {recipe.prefill_chunk}"]
+    if recipe.max_images:
+        lines.append(f"  --image-concurrency: 1..max concurrency; default {min(4, recipe.concurrency)}.")
+    if len(recipe.mla_compute_modes) > 1:
+        lines.append(f"  --mla-compute-mode: {', '.join(recipe.mla_compute_modes)}; default {recipe.mla_compute_mode}.")
+    if checkpoint.scale_compressed_device_bytes:
+        lines.append(f"  --expert-scale-compression: native, {', '.join(checkpoint.scale_compressed_device_bytes)};"
+                     f" default {recipe.expert_scale_compression or 'native'}.")
     speculation = recipe.speculation
     if speculation is not None:
         lines.extend((

@@ -108,12 +108,14 @@ def test_planning_resolves_missing_graph_budget_from_recipe_without_overriding_e
 
 
 def test_planning_rejects_graph_budget_below_required_endpoints():
-    from tests.cli.test_planning import derive
+    from tests.cli.test_planning import derive, gpu
 
     settings = selected("--speculative-graph-budget", "11")
+    devices = (gpu(0, 95), gpu(1, 95))
     with pytest.raises(UsageError, match="--speculative-graph-budget: .*at least 12"):
-        derive(concurrency=32, speculation=settings)
-    assert derive(concurrency=32, speculation=replace(settings, graph_budget=12)).speculation.graph_budget == 12
+        derive(gpus=devices, concurrency=32, speculation=settings)
+    assert derive(gpus=devices, concurrency=32,
+                  speculation=replace(settings, graph_budget=12)).speculation.graph_budget == 12
 
 
 @pytest.mark.parametrize("budget", [0, -1, True, 1.5])

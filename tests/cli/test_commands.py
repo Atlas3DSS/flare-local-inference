@@ -166,10 +166,10 @@ def test_speculation_flags_override_the_recipe():
     assert speculation("--no-mtp", model="glm-5.3-flash") is None
 
 
-def test_deepseek_defaults_to_five_adaptive_drafts_and_accepts_explicit_overrides():
+def test_deepseek_defaults_to_seven_adaptive_drafts_and_accepts_explicit_overrides():
     default = speculation(model="deepseek-v4.1-flash")
-    assert (default.draft_tokens, default.adaptive, default.fixed_width) == (5, True, None)
-    assert default.widths == tuple(range(1, 7))
+    assert (default.draft_tokens, default.adaptive, default.fixed_width) == (7, True, None)
+    assert default.widths == tuple(range(1, 9))
     reduced = speculation("--mtp-draft-tokens", "3", model="deepseek-v4.1-flash")
     assert (reduced.draft_tokens, reduced.adaptive, reduced.fixed_width) == (3, True, None)
     assert reduced.packed_verification and reduced.draft_prefix_selection == "gpu"

@@ -213,13 +213,13 @@ explicit flags take precedence.
 |---|---|---|
 | `--prefill-chunk-size N` | Most prompt tokens processed in one prefill step, a multiple of 64. A larger chunk reaches a long prompt's first token sooner; while it runs, other active requests wait for their next token. Command line only. | The recipe's chunk |
 | `--mixed-prefill` | Capture mixed prompt/decode graphs alongside separate graphs. Supported by Qwen with concurrency of at least two, with or without speculation. Command line only; existing packages retain their captured catalog. | Disabled |
-| `--expert-scale-compression [MODE]` | Losslessly compress routed-expert scales: DeepSeek V4.1 backbone and DSpark MXFP4 scales, or Step-5 NVFP4 scales including BF16 experts converted to W4A16. `csf` is a compressed scale encoding expanded during execution. Estimated resident GPU weight savings are 3% for DeepSeek V4.1 and 6% for Step-5; actual savings depend on encoded scales. A bare flag selects `csf`; `--expert-scale-compression csf` also works. Retain compressed scales and share expansion scratch across serial layers. | Native scales |
+| `--expert-scale-compression [MODE]` | Losslessly compress routed-expert scales: DeepSeek V4.1 backbone and DSpark MXFP4 scales, or Step-5 NVFP4 scales including BF16 experts converted to W4A16. `csf` is a compressed scale encoding expanded during execution. Estimated resident GPU weight savings are 3% for DeepSeek V4.1 and 6% for Step-5; actual savings depend on encoded scales. A bare flag selects `csf`; `native` disables compression. Retain compressed scales and share expansion scratch across serial layers. | Recipe default: `csf` for DeepSeek V4.1, native otherwise |
 | `--no-mtp` | Disable multi-token speculation: load no draft model, keep no verification rows, and decode one token per step. | Speculation on |
 | `--mtp-draft-tokens N` | Most draft tokens verified in one round; see `MODEL --help` for its limit. Verification capacities cover counts from 0 through `N` within the speculative token capacity. Retained and packed proposal producers execute the full configured block; verification adapts using measured cost and historical acceptance or native proposal confidence. Zero retains draft state with width-one execution; `--no-mtp` excludes draft weights and state. | Recipe declaration |
 | `--speculative-token-capacity N` | Maximum physical target-token rows in wider speculative graphs; width one covers every request bucket. Applies to every speculative recipe. | 128 |
 | `--speculative-graph-budget N` | Maximum packed round graphs to capture, independently of physical target-token rows. Excludes mandatory width-one and ordinary graphs; requires packed adaptive learned speculation at positive draft depth. Must cover both physical-row endpoints for every eligible request bucket. | 64 for DeepSeek V4.1 |
 | `--no-mtp-adaptive-verification` | Default to fixed-width serving. Capture includes every smaller width within the speculative token capacity. Positive-depth DeepSeek V4.1 DSpark requires adaptive verification. | Adaptive |
-| `--mla-compute-mode {auto,bf16}` | Constrain DeepSeek V4.1 MLA arithmetic while preserving packed KV storage and autotuning among compatible kernels. | `auto` |
+| `--mla-compute-mode {auto,bf16}` | Constrain DeepSeek V4.1 MLA arithmetic while preserving packed KV storage and autotuning among compatible kernels. | Recipe default: `bf16` for DeepSeek V4.1, `auto` otherwise |
 | `--no-stream-overlap` | Run every concurrent branch (shared experts, projection chains, query chains) serially on the main stream with the same kernels, to diagnose scheduling-dependent faults. Slower. Recipes that run no branches concurrently reject it. | Overlap |
 | `--autotune-effort off\|low\|medium\|high\|max` | Kernel search effort. Off uses heuristics; low applies broad exclusions; medium balances search cost; high retains only conservative exclusions; max enumerates every declared legal candidate. Overrides `[preparation] autotune_effort`. | Medium |
 | `--compile-workers N` | CPU compiler process budget per host, divided among local preparation ranks and bounded by available RAM and device memory. Applies to b12x kernel compilation and complete-forward compilation. Overrides `[preparation] compile_workers`. | Automatic |
@@ -242,7 +242,7 @@ Every recipe defaults to 32 concurrent requests. Speculative recipes declare
 through batch 16 and up to three drafts at batch 32; Step-5's three-draft catalog
 covers its full depth at batch 32. Each recipe selects its proposal and
 prefix-allocation mode.
-DeepSeek V4.1 defaults to five draft tokens, concurrency 32, a 4096-token
+DeepSeek V4.1 defaults to seven draft tokens, concurrency 32, a 4096-token
 prefill chunk, 128 physical target rows, and at most 64 packed round graphs,
 with packed GPU prefix selection.
 Its catalog contains combined proposal/allocation/verification rounds and
@@ -285,7 +285,7 @@ A catalog containing only combined packed rounds and width-one continuations
 allows a runtime row budget below the selected padded batch capacity. Batches
 without a retained combined round use their width-one graphs. For the default
 DeepSeek V4.1 catalog, concurrency 32 with an exact budget of eight retains
-batch 1 at six rows, batch 2 at eight rows, and batch 4 at eight rows; batches
+batches 1, 2, and 4 at eight rows each; batches
 8, 16, and 32 retain width-one execution. A maximum budget of eight retains every
 captured combined capacity at or below eight instead. At least one combined
 round must remain, and an uncaptured exact capacity fails selection.
@@ -295,9 +295,9 @@ budget to cover the selected padded batch capacity. A maximum budget must cover
 the captured per-request verification width for either catalog. Missing required
 graphs fail before GPU initialization.
 
-For DeepSeek V4.1, `--mla-compute-mode auto` lets b12x choose arithmetic
-and is the default. Use `bf16` when BF16 MLA arithmetic is required; packed KV
-storage remains unchanged, and compatible kernels still autotune. The pinned
+DeepSeek V4.1 defaults to BF16 MLA arithmetic. `--mla-compute-mode auto`
+lets b12x choose arithmetic. Packed KV storage remains unchanged, and compatible
+kernels still autotune. The pinned
 FlashInfer dependency supplies the required preparation API. For example:
 
 ```sh
@@ -380,8 +380,8 @@ performance results.
 The `deepseek-v4-flash` alias selects the lossless MXFP4-CSF checkpoint
 `local-inference-lab/DeepSeek-V4-Flash-Vision-Exp-lossless-CSF`.
 The `deepseek-v4.1-flash` alias selects `deepseek-ai/DeepSeek-V4.1-Flash-1017`,
-with native MXFP4 expert scales by default. `--expert-scale-compression csf`
-compresses its backbone and DSpark expert scales during preparation.
+with CSF compression of its backbone and DSpark MXFP4 expert scales by default.
+`--expert-scale-compression native` preserves native scales during preparation.
 Compressed routed-expert scales remain in GPU memory. Serialized layers reuse scale buffers by expert geometry;
 b12x prepares the scales needed by its selected MoE kernel before execution.
 Kernel autotuning uses the selected effort across the supported execution plans.
@@ -410,16 +410,16 @@ processes with separate delivery staging, while the native CLI shares staging
 between its rank threads.
 
 DeepSeek V4.1 exports combined packed rounds with GPU prefix allocation by
-default. This command uses the recipe's concurrency 32, five draft tokens,
+default. This command uses the recipe's concurrency 32, seven draft tokens,
 4096-token prefill chunk, and 128 physical target rows:
 
 ```sh
 .venv/bin/ignition export deepseek-v4.1-flash --gpus 0,1,2,3 \
-  --output /data/flare-runtime/ds41-tp4-c32-d5-p128.safetensors
+  --output /data/flare-runtime/ds41-tp4-c32-d7-p128.safetensors
 ```
 
-The default catalog contains 64 packed rounds with logical width six and six
-proposal-free width-one rounds. Packed execution generates the five-draft block,
+The default catalog contains 64 packed rounds with logical width eight and six
+proposal-free width-one rounds. Packed execution generates the seven-draft block,
 then allocates actual prefixes on the GPU within each request's immutable limit
 and the captured aggregate row capacity. It reports one terminal completion.
 Ordinary prefill, decode, and maintenance graphs remain available when native

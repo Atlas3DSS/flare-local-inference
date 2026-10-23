@@ -39,7 +39,7 @@ def usage(prepared):
 
 RECIPE = Recipe(
     name="deepseek41", served_model_name="DeepSeek-V4.1-Flash", prepare=prepare, usage=usage,
-    mla_compute_modes=("auto", "bf16"),
+    mla_compute_modes=("auto", "bf16"), mla_compute_mode="bf16", expert_scale_compression="csf",
     # Recommended sampling: https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017#minimal-inference.
     sampling_defaults=SamplingDefaults(temperature=1., top_p=1., top_k=-1),
     checkpoints=(Checkpoint(alias="deepseek-v4.1-flash", repository="deepseek-ai/DeepSeek-V4.1-Flash-1017",
@@ -48,7 +48,7 @@ RECIPE = Recipe(
         # Estimate half of backbone scale bytes saved; retain the full draft budget.
         scale_compressed_device_bytes={"csf": 298_063_988_040}),),
     context=1048576, page_tokens=128, concurrency=32, max_concurrency=64, prefill_chunk=4096,
-    speculation=Speculation(draft_tokens=5, token_capacity=128, packed_verification=True,
+    speculation=Speculation(draft_tokens=7, token_capacity=128, packed_verification=True,
                             draft_prefix_selection="gpu", graph_budget=64),
     max_draft_tokens=7, max_images=4, image_bytes=32 << 20,
     # Single-row decode runs the shared expert on an auxiliary stream.

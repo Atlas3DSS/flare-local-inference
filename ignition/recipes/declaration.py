@@ -173,7 +173,8 @@ class Recipe:
     `language_model_only` states that a plan may prepare the recipe without its vision
     encoder, rejecting images and leaving the encoder's memory to KV pages.
     `mla_compute_modes` declares the attention arithmetic constraints a plan may select,
-    independently of KV storage encoding and kernel tuning.
+    independently of KV storage encoding and kernel tuning. `mla_compute_mode` and
+    `expert_scale_compression` supply defaults when their preparation flags are omitted.
     `export_repository` names the Hugging Face destination and the default local snapshot
     namespace. Export writes locally; it does not upload or select a signing identity.
     `b12x_environment` holds the b12x settings the recipe prepares with. b12x reads them
@@ -205,6 +206,8 @@ class Recipe:
     language_model_only: bool = False
     b12x_environment: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
     mla_compute_modes: tuple[str, ...] = ("auto",)
+    mla_compute_mode: str = "auto"
+    expert_scale_compression: str | None = None
     export_repository: str = ""
 
     def mixed_shapes(self, concurrency, chunk, speculation):

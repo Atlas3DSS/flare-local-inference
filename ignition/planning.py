@@ -326,12 +326,18 @@ def fit(recipe: Recipe, checkpoint: Checkpoint, gpus: tuple[Gpu, ...], *, concur
         expert_scale_compression: str | None = None, roce_ring: bool = False,
         roce_chain: bool = False,
         image_concurrency: int | None = None, online_mxfp8: bool = False,
-        language_model_only: bool = False, mla_compute_mode: str = "auto") -> Plan:
+        language_model_only: bool = False, mla_compute_mode: str | None = None) -> Plan:
     """Size pages and the prefix cache to the supply; the result may not fit.
 
     Weights come from the checkpoint's stored tensors and graphs and scratch from
     the recipe's estimate.
     """
+    if mla_compute_mode is None:
+        mla_compute_mode = recipe.mla_compute_mode
+    if expert_scale_compression is None:
+        expert_scale_compression = recipe.expert_scale_compression
+    if expert_scale_compression == "native":
+        expert_scale_compression = None
     if mla_compute_mode not in recipe.mla_compute_modes:
         raise UsageError(f"--mla-compute-mode {mla_compute_mode}: supported values for this recipe are "
                          + ", ".join(recipe.mla_compute_modes))
@@ -415,7 +421,7 @@ def plan(recipe: Recipe, checkpoint: Checkpoint, gpus: tuple[Gpu, ...], *, selec
          cache_states: int | None = None, mixed_prefill: bool = False, prompt_logprobs: bool = False,
          expert_scale_compression: str | None = None, roce_ring: bool = False, roce_chain: bool = False,
          image_concurrency: int | None = None, online_mxfp8: bool = False,
-         language_model_only: bool = False, mla_compute_mode: str = "auto") -> Plan:
+         language_model_only: bool = False, mla_compute_mode: str | None = None) -> Plan:
     """Select GPUs and size the plan, or raise a capacity error that lists working settings.
 
     Without `selected`, the plan uses the smallest supported tensor-parallel size

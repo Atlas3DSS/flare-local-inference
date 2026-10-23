@@ -134,9 +134,9 @@ sampling, and commit execute inside prepared CUDA graphs.
 
 The [DSpark preparation code](../ignition/recipes/deepseek41/dspark.py) composes
 three draft layers with a noncausal block sized to the preparation's draft-token
-maximum, five by default. This matches the five draft positions described in
+maximum, seven by default. The five draft positions described in
 the [DeepSeek-V4.1 report](https://arxiv.org/html/2609.19969v1#S2.SS4.SSS3)
-and the checkpoint's `dspark_block_size`. Preparation accepts explicit draft
+match the checkpoint's `dspark_block_size`. Preparation accepts explicit draft
 limits through seven; block length controls prepared query and scratch shapes,
 not learned weight dimensions. Every graph offering drafts evaluates the complete block before
 sampling and verifying its selected prefix. Their context comes

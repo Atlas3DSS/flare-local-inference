@@ -9,13 +9,13 @@ from ignition.recipes.deepseek41.config import DSparkConfig
 from ignition.recipes.deepseek41.recipe import RECIPE
 
 
-def test_dspark_defaults_to_five_drafts_with_adaptive_verification():
+def test_dspark_preparation_and_recipe_draft_defaults():
     config = PreparationConfig(max_active=4)
     assert config.speculative_widths == (1, 2, 3, 4, 5, 6)
     assert config.draft_tokens == 5 and config.decode_tokens == 24
     assert config.split_speculation and config.packed_verification
     assert config.draft_prefix_selection == "gpu"
-    assert RECIPE.speculation.draft_tokens == 5 and RECIPE.max_draft_tokens == 7
+    assert RECIPE.speculation.draft_tokens == 7 and RECIPE.max_draft_tokens == 7
     assert RECIPE.speculation.adaptive
     assert PreparationConfig(dspark=False).speculative_shapes == ()
     assert PreparationConfig(dspark=False).draft_tokens == 0
