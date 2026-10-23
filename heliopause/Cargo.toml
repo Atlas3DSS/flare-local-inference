@@ -48,6 +48,3 @@ windows-sys = { version = "0.61", features = ["Win32_System_Console", "Win32_Sys
 
 [dev-dependencies]
 helios-core = { package = "flare-helios", path = "../helios", features = ["runtime-package", "test-tools"] }
-
-[patch."https://github.com/deepseek-ai/deepseek-recipe"]
-deepseek-recipe-encoding = { path = "../helios/vendor/deepseek-recipe-encoding" }

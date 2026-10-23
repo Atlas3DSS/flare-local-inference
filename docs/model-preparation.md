@@ -69,6 +69,17 @@ The JPEG decoder builds its bundled libjpeg-turbo source. Preparation requires
 the CUDA toolkit, including `nvcc` and CUPTI; configure `[paths] cuda` when it
 is not supplied by the Python environment.
 
+The DeepSeek Rust crates share a pinned revision of
+[`local-inference-lab/deepseek-recipe`](https://github.com/local-inference-lab/deepseek-recipe)
+in `helios/Cargo.toml`. Its `flare` branch exposes normalized-message byte
+boundaries, advisory checkpoint hints, and numeric V4.1 reasoning effort.
+To update these crates, integrate upstream changes
+on that branch, validate the encoder, and update all three dependency revisions
+together. Refresh and commit `helios/Cargo.lock`, `flare/Cargo.lock`, and
+`heliopause/Cargo.lock`; run the Helios frontend/protocol tests and build Flare
+and Heliopause against the pinned revision. Compare rendered prompts and token
+IDs with upstream when changing encoder behavior.
+
 The preparation dependency pins a Git revision of `local-inference-lab/flashinfer`
 in `pyproject.toml`; `uv.lock` records the same commit. To change it, update the
 revision, run `uv lock --upgrade-package flashinfer-python`, then sync the environment.

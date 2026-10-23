@@ -514,7 +514,7 @@ dependencies = [
 [[package]]
 name = "deepseek-recipe"
 version = "0.1.0"
-source = "git+https://github.com/deepseek-ai/deepseek-recipe?rev=8cadfede7063c896b944e7bae05daa3549ae97ea#8cadfede7063c896b944e7bae05daa3549ae97ea"
+source = "git+https://github.com/local-inference-lab/deepseek-recipe?rev=6a2d2aaed79c9cd4eebaaf9471635ca09b93ae0e#6a2d2aaed79c9cd4eebaaf9471635ca09b93ae0e"
 dependencies = [
  "async-stream",
  "base64 0.22.1",
@@ -531,7 +531,7 @@ dependencies = [
 [[package]]
 name = "deepseek-recipe-core"
 version = "0.1.0"
-source = "git+https://github.com/deepseek-ai/deepseek-recipe?rev=8cadfede7063c896b944e7bae05daa3549ae97ea#8cadfede7063c896b944e7bae05daa3549ae97ea"
+source = "git+https://github.com/local-inference-lab/deepseek-recipe?rev=6a2d2aaed79c9cd4eebaaf9471635ca09b93ae0e#6a2d2aaed79c9cd4eebaaf9471635ca09b93ae0e"
 dependencies = [
  "serde",
  "serde_json",
@@ -540,6 +540,7 @@ dependencies = [
 [[package]]
 name = "deepseek-recipe-encoding"
 version = "0.1.0"
+source = "git+https://github.com/local-inference-lab/deepseek-recipe?rev=6a2d2aaed79c9cd4eebaaf9471635ca09b93ae0e#6a2d2aaed79c9cd4eebaaf9471635ca09b93ae0e"
 dependencies = [
  "deepseek-recipe-core",
  "serde",
