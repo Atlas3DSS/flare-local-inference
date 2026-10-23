@@ -35,7 +35,7 @@ def _sol20(mt, ng, w, bk, pf, minb):
 
 # Sol-20 r4 instantiation per (graph capacity, shape) (astra-18). Every id produces the PINNED split's Sol-8 bits for
 # live rows (sol-20 identity4b: 0 mismatches at capacities 128/256/512); the capacity only selects the fastest measured
-# tile: capacity 128 = sol-20/results/live-choice.json, capacity 256 = fastest full-M=256 tile of live-sweep.json.
+# tile: capacity 128 = the Sol-20 live-choice result, capacity 256 = fastest full-M=256 tile of the Sol-20 live sweep.
 # Graphs with more than 128 rows use the 256 choices. sm70_pgemm_configs.inc compiles exactly these instantiations.
 TILES = {
     128: {

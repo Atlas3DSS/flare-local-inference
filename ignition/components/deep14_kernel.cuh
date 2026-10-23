@@ -1,5 +1,5 @@
 // Sol-14 paths 51 (split-K grid, separate fixed-order finish) and 47 (split 1),
-// from sol-10/deep_kernel.cuh and fast_kernel.cuh with the padded row count R
+// from the Sol-10 deep_kernel.cuh and fast_kernel.cuh with the padded row count R
 // as the template parameter and the real row count M at run time. Same packed
 // step sequence, same prefetch structure, same epilogue; R=20 clamps padded
 // fragment rows to a shared zero row exactly as in local14_kernel.cuh.

@@ -54,7 +54,7 @@ def compile_library(source_name, kernel_cache=None):
     with (cache / (digest + ".lock")).open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         if not output.exists():
-            # Exactly Sol-15's flags (sol-15/HANDOFF.md): the bit-identity, sanitizer and speed gates ran on this build.
+            # Exactly Sol-15's flags (Sol-15 handoff): the bit-identity, sanitizer and speed gates ran on this build.
             # nvcc writes a temporary file that is renamed into place, so an interrupted build never leaves a partial .so.
             partial = cache / (digest + f".{os.getpid()}.partial.so")
             subprocess.run([str(Path(CUDA_HOME) / "bin/nvcc"), "-O3", "-arch=compute_70", "-code=sm_70", "--fmad=false",

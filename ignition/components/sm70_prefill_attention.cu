@@ -2,7 +2,7 @@
 // Qwen3.8-27B full attention: 24 query heads, 4 KV heads (6 per group), head_dim 256, paged BF16 KV
 // [physical_page,128 tokens,4 kv heads,256], FP32 Q [M,24,256], FP32 out [M,24,256], one sequence.
 //
-// Exactness scheme (Argon, kevin/PROMPT8 Q1): Q per-row power-of-two scale, K/V per-(page,kv head)
+// Exactness scheme (Argon, PROMPT8 Q1): Q per-row power-of-two scale, K/V per-(page,kv head)
 // power-of-two scale kept as metadata (sol11s_meta), BF16->FP16 conversion in registers during the
 // tile load (exact for BF16 data whose in-page dynamic range is <= 2^32; smaller elements round with
 // absolute error <= 2^-40 of the page maximum). Scores, online softmax, normalisation and all

@@ -169,7 +169,7 @@ extern "C" int atlas_prefill(const half*x,const uint4*w,const uint32_t*s,const f
  #undef CALL
 }
 
-// astra-18: Sol-20 r4 register-B projection (sm70_pgemm.cuh, byte-identical to sol-20/kernel/pgemm.cuh sha256 60a4ed9f...;
+// astra-18: Sol-20 r4 register-B projection (sm70_pgemm.cuh, byte-identical to the reviewed Sol-20 pgemm.cuh, sha256 60a4ed9f...;
 // cleared by Argon PROMPT44/45/46/49 and Astra R1-R4) with a device live-row count. For rows < *live every output bit
 // equals atlas_prefill above (same pinned split, same per-element mma.m8n8k4 operand sequence, same epilogue/finish);
 // rows in [*live, M) are written +0.0. Serving calls atlas_pgemm4 with one reviewed instantiation per (capacity, shape).

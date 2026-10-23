@@ -31,9 +31,9 @@ class RepackedFP8(TensorFP8LinearWeight):
 
 
 # Reviewed Sol-14 tuple (BK, warps, split, path) per shape, fixed across every row count 1..24 (row invariance):
-# sm70_projection_plan14.json (sol-14/plan14.json). Fused members carry the fused shape's tuple. Shapes whose split
+# sm70_projection_plan14.json (the Sol-14 plan14.json). Fused members carry the fused shape's tuple. Shapes whose split
 # changed against Sol-10 (tensor_fp8 5120->14336 and its q/k/v members, 4 -> 2) produce new FP32 bits; every other
-# served projection is bit-identical to the Sol-10 build (sol-14/final-bit-reference.json, astra-8/bit-identity.json).
+# served projection is bit-identical to the Sol-10 build (the Sol-14 final bit reference and the astra-8 bit-identity record).
 PINNED = {
     ('nvfp4', 5120, 34816): (256, 4, 2, 60),
     ('tensor_fp8', 5120, 16384): (256, 4, 2, 60),

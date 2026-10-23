@@ -1,6 +1,6 @@
 // Sol-15: bit-identical, faster replacement for sm70_gdn._recurrence with PREFILL=True on Volta (sm_70).
 //
-// The reference is the Triton 3.8 kernel in src-mtp/ignition/components/sm70_gdn.py, compiled with num_warps=4,
+// The reference is the Triton 3.8 kernel in ignition/components/sm70_gdn.py (atlas/sm70-mtp revision), compiled with num_warps=4,
 // num_stages=1, enable_fp_fusion=False (triton-cache XNAG7YQR..., code sha256 eff220e8..., the function the astra-7
 // prefill128 graph runs 48x per chunk). Every floating-point operation below reproduces one PTX instruction of that
 // kernel, in the same order, with the same rounding mode and FTZ flavour, so outputs and recurrent state are

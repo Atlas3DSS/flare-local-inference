@@ -125,7 +125,7 @@ class BuildPathsTest(unittest.TestCase):
     def test_served_sol20_tiles_are_compiled_reviewed_instantiations(self):
         # astra-18: every served (capacity, shape) id is one of the pgemm4 instantiations compiled into the library
         # (sm70_pgemm_configs.inc), of the right format, inside the reviewed r4 template space, and the kernel header
-        # is byte-identical to the reviewed sol-20/kernel/pgemm.cuh (r4).
+        # is byte-identical to the reviewed Sol-20 pgemm.cuh (r4).
         module = self.load('sm70_prefill')
         directory = ROOT / 'ignition/components'
         self.assertEqual(hashlib.sha256((directory / 'sm70_pgemm.cuh').read_bytes()).hexdigest(),

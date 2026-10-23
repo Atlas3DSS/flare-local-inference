@@ -1,5 +1,5 @@
 // Served Sol-20 r4 instantiations for sm70_prefill.cu (astra-18): X(F, MT, NG, W, BK, PF, MINB) of pgemm4, a subset of
-// the reviewed r4 sweep list (sol-20/kernel/sol20_configs_r4.inc; identity4b: 0 mismatches at capacities 128/256/512).
+// the reviewed r4 sweep list (the Sol-20 sol20_configs_r4.inc; identity4b: 0 mismatches at capacities 128/256/512).
 // The r1-r3 entry points stay compiled but have no instantiations; serving calls atlas_pgemm4 only.
 #define SOL20_CONFIGS(X)
 #define SOL20_CONFIGS2(X)

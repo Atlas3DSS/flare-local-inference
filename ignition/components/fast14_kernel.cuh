@@ -1,5 +1,5 @@
 // Sol-14 path 47 (vocabulary head, split 1, two-step register prefetch), from
-// sol-10/fast_kernel.cuh with padded rows R as the template parameter and the
+// the Sol-10 fast_kernel.cuh with padded rows R as the template parameter and the
 // real row count M at run time; the unused completion-ticket variant is dropped.
 template<int R,bool F,int BK,int W,int MINBLOCKS>
 __global__ __launch_bounds__(W*32,MINBLOCKS) void projection_fast(

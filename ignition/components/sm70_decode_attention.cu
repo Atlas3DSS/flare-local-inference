@@ -13,7 +13,7 @@
 // + append-time exact K/V encoding (variant +256): committed 32x64 blocks are stored as exact scaled FP16 by
 // sol13b_encode_committed; for those tiles the hot loop skips the max pass and conversion (D from metadata).
 // Tail / not-yet-encoded / inadmissible blocks take the unchanged in-register path. Bit-identical to v2b.
-// Design follows kevin/PROMPT8.answer.md (Argon) with the PROMPT9 review applied:
+// Design follows the Argon PROMPT8 design answer with the PROMPT9 review applied:
 //  * one CTA = (fixed 512-token partition, agent, KV head); 4 warps, warp w owns head-dim slice [64w,64w+64)
 //  * K/V stay BF16 in HBM. Each warp loads its own 32x64 K (then V) block into registers, finds the block
 //    max exponent with a warp reduction, converts BF16 -> power-of-two-scaled FP16 with integer ops (exact
@@ -25,7 +25,7 @@
 //  * Blocks that fail admission (span > 2^30 within a 32x64 block, non-finite) and query slices whose
 //    two-half representation is off by more than 2^-20 componentwise take an FP32 SIMT path for that
 //    block / row only. No row ever selects another row's arithmetic.
-#include "sm70_decode_attention.h"   // = sol-21/attention.h = sol-13c/attention.h verbatim (astra-19: the only edit to sol-21/attention.cu)
+#include "sm70_decode_attention.h"   // = the Sol-21 attention.h = the Sol-13c attention.h verbatim (astra-19: the only edit to the Sol-21 attention.cu)
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <math_constants.h>

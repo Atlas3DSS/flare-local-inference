@@ -62,7 +62,7 @@ def compile_library(kernel_cache=None):
         fcntl.flock(lock, fcntl.LOCK_EX)
         if not output.exists():
             workers = len(os.sched_getaffinity(0))
-            # Exactly sol-21/build.sh (= sol-13c/sol-13b flags; the qualified attention.so): the SASS must stay identical.
+            # Exactly the Sol-21 build.sh flags (= the Sol-13c and Sol-13b flags; the qualified attention.so): the SASS must stay identical.
             subprocess.run([str(Path(CUDA_HOME) / "bin/nvcc"), "--threads", str(workers), "-std=c++17", "-O3",
                 "-arch=compute_70", "-code=sm_70", "-Xcompiler=-fPIC", "--shared", "-lineinfo", "--fmad=false",
                 str(source), "-o", str(output)], check=True)

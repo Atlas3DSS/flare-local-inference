@@ -1,5 +1,5 @@
 // Sol-14 path 60: CTA-local split-K with fixed partitions, generalised from
-// sol-10/local_kernel.cuh (template parameter M) to a padded row count R with
+// the Sol-10 local_kernel.cuh (template parameter M) to a padded row count R with
 // the real row count M at run time.
 //
 //   R in {8,16,20,24}; MT=(R+7)/8 row tiles of the m8n8k4 HMMA.

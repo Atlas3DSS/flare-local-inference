@@ -1,5 +1,5 @@
 // Sol-14 common device code. The decoders, producers, repack and native-scale
-// kernels below are copied verbatim from sol-10/selected.cu (lines 12-100 and
+// kernels below are copied verbatim from the Sol-10 selected.cu (lines 12-100 and
 // 105-229); the only edit is the exported symbol sol7_native_scales ->
 // sol14_native_scales. No decoder bit changes.
 #pragma once

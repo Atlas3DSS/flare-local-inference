@@ -53,7 +53,7 @@ def compile_library(kernel_cache=None):
         fcntl.flock(lock, fcntl.LOCK_EX)
         if not output.exists():
             workers = len(os.sched_getaffinity(0))
-            # Same flags as sol-11s/build.sh: the FP64-oracle and admission gates ran on this exact flag set.
+            # Same flags as the Sol-11s build.sh: the FP64-oracle and admission gates ran on this exact flag set.
             subprocess.run([str(Path(CUDA_HOME) / "bin/nvcc"), "--threads", str(workers), "-std=c++17", "-O3",
                 "-arch=compute_70", "-code=sm_70", "--fmad=false", "-Xcompiler=-fPIC", "--shared",
                 str(source), "-o", str(output)], check=True)
