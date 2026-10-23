@@ -111,3 +111,7 @@
 [ ] Run DeepSeek V4 packed-context native replay with its checkpoint and measure
     exported V4/V4.1 packages with packed context projections. Compare GLM's
     shared-expert launch order when the configured checkpoint shards are available.
+
+[ ] Invalidate b12x preparation discovery's cached compiler context when
+    Inductor selects a different libdevice in the same process. Repeated GPU
+    test preparation can restore program keys for the preceding library.

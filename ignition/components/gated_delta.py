@@ -150,6 +150,7 @@ class PreparedGDN:
         checkpoint_export: bool = False,
         workspace: torch.Tensor | None = None,
         projection_workspace: torch.Tensor | None = None,
+        projection_staging: torch.Tensor | None = None,
         records: GDNRecords | None = None,
         in_place: bool = False,
         partitions=None,
@@ -248,7 +249,7 @@ class PreparedGDN:
             weight = projections[key]
             options = dict(session=session, name=f"{name}.{key}")
             if isinstance(weight, TensorFP8Weight):
-                return TensorFP8Projection(inputs, weight, output, **options)
+                return TensorFP8Projection(inputs, weight, output, staging=projection_staging, **options)
             if isinstance(weight, torch.Tensor):
                 return UnquantizedProjection(inputs, weight, output, **options)
             return QuantizedProjection(inputs, weight, output, activation_mode="auto",

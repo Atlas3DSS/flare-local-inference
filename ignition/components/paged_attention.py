@@ -72,6 +72,16 @@ class PreparedPagedAttention:
             max_q_per_req=width, window_left=window, causal=causal, has_sinks=sink is not None)
         if not causal and not self.decode:
             raise ValueError("noncausal paged attention requires a supported paged-decode geometry")
+        self.compact_decode = None
+        if not self.decode and mode == "decode":
+            # The GQA decode schedule has one physical query row per request.
+            # Recurrent batches pack active queries, including holes between live requests.
+            self.compact_decode = (q, output, cu, selected_blocks)
+            q, output = torch.zeros_like(q), torch.zeros_like(output)
+            cu = torch.arange(pages.shape[0] + 1, dtype=torch.int32, device=q.device)
+            if selected_blocks is not None:
+                selected_blocks = torch.full_like(selected_blocks, -1)
+                self.selected_blocks = selected_blocks
         self.window, self.workspace = window, workspace
         self.arguments = dict(q=q, k_cache=key, v_cache=value, page_table=pages,
             cache_seqlens=lengths, cu_seqlens_q=cu, output=output, attention_sink_bias=sink,
@@ -165,10 +175,22 @@ class PreparedPagedAttention:
 
     def __call__(self):
         a = self.arguments
+        if self.compact_decode is not None:
+            source, destination, cu, selected = self.compact_decode
+            indices = cu[:-1].long().clamp(0, source.shape[0] - 1)
+            active = cu[1:] > cu[:-1]
+            a["q"].copy_(torch.where(active[:, None, None], source[indices], 0))
+            if selected is not None:
+                self.selected_blocks.copy_(torch.where(active[None, :, None], selected[:, indices], -1))
         _attend(a["q"], a["k_cache"], a["v_cache"], a["page_table"], a["cache_seqlens"],
                 a["cu_seqlens_q"], a["attention_sink_bias"], a["output"], self.scratch,
                 a["k_descale"], a["v_descale"], self.selected_blocks,
                 self.plan.handle, self.decode, self.window, self.schedule_storage, self.schedule_slot)
+        if self.compact_decode is not None:
+            positions = torch.arange(destination.shape[0], device=destination.device)
+            requests = (positions[:, None] >= cu[None, 1:]).sum(1).clamp_max(cu.numel() - 2)
+            destination.copy_(torch.where((positions < cu[-1])[:, None, None], a["output"][requests], 0))
+            return destination
         return a["output"]
 
 

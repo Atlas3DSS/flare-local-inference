@@ -16,6 +16,69 @@ pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
                                reason="requires FLARE_RUN_CUDA_TESTS=1 and an assigned GPU")
 
 
+def test_gqa_compact_requests_preserve_inactive_holes():
+    device = torch.device("cuda", 0)
+    cases = {}
+    with RecordedPreparationSession(device=device, checkpoint="gqa-compact-requests",
+            workload_schema="gqa-compact-requests", numerical_policy="default") as session:
+        arena = ScratchArena(device)
+        session.register_scratch(arena)
+        for selected in (False, True):
+            for width in (1, 8):
+                batch, heads, dim = 4, 16 if selected else 6, 128 if selected else 256
+                query = torch.randn((batch * width, heads, dim), device=device, dtype=torch.bfloat16) * .1
+                key = (torch.randn((8, 128, 1, dim), device=device).bfloat16() * .1).to(torch.float8_e4m3fn)
+                value = (torch.randn((8, 128, 1, dim), device=device).bfloat16() * .1).to(torch.float8_e4m3fn)
+                output = torch.empty_like(query)
+                table = torch.arange(8, device=device, dtype=torch.int32).view(batch, 2)
+                lengths = torch.zeros(batch, device=device, dtype=torch.int32)
+                cu = torch.zeros(batch + 1, device=device, dtype=torch.int32)
+                blocks = None
+                if selected:
+                    blocks = torch.full((1, batch * width, 16), -1, dtype=torch.int32, device=device)
+                    blocks[:, :, :2] = torch.tensor([0, 1], dtype=torch.int32, device=device)
+                attention = PreparedPagedAttention(query, key, value, table, lengths, cu, output,
+                    mode="decode" if width == 1 else "verify", width=width, selected_blocks=blocks,
+                    session=session, workspace=arena, name=f"attention-{selected}-{width}")
+                cases[selected, width] = attention
+        session.tune()
+        graphs = {}
+        for shape, attention in cases.items():
+            compiled = compile_forward(attention)
+            compiled()
+            graph = torch.cuda.CUDAGraph()
+            with session.capture(), torch.cuda.graph(graph):
+                compiled()
+            graphs[shape] = graph, compiled
+        session.freeze()
+        for (selected, width), attention in cases.items():
+            graph, compiled = graphs[selected, width]
+            a = attention.arguments
+            query, output, cu = ((a["q"], a["output"], a["cu_seqlens_q"]) if attention.compact_decode is None
+                                 else attention.compact_decode[:3])
+            key, value, lengths = a["k_cache"], a["v_cache"], a["cache_seqlens"]
+            batch, dim = lengths.numel(), query.shape[-1]
+            for counts in ([width, 0, 1, width], [0, 1, width, 0], [width] * batch):
+                lengths.copy_(torch.tensor([128 + n if n else 0 for n in counts], device=device))
+                cu.copy_(torch.tensor([0, *torch.tensor(counts).cumsum(0).tolist()], device=device))
+                output.fill_(float("nan"))
+                allocations = torch.cuda.memory_stats()["allocation.all.allocated"]
+                graph.replay()
+                torch.cuda.synchronize()
+                assert torch.cuda.memory_stats()["allocation.all.allocated"] == allocations
+                begin = 0
+                for row, count in enumerate(counts):
+                    for local in range(count):
+                        end = 129 + local
+                        k = key.view(batch, 256, 1, dim)[row, :end, 0].float()
+                        v = value.view(batch, 256, 1, dim)[row, :end, 0].float()
+                        scores = query[begin + local].float() @ k.T / dim ** .5
+                        torch.testing.assert_close(output[begin + local].float(), scores.softmax(-1) @ v,
+                                                   atol=.002, rtol=.02)
+                    begin += count
+            graph.reset()
+
+
 def test_selected_attention_releases_private_tuning_inputs(monkeypatch):
     import ignition.components.paged_attention as module
 

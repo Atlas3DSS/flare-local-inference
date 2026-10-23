@@ -211,14 +211,23 @@ For concurrency 32 with seven draft tokens per request, use
 `qwen3.8-27b` prepares `nvidia/Qwen3.8-27B-NVFP4` for text generation on one GPU.
 It uses the canonical Qwen3.5 dense decoder with tensor-scaled FP8 attention
 projections and NVFP4 MLP and vocabulary weights. FP8 KV pages and Gated DeltaNet
-continuations reside in device memory; the recipe has no host-mapped tables,
-vision graphs, or learned draft model. Prepare on the same GPU architecture
-as the serving device:
+continuations reside in device memory. The checkpoint's BF16 MTP layer shares
+the target embedding and vocabulary head. Speculation defaults to five draft
+tokens, supports up to seven, and commits accepted GDN corrections into one
+recurrent row per request. Draft KV trails target consumption by one token;
+prefix snapshots preserve its partial page separately. The recipe has no
+host-mapped tables or vision graphs. Prepare on the same GPU architecture as
+the serving device:
 
 ```sh
 .venv/bin/ignition export qwen3.8-27b --gpus 0 --max-concurrency 4 \
   --output /data/flare-runtime/qwen38-27b-tp1-c4.safetensors --verbose
 ```
+
+Use `--mtp-draft-tokens N` to select the prepared draft depth. Width-one rounds
+retain draft context so adaptive verification can resume wider rounds.
+`--no-mtp` omits the draft weights and state during preparation;
+`flare run PACKAGE --mtp-draft-tokens 0` selects the package's ordinary graphs.
 
 ## Qwen3.8 Flash
 
@@ -665,11 +674,10 @@ selected GPUs.
 
 | Recipe | Draft tokens | Verification layout | Speculative graphs at default concurrency | Maximum drafts at batch 32 |
 |---|---:|---|---:|---:|
-| Qwen3.8 Flash, GLM 5.3, DeepSeek V4 | 5 | Rectangular | 34 | 3 |
+| Qwen3.8 Flash, Qwen3.8 27B, GLM 5.3, DeepSeek V4 | 5 | Rectangular | 34 | 3 |
 | Step-5 | 3 | Rectangular | 24 | 3 |
 | MiMo V2.6 Pro, Kimi K3, Nemotron Bolt | 7 | Rectangular | 44 | 3 |
 | DeepSeek V4.1 | 5 | Packed | 64 packed + 6 width-one | Up to 5, sharing 128 rows across requests |
-| Qwen3.8 27B | None | Ordinary decode | None | None |
 
 Rectangular catalogs cover full draft depth through batch 16. The counts include
 width-one speculative graphs and exclude ordinary decode, prefill, maintenance,

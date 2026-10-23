@@ -17,7 +17,7 @@ class TensorFP8Weight:
 
 
 class TensorFP8Projection:
-    def __init__(self, source, weight, output, *, session, name):
+    def __init__(self, source, weight, output, *, session, name, staging=None):
         if (source.ndim != 2 or source.dtype != torch.bfloat16
                 or source.shape[1] != weight.packed.in_features
                 or output.shape != (source.shape[0], weight.packed.out_features)
@@ -27,7 +27,13 @@ class TensorFP8Projection:
         for tensor in (weight.packed.values, weight.packed.scale_mma, weight.packed.block_scale,
                        weight.packed.output_scale, weight.input_scale):
             record_numeric_tensor(tensor)
-        self.quantized = torch.empty_like(source, dtype=torch.float8_e4m3fn)
+        if staging is None:
+            self.quantized = torch.empty_like(source, dtype=torch.float8_e4m3fn)
+        else:
+            if (staging.dtype != torch.uint8 or staging.device != source.device
+                    or not staging.is_contiguous() or staging.numel() < source.numel()):
+                raise ValueError("tensor-FP8 staging requires sufficient contiguous device bytes")
+            self.quantized = staging.flatten()[:source.numel()].view(torch.float8_e4m3fn).view(source.shape)
         self.plan = blockscaled.plan(blockscaled.query_from_call(self.quantized, weight.packed))
 
         def prepare(state):

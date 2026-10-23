@@ -28,9 +28,12 @@ class PreparedMaintenance:
         draft_state=True,
         page_tokens=PAGE_TOKENS,
         buffers=None,
+        trailing_pages=(),
+        trailing_tables=None,
     ):
         self.pool, self.commands, self.inputs, self.requests = pool, commands, inputs, requests
         self.page_tokens = page_tokens
+        self.trailing_pages, self.trailing_tables = trailing_pages, trailing_tables
         self.excluded_regions = (
             () if draft_state else tuple(r.name for r in pool.layout.regions if r.name.startswith("draft"))
         )
@@ -77,6 +80,8 @@ class PreparedMaintenance:
             state_rows=self.inputs.request_state_rows,
             requests=self.requests,
             excluded_regions=self.excluded_regions,
+            trailing_pages=self.trailing_pages,
+            trailing_tables=self.trailing_tables,
         )
 
     def __call__(self):

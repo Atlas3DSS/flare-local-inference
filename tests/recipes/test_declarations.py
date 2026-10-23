@@ -18,6 +18,7 @@ COPY = Speculation(3, proposal_source="copy")
 
 @pytest.mark.parametrize("alias,drafts,graphs,options", [
     ("qwen3.8-flash", 5, 34, {"mtp": True}),
+    ("qwen3.8-27b", 5, 34, {"mtp": True}),
     ("glm-5.3-flash", 5, 34, {"mtp": True}),
     ("deepseek-v4-flash", 5, 34, {}),
     ("step5-preview-nvfp4", 3, 24, {}),
@@ -112,6 +113,11 @@ def test_fp8_cache_views_and_planned_bytes(alias, world_size, drafting):
         pool = module.ContinuationPool.for_model(config, world_size, 2, 3, "meta",
             speculative_tokens=model.recipe.speculation.draft_tokens if drafting else 0)
         caches = [pool.attention(layer) for layer, kind in enumerate(config.layers) if kind == "mla"]
+    elif model.recipe.name == "qwen38_dense":
+        pool = module.ContinuationPool.for_model(config, 2, 3, "meta", mtp=drafting)
+        layers = [i for i, kind in enumerate(config.layers) if kind == "full_attention"]
+        caches = [cache for layer in (*layers, *(("draft",) if drafting else ()))
+                  for cache in pool.attention(layer, config)]
     else:
         pool = module.ContinuationPool.for_model(config, 2, 3, "meta")
         caches = [cache for layer, kind in enumerate(config.layers) if kind in ("attention", "full_attention")
@@ -121,7 +127,7 @@ def test_fp8_cache_views_and_planned_bytes(alias, world_size, drafting):
     if model.recipe.name == "kimi3":
         assert len(draft_caches) == (2 * config.draft.layers if drafting else 0)
         assert all(cache.dtype == torch.bfloat16 for cache in draft_caches)
-    else:
+    elif model.recipe.name != "qwen38_dense":
         caches.extend(draft_caches)
     assert caches and all(cache.dtype == torch.float8_e4m3fn for cache in caches)
     costs = model.recipe.costs(world_size, model.recipe.speculation if drafting else None)

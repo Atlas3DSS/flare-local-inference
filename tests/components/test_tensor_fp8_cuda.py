@@ -16,8 +16,9 @@ pytestmark = pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1",
 
 
 @pytest.mark.parametrize("rows", [1, 17, 128])
+@pytest.mark.parametrize("shared", [False, True])
 @torch.no_grad()
-def test_tensor_fp8_calibration_survives_loading_and_replay(tmp_path, rows):
+def test_tensor_fp8_calibration_survives_loading_and_replay(tmp_path, rows, shared):
     from b12x.preparation import PreparationSession
 
     generator = torch.Generator().manual_seed(2741)
@@ -38,8 +39,11 @@ def test_tensor_fp8_calibration_survives_loading_and_replay(tmp_path, rows):
     source = torch.randn((rows, 288), generator=generator).mul(10).bfloat16()
     device_source = source.cuda()
     output = torch.empty((rows, 128), dtype=torch.bfloat16, device="cuda")
+    staging = torch.empty(rows * 512, dtype=torch.uint8, device="cuda") if shared else None
     with PreparationSession(device=device_source.device, autotune=False, compile_workers=0) as session:
-        projection = TensorFP8Projection(device_source, weight, output, session=session, name="tensor-fp8")
+        projection = TensorFP8Projection(device_source, weight, output, session=session, name="tensor-fp8", staging=staging)
+        if shared:
+            assert projection.quantized.data_ptr() == staging.data_ptr()
         projection(device_source)
         torch.cuda.synchronize()
         graph = torch.cuda.CUDAGraph()
