@@ -12,8 +12,6 @@ def prepare(snapshot, plan, *, compile_forwards, kernel_cache, progress, retain_
     from .bootstrap import PreparationConfig, prepare_rank
 
     speculation = plan.speculation
-    if speculation is not None and not speculation.learned:
-        raise ValueError("MiniMax M3 drafts from the checkpoint's DSpark model")
     drafting = {} if speculation is None else dict(speculative_widths=speculation.widths,
         speculative_fixed_width=speculation.fixed_width, speculative_token_capacity=plan.speculative_token_capacity,
         speculative_graph_budget=speculation.graph_budget, packed_verification=speculation.packed_verification,
