@@ -212,7 +212,7 @@ def test_prefill_chunk_defaults_to_the_recipe_and_accepts_an_override():
     for recipe in recipes() if recipe.speculation is not None for checkpoint in recipe.checkpoints
 ])
 @pytest.mark.parametrize("flags,configuration_text,expected", [
-    ((), "", (32, 4096, 128)),
+    ((), "", None),
     ((), '[defaults]\nmax_concurrency=16\nspeculative_token_capacity=96\n', (16, 4096, 96)),
     (("--max-concurrency", "8", "--prefill-chunk-size", "1024", "--speculative-token-capacity", "192"),
      '[models."{alias}"]\nmax_concurrency=16\nspeculative_token_capacity=96\n', (8, 1024, 192)),
@@ -227,6 +227,8 @@ def test_cli_plan_resolves_recipe_configuration_and_flag_defaults(tmp_path, alia
     path.write_text(configuration_text.format(alias=alias))
     configuration = Configuration.load(path)
     model = resolve(alias)
+    if expected is None:
+        expected = (4, 4096, 6) if model.recipe.name == "gemma4" else (32, 4096, 128)
     args = _parser().parse_args(["export", model.checkpoint.alias, *flags])
     selected = preparation.speculation(args, model, configuration)
     concurrency = configuration.max_concurrency(model.checkpoint.alias, model.recipe.concurrency,

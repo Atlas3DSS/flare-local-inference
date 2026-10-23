@@ -691,9 +691,11 @@ flare/target/release/flare run /data/flare-runtime/minimax-m3.1-flash-tp4.safete
 
 ## Storage and graph capacities
 
-Every recipe defaults to 32 concurrent requests. Speculative recipes default to
-128 target-token rows, independently of the selected concurrency. Explicit flags
-and configuration override these defaults; existing packages retain their
+Gemma 4 defaults to four concurrent requests; its speculative target-token capacity
+is the larger of padded concurrency and draft count plus one, giving six rows at
+its default settings. Other recipes default to 32 concurrent requests, with
+speculative recipes declaring 128 target-token rows independently of concurrency.
+Explicit flags and configuration override these defaults; existing packages retain their
 captured capacities. Memory planning rejects capacities that do not fit the
 selected GPUs.
 

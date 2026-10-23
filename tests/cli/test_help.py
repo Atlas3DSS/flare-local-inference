@@ -134,11 +134,15 @@ def test_all_recipe_help_reports_concurrency_and_speculative_capacity_defaults(c
                 main([command, checkpoint.alias, "--help"])
             assert error.value.code == 0
             output = capsys.readouterr().out
-            assert "--max-concurrency: 1..64; recipe default 32" in output
+            assert f"--max-concurrency: 1..{recipe.max_concurrency}; recipe default {recipe.concurrency}" in output
             if recipe.speculation is None:
                 assert "Multi-token speculation: unavailable" in output
+            elif recipe.speculation.token_capacity is None:
+                assert "--speculative-token-capacity: at least drafts + 1; default is the larger of" in output
+                assert "power-of-two padded concurrency and drafts + 1." in output
             else:
-                assert "--speculative-token-capacity: at least drafts + 1; default 128" in output
+                assert (f"--speculative-token-capacity: at least drafts + 1; default {recipe.speculation.token_capacity}"
+                        in output)
 
 
 @pytest.mark.parametrize("flag", [["--expert-scale-compression"], ["--expert-scale-compression", "csf"],

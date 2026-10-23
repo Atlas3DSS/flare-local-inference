@@ -237,9 +237,10 @@ fixed, and `branches serialized` under `--no-stream-overlap`. That flag is also
 recorded in the plan and the exported graph catalog; it changes graph scheduling,
 not kernel selection, so its packages share tuned kernels with overlapped ones.
 
-Every recipe defaults to 32 concurrent requests. Speculative recipes declare
-128 target-token rows. Rectangular catalogs cover the recipe's full draft depth
-through batch 16 and up to three drafts at batch 32; Step-5's three-draft catalog
+Gemma 4 defaults to four concurrent requests and six speculative target-token
+rows. Other recipes default to 32 concurrent requests, with speculative recipes
+declaring 128 target-token rows. Their rectangular catalogs cover the recipe's
+full draft depth through batch 16 and up to three drafts at batch 32; Step-5's three-draft catalog
 covers its full depth at batch 32. Each recipe selects its proposal and
 prefix-allocation mode.
 DeepSeek V4.1 defaults to seven draft tokens, concurrency 32, a 4096-token
