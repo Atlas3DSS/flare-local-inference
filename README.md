@@ -8,6 +8,15 @@ Apache-2.0 fork of [NVIDIA Flare](https://github.com/NVIDIA/flare-local-inferenc
 that adds a V100 path; everything else is upstream, whose README is kept as
 [README-UPSTREAM.md](README-UPSTREAM.md).
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/sm70/img/comparison-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="docs/sm70/img/comparison-light.svg">
+  <img alt="Same model, same card: Qwen3.8-27B on one Tesla V100 PCIe 32 GB. Decode speed per user: with one user, this port with MTP speculation 83.2 tokens per second, llama.cpp Q4_K_M with the checkpoint's MTP head 64.6, this port without speculation 30.9, llama.cpp without speculation 33.2; with four users at once, 64.9, 31.8, 28.3 and 20.5 per user. First token for a 30,720-token prompt: this port 35.5 s, llama.cpp 49.3 s. Four such prompts at once: llama.cpp first tokens at 60, 108, 157 and 200 s; this port all four at 140 to 142 s by default, or 36, 72, 108 and 145 s with --prefill-srpt. Mean KL from a full-precision run of the same checkpoint: this port 0.0011, llama.cpp Q8_0 0.0013, llama.cpp Q4_K_M 0.0088." src="docs/sm70/img/comparison-light.svg">
+</picture>
+
+The same checkpoint on the same card against llama.cpp, with and without speculation; methods,
+dates and caveats are in [WHY-NOT-LOW-BIT.md](docs/sm70/WHY-NOT-LOW-BIT.md#same-model-on-llamacpp).
+
 ## Before you start
 
 - One Tesla V100 32 GB card.
