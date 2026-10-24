@@ -1,0 +1,281 @@
+{
+ "format": "measurement-llamacpp-kl-v1",
+ "status": "measured",
+ "numerical_pass": null,
+ "reference": {
+  "path": "<release-host>/flare/<run-inputs>/reference.safetensors",
+  "sha256": "30dd669b1baf6a1ec517b635c083b275dd72417ca07521bf33cecdd954f02a3f"
+ },
+ "candidates": {
+  "llamacpp_Q8_0": {
+   "stem": "a1-kl-Q8_0",
+   "prompts": [
+    {
+     "positions": 47,
+     "kl_cand_ref": {
+      "mean": 0.0005976137999935736,
+      "p99": 0.0017269180097234699,
+      "max": 0.0018892247778412759
+     },
+     "kl_ref_cand": {
+      "mean": 0.0005969753826066324,
+      "p99": 0.0016951278777656326,
+      "max": 0.0018664585222928172
+     },
+     "top1_agreement_vs_ref": 0.9787234042553191,
+     "top1_disagreements": 1,
+     "top1_disagreement_positions": [
+      32
+     ],
+     "prompt_id": "reference-public-00",
+     "teacher_forced_ids": "reference prompt_ids + generated_ids[:-1] (identical to the Flare captures)",
+     "logits_sha256": "9c1b8d20cb6c3ea50a8d0bbfe4d8ac0c055df2b2696c13a9b24ce79dbf7d6bd5",
+     "greedy_ids": [
+      5215,
+      321,
+      6805,
+      279,
+      1727,
+      1330,
+      37780,
+      13,
+      271,
+      760,
+      5215,
+      303,
+      279,
+      9039,
+      37780,
+      369
+     ],
+     "greedy_common_prefix_with_reference": 1,
+     "greedy_positional_agreement": 0.0625
+    },
+    {
+     "positions": 47,
+     "kl_cand_ref": {
+      "mean": 0.0022565693257512193,
+      "p99": 0.03292277098005483,
+      "max": 0.03425988730684767
+     },
+     "kl_ref_cand": {
+      "mean": 0.0021712161111594234,
+      "p99": 0.031343762207774344,
+      "max": 0.03275842315636649
+     },
+     "top1_agreement_vs_ref": 0.9361702127659575,
+     "top1_disagreements": 3,
+     "top1_disagreement_positions": [
+      10,
+      26,
+      30
+     ],
+     "prompt_id": "reference-public-01",
+     "teacher_forced_ids": "reference prompt_ids + generated_ids[:-1] (identical to the Flare captures)",
+     "logits_sha256": "d644e77f542675905209b4b76372b34c4072a42b107745ffbada83ab2d2e4ad9",
+     "greedy_ids": [
+      4860,
+      1752,
+      1472,
+      279,
+      16078,
+      506,
+      41564,
+      13,
+      271,
+      248068,
+      198,
+      760,
+      1156,
+      6587,
+      264,
+      2708
+     ],
+     "greedy_common_prefix_with_reference": 16,
+     "greedy_positional_agreement": 1.0
+    },
+    {
+     "positions": 47,
+     "kl_cand_ref": {
+      "mean": 0.0010086756731101083,
+      "p99": 0.004462342293922894,
+      "max": 0.004468766546680308
+     },
+     "kl_ref_cand": {
+      "mean": 0.0010038111260036644,
+      "p99": 0.004484829695920077,
+      "max": 0.0045906373449300574
+     },
+     "top1_agreement_vs_ref": 0.9787234042553191,
+     "top1_disagreements": 1,
+     "top1_disagreement_positions": [
+      2
+     ],
+     "prompt_id": "reference-public-02",
+     "teacher_forced_ids": "reference prompt_ids + generated_ids[:-1] (identical to the Flare captures)",
+     "logits_sha256": "3189f4c8065c69826416f74c207e1ffcaae9858885f5d673ecb1f5177ba47348",
+     "greedy_ids": [
+      279,
+      1879,
+      1103,
+      5435,
+      874,
+      1442,
+      4947,
+      13,
+      271,
+      16,
+      13,
+      2972,
+      3886,
+      264,
+      491,
+      1103
+     ],
+     "greedy_common_prefix_with_reference": 16,
+     "greedy_positional_agreement": 1.0
+    }
+   ],
+   "aggregate": {
+    "positions": 141,
+    "mean_of_prompt_means_kl_cand_ref": 0.0012876195996183004,
+    "max_kl_cand_ref": 0.03425988730684767,
+    "top1_disagreements": 5
+   }
+  },
+  "llamacpp_Q4_K_M": {
+   "stem": "a1-kl-Q4_K_M",
+   "prompts": [
+    {
+     "positions": 47,
+     "kl_cand_ref": {
+      "mean": 0.006286216473523937,
+      "p99": 0.020858703184046166,
+      "max": 0.024835858318915917
+     },
+     "kl_ref_cand": {
+      "mean": 0.006290781404018097,
+      "p99": 0.021149610678221062,
+      "max": 0.02596759782658556
+     },
+     "top1_agreement_vs_ref": 1.0,
+     "top1_disagreements": 0,
+     "top1_disagreement_positions": [],
+     "prompt_id": "reference-public-00",
+     "teacher_forced_ids": "reference prompt_ids + generated_ids[:-1] (identical to the Flare captures)",
+     "logits_sha256": "4c712fe868d952bb945cfd1c6108d64e0363e7e343930812704cabba6718f2b5",
+     "greedy_ids": [
+      5215,
+      303,
+      279,
+      795,
+      321,
+      6805,
+      279,
+      1727,
+      1330,
+      37780,
+      13,
+      271,
+      760,
+      5215,
+      303,
+      279
+     ],
+     "greedy_common_prefix_with_reference": 16,
+     "greedy_positional_agreement": 1.0
+    },
+    {
+     "positions": 47,
+     "kl_cand_ref": {
+      "mean": 0.012848872864989841,
+      "p99": 0.06160344719924917,
+      "max": 0.06751866009156737
+     },
+     "kl_ref_cand": {
+      "mean": 0.013417978578947148,
+      "p99": 0.06323555893035095,
+      "max": 0.06803076040954664
+     },
+     "top1_agreement_vs_ref": 0.9574468085106383,
+     "top1_disagreements": 2,
+     "top1_disagreement_positions": [
+      10,
+      26
+     ],
+     "prompt_id": "reference-public-01",
+     "teacher_forced_ids": "reference prompt_ids + generated_ids[:-1] (identical to the Flare captures)",
+     "logits_sha256": "a3ce100ac2596bd1ab52f5274b8da281762e1d348449bcb5ceab58f8bc764358",
+     "greedy_ids": [
+      4860,
+      1752,
+      1472,
+      279,
+      16078,
+      506,
+      41564,
+      13,
+      271,
+      248068,
+      198,
+      760,
+      1156,
+      6587,
+      264,
+      2708
+     ],
+     "greedy_common_prefix_with_reference": 16,
+     "greedy_positional_agreement": 1.0
+    },
+    {
+     "positions": 47,
+     "kl_cand_ref": {
+      "mean": 0.00719952448841908,
+      "p99": 0.0242259392678197,
+      "max": 0.025150294097796864
+     },
+     "kl_ref_cand": {
+      "mean": 0.007197785921045299,
+      "p99": 0.02306161225746203,
+      "max": 0.023611783042379195
+     },
+     "top1_agreement_vs_ref": 0.9574468085106383,
+     "top1_disagreements": 2,
+     "top1_disagreement_positions": [
+      2,
+      43
+     ],
+     "prompt_id": "reference-public-02",
+     "teacher_forced_ids": "reference prompt_ids + generated_ids[:-1] (identical to the Flare captures)",
+     "logits_sha256": "f88ed7fa1d25312998042932b49e30e00fac08629972136c834395c55d4587de",
+     "greedy_ids": [
+      279,
+      1879,
+      1103,
+      5435,
+      874,
+      1442,
+      4947,
+      13,
+      271,
+      16,
+      13,
+      2972,
+      8275,
+      344,
+      888,
+      279
+     ],
+     "greedy_common_prefix_with_reference": 12,
+     "greedy_positional_agreement": 0.75
+    }
+   ],
+   "aggregate": {
+    "positions": 141,
+    "mean_of_prompt_means_kl_cand_ref": 0.00877820460897762,
+    "max_kl_cand_ref": 0.06751866009156737,
+    "top1_disagreements": 4
+   }
+  }
+ }
+}

@@ -66,19 +66,19 @@ does not show that a V100 emits the same tokens as an SM120 GPU.
 
 ## The usual options on a V100-class card
 
-None of these routes was measured by this fork. The figure quoted for INT8 DP4A
-is from a public project, with its own caveats, and does not compare directly
-with ours.
+Of these routes, only llama.cpp was measured by this fork, on the same model and
+card type ([same model on llama.cpp](#same-model-on-llamacpp)). The figure
+quoted for INT8 DP4A is from a public project, with its own caveats, and does
+not compare directly with ours.
 
 **GGUF K-quants with llama.cpp** (for example Q4_K_M or Q3_K_S).
 [llama.cpp](https://github.com/ggml-org/llama.cpp/blob/master/tools/quantize/README.md)
 requantizes a higher-precision checkpoint into its own block formats and runs
 them on NVIDIA GPUs, Volta included. This works on a wide
 range of models and cards. Applied to this model, it is a different set of
-weights: a K-quant is made from the BF16 model, not from NVIDIA's NVFP4 package,
-and it has its own quantization error. Its server has its own slot and
-prompt-cache design, which we have not compared with Flare's paged KV pool and
-prefix cache.
+weights: a K-quant requantizes the checkpoint into its own block formats, with
+its own quantization error. Its server has its own slot and prompt-cache
+design. The measured comparison on this model follows below.
 
 **INT8 DP4A kernels.** Volta has no INT8 tensor-core instructions, but its CUDA
 cores have the `dp4a` 4-way INT8 dot product. The public
@@ -106,6 +106,98 @@ room for KV pages.
 
 **BF16.** Volta has no BF16 arithmetic in hardware. The model's BF16 rounding
 points have to be emulated, as this port does in FP32.
+
+## Same model on llama.cpp
+
+On 2026-10-23 the fork ran the same checkpoint on llama.cpp, on the same card
+type (Tesla V100 PCIe 32 GB), with the same public prompts, prefill token IDs,
+sampling and FP32 reference as the release benchmarks. Receipts:
+[a1-summary.json](receipts/measurements/a1-summary.json),
+[a1-llamacpp-kl.json](receipts/measurements/a1-llamacpp-kl.json) and
+[gguf.sha256](receipts/measurements/gguf.sha256).
+
+- **Engine.** llama.cpp at commit `8e5a58df` (unmodified upstream), built for
+  `sm_70` only with CUDA 12.9.86, flash attention on, every layer on the GPU and
+  F16 KV unless stated.
+- **Weights.** GGUF files converted from `nvidia/Qwen3.8-27B-NVFP4` at
+  `482ca0f`: a BF16-outtype file (SHA-256 `8b7e7e4f…`), which keeps the NVFP4
+  MLP tensors and head as stored and converts the FP8 projections to BF16;
+  Q4_K_M (`d4e22cb3…`, 4.82 bits per weight) and Q8_0 (`9f335777…`, 8.31 bits
+  per weight) requantized from it. The head stays NVFP4 in both, because
+  upstream llama.cpp loads the head's per-tensor scale (`output.scale`) only for
+  an NVFP4 head and would drop it from a requantized one. The MTP head is not
+  converted.
+
+Decode, tokens per second per request after the first token:
+
+| Configuration | 1 agent, short prompts, 128 tokens | 4 agents, short prompts, per agent | 1 agent, 28.7k-token context, 512 tokens |
+| --- | ---: | ---: | ---: |
+| This port, depth-4 MTP (speculative) | 83.0 | 64.8 | 72.4 |
+| This port, speculation off (pending JOB6) | not yet measured | not yet measured | not yet measured |
+| llama.cpp Q4_K_M, no speculative decoding | 33.2 | 20.8 | 28.4 |
+| llama.cpp + speculation (pending JOB6) | not yet measured | not yet measured | not yet measured |
+
+The current decode gap is engine plus speculation, not kernels alone: this port
+decodes with its MTP head at depth 4 and llama.cpp decodes without speculation.
+A 2 x 2 table with speculation on and off for both engines will replace it.
+
+Prefill and numerics, which speculation does not affect:
+
+| Metric | This port | llama.cpp Q4_K_M | llama.cpp Q8_0 |
+| --- | ---: | ---: | ---: |
+| TTFT, 1 request, 2,048 / 8,192 / 22,528 / 30,720 tokens (s) | 2.54 / 10.43 / 30.39 / 42.75 | 3.25 / 11.57 / 34.21 / 49.27 | not measured |
+| Effective prefill, 1 request, same lengths (tok/s) | 807 / 785 / 741 / 719 | 630 / 708 / 659 / 623 | not measured |
+| KL(build ‖ FP32 reference), mean of 3 prompt means / max, 141 positions | 0.0011 / 0.021 | 0.0088 / 0.068 | 0.0013 / 0.034 |
+| Top-1 agreement with the FP32 reference (of 141) | 135 | 137 | 136 |
+
+Read the tables with these notes:
+
+- **Weights differ.** This port executes the checkpoint's NVFP4 and FP8 weights
+  as stored. Q4_K_M and Q8_0 requantize them, with the head left NVFP4. KV is
+  BF16 on this port and F16 on llama.cpp.
+- **Numerics.** This port's KL row is the SM70 capture of ordinary graphs from
+  the release tree ([distance from the FP32 reference](ARCHITECTURE.md#distance-from-the-fp32-reference));
+  the release export's own accuracy measurement gives 0.0012 mean, 0.023 max and
+  top-1 agreement on 136. Q8_0's mean KL from the FP32 reference (0.0013) is
+  close to this port's, and Q4_K_M's (0.0088) is about eight times higher.
+  llama.cpp matches the reference's top-1 token on one or two more of the 141
+  positions than this port's capture. Q8_0 was measured for KL only.
+- **TTFT.** Both columns are client times, including queueing and transport.
+  llama.cpp's own prompt-evaluation rate is higher than its effective rate here:
+  783 / 774 / 696 / 656 tok/s at 1 request.
+- **Cards.** The two engines ran on two physical V100 PCIe 32 GB cards in the
+  same host, alongside other work on other cards.
+
+### Four long-context agents on one card
+
+llama.cpp Q4_K_M ran with `-np 4 -c 131072`, 32,768 tokens per slot, in F16 and
+q8_0 KV variants, with cold requests and 256 output tokens. This port's column
+is the release long-context run.
+
+| Four agents, one V100 PCIe 32 GB | llama.cpp Q4_K_M, F16 KV | llama.cpp Q4_K_M, q8_0 KV | This port, BF16 KV |
+| --- | ---: | ---: | ---: |
+| Peak device memory (nvidia-smi) | 24,356 MiB | 20,988 MiB | 31,282 MiB, pre-allocated (131,584-token pool at `--memory-limit 31G`) |
+| All four 32K-class contexts resident | yes | yes | yes |
+| Four cold 30,720-token prompts: first token per agent (s) | 59.8 / 107.9 / 156.7 / 200.3 | 57.4 / 105.9 / 155.1 / 199.1 | 170.2-171.0, all four together |
+| Four public 28.7k-token agent prompts, first send: first token per agent (s) | 57.8 / 102.2 / 146.8 / 186.3 | 54.7 / 99.4 / 144.3 / 184.1 | 157.96-159.80, all four together (a) |
+| Decode per agent while all four decode (tok/s) | 14.3; 13.9 after 30,720-token prompts | 13.4; 13.2 | 40.2-46.1, median 41.9 (depth-4 MTP) |
+
+(a) That batch is not labelled cold: no request reports cache credit, but the
+server's reused-token counter moved during it
+([BENCHMARKS-SM70.md](../../BENCHMARKS-SM70.md)).
+
+- llama.cpp prefills the four requests largely one after another. The first
+  agent starts decoding after about a minute and the last waits about 200 s.
+  This port interleaves the four prefills, and none of them emits a token before
+  all four have finished. Total prompt throughput for four 30,720-token prompts
+  is 608-613 tok/s on llama.cpp and 719 tok/s on this port.
+- The KV formats differ: F16 and BF16 store 2 bytes per element and q8_0 about
+  1. On llama.cpp, q8_0 KV saves 3,368 MiB and costs 2-6 % of decode rate at
+  these lengths.
+- Output lengths differ (256 against 512 tokens), and the decode row carries the
+  speculation and requantization notes above.
+- No shared-prefix run was possible: the four public long prompts share only a
+  95-character prefix, about 20 tokens.
 
 ## Strata and Project Maya
 
@@ -203,8 +295,10 @@ on the GPU, the next in RAM and the rest on NVMe.
 
 | Engine | Model | Weights on the V100 | Cards / streams | Decode tok/s | Per card | Agreement with a reference | Source |
 | --- | --- | --- | --- | ---: | ---: | --- | --- |
-| This port | Qwen3.8-27B | NVIDIA NVFP4 + FP8, unchanged | 1 / 1 | 90.4 | 90.4 | KL 0.0011 / 0.0024 vs an FP32 forward of the same checkpoint | STATUS.md line 66 |
-| This port | Qwen3.8-27B | same | 1 / 4 | 70.7 per stream | 70.7 per stream | same | STATUS.md line 66 |
+| This port, release binary, depth-4 MTP (speculative) | Qwen3.8-27B | NVIDIA NVFP4 + FP8, unchanged | 1 / 1 | 83.0 | 83.0 | KL 0.0011 vs an FP32 forward of the same checkpoint (141 positions) | [release section](../../BENCHMARKS-SM70.md) |
+| This port, release binary, depth-4 MTP (speculative) | Qwen3.8-27B | same | 1 / 4 | 64.8 per stream | 64.8 per stream | same | same |
+| llama.cpp Q4_K_M, no speculative decoding (same model, same card type) | Qwen3.8-27B | Q4_K_M requantized from the checkpoint, NVFP4 head, F16 KV | 1 / 1 | 33.2 | 33.2 | KL 0.0088 vs the same FP32 forward | [a1-summary.json](receipts/measurements/a1-summary.json) |
+| llama.cpp Q4_K_M, no speculative decoding | Qwen3.8-27B | same | 1 / 4 | 20.8 per stream | 20.8 per stream | same | same |
 | Strata | Qwen3.8-Flash-Next, 125 B | UD-IQ4_XS GGUF, int8 KV | 1 / 1 | 38-51 | 38-51 | 88.91 % top token vs Q8_0 | NVIDIA_V100.md, QUANTS.md |
 | Strata (our run, 2026-10-20) | Qwen3.8-Flash-Next | not recorded | 3 / 1 | 56-64 tok/s total across a 3-V100 layer split, single stream | 18.7-21.3 if divided by 3; Strata's own 1-card figure is 38-51 | not measured | fork notes |
 | Project Maya | GLM-5.3-Flash, 321 B (18 B active) | Maya-S24, about 2.4 bits/param | 1 / `--bench` | 26.8 | 26.8 | 83 % next token vs FP8 | #171 |
@@ -352,7 +446,7 @@ Not for:
 | Route | Numerics relative to the NVFP4 checkpoint | Measured here? | Source |
 | --- | --- | --- | --- |
 | This port (SM70 Flare) | Checkpoint weights unchanged. Speculative decoding exact. KL to an FP32 reference 0.0011 / 0.0024 (short / long). | Yes | STATUS.md lines 49-66; commits `8ad725c`, `ca16f00` |
-| llama.cpp GGUF K-quants | Requantized from BF16 into a different format; its own quantization error | No | [llama.cpp quantize](https://github.com/ggml-org/llama.cpp/blob/master/tools/quantize/README.md) |
+| llama.cpp GGUF K-quants | Requantized from this checkpoint (head kept NVFP4); KL to the same FP32 reference 0.0088 (Q4_K_M) and 0.0013 (Q8_0) | Yes, same model and card type: Q4_K_M 33.2 tok/s decode without speculation (this port 83.0 with depth-4 MTP), TTFT 49.3 s at 30,720 tokens (this port 42.75 s) | [same model on llama.cpp](#same-model-on-llamacpp) |
 | INT8 DP4A (superl8) | 3-bit GGUF weights on INT8 `dp4a` kernels; Qwen3.6-27B Q3_K_S: 21.3 tok/s steady decode, 7.2 tok/s end to end, CMP 100-210 | No | [qwen3-scoreboard.json](https://github.com/jajmangold/superl8/blob/main/bench/qwen3-scoreboard.json) |
 | Strata | Different model (125 B MoE) as GGUF, UD-IQ4_XS on V100: 88.91 % top token vs Q8_0; 38-51 tok/s on one V100, one stream | No (our 2026-10-20 run: 56-64 tok/s on 3 V100s, one stream) | [Strata](https://github.com/Niko1221/Strata), [QUANTS.md](https://github.com/Niko1221/Strata/blob/main/docs/QUANTS.md) |
 | Project Maya | Different model (321 B MoE) as its own 2-4-bit GGUF: 83-90 % next token vs FP8; 26.8 tok/s Maya-S24 on one V100, 48.25 tok/s Maya-L on four | No | [Project Maya](https://github.com/mw00/project-maya), [#130](https://github.com/mw00/project-maya/issues/130) |

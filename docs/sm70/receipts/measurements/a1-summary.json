@@ -1,0 +1,4353 @@
+{
+ "format": "measurement-llamacpp-summary-v1",
+ "source": "a1-results.json",
+ "engine_commit": "8e5a58df87ab59dfceb5b961ae26691e39f30c24",
+ "card": "<card>",
+ "status": "complete",
+ "error": null,
+ "commands": {
+  "A": [
+   "taskset",
+   "-c",
+   "7-14,51-58",
+   "<release-host>/flare/engines/llama.cpp-sm70-bench/build-sm70/bin/llama-server",
+   "-m",
+   "<release-host>/flare/<measurements>/job2/qwen38-27b-nvfp4-q4_k_m.gguf",
+   "--host",
+   "127.0.0.1",
+   "--port",
+   "8491",
+   "--fit",
+   "off",
+   "--gpu-layers",
+   "all",
+   "-fa",
+   "on",
+   "--threads",
+   "16",
+   "--threads-batch",
+   "16",
+   "--jinja",
+   "--metrics",
+   "--no-webui",
+   "-c",
+   "32768",
+   "-np",
+   "1",
+   "-ctk",
+   "f16",
+   "-ctv",
+   "f16"
+  ],
+  "B": [
+   "taskset",
+   "-c",
+   "7-14,51-58",
+   "<release-host>/flare/engines/llama.cpp-sm70-bench/build-sm70/bin/llama-server",
+   "-m",
+   "<release-host>/flare/<measurements>/job2/qwen38-27b-nvfp4-q4_k_m.gguf",
+   "--host",
+   "127.0.0.1",
+   "--port",
+   "8492",
+   "--fit",
+   "off",
+   "--gpu-layers",
+   "all",
+   "-fa",
+   "on",
+   "--threads",
+   "16",
+   "--threads-batch",
+   "16",
+   "--jinja",
+   "--metrics",
+   "--no-webui",
+   "-c",
+   "32768",
+   "-np",
+   "4",
+   "-ctk",
+   "f16",
+   "-ctv",
+   "f16"
+  ],
+  "C": [
+   "taskset",
+   "-c",
+   "7-14,51-58",
+   "<release-host>/flare/engines/llama.cpp-sm70-bench/build-sm70/bin/llama-server",
+   "-m",
+   "<release-host>/flare/<measurements>/job2/qwen38-27b-nvfp4-q4_k_m.gguf",
+   "--host",
+   "127.0.0.1",
+   "--port",
+   "8493",
+   "--fit",
+   "off",
+   "--gpu-layers",
+   "all",
+   "-fa",
+   "on",
+   "--threads",
+   "16",
+   "--threads-batch",
+   "16",
+   "--jinja",
+   "--metrics",
+   "--no-webui",
+   "-c",
+   "131072",
+   "-np",
+   "4",
+   "-ctk",
+   "f16",
+   "-ctv",
+   "f16"
+  ],
+  "D": [
+   "taskset",
+   "-c",
+   "7-14,51-58",
+   "<release-host>/flare/engines/llama.cpp-sm70-bench/build-sm70/bin/llama-server",
+   "-m",
+   "<release-host>/flare/<measurements>/job2/qwen38-27b-nvfp4-q4_k_m.gguf",
+   "--host",
+   "127.0.0.1",
+   "--port",
+   "8494",
+   "--fit",
+   "off",
+   "--gpu-layers",
+   "all",
+   "-fa",
+   "on",
+   "--threads",
+   "16",
+   "--threads-batch",
+   "16",
+   "--jinja",
+   "--metrics",
+   "--no-webui",
+   "-c",
+   "131072",
+   "-np",
+   "4",
+   "-ctk",
+   "q8_0",
+   "-ctv",
+   "q8_0"
+  ]
+ },
+ "stage_peak_vram_mib": {
+  "kl": null,
+  "A": 17730,
+  "B": 18184,
+  "C": 24356,
+  "D": 20988
+ },
+ "kl_runs": {
+  "Q8_0": {
+   "command": [
+    "taskset",
+    "-c",
+    "7-14,51-58",
+    "<release-host>/flare/<measurements>/job2/llama_logits",
+    "<release-host>/flare/<measurements>/job2/qwen38-27b-nvfp4-q8_0.gguf",
+    "<release-host>/flare/<measurements>/job2/a1-kl-tokens.txt",
+    "<release-host>/flare/<measurements>/job2/a1-kl-Q8_0"
+   ],
+   "returncode": 0,
+   "seconds": 15.062306834,
+   "peak_vram_mib": 25970
+  },
+  "Q4_K_M": {
+   "command": [
+    "taskset",
+    "-c",
+    "7-14,51-58",
+    "<release-host>/flare/<measurements>/job2/llama_logits",
+    "<release-host>/flare/<measurements>/job2/qwen38-27b-nvfp4-q4_k_m.gguf",
+    "<release-host>/flare/<measurements>/job2/a1-kl-tokens.txt",
+    "<release-host>/flare/<measurements>/job2/a1-kl-Q4_K_M"
+   ],
+   "returncode": 0,
+   "seconds": 9.897399396,
+   "peak_vram_mib": 15378
+  }
+ },
+ "table": {
+  "decode_short_128_c1": {
+   "per_request_client_tok_s_median": 33.164037953942255,
+   "per_request_server_tok_s_median": 33.16146815338554,
+   "aggregate_tok_s_median": 23.863139738445753,
+   "ttft_s_median": 1.530370906999451,
+   "prompt_tokens": [
+    578,
+    579,
+    580,
+    582
+   ],
+   "batches": 12,
+   "peak_vram_mib": 17730
+  },
+  "decode_short_512_c1": {
+   "per_request_client_tok_s_median": 33.154552843228814,
+   "per_request_server_tok_s_median": 33.15419604315311,
+   "aggregate_tok_s_median": 30.042586498048212,
+   "ttft_s_median": 1.6379981789941667,
+   "prompt_tokens": [
+    578,
+    579,
+    580,
+    582
+   ],
+   "batches": 12,
+   "peak_vram_mib": 17730
+  },
+  "decode_short_128_c4": {
+   "per_request_client_tok_s_median": 20.768113988835548,
+   "per_request_server_tok_s_median": 20.76745908969381,
+   "aggregate_tok_s_median": 44.19226468483523,
+   "ttft_s_median": 5.449679038007162,
+   "prompt_tokens": [
+    578,
+    579,
+    580,
+    582
+   ],
+   "batches": 3,
+   "peak_vram_mib": 18182
+  },
+  "decode_short_512_c4": {
+   "per_request_client_tok_s_median": 20.597299636845936,
+   "per_request_server_tok_s_median": 20.598087022370187,
+   "aggregate_tok_s_median": 67.33928610798755,
+   "ttft_s_median": 5.594602206998388,
+   "prompt_tokens": [
+    578,
+    579,
+    580,
+    582
+   ],
+   "batches": 3,
+   "peak_vram_mib": 18182
+  },
+  "decode_long_512_c1_cold": {
+   "per_request_client_tok_s": [
+    28.445060731489985,
+    28.458583098814398,
+    28.395818129520443,
+    28.402163370477815
+   ],
+   "ttft_s": [
+    43.705175401002634,
+    45.49974421298248,
+    45.38144248101162,
+    45.57976769498782
+   ],
+   "prompt_tokens": [
+    28654,
+    28669,
+    28670,
+    28671
+   ],
+   "cache_n": [
+    0,
+    0,
+    0,
+    0
+   ],
+   "peak_vram_mib": 17730
+  },
+  "prefill_2048_c1": {
+   "ttft_s_median": 3.2510305870091543,
+   "effective_tok_s_median": 629.9540853856116,
+   "server_prompt_tok_s_median": 782.5934106246226,
+   "cache_n": [
+    0
+   ],
+   "prompt_n": [
+    2048
+   ],
+   "batches": 3,
+   "peak_vram_mib": 17730
+  },
+  "prefill_8192_c1": {
+   "ttft_s_median": 11.573021660005907,
+   "effective_tok_s_median": 707.8531640798657,
+   "server_prompt_tok_s_median": 773.8901261180171,
+   "cache_n": [
+    0
+   ],
+   "prompt_n": [
+    8192
+   ],
+   "batches": 3,
+   "peak_vram_mib": 17730
+  },
+  "prefill_22528_c1": {
+   "ttft_s_median": 34.209516485978384,
+   "effective_tok_s_median": 658.5302077927252,
+   "server_prompt_tok_s_median": 695.7476931275829,
+   "cache_n": [
+    0
+   ],
+   "prompt_n": [
+    22528
+   ],
+   "batches": 3,
+   "peak_vram_mib": 17730
+  },
+  "prefill_30720_c1": {
+   "ttft_s_median": 49.27273281200905,
+   "effective_tok_s_median": 623.4685645954821,
+   "server_prompt_tok_s_median": 655.9218048969559,
+   "cache_n": [
+    0
+   ],
+   "prompt_n": [
+    30720
+   ],
+   "batches": 3,
+   "peak_vram_mib": 17730
+  },
+  "prefill_2048_c4": {
+   "ttft_s_median": 13.987962204002542,
+   "effective_tok_s_median": 585.6464208672172,
+   "server_prompt_tok_s_median": 243.10773710070976,
+   "cache_n": [
+    0
+   ],
+   "prompt_n": [
+    2048
+   ],
+   "batches": 3,
+   "peak_vram_mib": 18184
+  },
+  "C_cold_4x8192_256": {
+   "ttft_s_per_agent": [
+    [
+     17.80852527898969,
+     45.960872440977255,
+     28.87142451098771,
+     39.940071488992544
+    ],
+    [
+     41.82444496001699,
+     19.661404607002623,
+     47.83845753900823,
+     30.719709332013736
+    ]
+   ],
+   "ttft_max_s": [
+    45.960872440977255,
+    47.83845753900823
+   ],
+   "effective_prefill_tok_s": [
+    712.9542643491052,
+    684.971917693635
+   ],
+   "server_prompt_tok_s": [
+    [
+     523.7349693913608,
+     568.5840251903824,
+     425.09732689439574,
+     421.57040740415965
+    ],
+    [
+     421.06518389220076,
+     520.5769278551677,
+     568.1377634208329,
+     424.0609446806493
+    ]
+   ],
+   "steady_decode_per_agent_tok_s": [
+    [
+     18.53949801905846,
+     18.463203788527355,
+     18.53949801905846,
+     18.53949801905846
+    ],
+    [
+     18.627603993390345,
+     18.627603993390345,
+     18.550947186833184,
+     18.627603993390345
+    ]
+   ],
+   "client_decode_per_agent_tok_s": [
+    [
+     6.18039518845301,
+     18.771317132814474,
+     8.391067102820845,
+     13.094617468882502
+    ],
+    [
+     13.138154107801599,
+     6.185985727940363,
+     18.851614269281946,
+     8.401570407707402
+    ]
+   ],
+   "cache_n": [
+    [
+     0,
+     0,
+     0,
+     0
+    ],
+    [
+     0,
+     0,
+     0,
+     0
+    ]
+   ],
+   "peak_vram_mib": [
+    24356,
+    24356
+   ]
+  },
+  "C_cold_4x22528_256": {
+   "ttft_s_per_agent": [
+    [
+     136.60415747901425,
+     41.208625733008375,
+     108.10302620698349,
+     74.55155061100959
+    ],
+    [
+     78.4636750970094,
+     45.089429018000374,
+     111.96181630002684,
+     140.45997192899813
+    ]
+   ],
+   "ttft_max_s": [
+    136.60415747901425,
+    140.45997192899813
+   ],
+   "effective_prefill_tok_s": [
+    659.6578146887177,
+    641.5493237144544
+   ],
+   "server_prompt_tok_s": [
+    [
+     596.2263961187059,
+     598.862612946996,
+     527.2822452823945,
+     531.1064457504636
+    ],
+    [
+     530.9634939264569,
+     599.4015456620361,
+     527.5721060487379,
+     596.0885446562215
+    ]
+   ],
+   "steady_decode_per_agent_tok_s": [
+    [
+     15.40598857963127,
+     15.475698935195211,
+     15.40598857963127,
+     15.40598857963127
+    ],
+    [
+     15.439438766664251,
+     15.508985788135712,
+     15.439438766664251,
+     15.439438766664251
+    ]
+   ],
+   "client_decode_per_agent_tok_s": [
+    [
+     16.13956985161713,
+     2.3236613947957485,
+     5.806493785984207,
+     3.3117934210875157
+    ],
+    [
+     3.3119424861118807,
+     2.3234771484512358,
+     5.801805069161411,
+     16.109639116844146
+    ]
+   ],
+   "cache_n": [
+    [
+     0,
+     0,
+     0,
+     0
+    ],
+    [
+     0,
+     0,
+     0,
+     0
+    ]
+   ],
+   "peak_vram_mib": [
+    24356,
+    24356
+   ]
+  },
+  "C_cold_4x30720_256": {
+   "ttft_s_per_agent": [
+    [
+     156.6767304049863,
+     107.92782934498973,
+     200.32958743697964,
+     59.76243171200622
+    ],
+    [
+     61.74363621001248,
+     158.60266538499855,
+     202.2650207330007,
+     109.87187560400344
+    ]
+   ],
+   "ttft_max_s": [
+    200.32958743697964,
+    202.2650207330007
+   ],
+   "effective_prefill_tok_s": [
+    613.3891731727148,
+    607.519775563207
+   ],
+   "server_prompt_tok_s": [
+    [
+     526.1096739666497,
+     532.6348326847829,
+     571.7972934667524,
+     589.0888999965215
+    ],
+    [
+     589.9119865526183,
+     526.1863433781427,
+     571.7232705273361,
+     532.8788228526402
+    ]
+   ],
+   "steady_decode_per_agent_tok_s": [
+    [
+     13.901671812391545,
+     13.901671812391545,
+     13.901671812391545,
+     13.968186988527389
+    ],
+    [
+     13.967912910462086,
+     13.967912910462086,
+     13.901399039459886,
+     13.967912910462086
+    ]
+   ],
+   "client_decode_per_agent_tok_s": [
+    [
+     4.22844487804534,
+     2.3531555732725065,
+     14.823283896658733,
+     1.6388035933761491
+    ],
+    [
+     1.6392826834501881,
+     4.230347822105255,
+     14.845323880860642,
+     2.3540878937268697
+    ]
+   ],
+   "cache_n": [
+    [
+     0,
+     0,
+     0,
+     0
+    ],
+    [
+     0,
+     0,
+     0,
+     0
+    ]
+   ],
+   "peak_vram_mib": [
+    24356,
+    24356
+   ]
+  },
+  "C_shared_prefix_4xlong_256": [
+   {
+    "label": "C-shared-prefix-4xlong-256-r0",
+    "ok": true,
+    "ttft_s": [
+     102.18679723699461,
+     146.7540206789854,
+     186.2614912269928,
+     57.81384061498102
+    ],
+    "cache_n": [
+     0,
+     0,
+     0,
+     0
+    ],
+    "prompt_n": [
+     28654,
+     28669,
+     28670,
+     28671
+    ],
+    "steady_decode_per_agent_tok_s": [
+     14.286178297704819,
+     14.286178297704819,
+     14.286178297704819,
+     14.353565931184558
+    ],
+    "client_decode_tok_s": [
+     2.555841786821088,
+     4.566303188679003,
+     15.142790470382117,
+     1.7796429527373177
+    ],
+    "peak_vram_mib": 24356
+   },
+   {
+    "label": "C-shared-prefix-4xlong-256-r1",
+    "ok": true,
+    "ttft_s": [
+     7.728111693984829,
+     7.7313522019831,
+     7.736507016001269,
+     7.729288267000811
+    ],
+    "cache_n": [
+     28650,
+     28665,
+     28666,
+     28667
+    ],
+    "prompt_n": [
+     4,
+     4,
+     4,
+     4
+    ],
+    "steady_decode_per_agent_tok_s": [
+     14.397548961264834,
+     14.341087984946148,
+     14.341087984946148,
+     14.341087984946148
+    ],
+    "client_decode_tok_s": [
+     14.39072775302159,
+     14.390834238612875,
+     14.391310283040859,
+     14.391136738492984
+    ],
+    "peak_vram_mib": 24356
+   },
+   {
+    "label": "C-shared-prefix-4xlong-256-r2",
+    "ok": true,
+    "ttft_s": [
+     7.58906948598451,
+     7.5884238189901225,
+     7.592498995014466,
+     7.585137592017418
+    ],
+    "cache_n": [
+     28650,
+     28665,
+     28666,
+     28667
+    ],
+    "prompt_n": [
+     4,
+     4,
+     4,
+     4
+    ],
+    "steady_decode_per_agent_tok_s": [
+     14.380464399546822,
+     14.380464399546822,
+     14.380464399546822,
+     14.437080401119841
+    ],
+    "client_decode_tok_s": [
+     14.429736887322651,
+     14.429118307580424,
+     14.428650239785684,
+     14.43106569823248
+    ],
+    "peak_vram_mib": 24356
+   }
+  ],
+  "D_cold_4x8192_256": {
+   "ttft_s_per_agent": [
+    [
+     28.97103052100283,
+     17.862933961994713,
+     40.123214885010384,
+     46.191342749021715
+    ]
+   ],
+   "ttft_max_s": [
+    46.191342749021715
+   ],
+   "effective_prefill_tok_s": [
+    709.3970006034084
+   ],
+   "server_prompt_tok_s": [
+    [
+     422.42836804504725,
+     519.1927996983713,
+     418.9321321763606,
+     564.3809742433664
+    ]
+   ],
+   "steady_decode_per_agent_tok_s": [
+    [
+     18.11265129933676,
+     18.187188959004814,
+     18.11265129933676,
+     18.11265129933676
+    ]
+   ],
+   "client_decode_per_agent_tok_s": [
+    [
+     8.271940381829333,
+     6.108597123289363,
+     12.861025271911211,
+     18.34699308113096
+    ]
+   ],
+   "cache_n": [
+    [
+     0,
+     0,
+     0,
+     0
+    ]
+   ],
+   "peak_vram_mib": [
+    20988
+   ]
+  },
+  "D_cold_4x22528_256": {
+   "ttft_s_per_agent": [
+    [
+     74.1183405329939,
+     40.526057814015076,
+     107.9040695890144,
+     136.61716217698995
+    ]
+   ],
+   "ttft_max_s": [
+    136.61716217698995
+   ],
+   "effective_prefill_tok_s": [
+    659.5950213287135
+   ],
+   "server_prompt_tok_s": [
+    [
+     526.9233063221207,
+     594.4278353710367,
+     523.1729407746541,
+     591.2955096161244
+    ]
+   ],
+   "steady_decode_per_agent_tok_s": [
+    [
+     14.664296757060445,
+     14.730651041029045,
+     14.664296757060445,
+     14.664296757060445
+    ]
+   ],
+   "client_decode_per_agent_tok_s": [
+    [
+     3.2616337244569826,
+     2.2939551241328857,
+     5.681656655662867,
+     15.398553256645048
+    ]
+   ],
+   "cache_n": [
+    [
+     0,
+     0,
+     0,
+     0
+    ]
+   ],
+   "peak_vram_mib": [
+    20988
+   ]
+  },
+  "D_cold_4x30720_256": {
+   "ttft_s_per_agent": [
+    [
+     105.92162186701898,
+     57.36721279198537,
+     155.0805664169893,
+     199.06144332999247
+    ]
+   ],
+   "ttft_max_s": [
+    199.06144332999247
+   ],
+   "effective_prefill_tok_s": [
+    617.2968403343519
+   ],
+   "server_prompt_tok_s": [
+    [
+     527.7411009356221,
+     584.2137791878444,
+     521.4817373938156,
+     566.5551746820362
+    ]
+   ],
+   "steady_decode_per_agent_tok_s": [
+    [
+     13.18017590552854,
+     13.243238948138723,
+     13.243238948138723,
+     13.18017590552854
+    ]
+   ],
+   "client_decode_per_agent_tok_s": [
+    [
+     2.32008224439297,
+     1.6185196444568444,
+     4.147576935270316,
+     14.135133230081419
+    ]
+   ],
+   "cache_n": [
+    [
+     0,
+     0,
+     0,
+     0
+    ]
+   ],
+   "peak_vram_mib": [
+    20988
+   ]
+  },
+  "D_shared_prefix_4xlong_256": [
+   {
+    "label": "D-shared-prefix-4xlong-256-r0",
+    "ok": true,
+    "ttft_s": [
+     144.34491250800784,
+     184.14070212899242,
+     54.69621609800379,
+     99.42153960300493
+    ],
+    "cache_n": [
+     0,
+     0,
+     0,
+     0
+    ],
+    "prompt_n": [
+     28654,
+     28669,
+     28670,
+     28671
+    ],
+    "steady_decode_per_agent_tok_s": [
+     13.42386336128094,
+     13.42386336128094,
+     13.487183471475662,
+     13.487183471475662
+    ],
+    "client_decode_tok_s": [
+     4.466401869219623,
+     14.3135422833003,
+     1.75574784194548,
+     2.515971141869183
+    ],
+    "peak_vram_mib": 20988
+   },
+   {
+    "label": "D-shared-prefix-4xlong-256-r1",
+    "ok": true,
+    "ttft_s": [
+     5.25407196598826,
+     5.251983413996641,
+     5.253079738991801,
+     5.251061809976818
+    ],
+    "cache_n": [
+     28650,
+     28665,
+     28666,
+     28667
+    ],
+    "prompt_n": [
+     4,
+     4,
+     4,
+     4
+    ],
+    "steady_decode_per_agent_tok_s": [
+     13.45803741546339,
+     13.45803741546339,
+     13.511021814736868,
+     13.45803741546339
+    ],
+    "client_decode_tok_s": [
+     13.50869183903566,
+     13.50821734667665,
+     13.510311477331426,
+     13.508841622732259
+    ],
+    "peak_vram_mib": 20988
+   }
+  ]
+ },
+ "batches": [
+  {
+   "stage": "A",
+   "label": "A-warmup-chat",
+   "concurrency": 1,
+   "ok": true,
+   "wall_s": 2.838845231,
+   "peak_vram_mib": 17728,
+   "ttft_s": [
+    1.9230499569966923
+   ],
+   "ttft_max_s": 1.9230499569966923,
+   "prompt_n": [
+    582
+   ],
+   "cache_n": [
+    0
+   ],
+   "server_prompt_tok_s": [
+    311.3899709957898
+   ],
+   "server_decode_tok_s": [
+    32.897529501655484
+   ],
+   "client_decode_tok_s": [
+    33.89221968080547
+   ],
+   "output_chunks": [
+    32
+   ],
+   "usage_prompt_tokens": [
+    582
+   ],
+   "steady_decode_per_agent_tok_s": [
+    33.89222709104108
+   ],
+   "steady_window_s": 0.9146640000000001,
+   "effective_prefill_tok_s": 302.6442437870588
+  },
+  {
+   "stage": "A",
+   "label": "A-decode-short-128-c1-r0-o0",
+   "concurrency": 1,
+   "ok": true,
+   "wall_s": 4.997429669,
+   "peak_vram_mib": 17728,
+   "ttft_s": [
+    1.1673132890136912
+   ],
+   "ttft_max_s": 1.1673132890136912,
+   "prompt_n": [
+    582
+   ],
+   "cache_n": [
+    0
+   ],
+   "server_prompt_tok_s": [
+    504.16368167694196
+   ],
+   "server_decode_tok_s": [
+    33.16701078528513
+   ],
+   "client_decode_tok_s": [
+    33.168457458346474
+   ],
+   "output_chunks": [
+    128
+   ],
+   "usage_prompt_tokens": [
+    582
+   ],
+   "steady_decode_per_agent_tok_s": [
+    33.1684573716113
+   ],
+   "steady_window_s": 3.828939,
+   "effective_prefill_tok_s": 498.5808055794127
+  },
+  {
+   "stage": "A",
+   "label": "A-decode-short-128-c1-r0-o1",
+   "concurrency": 1,
+   "ok": true,
+   "wall_s": 5.232191093,
+   "peak_vram_mib": 17730,
+   "ttft_s": [
+    1.4014983160013799
+   ],
+   "ttft_max_s": 1.4014983160013799,
+   "prompt_n": [
+    578
+   ],
+   "cache_n": [
+    0
+   ],
+   "server_prompt_tok_s": [
+    598.7688979958853
+   ],
+   "server_decode_tok_s": [
+    33.16111313762359
+   ],
+   "client_decode_tok_s": [
+    33.163467831324795
+   ],
+   "output_chunks": [
+    128
+   ],
+   "usage_prompt_tokens": [
+    578
+   ],
+   "steady_decode_per_agent_tok_s": [
+    33.16346848099564
+   ],
+   "steady_window_s": 3.829515,
+   "effective_prefill_tok_s": 412.4157649001634
+  },
+  {
+   "stage": "A",
+   "label": "A-decode-short-128-c1-r0-o2",
+   "concurrency": 1,
+   "ok": true,
+   "wall_s": 5.227603275,
+   "peak_vram_mib": 17730,
+   "ttft_s": [
+    1.3965552209992893
+   ],
+   "ttft_max_s": 1.3965552209992893,
+   "prompt_n": [
+    579
+   ],
+   "cache_n": [
+    0
+   ],
+   "server_prompt_tok_s": [
+    606.4122597916204
+   ],
+   "server_decode_tok_s": [
+    33.157658662007535
+   ],
+   "client_decode_tok_s": [
+    33.160152547816224
+   ],
+   "output_chunks": [
+    128
+   ],
+   "usage_prompt_tokens": [
+    579
+   ],
+   "steady_decode_per_agent_tok_s": [
+    33.16015204582472
+   ],
+   "steady_window_s": 3.829898,
+   "effective_prefill_tok_s": 414.5915544862616
+  },
+  {
+   "stage": "A",
+   "label": "A-decode-short-128-c1-r0-o3",
+   "concurrency": 1,
+   "ok": true,
+   "wall_s": 5.36544266,
+   "peak_vram_mib": 17730,
+   "ttft_s": [
+    1.532987807993777
+   ],
+   "ttft_max_s": 1.532987807993777,
+   "prompt_n": [
+    580
+   ],
+   "cache_n": [
+    0
+   ],
+   "server_prompt_tok_s": [
+    530.5903641130633
+   ],
+   "server_decode_tok_s": [
+    33.14724764308714
+   ],
+   "client_decode_tok_s": [
+    33.14963862187229
+   ],
+   "output_chunks": [
+    128
+   ],
+   "usage_prompt_tokens": [
+    580
+   ],
+   "steady_decode_per_agent_tok_s": [
+    33.149644280824994
+   ],
+   "steady_window_s": 3.8311119999999996,
+   "effective_prefill_tok_s": 378.34612707001673
+  },
+  {
+   "stage": "A",
+   "label": "A-decode-short-128-c1-r1-o0",
+   "concurrency": 1,
+   "ok": true,
+   "wall_s": 5.523372283,
+   "peak_vram_mib": 17730,
+   "ttft_s": [
+    1.6936747099971399
+   ],
+   "ttft_max_s": 1.6936747099971399,
+   "prompt_n": [
+    582
+   ],
+   "cache_n": [
+    0
+   ],
+   "server_prompt_tok_s": [
+    504.28818250033356
+   ],
+   "server_decode_tok_s": [
+    33.1700080443799
+   ],
+   "client_decode_tok_s": [
+    33.172286262859195
+   ],
+   "output_chunks": [
+    128
+   ],
+   "usage_prompt_tokens": [
+    582
+   ],
+   "steady_decode_per_agent_tok_s": [
+    33.17228667019982
+   ],
+   "steady_window_s": 3.8284970000000005,
+   "effective_prefill_tok_s": 343.6315111542185
+  },
+  {
+   "stage": "A",
+   "label": "A-decode-short-128-c1-r1-o1",
+   "concurrency": 1,
+   "ok": true,
+   "wall_s": 5.289206256,
+   "peak_vram_mib": 17730,
+   "ttft_s": [
+    1.4578390420065261
+   ],
+   "ttft_max_s": 1.4578390420065261,
+   "prompt_n": [
+    578
+   ],
+   "cache_n": [
+    0
+   ],
+   "server_prompt_tok_s": [
+    607.04147101482
+   ],
+   "server_decode_tok_s": [
+    33.15375484547348
+   ],
+   "client_decode_tok_s": [
+    33.15738256876116
+   ],
+   "output_chunks": [
+    128
+   ],
+   "usage_prompt_tokens": [
+    578
+   ],
+   "steady_decode_per_agent_tok_s": [
+    33.157381642507026
+   ],
+   "steady_window_s": 3.8302180000000003,
+   "effective_prefill_tok_s": 396.4772401790379
+  },
+  {
+   "stage": "A",
+   "label": "A-decode-short-128-c1-r1-o2",
+   "concurrency": 1,
+   "ok": true,
+   "wall_s": 5.305467867,
+   "peak_vram_mib": 17730,
+   "ttft_s": [
+    1.4724703589745332
+   ],
+   "ttft_max_s": 1.4724703589745332,
+   "prompt_n": [
+    579
+   ],
+   "cache_n": [
+    0
+   ],
+   "server_prompt_tok_s": [
+    605.5237571337286
+   ],
+   "server_decode_tok_s": [
+    33.14006845642172
+   ],
+   "client_decode_tok_s": [
+    33.14328065402627
+   ],
+   "output_chunks": [
+    128
+   ],
+   "usage_prompt_tokens": [
+    579
+   ],
+   "steady_decode_per_agent_tok_s": [
+    33.14327708197193
+   ],
+   "steady_window_s": 3.8318480000000004,
+   "effective_prefill_tok_s": 393.2167438692829
+  },
+  {
+   "stage": "A",
+   "label": "A-decode-short-128-c1-r1-o3",
+   "concurrency": 1,
+   "ok": true,
+   "wall_s": 5.498416342,
+   "peak_vram_mib": 17730,
+   "ttft_s": [
+    1.6738236780220177
+   ],
+   "ttft_max_s": 1.6738236780220177,
+   "prompt_n": [
+    580
+   ],
+   "cache_n": [
+    0
+   ],
+   "server_prompt_tok_s": [
+    525.5970283831457
+   ],
+   "server_decode_tok_s": [
+    33.21373772497404
+   ],
+   "client_decode_tok_s": [
+    33.215616265152605
+   ],
+   "output_chunks": [
+    128
+   ],
+   "usage_prompt_tokens": [
+    580
+   ],
+   "steady_decode_per_agent_tok_s": [
+    33.215622745849224
+   ],
+   "steady_window_s": 3.8235020000000004,
+   "effective_prefill_tok_s": 346.5120057839035
+  },
+  {
+   "stage": "A",
+   "label": "A-decode-short-128-c1-r2-o0",
+   "concurrency": 1,
+   "ok": true,
+   "wall_s": 5.516839967,
+   "peak_vram_mib": 17730,
+   "ttft_s": [
+    1.686327366012847
+   ],
+   "ttft_max_s": 1.686327366012847,
+   "prompt_n": [
+    582
+   ],
+   "cache_n": [
+    0
+   ],
+   "server_prompt_tok_s": [
+    505.5796183655705
+   ],
+   "server_decode_tok_s": [
+    33.161823169147496
+   ],
+   "client_decode_tok_s": [
+    33.164608076559716
+   ],
+   "output_chunks": [
+    128
+   ],
+   "usage_prompt_tokens": [
+    582
+   ],
+   "steady_decode_per_agent_tok_s": [
+    33.164602975308824
+   ],
+   "steady_window_s": 3.8293839999999997,
+   "effective_prefill_tok_s": 345.1287168375148
+  },
+  {
+   "stage": "A",
+   "label": "A-decode-short-128-c1-r2-o1",
+   "concurrency": 1,
+   "ok": true,
+   "wall_s": 5.456559195,
+   "peak_vram_mib": 17730,
+   "ttft_s": [
+    1.6296712210169062
+   ],
+   "ttft_max_s": 1.6296712210169062,
+   "prompt_n": [
+    578
+   ],
+   "cache_n": [
+    0
+   ],
+   "server_prompt_tok_s": [
+    601.270991171303
+   ],
+   "server_decode_tok_s": [
+    33.19282574968741
+   ],
+   "client_decode_tok_s": [
+    33.19533202637473
+   ],
+   "output_chunks": [
+    128
+   ],
+   "usage_prompt_tokens": [
+    578
+   ],
+   "steady_decode_per_agent_tok_s": [
+    33.19533310209865
+   ],
+   "steady_window_s": 3.825839,
+   "effective_prefill_tok_s": 354.67276622785977
+  },
+  {
+   "stage": "A",
+   "label": "A-decode-short-128-c1-r2-o2",
+   "concurrency": 1,
+   "ok": true,
+   "wall_s": 5.362400507,
+   "peak_vram_mib": 17730,
+   "ttft_s": [
+    1.5277540060051251
+   ],
+   "ttft_max_s": 1.5277540060051251,
+   "prompt_n": [
+    579
+   ],
+   "cache_n": [
+    0
+   ],
+   "server_prompt_tok_s": [
+    601.6303246621675
+   ],
+   "server_decode_tok_s": [
+    33.12591813568376
+   ],
+   "client_decode_tok_s": [
+    33.12850716435405
+   ],
+   "output_chunks": [
+    128
+   ],
+   "usage_prompt_tokens": [
+    579
+   ],
+   "steady_decode_per_agent_tok_s": [
+    33.12851044826266
+   ],
+   "steady_window_s": 3.8335559999999997,
+   "effective_prefill_tok_s": 378.9877151191431
+  },
+  {
+   "stage": "A",
+   "label": "A-decode-short-128-c1-r2-o3",
+   "concurrency": 1,
+   "ok": true,
+   "wall_s": 5.450335954,
+   "peak_vram_mib": 17730,
+   "ttft_s": [
+    1.6287209679721855
+   ],
+   "ttft_max_s": 1.6287209679721855,
+   "prompt_n": [
+    580
+   ],
+   "cache_n": [
+    0
+   ],
+   "server_prompt_tok_s": [
+    528.4035107858089
+   ],
+   "server_decode_tok_s": [
+    33.2362329373162
+   ],
+   "client_decode_tok_s": [
+    33.23875214125958
+   ],
+   "output_chunks": [
+    128
+   ],
+   "usage_prompt_tokens": [
+    580
+   ],
+   "steady_decode_per_agent_tok_s": [
+    33.238755551461054
+   ],
+   "steady_window_s": 3.820841,
+   "effective_prefill_tok_s": 356.10765220399924
+  },
+  {
+   "stage": "A",
+   "label": "A-decode-short-512-c1-r0-o0",
+   "concurrency": 1,
+   "ok": true,
+   "wall_s": 17.159066484,
+   "peak_vram_mib": 17730,
+   "ttft_s": [
+    1.7158553740009665
+   ],
+   "ttft_max_s": 1.7158553740009665,
+   "prompt_n": [
+    582
+   ],
+   "cache_n": [
+    0
+   ],
+   "server_prompt_tok_s": [
+    501.161627208082
+   ],
+   "server_decode_tok_s": [
+    33.093981597155704
+   ],
+   "client_decode_tok_s": [
+    33.0939967265058
+   ],
+   "output_chunks": [
+    512
+   ],
+   "usage_prompt_tokens": [
+    582
+   ],
+   "steady_decode_per_agent_tok_s": [
+    33.09399660006139
+   ],
+   "steady_window_s": 15.440866999999999,
+   "effective_prefill_tok_s": 339.18942634594805
+  },
+  {
+   "stage": "A",
+   "label": "A-decode-short-512-c1-r0-o1",
+   "concurrency": 1,
+   "ok": true,
+   "wall_s": 16.980972783,
+   "peak_vram_mib": 17730,
+   "ttft_s": [
+    1.5588307850121055
+   ],
+   "ttft_max_s": 1.5588307850121055,
+   "prompt_n": [
+    578
+   ],
+   "cache_n": [
+    0
+   ],
+   "server_prompt_tok_s": [
+    594.0854578569343
+   ],
+   "server_decode_tok_s": [
+    33.13927939771856
+   ],
+   "client_decode_tok_s": [
+    33.139706433543914
+   ],
+   "output_chunks": [
+    512
+   ],
+   "usage_prompt_tokens": [
+    578
+   ],
+   "steady_decode_per_agent_tok_s": [
+    33.13970708260393
+   ],
+   "steady_window_s": 15.419569000000001,
+   "effective_prefill_tok_s": 370.79072697137644
+  },
+  {
+   "stage": "A",
+   "label": "A-decode-short-512-c1-r0-o2",
+   "concurrency": 1,
+   "ok": true,
+   "wall_s": 16.999931826,
+   "peak_vram_mib": 17730,
+   "ttft_s": [
+    1.5918269740068354
+   ],
+   "ttft_max_s": 1.5918269740068354,
+   "prompt_n": [
+    579
+   ],
+   "cache_n": [
+    0
+   ],
+   "server_prompt_tok_s": [
+    599.9365870136006
+   ],
+   "server_decode_tok_s": [
+    33.16911268858766
+   ],
+   "client_decode_tok_s": [
+    33.16939925291372
+   ],
+   "output_chunks": [
+    512
+   ],
+   "usage_prompt_tokens": [
+    579
+   ],
+   "steady_decode_per_agent_tok_s": [
+    33.169399041891204
+   ],
+   "steady_window_s": 15.405765999999998,
+   "effective_prefill_tok_s": 363.73299953736915
+  },
+  {
+   "stage": "A",
+   "label": "A-decode-short-512-c1-r0-o3",
+   "concurrency": 1,
+   "ok": true,
+   "wall_s": 17.067056279,
+   "peak_vram_mib": 17730,
+   "ttft_s": [
+    1.6625983529957011
+   ],
+   "ttft_max_s": 1.6625983529957011,
+   "prompt_n": [
+    580
+   ],
+   "cache_n": [
+    0
+   ],
+   "server_prompt_tok_s": [
+    524.7904683573968
+   ],
+   "server_decode_tok_s": [
+    33.17692566245588
+   ],
+   "client_decode_tok_s": [
+    33.17730222318814
+   ],
+   "output_chunks": [
+    512
+   ],
+   "usage_prompt_tokens": [
+    580
+   ],
+   "steady_decode_per_agent_tok_s": [
+    33.17730046759217
+   ],
+   "steady_window_s": 15.402097000000001,
+   "effective_prefill_tok_s": 348.8515424996933
+  },
+  {
+   "stage": "A",
+   "label": "A-decode-short-512-c1-r1-o0",
+   "concurrency": 1,
+   "ok": true,
+   "wall_s": 17.185157503,
+   "peak_vram_mib": 17730,
+   "ttft_s": [
+    1.7919819449889474
+   ],
+   "ttft_max_s": 1.7919819449889474,
+   "prompt_n": [
+    582
+   ],
+   "cache_n": [
+    0
+   ],
+   "server_prompt_tok_s": [
+    501.3161702890062
+   ],
+   "server_decode_tok_s": [
+    33.20127110839033
+   ],
+   "client_decode_tok_s": [
+    33.20164129721314
+   ],
+   "output_chunks": [
+    512
+   ],
+   "usage_prompt_tokens": [
+    582
+   ],
+   "steady_decode_per_agent_tok_s": [
+    33.201642149322275
+   ],
+   "steady_window_s": 15.390805,
+   "effective_prefill_tok_s": 324.7800579841164
+  },
+  {
+   "stage": "A",
+   "label": "A-decode-short-512-c1-r1-o1",
+   "concurrency": 1,
+   "ok": true,
+   "wall_s": 16.917108056,
+   "peak_vram_mib": 17730,
+   "ttft_s": [
+    1.5272730329888873
+   ],
+   "ttft_max_s": 1.5272730329888873,
+   "prompt_n": [
+    578
+   ],
+   "cache_n": [
+    0
+   ],
+   "server_prompt_tok_s": [
+    596.0120811030142
+   ],
+   "server_decode_tok_s": [
+    33.208533800341066
+   ],
+   "client_decode_tok_s": [
+    33.20884665939376
+   ],
+   "output_chunks": [
+    512
+   ],
+   "usage_prompt_tokens": [
+    578
+   ],
+   "steady_decode_per_agent_tok_s": [
+    33.208846732788885
+   ],
+   "steady_window_s": 15.387466,
+   "effective_prefill_tok_s": 378.4523051970928
+  },
+  {
+   "stage": "A",
+   "label": "A-decode-short-512-c1-r1-o2",
+   "concurrency": 1,
+   "ok": true,
+   "wall_s": 17.01796248,
+   "peak_vram_mib": 17730,
+   "ttft_s": [
+    1.6133980049926322
+   ],
+   "ttft_max_s": 1.6133980049926322,
+   "prompt_n": [
+    579
+   ],
+   "cache_n": [
+    0
+   ],
+   "server_prompt_tok_s": [
+    599.4434183390345
+   ],
+   "server_decode_tok_s": [
+    33.177128142339875
+   ],
+   "client_decode_tok_s": [
+    33.17713799280526
+   ],
+   "output_chunks": [
+    512
+   ],
+   "usage_prompt_tokens": [
+    579
+   ],
+   "steady_decode_per_agent_tok_s": [
+    33.1771389126157
+   ],
+   "steady_window_s": 15.402172,
+   "effective_prefill_tok_s": 358.8699119549513
+  },
+  {
+   "stage": "A",
+   "label": "A-decode-short-512-c1-r1-o3",
+   "concurrency": 1,
+   "ok": true,
+   "wall_s": 17.086888726,
+   "peak_vram_mib": 17730,
+   "ttft_s": [
+    1.6931233420036733
+   ],
+   "ttft_max_s": 1.6931233420036733,
+   "prompt_n": [
+    580
+   ],
+   "cache_n": [
+    0
+   ],
+   "server_prompt_tok_s": [
+    521.8112608669444
+   ],
+   "server_decode_tok_s": [
+    33.200613178291455
+   ],
+   "client_decode_tok_s": [
+    33.201155148991425
+   ],
+   "output_chunks": [
+    512
+   ],
+   "usage_prompt_tokens": [
+    580
+   ],
+   "steady_decode_per_agent_tok_s": [
+    33.201154620505925
+   ],
+   "steady_window_s": 15.391031000000002,
+   "effective_prefill_tok_s": 342.562166388668
+  },
+  {
+   "stage": "A",
+   "label": "A-decode-short-512-c1-r2-o0",
+   "concurrency": 1,
+   "ok": true,
+   "wall_s": 17.243602849,
+   "peak_vram_mib": 17730,
+   "ttft_s": [
+    1.816198020009324
+   ],
+   "ttft_max_s": 1.816198020009324,
+   "prompt_n": [
+    582
+   ],
+   "cache_n": [
+    0
+   ],
+   "server_prompt_tok_s": [
+    502.95246926329565
+   ],
+   "server_decode_tok_s": [
+    33.12803245483971
+   ],
+   "client_decode_tok_s": [
+    33.1280972678018
+   ],
+   "output_chunks": [
+    512
+   ],
+   "usage_prompt_tokens": [
+    582
+   ],
+   "steady_decode_per_agent_tok_s": [
+    33.12809688548563
+   ],
+   "steady_window_s": 15.424973000000001,
+   "effective_prefill_tok_s": 320.44963907460493
+  },
+  {
+   "stage": "A",
+   "label": "A-decode-short-512-c1-r2-o1",
+   "concurrency": 1,
+   "ok": true,
+   "wall_s": 17.016687444,
+   "peak_vram_mib": 17730,
+   "ttft_s": [
+    1.5660342359915376
+   ],
+   "ttft_max_s": 1.5660342359915376,
+   "prompt_n": [
+    578
+   ],
+   "cache_n": [
+    0
+   ],
+   "server_prompt_tok_s": [
+    590.2379945796138
+   ],
+   "server_decode_tok_s": [
+    33.0783816528005
+   ],
+   "client_decode_tok_s": [
+    33.0781274304119
+   ],
+   "output_chunks": [
+    512
+   ],
+   "usage_prompt_tokens": [
+    578
+   ],
+   "steady_decode_per_agent_tok_s": [
+    33.07812684587761
+   ],
+   "steady_window_s": 15.448275,
+   "effective_prefill_tok_s": 369.085162198921
+  },
+  {
+   "stage": "A",
+   "label": "A-decode-short-512-c1-r2-o2",
+   "concurrency": 1,
+   "ok": true,
+   "wall_s": 16.973543969,
+   "peak_vram_mib": 17730,
+   "ttft_s": [
+    1.5282202789967414
+   ],
+   "ttft_max_s": 1.5282202789967414,
+   "prompt_n": [
+    579
+   ],
+   "cache_n": [
+    0
+   ],
+   "server_prompt_tok_s": [
+    595.4505112749943
+   ],
+   "server_decode_tok_s": [
+    33.086751779691696
+   ],
+   "client_decode_tok_s": [
+    33.087358979967874
+   ],
+   "output_chunks": [
+    512
+   ],
+   "usage_prompt_tokens": [
+    579
+   ],
+   "steady_decode_per_agent_tok_s": [
+    33.0873580715833
+   ],
+   "steady_window_s": 15.443965,
+   "effective_prefill_tok_s": 378.87208274719836
+  },
+  {
+   "stage": "A",
+   "label": "A-decode-short-512-c1-r2-o3",
+   "concurrency": 1,
+   "ok": true,
+   "wall_s": 17.231094755,
+   "peak_vram_mib": 17730,
+   "ttft_s": [
+    1.7826944130065385
+   ],
+   "ttft_max_s": 1.7826944130065385,
+   "prompt_n": [
+    580
+   ],
+   "cache_n": [
+    0
+   ],
+   "server_prompt_tok_s": [
+    518.5488499838177
+   ],
+   "server_decode_tok_s": [
+    33.08273753114213
+   ],
+   "client_decode_tok_s": [
+    33.08294182305286
+   ],
+   "output_chunks": [
+    512
+   ],
+   "usage_prompt_tokens": [
+    580
+   ],
+   "steady_decode_per_agent_tok_s": [
+    33.082941004829266
+   ],
+   "steady_window_s": 15.446027,
+   "effective_prefill_tok_s": 325.35020908144435
+  },
+  {
+   "stage": "A",
+   "label": "A-decode-long-512-c1-long-00-cold",
+   "concurrency": 1,
+   "ok": true,
+   "wall_s": 61.674233543,
+   "peak_vram_mib": 17730,
+   "ttft_s": [
+    43.705175401002634
+   ],
+   "ttft_max_s": 43.705175401002634,
+   "prompt_n": [
+    28654
+   ],
+   "cache_n": [
+    0
+   ],
+   "server_prompt_tok_s": [
+    665.1390952924452
+   ],
+   "server_decode_tok_s": [
+    28.444797137662967
+   ],
+   "client_decode_tok_s": [
+    28.445060731489985
+   ],
+   "output_chunks": [
+    512
+   ],
+   "usage_prompt_tokens": [
+    28654
+   ],
+   "steady_decode_per_agent_tok_s": [
+    28.445059980945704
+   ],
+   "steady_window_s": 17.964455,
+   "effective_prefill_tok_s": 655.6202952417999
+  },
+  {
+   "stage": "A",
+   "label": "A-decode-long-512-c1-long-01-cold",
+   "concurrency": 1,
+   "ok": true,
+   "wall_s": 63.459790047,
+   "peak_vram_mib": 17730,
+   "ttft_s": [
+    45.49974421298248
+   ],
+   "ttft_max_s": 45.49974421298248,
+   "prompt_n": [
+    28669
+   ],
+   "cache_n": [
+    0
+   ],
+   "server_prompt_tok_s": [
+    665.3876944565886
+   ],
+   "server_decode_tok_s": [
+    28.458297094485836
+   ],
+   "client_decode_tok_s": [
+    28.458583098814398
+   ],
+   "output_chunks": [
+    512
+   ],
+   "usage_prompt_tokens": [
+    28669
+   ],
+   "steady_decode_per_agent_tok_s": [
+    28.458582376095592
+   ],
+   "steady_window_s": 17.955919,
+   "effective_prefill_tok_s": 630.0914542684363
+  },
+  {
+   "stage": "A",
+   "label": "A-decode-long-512-c1-long-02-cold",
+   "concurrency": 1,
+   "ok": true,
+   "wall_s": 63.381113377,
+   "peak_vram_mib": 17730,
+   "ttft_s": [
+    45.38144248101162
+   ],
+   "ttft_max_s": 45.38144248101162,
+   "prompt_n": [
+    28670
+   ],
+   "cache_n": [
+    0
+   ],
+   "server_prompt_tok_s": [
+    664.9729763981677
+   ],
+   "server_decode_tok_s": [
+    28.39578590977764
+   ],
+   "client_decode_tok_s": [
+    28.395818129520443
+   ],
+   "output_chunks": [
+    512
+   ],
+   "usage_prompt_tokens": [
+    28670
+   ],
+   "steady_decode_per_agent_tok_s": [
+    28.395817468351172
+   ],
+   "steady_window_s": 17.995607999999997,
+   "effective_prefill_tok_s": 631.7560313777162
+  },
+  {
+   "stage": "A",
+   "label": "A-decode-long-512-c1-long-03-cold",
+   "concurrency": 1,
+   "ok": true,
+   "wall_s": 63.575281937,
+   "peak_vram_mib": 17730,
+   "ttft_s": [
+    45.57976769498782
+   ],
+   "ttft_max_s": 45.57976769498782,
+   "prompt_n": [
+    28671
+   ],
+   "cache_n": [
+    0
+   ],
+   "server_prompt_tok_s": [
+    665.4277037668393
+   ],
+   "server_decode_tok_s": [
+    28.401514940141723
+   ],
+   "client_decode_tok_s": [
+    28.402163370477815
+   ],
+   "output_chunks": [
+    512
+   ],
+   "usage_prompt_tokens": [
+    28671
+   ],
+   "steady_decode_per_agent_tok_s": [
+    28.402163744643545
+   ],
+   "steady_window_s": 17.991586999999996,
+   "effective_prefill_tok_s": 629.0290944846743
+  },
+  {
+   "stage": "A",
+   "label": "A-prefill-2048-c1-warmup0",
+   "concurrency": 1,
+   "ok": true,
+   "wall_s": 5.800365025,
+   "peak_vram_mib": 17730,
+   "ttft_s": [
+    4.852301677979995
+   ],
+   "ttft_max_s": 4.852301677979995,
+   "prompt_n": [
+    2048
+   ],
+   "cache_n": [
+    0
+   ],
+   "server_prompt_tok_s": [
+    778.7397952005598
+   ],
+   "server_decode_tok_s": [
+    32.76359900736864
+   ],
+   "client_decode_tok_s": [
+    32.76028624874291
+   ],
+   "output_chunks": [
+    32
+   ],
+   "usage_prompt_tokens": [
+    null
+   ],
+   "steady_decode_per_agent_tok_s": [
+    32.760309722308826
+   ],
+   "steady_window_s": 0.9462669999999997,
+   "effective_prefill_tok_s": 422.0677393769505
+  },
+  {
+   "stage": "A",
+   "label": "A-prefill-2048-c1-measured0",
+   "concurrency": 1,
+   "ok": true,
+   "wall_s": 4.195905805,
+   "peak_vram_mib": 17730,
+   "ttft_s": [
+    3.2510305870091543
+   ],
+   "ttft_max_s": 3.2510305870091543,
+   "prompt_n": [
+    2048
+   ],
+   "cache_n": [
+    0
+   ],
+   "server_prompt_tok_s": [
+    782.7145442350285
+   ],
+   "server_decode_tok_s": [
+    32.86478051097313
+   ],
+   "client_decode_tok_s": [
+    32.87009884817028
+   ],
+   "output_chunks": [
+    32
+   ],
+   "usage_prompt_tokens": [
+    null
+   ],
+   "steady_decode_per_agent_tok_s": [
+    32.870112161305315
+   ],
+   "steady_window_s": 0.9431059999999998,
+   "effective_prefill_tok_s": 629.9540853856116
+  },
+  {
+   "stage": "A",
+   "label": "A-prefill-2048-c1-measured1",
+   "concurrency": 1,
+   "ok": true,
+   "wall_s": 4.159160173,
+   "peak_vram_mib": 17730,
+   "ttft_s": [
+    3.2097403130028397
+   ],
+   "ttft_max_s": 3.2097403130028397,
+   "prompt_n": [
+    2048
+   ],
+   "cache_n": [
+    0
+   ],
+   "server_prompt_tok_s": [
+    782.108056171245
+   ],
+   "server_decode_tok_s": [
+    32.711153131459795
+   ],
+   "client_decode_tok_s": [
+    32.71164479568829
+   ],
+   "output_chunks": [
+    32
+   ],
+   "usage_prompt_tokens": [
+    null
+   ],
+   "steady_decode_per_agent_tok_s": [
+    32.71163637322921
+   ],
+   "steady_window_s": 0.9476750000000003,
+   "effective_prefill_tok_s": 638.0578490114717
+  },
+  {
+   "stage": "A",
+   "label": "A-prefill-2048-c1-measured2",
+   "concurrency": 1,
+   "ok": true,
+   "wall_s": 4.231889147,
+   "peak_vram_mib": 17730,
+   "ttft_s": [
+    3.2865708649915177
+   ],
+   "ttft_max_s": 3.2865708649915177,
+   "prompt_n": [
+    2048
+   ],
+   "cache_n": [
+    0
+   ],
+   "server_prompt_tok_s": [
+    782.5934106246226
+   ],
+   "server_decode_tok_s": [
+    32.85715194206966
+   ],
+   "client_decode_tok_s": [
+    32.860236452872655
+   ],
+   "output_chunks": [
+    32
+   ],
+   "usage_prompt_tokens": [
+    null
+   ],
+   "steady_decode_per_agent_tok_s": [
+    32.860251709528086
+   ],
+   "steady_window_s": 0.9433890000000003,
+   "effective_prefill_tok_s": 623.141895954611
+  },
+  {
+   "stage": "A",
+   "label": "A-prefill-8192-c1-warmup0",
+   "concurrency": 1,
+   "ok": true,
+   "wall_s": 12.07874854,
+   "peak_vram_mib": 17730,
+   "ttft_s": [
+    11.091437174996827
+   ],
+   "ttft_max_s": 11.091437174996827,
+   "prompt_n": [
+    8192
+   ],
+   "cache_n": [
+    0
+   ],
+   "server_prompt_tok_s": [
+    774.9795872533642
+   ],
+   "server_decode_tok_s": [
+    31.541472457681007
+   ],
+   "client_decode_tok_s": [
+    31.544409314270055
+   ],
+   "output_chunks": [
+    32
+   ],
+   "usage_prompt_tokens": [
+    null
+   ],
+   "steady_decode_per_agent_tok_s": [
+    31.544393136754103
+   ],
+   "steady_window_s": 0.982742,
+   "effective_prefill_tok_s": 738.5877835982373
+  },
+  {
+   "stage": "A",
+   "label": "A-prefill-8192-c1-measured0",
+   "concurrency": 1,
+   "ok": true,
+   "wall_s": 12.436466306,
+   "peak_vram_mib": 17730,
+   "ttft_s": [
+    11.449269759992603
+   ],
+   "ttft_max_s": 11.449269759992603,
+   "prompt_n": [
+    8192
+   ],
+   "cache_n": [
+    0
+   ],
+   "server_prompt_tok_s": [
+    773.9978301227824
+   ],
+   "server_decode_tok_s": [
+    31.545933932638235
+   ],
+   "client_decode_tok_s": [
+    31.54852524793457
+   ],
+   "output_chunks": [
+    32
+   ],
+   "usage_prompt_tokens": [
+    null
+   ],
+   "steady_decode_per_agent_tok_s": [
+    31.548534367039757
+   ],
+   "steady_window_s": 0.9826129999999988,
+   "effective_prefill_tok_s": 715.5041475767703
+  },
+  {
+   "stage": "A",
+   "label": "A-prefill-8192-c1-measured1",
+   "concurrency": 1,
+   "ok": true,
+   "wall_s": 12.619290545,
+   "peak_vram_mib": 17730,
+   "ttft_s": [
+    11.631951775983907
+   ],
+   "ttft_max_s": 11.631951775983907,
+   "prompt_n": [
+    8192
+   ],
+   "cache_n": [
+    0
+   ],
+   "server_prompt_tok_s": [
+    772.8343444865694
+   ],
+   "server_decode_tok_s": [
+    31.538263543903806
+   ],
+   "client_decode_tok_s": [
+    31.543007960517762
+   ],
+   "output_chunks": [
+    32
+   ],
+   "usage_prompt_tokens": [
+    null
+   ],
+   "steady_decode_per_agent_tok_s": [
+    31.5430129682484
+   ],
+   "steady_window_s": 0.9827849999999998,
+   "effective_prefill_tok_s": 704.2670187916135
+  },
+  {
+   "stage": "A",
+   "label": "A-prefill-8192-c1-measured2",
+   "concurrency": 1,
+   "ok": true,
+   "wall_s": 12.559314472,
+   "peak_vram_mib": 17730,
+   "ttft_s": [
+    11.573021660005907
+   ],
+   "ttft_max_s": 11.573021660005907,
+   "prompt_n": [
+    8192
+   ],
+   "cache_n": [
+    0
+   ],
+   "server_prompt_tok_s": [
+    773.8901261180171
+   ],
+   "server_decode_tok_s": [
+    31.57186112047517
+   ],
+   "client_decode_tok_s": [
+    31.576328752261233
+   ],
+   "output_chunks": [
+    32
+   ],
+   "usage_prompt_tokens": [
+    null
+   ],
+   "steady_decode_per_agent_tok_s": [
+    31.5763311970078
+   ],
+   "steady_window_s": 0.9817479999999996,
+   "effective_prefill_tok_s": 707.8531640798657
+  },
+  {
+   "stage": "A",
+   "label": "A-prefill-22528-c1-warmup0",
+   "concurrency": 1,
+   "ok": true,
+   "wall_s": 34.53565855,
+   "peak_vram_mib": 17730,
+   "ttft_s": [
+    33.45647836700664
+   ],
+   "ttft_max_s": 33.45647836700664,
+   "prompt_n": [
+    22528
+   ],
+   "cache_n": [
+    0
+   ],
+   "server_prompt_tok_s": [
+    695.1065032878403
+   ],
+   "server_decode_tok_s": [
+    29.050943171669523
+   ],
+   "client_decode_tok_s": [
+    29.04927166079713
+   ],
+   "output_chunks": [
+    32
+   ],
+   "usage_prompt_tokens": [
+    null
+   ],
+   "steady_decode_per_agent_tok_s": [
+    29.04925535513639
+   ],
+   "steady_window_s": 1.0671530000000047,
+   "effective_prefill_tok_s": 673.3523998812785
+  },
+  {
+   "stage": "A",
+   "label": "A-prefill-22528-c1-measured0",
+   "concurrency": 1,
+   "ok": true,
+   "wall_s": 35.146098492,
+   "peak_vram_mib": 17730,
+   "ttft_s": [
+    34.06630367701291
+   ],
+   "ttft_max_s": 34.06630367701291,
+   "prompt_n": [
+    22528
+   ],
+   "cache_n": [
+    0
+   ],
+   "server_prompt_tok_s": [
+    695.7476931275829
+   ],
+   "server_decode_tok_s": [
+    29.007096445788545
+   ],
+   "client_decode_tok_s": [
+    29.007180967673307
+   ],
+   "output_chunks": [
+    32
+   ],
+   "usage_prompt_tokens": [
+    null
+   ],
+   "steady_decode_per_agent_tok_s": [
+    29.007177872950507
+   ],
+   "steady_window_s": 1.0687009999999972,
+   "effective_prefill_tok_s": 661.2986314450467
+  },
+  {
+   "stage": "A",
+   "label": "A-prefill-22528-c1-measured1",
+   "concurrency": 1,
+   "ok": true,
+   "wall_s": 35.287308627,
+   "peak_vram_mib": 17730,
+   "ttft_s": [
+    34.209516485978384
+   ],
+   "ttft_max_s": 34.209516485978384,
+   "prompt_n": [
+    22528
+   ],
+   "cache_n": [
+    0
+   ],
+   "server_prompt_tok_s": [
+    695.7869740450581
+   ],
+   "server_decode_tok_s": [
+    29.057914297899863
+   ],
+   "client_decode_tok_s": [
+    29.060984315242997
+   ],
+   "output_chunks": [
+    32
+   ],
+   "usage_prompt_tokens": [
+    null
+   ],
+   "steady_decode_per_agent_tok_s": [
+    29.060965217774545
+   ],
+   "steady_window_s": 1.066722999999996,
+   "effective_prefill_tok_s": 658.5302077927252
+  },
+  {
+   "stage": "A",
+   "label": "A-prefill-22528-c1-measured2",
+   "concurrency": 1,
+   "ok": true,
+   "wall_s": 35.312416138,
+   "peak_vram_mib": 17730,
+   "ttft_s": [
+    34.24048640302499
+   ],
+   "ttft_max_s": 34.24048640302499,
+   "prompt_n": [
+    22528
+   ],
+   "cache_n": [
+    0
+   ],
+   "server_prompt_tok_s": [
+    695.6705839207763
+   ],
+   "server_decode_tok_s": [
+    29.218765610832435
+   ],
+   "client_decode_tok_s": [
+    29.222989820651225
+   ],
+   "output_chunks": [
+    32
+   ],
+   "usage_prompt_tokens": [
+    null
+   ],
+   "steady_decode_per_agent_tok_s": [
+    29.22297982011825
+   ],
+   "steady_window_s": 1.060809000000006,
+   "effective_prefill_tok_s": 657.9345788151467
+  },
+  {
+   "stage": "A",
+   "label": "A-prefill-30720-c1-warmup0",
+   "concurrency": 1,
+   "ok": true,
+   "wall_s": 49.863214062,
+   "peak_vram_mib": 17730,
+   "ttft_s": [
+    48.735182928998256
+   ],
+   "ttft_max_s": 48.735182928998256,
+   "prompt_n": [
+    30720
+   ],
+   "cache_n": [
+    0
+   ],
+   "server_prompt_tok_s": [
+    655.5212827083409
+   ],
+   "server_decode_tok_s": [
+    27.86221326636815
+   ],
+   "client_decode_tok_s": [
+    27.864778958240024
+   ],
+   "output_chunks": [
+    32
+   ],
+   "usage_prompt_tokens": [
+    null
+   ],
+   "steady_decode_per_agent_tok_s": [
+    27.864792834253873
+   ],
+   "steady_window_s": 1.112515000000002,
+   "effective_prefill_tok_s": 630.3454332931432
+  },
+  {
+   "stage": "A",
+   "label": "A-prefill-30720-c1-measured0",
+   "concurrency": 1,
+   "ok": true,
+   "wall_s": 50.235162954,
+   "peak_vram_mib": 17730,
+   "ttft_s": [
+    49.107839816017076
+   ],
+   "ttft_max_s": 49.107839816017076,
+   "prompt_n": [
+    30720
+   ],
+   "cache_n": [
+    0
+   ],
+   "server_prompt_tok_s": [
+    655.7730495848318
+   ],
+   "server_decode_tok_s": [
+    27.90462379616303
+   ],
+   "client_decode_tok_s": [
+    27.90757448162384
+   ],
+   "output_chunks": [
+    32
+   ],
+   "usage_prompt_tokens": [
+    null
+   ],
+   "steady_decode_per_agent_tok_s": [
+    27.9075880731972
+   ],
+   "steady_window_s": 1.1108089999999962,
+   "effective_prefill_tok_s": 625.5620307285503
+  },
+  {
+   "stage": "A",
+   "label": "A-prefill-30720-c1-measured1",
+   "concurrency": 1,
+   "ok": true,
+   "wall_s": 50.397971355,
+   "peak_vram_mib": 17730,
+   "ttft_s": [
+    49.27273281200905
+   ],
+   "ttft_max_s": 49.27273281200905,
+   "prompt_n": [
+    30720
+   ],
+   "cache_n": [
+    0
+   ],
+   "server_prompt_tok_s": [
+    656.002091348334
+   ],
+   "server_decode_tok_s": [
+    27.945576440617003
+   ],
+   "client_decode_tok_s": [
+    27.94880661876375
+   ],
+   "output_chunks": [
+    32
+   ],
+   "usage_prompt_tokens": [
+    null
+   ],
+   "steady_decode_per_agent_tok_s": [
+    27.94880140212835
+   ],
+   "steady_window_s": 1.1091709999999964,
+   "effective_prefill_tok_s": 623.4685645954821
+  },
+  {
+   "stage": "A",
+   "label": "A-prefill-30720-c1-measured2",
+   "concurrency": 1,
+   "ok": true,
+   "wall_s": 50.410584234,
+   "peak_vram_mib": 17730,
+   "ttft_s": [
+    49.287587447994156
+   ],
+   "ttft_max_s": 49.287587447994156,
+   "prompt_n": [
+    30720
+   ],
+   "cache_n": [
+    0
+   ],
+   "server_prompt_tok_s": [
+    655.9218048969559
+   ],
+   "server_decode_tok_s": [
+    27.980334337917594
+   ],
+   "client_decode_tok_s": [
+    27.980090201802348
+   ],
+   "output_chunks": [
+    32
+   ],
+   "usage_prompt_tokens": [
+    null
+   ],
+   "steady_decode_per_agent_tok_s": [
+    27.980081792097145
+   ],
+   "steady_window_s": 1.1079310000000007,
+   "effective_prefill_tok_s": 623.2806593021871
+  },
+  {
+   "stage": "B",
+   "label": "B-warmup-chat",
+   "concurrency": 1,
+   "ok": true,
+   "wall_s": 2.190882918,
+   "peak_vram_mib": 18152,
+   "ttft_s": [
+    1.249378064996563
+   ],
+   "ttft_max_s": 1.249378064996563,
+   "prompt_n": [
+    582
+   ],
+   "cache_n": [
+    0
+   ],
+   "server_prompt_tok_s": [
+    468.2555709942224
+   ],
+   "server_decode_tok_s": [
+    32.94234664274982
+   ],
+   "client_decode_tok_s": [
+    32.95545951365984
+   ],
+   "output_chunks": [
+    32
+   ],
+   "usage_prompt_tokens": [
+    582
+   ],
+   "steady_decode_per_agent_tok_s": [
+    32.95544423938835
+   ],
+   "steady_window_s": 0.940664,
+   "effective_prefill_tok_s": 465.83177366860616
+  },
+  {
+   "stage": "B",
+   "label": "B-decode-short-128-c4-r0-o0",
+   "concurrency": 4,
+   "ok": true,
+   "wall_s": 10.699403253,
+   "peak_vram_mib": 18152,
+   "ttft_s": [
+    4.027469880995341,
+    4.582321965019219,
+    4.584536129026674,
+    4.580906838993542
+   ],
+   "ttft_max_s": 4.584536129026674,
+   "prompt_n": [
+    582,
+    578,
+    579,
+    580
+   ],
+   "cache_n": [
+    0,
+    0,
+    0,
+    0
+   ],
+   "server_prompt_tok_s": [
+    144.8591431507013,
+    140.5883061176588,
+    140.74212178350166,
+    141.16040178144425
+   ],
+   "server_decode_tok_s": [
+    19.191946515218532,
+    20.775070438939615,
+    20.781665531038644,
+    20.76886671653375
+   ],
+   "client_decode_tok_s": [
+    19.19223635826763,
+    20.774003953786924,
+    20.781617395511486,
+    20.769516037950055
+   ],
+   "output_chunks": [
+    128,
+    128,
+    128,
+    128
+   ],
+   "usage_prompt_tokens": [
+    582,
+    578,
+    579,
+    580
+   ],
+   "steady_decode_per_agent_tok_s": [
+    20.791417039028296,
+    20.6264057926868,
+    20.6264057926868,
+    20.6264057926868
+   ],
+   "steady_window_s": 6.060193,
+   "effective_prefill_tok_s": 505.83089209776574
+  },
+  {
+   "stage": "B",
+   "label": "B-decode-short-128-c4-r1-o0",
+   "concurrency": 4,
+   "ok": true,
+   "wall_s": 11.664111116,
+   "peak_vram_mib": 18182,
+   "ttft_s": [
+    5.543536227982258,
+    5.548137589008547,
+    5.5501419930078555,
+    5.5452784419758245
+   ],
+   "ttft_max_s": 5.5501419930078555,
+   "prompt_n": [
+    582,
+    578,
+    579,
+    580
+   ],
+   "cache_n": [
+    0,
+    0,
+    0,
+    0
+   ],
+   "server_prompt_tok_s": [
+    139.072719500122,
+    139.15538938229935,
+    139.95953501526503,
+    139.0541488843182
+   ],
+   "server_decode_tok_s": [
+    20.766051462853866,
+    20.77844565119403,
+    20.784685712639774,
+    20.772100615475708
+   ],
+   "client_decode_tok_s": [
+    20.76671193972104,
+    20.777423175813464,
+    20.779695369702683,
+    20.7701637252852
+   ],
+   "output_chunks": [
+    128,
+    128,
+    128,
+    128
+   ],
+   "usage_prompt_tokens": [
+    582,
+    578,
+    579,
+    580
+   ],
+   "steady_decode_per_agent_tok_s": [
+    20.789166585228788,
+    20.625472360148247,
+    20.625472360148247,
+    20.625472360148247
+   ],
+   "steady_window_s": 6.108951,
+   "effective_prefill_tok_s": 417.82714801198017
+  },
+  {
+   "stage": "B",
+   "label": "B-decode-short-128-c4-r2-o0",
+   "concurrency": 4,
+   "ok": true,
+   "wall_s": 11.585737994,
+   "peak_vram_mib": 18182,
+   "ttft_s": [
+    5.446226796018891,
+    5.450858546013478,
+    5.4533421710075345,
+    5.448499530000845
+   ],
+   "ttft_max_s": 5.4533421710075345,
+   "prompt_n": [
+    582,
+    578,
+    579,
+    580
+   ],
+   "cache_n": [
+    0,
+    0,
+    0,
+    0
+   ],
+   "server_prompt_tok_s": [
+    140.05504500170738,
+    140.1836405691456,
+    141.03118396775037,
+    140.05155829090737
+   ],
+   "server_decode_tok_s": [
+    20.704203768491137,
+    20.711800997101975,
+    20.716223461824484,
+    20.70805571086597
+   ],
+   "client_decode_tok_s": [
+    20.705136799599355,
+    20.712658105036223,
+    20.713198832454044,
+    20.70727703366672
+   ],
+   "output_chunks": [
+    128,
+    128,
+    128,
+    128
+   ],
+   "usage_prompt_tokens": [
+    582,
+    578,
+    579,
+    580
+   ],
+   "steady_decode_per_agent_tok_s": [
+    20.729184145014194,
+    20.565962222612505,
+    20.565962222612505,
+    20.565962222612505
+   ],
+   "steady_window_s": 6.126627999999999,
+   "effective_prefill_tok_s": 425.2438096272166
+  },
+  {
+   "stage": "B",
+   "label": "B-decode-short-512-c4-r0-o0",
+   "concurrency": 4,
+   "ok": true,
+   "wall_s": 30.243051769,
+   "peak_vram_mib": 18182,
+   "ttft_s": [
+    5.4473475420090836,
+    5.449522516981233,
+    5.45136461299262,
+    5.448854838003172
+   ],
+   "ttft_max_s": 5.45136461299262,
+   "prompt_n": [
+    582,
+    578,
+    579,
+    580
+   ],
+   "cache_n": [
+    0,
+    0,
+    0,
+    0
+   ],
+   "server_prompt_tok_s": [
+    140.07678711023996,
+    140.23397723696849,
+    141.1014343850305,
+    140.1018298748311
+   ],
+   "server_decode_tok_s": [
+    20.617802152780982,
+    20.61794856576345,
+    20.6180825021879,
+    20.617836260164975
+   ],
+   "client_decode_tok_s": [
+    20.61778191968276,
+    20.616841181195735,
+    20.617403215400667,
+    20.615415852778238
+   ],
+   "output_chunks": [
+    512,
+    512,
+    512,
+    512
+   ],
+   "usage_prompt_tokens": [
+    582,
+    578,
+    579,
+    580
+   ],
+   "steady_decode_per_agent_tok_s": [
+    20.6211244089788,
+    20.5807699580806,
+    20.5807699580806,
+    20.5807699580806
+   ],
+   "steady_window_s": 24.780414,
+   "effective_prefill_tok_s": 425.39807270879743
+  },
+  {
+   "stage": "B",
+   "label": "B-decode-short-512-c4-r1-o0",
+   "concurrency": 4,
+   "ok": true,
+   "wall_s": 30.698304371,
+   "peak_vram_mib": 18182,
+   "ttft_s": [
+    5.855991151998751,
+    5.857302224001614,
+    5.860116807976738,
+    5.857283865014324
+   ],
+   "ttft_max_s": 5.860116807976738,
+   "prompt_n": [
+    582,
+    578,
+    579,
+    580
+   ],
+   "cache_n": [
+    0,
+    0,
+    0,
+    0
+   ],
+   "server_prompt_tok_s": [
+    138.27551896085234,
+    138.46029279800464,
+    139.26909940999454,
+    138.37521728487783
+   ],
+   "server_decode_tok_s": [
+    20.57944052676602,
+    20.57965850171065,
+    20.579733094957465,
+    20.579554072073545
+   ],
+   "client_decode_tok_s": [
+    20.57964423623436,
+    20.578204856092334,
+    20.5785802388232,
+    20.577656543907253
+   ],
+   "output_chunks": [
+    512,
+    512,
+    512,
+    512
+   ],
+   "usage_prompt_tokens": [
+    582,
+    578,
+    579,
+    580
+   ],
+   "steady_decode_per_agent_tok_s": [
+    20.583064649150383,
+    20.542784679191186,
+    20.542784679191186,
+    20.542784679191186
+   ],
+   "steady_window_s": 24.826235,
+   "effective_prefill_tok_s": 395.72590035123505
+  },
+  {
+   "stage": "B",
+   "label": "B-decode-short-512-c4-r2-o0",
+   "concurrency": 4,
+   "ok": true,
+   "wall_s": 30.413152832,
+   "peak_vram_mib": 18182,
+   "ttft_s": [
+    5.593440676020691,
+    5.595643194013974,
+    5.595873946993379,
+    5.593561219982803
+   ],
+   "ttft_max_s": 5.595873946993379,
+   "prompt_n": [
+    582,
+    578,
+    579,
+    580
+   ],
+   "cache_n": [
+    0,
+    0,
+    0,
+    0
+   ],
+   "server_prompt_tok_s": [
+    139.63749434672084,
+    140.0283012217106,
+    140.990934940354,
+    139.80936751688438
+   ],
+   "server_decode_tok_s": [
+    20.597901867887074,
+    20.598145973376877,
+    20.59832698050294,
+    20.5980280713635
+   ],
+   "client_decode_tok_s": [
+    20.59790927233766,
+    20.59669000135421,
+    20.593394573356317,
+    20.59817627192037
+   ],
+   "output_chunks": [
+    512,
+    512,
+    512,
+    512
+   ],
+   "usage_prompt_tokens": [
+    582,
+    578,
+    579,
+    580
+   ],
+   "steady_decode_per_agent_tok_s": [
+    20.559783233770904,
+    20.559783233770904,
+    20.559783233770904,
+    20.600096534229277
+   ],
+   "steady_window_s": 24.805709,
+   "effective_prefill_tok_s": 414.4124799748181
+  },
+  {
+   "stage": "B",
+   "label": "B-prefill-2048-c4-warmup0",
+   "concurrency": 4,
+   "ok": true,
+   "wall_s": 14.98694627,
+   "peak_vram_mib": 18184,
+   "ttft_s": [
+    13.473138047003886,
+    13.235059711994836,
+    12.219424687995343,
+    9.949397221993422
+   ],
+   "ttft_max_s": 13.473138047003886,
+   "prompt_n": [
+    2048,
+    2048,
+    2048,
+    2048
+   ],
+   "cache_n": [
+    0,
+    0,
+    0,
+    0
+   ],
+   "server_prompt_tok_s": [
+    331.24713413810645,
+    233.7247462009458,
+    198.4916572444512,
+    253.9051555144282
+   ],
+   "server_decode_tok_s": [
+    20.4997847522601,
+    18.09873384760983,
+    11.524412050520048,
+    6.310956716608729
+   ],
+   "client_decode_tok_s": [
+    20.50017889190563,
+    18.09636943918084,
+    11.52392151075675,
+    6.311202896445785
+   ],
+   "output_chunks": [
+    32,
+    32,
+    32,
+    32
+   ],
+   "usage_prompt_tokens": [
+    null,
+    null,
+    null,
+    null
+   ],
+   "steady_decode_per_agent_tok_s": [
+    19.45020746887968,
+    19.45020746887968,
+    19.45020746887968,
+    20.170585523282632
+   ],
+   "steady_window_s": 1.3881599999999992,
+   "effective_prefill_tok_s": 608.0246466280149
+  },
+  {
+   "stage": "B",
+   "label": "B-prefill-2048-c4-measured0",
+   "concurrency": 4,
+   "ok": true,
+   "wall_s": 15.505366776,
+   "peak_vram_mib": 18184,
+   "ttft_s": [
+    13.754062405991135,
+    12.704562076978618,
+    10.410394923004787,
+    13.987962204002542
+   ],
+   "ttft_max_s": 13.987962204002542,
+   "prompt_n": [
+    2048,
+    2048,
+    2048,
+    2048
+   ],
+   "cache_n": [
+    0,
+    0,
+    0,
+    0
+   ],
+   "server_prompt_tok_s": [
+    231.55960709490495,
+    197.5941751398355,
+    253.21013077907614,
+    327.8350528666038
+   ],
+   "server_decode_tok_s": [
+    18.094803931125337,
+    11.399305157192742,
+    6.2390175680671796,
+    20.469017830495403
+   ],
+   "client_decode_tok_s": [
+    18.09100522966606,
+    11.399811177903869,
+    6.239070134051788,
+    20.467684883133895
+   ],
+   "output_chunks": [
+    32,
+    32,
+    32,
+    32
+   ],
+   "usage_prompt_tokens": [
+    null,
+    null,
+    null,
+    null
+   ],
+   "steady_decode_per_agent_tok_s": [
+    19.408793765032815,
+    20.12763797855255,
+    20.12763797855255,
+    19.408793765032815
+   ],
+   "steady_window_s": 1.391122000000001,
+   "effective_prefill_tok_s": 585.6464208672172
+  },
+  {
+   "stage": "B",
+   "label": "B-prefill-2048-c4-measured1",
+   "concurrency": 4,
+   "ok": true,
+   "wall_s": 15.469826427,
+   "peak_vram_mib": 18184,
+   "ttft_s": [
+    12.629431456996826,
+    13.953602178982692,
+    10.331803367007524,
+    13.697437370021362
+   ],
+   "ttft_max_s": 13.953602178982692,
+   "prompt_n": [
+    2048,
+    2048,
+    2048,
+    2048
+   ],
+   "cache_n": [
+    0,
+    0,
+    0,
+    0
+   ],
+   "server_prompt_tok_s": [
+    197.97571762089257,
+    325.1651983690298,
+    253.80742114062147,
+    231.328184097475
+   ],
+   "server_decode_tok_s": [
+    11.213450932289929,
+    20.503337083459826,
+    6.181444539780487,
+    17.87744034269323
+   ],
+   "client_decode_tok_s": [
+    11.213122854023204,
+    20.50182168725582,
+    6.18162948787123,
+    17.875133582067793
+   ],
+   "output_chunks": [
+    32,
+    32,
+    32,
+    32
+   ],
+   "usage_prompt_tokens": [
+    null,
+    null,
+    null,
+    null
+   ],
+   "steady_decode_per_agent_tok_s": [
+    19.38179260046229,
+    19.38179260046229,
+    20.09963677084978,
+    19.38179260046229
+   ],
+   "steady_window_s": 1.3930600000000002,
+   "effective_prefill_tok_s": 587.0885449449763
+  },
+  {
+   "stage": "B",
+   "label": "B-prefill-2048-c4-measured2",
+   "concurrency": 4,
+   "ok": true,
+   "wall_s": 15.59374135,
+   "peak_vram_mib": 18184,
+   "ttft_s": [
+    12.82991527399281,
+    13.847587291995296,
+    10.54155777199776,
+    14.077581127989106
+   ],
+   "ttft_max_s": 14.077581127989106,
+   "prompt_n": [
+    2048,
+    2048,
+    2048,
+    2048
+   ],
+   "cache_n": [
+    0,
+    0,
+    0,
+    0
+   ],
+   "server_prompt_tok_s": [
+    198.38700131169844,
+    233.00534342234334,
+    254.21793229461474,
+    330.21946695354484
+   ],
+   "server_decode_tok_s": [
+    11.53512408072503,
+    18.145537748864584,
+    6.2901070413893105,
+    20.509074934867147
+   ],
+   "client_decode_tok_s": [
+    11.534159246930555,
+    18.143675960880962,
+    6.290183029658593,
+    20.50767768259681
+   ],
+   "output_chunks": [
+    32,
+    32,
+    32,
+    32
+   ],
+   "usage_prompt_tokens": [
+    null,
+    null,
+    null,
+    null
+   ],
+   "steady_decode_per_agent_tok_s": [
+    20.110738344211086,
+    20.110738344211086,
+    20.110738344211086,
+    19.39249768906069
+   ],
+   "steady_window_s": 1.3922910000000002,
+   "effective_prefill_tok_s": 581.9181523814934
+  },
+  {
+   "stage": "C",
+   "label": "C-warmup-4x2048",
+   "concurrency": 4,
+   "ok": true,
+   "wall_s": 13.086562058,
+   "peak_vram_mib": 24356,
+   "ttft_s": [
+    11.575545508996584,
+    11.336150313989492,
+    10.321864961995743,
+    8.058950020989869
+   ],
+   "ttft_max_s": 11.575545508996584,
+   "prompt_n": [
+    2048,
+    2048,
+    2048,
+    2048
+   ],
+   "cache_n": [
+    0,
+    0,
+    0,
+    0
+   ],
+   "server_prompt_tok_s": [
+    333.3236222447295,
+    235.47659577648352,
+    198.54007126115016,
+    254.29905718127873
+   ],
+   "server_decode_tok_s": [
+    20.54001692232362,
+    18.11798549041588,
+    11.529538305217375,
+    6.319308545335942
+   ],
+   "client_decode_tok_s": [
+    20.54027147648125,
+    18.118913787022226,
+    11.529308126040904,
+    6.319615347378067
+   ],
+   "output_chunks": [
+    32,
+    32,
+    32,
+    32
+   ],
+   "usage_prompt_tokens": [
+    null,
+    null,
+    null,
+    null
+   ],
+   "steady_decode_per_agent_tok_s": [
+    19.44172020340359,
+    19.44172020340359,
+    19.44172020340359,
+    20.16178391464076
+   ],
+   "steady_window_s": 1.3887660000000004,
+   "effective_prefill_tok_s": 707.6988288485521
+  },
+  {
+   "stage": "C",
+   "label": "C-cold-4x8192-r0",
+   "concurrency": 4,
+   "ok": true,
+   "wall_s": 59.556938292,
+   "peak_vram_mib": 24356,
+   "ttft_s": [
+    17.80852527898969,
+    45.960872440977255,
+    28.87142451098771,
+    39.940071488992544
+   ],
+   "ttft_max_s": 45.960872440977255,
+   "prompt_n": [
+    8192,
+    8192,
+    8192,
+    8192
+   ],
+   "cache_n": [
+    0,
+    0,
+    0,
+    0
+   ],
+   "server_prompt_tok_s": [
+    523.7349693913608,
+    568.5840251903824,
+    425.09732689439574,
+    421.57040740415965
+   ],
+   "server_decode_tok_s": [
+    6.180386579545029,
+    18.771508560139164,
+    8.391068270521197,
+    13.094712411615186
+   ],
+   "client_decode_tok_s": [
+    6.18039518845301,
+    18.771317132814474,
+    8.391067102820845,
+    13.094617468882502
+   ],
+   "output_chunks": [
+    256,
+    256,
+    256,
+    256
+   ],
+   "usage_prompt_tokens": [
+    null,
+    null,
+    null,
+    null
+   ],
+   "steady_decode_per_agent_tok_s": [
+    18.53949801905846,
+    18.463203788527355,
+    18.53949801905846,
+    18.53949801905846
+   ],
+   "steady_window_s": 13.107150999999995,
+   "effective_prefill_tok_s": 712.9542643491052
+  },
+  {
+   "stage": "C",
+   "label": "C-cold-4x8192-r1",
+   "concurrency": 4,
+   "ok": true,
+   "wall_s": 61.373450964,
+   "peak_vram_mib": 24356,
+   "ttft_s": [
+    41.82444496001699,
+    19.661404607002623,
+    47.83845753900823,
+    30.719709332013736
+   ],
+   "ttft_max_s": 47.83845753900823,
+   "prompt_n": [
+    8192,
+    8192,
+    8192,
+    8192
+   ],
+   "cache_n": [
+    0,
+    0,
+    0,
+    0
+   ],
+   "server_prompt_tok_s": [
+    421.06518389220076,
+    520.5769278551677,
+    568.1377634208329,
+    424.0609446806493
+   ],
+   "server_decode_tok_s": [
+    13.138207086068807,
+    6.185969154574512,
+    18.851709129217376,
+    8.401587722163514
+   ],
+   "client_decode_tok_s": [
+    13.138154107801599,
+    6.185985727940363,
+    18.851614269281946,
+    8.401570407707402
+   ],
+   "output_chunks": [
+    256,
+    256,
+    256,
+    256
+   ],
+   "usage_prompt_tokens": [
+    null,
+    null,
+    null,
+    null
+   ],
+   "steady_decode_per_agent_tok_s": [
+    18.627603993390345,
+    18.627603993390345,
+    18.550947186833184,
+    18.627603993390345
+   ],
+   "steady_window_s": 13.045155999999999,
+   "effective_prefill_tok_s": 684.971917693635
+  },
+  {
+   "stage": "C",
+   "label": "C-cold-4x22528-r0",
+   "concurrency": 4,
+   "ok": true,
+   "wall_s": 152.436806266,
+   "peak_vram_mib": 24356,
+   "ttft_s": [
+    136.60415747901425,
+    41.208625733008375,
+    108.10302620698349,
+    74.55155061100959
+   ],
+   "ttft_max_s": 136.60415747901425,
+   "prompt_n": [
+    22528,
+    22528,
+    22528,
+    22528
+   ],
+   "cache_n": [
+    0,
+    0,
+    0,
+    0
+   ],
+   "server_prompt_tok_s": [
+    596.2263961187059,
+    598.862612946996,
+    527.2822452823945,
+    531.1064457504636
+   ],
+   "server_decode_tok_s": [
+    16.1396695355193,
+    2.3236609684971534,
+    5.806480788541039,
+    3.3118010419549475
+   ],
+   "client_decode_tok_s": [
+    16.13956985161713,
+    2.3236613947957485,
+    5.806493785984207,
+    3.3117934210875157
+   ],
+   "output_chunks": [
+    256,
+    256,
+    256,
+    256
+   ],
+   "usage_prompt_tokens": [
+    null,
+    null,
+    null,
+    null
+   ],
+   "steady_decode_per_agent_tok_s": [
+    15.40598857963127,
+    15.475698935195211,
+    15.40598857963127,
+    15.40598857963127
+   ],
+   "steady_window_s": 14.345071000000019,
+   "effective_prefill_tok_s": 659.6578146887177
+  },
+  {
+   "stage": "C",
+   "label": "C-cold-4x22528-r1",
+   "concurrency": 4,
+   "ok": true,
+   "wall_s": 156.323010896,
+   "peak_vram_mib": 24356,
+   "ttft_s": [
+    78.4636750970094,
+    45.089429018000374,
+    111.96181630002684,
+    140.45997192899813
+   ],
+   "ttft_max_s": 140.45997192899813,
+   "prompt_n": [
+    22528,
+    22528,
+    22528,
+    22528
+   ],
+   "cache_n": [
+    0,
+    0,
+    0,
+    0
+   ],
+   "server_prompt_tok_s": [
+    530.9634939264569,
+    599.4015456620361,
+    527.5721060487379,
+    596.0885446562215
+   ],
+   "server_decode_tok_s": [
+    3.3119436754493656,
+    2.323476810608029,
+    5.801791948286786,
+    16.10960495079116
+   ],
+   "client_decode_tok_s": [
+    3.3119424861118807,
+    2.3234771484512358,
+    5.801805069161411,
+    16.109639116844146
+   ],
+   "output_chunks": [
+    256,
+    256,
+    256,
+    256
+   ],
+   "usage_prompt_tokens": [
+    null,
+    null,
+    null,
+    null
+   ],
+   "steady_decode_per_agent_tok_s": [
+    15.439438766664251,
+    15.508985788135712,
+    15.439438766664251,
+    15.439438766664251
+   ],
+   "steady_window_s": 14.378760999999997,
+   "effective_prefill_tok_s": 641.5493237144544
+  },
+  {
+   "stage": "C",
+   "label": "C-cold-4x30720-r0",
+   "concurrency": 4,
+   "ok": true,
+   "wall_s": 217.55299395,
+   "peak_vram_mib": 24356,
+   "ttft_s": [
+    156.6767304049863,
+    107.92782934498973,
+    200.32958743697964,
+    59.76243171200622
+   ],
+   "ttft_max_s": 200.32958743697964,
+   "prompt_n": [
+    30720,
+    30720,
+    30720,
+    30720
+   ],
+   "cache_n": [
+    0,
+    0,
+    0,
+    0
+   ],
+   "server_prompt_tok_s": [
+    526.1096739666497,
+    532.6348326847829,
+    571.7972934667524,
+    589.0888999965215
+   ],
+   "server_decode_tok_s": [
+    4.228432948221479,
+    2.3531561794924043,
+    14.823091633039079,
+    1.6388014086699894
+   ],
+   "client_decode_tok_s": [
+    4.22844487804534,
+    2.3531555732725065,
+    14.823283896658733,
+    1.6388035933761491
+   ],
+   "output_chunks": [
+    256,
+    256,
+    256,
+    256
+   ],
+   "usage_prompt_tokens": [
+    null,
+    null,
+    null,
+    null
+   ],
+   "steady_decode_per_agent_tok_s": [
+    13.901671812391545,
+    13.901671812391545,
+    13.901671812391545,
+    13.968186988527389
+   ],
+   "steady_window_s": 15.034163000000007,
+   "effective_prefill_tok_s": 613.3891731727148
+  },
+  {
+   "stage": "C",
+   "label": "C-cold-4x30720-r1",
+   "concurrency": 4,
+   "ok": true,
+   "wall_s": 219.467892522,
+   "peak_vram_mib": 24356,
+   "ttft_s": [
+    61.74363621001248,
+    158.60266538499855,
+    202.2650207330007,
+    109.87187560400344
+   ],
+   "ttft_max_s": 202.2650207330007,
+   "prompt_n": [
+    30720,
+    30720,
+    30720,
+    30720
+   ],
+   "cache_n": [
+    0,
+    0,
+    0,
+    0
+   ],
+   "server_prompt_tok_s": [
+    589.9119865526183,
+    526.1863433781427,
+    571.7232705273361,
+    532.8788228526402
+   ],
+   "server_decode_tok_s": [
+    1.6392818315296047,
+    4.230354515652943,
+    14.845303208040914,
+    2.354090298361836
+   ],
+   "client_decode_tok_s": [
+    1.6392826834501881,
+    4.230347822105255,
+    14.845323880860642,
+    2.3540878937268697
+   ],
+   "output_chunks": [
+    256,
+    256,
+    256,
+    256
+   ],
+   "usage_prompt_tokens": [
+    null,
+    null,
+    null,
+    null
+   ],
+   "steady_decode_per_agent_tok_s": [
+    13.967912910462086,
+    13.967912910462086,
+    13.901399039459886,
+    13.967912910462086
+   ],
+   "steady_window_s": 15.034458,
+   "effective_prefill_tok_s": 607.519775563207
+  },
+  {
+   "stage": "C",
+   "label": "C-shared-prefix-4xlong-256-r0",
+   "concurrency": 4,
+   "ok": true,
+   "wall_s": 203.106543476,
+   "peak_vram_mib": 24356,
+   "ttft_s": [
+    102.18679723699461,
+    146.7540206789854,
+    186.2614912269928,
+    57.81384061498102
+   ],
+   "ttft_max_s": 186.2614912269928,
+   "prompt_n": [
+    28654,
+    28669,
+    28670,
+    28671
+   ],
+   "cache_n": [
+    0,
+    0,
+    0,
+    0
+   ],
+   "server_prompt_tok_s": [
+    532.4878742583796,
+    529.5269796018612,
+    584.2393577499738,
+    592.1182903276731
+   ],
+   "server_decode_tok_s": [
+    2.5558381221136757,
+    4.5662918129073855,
+    15.142614029673465,
+    1.7796394962637587
+   ],
+   "client_decode_tok_s": [
+    2.555841786821088,
+    4.566303188679003,
+    15.142790470382117,
+    1.7796429527373177
+   ],
+   "output_chunks": [
+    256,
+    256,
+    256,
+    256
+   ],
+   "usage_prompt_tokens": [
+    28654,
+    28669,
+    28670,
+    28671
+   ],
+   "steady_decode_per_agent_tok_s": [
+    14.286178297704819,
+    14.286178297704819,
+    14.286178297704819,
+    14.353565931184558
+   ],
+   "steady_window_s": 14.839517999999998,
+   "effective_prefill_tok_s": 615.6076559070468
+  },
+  {
+   "stage": "C",
+   "label": "C-shared-prefix-4xlong-256-r1",
+   "concurrency": 4,
+   "ok": true,
+   "wall_s": 25.458333094,
+   "peak_vram_mib": 24356,
+   "ttft_s": [
+    7.728111693984829,
+    7.7313522019831,
+    7.736507016001269,
+    7.729288267000811
+   ],
+   "ttft_max_s": 7.736507016001269,
+   "prompt_n": [
+    4,
+    4,
+    4,
+    4
+   ],
+   "cache_n": [
+    28650,
+    28665,
+    28666,
+    28667
+   ],
+   "server_prompt_tok_s": [
+    5.415614570711003,
+    7.28971894488608,
+    13.223665071011082,
+    4.307518018886313
+   ],
+   "server_decode_tok_s": [
+    14.39118758168057,
+    14.391560382641678,
+    14.39181704986714,
+    14.390968296019622
+   ],
+   "client_decode_tok_s": [
+    14.39072775302159,
+    14.390834238612875,
+    14.391310283040859,
+    14.391136738492984
+   ],
+   "output_chunks": [
+    256,
+    256,
+    256,
+    256
+   ],
+   "usage_prompt_tokens": [
+    28654,
+    28669,
+    28670,
+    28671
+   ],
+   "steady_decode_per_agent_tok_s": [
+    14.397548961264834,
+    14.341087984946148,
+    14.341087984946148,
+    14.341087984946148
+   ],
+   "steady_window_s": 17.711348,
+   "effective_prefill_tok_s": 2.068116782794549
+  },
+  {
+   "stage": "C",
+   "label": "C-shared-prefix-4xlong-256-r2",
+   "concurrency": 4,
+   "ok": true,
+   "wall_s": 25.268154503,
+   "peak_vram_mib": 24356,
+   "ttft_s": [
+    7.58906948598451,
+    7.5884238189901225,
+    7.592498995014466,
+    7.585137592017418
+   ],
+   "ttft_max_s": 7.592498995014466,
+   "prompt_n": [
+    4,
+    4,
+    4,
+    4
+   ],
+   "cache_n": [
+    28650,
+    28665,
+    28666,
+    28667
+   ],
+   "server_prompt_tok_s": [
+    5.513340215819703,
+    7.399391400057345,
+    13.40981397235567,
+    4.375879278242472
+   ],
+   "server_decode_tok_s": [
+    14.430292885712817,
+    14.429840502728853,
+    14.429406927609193,
+    14.430889846018443
+   ],
+   "client_decode_tok_s": [
+    14.429736887322651,
+    14.429118307580424,
+    14.428650239785684,
+    14.43106569823248
+   ],
+   "output_chunks": [
+    256,
+    256,
+    256,
+    256
+   ],
+   "usage_prompt_tokens": [
+    28654,
+    28669,
+    28670,
+    28671
+   ],
+   "steady_decode_per_agent_tok_s": [
+    14.380464399546822,
+    14.380464399546822,
+    14.380464399546822,
+    14.437080401119841
+   ],
+   "steady_window_s": 17.662851,
+   "effective_prefill_tok_s": 2.1073430514124833
+  },
+  {
+   "stage": "D",
+   "label": "D-warmup-4x2048",
+   "concurrency": 4,
+   "ok": true,
+   "wall_s": 13.203484382,
+   "peak_vram_mib": 20988,
+   "ttft_s": [
+    8.140067528001964,
+    11.671251981984824,
+    10.423498947988264,
+    11.438165889005177
+   ],
+   "ttft_max_s": 11.671251981984824,
+   "prompt_n": [
+    2048,
+    2048,
+    2048,
+    2048
+   ],
+   "cache_n": [
+    0,
+    0,
+    0,
+    0
+   ],
+   "server_prompt_tok_s": [
+    251.83425223733462,
+    330.73450513688175,
+    196.5949146424814,
+    233.40066015462108
+   ],
+   "server_decode_tok_s": [
+    6.274593623919884,
+    20.29705725407005,
+    11.47380677961334,
+    17.945775969563964
+   ],
+   "client_decode_tok_s": [
+    6.274896306400515,
+    20.2969914982797,
+    11.474085574895417,
+    17.945834094542658
+   ],
+   "output_chunks": [
+    32,
+    32,
+    32,
+    32
+   ],
+   "usage_prompt_tokens": [
+    null,
+    null,
+    null,
+    null
+   ],
+   "steady_decode_per_agent_tok_s": [
+    19.870331891314983,
+    19.870331891314983,
+    19.870331891314983,
+    19.160677180910877
+   ],
+   "steady_window_s": 1.4091359999999984,
+   "effective_prefill_tok_s": 701.8955646442021
+  },
+  {
+   "stage": "D",
+   "label": "D-cold-4x8192-r0",
+   "concurrency": 4,
+   "ok": true,
+   "wall_s": 60.100913742,
+   "peak_vram_mib": 20988,
+   "ttft_s": [
+    28.97103052100283,
+    17.862933961994713,
+    40.123214885010384,
+    46.191342749021715
+   ],
+   "ttft_max_s": 46.191342749021715,
+   "prompt_n": [
+    8192,
+    8192,
+    8192,
+    8192
+   ],
+   "cache_n": [
+    0,
+    0,
+    0,
+    0
+   ],
+   "server_prompt_tok_s": [
+    422.42836804504725,
+    519.1927996983713,
+    418.9321321763606,
+    564.3809742433664
+   ],
+   "server_decode_tok_s": [
+    8.271926980748598,
+    6.108602618103962,
+    12.861051319831347,
+    18.347104334082495
+   ],
+   "client_decode_tok_s": [
+    8.271940381829333,
+    6.108597123289363,
+    12.861025271911211,
+    18.34699308113096
+   ],
+   "output_chunks": [
+    256,
+    256,
+    256,
+    256
+   ],
+   "usage_prompt_tokens": [
+    null,
+    null,
+    null,
+    null
+   ],
+   "steady_decode_per_agent_tok_s": [
+    18.11265129933676,
+    18.187188959004814,
+    18.11265129933676,
+    18.11265129933676
+   ],
+   "steady_window_s": 13.416036999999996,
+   "effective_prefill_tok_s": 709.3970006034084
+  },
+  {
+   "stage": "D",
+   "label": "D-cold-4x22528-r0",
+   "concurrency": 4,
+   "ok": true,
+   "wall_s": 153.210605108,
+   "peak_vram_mib": 20988,
+   "ttft_s": [
+    74.1183405329939,
+    40.526057814015076,
+    107.9040695890144,
+    136.61716217698995
+   ],
+   "ttft_max_s": 136.61716217698995,
+   "prompt_n": [
+    22528,
+    22528,
+    22528,
+    22528
+   ],
+   "cache_n": [
+    0,
+    0,
+    0,
+    0
+   ],
+   "server_prompt_tok_s": [
+    526.9233063221207,
+    594.4278353710367,
+    523.1729407746541,
+    591.2955096161244
+   ],
+   "server_decode_tok_s": [
+    3.2616395540640353,
+    2.2939476377574928,
+    5.681654745626636,
+    15.39858791929449
+   ],
+   "client_decode_tok_s": [
+    3.2616337244569826,
+    2.2939551241328857,
+    5.681656655662867,
+    15.398553256645048
+   ],
+   "output_chunks": [
+    256,
+    256,
+    256,
+    256
+   ],
+   "usage_prompt_tokens": [
+    null,
+    null,
+    null,
+    null
+   ],
+   "steady_decode_per_agent_tok_s": [
+    14.664296757060445,
+    14.730651041029045,
+    14.664296757060445,
+    14.664296757060445
+   ],
+   "steady_window_s": 15.070616999999999,
+   "effective_prefill_tok_s": 659.5950213287135
+  },
+  {
+   "stage": "D",
+   "label": "D-cold-4x30720-r0",
+   "concurrency": 4,
+   "ok": true,
+   "wall_s": 217.14396223,
+   "peak_vram_mib": 20988,
+   "ttft_s": [
+    105.92162186701898,
+    57.36721279198537,
+    155.0805664169893,
+    199.06144332999247
+   ],
+   "ttft_max_s": 199.06144332999247,
+   "prompt_n": [
+    30720,
+    30720,
+    30720,
+    30720
+   ],
+   "cache_n": [
+    0,
+    0,
+    0,
+    0
+   ],
+   "server_prompt_tok_s": [
+    527.7411009356221,
+    584.2137791878444,
+    521.4817373938156,
+    566.5551746820362
+   ],
+   "server_decode_tok_s": [
+    2.320078461232253,
+    1.6185191391506724,
+    4.147578318477413,
+    14.135026979331984
+   ],
+   "client_decode_tok_s": [
+    2.32008224439297,
+    1.6185196444568444,
+    4.147576935270316,
+    14.135133230081419
+   ],
+   "output_chunks": [
+    256,
+    256,
+    256,
+    256
+   ],
+   "usage_prompt_tokens": [
+    null,
+    null,
+    null,
+    null
+   ],
+   "steady_decode_per_agent_tok_s": [
+    13.18017590552854,
+    13.243238948138723,
+    13.243238948138723,
+    13.18017590552854
+   ],
+   "steady_window_s": 15.857147999999995,
+   "effective_prefill_tok_s": 617.2968403343519
+  },
+  {
+   "stage": "D",
+   "label": "D-shared-prefix-4xlong-256-r0",
+   "concurrency": 4,
+   "ok": true,
+   "wall_s": 201.962178612,
+   "peak_vram_mib": 20988,
+   "ttft_s": [
+    144.34491250800784,
+    184.14070212899242,
+    54.69621609800379,
+    99.42153960300493
+   ],
+   "ttft_max_s": 184.14070212899242,
+   "prompt_n": [
+    28654,
+    28669,
+    28670,
+    28671
+   ],
+   "cache_n": [
+    0,
+    0,
+    0,
+    0
+   ],
+   "server_prompt_tok_s": [
+    524.8491644789251,
+    578.9438822863245,
+    587.3916455001477,
+    528.1153889851388
+   ],
+   "server_decode_tok_s": [
+    4.466402016291508,
+    14.313495296613512,
+    1.7557480678612187,
+    2.5159671662930174
+   ],
+   "client_decode_tok_s": [
+    4.466401869219623,
+    14.3135422833003,
+    1.75574784194548,
+    2.515971141869183
+   ],
+   "output_chunks": [
+    256,
+    256,
+    256,
+    256
+   ],
+   "usage_prompt_tokens": [
+    28654,
+    28669,
+    28670,
+    28671
+   ],
+   "steady_decode_per_agent_tok_s": [
+    13.42386336128094,
+    13.42386336128094,
+    13.487183471475662,
+    13.487183471475662
+   ],
+   "steady_window_s": 15.792770999999988,
+   "effective_prefill_tok_s": 622.6977451170828
+  },
+  {
+   "stage": "D",
+   "label": "D-shared-prefix-4xlong-256-r1",
+   "concurrency": 4,
+   "ok": true,
+   "wall_s": 24.136684978,
+   "peak_vram_mib": 20988,
+   "ttft_s": [
+    5.25407196598826,
+    5.251983413996641,
+    5.253079738991801,
+    5.251061809976818
+   ],
+   "ttft_max_s": 5.25407196598826,
+   "prompt_n": [
+    4,
+    4,
+    4,
+    4
+   ],
+   "cache_n": [
+    28650,
+    28665,
+    28666,
+    28667
+   ],
+   "server_prompt_tok_s": [
+    7.526153383005945,
+    12.225947740186385,
+    4.370772643334026,
+    5.517804575915335
+   ],
+   "server_decode_tok_s": [
+    13.50919873127963,
+    13.508528887830103,
+    13.510263747368874,
+    13.509459959603006
+   ],
+   "client_decode_tok_s": [
+    13.50869183903566,
+    13.50821734667665,
+    13.510311477331426,
+    13.508841622732259
+   ],
+   "output_chunks": [
+    256,
+    256,
+    256,
+    256
+   ],
+   "usage_prompt_tokens": [
+    28654,
+    28669,
+    28670,
+    28671
+   ],
+   "steady_decode_per_agent_tok_s": [
+    13.45803741546339,
+    13.45803741546339,
+    13.511021814736868,
+    13.45803741546339
+   ],
+   "steady_window_s": 18.87348,
+   "effective_prefill_tok_s": 3.045257107929715
+  }
+ ]
+}
