@@ -7,13 +7,26 @@ import struct
 import threading
 
 
+_FUNCTION_QUERIES = {
+    "cuFuncGetAttribute": 2,
+    "cuOccupancyMaxActiveBlocksPerMultiprocessor": 1,
+    "cuOccupancyMaxActiveBlocksPerMultiprocessorWithFlags": 1,
+    "cuOccupancyMaxPotentialBlockSize": 2,
+    "cuOccupancyMaxPotentialBlockSizeWithFlags": 2,
+    "cuOccupancyAvailableDynamicSMemPerBlock": 1,
+    "cuOccupancyMaxPotentialClusterSize": 1,
+    "cuOccupancyMaxActiveClusters": 1,
+}
+_KERNEL_QUERIES = {"cuKernelGetAttribute": 2}
+
+
 _MATERIALIZERS = {
     "cuModuleLoad", "cuModuleLoadData", "cuModuleLoadDataEx", "cuModuleLoadFatBinary",
     "cuModuleGetFunction", "cuLibraryLoadData", "cuLibraryLoadFromFile", "cuLibraryGetModule",
     "cuLibraryGetKernel", "cuKernelGetFunction", "cuKernelSetAttribute", "cuFuncSetAttribute",
     "cuFuncLoad", "cuLaunchKernel", "cuLaunchKernel_ptsz", "cuLaunchKernelEx", "cuLaunchKernelEx_ptsz",
     "cuLaunchCooperativeKernel", "cuLaunchCooperativeKernel_ptsz",
-}
+} | _FUNCTION_QUERIES.keys() | _KERNEL_QUERIES.keys()
 
 
 class _Resource(C.Structure):
@@ -168,7 +181,7 @@ class ModuleImages:
         self._library = cupti_library(library)
         self._subscriber = C.c_void_p()
         self._callback = C.CFUNCTYPE(None, C.c_void_p, C.c_int, C.c_uint, C.c_void_p)(self._record)
-        self.images = []
+        self.images = {}
         self.modules = {}
         self.libraries = {}
         self.allocations = {}
@@ -197,6 +210,9 @@ class ModuleImages:
                 return
             resource = C.cast(data, C.POINTER(_Resource)).contents
             if callback == 2:
+                for context, module_id in tuple(self.images):
+                    if context == resource.context:
+                        self._drop_module_bindings(context, module_id)
                 for address, context in list(self.allocation_contexts.items()):
                     if context == resource.context:
                         self.allocations.pop(address, None)
@@ -209,7 +225,8 @@ class ModuleImages:
             if not module.image or not module.size:
                 raise RuntimeError("CUPTI returned a module without its cubin")
             image = ModuleImage(resource.context, module.id, C.string_at(module.image, module.size))
-            self.images.append(image)
+            with self._binding_lock:
+                self.images[(image.context, image.module_id)] = image
             pending = self._pending.get(threading.get_ident())
             if pending:
                 pending[-1][1].append(image)
@@ -224,6 +241,7 @@ class ModuleImages:
     def _drop_module_bindings(self, context, module_id):
         key = (context, module_id)
         with self._binding_lock:
+            self.images.pop(key, None)
             for handle in self._bindings.pop(key, ()):
                 for table in (self._functions, self._kernels):
                     image = table.get(handle)
@@ -241,9 +259,18 @@ class ModuleImages:
             entered, images = pending.pop()
             if entered != name:
                 raise RuntimeError("unbalanced CUDA driver callbacks")
-        if call.site != 1 or call.result[0] != 0:
+        if call.site != 1:
             return
         values = C.cast(call.params, C.POINTER(C.c_uint64))
+        # Occupancy probes can load a function before rejecting their launch
+        # configuration. The input handle still identifies the loaded image.
+        if len(images) == 1:
+            if name in _FUNCTION_QUERIES:
+                self._bind(self._functions, values[_FUNCTION_QUERIES[name]], images[0])
+            elif name in _KERNEL_QUERIES:
+                self._bind(self._kernels, values[_KERNEL_QUERIES[name]], images[0])
+        if call.result[0] != 0:
+            return
         if len(images) == 1:
             image, = images
             if name.startswith(("cuLaunchKernelEx",)):
@@ -319,7 +346,7 @@ class ModuleImages:
             return self.modules[module.value]
         name = C.c_char_p()
         cuda.call("cuFuncGetName", C.byref(name), C.c_void_p(function))
-        matches = {image.cubin for image in self.images if name.value + b"\0" in image.cubin}
+        matches = {image.cubin for image in tuple(self.images.values()) if name.value + b"\0" in image.cubin}
         if len(matches) != 1:
             raise ValueError(f"cannot uniquely associate captured kernel {name.value!r} with its loaded cubin")
         image, = matches
@@ -334,6 +361,7 @@ class ModuleImages:
             for callback in (2, 6, 7):
                 self._check("cuptiEnableCallback", C.c_uint(1), self._subscriber, C.c_int(3), C.c_uint(callback))
             for callback in (18, 19, 20, 22, 23, 678, 679, 680, 681, 682, 683, 687, 742,
+                             85, 686, 374, 384, 451, 452, 543, 675, 676,
                              307, 442, 477, 478, 481, 652, 653, 243, 245, 38, 39, 271, 294,
                              301, 302, 379, 551, 552, 598, 599, 600, 601, 611, 612):
                 self._check("cuptiEnableCallback", C.c_uint(1), self._subscriber, C.c_int(1), C.c_uint(callback))

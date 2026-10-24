@@ -395,8 +395,10 @@ the driver loads, from the driver-API load calls and from the resource
 callback that also covers modules loaded internally by CUDA libraries. Each
 kernel node's function maps to its image through `cuFuncGetModule`. Resource
 callbacks during lazy loading are associated with the driver call that
-materializes the module, including launches using context-independent
-`CUkernel` handles. A unique symbol-name match is a fallback. The exporter records
+materializes the module, including attribute and occupancy queries and launches
+using context-independent `CUkernel` handles. Occupancy queries retain their
+input-function association even when they reject the launch configuration.
+A unique symbol-name match is a fallback. The exporter records
 each function's parameter layout from `cuFuncGetParamInfo` and its dynamic
 shared-memory, carveout, and cluster attributes. ELF symbol enumeration and
 `cuModuleGetGlobal` capture initialized module globals and constants; native
