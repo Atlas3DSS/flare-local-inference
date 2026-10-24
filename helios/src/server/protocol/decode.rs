@@ -1054,4 +1054,44 @@ mod native_prompt_tests {
             );
         }
     }
+    /// The public benchmark tools' canonical request bodies, shared with
+    /// tests/test_public_tools_http_contract.py, must meet this validator's endpoint rules.
+    #[test]
+    fn public_tool_request_fixtures_match_endpoint_rules() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../tests/fixtures/http_requests");
+        let mut checked = 0;
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|extension| extension != "json") {
+                continue;
+            }
+            let fixture: Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            let protocol = match fixture["endpoint"].as_str() {
+                Some("/v1/completions") => Protocol::Completions,
+                Some("/v1/chat/completions") => Protocol::Chat,
+                endpoint => panic!("{}: unsupported endpoint {endpoint:?}", path.display()),
+            };
+            let error = decode(protocol, fixture["body"].clone(), false)
+                .err()
+                .map(|e| e.to_string());
+            match fixture["expect"]["status"].as_u64() {
+                Some(200) => assert_eq!(error, None, "{}", path.display()),
+                Some(400) => assert_eq!(
+                    error.as_deref(),
+                    fixture["expect"]["error"].as_str(),
+                    "{}",
+                    path.display()
+                ),
+                status => panic!("{}: unsupported expected status {status:?}", path.display()),
+            }
+            checked += 1;
+        }
+        assert!(
+            checked >= 4,
+            "public tool fixtures missing from {}",
+            dir.display()
+        );
+    }
 }

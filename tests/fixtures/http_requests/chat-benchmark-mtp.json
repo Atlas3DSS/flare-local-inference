@@ -1,0 +1,39 @@
+{
+  "tool": "tools/benchmark_mtp.py",
+  "endpoint": "/v1/chat/completions",
+  "description": "Short-prompt MTP decode request with token observation extensions; logprobs are added when the model card allows them.",
+  "expect": {
+    "status": 200
+  },
+  "body": {
+    "model": "contract-fixture-model",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Write a Python function that merges two sorted lists."
+      }
+    ],
+    "max_tokens": 128,
+    "stream": true,
+    "ignore_eos": true,
+    "seed": 7035,
+    "temperature": 0.7,
+    "top_p": 0.95,
+    "top_k": 20,
+    "min_p": 0.0,
+    "repetition_penalty": 1.0,
+    "presence_penalty": 0.0,
+    "frequency_penalty": 0.0,
+    "return_token_ids": true,
+    "return_token_timestamps": true,
+    "chat_template_kwargs": {
+      "enable_thinking": false
+    },
+    "stream_options": {
+      "include_usage": true,
+      "continuous_usage_stats": true
+    },
+    "logprobs": true,
+    "top_logprobs": 1
+  }
+}

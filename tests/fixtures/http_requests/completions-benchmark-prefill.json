@@ -1,0 +1,28 @@
+{
+  "tool": "tools/benchmark_prefill.py",
+  "endpoint": "/v1/completions",
+  "description": "Exact-length token-ID prefill request. Completions requests carry no token observation extensions.",
+  "expect": {
+    "status": 200
+  },
+  "body": {
+    "model": "contract-fixture-model",
+    "prompt": [
+      101,
+      102,
+      103,
+      104
+    ],
+    "max_tokens": 32,
+    "stream": true,
+    "ignore_eos": true,
+    "seed": 7035,
+    "temperature": 0.7,
+    "top_p": 0.95,
+    "top_k": 20,
+    "stream_options": {
+      "include_usage": true,
+      "continuous_usage_stats": true
+    }
+  }
+}
