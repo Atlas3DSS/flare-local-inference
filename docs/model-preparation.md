@@ -38,12 +38,15 @@ Unsigned rank staging is private to preparation and cannot load in Helios.
 Flare loads the package files without Python. Helios is a Rust library;
 `flare_heliopause` is a CPython extension imported by Ignition.
 
-Every recipe defaults to FP8 E4M3 KV storage, including learned draft-model
-caches. Qwen Flash retains BF16 selector keys; GLM and DeepSeek retain their
+On SM120/SM121, recipes default to FP8 E4M3 KV storage, including learned
+draft-model caches. This fork's SM70 Qwen3.8 dense path instead uses BF16 KV
+pages for target and MTP attention; it does not use the FP8 KV layout.
+Qwen Flash retains BF16 selector keys; GLM and DeepSeek retain their
 packed latent formats, including scale metadata and any BF16 rotary fields.
 Recurrent state, compressor accumulators, and hidden activations retain their
 model-specific precision. Cache writers and attention readers use matching
-scales, and memory planning includes FP8 pages and partial-page snapshots.
+scales, and memory planning includes the selected KV format and partial-page
+snapshots.
 Export a package to use these cache layouts; existing packages retain the
 layouts captured when they were prepared.
 
@@ -164,10 +167,12 @@ For concurrency 32 with seven draft tokens per request, use
 
 `qwen3.8-27b` prepares `nvidia/Qwen3.8-27B-NVFP4` for text generation on one GPU.
 It uses the canonical Qwen3.5 dense decoder with tensor-scaled FP8 attention
-projections and NVFP4 MLP and vocabulary weights. FP8 KV pages and Gated DeltaNet
-continuations reside in device memory; the recipe has no host-mapped tables,
-vision graphs, or learned draft model. Prepare on the same GPU architecture
-as the serving device:
+projections and NVFP4 MLP and vocabulary weights. KV pages (FP8 on SM120/SM121,
+BF16 on this fork's SM70 path) and Gated DeltaNet continuations reside in device
+memory; the recipe has no host-mapped tables, vision graphs, or learned draft
+model. Prepare on the same GPU architecture as the serving device. The CLI
+example below is for SM120/SM121; SM70 uses the explicit preparation and
+qualification harness in [the SM70 export guide](sm70/EXPORT.md):
 
 ```sh
 .venv/bin/ignition export qwen3.8-27b --gpus 0 --max-concurrency 4 \

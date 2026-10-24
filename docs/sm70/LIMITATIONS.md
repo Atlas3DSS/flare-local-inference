@@ -41,9 +41,11 @@ upstream. Read this before you rely on the port.
 - **GPU unit tests on the release tree.** The CUDA test groups last ran on the
   replay-commit branch before its rebase; on the release tree only the CPU suites
   were run (STATUS.md lines 46, 60, 61).
-- **Export gate and benchmark harnesses.** The fork's gate harness and
-  benchmark harness are not in this repository. Without them a package you
-  prepare is not gated byte for byte ([VALIDATE.md](VALIDATE.md#gate-2-preparation-with-every-export-gate)).
+- **Export gate and benchmark harnesses.** The helpers are now public under
+  `tools/`, with newly authored public inputs. Historical private traces remain
+  unpublished. The tools and inputs still require fresh GPU qualification;
+  their publication does not reproduce or validate the historical results
+  ([VALIDATE.md](VALIDATE.md#gate-2-preparation-with-every-export-gate)).
 - **Adaptive verification.** `--mtp-adaptive-verification` makes sampled outputs
   depend on which requests share a batch. Serve with fixed width when outputs must
   not depend on co-scheduled requests ([SERVE.md](SERVE.md#fixed-width-verification)).
@@ -84,18 +86,24 @@ These exist in the fork's history but are not part of this branch:
 
 ## Upstream divergence
 
-- **Base.** This branch forks upstream at `e7b8c01` (2026-10-20) and adds 56
-  commits that change 115 files.
-- **Distance.** On 2026-10-23, upstream `main` was `e19549a`, with 816 commits
-  not in this branch, 96 of them on its first-parent line. 42 files changed both
-  upstream and here, including the Helios scheduler and server, the
-  `qwen38_dense` recipe, `AGENTS.md` and the design documents. Recompute with:
+- **Base.** The fork uses upstream snapshot `e7b8c01` (2026-10-20), from a
+  separate lineage rooted in squash `d88e29bf`. Commit ancestry alone therefore
+  overstates the missing upstream content.
+- **Distance as of `e19549a` (2026-10-23).** There are 816 upstream commit SHAs
+  absent from the fork base's ancestry, including 96 on the first-parent line.
+  The history audit classifies 680 of those as content already represented in
+  the squashed base, and 136 as subsequent upstream development. The 680 are
+  ancestors of full-history merge `863ee3d5`; the 136 come after that merge.
+  The content classification used tree comparison and spot checks, not a
+  per-commit equivalence proof. These are not 816 missing fixes, nor a claim
+  that every change in the 136 should be ported. Reproduce the ancestry split
+  with the fixed revisions (after fetching the upstream history):
 
   ```sh
-  git remote add upstream https://github.com/NVIDIA/flare-local-inference.git
-  git fetch upstream
-  git rev-list --count e7b8c01..upstream/main
-  git rev-list --count --first-parent e7b8c01..upstream/main
+  git rev-list --count e19549a --not e7b8c01             # 816
+  git rev-list --count 863ee3d5 --not e7b8c01           # 680
+  git rev-list --count e19549a --not e7b8c01 863ee3d5   # 136
+  git rev-list --count --first-parent e19549a --not e7b8c01  # 96
   ```
 
 - **Hardware scope.** Upstream targets SM120/SM121 and asks contributors to

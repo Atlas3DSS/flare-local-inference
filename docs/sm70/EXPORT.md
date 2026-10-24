@@ -20,7 +20,7 @@ package yet, for two reasons:
 
 The fork prepared its packages by calling
 `ignition.recipes.qwen38_dense.bootstrap.prepare` with a `PreparationConfig`
-directly. The script below does the same.
+directly. The checked-in harness does the same, then runs the export gates.
 
 ## 1. Download the checkpoint
 
@@ -33,138 +33,87 @@ The recipe pins this revision; its stored weights are 21,921,428,072 bytes
 authentication, run `.venv/bin/hf auth login` and accept the model's terms on
 its Hugging Face page first.
 
-## 2. Write the preparation script
+## 2. Prepare public inputs and FP32 references
 
-Paste this block into a shell at the repository root. It writes
-`prepare_sm70.py`.
+The checked-in [tools/prepare_replay.py](../../tools/prepare_replay.py) is the
+release replay-commit preparation harness, with its numerical helpers in the
+same flat `tools/` directory. It retains the strict, invariance, commit-growth,
+consumer, component, full-vocabulary accuracy and token/tau gates. It replaces
+the earlier documentation-only export example, which omitted those gates.
+
+Use explicit paths. Create the following output directories once, outside the
+checkout; keep keys and generated model/reference data out of Git:
 
 ```sh
-cat > prepare_sm70.py <<'EOF'
-#!/usr/bin/env python3
-"""Prepare and export the SM70 qwen3.8-27b package (one Tesla V100 32 GB, TP1, MTP).
-
-The same PreparationConfig and export calls as the fork's release preparation,
-without its export gates (docs/sm70/VALIDATE.md). Run from the repository root
-with the repository's .venv, on one V100 selected with CUDA_VISIBLE_DEVICES,
-with CUDA_HOME pointing at CUDA 12.x.
-"""
-import argparse
-from dataclasses import replace
-import json
-import os
-from pathlib import Path
-from types import SimpleNamespace
-import time
-
-REPOSITORY = "nvidia/Qwen3.8-27B-NVFP4"
-REVISION = "482ca0f3832238542f8f5295dde86b5f22711d80"
-
-
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--checkpoint", type=Path, required=True, help=f"local {REPOSITORY} snapshot at {REVISION}")
-    parser.add_argument("--cutlass-include", type=Path, required=True, help="CUTLASS include directory")
-    parser.add_argument("--signing-dir", type=Path, required=True,
-                        help="development-signing-key.pem and development-publisher.json are created or reused here")
-    parser.add_argument("--kernel-cache", type=Path, required=True, help="writable SM70 kernel cache")
-    parser.add_argument("--output", type=Path, required=True, help="new .safetensors primary; payload blobs go beside it")
-    parser.add_argument("--report", type=Path, help="optional JSON report")
-    parser.add_argument("--context", type=int, default=32768, help="tokens per request; SM70 admits at most 32768")
-    parser.add_argument("--concurrency", type=int, default=4, help="requests; SM70 MTP admits at most 4")
-    parser.add_argument("--depth", type=int, choices=(2, 3, 4), default=4, help="MTP draft depth: widths 1..depth+1")
-    parser.add_argument("--chunk", type=int, default=128, help="prefill chunk tokens")
-    parser.add_argument("--compile-workers", type=int, default=max(1, (os.cpu_count() or 2) - 2))
-    parser.add_argument("--compiler-context-mib", type=int, default=400,
-                        help="device memory budgeted per compiler worker")
-    parser.add_argument("--pages", type=int, default=86, help="KV pages backed during preparation")
-    parser.add_argument("--device-budget-gib", type=int, default=30,
-                        help="preparation leaves the rest of the card, plus 256 MiB, free")
-    args = parser.parse_args()
-    if args.output.suffix != ".safetensors":
-        parser.error("--output must end in .safetensors")
-    if args.output.exists():
-        parser.error(f"{args.output} exists; choose a new name")
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-
-    import torch
-    from cuda.pathfinder import load_nvidia_dynamic_lib
-    from ignition.development import publisher
-    from ignition.preparation import compile_pool
-    from ignition.preparation.compilation import _OPTIONS
-    from ignition.preparation.model_card import model_license
-    from ignition.preparation.model_package import export_package
-    from ignition.preparation.module_images import ModuleImages
-    from ignition.preparation.package_storage import PackageStorage
-    from ignition.recipes.qwen38_dense.bootstrap import PreparationConfig, prepare
-
-    def progress(message):
-        print(time.strftime("%H:%M:%S"), message, flush=True)
-
-    started = time.monotonic()
-    torch.cuda.set_device(0)
-    if torch.cuda.get_device_capability() != (7, 0):
-        raise SystemExit("this script prepares SM70 packages; GPU 0 of this process is not sm_70")
-    _OPTIONS["compile_threads"] = args.compile_workers
-    compile_pool._DISCRETE_WORKER_DEVICE_BYTES = args.compiler_context_mib << 20
-    total = torch.cuda.get_device_properties(0).total_memory
-    headroom = max(0, total - (args.device_budget_gib << 30)) + (256 << 20)
-    config = PreparationConfig(context=args.context, max_active=args.concurrency, prefill_chunk_size=args.chunk,
-        compile_workers=args.compile_workers, snapshot_budget_bytes=172 << 20, headroom_bytes=headroom,
-        preparation_pages=args.pages, mtp=True, speculative_widths=tuple(range(1, args.depth + 2)),
-        retain_graphs=True, kernel_cache=args.kernel_cache, cutlass_include=args.cutlass_include)
-    recorder = ModuleImages(load_nvidia_dynamic_lib("cupti").abs_path)
-    with recorder:
-        storage = PackageStorage(device=0)
-        with storage:
-            prepared = prepare(args.checkpoint, config, progress=progress, package_storage=storage)
-    memory = prepared.memory_report
-    signer = replace(publisher(SimpleNamespace(path=args.signing_dir / "config.toml")),
-                     license=model_license(args.checkpoint, REPOSITORY, REVISION))
-    with prepared:
-        export_package(prepared, recorder, storage, args.output, options={}, publisher=signer, progress=progress)
-    result = {"package": str(args.output), "signer_fingerprint": signer.fingerprint.hex(),
-              "publisher_profile": str(args.signing_dir / "development-publisher.json"),
-              "memory": memory, "peak_allocated_bytes": torch.cuda.max_memory_allocated(),
-              "elapsed_seconds": time.monotonic() - started, "torch": torch.__version__}
-    text = json.dumps(result, indent=2, default=str)
-    if args.report:
-        args.report.write_text(text + "\n")
-    print(text)
-
-
-if __name__ == "__main__":
-    main()
-EOF
+mkdir -p /data/flare-run /data/flare-refs /data/flare-keys /data/flare-cache
+.venv/bin/python tools/generate_prompts.py --output /data/flare-run/prompts.jsonl
+.venv/bin/python tools/generate_prompts.py --output /data/flare-refs/prompts.jsonl \
+  --checkpoint /data/models/Qwen3.8-27B-NVFP4 --target-tokens 4096
 ```
 
-The quickstart in [README-SM70.md](../../README-SM70.md) extracts the same block
-with `sed -n '/^cat > prepare_sm70.py/,/^EOF$/p' docs/sm70/EXPORT.md | sh`.
+These are **new benchmark inputs**, labelled `public-generated-v1-new-baseline`.
+They contain deterministic, newly authored coding tasks and example modules.
+They are not the unpublished historical prompts or agent traces. Their results
+must establish a new baseline, not be presented as reproduction of the old scores.
+The four hardcoded strict-validator prompts remain unchanged.
 
-The values match the fork's release preparation: `--context 32768`,
-4 requests, draft depth 4 (verification widths 1 to 5), 128-token prefill
-chunks, 86 preparation pages, a 172 MiB snapshot budget, a 30 GiB device budget
-and 400 MiB per compiler worker. The fork ran 86 compiler workers on an
-88-thread host (STATUS.md line 61). The default here is the host's CPU count
-minus two.
+Accuracy references are generated locally from the pinned checkpoint; no binary
+reference download is required. The short reference streams FP32 layers using
+canonical Transformers arithmetic. The long-reference helper retains its original
+GPU-resident checkpoint implementation and PRO 6000 device check: use a separately
+allocated RTX PRO 6000 96 GB for that step. It is not a V100-memory-fit claim.
+Neither reference script imports Flare kernels. Use the pinned Transformers
+preparation environment, and allocate the hardware before running these commands.
+Set `THREADS` to the allocated CPU thread count, reserving one physical core.
+
+```sh
+CUDA_VISIBLE_DEVICES="$REFERENCE_GPU_UUID" .venv/bin/python tools/reference_model.py \
+  --root /data/flare-refs --checkpoint /data/models/Qwen3.8-27B-NVFP4 \
+  --device cuda:0 --threads "$THREADS"
+CUDA_VISIBLE_DEVICES="$REFERENCE_GPU_UUID" .venv/bin/python tools/john_reference.py long \
+  --root /data/flare-refs --out /data/flare-refs --calib-out /data/flare-refs \
+  --checkpoint /data/models/Qwen3.8-27B-NVFP4 --prompts /data/flare-refs/prompts.jsonl \
+  --threads "$THREADS" --count 6 --new-tokens 32 --positions 48
+```
+
+Retain both `.safetensors` files and their companion JSON files. Accuracy checks
+bind the model ID, revision, checkpoint config/index hashes and exact token
+contexts. They report FP64-reduced full-vocabulary KL and top-1 differences;
+`complete` means the measurement completed, not an invented numerical threshold.
+Reference generation is expensive GPU work and has not been rerun for this port.
 
 ## 3. Prepare and export
 
+Complete [Gate 1](VALIDATE.md#gate-1-unit-and-regression-tests) first. Use an
+exclusively allocated V100 and an explicit compiler budget. The shell helper
+turns on every release export gate; it does not allocate hardware for you.
+
 ```sh
 export CUDA_HOME=/usr/local/cuda-12.9 PATH=/usr/local/cuda-12.9/bin:$PATH
-CUDA_VISIBLE_DEVICES=0 .venv/bin/python prepare_sm70.py \
-  --checkpoint /data/models/Qwen3.8-27B-NVFP4 \
-  --cutlass-include /data/src/cutlass/include \
-  --signing-dir /data/flare/keys \
-  --kernel-cache /data/flare/kernel-cache \
-  --output /data/flare-runtime/qwen38-27b-sm70-c4-d4.safetensors \
-  --report /data/flare-runtime/qwen38-27b-sm70-c4-d4.prepare.json
+CUDA_VISIBLE_DEVICES="$V100_GPU_UUID" bash tools/prepare_replay.sh .venv/bin/python \
+  --root /data/flare-run --checkpoint /data/models/Qwen3.8-27B-NVFP4 \
+  --prompts /data/flare-run/prompts.jsonl --compile-workers "$THREADS" \
+  --cutlass-include /data/src/cutlass/include --kernel-cache /data/flare-cache \
+  --signing-dir /data/flare-keys \
+  --short-reference /data/flare-refs/reference.safetensors \
+  --long-reference /data/flare-refs/long-code-reference.safetensors \
+  --measure /data/flare-run/tau.json \
+  --output /data/flare-run/model.safetensors --report /data/flare-run/prepare.json
 ```
 
-Use a GPU with no other processes on it. The script prints a timestamped line
-per preparation phase. At the end it prints a JSON summary with the signer
-fingerprint and the memory report. A package prepared like the release package
-reports `state_rows` 5 (one null row and one per request), one speculative state
-column and 30.4 MiB of replay operands (STATUS.md line 62).
+The first successful run creates `tau.json` for the new public inputs. Preserve
+it. A subsequent preparation using that same file must match its prompt-file
+hash, per-run token IDs and complete tau summary exactly before export. Use a
+new package output path for the rebuild: existing packages are not overwritten.
+An initial baseline is not a prior-golden match; the latter is reported explicitly
+as `measurement.prior_measurement_identity: true` only after comparison.
+
+The report records the SHA-256 of the exported signed primary; native benchmarking
+re-hashes that exact file and still asks the server to verify weight blobs.
+It records every gate and fails export if any required gate is missing
+or failed. Raw per-check progress remains in `validation-attempts.jsonl`, including
+failed attempts. Review the report before [native qualification](BENCHMARK.md#the-client).
+The port has CPU-only validation so far; it does not assert a new GPU pass.
 
 ### Sizes and times
 
@@ -185,8 +134,8 @@ together, and never edit them; signature verification fails on any change. See
 ## 4. Check the package
 
 ```sh
-./flare/target/release/flare inspect /data/flare-runtime/qwen38-27b-sm70-c4-d4.safetensors --publisher-keys /data/flare/keys/development-publisher.json
-./flare/target/release/flare inspect /data/flare-runtime/qwen38-27b-sm70-c4-d4.safetensors --publisher-keys /data/flare/keys/development-publisher.json --graphs
+./flare/target/release/flare inspect /data/flare-run/model.safetensors --publisher-keys /data/flare-keys/development-publisher.json
+./flare/target/release/flare inspect /data/flare-run/model.safetensors --publisher-keys /data/flare-keys/development-publisher.json --graphs
 ```
 
 `inspect` verifies the signed index without a GPU. Check that it reports a
@@ -213,14 +162,14 @@ For a service with no terminal, accept the key once unattended. Compute the
 fingerprint from the profile, then pass it with the two explicit approval flags:
 
 ```sh
-FP=$(python3 -c "import hashlib, json, sys; print(hashlib.sha256(bytes(json.load(open(sys.argv[1]))[0]['public_key'])).hexdigest())" /data/flare/keys/development-publisher.json)
-./flare/target/release/flare run /data/flare-runtime/qwen38-27b-sm70-c4-d4.safetensors --publisher-keys /data/flare/keys/development-publisher.json --trust-store /data/flare/keys/trust.toml --dangerously-approve-key "$FP" --dangerously-accept-publisher local-development --gpus 0 --memory-limit 31G
+FP=$(python3 -c "import hashlib, json, sys; print(hashlib.sha256(bytes(json.load(open(sys.argv[1]))[0]['public_key'])).hexdigest())" /data/flare-keys/development-publisher.json)
+./flare/target/release/flare run /data/flare-run/model.safetensors --publisher-keys /data/flare-keys/development-publisher.json --trust-store /data/flare-keys/trust.toml --dangerously-approve-key "$FP" --dangerously-accept-publisher local-development --gpus 0 --memory-limit 31G
 ```
 
 Stop it once it is ready (Ctrl-C). The acceptance is now in
-`/data/flare/keys/trust.toml`, and the [serve command](SERVE.md) needs neither
-flag. The fingerprint printed by `prepare_sm70.py` must match `$FP`. To withdraw
-trust, run `flare trust revoke FINGERPRINT --trust-store /data/flare/keys/trust.toml`.
+`/data/flare-keys/trust.toml`, and the [serve command](SERVE.md) needs neither
+flag. The `fingerprint` in `/data/flare-run/prepare.json` must match `$FP`. To withdraw
+trust, run `flare trust revoke FINGERPRINT --trust-store /data/flare-keys/trust.toml`.
 
 Development keys are for your own packages. To publish packages for others,
 create a production key with `ignition keygen` ([signing](../signing.md)).
@@ -229,10 +178,9 @@ create a production key with `ignition keygen` ([signing](../signing.md)).
 
 The fork exported a package only after every gate below passed. They run on the
 retained production CUDA graphs inside the preparation process, after `prepare`
-and before `export_package`. They are part of the fork's preparation harness,
-which is **not in this repository**. `prepare_sm70.py` runs the same
-preparation and export without them. A package it produces has the same
-configuration as the release package but has not been through these gates.
+and before `export_package`. They now ship in `tools/`. The table's release
+results describe the historical package; the newly generated public inputs
+require fresh results and a fresh token/tau baseline.
 
 | Gate | What it checks | Pass criterion | Release package (`0e4c81f`, STATUS.md line 62) |
 | --- | --- | --- | --- |

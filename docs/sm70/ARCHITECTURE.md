@@ -4,6 +4,8 @@ This page explains why a V100 needs its own execution path, and the four
 changes in the release tree on top of the SM70 base port. Each change section
 gives the problem, the change, the tests that guard it, and its review history.
 Commit messages hold the detailed validation records; they are cited by hash.
+Performance and timing figures here are historical observations for those
+commits and packages. Fresh validation of the current public checkout is pending.
 
 ## Why Volta needs its own path
 
@@ -241,6 +243,13 @@ without the S1L draft attention (STATUS.md line 64).
 Commits `d3258bc` to `7cb1bc7`; kernels `_recurrence` (REPLAY mode) and
 `_replay` in `ignition/components/sm70_gdn.py`.
 
+**Idea credit.** Strata's accepted-token GDN state replay is the prior art for
+this approach. The implementation below stores verification operands and
+integrates one committed row per request with Flare's existing graph and state
+contract; it does not claim the replay idea as a new algorithm. See the
+[Strata source](https://github.com/Niko1221/Strata/blob/main/include/strata/kernels/verify_kernels.hpp)
+and the implementation comparison below.
+
 **Gated DeltaNet.** Each linear-attention layer keeps, per request, a recurrent
 state: 48 value heads of 128 x 128 FP32, plus a convolution history. For each
 token the recurrence computes `state = state * decay`, then
@@ -351,9 +360,11 @@ commit-growth gate's negative capacity round.
 step the same way: the verify half writes no state, and the commit half replays
 the accepted tokens from stored inputs
 ([verify_kernels.hpp](https://github.com/Niko1221/Strata/blob/main/include/strata/kernels/verify_kernels.hpp)).
-This port's version keeps the existing Flare graph and contract, proves byte
-equality with the old candidate path, and returns the freed rows to the shared
-KV pool.
+This port's implementation stores the verification operands described above,
+keeps one committed row per request within the existing Flare graph and
+contract, checks byte equality with the old candidate path, and returns the
+freed rows to the shared KV pool. These are details of this implementation,
+not a claim of novelty for accepted-token replay.
 
 `7cb1bc7` changed a generic capacity check that still assumed one state column
 per verified position, and so refused the replay round at bootstrap. It is a

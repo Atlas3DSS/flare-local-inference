@@ -120,6 +120,21 @@ environment: `torch` 2.14.1+cu126, `triton` 3.8.0, `flashinfer-python` 0.7.1,
 runs used the same environment directory; its package list was not re-recorded
 for them. Apart from PyTorch, `uv.lock` is the reference.
 
+Use CUDA 12 CUPTI for V100 preparation and package tests. If the environment
+also contains a CUDA 13 CUPTI wheel, automatic library discovery can select it
+and fail with `CUPTI_ERROR_INVALID_DEVICE`. Preload the installed CUDA 12
+library in the preparation/test shell before running Python:
+
+```sh
+FLARE_CUPTI12=$(.venv/bin/python -c 'import pathlib, nvidia.cuda_cupti; print(pathlib.Path(next(iter(nvidia.cuda_cupti.__path__))) / "lib/libcupti.so.12")')
+test -f "$FLARE_CUPTI12"
+export LD_PRELOAD="$FLARE_CUPTI12${LD_PRELOAD:+:$LD_PRELOAD}"
+.venv/bin/python -c 'from cuda.pathfinder import load_nvidia_dynamic_lib; print(load_nvidia_dynamic_lib("cupti").abs_path)'
+```
+
+The last command must resolve `libcupti.so.12`. Native serving does not require
+CUPTI; this setting is for the Python preparation environment.
+
 Point the build at CUDA 12.9 and fetch CUTLASS:
 
 ```sh

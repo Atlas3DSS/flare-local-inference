@@ -10,10 +10,10 @@ the chain; nothing after it runs.
 5. Native serving, four 22.4k to 30.2k-token prompts at `--memory-limit 31G`, at
    4 and 1 agents.
 
-Gates 1 and 3 to 5 can be run from this repository. Gate 2 needs the fork's
-preparation harness, which is not in this repository; this page states its
-checks and criteria so you can judge a package, and
-[EXPORT.md](EXPORT.md#export-gates) describes each check.
+All five gates now have checked-in helpers under `tools/`. Follow the explicit
+commands in [EXPORT.md](EXPORT.md) and [BENCHMARK.md](BENCHMARK.md). The public
+prompt fixtures are newly authored inputs; they require new baseline results.
+CPU CLI/gate tests do not qualify a model, export, or GPU execution.
 
 Release results below are for the release tree `0e4c81f` and its package
 `model-32k-tonight-a`, on one Tesla V100 PCIe 32 GB, 2026-10-22. Sources are
@@ -27,26 +27,15 @@ enabled on the V100. Group A holds the SM70 component tests, group B the
 sampling, recipe, contract and planning tests.
 
 ```sh
-export CUDA_HOME=/usr/local/cuda-12.9 PATH=/usr/local/cuda-12.9/bin:$PATH
-export CUDA_VISIBLE_DEVICES=0 FLARE_RUN_CUDA_TESTS=1
-export B12X_COMPILE_CACHE_DIR=$(mktemp -d)
-N=$(nproc); H=$((N / 2))
-taskset -c 0-$((H - 1)) .venv/bin/python -m pytest -q -rA -p no:cacheprovider \
-  tests/components/test_sm70_gdn_replay.py tests/components/test_sm70_gdn_cuda.py \
-  tests/components/test_sm70_build.py tests/components/test_sm70_dense.py tests/components/test_sm70_precision.py \
-  tests/components/test_sm70_projection_cuda.py tests/components/test_sm70_sampling_cuda.py \
-  tests/components/test_sm70_attention_cuda.py tests/components/test_sm70_prefill_attention_cuda.py \
-  tests/components/test_sm70_gdn_prefill_cuda.py tests/components/test_sm70_decode_attention_cuda.py \
-  tests/components/test_sm70_embedding_cuda.py tests/components/test_conditional_scores_cuda.py \
-  tests/components/test_sampling_scratch.py > tests-A.log 2>&1 &
-taskset -c $H-$((N - 1)) .venv/bin/python -m pytest -q -rA -p no:cacheprovider \
-  tests/components/test_sampling_flashinfer.py tests/components/test_draft_candidate_ties_cuda.py \
-  tests/recipes/test_qwen38_speculation_cuda.py tests/recipes/test_qwen38_copy_speculation.py \
-  tests/recipes/test_qwen38_sampling.py tests/recipes/test_qwen38_dense_mtp.py \
-  tests/recipes/test_qwen38_dense_speculation.py tests/preparation/test_contract.py tests/cli/test_planning.py > tests-B.log 2>&1 &
-wait
-tail -n 3 tests-A.log tests-B.log
+# OUTPUT_DIR and EMPTY_CACHE_DIR must already exist; outputs must be new.
+# Set disjoint CPU_SET_A/CPU_SET_B covering allocated cores except one physical core.
+CUDA_VISIBLE_DEVICES="$V100_GPU_UUID" bash tools/tests_replay.sh \
+  "$PWD/.venv/bin/python" /data/flare-tests /data/flare-test-cache \
+  "$CPU_SET_A" "$CPU_SET_B" "$COMPILER_THREADS_PER_GROUP"
 ```
+
+Choose the compiler thread budget explicitly for each disjoint group; the historical
+86-thread host used 40 compiler workers per group.
 
 `B12X_COMPILE_CACHE_DIR` gives the run an empty b12x selection cache. With a
 warm shared cache, one attention tuning test reports no benchmarked candidates
@@ -115,8 +104,7 @@ stall without the fix and pass with it. The run log does not record a
 ## Gate 2: preparation with every export gate
 
 Prepare with `--context 32768`, 4 requests and draft depth 4, as in
-[EXPORT.md](EXPORT.md). The fork's harness then runs, on the retained graphs and
-in this order:
+[EXPORT.md](EXPORT.md). The checked-in harness runs the following gates on retained graphs (accuracy is measured before strict validation):
 
 | Gate | Pass criterion | Release result (STATUS.md line 62) |
 | --- | --- | --- |
@@ -146,9 +134,10 @@ arithmetic, or the reference predates a reviewed change to the draft. Compare
 against the goldens of the commit that introduced that change before you
 conclude anything (line 54).
 
-Without the harness, `prepare_sm70.py` runs only the preparation. Treat its
-package as unqualified until gates 3 to 5 pass. They exercise the same package
-through the real server, but they do not replace the byte-level checks.
+Do not skip the byte-level checks in favor of native serving. The first public
+fixture run establishes a new tau baseline; subsequent runs must match the
+preserved baseline exactly. Neither a first baseline nor an `accuracy: complete`
+measurement establishes an unreported numerical tolerance or the historical scores.
 
 ## Gates 3 to 5: native serving
 

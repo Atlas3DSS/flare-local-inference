@@ -23,15 +23,20 @@ OpenAI-compatible API. It also documents how to keep speculative decoding
 bit-exact on a GPU without BF16 tensor cores. For any other model, GPU, more
 than 4 concurrent requests or contexts above 32,768 tokens, use upstream Flare.
 
-**What is in the tree.** The code is the release tree `0e4c81f`, validated on
-2026-10-22. It is followed by a comment-only scrub (`8889ec8`) and documentation
-commits. On top of the SM70 base port, the release tree carries four changes,
-explained in [ARCHITECTURE.md](docs/sm70/ARCHITECTURE.md):
+**Historical baseline.** The results below refer to release tree `0e4c81f` and
+its named packages, measured on 2026-10-22. Later fixes and public harness
+changes do not inherit those results; fresh validation of the current public
+checkout is pending. On top of the SM70 base port, that release carried four
+changes, explained in [ARCHITECTURE.md](docs/sm70/ARCHITECTURE.md):
 
 - the scheduler hang fix (`e81534a`, `718a187`);
 - prefill projections on the pgemm kernel (`8ad725c`);
 - the S1L decode, verification and draft attention (`0aea71a`, `ca16f00`);
-- GDN replay-commit (`d3258bc` to `7cb1bc7`).
+- GDN replay-commit (`d3258bc` to `7cb1bc7`), with credit to
+  [Strata](https://github.com/Niko1221/Strata/blob/main/include/strata/kernels/verify_kernels.hpp)
+  for the accepted-token GDN state replay idea. This fork stores verification
+  operands and integrates one committed row per request with Flare's graph,
+  state contract and shared KV pool.
 
 ## Measured results
 
@@ -133,8 +138,10 @@ detail and the sources.
 - **Given up:** extra decode work per weight compared with native FP4/FP8 tensor
   cores; prefill-bound long prompts (TTFT p50 90.7 s for four 22.4k-30.2k
   prompts at 4 agents, STATUS.md line 65); one recipe, TP1, at most 4 requests of
-  32,768 tokens; 816 upstream commits not in this branch; old cards, with power
-  not measured; no real-trace end-to-end number for the release.
+  32,768 tokens; subsequent upstream work to assess and port (136 commits as of
+  `e19549a`, beyond 680 whose content the history audit identifies in the
+  squashed base; see [history accounting](docs/sm70/LIMITATIONS.md#upstream-divergence));
+  old cards, with power not measured; no real-trace end-to-end number for the release.
 - **Gained:** no requantization, calibration or retraining; speculative
   decoding that emits exactly the ordinary greedy tokens (strict 47/47,
   invariance 28/28, line 62); a 131,584-token unquantized BF16 KV pool at 31G
@@ -146,8 +153,8 @@ detail and the sources.
 hardware without FP4 instructions, with its outputs measured against an
 independent FP32 forward of the same checkpoint (KL 0.0011 short, 0.0024 long;
 not bit-identical, and not compared with SM120); one committed recurrent row per
-request, so long multi-agent contexts stay resident (Strata uses the same
-verify-then-replay idea for its GDN layers); exact MTP verification with the draft
+request, so long multi-agent contexts stay resident (the accepted-token GDN
+state replay idea is credited to Strata above); exact MTP verification with the draft
 attention on tensor cores; every package the fork measured gated before export;
 and end-to-end and
 decode-only results published apart. It suits multi-agent, long-context and

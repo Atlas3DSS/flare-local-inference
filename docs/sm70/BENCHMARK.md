@@ -25,15 +25,16 @@ the other as if they measured the same thing.
 
 ## What was run
 
-The numbers come from the fork's lab harness. It is not in this repository. It
-consists of:
+The numbers come from the fork's lab harness. Its portable helpers now ship under `tools/`; the original orchestration and
+private trace inputs do not. The workflow consists of:
 
 - a chain script that runs the gates in [VALIDATE.md](VALIDATE.md) in order;
 - a server driver that starts `flare run`, waits for `/health`, snapshots
   `/metrics` before and after, and checks clean shutdown;
 - two streaming clients, one for the short prompts and one for the long prompts.
 
-The client below reproduces the clients' requests and statistics.
+The checked-in clients preserve the requests and statistics. New public fixtures
+are different workloads, so historical scores below are context, not expected results.
 
 **Package.** `model-32k-tonight-a`, prepared from the release tree `0e4c81f`:
 `--context 32768`, 4 requests, draft depth 4 (widths 1 to 5), 128-token
@@ -84,174 +85,73 @@ budget. Seeds are `7035 + repetition x 4 + index`.
 
 ## The client
 
-Paste this block at the repository root. It writes `bench_sm70.py`, which needs
-only the Python standard library.
+Use [tools/native.py](../../tools/native.py) to start and cleanly stop a server,
+collect telemetry and before/after native metrics, and run the original streaming
+clients. It requires all preparation qualification results before measurement.
+`--dry-run` prints the commands without loading a model or touching a GPU.
+Allocate a V100 externally first; the tool checks the selected UUID and SM70
+capability, not your site's lease authority. Signing keys and trust files remain
+external (see [EXPORT.md](EXPORT.md#signing-keys-and-the-trust-store)).
+
+Run from the checkout root after the fully gated export. All output directories
+must already exist; existing benchmark files are refused. The prefix-cache and
+GPU memory limits below match the historical serving configuration.
 
 ```sh
-cat > bench_sm70.py <<'EOF'
-#!/usr/bin/env python3
-"""Fixed-prompt Flare benchmark: per-request decode rate, TTFT and aggregate output (standard library only).
-
-Statistics match the fork's benchmark clients (docs/sm70/BENCHMARK.md). For each request:
-decode rate = output tokens after the first observation / (last observation - first observation),
-where an observation is a streamed chunk whose cumulative completion_tokens grew; TTFT = time to the
-first observation. For each concurrency: aggregate output = output tokens / total batch wall time,
-which includes prefill and HTTP. Prompts run in groups of `concurrency`, released together.
-"""
-import argparse
-from concurrent.futures import ThreadPoolExecutor
-import json
-from pathlib import Path
-import statistics
-import threading
-import time
-import urllib.request
-
-SAMPLING = {"short": {"temperature": 0.7, "top_p": 0.95, "top_k": 20, "min_p": 0.0},
-            "greedy": {"temperature": 0.0, "top_p": 1.0, "top_k": 1, "min_p": 0.0}}
-
-
-def request(base, model, prompt, tokens, seed, sampling, barrier, timeout):
-    body = {"model": model, "messages": prompt["messages"], "max_tokens": tokens, "stream": True,
-            "ignore_eos": True, "seed": seed, **SAMPLING[sampling], "repetition_penalty": 1.0,
-            "presence_penalty": 0.0, "frequency_penalty": 0.0,
-            "chat_template_kwargs": {"enable_thinking": bool(prompt.get("thinking", False))},
-            "stream_options": {"include_usage": True, "continuous_usage_stats": True}}
-    if prompt.get("tools"):
-        body.update(tools=prompt["tools"], tool_choice="auto")
-    http = urllib.request.Request(base + "/v1/chat/completions", data=json.dumps(body).encode(),
-                                  headers={"Content-Type": "application/json"})
-    result = {"id": prompt["id"], "seed": seed, "ok": False}
-    barrier.wait()
-    start = time.perf_counter()
-    count = first_count = 0
-    first = last = None
-    done = False
-    try:
-        with urllib.request.urlopen(http, timeout=timeout) as response:
-            for line in response:
-                if not line.startswith(b"data:"):
-                    continue
-                payload = line[5:].strip()
-                if payload == b"[DONE]":
-                    done = True
-                    break
-                event = json.loads(payload)
-                if "error" in event:
-                    raise RuntimeError(event["error"])
-                seen = (event.get("usage") or {}).get("completion_tokens", 0)
-                if seen > count:
-                    now = time.perf_counter() - start
-                    if first is None:
-                        first, first_count = now, seen
-                    last, count = now, seen
-        if not done or count != tokens or first is None or last <= first:
-            raise RuntimeError(f"incomplete stream: {count} of {tokens} tokens, [DONE] {done}")
-        result.update(ok=True, ttft=first, decode=(count - first_count) / (last - first))
-    except Exception as error:
-        result["error"] = f"{type(error).__name__}: {error}"
-    result.update(tokens=count, elapsed=time.perf_counter() - start)
-    return result
-
-
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--base-url", default="http://127.0.0.1:8300")
-    parser.add_argument("--prompts", type=Path, required=True, help="JSONL: one {id, messages[, thinking, tools]} per line")
-    parser.add_argument("--prompt-ids", nargs="+", help="run these ids, in this order (default: all)")
-    parser.add_argument("--concurrencies", type=int, nargs="+", default=[1, 4])
-    parser.add_argument("--repetitions", type=int, default=3)
-    parser.add_argument("--output-tokens", type=int, default=128)
-    parser.add_argument("--sampling", choices=sorted(SAMPLING), default="short")
-    parser.add_argument("--seed", type=int, default=7035)
-    parser.add_argument("--timeout", type=float, default=3600)
-    parser.add_argument("--output", type=Path, help="write every request and the summary as JSON")
-    args = parser.parse_args()
-    rows = [json.loads(line) for line in args.prompts.read_text().splitlines() if line.strip()]
-    if args.prompt_ids:
-        by_id = {row["id"]: row for row in rows}
-        rows = [by_id[name] for name in args.prompt_ids]
-    base = args.base_url.rstrip("/")
-    with urllib.request.urlopen(base + "/v1/models", timeout=30) as response:
-        model = json.load(response)["data"][0]["id"]
-    report = {"model": model, "args": {k: str(v) for k, v in vars(args).items()}, "requests": [], "summary": []}
-    for concurrency in args.concurrencies:
-        done, wall = [], 0.0
-        for repetition in range(args.repetitions):
-            for offset in range(0, len(rows), concurrency):
-                group = rows[offset:offset + concurrency]
-                barrier = threading.Barrier(len(group) + 1)
-                with ThreadPoolExecutor(len(group)) as pool:
-                    futures = [pool.submit(request, base, model, prompt, args.output_tokens,
-                                           args.seed + repetition * len(rows) + offset + index,
-                                           args.sampling, barrier, args.timeout)
-                               for index, prompt in enumerate(group)]
-                    started = time.perf_counter()
-                    barrier.wait()
-                    results = [future.result() for future in futures]
-                    wall += time.perf_counter() - started
-                for result in results:
-                    result.update(concurrency=concurrency, repetition=repetition)
-                    print(json.dumps({k: result.get(k) for k in ("concurrency", "repetition", "id", "ok", "tokens",
-                                                                    "ttft", "decode", "error") if k in result}), flush=True)
-                done.extend(results)
-        report["requests"].extend(done)
-        ok = [r for r in done if r["ok"]]
-        summary = {"concurrency": concurrency, "requests_ok": f"{len(ok)}/{len(done)}",
-                   "median_decode_tok_s": statistics.median(r["decode"] for r in ok) if ok else None,
-                   "per_prompt_median_decode_tok_s": {row["id"]: statistics.median(
-                       [r["decode"] for r in ok if r["id"] == row["id"]] or [float("nan")]) for row in rows},
-                   "ttft_p50_s": statistics.median(r["ttft"] for r in ok) if ok else None,
-                   "aggregate_output_tok_s": sum(r["tokens"] for r in ok) / wall if wall else None}
-        report["summary"].append(summary)
-        print(json.dumps(summary), flush=True)
-    if args.output:
-        args.output.write_text(json.dumps(report, indent=2) + "\n")
-    raise SystemExit(0 if all(r["ok"] for r in report["requests"]) else 1)
-
-
-if __name__ == "__main__":
-    main()
-EOF
+CUDA_VISIBLE_DEVICES="$V100_GPU_UUID" .venv/bin/python tools/native.py \
+  --mode native --depths 4 --gpu-uuid "$V100_GPU_UUID" \
+  --executable "$PWD/flare/target/release/flare" \
+  --package /data/flare-run/model.safetensors --qualification /data/flare-run/prepare.json \
+  --publisher-keys /data/flare-keys/development-publisher.json \
+  --trust-store /data/flare-keys/trust.toml --memory-limit 31G --prefix-cache 8G \
+  --prompts /data/flare-run/prompts.jsonl --output-dir /data/flare-bench \
+  --prompt-ids code-00 code-01 code-02 code-03 --concurrencies 1 4 \
+  --tokens 128 --repetitions 3 --ready-timeout 1800
 ```
 
-The prompt file is JSON Lines, one prompt per line:
-
-```json
-{"id": "code-00", "thinking": false, "messages": [{"role": "system", "content": "You are a senior software engineer working as a coding agent. Be concise and output working code."}, {"role": "user", "content": "..."}]}
-```
-
-**The fork's prompt files are not in this repository.** They are:
-
-- Short prompts `code-00` to `code-03`: a coding-agent system prompt and a user
-  message that contains one source file of this repository with a coding task.
-- Prompts `l24-00` to `l24-03`: four prompts of 16.6k to 18.6k tokens.
-- Prompts `long-00` to `long-03`: 30,194, 22,388, 29,487 and 27,953 prompt
-  tokens, 110,022 in total (STATUS.md line 53).
-
-With your own prompts of similar lengths, expect similar decode rates but not
-the same numbers. Decode rates depend on how many draft tokens the model
-accepts, which depends on the text.
+This is **new public input data**, not the unpublished historical prompt set.
+There are 24 requests total: 12 at concurrency one and 12 at concurrency four.
+The client requires the exact output-token budget, complete SSE termination and
+consistent native token observations. Partial streams fail the measurement.
 
 ## Reproduce each row
 
-Start the server with the flags under [What was run](#what-was-run), on port
-8990, and wait for `/health`. Then:
+To measure a long-context workload, first generate deterministic example modules
+rendered to approximately 28,000 tokens with the checkpoint's actual chat template:
 
-| Row | Command | Report |
-| --- | --- | --- |
-| Short prompts, median decode, 1 and 4 agents (90.4 and 70.7 tok/s); aggregate output (238.0 tok/s) | `.venv/bin/python bench_sm70.py --base-url http://127.0.0.1:8990 --prompts short.jsonl --concurrencies 1 4 --repetitions 3 --output-tokens 128 --sampling short` | `median_decode_tok_s` at concurrency 1 and 4; `aggregate_output_tok_s` at 4; requests 24/24 |
-| 16.6k-18.6k prompts, median decode, 1 and 4 agents (82.6 and 42.6 tok/s) | `.venv/bin/python bench_sm70.py --base-url http://127.0.0.1:8990 --prompts long24.jsonl --concurrencies 4 1 --repetitions 3 --output-tokens 512 --sampling greedy` | `median_decode_tok_s`, per-prompt medians, and the GPU step per round below |
-| 22.4k-30.2k prompts, median decode, 1 and 4 agents (82.2 and 37.2 tok/s); TTFT p50 at 4 agents (90.7 s); residency | `.venv/bin/python bench_sm70.py --base-url http://127.0.0.1:8990 --prompts long26.jsonl --concurrencies 4 1 --repetitions 3 --output-tokens 512 --sampling greedy` | `median_decode_tok_s`, per-prompt medians, `ttft_p50_s` at 4; `Allocate cache` KV tokens; zero restores |
-| KV pool (131,584 tokens) | the server's `Allocate cache` line | KV tokens and the limiting factor |
+```sh
+.venv/bin/python tools/generate_prompts.py --mode long --target-tokens 28000 \
+  --checkpoint /data/models/Qwen3.8-27B-NVFP4 --output /data/flare-run/long-prompts.jsonl
+```
 
-Restart the server between legs, as the harness did, so that one leg's prefix
-cache does not serve the next.
+Run the same `native.py` command with a fresh output directory and these changes:
 
-**Medians.** `median_decode_tok_s` is the median over all successful requests
-at that concurrency, 12 per concurrency. "Per agent" at 4 agents means this
-median over the requests that ran four at a time. It is not the sum of four
-rates.
+```sh
+--client "$PWD/tools/benchmark_long.py" --prompts /data/flare-run/long-prompts.jsonl \
+--prompt-ids long-00 long-01 long-02 long-03 --concurrencies 4 1 --tokens 512
+```
+
+The generator records rendered prompt lengths. These four inputs are not the
+historical 16.6–18.6k or 22.4–30.2k sets. Report the measured lengths and establish
+a new result table. The long client requests greedy sampling, but the server's
+model-author clamps still apply; inspect the package and native configuration
+before describing actual sampling as greedy. Each driver invocation starts a
+fresh server so the previous leg's prefix cache is not retained.
+
+Read each concurrency's `summary` entry in the request JSON:
+
+| Quantity | Field |
+| --- | --- |
+| Median request decode rate after first observed tokens | `median_per_agent_decode_tokens_per_second` |
+| Output throughput including prefill and HTTP | `aggregate_output_tokens_per_second` |
+| Median for each prompt | `per_agent[].median_decode_tokens_per_second` |
+| Time to first token | `first_token_seconds.p50` and `.p95` |
+| Request completeness | `successful_requests` and `failed_requests` |
+
+A concurrency-four median is per request, not the sum of four rates. Keep
+aggregate wall-time throughput separate from decode-only rates. Exact tau is
+measured by `measure_mtp.py` during preparation; the HTTP client deliberately
+reports tau as unavailable rather than inferring it from graph counters.
 
 ### GPU step per round
 
@@ -262,7 +162,7 @@ after a run at concurrency 1:
 
 ```sh
 curl -s http://127.0.0.1:8990/metrics > before.prom
-.venv/bin/python bench_sm70.py --base-url http://127.0.0.1:8990 --prompts long24.jsonl --concurrencies 1 --repetitions 3 --output-tokens 512 --sampling greedy
+.venv/bin/python tools/benchmark_long.py --base-url http://127.0.0.1:8990 --depth 4 --prompts /data/flare-run/long-prompts.jsonl --prompt-ids long-00 long-01 long-02 long-03 --concurrencies 1 --repetitions 3 --output-tokens 512 --output /data/flare-bench/gpu-round-requests.json
 curl -s http://127.0.0.1:8990/metrics > after.prom
 python3 - before.prom after.prom <<'PY'
 import re, sys
@@ -305,6 +205,60 @@ figure. To measure end to end on your own traces, replay recorded agent
 conversations against the server with their real tool-call delays. Report
 generated tokens over wall time, with the number of agents, the memory limit,
 the package and the date.
+
+## Fixed-length prefill and TTFT
+
+[tools/benchmark_prefill.py](../../tools/benchmark_prefill.py) supplies the new
+fixed-length workload required before publishing a prefill comparison. It is a
+client for an already running, exclusively allocated native server; it never
+starts one. Run the release binary with the package/flags above, wait for health,
+and exclude every other client for the entire benchmark. Use the exact served
+checkpoint's `tokenizer.json` and the model ID returned by `/v1/models`.
+
+```sh
+.venv/bin/python tools/benchmark_prefill.py \
+  --base-url http://127.0.0.1:8990 --model YOUR_NATIVE_MODEL_ID \
+  --tokenizer /data/models/Qwen3.8-27B-NVFP4/tokenizer.json \
+  --exclusive-endpoint --run-id public-prefill-run-001 \
+  --warmups 1 --repetitions 3 --output-tokens 32 \
+  --output /data/flare-bench/prefill.json
+```
+
+The complete matrix is **2,048, 8,192, 22,528 and 30,720 prompt tokens**, each at
+**concurrency 1 and 4**. Raw `/v1/completions` token-ID inputs avoid chat-template
+length ambiguity, but every final server `usage.prompt_tokens` must still match
+the requested length exactly. These are deterministic, newly authored generic
+coding inputs, not the historical prompts. A new `--run-id` changes the early
+prompt tokens for every warmup/repetition/slot; reuse of a namespace is permitted
+only if cache checks still prove zero reuse. The tool does not flush or change
+server caches.
+
+There is one separately recorded warmup batch before three measured batches for
+each matrix cell: 20 warmup requests and 60 measured requests. Warmups never enter
+the summary. Each request must complete its exact output-token budget and SSE
+termination. Cache credit in usage fails the request. Before/after native metrics
+must show idle endpoints, exact completed/prefill/generated counts, no failures
+and zero reused tokens; missing metrics, resets or extra traffic fail the batch.
+The report retains raw token IDs, SSE events, per-request timing and both metric
+snapshots, including failed batches. A failed report is not a comparison result.
+
+Keep these fields in separate columns:
+
+- `transport_ttft_seconds.p50` / `.p95`: client POST start to the first observed
+  native output token, including transport, queueing and first-token generation.
+- `effective_prefill_tokens_per_second_median`: native prefill-token counter
+  delta divided by the batch's first-token wall window. This includes queueing,
+  first-token generation and transport. It is an effective wall-time rate,
+  **not pure GPU prefill throughput**.
+- `median_request_decode_tokens_per_second`: tokens after each request's first
+  observation divided by its subsequent decode window.
+
+The current release exposes prefill-token counters but no isolated prefill GPU
+execution-duration counter. Therefore `pure_gpu_prefill_tokens_per_second` stays
+`null`; do not substitute prompt tokens / TTFT and label it a CUDA-only rate.
+Record the exact binary/package identities and server flags beside the table.
+Only the CPU stub-server tests have run for this added client. Real V100 results
+and all prefill comparison claims remain pending until the complete matrix passes.
 
 ## Reporting your numbers
 
