@@ -52,10 +52,17 @@ port's arithmetic only. It does not include the error of NVIDIA's NVFP4
 quantization relative to the BF16 model, which this port inherits unchanged and
 did not measure.
 
-Not measured: a comparison with Flare on SM120. The SM70 kernels are new code
-with their own reduction orders. SM70 runs NVFP4 projections weight-only: it
-does not quantize activations to FP4. So nothing here shows that a V100 emits
-the same tokens as an SM120 GPU.
+Measured since, but not exact: a comparison with Flare on SM120 (2026-10-23,
+ordinary graphs, 3 public prompts x 47 positions). Full-vocabulary
+KL(SM70 ‖ SM120) averaged 0.0015 to 0.0024 per prompt, top-1 agreement was
+0.979 to 1.000, and one of three independent greedy continuations parted after
+9 tokens ([comparison](ARCHITECTURE.md#sm70-and-sm120-comparison-ordinary-graphs);
+receipt [sm70-vs-sm120-comparison.json](receipts/sm70-vs-sm120-comparison.json)).
+The SM70 kernels are new code with their own reduction orders, and SM70 runs
+NVFP4 projections weight-only: it does not quantize activations to FP4. The
+comparison is not hardware-only, since each architecture keeps its own recipe
+arithmetic and KV format, and it covers neither MTP nor native serving. So it
+does not show that a V100 emits the same tokens as an SM120 GPU.
 
 ## The usual options on a V100-class card
 
@@ -243,7 +250,7 @@ Volta kernels for the parts that need them
 
 - **Arithmetic work per weight.** With no FP4 or FP8 tensor cores, every packed
   weight is decoded to FP16 in registers before the FP16 multiply. On SM120 the
-  tensor cores consume FP4 and FP8 directly. We have not measured an SM120 run
+  tensor cores consume FP4 and FP8 directly. We have not measured SM120 speed
   for comparison.
 - **Prefill and time to first token.** Long prompts are prefill-bound. Four
   prompts of 22.4k to 30.2k tokens at 4 agents had a TTFT p50 of 90.7 s

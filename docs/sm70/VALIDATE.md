@@ -66,11 +66,14 @@ grep -cE "^PASSED tests/components/test_sm70_gdn_replay.py::(test_replay_commit_
 
 The second command must print 5.
 
-**Release result.** The last GPU run of both groups was on the replay-commit
-branch before it was rebased and merged: group A passed every test, and group B
-failed only its 2 known failures (STATUS.md lines 43, 46). On the release tree
-itself these groups were not rerun on the GPU; its chain started at gate 2
-(line 60).
+**Release result.** For the 2026-10-22 release, the last GPU run of both groups
+was on the replay-commit branch before it was rebased and merged: group A passed
+every test, and group B failed only its 2 known failures (STATUS.md lines 43,
+46). On the current release tree, the public GPU runner at `b4987de5` passed
+group A with 223 tests and 17 subtests and group B with 218 tests, with no
+failures, exemptions or skips; production source is unchanged through
+`c6fdc120` ([tests-A.log](receipts/tests-A.log), [tests-B.log](receipts/tests-B.log),
+[release-tests-FINAL.json](receipts/release-tests-FINAL.json)).
 
 **CPU suites.** The fork also runs the broad CPU suites and compares their
 failure set with the base commit:

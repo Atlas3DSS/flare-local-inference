@@ -174,9 +174,8 @@ These exist in the fork's history but are not part of this branch:
 
 Report problems with the SM70 port on this fork,
 [Atlas3DSS/flare-local-inference](https://github.com/Atlas3DSS/flare-local-inference),
-not upstream; upstream does not support SM70. As of 2026-10-23, Issues are not
-enabled on the fork, so until they are, the repository owner has to be
-contacted through GitHub.
+not upstream; upstream does not support SM70. Issues are enabled on the fork;
+open one there.
 
 Include:
 
