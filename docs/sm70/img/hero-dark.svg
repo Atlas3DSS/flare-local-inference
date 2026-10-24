@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="500" viewBox="0 0 1200 500" role="img" aria-labelledby="title desc">
+<title id="title">Flare SM70 decode-only headline</title>
+<desc id="desc">Decode-only, Qwen3.8-27B NVFP4 on one Tesla V100 PCIe 32 GB, memory limit 31G, package model-32k-tonight-a, 2026-10-22: median decode 90.4 tok/s at 1 agent and 70.7 tok/s per agent at 4 agents. Source: BENCHMARKS-SM70.md, STATUS.md line 66.</desc>
+<rect x="0.5" y="0.5" width="1199" height="499" rx="20" fill="#222629" stroke="rgba(255,255,255,0.10)" stroke-width="1"/>
+<rect x="56" y="40" width="136" height="28" rx="14" fill="none" stroke="#b0b8bc" stroke-width="1"/>
+<text x="124.0" y="59" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', 'Noto Sans', Arial, sans-serif" font-size="12.5" font-weight="700" fill="#f3f5f4" text-anchor="middle" letter-spacing="0.08em">DECODE-ONLY</text>
+<text x="206" y="60" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', 'Noto Sans', Arial, sans-serif" font-size="15" font-weight="400" fill="#b0b8bc" text-anchor="start">Flare on SM70 · Qwen3.8-27B NVFP4 · MTP draft depth 4</text>
+<text x="56" y="120" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', 'Noto Sans', Arial, sans-serif" font-size="36" font-weight="650" fill="#f3f5f4" text-anchor="start">A 27B model decoding at 90.4 tok/s on one V100</text>
+<text x="56" y="156" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', 'Noto Sans', Arial, sans-serif" font-size="17" font-weight="400" fill="#b0b8bc" text-anchor="start">Median per-request decode rate on short-context screening prompts. Excludes prefill and queueing.</text>
+<g><title>Median decode, 1 agent: 90.4 tok/s (STATUS.md line 66)</title>
+<rect x="56" y="192" width="532.0" height="196" rx="14" fill="#2a2f33" stroke="rgba(255,255,255,0.10)" stroke-width="1"/>
+<rect x="84" y="218" width="36" height="4" rx="2" fill="#6c9f27"/>
+<text x="84" y="254" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', 'Noto Sans', Arial, sans-serif" font-size="18" font-weight="400" fill="#b0b8bc" text-anchor="start">Median decode, 1 agent</text>
+<text x="84" y="344" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', 'Noto Sans', Arial, sans-serif" font-size="84" font-weight="650" fill="#f3f5f4" text-anchor="start">90.4<tspan font-size="26" font-weight="400" fill="#b0b8bc" dx="12">tok/s</tspan></text>
+
+</g>
+<g><title>Median decode per agent at 4 agents: 70.7 tok/s (STATUS.md line 66)</title>
+<rect x="612.0" y="192" width="532.0" height="196" rx="14" fill="#2a2f33" stroke="rgba(255,255,255,0.10)" stroke-width="1"/>
+<rect x="640.0" y="218" width="36" height="4" rx="2" fill="#6c9f27"/>
+<text x="640.0" y="254" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', 'Noto Sans', Arial, sans-serif" font-size="18" font-weight="400" fill="#b0b8bc" text-anchor="start">Median decode per agent, 4 concurrent agents</text>
+<text x="640.0" y="344" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', 'Noto Sans', Arial, sans-serif" font-size="84" font-weight="650" fill="#f3f5f4" text-anchor="start">70.7<tspan font-size="26" font-weight="400" fill="#b0b8bc" dx="12">tok/s per agent</tspan></text>
+
+</g>
+<line x1="56" y1="408" x2="1144" y2="408" stroke="#353b3f" stroke-width="1"/>
+<text x="56" y="438" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', 'Noto Sans', Arial, sans-serif" font-size="14" font-weight="400" fill="#f3f5f4" text-anchor="start">Tesla V100 PCIe 32 GB · TP1 · <tspan font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', 'DejaVu Sans Mono', monospace" font-size="0.92em">--memory-limit 31G</tspan> (a) · 1 and 4 agents, 24/24 requests ok · package <tspan font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', 'DejaVu Sans Mono', monospace" font-size="0.92em">model-32k-tonight-a</tspan> · 2026-10-22</text>
+<text x="56" y="464" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', 'Noto Sans', Arial, sans-serif" font-size="13" font-weight="400" fill="#b0b8bc" text-anchor="start">Source: BENCHMARKS-SM70.md (Decode-only) · STATUS.md line 66 (20:07) · (a) limit not restated on that line; same 131,584-token KV pool as the 31G run</text>
+</svg>
