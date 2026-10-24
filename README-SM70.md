@@ -221,9 +221,12 @@ detail and the sources.
 **What makes it useful** is the combination: upstream's NVFP4 package on
 hardware without FP4 instructions, with its outputs measured against an
 independent FP32 forward of the same checkpoint (KL 0.0011 short, 0.0024 long;
-not bit-exact), and a separately measured SM70/SM120 comparison of ordinary
-graphs that shows small, non-zero divergence
-([comparison](docs/sm70/ARCHITECTURE.md#sm70-and-sm120-comparison-ordinary-graphs));
+not bit-exact), and at least as close to that reference in mean KL as the SM120
+build on three public prompts: lower on each (0.00079-0.00156 against
+0.00116-0.00225), top-1 agreement 135 against 136 of 141 positions, with
+different catalogs and with SM70's FP32 continuation and BF16 KV against
+SM120's BF16 and FP8; the direct SM70/SM120 divergence is small and non-zero
+([comparison](docs/sm70/ARCHITECTURE.md#distance-from-the-fp32-reference));
 one committed recurrent row per
 request, so long multi-agent contexts stay resident (the accepted-token GDN
 state replay idea is credited to Strata above); exact MTP verification with the draft

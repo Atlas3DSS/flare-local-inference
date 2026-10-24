@@ -1,0 +1,489 @@
+{
+ "format": "measurement-reference-kl-v1",
+ "status": "measured",
+ "numerical_pass": null,
+ "basis": "FP64 log_softmax over the full vocabulary on identical teacher-forced token ids; KL(cand||ref) primary as briefed, KL(ref||cand) also reported; p99 = torch.quantile linear",
+ "inputs": {
+  "reference": {
+   "path": "<reference-host>/flare/release-references/reference.safetensors",
+   "sha256": "30dd669b1baf6a1ec517b635c083b275dd72417ca07521bf33cecdd954f02a3f"
+  },
+  "reference_report": {
+   "path": "<reference-host>/flare/release-references/reference.json",
+   "sha256": "277f47825bac44feba200dfab6ab555d637b66a30d31c2bfdfa2f0f09afcc5a3"
+  },
+  "long_reference": {
+   "path": "<reference-host>/flare/release-references/long-code-reference.safetensors",
+   "sha256": "d4479957d5ec101c8274d7a7fe59032d0171423ebacd8607a6aeb61e00f1afc9"
+  },
+  "sm70_capture_manifest": {
+   "path": "<reference-host>/flare/release-references/sm70.capture.json",
+   "sha256": "e263d3f75c1acfecaf0454af96005e906b8cddf7823eb3ce38785c8525448027"
+  },
+  "sm120_capture_manifest": {
+   "path": "<reference-host>/flare/release-references/sm120.capture.json",
+   "sha256": "0b5b4fa2c1c545cf53fe4aba9264c26c2286a2abbdee7329d6ad40b5b69916f1"
+  },
+  "export_accuracy": {
+   "path": "<reference-host>/flare/release-references-v2/accuracy.safetensors",
+   "sha256": "aadec3431bbe9527c430365fcafda22f223a82da593bee0ee6a31d091b77a7db"
+  }
+ },
+ "candidates": {
+  "sm70_depth4cat_ordinary": {
+   "identity": {
+    "architecture": "sm70",
+    "gpu_uuid": "GPU-30ab07ae-8f44-df0e-ce62-9b6b088f1d00",
+    "source_sha256": "40e9a520957a4b1cdec8bebed711e10edb45626bffb0f8b21b1e957e9e9ba9fc",
+    "prepared_mtp": true,
+    "prepared_speculative_widths": [
+     1,
+     2,
+     3,
+     4,
+     5
+    ],
+    "context": 128,
+    "prefill_chunk_size": 128,
+    "arithmetic": {
+     "continuation_dtype": "float32",
+     "kv_element_bytes": 2,
+     "note": "native recipe choices preserved; not forced to match architectures",
+     "tf32": false
+    },
+    "runtime": {
+     "torch": "2.14.1+cu126",
+     "cuda": "12.6",
+     "device_name": "Tesla V100-PCIE-32GB"
+    },
+    "scope": "ordinary non-MTP retained Flare graphs; host argmax; native serving not tested",
+    "manifest_sha256": "e263d3f75c1acfecaf0454af96005e906b8cddf7823eb3ce38785c8525448027",
+    "artifact_sha256": "868461ae3b04e8b09a2242f537c5239bcff3f654724b88ebb3b43a29588a8799"
+   },
+   "window": "short public prompts: 32 prompt + 15 decode teacher-forced positions (offsets 0..46)",
+   "prompts": [
+    {
+     "positions": 47,
+     "kl_cand_ref": {
+      "mean": 0.0008755933002876701,
+      "p99": 0.004360193132698655,
+      "max": 0.005047246605831959
+     },
+     "kl_ref_cand": {
+      "mean": 0.0008760381767947219,
+      "p99": 0.0043651464878004895,
+      "max": 0.005105693302942867
+     },
+     "top1_agreement_vs_ref": 1.0,
+     "top1_disagreements": 0,
+     "top1_disagreement_positions": [],
+     "stored_kl_ref_cand_max_abs_diff": 1.1189606099332172e-13,
+     "input_ids_identical": true,
+     "prompt_id": "reference-public-00"
+    },
+    {
+     "positions": 47,
+     "kl_cand_ref": {
+      "mean": 0.0015584970995159702,
+      "p99": 0.016603816894894822,
+      "max": 0.021234373046811725
+     },
+     "kl_ref_cand": {
+      "mean": 0.0015110336357328396,
+      "p99": 0.015659053624184367,
+      "max": 0.020485663171516226
+     },
+     "top1_agreement_vs_ref": 0.9148936170212766,
+     "top1_disagreements": 4,
+     "top1_disagreement_positions": [
+      10,
+      26,
+      30,
+      37
+     ],
+     "stored_kl_ref_cand_max_abs_diff": 1.2682563332866437e-13,
+     "input_ids_identical": true,
+     "prompt_id": "reference-public-01"
+    },
+    {
+     "positions": 47,
+     "kl_cand_ref": {
+      "mean": 0.0007926211921796214,
+      "p99": 0.0028205756340987315,
+      "max": 0.002967135166221286
+     },
+     "kl_ref_cand": {
+      "mean": 0.0007944253001142877,
+      "p99": 0.002817689208699272,
+      "max": 0.0029605816417255966
+     },
+     "top1_agreement_vs_ref": 0.9574468085106383,
+     "top1_disagreements": 2,
+     "top1_disagreement_positions": [
+      2,
+      34
+     ],
+     "stored_kl_ref_cand_max_abs_diff": 1.1189606099332172e-13,
+     "input_ids_identical": true,
+     "prompt_id": "reference-public-02"
+    }
+   ],
+   "aggregate": {
+    "positions": 141,
+    "mean_of_prompt_means_kl_cand_ref": 0.0010755705306610872,
+    "max_kl_cand_ref": 0.021234373046811725,
+    "max_kl_ref_cand": 0.020485663171516226,
+    "top1_disagreements": 6
+   }
+  },
+  "sm120_ordinary": {
+   "identity": {
+    "architecture": "sm120",
+    "gpu_uuid": "GPU-d739b9c5-bfbb-e95a-bbf1-7122f38c2cf1",
+    "source_sha256": "40e9a520957a4b1cdec8bebed711e10edb45626bffb0f8b21b1e957e9e9ba9fc",
+    "prepared_mtp": false,
+    "prepared_speculative_widths": [],
+    "context": 128,
+    "prefill_chunk_size": 128,
+    "arithmetic": {
+     "continuation_dtype": "bfloat16",
+     "kv_element_bytes": 1,
+     "note": "native recipe choices preserved; not forced to match architectures",
+     "tf32": false
+    },
+    "runtime": {
+     "torch": "2.14.1+cu130",
+     "cuda": "13.0",
+     "device_name": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition"
+    },
+    "scope": "ordinary non-MTP retained Flare graphs; host argmax; native serving not tested",
+    "manifest_sha256": "0b5b4fa2c1c545cf53fe4aba9264c26c2286a2abbdee7329d6ad40b5b69916f1",
+    "artifact_sha256": "7cf990b6558b65c4f912ef4a6f28a4daf97191232b4604cc92bdc3a88c458e2f"
+   },
+   "window": "short public prompts: 32 prompt + 15 decode teacher-forced positions (offsets 0..46)",
+   "prompts": [
+    {
+     "positions": 47,
+     "kl_cand_ref": {
+      "mean": 0.001156999265193461,
+      "p99": 0.005264507635132021,
+      "max": 0.00577946334908135
+     },
+     "kl_ref_cand": {
+      "mean": 0.001159187404088968,
+      "p99": 0.005277706329084844,
+      "max": 0.0058164971917300246
+     },
+     "top1_agreement_vs_ref": 1.0,
+     "top1_disagreements": 0,
+     "top1_disagreement_positions": [],
+     "stored_kl_ref_cand_max_abs_diff": 0.0,
+     "input_ids_identical": true,
+     "prompt_id": "reference-public-00"
+    },
+    {
+     "positions": 47,
+     "kl_cand_ref": {
+      "mean": 0.0022485160302629105,
+      "p99": 0.018351726462639297,
+      "max": 0.020750480872819343
+     },
+     "kl_ref_cand": {
+      "mean": 0.0022370363223638773,
+      "p99": 0.01783653216243544,
+      "max": 0.019607534495713168
+     },
+     "top1_agreement_vs_ref": 0.9148936170212766,
+     "top1_disagreements": 4,
+     "top1_disagreement_positions": [
+      10,
+      26,
+      30,
+      37
+     ],
+     "stored_kl_ref_cand_max_abs_diff": 0.0,
+     "input_ids_identical": true,
+     "prompt_id": "reference-public-01"
+    },
+    {
+     "positions": 47,
+     "kl_cand_ref": {
+      "mean": 0.001639133535071183,
+      "p99": 0.011747654595982216,
+      "max": 0.011812703913949757
+     },
+     "kl_ref_cand": {
+      "mean": 0.0015765119879797948,
+      "p99": 0.010375360747927175,
+      "max": 0.010572155733184128
+     },
+     "top1_agreement_vs_ref": 0.9787234042553191,
+     "top1_disagreements": 1,
+     "top1_disagreement_positions": [
+      34
+     ],
+     "stored_kl_ref_cand_max_abs_diff": 0.0,
+     "input_ids_identical": true,
+     "prompt_id": "reference-public-02"
+    }
+   ],
+   "aggregate": {
+    "positions": 141,
+    "mean_of_prompt_means_kl_cand_ref": 0.0016815496101758515,
+    "max_kl_cand_ref": 0.020750480872819343,
+    "max_kl_ref_cand": 0.019607534495713168,
+    "top1_disagreements": 5
+   }
+  },
+  "sm70_package_sequential": {
+   "identity": {
+    "source": "release-preparation/accuracy.safetensors (export of the qualified package)",
+    "execution": "one live token per retained prefill128 replay at every position"
+   },
+   "window": "short public prompts, offsets 0..46",
+   "prompts": [
+    {
+     "positions": 47,
+     "kl_cand_ref": {
+      "mean": 0.0007846086423222056,
+      "p99": 0.0021699801539179584,
+      "max": 0.002389443699215725
+     },
+     "kl_ref_cand": {
+      "mean": 0.0007842385416083165,
+      "p99": 0.0021612727430728026,
+      "max": 0.0023550913775078515
+     },
+     "top1_agreement_vs_ref": 1.0,
+     "top1_disagreements": 0,
+     "top1_disagreement_positions": [],
+     "stored_kl_ref_cand_max_abs_diff": 1.1189606099332172e-13,
+     "input_ids_identical": true,
+     "prompt_id": "reference-public-00"
+    },
+    {
+     "positions": 47,
+     "kl_cand_ref": {
+      "mean": 0.0020324855639875187,
+      "p99": 0.02184334415453266,
+      "max": 0.023011939239392827
+     },
+     "kl_ref_cand": {
+      "mean": 0.001985465675018884,
+      "p99": 0.02089008624346292,
+      "max": 0.02187504204985179
+     },
+     "top1_agreement_vs_ref": 0.9148936170212766,
+     "top1_disagreements": 4,
+     "top1_disagreement_positions": [
+      10,
+      26,
+      30,
+      37
+     ],
+     "stored_kl_ref_cand_max_abs_diff": 1.1590576588782486e-13,
+     "input_ids_identical": true,
+     "prompt_id": "reference-public-01"
+    },
+    {
+     "positions": 47,
+     "kl_cand_ref": {
+      "mean": 0.0009165916160623617,
+      "p99": 0.004523346395933689,
+      "max": 0.005178933006885843
+     },
+     "kl_ref_cand": {
+      "mean": 0.0009085319686120533,
+      "p99": 0.00447069235360654,
+      "max": 0.005151779689835864
+     },
+     "top1_agreement_vs_ref": 0.9787234042553191,
+     "top1_disagreements": 1,
+     "top1_disagreement_positions": [
+      34
+     ],
+     "stored_kl_ref_cand_max_abs_diff": 1.1189606099332172e-13,
+     "input_ids_identical": true,
+     "prompt_id": "reference-public-02"
+    }
+   ],
+   "aggregate": {
+    "positions": 141,
+    "mean_of_prompt_means_kl_cand_ref": 0.0012445619407906953,
+    "max_kl_cand_ref": 0.023011939239392827,
+    "max_kl_ref_cand": 0.02187504204985179,
+    "top1_disagreements": 5
+   }
+  },
+  "sm70_package_long": {
+   "identity": {
+    "source": "release-preparation/accuracy.safetensors (export of the qualified package)",
+    "execution": "retained 128-token prefill to first measured position, then ordinary decode"
+   },
+   "window": "6 public code prompts of 4080-4096 prompt tokens; last 16 prompt + 32 continuation positions",
+   "prompts": [
+    {
+     "positions": 48,
+     "kl_cand_ref": {
+      "mean": 0.0007061139664480795,
+      "p99": 0.010545402926571763,
+      "max": 0.014177574345284792
+     },
+     "kl_ref_cand": {
+      "mean": 0.0006260824078165407,
+      "p99": 0.008406543785210156,
+      "max": 0.010057571233347357
+     },
+     "top1_agreement_vs_ref": 1.0,
+     "top1_disagreements": 0,
+     "top1_disagreement_positions": [],
+     "stored_kl_ref_cand_max_abs_diff": 2.5716050382901257e-13,
+     "input_ids_identical": true,
+     "prompt_id": "code-00",
+     "window_positions": [
+      4080,
+      4127
+     ],
+     "prompt_tokens": 4128
+    },
+    {
+     "positions": 48,
+     "kl_cand_ref": {
+      "mean": 0.0009798919317784251,
+      "p99": 0.01457867765058295,
+      "max": 0.022246529905596783
+     },
+     "kl_ref_cand": {
+      "mean": 0.0009130891683074679,
+      "p99": 0.013025633903417358,
+      "max": 0.01923726447592643
+     },
+     "top1_agreement_vs_ref": 1.0,
+     "top1_disagreements": 0,
+     "top1_disagreement_positions": [],
+     "stored_kl_ref_cand_max_abs_diff": 2.0583437573640586e-13,
+     "input_ids_identical": true,
+     "prompt_id": "code-05",
+     "window_positions": [
+      4080,
+      4127
+     ],
+     "prompt_tokens": 4128
+    },
+    {
+     "positions": 48,
+     "kl_cand_ref": {
+      "mean": 0.0027109696991062505,
+      "p99": 0.05556538182388972,
+      "max": 0.09075909867599445
+     },
+     "kl_ref_cand": {
+      "mean": 0.002637204080818202,
+      "p99": 0.05342152619728042,
+      "max": 0.08681015545385082
+     },
+     "top1_agreement_vs_ref": 0.9791666666666666,
+     "top1_disagreements": 1,
+     "top1_disagreement_positions": [
+      42
+     ],
+     "stored_kl_ref_cand_max_abs_diff": 2.544543607233563e-13,
+     "input_ids_identical": true,
+     "prompt_id": "code-03",
+     "window_positions": [
+      4078,
+      4125
+     ],
+     "prompt_tokens": 4126
+    },
+    {
+     "positions": 48,
+     "kl_cand_ref": {
+      "mean": 0.004201185722472953,
+      "p99": 0.060778323579080494,
+      "max": 0.0825781613845468
+     },
+     "kl_ref_cand": {
+      "mean": 0.004169059403951917,
+      "p99": 0.0624556265386865,
+      "max": 0.08356988308671809
+     },
+     "top1_agreement_vs_ref": 0.9791666666666666,
+     "top1_disagreements": 1,
+     "top1_disagreement_positions": [
+      1
+     ],
+     "stored_kl_ref_cand_max_abs_diff": 2.352748800903831e-13,
+     "input_ids_identical": true,
+     "prompt_id": "code-02",
+     "window_positions": [
+      4077,
+      4124
+     ],
+     "prompt_tokens": 4125
+    },
+    {
+     "positions": 48,
+     "kl_cand_ref": {
+      "mean": 0.0017784689836833265,
+      "p99": 0.026249370067228873,
+      "max": 0.03755165631089853
+     },
+     "kl_ref_cand": {
+      "mean": 0.002134130699265597,
+      "p99": 0.03535064056936369,
+      "max": 0.05171156755185303
+     },
+     "top1_agreement_vs_ref": 1.0,
+     "top1_disagreements": 0,
+     "top1_disagreement_positions": [],
+     "stored_kl_ref_cand_max_abs_diff": 2.1067569863731446e-13,
+     "input_ids_identical": true,
+     "prompt_id": "code-01",
+     "window_positions": [
+      4076,
+      4123
+     ],
+     "prompt_tokens": 4124
+    },
+    {
+     "positions": 48,
+     "kl_cand_ref": {
+      "mean": 0.0009259495850187912,
+      "p99": 0.008861970302616465,
+      "max": 0.008879421112552553
+     },
+     "kl_ref_cand": {
+      "mean": 0.0009502349360149681,
+      "p99": 0.010306867214195992,
+      "max": 0.011930076416764775
+     },
+     "top1_agreement_vs_ref": 1.0,
+     "top1_disagreements": 0,
+     "top1_disagreement_positions": [],
+     "stored_kl_ref_cand_max_abs_diff": 2.5667964952466384e-13,
+     "input_ids_identical": true,
+     "prompt_id": "code-04",
+     "window_positions": [
+      4064,
+      4111
+     ],
+     "prompt_tokens": 4112
+    }
+   ],
+   "aggregate": {
+    "positions": 288,
+    "mean_of_prompt_means_kl_cand_ref": 0.0018837633147513041,
+    "max_kl_cand_ref": 0.09075909867599445,
+    "max_kl_ref_cand": 0.08681015545385082,
+    "top1_disagreements": 2
+   }
+  }
+ },
+ "not_measured": {
+  "sm70_ordinary_catalog": "BLOCKED: SM70 GDN prefill admits only the reviewed [GDN prefill] contract (conv history 7 = 3 + depth 4); an ordinary catalog (history 3) fails preparation: \"SM70 GDN prefill: the prefill graph is outside the reviewed [GDN prefill] contract\" (attempt flare-release-capture70, invocation 9ec3fbeb, release-tests-CAPTURE70.log). Lifting it is a runtime change, outside a measurement brief.",
+  "sm70_native_depth4_verification_logits": "no pinned tool exposes MTP verification logits (validate_candidate modes: sequential/ordinary/chunked); export gates prove byte-equal committed state and identical tokens versus ordinary decode, not verification-logit values",
+  "offset_8192_window": "no FP32 reference exists at offsets 8192..8239 and no SM120 long capture exists; both need <reference GPU> (not in this job's card set). Closest measured window: sm70_package_long at ~4.1k.",
+  "sm120_long_window": "no SM120 capture of the long-code prompts exists"
+ }
+}

@@ -149,6 +149,44 @@ This compares the two recipes as each architecture prepares them; it is not a
 hardware-only experiment. It does not cover MTP, native serving or longer
 contexts, and it does not show that SM70 and SM120 emit the same tokens.
 
+### Distance from the FP32 reference
+
+Both captures were also measured against the shared public FP32 reference, with
+the same FP64 full-vocabulary KL on the same 141 teacher-forced positions, here
+KL(build ‖ FP32 reference)
+([measurements/reference-kl.json](receipts/measurements/reference-kl.json)):
+
+| Prompt | SM70 KL mean / p99 / max | SM120 KL mean / p99 / max | Top-1 agreement with the reference, SM70 / SM120 (of 47) |
+| --- | ---: | ---: | ---: |
+| `reference-public-00` | 0.00088 / 0.0044 / 0.0050 | 0.00116 / 0.0053 / 0.0058 | 47 / 47 |
+| `reference-public-01` | 0.00156 / 0.0166 / 0.0212 | 0.00225 / 0.0184 / 0.0208 | 43 / 43 |
+| `reference-public-02` | 0.00079 / 0.0028 / 0.0030 | 0.00164 / 0.0117 / 0.0118 | 45 / 46 |
+
+On these prompts the SM70 build is at least as close to the FP32 reference as
+the SM120 build in mean and p99 KL, which are lower on each of the three
+prompts. The largest single-position KL differs by about 2 % (0.0212 against
+0.0208, both on `reference-public-01`), and top-1 agreement is 135 against 136
+of 141. The four top-1 misses on `reference-public-01` fall on the same positions
+(10, 26, 30 and 37) in every run, which points to near-ties in the reference
+rather than to either architecture.
+
+This does not isolate the hardware. The catalogs differ, SM70 runs FP32
+continuation and BF16 KV against SM120's BF16 continuation and FP8 KV, and part
+of SM70's margin can come from that higher precision. The sample is 141
+positions on 3 prompts, with no MTP and no native serving, and it does not show
+that the two architectures emit the same tokens.
+
+Not measured:
+
+- an SM70 capture with the ordinary catalog. The reviewed SM70 GDN prefill
+  admits only the convolution history of 7 that the depth-4 catalog uses, and
+  refuses the ordinary catalog's history of 3 at preparation;
+- verification logits of the native depth-4 path, which no pinned tool exposes;
+- a window at an 8,192-token offset, for which no FP32 reference or SM120
+  capture exists. The closest long window measured is the release package's
+  export accuracy at about 4.1k tokens: a mean KL of 0.0019 over 288 positions on
+  6 prompts, with top-1 agreement on 286.
+
 ## Why Volta needs its own path
 
 V100 tensor cores execute FP16 `mma.m8n8k4` only. Volta has no BF16, FP8 or FP4
