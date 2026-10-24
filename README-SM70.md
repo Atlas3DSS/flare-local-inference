@@ -144,9 +144,10 @@ detail and the sources.
 
 **What makes it useful** is the combination: upstream's NVFP4 package on
 hardware without FP4 instructions, with its outputs measured against an
-independent FP32 reference (KL 0.0011 short, 0.0024 long; not bit-identical,
-and not compared with SM120); one committed recurrent row per request, so long
-multi-agent contexts stay resident; exact MTP verification with the draft
+independent FP32 forward of the same checkpoint (KL 0.0011 short, 0.0024 long;
+not bit-identical, and not compared with SM120); one committed recurrent row per
+request, so long multi-agent contexts stay resident (Strata uses the same
+verify-then-replay idea for its GDN layers); exact MTP verification with the draft
 attention on tensor cores; every package the fork measured gated before export;
 and end-to-end and
 decode-only results published apart. It suits multi-agent, long-context and
@@ -158,8 +159,19 @@ workloads, other models, or speed records.
 | This port | Weights unchanged; speculation exact; KL to FP32 reference 0.0011 / 0.0024 | Yes | STATUS.md lines 49-66, commits `8ad725c`, `ca16f00` |
 | llama.cpp GGUF K-quants | Requantized from BF16; its own quantization error | No | [llama.cpp](https://github.com/ggml-org/llama.cpp/blob/master/tools/quantize/README.md) |
 | INT8 DP4A (superl8) | 3-bit GGUF on INT8 kernels; reports 21.3 tok/s decode for Qwen3.6-27B Q3_K_S on a CMP 100-210 | No | [scoreboard](https://github.com/jajmangold/superl8/blob/main/bench/qwen3-scoreboard.json) |
+| [Strata](https://github.com/Niko1221/Strata) | A different, 125 B MoE model as GGUF; on V100, UD-IQ4_XS at 88.91 % top token vs Q8_0; 38-51 tok/s on one V100, one stream | No (our 2026-10-20 run: 56-64 tok/s on 3 V100s, one stream) | [V100 notes](https://github.com/Niko1221/Strata/blob/main/docs/NVIDIA_V100.md), [quants](https://github.com/Niko1221/Strata/blob/main/docs/QUANTS.md) |
+| [Project Maya](https://github.com/mw00/project-maya) | A different, 321 B MoE model (18 B active) as its own 2-4-bit GGUF; 83-90 % next token vs FP8; 26.8 tok/s Maya-S24 on one V100, 48.25 tok/s Maya-L on four | No | [README](https://github.com/mw00/project-maya), [#130](https://github.com/mw00/project-maya/issues/130) |
 | W8A8 / SmoothQuant | INT8 weights and activations, calibrated | No | [SmoothQuant](https://arxiv.org/abs/2211.10438) |
 | FP16 dense | About 54 GB; does not fit one 32 GB card | No | two bytes per parameter |
+
+Strata and Project Maya serve much larger MoE models by tiering experts across
+VRAM, RAM and NVMe. Their published V100 decode rates are lower per card than
+this port's, so they show no speed bought by lower precision. Their strength is
+fitting 125-748 B models on old cards; this port's is serving 4 agents per card
+on a 27B model. The KL figures are not on one scale: ours compares the port with
+the same 4-bit checkpoint, theirs compare a quantization with a higher-precision
+release. Details:
+[WHY-NOT-LOW-BIT.md](docs/sm70/WHY-NOT-LOW-BIT.md#strata-and-project-maya).
 
 ## Quickstart
 

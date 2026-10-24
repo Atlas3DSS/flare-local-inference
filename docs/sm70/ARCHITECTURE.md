@@ -347,6 +347,14 @@ The export gates add the `forced_prefix_*` checks, which restore the committed
 rows before each accepted count and drive the replay commit, and the
 commit-growth gate's negative capacity round.
 
+**Prior art.** The Strata engine already splits its Gated DeltaNet speculative
+step the same way: the verify half writes no state, and the commit half replays
+the accepted tokens from stored inputs
+([verify_kernels.hpp](https://github.com/Niko1221/Strata/blob/main/include/strata/kernels/verify_kernels.hpp)).
+This port's version keeps the existing Flare graph and contract, proves byte
+equality with the old candidate path, and returns the freed rows to the shared
+KV pool.
+
 `7cb1bc7` changed a generic capacity check that still assumed one state column
 per verified position, and so refused the replay round at bootstrap. It is a
 validation change only.

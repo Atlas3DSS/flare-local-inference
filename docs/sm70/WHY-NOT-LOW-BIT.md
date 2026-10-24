@@ -46,8 +46,11 @@ records full-vocabulary KL(reference ‖ SM70). For the component packages just
 before the release merge, the commit messages record a short-context
 `kld_mean` of 0.0011443 and a long-context one of 0.0024010 (`8ad725c`,
 `ca16f00`). The release run records the measurement as complete without
-restating the values (line 62). The KL is small, but it is not zero. SM70
-outputs are not bit-identical to that reference.
+restating the values (line 62). The KL is small, but it is not zero. SM70 outputs are not bit-identical to that
+reference. The reference runs the same 4-bit checkpoint, so this KL measures the
+port's arithmetic only. It does not include the error of NVIDIA's NVFP4
+quantization relative to the BF16 model, which this port inherits unchanged and
+did not measure.
 
 Not measured: a comparison with Flare on SM120. The SM70 kernels are new code
 with their own reduction orders. SM70 runs NVFP4 projections weight-only: it
@@ -96,6 +99,129 @@ room for KV pages.
 
 **BF16.** Volta has no BF16 arithmetic in hardware. The model's BF16 rounding
 points have to be emulated, as this port does in FP32.
+
+## Strata and Project Maya
+
+Two public engines serve large models on V100s. Neither serves Qwen3.8-27B, and
+this fork has measured neither on its release, so nothing below is a
+like-for-like comparison.
+
+**[Strata](https://github.com/Niko1221/Strata)** is a C++/CUDA engine for
+Qwen3.8-Flash-Next, which its README describes as a 125-billion-parameter model,
+and for Qwen3.6-35B-A3B. It keeps attention and the most-used experts in VRAM,
+all experts in RAM, and computes RAM-resident experts on the CPU
+([HOW_IT_WORKS.md](https://github.com/Niko1221/Strata/blob/main/docs/HOW_IT_WORKS.md)).
+
+- **Volta.** A community-tested build, outside its supported cards, compiled
+  with CUDA 12.x because CUDA 13 dropped Volta
+  ([NVIDIA_V100.md](https://github.com/Niko1221/Strata/blob/main/docs/NVIDIA_V100.md)).
+- **Weights.** GGUF quantizations: Strata's own 1- to 3-bit sizes and
+  Unsloth's 4- to 8-bit files
+  ([MODELS.md](https://github.com/Niko1221/Strata/blob/main/docs/MODELS.md)).
+  The V100 measurements use Unsloth's UD-IQ4_XS with an int8 KV cache.
+  Strata's own table puts UD-IQ4_XS at 88.91 % the same top token as Q8_0, with
+  mean KL 0.101
+  ([QUANTS.md](https://github.com/Niko1221/Strata/blob/main/docs/QUANTS.md)).
+  Its default Volta prompt-path expert kernels (MMQ, `dp4a`) quantize
+  activations to 8 bits (q8_1). The opt-in FP16 tensor-core expert kernel uses
+  FP16 activations instead, "so the answers differ" (NVIDIA_V100.md).
+- **Speed on a V100.** One V100-PCIE-32GB with UD-IQ4_XS and MTP: decode
+  38-51 tok/s (NVIDIA_V100.md). One community V100-SXM2-32GB: 28.16 and 28.64
+  tok/s, then 30.92 and 32.94 tok/s with the opt-in Volta decode kernels
+  ([COMMUNITY_BENCHMARKS.md](https://github.com/Niko1221/Strata/blob/main/docs/COMMUNITY_BENCHMARKS.md)).
+  "Bit-identical" in that report means the opt-in kernels produced the same
+  tokens as Strata's default kernels, not the same tokens as a reference.
+- **Several cards.** Strata splits layers across cards, and the cards take turns
+  on one request. A split adds expert-cache room, not speed for a single stream
+  (NVIDIA_V100.md, "Limits";
+  [MULTI_GPU.md](https://github.com/Niko1221/Strata/blob/main/docs/MULTI_GPU.md)).
+  A multi-card figure is one stream, not a sum of streams. Strata answers one
+  request at a time by default; `--parallel N` serves several (its README).
+- **Our own run.** On 2026-10-20 this fork ran Strata with Qwen3.8-Flash-Next
+  on three V100s: 56-64 tok/s decode with MTP, one stream. The quantization used
+  was not recorded. Divided by three cards, that is 18.7-21.3 tok/s per card.
+- **Shared design.** Strata already commits its Gated DeltaNet state by
+  replaying accepted tokens. Its verify half writes no state, and its commit half
+  replays the first accepted tokens from stored inputs
+  ([verify_kernels.hpp](https://github.com/Niko1221/Strata/blob/main/include/strata/kernels/verify_kernels.hpp)).
+  That is the same idea as this port's GDN replay-commit
+  ([ARCHITECTURE.md](ARCHITECTURE.md#4-gdn-replay-commit)).
+
+**[Project Maya](https://github.com/mw00/project-maya)** builds on the Strata
+engine; its MIT license credits Niko1221 and the Strata contributors. It serves
+GLM-5.3-Flash, which its README gives as 321 B parameters with about 18 B active
+per token, and DeepSeek-V4.1-Flash-1017 (748 B). It keeps the most-used experts
+on the GPU, the next in RAM and the rest on NVMe.
+
+- **Weights.** Maya's own GGUF quantizations of Z.ai's FP8 release: Maya-S
+  96.5 GB, Maya-S24 94.7 GB (4-bit attention, for cards of 24 GB or less),
+  Maya-M 116 GB and Maya-L 156.3 GB. Maya-L is IQ3_S
+  ([issue #130](https://github.com/mw00/project-maya/issues/130)). Against the
+  FP8 model, the README reports the same next token 83 % of the time for Maya-S
+  and Maya-S24, 86 % for Maya-M and 90 % for Maya-L, with 97.7-99.2 % of its
+  zero-shot accuracy. By our arithmetic (file size x 8 / 321 B parameters), that
+  is about 2.4 bits per parameter on average for Maya-S and 3.9 for Maya-L.
+- **Speed on V100s**, from user reports linked in the README's table:
+  - one V100-PCIE-32GB, Maya-S24: 26.8 tok/s, mean of three 256-token answers
+    from `./maya.sh --bench`, with 65-72 % of each token's experts in VRAM and
+    the rest computed by the CPU
+    ([#171](https://github.com/mw00/project-maya/issues/171));
+  - four V100-PCIE-32GB, Maya-S (its v2 IQ2_XXS file): 69.3 tok/s, mean of
+    three answers, with every expert in VRAM
+    ([#327](https://github.com/mw00/project-maya/issues/327));
+  - four V100-PCIE-32GB, Maya-L, concurrency 1, 24-30-token prompts: 26.7 tok/s
+    on v1.1.0, and 48.25 tok/s on v1.1.3 after `--calibrate` (#130).
+- **What `--calibrate` does.** It measures the host's CPU expert-lane threads and
+  its PCIe share (the maintainer's reply in #130). It tunes the host side. It
+  does not change precision. In #130, calibration alone raised decode by 34 %
+  over the same version without it.
+- **Concurrency.** The README says up to 8 requests can be answered together.
+  #130 states concurrency 1; the `--bench` reports give a mean over answers and
+  do not state concurrency.
+
+### What the comparison shows
+
+| Engine | Model | Weights on the V100 | Cards / streams | Decode tok/s | Per card | Agreement with a reference | Source |
+| --- | --- | --- | --- | ---: | ---: | --- | --- |
+| This port | Qwen3.8-27B | NVIDIA NVFP4 + FP8, unchanged | 1 / 1 | 90.4 | 90.4 | KL 0.0011 / 0.0024 vs an FP32 forward of the same checkpoint | STATUS.md line 66 |
+| This port | Qwen3.8-27B | same | 1 / 4 | 70.7 per stream | 70.7 per stream | same | STATUS.md line 66 |
+| Strata | Qwen3.8-Flash-Next, 125 B | UD-IQ4_XS GGUF, int8 KV | 1 / 1 | 38-51 | 38-51 | 88.91 % top token vs Q8_0 | NVIDIA_V100.md, QUANTS.md |
+| Strata (our run, 2026-10-20) | Qwen3.8-Flash-Next | not recorded | 3 / 1 | 56-64 | 18.7-21.3 | not measured | fork notes |
+| Project Maya | GLM-5.3-Flash, 321 B (18 B active) | Maya-S24, about 2.4 bits/param | 1 / `--bench` | 26.8 | 26.8 | 83 % next token vs FP8 | #171 |
+| Project Maya | GLM-5.3-Flash | Maya-S v2 (IQ2_XXS) | 4 / `--bench` | 69.3 | 17.3 | 83 % (Maya-S) | #327 |
+| Project Maya | GLM-5.3-Flash | Maya-L (IQ3_S), about 3.9 bits/param | 4 / 1 | 48.25 | 12.1 | 90 % | #130 |
+
+Read the table with these limits:
+
+- **Different models.** Strata and Maya serve mixture-of-experts models about
+  4.6 and 12 times larger in total parameters (125 B and 321 B against 27 B),
+  often with part of the experts in host RAM. Maya's model activates about 18 B
+  parameters per token, fewer than this dense 27B model. This port serves a 27B model that fits on one card. Decode rates across
+  different models do not rank the engines.
+- **Different references.** Our KL compares the port with an FP32 forward of the
+  same 4-bit checkpoint, so it measures kernel arithmetic. Strata's and Maya's
+  figures compare their quantizations with a higher-precision release, so they
+  measure quantization error. The numbers are not on one scale. All three routes
+  serve weights of about 2 to 4 bits.
+- **Different concurrency.** This port serves up to 4 requests per card
+  together, with a shared KV pool and prefix cache. The Strata and Maya V100
+  figures are one stream where stated; their multi-card figures are one stream
+  spread over the cards.
+
+What the evidence supports:
+
+- **No per-card speed advantage to explain.** In the published V100 figures,
+  Strata and Maya do not decode faster per card than this port; they decode
+  slower. Their numbers do not show speed bought by lower precision, because
+  they show no speed gain over this port at all. Our numbers do not show that
+  this engine is faster on their models either; nobody has run the same model
+  on both.
+- **Their advantage is capacity.** They fit 125 B to 748 B-parameter models on
+  cards that cannot hold them, by quantizing to 2-4 bits and tiering experts
+  across VRAM, RAM and NVMe. This port cannot serve those models at all.
+- **This port's advantage is multi-agent serving of a mid-size model.** It keeps
+  NVIDIA's weights unchanged, runs 4 streams per card with exact speculative
+  decoding, and keeps four 22-30k-token contexts resident.
 
 ## What this port did
 
@@ -162,7 +288,9 @@ combination.
   against an independent FP32 reference (KL above), not assumed.
 - **One committed recurrent row per request.** GDN replay-commit keeps long
   multi-agent contexts resident: four 22-30k-token agents with zero evictions at
-  31G (line 65).
+  31G (line 65). Strata uses the same verify-then-replay idea for its own GDN
+  layers; what this port adds is the byte-exact proof against the old candidate
+  path and the freed rows going to a shared KV pool for four requests.
 - **MTP speculative decoding on Volta.** The S1L kernel serves target decode,
   verification and draft attention on tensor cores, and its row contract makes
   verification bit-exact.
@@ -203,5 +331,7 @@ Not for:
 | This port (SM70 Flare) | Checkpoint weights unchanged. Speculative decoding exact. KL to an FP32 reference 0.0011 / 0.0024 (short / long). | Yes | STATUS.md lines 49-66; commits `8ad725c`, `ca16f00` |
 | llama.cpp GGUF K-quants | Requantized from BF16 into a different format; its own quantization error | No | [llama.cpp quantize](https://github.com/ggml-org/llama.cpp/blob/master/tools/quantize/README.md) |
 | INT8 DP4A (superl8) | 3-bit GGUF weights on INT8 `dp4a` kernels; Qwen3.6-27B Q3_K_S: 21.3 tok/s steady decode, 7.2 tok/s end to end, CMP 100-210 | No | [qwen3-scoreboard.json](https://github.com/jajmangold/superl8/blob/main/bench/qwen3-scoreboard.json) |
+| Strata | Different model (125 B MoE) as GGUF, UD-IQ4_XS on V100: 88.91 % top token vs Q8_0; 38-51 tok/s on one V100, one stream | No (our 2026-10-20 run: 56-64 tok/s on 3 V100s, one stream) | [Strata](https://github.com/Niko1221/Strata), [QUANTS.md](https://github.com/Niko1221/Strata/blob/main/docs/QUANTS.md) |
+| Project Maya | Different model (321 B MoE) as its own 2-4-bit GGUF: 83-90 % next token vs FP8; 26.8 tok/s Maya-S24 on one V100, 48.25 tok/s Maya-L on four | No | [Project Maya](https://github.com/mw00/project-maya), [#130](https://github.com/mw00/project-maya/issues/130) |
 | W8A8 / SmoothQuant | INT8 weights and activations, calibrated; on Volta via `dp4a` | No | [SmoothQuant](https://arxiv.org/abs/2211.10438) |
 | FP16 dense | FP16 conversion of the BF16 model (FP16 has a smaller range than BF16), about 54 GB; does not fit one 32 GB card | No (arithmetic) | two bytes per parameter |
