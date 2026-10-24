@@ -167,6 +167,35 @@ curl -s http://127.0.0.1:8300/v1/chat/completions -H 'Content-Type: application/
 Any OpenAI client works with `base_url="http://127.0.0.1:8300/v1"`. Each
 request may use up to 32,768 tokens of prompt plus output.
 
+### Token observation extensions
+
+Flare's request extensions `return_token_ids` and `return_token_timestamps`
+add native token IDs and per-token timestamps to stream chunks
+([native inference APIs](../api.md)). They are accepted only on
+`POST /v1/chat/completions`:
+
+```sh
+curl -sN http://127.0.0.1:8300/v1/chat/completions -H 'Content-Type: application/json' -d '{"model": "Qwen3.8-27B", "messages": [{"role": "user", "content": "Write a Python function that reverses a linked list."}], "max_tokens": 64, "stream": true, "return_token_ids": true, "return_token_timestamps": true, "stream_options": {"include_usage": true, "continuous_usage_stats": true}}'
+```
+
+`POST /v1/completions` rejects either extension with HTTP 400 before
+generation, with this body:
+
+```json
+{"error": {"type": "invalid_request_error", "message": "token observation extensions require /v1/chat/completions", "param": null, "code": "invalid_request_error"}}
+```
+
+To count generated tokens on `/v1/completions`, request cumulative usage
+instead. Every chunk then carries native token counts:
+
+```sh
+curl -sN http://127.0.0.1:8300/v1/completions -H 'Content-Type: application/json' -d '{"model": "Qwen3.8-27B", "prompt": "def reverse_linked_list(head):", "max_tokens": 64, "stream": true, "stream_options": {"include_usage": true, "continuous_usage_stats": true}}'
+```
+
+These request bodies are fixtures in `tests/fixtures/http_requests/`, checked
+against the server's request validator by `cargo test` (see
+[BUILD.md](BUILD.md#build-the-native-server)).
+
 ## Health and metrics
 
 `GET /health` returns `{"status":"ok"}` with HTTP 200 while the runtime is

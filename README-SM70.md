@@ -219,6 +219,19 @@ the fork's production serve command, with 3 draft tokens; the tables above were
 measured with 4. [SERVE.md](docs/sm70/SERVE.md) explains each flag. Change the
 `/data` paths if you cannot write there.
 
+**API note.** Flare's request extensions `return_token_ids` and
+`return_token_timestamps` are accepted only on `POST /v1/chat/completions`.
+`POST /v1/completions` rejects them with HTTP 400 and the message
+`token observation extensions require /v1/chat/completions`; use
+`"stream_options": {"include_usage": true, "continuous_usage_stats": true}`
+there for per-chunk token counts. A working request with the extensions:
+
+```sh
+curl -sN http://127.0.0.1:8300/v1/chat/completions -H 'Content-Type: application/json' -d '{"model": "Qwen3.8-27B", "messages": [{"role": "user", "content": "Write a Python function that reverses a linked list."}], "max_tokens": 64, "stream": true, "return_token_ids": true, "return_token_timestamps": true, "stream_options": {"include_usage": true, "continuous_usage_stats": true}}'
+```
+
+Details are in [SERVE.md](docs/sm70/SERVE.md#token-observation-extensions).
+
 Preparation takes about 25 minutes on one card (STATUS.md lines 49, 55). The
 script exports without the fork's export gates; [VALIDATE.md](docs/sm70/VALIDATE.md)
 explains what that means.

@@ -1,0 +1,20 @@
+{
+  "tool": "documentation",
+  "endpoint": "/v1/completions",
+  "description": "Documented rejection (README-SM70.md, docs/sm70/SERVE.md): token observation extensions on /v1/completions.",
+  "expect": {
+    "status": 400,
+    "error": "token observation extensions require /v1/chat/completions"
+  },
+  "body": {
+    "model": "Qwen3.8-27B",
+    "prompt": "def reverse_linked_list(head):",
+    "max_tokens": 64,
+    "stream": true,
+    "stream_options": {
+      "include_usage": true,
+      "continuous_usage_stats": true
+    },
+    "return_token_ids": true
+  }
+}

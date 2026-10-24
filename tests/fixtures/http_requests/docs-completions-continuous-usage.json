@@ -1,0 +1,18 @@
+{
+  "tool": "documentation",
+  "endpoint": "/v1/completions",
+  "description": "Documented curl example (docs/sm70/SERVE.md): completions stream with cumulative usage instead of extensions.",
+  "expect": {
+    "status": 200
+  },
+  "body": {
+    "model": "Qwen3.8-27B",
+    "prompt": "def reverse_linked_list(head):",
+    "max_tokens": 64,
+    "stream": true,
+    "stream_options": {
+      "include_usage": true,
+      "continuous_usage_stats": true
+    }
+  }
+}

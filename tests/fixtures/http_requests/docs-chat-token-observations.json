@@ -1,0 +1,25 @@
+{
+  "tool": "documentation",
+  "endpoint": "/v1/chat/completions",
+  "description": "Documented curl example (README-SM70.md, docs/sm70/SERVE.md): chat stream with token observation extensions.",
+  "expect": {
+    "status": 200
+  },
+  "body": {
+    "model": "Qwen3.8-27B",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Write a Python function that reverses a linked list."
+      }
+    ],
+    "max_tokens": 64,
+    "stream": true,
+    "return_token_ids": true,
+    "return_token_timestamps": true,
+    "stream_options": {
+      "include_usage": true,
+      "continuous_usage_stats": true
+    }
+  }
+}
