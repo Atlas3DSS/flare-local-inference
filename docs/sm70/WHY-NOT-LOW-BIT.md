@@ -133,9 +133,9 @@ Decode, tokens per second per request after the first token:
 | Configuration | 1 agent, short prompts, 128 tokens | 4 agents, short prompts, per agent | 1 agent, 28.7k-token context, 512 tokens |
 | --- | ---: | ---: | ---: |
 | This port, depth-4 MTP (speculative) | 83.0 | 64.8 | 72.4 |
-| This port, speculation off (pending JOB6) | not yet measured | not yet measured | not yet measured |
+| This port, speculation off (pending: speculation on/off comparison for both engines) | not yet measured | not yet measured | not yet measured |
 | llama.cpp Q4_K_M, no speculative decoding | 33.2 | 20.8 | 28.4 |
-| llama.cpp + speculation (pending JOB6) | not yet measured | not yet measured | not yet measured |
+| llama.cpp + speculation (pending: speculation on/off comparison for both engines) | not yet measured | not yet measured | not yet measured |
 
 The current decode gap is engine plus speculation, not kernels alone: this port
 decodes with its MTP head at depth 4 and llama.cpp decodes without speculation.

@@ -1,5 +1,5 @@
 {
- "format": "measurement-job3-summary-v1",
+ "format": "measurement-prefill-profile-summary-v1",
  "binary_sha256": "d4ffb1fa3453bf37f2017a7b58d09559010881311b2d9afcdfb33b4011caa667",
  "package": "release-preparation/model.safetensors (sha256 fd7c24dc...)",
  "card": "<card> GPU-30ab07ae-8f44-df0e-ce62-9b6b088f1d00",
