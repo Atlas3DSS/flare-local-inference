@@ -221,9 +221,9 @@ detail and the sources.
 **What makes it useful** is the combination: upstream's NVFP4 package on
 hardware without FP4 instructions, with its outputs measured against an
 independent FP32 forward of the same checkpoint (KL 0.0011 short, 0.0024 long;
-not bit-exact), and at least as close to that reference in mean KL as the SM120
-build on three public prompts: lower on each (0.00079-0.00156 against
-0.00116-0.00225), top-1 agreement 135 against 136 of 141 positions, with
+not bit-exact), and with no measurable difference from the SM120 build in mean
+or p99 KL against that reference over 30 public prompts (3,840 positions: mean
+0.00294 against 0.00423, with paired 95 % intervals that include zero), with
 different catalogs and with SM70's FP32 continuation and BF16 KV against
 SM120's BF16 and FP8; the direct SM70/SM120 divergence is small and non-zero
 ([comparison](docs/sm70/ARCHITECTURE.md#distance-from-the-fp32-reference));

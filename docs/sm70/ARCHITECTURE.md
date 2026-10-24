@@ -151,10 +151,58 @@ contexts, and it does not show that SM70 and SM120 emit the same tokens.
 
 ### Distance from the FP32 reference
 
-Both captures were also measured against the shared public FP32 reference, with
-the same FP64 full-vocabulary KL on the same 141 teacher-forced positions, here
-KL(build ‖ FP32 reference)
-([measurements/reference-kl.json](receipts/measurements/reference-kl.json)):
+Both builds were also measured against a shared FP32 reference, as
+KL(build ‖ FP32 reference) in FP64 over the full vocabulary on the same
+teacher-forced positions. The result rests on a fixed-budget run: 30 public
+prompts fixed before any capture, 128 positions each (3,840 positions), with the
+statistics computed once and no interim decisions
+([kl-30-prompts.json](receipts/measurements/kl-30-prompts.json),
+[kl-30-prompts-stats.json](receipts/measurements/kl-30-prompts-stats.json),
+[kl-30-prompts-per-position.json](receipts/measurements/kl-30-prompts-per-position.json)).
+
+| Build, pooled over 3,840 positions | KL mean | p50 | p99 | max | Positions with KL above 1.0 | Top-1 agreement with the reference |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| SM70: FP32 continuation, BF16 KV, depth-4 catalog | 0.00294 | 0.00042 | 0.0239 | 3.007 | 1 | 97.92 % |
+| SM120: BF16 continuation, FP8 KV, ordinary catalog | 0.00423 | 0.00056 | 0.0285 | 3.644 | 2 | 97.99 % |
+
+Paired by prompt, as SM70 minus SM120 (negative means SM70 is closer to the
+reference), with bootstrap 95 % intervals over prompts (10,000 resamples):
+
+| Per-prompt statistic | Mean difference | 95 % interval | Prompts with SM70 lower | Sign test p |
+| --- | ---: | --- | ---: | ---: |
+| Mean KL | -0.00129 | [-0.00353, +0.00006] | 24 of 30 | 0.0014 |
+| p99 KL | -0.0106 | [-0.0236, +0.0020] | 24 of 30 | 0.0014 |
+| Max KL | -0.0995 | [-0.358, +0.052] | 19 of 30 | 0.20 |
+
+Both intervals for the mean and p99 differences include zero. **At this sample
+size there is no measurable difference between the two builds in mean or p99
+KL from the FP32 reference.** Top-1 agreement does not differ measurably
+either: the position-level difference is -0.08 percentage points
+[-0.48, +0.32].
+
+The per-prompt sign test points the other way: SM70 has the lower mean and the
+lower p99 on 24 of the 30 prompts (p = 0.0014). The two tests disagree because
+KL is heavy-tailed, and a handful of single positions decide the means. SM70's
+largest per-position KL is 3.007 and SM120's is 3.644. In the per-position
+receipt, SM70 has 1 position above 1.0 and SM120 has 2. One of these positions
+coincides: position 28 of prompt index 3 reaches 3.007 on SM70 and 3.073 on
+SM120. The other, position 22 of prompt index 20, reaches 3.644 on SM120 and
+0.092 on SM70. That prompt's mean difference, -0.0303, is the largest of the 30
+by a factor of about eight.
+
+This does not isolate the hardware. The catalogs differ, and SM70 runs FP32
+continuation and BF16 KV against SM120's BF16 continuation and FP8 KV. The FP32
+reference is a Hugging Face eager forward and is not bit-stable across GEMM
+shapes, so KL is observational, and no pass threshold is set. Only ordinary
+graphs are measured, with no MTP and no native serving, and the result does not
+show that the two architectures emit the same tokens. The pinned tools
+hard-code three prompts, so a wrapper replaced the prompt list at run time; no
+tool file was edited.
+
+#### Earlier 3-prompt measurement
+
+An earlier run used the 3 public reference prompts and 47 positions each
+([reference-kl.json](receipts/measurements/reference-kl.json)):
 
 | Prompt | SM70 KL mean / p99 / max | SM120 KL mean / p99 / max | Top-1 agreement with the reference, SM70 / SM120 (of 47) |
 | --- | ---: | ---: | ---: |
@@ -162,19 +210,13 @@ KL(build ‖ FP32 reference)
 | `reference-public-01` | 0.00156 / 0.0166 / 0.0212 | 0.00225 / 0.0184 / 0.0208 | 43 / 43 |
 | `reference-public-02` | 0.00079 / 0.0028 / 0.0030 | 0.00164 / 0.0117 / 0.0118 | 45 / 46 |
 
-On these prompts the SM70 build is at least as close to the FP32 reference as
-the SM120 build in mean and p99 KL, which are lower on each of the three
-prompts. The largest single-position KL differs by about 2 % (0.0212 against
-0.0208, both on `reference-public-01`), and top-1 agreement is 135 against 136
-of 141. The four top-1 misses on `reference-public-01` fall on the same positions
-(10, 26, 30 and 37) in every run, which points to near-ties in the reference
-rather than to either architecture.
-
-This does not isolate the hardware. The catalogs differ, SM70 runs FP32
-continuation and BF16 KV against SM120's BF16 continuation and FP8 KV, and part
-of SM70's margin can come from that higher precision. The sample is 141
-positions on 3 prompts, with no MTP and no native serving, and it does not show
-that the two architectures emit the same tokens.
+Its paired intervals excluded zero: the mean difference was -0.00061
+[-0.00085, -0.00028] and the p99 difference -0.0039 [-0.0089, -0.0009]. The
+30-prompt run's intervals did not, which is why 3 prompts were not enough. With
+3 prompts the bootstrap has only 10 distinct resample means, and the sign test
+cannot go below p = 0.25. The four top-1 misses on `reference-public-01` fall on
+the same positions (10, 26, 30 and 37) in every run, which points to near-ties
+in the reference rather than to either architecture.
 
 Not measured:
 
@@ -182,10 +224,11 @@ Not measured:
   admits only the convolution history of 7 that the depth-4 catalog uses, and
   refuses the ordinary catalog's history of 3 at preparation;
 - verification logits of the native depth-4 path, which no pinned tool exposes;
-- a window at an 8,192-token offset, for which no FP32 reference or SM120
-  capture exists. The closest long window measured is the release package's
-  export accuracy at about 4.1k tokens: a mean KL of 0.0019 over 288 positions on
-  6 prompts, with top-1 agreement on 286.
+- long-context windows at 8,192 and 24,576-token offsets. The pinned reference
+  and comparison tools score every prompt from offset 0 and have no offset
+  option. The closest long window measured is the release package's export
+  accuracy at about 4.1k tokens: a mean KL of 0.0019 over 288 positions on 6
+  prompts, with top-1 agreement on 286.
 
 ## Why Volta needs its own path
 

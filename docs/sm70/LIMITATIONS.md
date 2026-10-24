@@ -69,8 +69,12 @@ upstream. Read this before you rely on the port.
 - **SM70 and SM120 outputs differ slightly.** A measured comparison of
   ordinary graphs on 3 public prompts found small, non-zero full-vocabulary KL
   (mean 0.0015 to 0.0024 per prompt), and one of the three independent greedy
-  continuations parts after 9 tokens. It is not a hardware-only comparison,
-  covers neither MTP nor native serving, and asserts no acceptance threshold
+  continuations parts after 9 tokens. Against a shared FP32 reference, 30
+  public prompts (3,840 positions) show no measurable difference between the two
+  builds in mean or p99 KL at that sample size
+  ([distance from the FP32 reference](ARCHITECTURE.md#distance-from-the-fp32-reference)).
+  It is not a hardware-only comparison, covers neither MTP nor native serving,
+  and asserts no acceptance threshold
   ([comparison](ARCHITECTURE.md#sm70-and-sm120-comparison-ordinary-graphs)).
 - **What is public and what is not.** Public in this tree: the export and gate
   harness (`tools/prepare_replay.py`, `prepare_replay.sh`, `validate_replay.py`,
