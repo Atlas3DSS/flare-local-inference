@@ -21,6 +21,9 @@ Capture artifacts include the checkpoint's complete file-content hashes. Source,
 reference, prompt IDs, teacher-forced IDs and execution mode must match. The
 report retains genuine architecture-specific arithmetic/KV formats and reports
 measurements without invented acceptance bounds or an exactness guarantee.
+SM70 prepares the MTP-capable depth-four catalog required by its GDN prefill
+history geometry, but measures only ordinary graphs. SM120 prepares its ordinary
+catalog. These are actual recipe configurations, not a hardware-only experiment.
 """
 import argparse
 import hashlib
@@ -38,6 +41,15 @@ else:
 ARCHITECTURES = {"sm70": (7, 0), "sm120": (12, 0)}
 FORMAT = "flare-ordinary-cross-architecture-v1"
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def preparation_catalog(architecture):
+    if architecture not in ARCHITECTURES:
+        raise ValueError("unsupported capture architecture")
+    # Sol15 SM70 prefill requires history length 3 + 4. Keep kernel admission
+    # intact and select only the catalog's non-speculative graphs for measurement.
+    return {"mtp": architecture == "sm70",
+            "speculative_widths": (1, 2, 3, 4, 5) if architecture == "sm70" else (1, 2, 3, 4)}
 
 
 def sha256(path):
@@ -154,7 +166,7 @@ def capture(args):
     headroom = max(0, total - (args.lease_gib << 30)) + (256 << 20)
     config = PreparationConfig(device=0, context=context, max_active=1, prefill_chunk_size=128,
         snapshot_budget_bytes=1 << 30, headroom_bytes=headroom, compile_workers=args.compile_workers,
-        preparation_pages=context // 128, retain_graphs=True, mtp=False,
+        preparation_pages=context // 128, retain_graphs=True, **preparation_catalog(args.architecture),
         kernel_cache=args.kernel_cache, cutlass_include=args.cutlass_include)
     source_hash = source_identity()
     with PackageStorage(device=0) as storage:
@@ -170,6 +182,8 @@ def capture(args):
         "reference_sha256": sha256(args.reference),
         "reference_report_sha256": sha256(args.reference.with_suffix(".json")),
         "vocabulary": vocabulary, "mode": "ordinary", "mtp": False,
+        "prepared_mtp": config.mtp, "prepared_draft_tokens": config.draft_tokens,
+        "prepared_speculative_widths": list(config.speculative_widths) if config.mtp else [],
         "context": context, "prefill_chunk_size": 128, "max_active": 1,
         "arithmetic": {"continuation_dtype": "float32" if capability == (7, 0) else "bfloat16",
                        "kv_element_bytes": 2 if capability == (7, 0) else 1,
@@ -194,6 +208,13 @@ def load_capture(path, architecture):
             or document.get("compute_capability") != list(ARCHITECTURES[architecture])
             or document.get("mode") != "ordinary" or document.get("mtp") is not False):
         raise ValueError("requires a complete ordinary capture on the named architecture")
+    catalog = preparation_catalog(architecture)
+    expected_widths = list(catalog["speculative_widths"]) if catalog["mtp"] else []
+    if (document.get("prepared_mtp") is not catalog["mtp"]
+            or type(document.get("prepared_draft_tokens")) is not int
+            or document["prepared_draft_tokens"] != (expected_widths[-1] - 1 if expected_widths else 0)
+            or document.get("prepared_speculative_widths") != expected_widths):
+        raise ValueError("capture does not identify the architecture's prepared catalog")
     for field in ("candidate_report", "artifact"):
         name = document[field]
         if Path(name).name != name or sha256(path.parent / name) != document[field + "_sha256"]:
@@ -279,8 +300,11 @@ def compare(args):
     result = {"format": FORMAT, "status": "measured", "numerical_pass": None,
         "scope": "ordinary retained Flare graphs; independent greedy and full-vocabulary common-prefix KL",
         "native_runtime_tested": False, "mtp_tested": False, "stop_on_eos": False,
+        "hardware_only_comparison": False,
         "interpretation": "No cross-architecture exactness guarantee or acceptance threshold is asserted. "
-                          "Teacher forcing follows the same public FP32 reference continuation after divergence.",
+                          "Teacher forcing follows the same public FP32 reference continuation after divergence. "
+                          "SM70 prepares an MTP-capable depth-four catalog; SM120 prepares an ordinary catalog. "
+                          "Only ordinary graphs are measured; catalog, state geometry and recipe arithmetic differ.",
         "captures": {"sm70": left, "sm120": right},
         "capture_manifest_sha256": {"sm70": sha256(args.sm70), "sm120": sha256(args.sm120)},
         "prompts": rows}

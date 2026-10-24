@@ -102,6 +102,25 @@ def require_capability(actual, expected=(7, 0)):
         raise ValueError(f"candidate qualification requires actual SM{expected[0]}{expected[1]} hardware")
 
 
+def _ordinary_graph_names(signatures, *, mode):
+    """Select only non-speculative variants, including in an MTP-capable catalog."""
+    names = {}
+    kinds = ("init", "prefill", "snapshot", "restore", "resume")
+    if mode != "sequential":
+        kinds += ("decode",)
+    for kind in kinds:
+        candidates = [(signature.token_capacity, signature.batch_capacity, name)
+            for name, signature in signatures.items()
+            if signature.kind == kind and signature.batch_capacity == 1
+            and signature.speculation_enabled is not True]
+        if not candidates:
+            raise ValueError(f"prepared catalog lacks a one-request ordinary {kind} graph")
+        if kind == "resume" and len(candidates) != 1:
+            raise ValueError("qualification requires one one-request captured resume graph")
+        names[kind] = (max(candidates) if kind == "prefill" and mode == "chunked" else min(candidates))[-1]
+    return names
+
+
 def _owners(prepared, *, mode="sequential", expected_capability=(7, 0)):
     if mode not in ("sequential", "ordinary", "chunked"):
         raise ValueError("unknown qualification execution mode")
@@ -115,14 +134,8 @@ def _owners(prepared, *, mode="sequential", expected_capability=(7, 0)):
     if prepared.closed or prepared.consumed:
         raise ValueError("qualification requires an open model before native ownership handoff")
     require_capability(torch.cuda.get_device_capability(prepared.device), expected_capability)
-    names = {}
+    names = _ordinary_graph_names(prepared.signatures, mode=mode)
     for kind in ("init", "prefill", "snapshot", "restore"):
-        candidates = [(signature.token_capacity, signature.batch_capacity, name)
-            for name, signature in prepared.signatures.items()
-            if signature.kind == kind and signature.batch_capacity == 1]
-        if not candidates:
-            raise ValueError(f"prepared catalog lacks a one-request {kind} graph")
-        names[kind] = (max(candidates) if kind == "prefill" and mode == "chunked" else min(candidates))[-1]
         if not isinstance(prepared.graphs[names[kind]], torch.cuda.CUDAGraph):
             raise TypeError("qualification must replay actual retained CUDA graphs")
     catalogs = [resource for resource in prepared.resources if isinstance(resource, Mapping)
@@ -156,11 +169,6 @@ def _owners(prepared, *, mode="sequential", expected_capability=(7, 0)):
     # Exercise the existing graph/device/storage registration checks as well.
     prepared.manifest(all_variants=True)
     if mode != "sequential":
-        candidates = [(signature.token_capacity, name) for name, signature in prepared.signatures.items()
-                      if signature.kind == "decode" and signature.batch_capacity == 1]
-        if not candidates:
-            raise ValueError("prepared catalog lacks ordinary one-request decode")
-        names["decode"] = min(candidates)[-1]
         decode = catalogs[0][names["decode"]]
         if (not isinstance(decode, PreparedGeneration) or decode.batch.mode != "decode"
                 or decode.batch.requests is not batch.requests or decode.batch.inputs is not batch.inputs
@@ -168,11 +176,6 @@ def _owners(prepared, *, mode="sequential", expected_capability=(7, 0)):
                 or not isinstance(prepared.graphs[names["decode"]], torch.cuda.CUDAGraph)):
             raise ValueError("ordinary decode must share production state and retain an actual graph")
     from ignition.components.paged_resume import PreparedResume
-    candidates = [name for name, signature in prepared.signatures.items()
-                  if signature.kind == "resume" and signature.batch_capacity == 1]
-    if len(candidates) != 1:
-        raise ValueError("qualification requires one one-request captured resume graph")
-    names["resume"] = candidates[0]
     resume = catalogs[0][names["resume"]]
     if (not isinstance(resume, PreparedResume) or resume.state.requests is not batch.requests
             or not isinstance(prepared.graphs[names["resume"]], torch.cuda.CUDAGraph)):

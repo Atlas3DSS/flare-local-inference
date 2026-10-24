@@ -16,6 +16,39 @@ from tools import validate_candidate
 
 
 class ArchitectureTests(unittest.TestCase):
+    def test_prepared_catalog_preserves_sm70_history_without_claiming_mtp_execution(self):
+        sm70 = comparison.preparation_catalog("sm70")
+        self.assertIs(sm70["mtp"], True)
+        self.assertEqual(sm70["speculative_widths"], (1, 2, 3, 4, 5))
+        self.assertEqual(3 + max(sm70["speculative_widths"]) - 1, 7)
+        self.assertIs(comparison.preparation_catalog("sm120")["mtp"], False)
+        with self.assertRaises(ValueError):
+            comparison.preparation_catalog("sm80")
+
+    def test_mtp_catalog_selects_only_ordinary_graphs_and_rejects_missing_ordinary_variants(self):
+        signatures = {}
+        for kind in ("init", "prefill", "snapshot", "restore", "resume", "decode"):
+            for enabled in (True, False):
+                name = kind + "1" + ("" if enabled else "-no-mtp")
+                signatures[name] = SimpleNamespace(kind=kind, batch_capacity=1, token_capacity=1,
+                                                  speculation_enabled=enabled)
+        signatures["prefill128-no-mtp"] = SimpleNamespace(kind="prefill", batch_capacity=1,
+                                                         token_capacity=128, speculation_enabled=False)
+        ordinary = validate_candidate._ordinary_graph_names(signatures, mode="ordinary")
+        self.assertEqual(ordinary, {kind: kind + "1-no-mtp"
+                                    for kind in ("init", "prefill", "snapshot", "restore", "resume", "decode")})
+        self.assertEqual(validate_candidate._ordinary_graph_names(signatures, mode="chunked")["prefill"],
+                         "prefill128-no-mtp")
+        self.assertNotIn("decode", validate_candidate._ordinary_graph_names(signatures, mode="sequential"))
+        for kind in ordinary:
+            missing = {name: signature for name, signature in signatures.items()
+                       if not (signature.kind == kind and signature.speculation_enabled is False)}
+            with self.subTest(kind=kind), self.assertRaisesRegex(ValueError, "ordinary " + kind):
+                validate_candidate._ordinary_graph_names(missing, mode="ordinary")
+        signatures["resume-duplicate"] = signatures["resume1-no-mtp"]
+        with self.assertRaisesRegex(ValueError, "one one-request captured resume"):
+            validate_candidate._ordinary_graph_names(signatures, mode="ordinary")
+
     def fixture(self):
         ids, generated = torch.tensor([1, 2]), torch.tensor([3, 4, 4])
         prefill = torch.zeros(2, 32); prefill[0, 2] = 4; prefill[1, 3] = 4
@@ -79,11 +112,19 @@ class ArchitectureTests(unittest.TestCase):
             report_path = directory / "sm70.json"; report_path.write_text(json.dumps(report))
             document = {"format": comparison.FORMAT, "status": "complete", "architecture": "sm70",
                 "compute_capability": [7, 0], "mode": "ordinary", "mtp": False,
+                "prepared_mtp": True, "prepared_draft_tokens": 4,
+                "prepared_speculative_widths": [1, 2, 3, 4, 5],
                 "reference_sha256": "a" * 64, "candidate_report": report_path.name,
                 "candidate_report_sha256": comparison.sha256(report_path), "artifact": artifact.name,
                 "artifact_sha256": comparison.sha256(artifact)}
             path = directory / "sm70.capture.json"; path.write_text(json.dumps(document))
             comparison.load_capture(path, "sm70")
+            for field, wrong in (("prepared_mtp", False), ("prepared_draft_tokens", 0),
+                                 ("prepared_speculative_widths", [1, 2, 3, 4])):
+                path.write_text(json.dumps({**document, field: wrong}))
+                with self.subTest(field=field), self.assertRaisesRegex(ValueError, "prepared catalog"):
+                    comparison.load_capture(path, "sm70")
+            path.write_text(json.dumps(document))
             report["state_restored"] = False; report_path.write_text(json.dumps(report))
             document["candidate_report_sha256"] = comparison.sha256(report_path); path.write_text(json.dumps(document))
             with self.assertRaisesRegex(ValueError, "incomplete"):
@@ -143,6 +184,7 @@ class ArchitectureTests(unittest.TestCase):
             report = json.loads(args.output.read_text())
             self.assertIsNone(report["numerical_pass"])
             self.assertFalse(report["mtp_tested"]); self.assertFalse(report["native_runtime_tested"])
+            self.assertFalse(report["hardware_only_comparison"])
             self.assertTrue(report["prompts"][0]["independent_greedy"]["exact_sequence_match"])
 
 
