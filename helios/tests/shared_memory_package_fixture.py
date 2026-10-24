@@ -64,6 +64,11 @@ extern "C" __global__ void shared_requirement(int *out, int bytes) {
 
 
 if __name__ == "__main__":
+    from ignition.preparation.module_images import ModuleImages
+
     root = Path(sys.argv[1])
     root.mkdir(parents=True, exist_ok=True)
-    prepare(root)
+    # This fork preserves graph construction order through CUPTI node IDs.
+    # Subscribe before constructing graphs, just as normal preparation does.
+    with ModuleImages():
+        prepare(root)

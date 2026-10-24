@@ -98,12 +98,14 @@ def test_unknown_packing_fields_do_not_acquire_sources_from_model_identity():
 
 def test_dense_qwen_preserves_device_decode_and_page_storage_in_typed_contract():
     import torch
+    from ignition.components.state import StateLayout
     from ignition.components.paged_batch import BatchInputs
     from ignition.recipes.qwen38_dense.contract import prepare
 
     inputs = BatchInputs.allocate(128, 2, "cpu", capacity=4)
     buffers = inputs.buffers()
-    pool = SimpleNamespace(layout=SimpleNamespace(row_bytes=4096),
+    pool = SimpleNamespace(layout=StateLayout.from_specs([("consumed_tokens", (1,), torch.int64),
+                                                        ("last_hidden", (960,), torch.float32)]),
         pages={name: torch.empty((8, 128 * 4 * 256 * 2), dtype=torch.uint8)
                for name in ("layer3.key", "layer3.value")})
     signatures = {kind: GraphSignature(kind, 4, 128 if kind == "prefill" else 1, tuple(buffers))

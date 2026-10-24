@@ -36,10 +36,15 @@ def test_checkpoint_columns_and_memory(depth, row_bytes):
         {'draft.key', 'draft.value', 'draft.key.extra', 'draft.value.extra'} if depth else set())
 
 
-@pytest.mark.parametrize('widths', [(), (2, 3), (1, 1), (1, 3, 2), (1, 5)])
+@pytest.mark.parametrize('widths', [(), (2, 3), (1, 1), (1, 3, 2), (1, 6)])
 def test_reject_invalid_catalog(widths):
     with pytest.raises(ValueError):
         PreparationConfig(mtp=True, speculative_widths=widths)
+
+
+def test_maximum_verification_width_admits_four_draft_tokens():
+    prepared = PreparationConfig(mtp=True, speculative_widths=(1, 5))
+    assert prepared.draft_tokens == 4
 
 
 def test_native_contract_requires_all_state_columns_and_trailing_draft_pages():

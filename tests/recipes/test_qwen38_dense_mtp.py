@@ -398,8 +398,55 @@ def test_dense_mtp_captured_dynamic_draft_rows_pages_and_empty_replay(batch):
         live_requests = lengths_cpu.bool()
         torch.testing.assert_close(scratch.logits.cpu()[live_requests], expected[2][live_requests],
                                    rtol=.02, atol=.015625)
-        assert torch.equal(key.cpu(), expected[3].view(torch.uint16))
-        assert torch.equal(value.cpu(), expected[4].view(torch.uint16))
+        # CPU and GPU projections/norms need not round newly computed K/V identically. Derive writer ownership
+        # independently: numerical bounds apply only to those slots; all untouched bytes remain exact.
+        written = torch.zeros(initial_k.shape[:2], dtype=torch.bool)
+        written_tokens, written_pages, written_offsets = [], [], []
+        for token, token_position in enumerate(cpu_metadata.positions.tolist()):
+            if token_position >= 0:
+                page = int(cpu_metadata.token_page_table[token, token_position // 128])
+                written[page, token_position % 128] = True
+                written_tokens.append(token)
+                written_pages.append(page)
+                written_offsets.append(token_position % 128)
+        writer_values = tuple(source.cpu().bfloat16()
+                              for source in (operation.attention.key, operation.attention.value))
+        diagnostics = {"ordinal": ordinal, "position": position, "lengths": lengths, "cache": {}}
+        for name, saved, reference, before in zip(
+                ("key", "value"), captured[2:], expected[3:], (before_k, before_v), strict=True):
+            actual = saved.cpu()
+            different = actual != reference.view(torch.uint16)
+            absolute = (actual.view(torch.bfloat16).float() - reference.float()).abs()
+            diagnostics["cache"][name] = {
+                "written_slots": int(written.sum()),
+                "written_reference_mismatches": int(different[written].sum()),
+                "unwritten_reference_mismatches": int(different[~written].sum()),
+                "unwritten_changed_words": int((actual != before.view(torch.uint16))[~written].sum()),
+                "max_absolute_error": float(absolute.max()),
+                "max_relative_error_floor_1e_12": float((absolute / reference.float().abs().clamp_min(1e-12)).max()),
+            }
+        key.copy_(before_k.view(torch.uint16))
+        value.copy_(before_v.view(torch.uint16))
+        compiled()
+        torch.cuda.synchronize()
+        diagnostics["captured_eager_mismatched_bytes"] = {
+            name: int((actual.view(torch.uint8) != saved.view(torch.uint8)).sum())
+            for name, actual, saved in zip(("hidden", "logits", "key", "value"),
+                                           (scratch.hidden, scratch.logits, key, value), captured, strict=True)
+        }
+        if any(row["written_reference_mismatches"] or row["unwritten_reference_mismatches"]
+               for row in diagnostics["cache"].values()) or any(diagnostics["captured_eager_mismatched_bytes"].values()):
+            print("dynamic MTP cache diagnostics:", diagnostics)
+        assert not any(diagnostics["captured_eager_mismatched_bytes"].values()), diagnostics
+        for saved, reference, before, writer in zip(
+                captured[2:], expected[3:], (before_k, before_v), writer_values, strict=True):
+            actual = saved.cpu().view(torch.bfloat16)
+            assert torch.equal(actual[~written].view(torch.uint8), before[~written].view(torch.uint8)), diagnostics
+            torch.testing.assert_close(actual[written], reference[written], rtol=.02, atol=.015625,
+                                       msg=lambda message: f"{diagnostics}\n{message}")
+            # Writer fidelity is a byte contract even where the independent CPU arithmetic differs.
+            assert torch.equal(actual[written_pages, written_offsets].view(torch.uint8),
+                               writer[written_tokens].view(torch.uint8)), diagnostics
         active = sum(lengths)
         assert torch.equal(scratch.hidden[active:].view(torch.int32),
                            torch.zeros_like(scratch.hidden[active:], dtype=torch.int32))
@@ -408,11 +455,4 @@ def test_dense_mtp_captured_dynamic_draft_rows_pages_and_empty_replay(batch):
         assert agents.lengths.cpu().tolist() == [
             *[int(starts[row]) + length if length else 0 for row, length in enumerate(lengths)],
             *([0] * (4 - batch))]
-        # Same compiled operators, inputs and initial state: captured and eager executions must agree in bytes.
-        key.copy_(before_k.view(torch.uint16))
-        value.copy_(before_v.view(torch.uint16))
-        compiled()
-        torch.cuda.synchronize()
-        for actual, saved in zip((scratch.hidden, scratch.logits, key, value), captured, strict=True):
-            assert torch.equal(actual.view(torch.uint8), saved.view(torch.uint8))
     graph.reset()
