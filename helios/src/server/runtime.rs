@@ -140,6 +140,8 @@ struct Incoming {
     readmitted: bool,
     /// Retry capacity admission only after the scheduler's admission key changes.
     blocked: Option<crate::scheduler::AdmissionKey>,
+    /// Monotonic time of the first capacity refusal since the last admission, bounding a host restore's wait.
+    capacity_since_ns: Option<u64>,
 }
 impl Incoming {
     fn notify_admission(&self, result: Result<()>) {
@@ -770,6 +772,7 @@ impl ModelRuntime {
                 host_lookup: true,
                 readmitted: false,
                 blocked: None,
+                capacity_since_ns: None,
             };
             let enqueue_ns = observation
                 .filter(|timestamps| *timestamps)
@@ -1184,7 +1187,15 @@ impl<'a> Worker<'a> {
             let admission = if let Some(store) =
                 self.store.as_mut().filter(|_| incoming.host_lookup)
             {
-                admit_with_host_store(&mut self.scheduler, store.as_mut(), spec, self.prefill_rate)
+                // A host restore may wait only while other requests run: they release pages and snapshot rows.
+                let wait_ns = (self.scheduler.policy().host_restore_wait
+                    && self.active.iter().any(Option::is_some))
+                .then(|| {
+                    incoming.capacity_since_ns.map_or(0, |since| {
+                        super::observation::monotonic_ns().saturating_sub(since)
+                    })
+                });
+                admit_with_host_store(&mut self.scheduler, store.as_mut(), spec, self.prefill_rate, wait_ns)
             } else {
                 self.scheduler.admit(spec)
             };
@@ -1199,6 +1210,9 @@ impl<'a> Worker<'a> {
                 // Pages are short: wait for running requests to finish or yield theirs.
                 Err(Error::Admission(AdmissionError::Capacity(_))) => {
                     incoming.blocked = Some(resources);
+                    incoming
+                        .capacity_since_ns
+                        .get_or_insert_with(super::observation::monotonic_ns);
                     match parked {
                         Some(parked) => self.parked.insert(position, (incoming, parked)),
                         None => self.pending.insert(position, incoming),
@@ -1224,6 +1238,8 @@ impl<'a> Worker<'a> {
                 }
             };
             incoming.blocked = None;
+            // A later readmission of this request measures its own capacity wait.
+            incoming.capacity_since_ns = None;
             self.scheduler.set_arrival(handle, incoming.arrival_ns)?;
             let slot = handle.slot as usize;
             if let Err(error) = self
@@ -2073,11 +2089,15 @@ impl<'a> Worker<'a> {
 
 /// Plan the admission, look the history up in the host store above the GPU
 /// checkpoint, and start a restore when the transfer beats recomputation.
+/// `wait_ns` (`host_restore_wait` with other requests running): how long this request has waited for capacity; a
+/// restore that lacks resources then reports Capacity while the wait is shorter than the recomputation it saves.
+/// None: such a restore falls back to a plain admission at once.
 fn admit_with_host_store(
     scheduler: &mut RequestScheduler,
     store: &mut dyn crate::offload::PrefixStore,
     spec: RequestSpec,
     prefill_rate: f64,
+    wait_ns: Option<u64>,
 ) -> Result<RequestHandle> {
     let plan = scheduler.plan_admission(&spec)?;
     let hit = store
@@ -2094,9 +2114,18 @@ fn admit_with_host_store(
         consumed_tokens: hit.consumed_tokens,
         pages: hit.pages,
     };
+    let gained = hit.consumed_tokens.saturating_sub(hit.resident_tokens);
     let admitted = match scheduler.admit_planned(spec.clone(), plan, Some(inbound)) {
         Ok(admitted) => admitted,
-        Err(Error::Admission(AdmissionError::Capacity(_))) => {
+        Err(Error::Admission(AdmissionError::Capacity(failure))) => {
+            // The restore needs one snapshot row more than a plain admission, so under KV pressure the plain admission
+            // can succeed where the restore cannot; it would prefill `gained` tokens again and take the pages running
+            // decoders need. With `wait_ns`, report the shortage and retry the restore as resources change, until the
+            // wait reaches the time the recomputation would take.
+            let recompute_ns = gained as f64 / prefill_rate.max(1.0) * 1e9;
+            if wait_ns.is_some_and(|waited| (waited as f64) < recompute_ns) {
+                return Err(Error::Admission(AdmissionError::Capacity(failure)));
+            }
             let handle = scheduler.admit(spec)?;
             scheduler.record_host_lookup();
             return Ok(handle);
@@ -2500,6 +2529,7 @@ mod tests {
             host_lookup: true,
             readmitted: false,
             blocked: None,
+            capacity_since_ns: None,
         };
         (
             incoming,

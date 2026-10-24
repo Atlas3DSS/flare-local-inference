@@ -275,6 +275,7 @@ impl OrbitPush {
             prefill_srpt_aging_tokens_per_chunk: None,
             prefill_srpt_short_tokens: None,
             prefill_srpt_decode_priority_tokens: None,
+            prefix_cache_restore_wait: false,
             unclamped_sampling: false,
             serving: self.serving.clone(),
         }
@@ -426,6 +427,7 @@ impl OrbitRun {
             prefill_srpt_aging_tokens_per_chunk: None,
             prefill_srpt_short_tokens: None,
             prefill_srpt_decode_priority_tokens: None,
+            prefix_cache_restore_wait: false,
             unclamped_sampling: false,
             serving: self.serving.clone(),
         }
@@ -525,6 +527,12 @@ pub struct Run {
     /// request delays waiting prompts by at most this many output tokens [default: 0 = off].
     #[arg(long, value_name = "TOKENS", help_heading = "Serving options")]
     pub prefill_srpt_decode_priority_tokens: Option<u64>,
+
+    /// Under KV pressure, a request whose prefix the host prefix cache holds waits for its restore while other
+    /// requests run, at most as long as recomputing that prefix would take, instead of prefilling it again
+    /// [default: off]. Arithmetic is unchanged.
+    #[arg(long, help_heading = "Prefix cache options")]
+    pub prefix_cache_restore_wait: bool,
 
     /// Validation only: accept request sampling values outside the package's model-author
     /// ranges, e.g. top_k 1 for greedy token-for-token comparisons. Not for serving.
@@ -955,6 +963,12 @@ mod tests {
         let args = run(&["flare", "run", "model.safetensors", "--prefill-srpt", "--prefill-srpt-short-tokens", "1024",
                          "--prefill-srpt-decode-priority-tokens", "512"]);
         assert_eq!((args.prefill_srpt_short_tokens, args.prefill_srpt_decode_priority_tokens), (Some(1024), Some(512)));
+    }
+
+    #[test]
+    fn prefix_cache_restore_wait_parses_and_defaults_off() {
+        assert!(!run(&["flare", "run", "model.safetensors"]).prefix_cache_restore_wait);
+        assert!(run(&["flare", "run", "model.safetensors", "--prefix-cache-restore-wait"]).prefix_cache_restore_wait);
     }
 
     #[test]

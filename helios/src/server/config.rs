@@ -334,6 +334,7 @@ impl Bootstrap {
                                                        "prefill_srpt_short_tokens must be a non-negative integer")?,
                 prefill_srpt_decode_priority_tokens: srpt_tokens(object.get("prefill_srpt_decode_priority_tokens"),
                                                                  "prefill_srpt_decode_priority_tokens must be a non-negative integer")?,
+                host_restore_wait: host_restore_wait(object.get("host_restore_wait"))?,
                 ..match object.get("scheduler_policy") {
                     None => crate::scheduler::PolicyConfig::default(),
                     Some(Value::String(value)) if value == "balanced" => crate::scheduler::PolicyConfig::default(),
@@ -658,6 +659,15 @@ fn prefill_srpt(value: Option<&Value>) -> Result<bool> {
     }
 }
 
+/// The host-restore wait option (`host_restore_wait`): a JSON boolean, off when absent.
+fn host_restore_wait(value: Option<&Value>) -> Result<bool> {
+    match value {
+        None => Ok(false),
+        Some(Value::Bool(value)) => Ok(*value),
+        Some(_) => Err("host_restore_wait must be a boolean".into()),
+    }
+}
+
 /// A token-count SRPT refinement option (`prefill_srpt_short_tokens`, `prefill_srpt_decode_priority_tokens`): a
 /// non-negative JSON integer, 0 (off) when absent.
 fn srpt_tokens(value: Option<&Value>, error: &'static str) -> Result<u64> {
@@ -669,7 +679,17 @@ fn srpt_tokens(value: Option<&Value>, error: &'static str) -> Result<u64> {
 
 #[cfg(test)]
 mod prefill_srpt_option_tests {
-    use super::{prefill_srpt, srpt_tokens};
+    use super::{host_restore_wait, prefill_srpt, srpt_tokens};
+
+    #[test]
+    fn host_restore_wait_is_a_boolean_option_and_off_by_default() {
+        assert!(!host_restore_wait(None).unwrap());
+        assert!(host_restore_wait(Some(&serde_json::json!(true))).unwrap());
+        assert!(!host_restore_wait(Some(&serde_json::json!(false))).unwrap());
+        assert!(host_restore_wait(Some(&serde_json::json!("true"))).is_err());
+        assert!(host_restore_wait(Some(&serde_json::json!(1))).is_err());
+        assert!(!crate::scheduler::PolicyConfig::default().host_restore_wait);
+    }
 
     #[test]
     fn srpt_token_options_default_off_and_reject_non_integers() {

@@ -205,6 +205,7 @@ impl Fixture {
                 host_lookup: true,
                 readmitted: false,
                 blocked: None,
+                capacity_since_ns: None,
             },
             Generation {
                 events: receiver,
@@ -1304,6 +1305,47 @@ fn host_hit_recomputes_when_snapshot_backing_would_prevent_admission() {
     assert_eq!(worker.scheduler.free_page_count(), 14);
     assert_eq!(worker.scheduler.free_snapshot_count(), 16);
     assert!(fake_store(&mut worker).fetched.is_empty());
+}
+
+/// `host_restore_wait`: a host hit whose restore cannot get a snapshot row (every row aliases every page here) while a
+/// plain admission can waits (Capacity, nothing reserved or fetched, no lookup counted) while the caller allows it and
+/// the wait is shorter than recomputing the restorable tokens; otherwise the plain admission recomputes them.
+#[test]
+fn host_hit_waits_for_its_restore_within_the_recompute_bound() {
+    for (wait_ns, waits) in [(None, false), (Some(0), true), (Some(69_000_000), true), (Some(70_000_000), false),
+                             (Some(u64::MAX), false)] {
+        let fixture = Fixture::new();
+        let (_sender, receiver) = mpsc::channel();
+        let (incoming, _generation) = fixture.incoming(vec![0; 70], 4);
+        let mut history = crate::cache::PrefixHistory::new(fixture.config.identity);
+        history.append(&incoming.prompt.tokens, &[]).unwrap();
+        let mut worker = fixture.worker(receiver);
+        worker.scheduler.share_snapshot_pages(&vec![0..16; 16]).unwrap();
+        let mut store = FakeStore::new(Some(host_hit(&history, 70)));
+        let free_pages = worker.scheduler.free_page_count();
+        let spec = RequestSpec {
+            prompt: incoming.prompt.tokens.clone(),
+            message_boundaries: Vec::new(),
+            conditioning: Vec::new(),
+            max_new_tokens: 4,
+            grammar_constrained: false,
+            host_stops: false,
+            growable_output: true,
+        };
+        // 70 restorable tokens at 1000 tokens/s: a 70 ms recompute bound.
+        let result = admit_with_host_store(&mut worker.scheduler, &mut store, spec, 1000.0, wait_ns);
+        if waits {
+            assert!(matches!(result, Err(Error::Admission(AdmissionError::Capacity(_)))), "{wait_ns:?}");
+            assert_eq!(worker.scheduler.free_page_count(), free_pages);
+            assert_eq!(worker.scheduler.stats().active_requests, 0);
+            assert_eq!(worker.scheduler.stats().host_lookups, 0);
+        } else {
+            let handle = result.unwrap();
+            assert_eq!(worker.scheduler.request(handle).unwrap().phase, RequestPhase::Initialize, "{wait_ns:?}");
+            assert_eq!(worker.scheduler.stats().host_lookups, 1);
+        }
+        assert!(store.fetched.is_empty());
+    }
 }
 
 #[test]

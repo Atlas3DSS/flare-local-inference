@@ -43,6 +43,12 @@ pub struct PolicyConfig {
     /// best-priced waiting prompt, whose unserved price keeps rising), so decoders past the budget compete with the
     /// running prompt. 0 = off (v3).
     pub prefill_srpt_decode_priority_tokens: u64,
+    /// Runtime admission: a request whose prefix the host store holds, but whose restore lacks pages or a snapshot row
+    /// that a plain admission would not need, waits for the restore while other requests run, at most as long as
+    /// recomputing the restorable tokens takes (their count over the measured prefill rate), instead of being admitted
+    /// at once to prefill them again. With nothing else running, or past that bound, it is admitted as before. Off: the
+    /// restore falls back to the plain admission immediately (the default).
+    pub host_restore_wait: bool,
 }
 
 impl Default for PolicyConfig {
@@ -61,6 +67,7 @@ impl Default for PolicyConfig {
             prefill_srpt_aging_tokens_per_chunk: 32,
             prefill_srpt_short_tokens: 0,
             prefill_srpt_decode_priority_tokens: 0,
+            host_restore_wait: false,
         }
     }
 }
@@ -139,6 +146,10 @@ impl Candidate {
 }
 
 impl RequestScheduler {
+    pub fn policy(&self) -> &PolicyConfig {
+        &self.policy
+    }
+
     pub fn configure_policy(&mut self, policy: PolicyConfig) -> Result<()> {
         if self.submitted != Fence(0) || self.slots.iter().any(|s| s.request.is_some()) {
             return Err("scheduling policy must be configured before admission".into());

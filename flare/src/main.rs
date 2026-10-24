@@ -206,6 +206,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(tokens) = args.prefill_srpt_decode_priority_tokens {
         config["prefill_srpt_decode_priority_tokens"] = tokens.into();
     }
+    // Opt-in host-restore wait; without the flag the server configuration's key (default off) applies.
+    if args.prefix_cache_restore_wait {
+        config["host_restore_wait"] = true.into();
+    }
     config["unclamped_sampling"] = args.unclamped_sampling.into();
     if let Some(name) = args.served_model_name {
         config["served_names"] = serde_json::json!([name]);
