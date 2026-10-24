@@ -1,0 +1,61 @@
+test server::runtime::tests::admission_waits_for_one_choice_and_preserves_later_failures ... ok
+test server::runtime::phase_tests::host_prefix_selects_whole_required_images_and_compacts_feature_indices ... ok
+test server::runtime::phase_tests::worker_discovers_indeterminate_costs_and_records_actual_progress ... ok
+test server::runtime::phase_tests::output_clock_advances_only_after_stop_buffering_releases_tokens ... ok
+test server::runtime::tests::copy_preparation_trims_eos_and_explicit_disable_has_no_proposals ... ok
+test server::runtime::tests::general_sampler_handles_mixed_positive_temperatures_with_matching_epochs ... ok
+test server::runtime::tests::disconnected_output_marks_cancellation_and_retains_failure_for_the_reader ... ok
+test server::runtime::tests::observations_keep_raw_stop_and_eos_ids_without_changing_visible_tokens ... [Sat, 24 Oct 2026 06:54:28 GMT] request_id=cmpl-3659104-0 stage=admission code=context_length_exceeded message="too long"ok
+
+test server::runtime::tests::only_successful_output_events_count_as_publication ... ok
+test server::runtime::tests::observation_timestamps_are_monotonic_and_backpressure_remains_bounded ... ok
+test server::runtime::tests::a_parked_request_cancelled_after_the_scan_releases_its_readmission_pin ... ok
+test server::runtime::tests::resource_rejection_is_distinct_from_execution_failure_and_retains_first_error ... ok
+test server::runtime::tests::duplicate_retirement_keeps_resources_until_pending_fence_completes ... ok
+test server::stops::string_tests::every_utf8_chunk_boundary_preserves_visible_prefix_and_unmatched_suffix ... ok
+test server::runtime::tests::string_and_token_stops_both_require_the_host_stop_scheduler_barrier ... ok
+test server::stops::string_tests::first_completed_overlap_is_independent_of_every_chunk_partition ... ok
+test server::runtime::tests::retirement_deduplication_preserves_generation_and_first_occurrence_order ... ok
+test server::runtime::phase_tests::speculative_dashboard_counts_live_rounds_and_batched_forward_passes ... ok
+test server::runtime::tests::saturated_output_cancels_without_blocking_and_preserves_first_failure ... ok
+test server::runtime::tests::worker_string_stop_keeps_raw_final_token_and_suppresses_subtoken_suffix ... ok
+test server::stops::string_tests::first_stop_wins_inside_a_token_and_overlapping_prefixes_are_held ... ok
+test server::stops::tests::invalid_stop_admission_has_typed_errors ... ok
+test server::stops::tests::overlapping_stop_prefixes_are_held_without_losing_ordinary_tokens ... ok
+test server::stops::tests::terminal_flush_preserves_an_unfinished_stop_prefix ... ok
+test server::stops::string_tests::invalid_or_incompatible_stop_contracts_are_rejected ... ok
+test server::runtime::phase_tests::metrics_route_serves_prometheus_or_json_without_the_api_key ... ok
+test server::runtime::tests::grammar_metrics_count_submitted_lanes_and_ignore_unconstrained_pipeline_depth ... ok
+test server::stops::string_tests::held_spans_release_before_later_token_controls_and_clipped_tokens_have_no_control ... ok
+test server::stops::string_tests::incremental_decoder_handles_split_utf8_and_subtoken_stops ... ok
+test server::runtime::phase_tests::text_and_conditioned_admission_reserve_prompt_and_initial_output_pages ... ok
+test server::runtime::phase_tests::worker_observes_prefill_decode_and_prerequisite_timings ... ok
+[Sat, 24 Oct 2026 06:54:28 GMT] request_id=cmpl-3659104-0 stage=admission code=capacity_exhausted message="full"
+test server::runtime::phase_tests::a_greedy_readmission_that_re_derives_another_token_prefills_the_delivered_one ... ok
+test server::runtime::tests::poisoned_grammar_vector_retires_once_and_preserves_other_request ... ok
+[Sat, 24 Oct 2026 06:54:28 GMT] request_id=cmpl-3659104-0 stage=admission code=server_unavailable message="stopped"
+test server::runtime::phase_tests::observations_precede_grammar_failures_and_token_stop_completion ... ok
+[Sat, 24 Oct 2026 06:54:28 GMT] request_id=cmpl-3659104-0 stage=admission code=context_length_exceeded message="too long"
+test server::runtime::phase_tests::http_waits_for_admission_and_rejects_before_stream_headers ... ok
+test engram::reader::tests::resident_load_covers_parallel_chunks_and_rejects_truncated_planes ... ok
+test scheduler::policy_tests::mixed_catalog_completes_common_concurrent_workloads_without_decode_starvation ... ok
+test frontend::images::conditioned::tests::independent_preparation_matches_batches_for_every_profile ... ok
+balanced: 65.9 tok/GPU-s (best fixed 77.8; fixed widths [57.5, 71.3, 77.8, 76.6]); widths by batch 1/2/4: [[0, 0, 0, 0], [0, 1, 0, 1], [867, 485, 141, 5]]
+test startup::banner::tests::all_animation_frames_render_identically_with_lf_and_crlf ... ok
+throughput: 75.5 tok/GPU-s (best fixed 77.8; fixed widths [57.5, 71.3, 77.8, 76.6]); widths by batch 1/2/4: [[4, 9, 13, 15], [3, 7, 3, 30], [9, 23, 1126, 258]]
+agent: 75.5 tok/GPU-s (best fixed 77.8; fixed widths [57.5, 71.3, 77.8, 76.6]); widths by batch 1/2/4: [[4, 9, 13, 15], [3, 7, 3, 30], [9, 23, 1126, 258]]
+test scheduler::policy_tests::adaptive_width_tracks_long_context_costs_for_fresh_agent_turns ... ok
+test server::runtime::phase_tests::text_preemption_restores_or_recomputes_every_attention_contract ... ok
+test scheduler::policy_tests::five_and_sixteen_streams_receive_repeated_output_service ... ok
+test offload::disk_store::tests::staged_holds_submissions_at_the_disk_queue_depth_and_finishes_every_record ... ok
+test offload::input::tests::restart_bounds_the_disk_index_and_preserves_unrelated_pending_files ... ok
+test engram::reader::tests::resident_sealing_waits_for_unmapped_pages_held_by_io ... ok
+test server::request::tests::image_budget_rejections_report_the_whole_request_in_tokens_and_name_the_overrun ... ok
+Refused a rank from 127.0.0.1:37552: its file comes from a different export than rank zero's
+test execution::rendezvous::tests::a_peer_refuses_more_cache_than_it_can_back ... ok
+test scheduler::progress_tests::four_agents_on_the_depth4_pool_keep_making_progress ... ok
+test execution::rendezvous::tests::ranks_join_once_from_one_export_and_exchange_records ... ok
+
+test result: ok. 795 passed; 0 failed; 19 ignored; 0 measured; 0 filtered out; finished in 0.56s
+
+test exit 0

@@ -68,6 +68,64 @@ four times the single-request TTFT (170.2-171.0 s against 42.7 s at 30,720
 tokens). The effective rate falls from 807 to 719 tok/s as the prompt grows from
 2,048 to 30,720 tokens.
 
+#### Opt-in prefill ordering (shortest remaining prompt first)
+
+A scheduler option added to this tree after the release binary orders
+concurrent prompts by remaining prefill tokens, shortest first, instead of
+interleaving their chunks round-robin. It is off by default, and the release
+binary `d4ffb1fa` does not contain it. It was measured in the prefill lab on
+2026-10-24 with a lab build of the option (`dd7533f1`), the release package,
+one Tesla V100 PCIe 32 GB and the release server flags
+([v3-off.json](docs/sm70/receipts/prefill-srpt/v3-off.json), [v3-on.json](docs/sm70/receipts/prefill-srpt/v3-on.json)). Each row is 1
+warmup and 1 measured batch with 2 output tokens, not the 3 measured batches
+and 32 tokens of the table above.
+
+| Prompt tokens | Concurrency | Option | First token per request (s) | Mean first token (s) | Effective prefill tok/s |
+| ---: | ---: | --- | --- | ---: | ---: |
+| 2,048 | 1 | off / on | n/a | n/a | 805.6 / 806.2 |
+| 30,720 | 1 | off / on | n/a | n/a | 718.2 / 718.5 |
+| 2,048 | 4 | off | 9.66 / 9.82 / 9.98 / 10.20 | 9.92 | 803.3 |
+| 2,048 | 4 | on | 2.54 / 5.08 / 7.68 / 10.26 | 6.39 (36 % lower) | 798.2 |
+| 30,720 | 4 | off | 170.11 / 170.31 / 170.52 / 170.78 | 170.43 | 719.5 |
+| 30,720 | 4 | on | 42.73 / 85.49 / 128.24 / 171.00 | 106.86 (37 % lower) | 718.6 |
+
+With the option on, the four prompts finish prefill one after another. The
+first 30,720-token prompt gets its first token after 42.7 s instead of about
+170 s, and the last at 171.0 s as before. The mean first-token time falls 36-37
+%. The worst case, the single-request rate and the aggregate rate stay
+unchanged within 0.7 %. Greedy outputs matched the release binary on 4 of 4
+prompts with the option off and on. With the option off, the build reproduces
+the release: 805.6 and 718.2 tok/s at one request against 807 and 719, and
+170.11-170.78 s for four 30,720-token prompts against 170.15-170.96 s.
+
+The public `--prefill-srpt` flag was checked on a build of this commit: four
+2,048-token prompts got their first tokens at 2.56 / 5.09 / 7.67 / 10.26 s
+against 9.67-10.20 s with the flag off, and greedy outputs matched on 3 of 3
+prompts ([smoke-public-on.json](docs/sm70/receipts/prefill-srpt/smoke-public-on.json),
+[smoke-public-off.json](docs/sm70/receipts/prefill-srpt/smoke-public-off.json)). Tests on this commit:
+Helios library 796 passed with 19 ignored, and `flare` 112 passed
+([public-helios-lib-tests.log](docs/sm70/receipts/prefill-srpt/public-helios-lib-tests.log),
+[public-flare-tests.log](docs/sm70/receipts/prefill-srpt/public-flare-tests.log)). On the lab tree, the GPU
+groups passed (A: 223 and 17 subtests, B: 245;
+[groups-A](docs/sm70/receipts/prefill-srpt/groups-A-release-srpt3-tree.log),
+[groups-B](docs/sm70/receipts/prefill-srpt/groups-B-release-srpt3-tree.log)), and so did the export gates
+with the option set: strict 47/47 and invariance 28/28
+([gates.log](docs/sm70/receipts/prefill-srpt/gates.log)). The export gates run in Python and never enter
+the Helios scheduler, so they confirm the package path, not the ordering.
+
+To enable the option, start the server with `flare run --prefill-srpt`. The
+flag sets the top-level server configuration key `prefill_srpt` (a JSON
+boolean), which a configuration file can also set. When a flag is given, it
+overrides the configuration file's key. Round-robin stays the default.
+
+Aging bounds the wait of a long prompt behind a stream of shorter arrivals. By
+default a waiting prompt gains 32 tokens of credit for every other prompt's
+chunk scheduled, and is served first-come after 256 such chunks.
+`--prefill-srpt-max-wait-chunks` and `--prefill-srpt-aging-tokens-per-chunk`
+change these, as do the configuration keys `prefill_srpt_max_wait_chunks` and
+`prefill_srpt_aging_tokens_per_chunk`. A prompt whose prefill has started is not
+preempted.
+
 ### Short-prompt native decode, MTP depth 4
 
 128 output tokens per request, concurrency 1 then 4, 3 repetitions. Tok/s per

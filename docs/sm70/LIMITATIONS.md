@@ -106,6 +106,13 @@ upstream. Read this before you rely on the port.
   to about 12 % extrapolated over a whole 30,720-token prompt. The GPU is idle
   only 1.4-1.9 % of the time, so the cost is in the kernels, not in gaps between
   them ([prefill-profile.json](receipts/measurements/prefill-profile.json)).
+- **Opt-in prefill ordering.** The shortest-remaining-first prefill option is
+  off by default and is not in the release binary `d4ffb1fa`. Its evidence is
+  the lab benchmark batches, the greedy comparison with the release and the
+  scheduler's CPU unit tests; it has not had a long soak run under mixed
+  traffic. It lowers the mean first-token time, not the worst case: the last of
+  four concurrent prompts waits as long as with round-robin
+  ([BENCHMARKS-SM70.md](../../BENCHMARKS-SM70.md#opt-in-prefill-ordering-shortest-remaining-prompt-first)).
 - **Profiling issue under investigation.** Node-level CUDA-graph tracing with
   Nsight Systems (`nsys --cuda-graph-trace=node`) made the server fail with CUDA
   error 719 (`unspecified launch failure`) after about 127 cumulative 128-token

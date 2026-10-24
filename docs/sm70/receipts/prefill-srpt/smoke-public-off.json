@@ -1,0 +1,312 @@
+{
+ "exp": "smoke-public-off",
+ "args": {
+  "exp": "smoke-public-off",
+  "executable": "<release-host>/flare/src-prefill-lab/flare-lab-srpt3p",
+  "package": "<release-host>/packages/prefill-lab/release/model.safetensors",
+  "port": "8612",
+  "prefix_cache": "8G",
+  "scheduler_policy": "balanced",
+  "depth": "4",
+  "memory_limit": "31G",
+  "plan": "2048x4",
+  "warmups": "1",
+  "reps": "1",
+  "output_tokens": "2",
+  "greedy": "[]",
+  "greedy_tokens": "64",
+  "greedy_reference": "None",
+  "server_cpus": "None",
+  "wrap": "",
+  "extra": "[]",
+  "env": "[]",
+  "public_tool_output": "None",
+  "warm_probe": "0",
+  "keys": "<release-host>/flare/release-signing/development-publisher.json",
+  "output": "<release-host>/flare/prefill-lab/smoke-public-off.json",
+  "ready_timeout": "1200"
+ },
+ "started": 1792830301.2361958,
+ "executable_sha256": "79ae7b1f452d210981e5ea4fd6a36e5bd779dfa53f258da8b5d0888c214aea7d",
+ "cuda_visible_devices": "GPU-5b95eabd-c3e3-a8bf-e8a0-f2717e731f07",
+ "tool_sha256": {
+  "benchmark_prefill.py": "c64786794779f4df4d22d3078fdbc5b947180bcadaf6af7ff514249a18a38af1",
+  "native.py": "32f1d6de9eda1f0891ff1366d3fd0778b75f45c84dfa6735fa94e9e4ba4aacfa",
+  "benchmark_mtp.py": "a4656afb11c6f7ef4acb065324106a0da8a43adc129d95710bded4d3c5157c2b"
+ },
+ "batches": [
+  {
+   "status": "complete",
+   "phase": "warmup",
+   "prompt_length": 2048,
+   "concurrency": 4,
+   "repetition": 0,
+   "output_tokens": 2,
+   "metric_deltas": {
+    "prefill_tokens": 8192,
+    "generated_tokens": 8,
+    "completed": 4,
+    "failed": 0,
+    "reused_tokens": 0
+   },
+   "request_metric_deltas": {
+    "flare_requests_admitted_total": 4,
+    "flare_requests_cancelled_total": 0
+   },
+   "first_token_wall_window_seconds": 10.333996719011338,
+   "effective_prefill_tokens_per_second": 792.7233018111249,
+   "prefill_rate_basis": "successful server prefill-token counter delta / batch first-token wall window; includes queueing, prefill, first-token generation and transport; not pure GPU prefill",
+   "pure_gpu_prefill_tokens_per_second": null,
+   "pure_gpu_prefill_unavailable_reason": "native release exposes prefill token counters but no isolated prefill GPU duration",
+   "per_request": [
+    {
+     "case_id": "prefill-lab-smoke-public-off/warmup/2048/4/0/0",
+     "status": "complete",
+     "error": null,
+     "start_offset_s": 0.00035490700975060463,
+     "ttft_s": 10.333641812001588,
+     "first_token_wall_s": 10.333996719011338,
+     "cached_tokens": 0,
+     "output_tokens": 2,
+     "elapsed_s": 10.381871611985844
+    },
+    {
+     "case_id": "prefill-lab-smoke-public-off/warmup/2048/4/0/1",
+     "status": "complete",
+     "error": null,
+     "start_offset_s": 0.001040625007590279,
+     "ttft_s": 9.21447029200499,
+     "first_token_wall_s": 9.21551091701258,
+     "cached_tokens": 0,
+     "output_tokens": 2,
+     "elapsed_s": 9.26295627799118
+    },
+    {
+     "case_id": "prefill-lab-smoke-public-off/warmup/2048/4/0/2",
+     "status": "complete",
+     "error": null,
+     "start_offset_s": 0.0006954180134925991,
+     "ttft_s": 9.902429816982476,
+     "first_token_wall_s": 9.903125234995969,
+     "cached_tokens": 0,
+     "output_tokens": 2,
+     "elapsed_s": 9.954033683985472
+    },
+    {
+     "case_id": "prefill-lab-smoke-public-off/warmup/2048/4/0/3",
+     "status": "complete",
+     "error": null,
+     "start_offset_s": 0.0,
+     "ttft_s": 10.114412060007453,
+     "first_token_wall_s": 10.114412060007453,
+     "cached_tokens": 0,
+     "output_tokens": 2,
+     "elapsed_s": 10.174261826992733
+    }
+   ]
+  },
+  {
+   "status": "complete",
+   "phase": "measured",
+   "prompt_length": 2048,
+   "concurrency": 4,
+   "repetition": 0,
+   "output_tokens": 2,
+   "metric_deltas": {
+    "prefill_tokens": 8192,
+    "generated_tokens": 8,
+    "completed": 4,
+    "failed": 0,
+    "reused_tokens": 0
+   },
+   "request_metric_deltas": {
+    "flare_requests_admitted_total": 4,
+    "flare_requests_cancelled_total": 0
+   },
+   "first_token_wall_window_seconds": 10.202716433006572,
+   "effective_prefill_tokens_per_second": 802.9234227757473,
+   "prefill_rate_basis": "successful server prefill-token counter delta / batch first-token wall window; includes queueing, prefill, first-token generation and transport; not pure GPU prefill",
+   "pure_gpu_prefill_tokens_per_second": null,
+   "pure_gpu_prefill_unavailable_reason": "native release exposes prefill token counters but no isolated prefill GPU duration",
+   "per_request": [
+    {
+     "case_id": "prefill-lab-smoke-public-off/measured/2048/4/0/0",
+     "status": "complete",
+     "error": null,
+     "start_offset_s": 0.0006804339936934412,
+     "ttft_s": 9.668984196003294,
+     "first_token_wall_s": 9.669664629996987,
+     "cached_tokens": 0,
+     "output_tokens": 2,
+     "elapsed_s": 10.0422042820137
+    },
+    {
+     "case_id": "prefill-lab-smoke-public-off/measured/2048/4/0/1",
+     "status": "complete",
+     "error": null,
+     "start_offset_s": 0.00034015701385214925,
+     "ttft_s": 9.828949143993668,
+     "first_token_wall_s": 9.82928930100752,
+     "cached_tokens": 0,
+     "output_tokens": 2,
+     "elapsed_s": 10.042642760003218
+    },
+    {
+     "case_id": "prefill-lab-smoke-public-off/measured/2048/4/0/2",
+     "status": "complete",
+     "error": null,
+     "start_offset_s": 0.0015940699959173799,
+     "ttft_s": 10.201122363010654,
+     "first_token_wall_s": 10.202716433006572,
+     "cached_tokens": 0,
+     "output_tokens": 2,
+     "elapsed_s": 10.255369974998757
+    },
+    {
+     "case_id": "prefill-lab-smoke-public-off/measured/2048/4/0/3",
+     "status": "complete",
+     "error": null,
+     "start_offset_s": 0.0,
+     "ttft_s": 9.990140184003394,
+     "first_token_wall_s": 9.990140184003394,
+     "cached_tokens": 0,
+     "output_tokens": 2,
+     "elapsed_s": 10.257087844016496
+    }
+   ]
+  }
+ ],
+ "status": "complete",
+ "server_command": [
+  "<release-host>/flare/src-prefill-lab/flare-lab-srpt3p",
+  "run",
+  "<release-host>/packages/prefill-lab/release/model.safetensors",
+  "--publisher-keys",
+  "<release-host>/flare/release-signing/development-publisher.json",
+  "--trust-store",
+  "<release-host>/flare/prefill-lab/smoke-public-off-work/trust.toml",
+  "--verify-weights",
+  "--gpus",
+  "0",
+  "--prefix-cache-memory",
+  "8G",
+  "--embedding-table-storage",
+  "ram",
+  "--memory-limit",
+  "31G",
+  "--scheduler-policy",
+  "balanced",
+  "--kv-cache-limit",
+  "concurrency",
+  "--max-concurrency",
+  "4",
+  "--mtp-draft-tokens",
+  "4",
+  "--no-mtp-adaptive-verification",
+  "--host",
+  "127.0.0.1",
+  "--port",
+  "8612",
+  "--dangerously-approve-key",
+  "ef39a0be57c2916c486172fa23d44f0031879e954250765ac1a1a835977f18ab",
+  "--dangerously-accept-publisher",
+  "local-development"
+ ],
+ "server_env_extra": [],
+ "server_pid": 3829654,
+ "ready_seconds": 82.15413409098983,
+ "model": "checkpoint",
+ "metrics_end": {
+  "prefill_tokens": 16384,
+  "generated_tokens": 16,
+  "draft_steps": 24,
+  "verify_steps": 6,
+  "verification_drafts": 24,
+  "accepted_drafts": 0,
+  "draft_rounds": 0,
+  "active": 0,
+  "pending": 0,
+  "completed": 8,
+  "failed": 0,
+  "reused_tokens": 0,
+  "cached_pages": 128,
+  "free_pages": 584,
+  "total_pages": 1028,
+  "page_tokens": 128,
+  "host_hits": 0,
+  "host_reused_tokens": 0,
+  "host_memory_records": 12,
+  "host_disk_records": 0,
+  "host_bytes_out": 3579866624,
+  "host_bytes_in": 0,
+  "decode_weight_bytes": 0,
+  "learned_drafter": true,
+  "input_decoded_images_total": 0,
+  "input_prepared_images_total": 0,
+  "input_decoded_source_bytes": 0,
+  "input_decoded_source_capacity": 0,
+  "input_cache_metadata_hits_total": 0,
+  "input_cache_metadata_misses_total": 0,
+  "input_cache_payload_hits_total": 0,
+  "input_cache_payload_misses_total": 0,
+  "input_cache_memory_hits_total": 0,
+  "input_cache_disk_hits_total": 0,
+  "input_cache_failures_total": 0,
+  "input_cache_stored_total": 0,
+  "input_cache_skipped_total": 0,
+  "input_cache_queued": 0,
+  "input_cache_pending_writes": 0,
+  "input_cache_staging_bytes": 0,
+  "input_cache_staging_limit": 0,
+  "input_cache_index_bytes": 0,
+  "input_cache_memory_limit": 0,
+  "input_cache_memory_records": 0,
+  "input_cache_memory_bytes": 0,
+  "input_cache_disk_records": 0,
+  "input_cache_disk_bytes": 0
+ },
+ "smi": [
+  [
+   1792830383.5453877,
+   "1230, 877, 151.85, 35, 0, 31282, 0x0000000000000000\n1230, 877, 37.19, 32, 0, 31632, 0x0000000000000000\n1380, 877, 213.81, 63, 100, 31282, 0x0000000000000000\n1230, 877, 34.85, 32, 0, 22354, 0x0000000000000000\n1380, 877, 215.20, 68, 100, 31282, 0x0000000000000000\n1230, 877, 37.11, 29, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792830385.6454268,
+   "1380, 877, 208.82, 43, 100, 31282, 0x0000000000000000\n1230, 877, 37.27, 32, 0, 31632, 0x0000000000000000\n1380, 877, 217.62, 64, 100, 31282, 0x0000000000000000\n1230, 877, 35.03, 32, 0, 22354, 0x0000000000000000\n1380, 877, 224.85, 68, 100, 31282, 0x0000000000000000\n1230, 877, 37.09, 29, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792830387.7449605,
+   "1380, 877, 210.23, 44, 100, 31282, 0x0000000000000000\n1230, 877, 37.17, 32, 0, 31632, 0x0000000000000000\n1380, 877, 217.19, 64, 100, 31282, 0x0000000000000000\n1230, 877, 34.94, 32, 0, 22354, 0x0000000000000000\n1380, 877, 227.40, 68, 100, 31282, 0x0000000000000000\n1230, 877, 36.99, 29, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792830389.8406067,
+   "1380, 877, 203.72, 46, 100, 31282, 0x0000000000000000\n1230, 877, 37.27, 32, 0, 31632, 0x0000000000000000\n1380, 877, 207.90, 64, 100, 31282, 0x0000000000000000\n1230, 877, 34.84, 32, 0, 22354, 0x0000000000000000\n1380, 877, 225.21, 68, 100, 31282, 0x0000000000000000\n1230, 877, 37.09, 29, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792830391.9378972,
+   "1380, 877, 209.74, 46, 100, 31282, 0x0000000000000000\n1230, 877, 37.37, 32, 0, 31632, 0x0000000000000000\n1380, 877, 218.98, 64, 100, 31282, 0x0000000000000000\n1230, 877, 34.94, 32, 0, 22354, 0x0000000000000000\n1380, 877, 227.43, 68, 100, 31282, 0x0000000000000000\n1230, 877, 37.09, 29, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792830394.0351863,
+   "1380, 877, 211.94, 47, 98, 31282, 0x0000000000000000\n1230, 877, 37.26, 32, 0, 31632, 0x0000000000000000\n1380, 877, 216.86, 64, 100, 31282, 0x0000000000000000\n1230, 877, 34.83, 32, 0, 22354, 0x0000000000000000\n1380, 877, 225.46, 68, 100, 31282, 0x0000000000000000\n1230, 877, 36.99, 29, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792830396.1311252,
+   "1380, 877, 212.32, 48, 100, 31282, 0x0000000000000000\n1230, 877, 37.25, 32, 0, 31632, 0x0000000000000000\n1380, 877, 218.31, 64, 100, 31282, 0x0000000000000000\n1230, 877, 34.93, 32, 0, 22354, 0x0000000000000000\n1380, 877, 226.38, 68, 100, 31282, 0x0000000000000000\n1230, 877, 36.99, 29, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792830398.253503,
+   "1380, 877, 208.22, 49, 100, 31282, 0x0000000000000000\n1230, 877, 37.37, 32, 0, 31632, 0x0000000000000000\n1380, 877, 214.60, 65, 100, 31282, 0x0000000000000000\n1230, 877, 35.03, 32, 0, 22970, 0x0000000000000000\n1380, 877, 228.15, 68, 100, 31282, 0x0000000000000000\n1230, 877, 37.09, 29, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792830400.3547723,
+   "1380, 877, 212.77, 50, 100, 31282, 0x0000000000000000\n1230, 877, 37.28, 32, 0, 31632, 0x0000000000000000\n1380, 877, 216.51, 64, 100, 31282, 0x0000000000000000\n1230, 877, 34.93, 32, 0, 23278, 0x0000000000000000\n1380, 877, 224.57, 68, 100, 31282, 0x0000000000000000\n1230, 877, 36.99, 29, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792830402.4508002,
+   "1380, 877, 207.88, 51, 100, 31282, 0x0000000000000000\n1230, 877, 37.37, 32, 0, 31632, 0x0000000000000000\n1380, 877, 217.71, 65, 100, 31282, 0x0000000000000000\n1230, 877, 34.84, 32, 0, 23586, 0x0000000000000000\n1380, 877, 227.93, 68, 100, 31282, 0x0000000000000000\n1230, 877, 36.99, 29, 0, 31632, 0x0000000000000000"
+  ]
+ ],
+ "server_returncode": 0,
+ "ended": 1792830406.8901987
+}

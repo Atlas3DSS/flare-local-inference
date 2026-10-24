@@ -71,10 +71,22 @@ Concurrent prefills do not overlap. Four requests prefill no faster in total
 than one, and the server interleaves them, so all four first tokens arrive
 together at about four times the single-request TTFT.
 
+An opt-in scheduler option orders concurrent prompts shortest-remaining first
+instead, so they finish prefill one after another. With four 30,720-token
+prompts the first tokens arrive at 42.7 / 85.5 / 128.2 / 171.0 s instead of all
+at about 170 s. That is 37 % lower on average, with the same last first token
+and the same total prefill time. Round-robin stays the default. Enable the
+option with `flare run --prefill-srpt`, or with the `"prefill_srpt"` boolean in
+the server configuration; a flag on the command line overrides the
+configuration file. Aging bounds how long a long prompt can wait behind shorter
+ones; `--prefill-srpt-max-wait-chunks` and
+`--prefill-srpt-aging-tokens-per-chunk` adjust it
+([details](BENCHMARKS-SM70.md#opt-in-prefill-ordering-shortest-remaining-prompt-first)).
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/sm70/img/prefill-dark.svg">
   <source media="(prefers-color-scheme: light)" srcset="docs/sm70/img/prefill-light.svg">
-  <img alt="Time to first token against prompt length, release binary d4ffb1fa, one Tesla V100 PCIe 32 GB, 2026-10-23: 2.54, 10.43, 30.39 and 42.75 s for one request at 2,048, 8,192, 22,528 and 30,720 tokens (807, 785, 741 and 719 tok/s); 9.89, 41.44, 121.11 and 170.49 s for four concurrent requests (796, 782, 741 and 719 tok/s aggregate)." src="docs/sm70/img/prefill-light.svg">
+  <img alt="Time to first token against prompt length, release binary d4ffb1fa, one Tesla V100 PCIe 32 GB, 2026-10-23: 2.54, 10.43, 30.39 and 42.75 s for one request at 2,048, 8,192, 22,528 and 30,720 tokens (807, 785, 741 and 719 tok/s); 9.89, 41.44, 121.11 and 170.49 s for four concurrent requests (796, 782, 741 and 719 tok/s aggregate). With the opt-in prefill ordering, four concurrent 30,720-token prompts get their first tokens at 42.7, 85.5, 128.2 and 171.0 s instead of all at about 170 s." src="docs/sm70/img/prefill-light.svg">
 </picture>
 
 ### Decode-only
@@ -205,7 +217,8 @@ detail and the sources.
 - **Given up:** extra decode work per weight compared with native FP4/FP8 tensor
   cores; prefill at 720-810 tok/s, one request at a time, so long prompts are
   prefill-bound (a 30,720-token prompt waits 42.7 s for its first token, and
-  four arriving together wait 170-171 s each); one recipe, TP1, at most 4 requests of
+  four arriving together wait 170-171 s each, or 43-171 s one after another
+  with the opt-in prefill ordering); one recipe, TP1, at most 4 requests of
   32,768 tokens; subsequent upstream work to assess and port (136 commits as of
   `e19549a`, beyond 680 whose content the history audit identifies in the
   squashed base; see [history accounting](docs/sm70/LIMITATIONS.md#upstream-divergence));

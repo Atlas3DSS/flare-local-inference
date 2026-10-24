@@ -1,0 +1,327 @@
+00:50:44 Inspect checkpoint started
+00:50:44 Inspect checkpoint complete in 0.02s
+00:50:46 Load weights started
+b12x routing checkpoint shards: 0/3 shards routed, 0.00 GB selected on rank 0, 0:00
+b12x routing checkpoint shards: 3/3 shards routed, 0.00 GB selected on rank 0, 0:00
+b12x reading and scattering weights: 3/3 shards routed, 0.00 GB selected on rank 0, 0:00
+b12x reading and scattering weights: 3/3 shards routed, 2.11 GB selected on rank 0, 0:10
+b12x reading and scattering weights: 3/3 shards routed, 4.46 GB selected on rank 0, 0:20
+b12x reading and scattering weights: 3/3 shards routed, 6.72 GB selected on rank 0, 0:30
+b12x reading and scattering weights: 3/3 shards routed, 9.08 GB selected on rank 0, 0:40
+b12x reading and scattering weights: 3/3 shards routed, 11.36 GB selected on rank 0, 0:50
+b12x reading and scattering weights: 3/3 shards routed, 14.16 GB selected on rank 0, 1:01
+b12x reading and scattering weights: 3/3 shards routed, 16.22 GB selected on rank 0, 1:11
+b12x reading and scattering weights: 3/3 shards routed, 18.31 GB selected on rank 0, 1:21
+b12x weights loaded: 20.15 GB selected on rank 0 · 20.16 GB physical reads; 89.60 s total loading; ROUTE 0.11s · SETUP 0.00s · PLAN 0.00s · READ 89.49s · SYNC 0.00s
+00:52:16 Load weights complete in 89.60s
+00:52:16 Load dense MTP weights started
+b12x routing checkpoint shards: 0/1 shards routed, 0.00 GB selected on rank 0, 0:00
+b12x routing checkpoint shards: 1/1 shards routed, 0.00 GB selected on rank 0, 0:00
+b12x reading and scattering weights: 1/1 shards routed, 0.00 GB selected on rank 0, 0:00
+b12x weights loaded: 0.85 GB selected on rank 0 · 0.85 GB physical reads; 3.29 s total loading; ROUTE 0.03s · SETUP 0.00s · PLAN 0.00s · READ 3.25s · SYNC 0.00s
+00:52:19 Load dense MTP weights complete in 3.29s
+00:52:20 Allocate model state started
+00:52:20 Allocate model state complete in 0.11s
+00:52:20 Construct graph catalog started
+00:52:27 Construct graph catalog complete in 7.11s
+00:52:27 Prepare and tune kernels started
+b12x planning flare.sm70.embedding: 0/3020 ready, candidates 0/1 prepared, 0 measured, 0 cached, 0 compilations, 0:00
+b12x planning flare.sm70.gdn_prefill: 0/3020 ready, candidates 0/1 prepared, 0 measured, 0 cached, 0 compilations, 0:01
+b12x planning flare.sm70.projection: 0/3020 ready, candidates 0/1 prepared, 0 measured, 0 cached, 0 compilations, 0:01
+b12x priming flare.sm70.projection: 1/3020 ready, candidates 0/1 prepared, 0 measured, 0 cached, 0 compilations, 0:01
+b12x priming flare.sm70_gdn_sequence: 248/3020 ready, candidates 0/1 prepared, 0 measured, 0 cached, 0 compilations, 0:02
+b12x priming flare.sm70.row_rms_norm: 251/3020 ready, candidates 0/1 prepared, 0 measured, 0 cached, 0 compilations, 0:02
+b12x priming flare.sm70.decode_attention: 510/3020 ready, candidates 0/1 prepared, 0 measured, 0 cached, 0 compilations, 0:03
+b12x ready flare.sm70_gdn_sequence: 3020/3020 ready, candidates 0/1 prepared, 0 measured, 0 cached, 0 compilations, 0:06
+00:52:36 Prepare and tune kernels complete in 9.68s
+00:53:58 Compile model forwards started
+00:56:13 Compile model forwards complete in 134.53s
+00:56:15 Warm compiled forwards started
+00:57:04 Warm compiled forwards complete in 49.72s
+00:57:06 Prepare serving graphs started
+00:57:06 capturing prefill128-no-mtp: 9108 MiB free, 20923 MiB allocated, 21232 MiB reserved, 2154 MiB outside PyTorch
+00:57:07 instantiating prefill128-no-mtp: 9086 MiB free, 20923 MiB allocated, 21254 MiB reserved, 2154 MiB outside PyTorch
+00:57:07 captured prefill128-no-mtp in 0.23s (compiled cache hit)
+00:57:07 capturing decode4: 9066 MiB free, 20923 MiB allocated, 21254 MiB reserved, 2174 MiB outside PyTorch
+00:57:07 instantiating decode4: 9066 MiB free, 20923 MiB allocated, 21254 MiB reserved, 2174 MiB outside PyTorch
+00:57:07 captured decode4 in 0.19s (compiled cache hit)
+00:57:07 capturing decode2: 9052 MiB free, 20923 MiB allocated, 21254 MiB reserved, 2188 MiB outside PyTorch
+00:57:07 instantiating decode2: 9052 MiB free, 20923 MiB allocated, 21254 MiB reserved, 2188 MiB outside PyTorch
+00:57:07 captured decode2 in 0.20s (compiled cache hit)
+00:57:07 capturing decode1: 9038 MiB free, 20923 MiB allocated, 21254 MiB reserved, 2202 MiB outside PyTorch
+00:57:07 instantiating decode1: 9038 MiB free, 20923 MiB allocated, 21254 MiB reserved, 2202 MiB outside PyTorch
+00:57:07 captured decode1 in 0.21s (compiled cache hit)
+00:57:07 capturing resume4-no-mtp: 9022 MiB free, 20923 MiB allocated, 21254 MiB reserved, 2218 MiB outside PyTorch
+00:57:07 instantiating resume4-no-mtp: 9022 MiB free, 20923 MiB allocated, 21254 MiB reserved, 2218 MiB outside PyTorch
+00:57:07 captured resume4-no-mtp in 0.03s (compiled cache hit)
+00:57:07 capturing init4-no-mtp: 9022 MiB free, 20923 MiB allocated, 21254 MiB reserved, 2218 MiB outside PyTorch
+00:57:07 instantiating init4-no-mtp: 9022 MiB free, 20923 MiB allocated, 21254 MiB reserved, 2218 MiB outside PyTorch
+00:57:07 captured init4-no-mtp in 0.03s
+00:57:07 capturing restore4-no-mtp: 9022 MiB free, 20923 MiB allocated, 21254 MiB reserved, 2218 MiB outside PyTorch
+00:57:07 instantiating restore4-no-mtp: 9022 MiB free, 20923 MiB allocated, 21254 MiB reserved, 2218 MiB outside PyTorch
+00:57:07 captured restore4-no-mtp in 0.03s
+00:57:07 capturing snapshot4-no-mtp: 9022 MiB free, 20923 MiB allocated, 21254 MiB reserved, 2218 MiB outside PyTorch
+00:57:07 instantiating snapshot4-no-mtp: 9022 MiB free, 20923 MiB allocated, 21254 MiB reserved, 2218 MiB outside PyTorch
+00:57:07 captured snapshot4-no-mtp in 0.02s
+00:57:07 capturing resume2-no-mtp: 9022 MiB free, 20923 MiB allocated, 21254 MiB reserved, 2218 MiB outside PyTorch
+00:57:07 instantiating resume2-no-mtp: 9022 MiB free, 20923 MiB allocated, 21254 MiB reserved, 2218 MiB outside PyTorch
+00:57:07 captured resume2-no-mtp in 0.03s (compiled cache hit)
+00:57:07 capturing init2-no-mtp: 9022 MiB free, 20923 MiB allocated, 21254 MiB reserved, 2218 MiB outside PyTorch
+00:57:07 instantiating init2-no-mtp: 9022 MiB free, 20923 MiB allocated, 21254 MiB reserved, 2218 MiB outside PyTorch
+00:57:07 captured init2-no-mtp in 0.02s
+00:57:07 capturing restore2-no-mtp: 9022 MiB free, 20923 MiB allocated, 21254 MiB reserved, 2218 MiB outside PyTorch
+00:57:07 instantiating restore2-no-mtp: 9022 MiB free, 20923 MiB allocated, 21254 MiB reserved, 2218 MiB outside PyTorch
+00:57:07 captured restore2-no-mtp in 0.02s
+00:57:07 capturing snapshot2-no-mtp: 9022 MiB free, 20923 MiB allocated, 21254 MiB reserved, 2218 MiB outside PyTorch
+00:57:07 instantiating snapshot2-no-mtp: 9022 MiB free, 20923 MiB allocated, 21254 MiB reserved, 2218 MiB outside PyTorch
+00:57:07 captured snapshot2-no-mtp in 0.02s
+00:57:07 capturing resume1-no-mtp: 9022 MiB free, 20923 MiB allocated, 21254 MiB reserved, 2218 MiB outside PyTorch
+00:57:07 instantiating resume1-no-mtp: 9022 MiB free, 20923 MiB allocated, 21254 MiB reserved, 2218 MiB outside PyTorch
+00:57:07 captured resume1-no-mtp in 0.03s (compiled cache hit)
+00:57:08 capturing init1-no-mtp: 9022 MiB free, 20923 MiB allocated, 21254 MiB reserved, 2218 MiB outside PyTorch
+00:57:08 instantiating init1-no-mtp: 9022 MiB free, 20923 MiB allocated, 21254 MiB reserved, 2218 MiB outside PyTorch
+00:57:08 captured init1-no-mtp in 0.02s
+00:57:08 capturing restore1-no-mtp: 9022 MiB free, 20923 MiB allocated, 21254 MiB reserved, 2218 MiB outside PyTorch
+00:57:08 instantiating restore1-no-mtp: 9022 MiB free, 20923 MiB allocated, 21254 MiB reserved, 2218 MiB outside PyTorch
+00:57:08 captured restore1-no-mtp in 0.02s
+00:57:08 capturing snapshot1-no-mtp: 9022 MiB free, 20923 MiB allocated, 21254 MiB reserved, 2218 MiB outside PyTorch
+00:57:08 instantiating snapshot1-no-mtp: 9022 MiB free, 20923 MiB allocated, 21254 MiB reserved, 2218 MiB outside PyTorch
+00:57:08 captured snapshot1-no-mtp in 0.02s
+00:57:08 capturing prefill128: 9022 MiB free, 20923 MiB allocated, 21254 MiB reserved, 2218 MiB outside PyTorch
+00:57:08 instantiating prefill128: 9022 MiB free, 20923 MiB allocated, 21254 MiB reserved, 2218 MiB outside PyTorch
+00:57:08 captured prefill128 in 0.24s (compiled cache hit)
+00:57:08 capturing resume4: 9000 MiB free, 20923 MiB allocated, 21254 MiB reserved, 2240 MiB outside PyTorch
+00:57:08 instantiating resume4: 9000 MiB free, 20923 MiB allocated, 21254 MiB reserved, 2240 MiB outside PyTorch
+00:57:08 captured resume4 in 0.02s (compiled cache hit)
+00:57:08 capturing init4: 8998 MiB free, 20923 MiB allocated, 21254 MiB reserved, 2242 MiB outside PyTorch
+00:57:08 instantiating init4: 8998 MiB free, 20923 MiB allocated, 21254 MiB reserved, 2242 MiB outside PyTorch
+00:57:08 captured init4 in 0.02s
+00:57:08 capturing restore4: 8996 MiB free, 20923 MiB allocated, 21254 MiB reserved, 2244 MiB outside PyTorch
+00:57:08 instantiating restore4: 8996 MiB free, 20923 MiB allocated, 21254 MiB reserved, 2244 MiB outside PyTorch
+00:57:08 captured restore4 in 0.02s
+00:57:08 capturing snapshot4: 8996 MiB free, 20923 MiB allocated, 21254 MiB reserved, 2244 MiB outside PyTorch
+00:57:08 instantiating snapshot4: 8996 MiB free, 20923 MiB allocated, 21254 MiB reserved, 2244 MiB outside PyTorch
+00:57:08 captured snapshot4 in 0.03s
+00:57:08 capturing resume2: 8996 MiB free, 20923 MiB allocated, 21254 MiB reserved, 2244 MiB outside PyTorch
+00:57:08 instantiating resume2: 8996 MiB free, 20923 MiB allocated, 21254 MiB reserved, 2244 MiB outside PyTorch
+00:57:08 captured resume2 in 0.03s (compiled cache hit)
+00:57:08 capturing init2: 8996 MiB free, 20923 MiB allocated, 21254 MiB reserved, 2244 MiB outside PyTorch
+00:57:08 instantiating init2: 8996 MiB free, 20923 MiB allocated, 21254 MiB reserved, 2244 MiB outside PyTorch
+00:57:08 captured init2 in 0.02s
+00:57:08 capturing restore2: 8996 MiB free, 20923 MiB allocated, 21254 MiB reserved, 2244 MiB outside PyTorch
+00:57:08 instantiating restore2: 8996 MiB free, 20923 MiB allocated, 21254 MiB reserved, 2244 MiB outside PyTorch
+00:57:08 captured restore2 in 0.02s
+00:57:08 capturing snapshot2: 8996 MiB free, 20923 MiB allocated, 21254 MiB reserved, 2244 MiB outside PyTorch
+00:57:08 instantiating snapshot2: 8996 MiB free, 20923 MiB allocated, 21254 MiB reserved, 2244 MiB outside PyTorch
+00:57:08 captured snapshot2 in 0.02s
+00:57:08 capturing resume1: 8996 MiB free, 20923 MiB allocated, 21254 MiB reserved, 2244 MiB outside PyTorch
+00:57:08 instantiating resume1: 8996 MiB free, 20923 MiB allocated, 21254 MiB reserved, 2244 MiB outside PyTorch
+00:57:08 captured resume1 in 0.02s (compiled cache hit)
+00:57:08 capturing init1: 8996 MiB free, 20923 MiB allocated, 21254 MiB reserved, 2244 MiB outside PyTorch
+00:57:08 instantiating init1: 8996 MiB free, 20923 MiB allocated, 21254 MiB reserved, 2244 MiB outside PyTorch
+00:57:08 captured init1 in 0.03s
+00:57:08 capturing restore1: 8996 MiB free, 20923 MiB allocated, 21254 MiB reserved, 2244 MiB outside PyTorch
+00:57:08 instantiating restore1: 8996 MiB free, 20923 MiB allocated, 21254 MiB reserved, 2244 MiB outside PyTorch
+00:57:08 captured restore1 in 0.02s
+00:57:08 capturing snapshot1: 8996 MiB free, 20923 MiB allocated, 21254 MiB reserved, 2244 MiB outside PyTorch
+00:57:08 instantiating snapshot1: 8996 MiB free, 20923 MiB allocated, 21254 MiB reserved, 2244 MiB outside PyTorch
+00:57:08 captured snapshot1 in 0.02s
+00:57:08 capturing speculative4x5: 8996 MiB free, 20923 MiB allocated, 21254 MiB reserved, 2244 MiB outside PyTorch
+00:57:08 instantiating speculative4x5: 8978 MiB free, 20923 MiB allocated, 21272 MiB reserved, 2244 MiB outside PyTorch
+00:57:08 captured speculative4x5 in 0.25s (compiled cache hit)
+00:57:08 capturing speculative4x4: 8960 MiB free, 20923 MiB allocated, 21272 MiB reserved, 2262 MiB outside PyTorch
+00:57:09 instantiating speculative4x4: 8960 MiB free, 20923 MiB allocated, 21272 MiB reserved, 2262 MiB outside PyTorch
+00:57:09 captured speculative4x4 in 0.22s (compiled cache hit)
+00:57:09 capturing speculative4x3: 8942 MiB free, 20923 MiB allocated, 21272 MiB reserved, 2280 MiB outside PyTorch
+00:57:09 instantiating speculative4x3: 8942 MiB free, 20923 MiB allocated, 21272 MiB reserved, 2280 MiB outside PyTorch
+00:57:09 captured speculative4x3 in 0.21s (compiled cache hit)
+00:57:09 capturing speculative4x2: 8926 MiB free, 20923 MiB allocated, 21272 MiB reserved, 2296 MiB outside PyTorch
+00:57:09 instantiating speculative4x2: 8926 MiB free, 20923 MiB allocated, 21272 MiB reserved, 2296 MiB outside PyTorch
+00:57:09 captured speculative4x2 in 0.19s (compiled cache hit)
+00:57:09 capturing speculative4x1: 8910 MiB free, 20923 MiB allocated, 21272 MiB reserved, 2312 MiB outside PyTorch
+00:57:09 instantiating speculative4x1: 8910 MiB free, 20923 MiB allocated, 21272 MiB reserved, 2312 MiB outside PyTorch
+00:57:09 captured speculative4x1 in 0.19s (compiled cache hit)
+00:57:09 capturing speculative2x5: 8896 MiB free, 20923 MiB allocated, 21272 MiB reserved, 2326 MiB outside PyTorch
+00:57:09 instantiating speculative2x5: 8896 MiB free, 20923 MiB allocated, 21272 MiB reserved, 2326 MiB outside PyTorch
+00:57:09 captured speculative2x5 in 0.23s (compiled cache hit)
+00:57:09 capturing speculative2x4: 8876 MiB free, 20923 MiB allocated, 21272 MiB reserved, 2346 MiB outside PyTorch
+00:57:10 instantiating speculative2x4: 8876 MiB free, 20923 MiB allocated, 21272 MiB reserved, 2346 MiB outside PyTorch
+00:57:10 captured speculative2x4 in 0.25s (compiled cache hit)
+00:57:10 capturing speculative2x3: 8860 MiB free, 20923 MiB allocated, 21272 MiB reserved, 2362 MiB outside PyTorch
+00:57:10 instantiating speculative2x3: 8860 MiB free, 20923 MiB allocated, 21272 MiB reserved, 2362 MiB outside PyTorch
+00:57:10 captured speculative2x3 in 0.22s (compiled cache hit)
+00:57:10 capturing speculative2x2: 8844 MiB free, 20923 MiB allocated, 21272 MiB reserved, 2378 MiB outside PyTorch
+00:57:10 instantiating speculative2x2: 8844 MiB free, 20923 MiB allocated, 21272 MiB reserved, 2378 MiB outside PyTorch
+00:57:10 captured speculative2x2 in 0.21s (compiled cache hit)
+00:57:10 capturing speculative2x1: 8826 MiB free, 20923 MiB allocated, 21272 MiB reserved, 2396 MiB outside PyTorch
+00:57:10 instantiating speculative2x1: 8826 MiB free, 20923 MiB allocated, 21272 MiB reserved, 2396 MiB outside PyTorch
+00:57:10 captured speculative2x1 in 0.20s (compiled cache hit)
+00:57:10 capturing speculative1x5: 8812 MiB free, 20923 MiB allocated, 21272 MiB reserved, 2410 MiB outside PyTorch
+00:57:10 instantiating speculative1x5: 8812 MiB free, 20923 MiB allocated, 21272 MiB reserved, 2410 MiB outside PyTorch
+00:57:10 captured speculative1x5 in 0.24s (compiled cache hit)
+00:57:10 capturing speculative1x4: 8794 MiB free, 20923 MiB allocated, 21272 MiB reserved, 2428 MiB outside PyTorch
+00:57:11 instantiating speculative1x4: 8794 MiB free, 20923 MiB allocated, 21272 MiB reserved, 2428 MiB outside PyTorch
+00:57:11 captured speculative1x4 in 0.22s (compiled cache hit)
+00:57:11 capturing speculative1x3: 8778 MiB free, 20923 MiB allocated, 21272 MiB reserved, 2444 MiB outside PyTorch
+00:57:11 instantiating speculative1x3: 8778 MiB free, 20923 MiB allocated, 21272 MiB reserved, 2444 MiB outside PyTorch
+00:57:11 captured speculative1x3 in 0.22s (compiled cache hit)
+00:57:11 capturing speculative1x2: 8760 MiB free, 20923 MiB allocated, 21272 MiB reserved, 2462 MiB outside PyTorch
+00:57:11 instantiating speculative1x2: 8760 MiB free, 20923 MiB allocated, 21272 MiB reserved, 2462 MiB outside PyTorch
+00:57:11 captured speculative1x2 in 0.21s (compiled cache hit)
+00:57:11 capturing speculative1x1: 8744 MiB free, 20923 MiB allocated, 21272 MiB reserved, 2478 MiB outside PyTorch
+00:57:11 instantiating speculative1x1: 8744 MiB free, 20923 MiB allocated, 21272 MiB reserved, 2478 MiB outside PyTorch
+00:57:11 captured speculative1x1 in 0.21s (compiled cache hit)
+00:57:11 Prepare serving graphs complete in 4.90s
+00:57:15 strict MTP validation: ordinary_greedy_B1
+00:57:16 strict MTP validation result: ordinary_greedy_B1 PASS
+00:57:16 strict MTP validation: learned_greedy_B1_width1
+00:57:16 strict MTP validation result: learned_greedy_B1_width1 PASS
+00:57:16 strict MTP validation: actual_prefix_B1_width1
+00:57:18 strict MTP validation result: actual_prefix_B1_width1 PASS
+00:57:18 strict MTP validation: learned_greedy_B1_width2
+00:57:18 strict MTP validation result: learned_greedy_B1_width2 PASS
+00:57:18 strict MTP validation: actual_prefix_B1_width2
+00:57:20 strict MTP validation result: actual_prefix_B1_width2 PASS
+00:57:20 strict MTP validation: learned_greedy_B1_width3
+00:57:20 strict MTP validation result: learned_greedy_B1_width3 PASS
+00:57:20 strict MTP validation: actual_prefix_B1_width3
+00:57:22 strict MTP validation result: actual_prefix_B1_width3 PASS
+00:57:22 strict MTP validation: learned_greedy_B1_width4
+00:57:22 strict MTP validation result: learned_greedy_B1_width4 PASS
+00:57:22 strict MTP validation: actual_prefix_B1_width4
+00:57:24 strict MTP validation result: actual_prefix_B1_width4 PASS
+00:57:24 strict MTP validation: learned_greedy_B1_width5
+00:57:25 strict MTP validation result: learned_greedy_B1_width5 PASS
+00:57:25 strict MTP validation: actual_prefix_B1_width5
+00:57:26 strict MTP validation result: actual_prefix_B1_width5 PASS
+00:57:26 strict MTP validation: forced_prefix_B1_P127
+00:57:29 strict MTP validation result: forced_prefix_B1_P127 PASS
+00:57:29 strict MTP validation: forced_prefix_B1_P128
+00:57:31 strict MTP validation result: forced_prefix_B1_P128 PASS
+00:57:31 strict MTP validation: forced_prefix_B1_P127_width5
+00:57:34 strict MTP validation result: forced_prefix_B1_P127_width5 PASS
+00:57:34 strict MTP validation: forced_prefix_B1_P128_width5
+00:57:36 strict MTP validation result: forced_prefix_B1_P128_width5 PASS
+00:57:36 strict MTP validation: snapshot_restore_branch_B1_P128
+00:57:36 strict MTP validation result: snapshot_restore_branch_B1_P128 PASS
+00:57:36 strict MTP validation: snapshot_restore_branch_B1_P129
+00:57:37 strict MTP validation result: snapshot_restore_branch_B1_P129 PASS
+00:57:37 strict MTP validation: snapshot_restore_branch_B1_P130
+00:57:38 strict MTP validation result: snapshot_restore_branch_B1_P130 PASS
+00:57:38 strict MTP validation: all_inactive_B1
+00:57:41 strict MTP validation result: all_inactive_B1 PASS
+00:57:41 strict MTP validation: ordinary_greedy_B4
+00:57:42 strict MTP validation result: ordinary_greedy_B4 PASS
+00:57:42 strict MTP validation: learned_greedy_B4_width1
+00:57:43 strict MTP validation result: learned_greedy_B4_width1 PASS
+00:57:43 strict MTP validation: actual_prefix_B4_width1
+00:57:45 strict MTP validation result: actual_prefix_B4_width1 PASS
+00:57:45 strict MTP validation: learned_greedy_B4_width2
+00:57:46 strict MTP validation result: learned_greedy_B4_width2 PASS
+00:57:46 strict MTP validation: actual_prefix_B4_width2
+00:57:49 strict MTP validation result: actual_prefix_B4_width2 PASS
+00:57:49 strict MTP validation: learned_greedy_B4_width3
+00:57:50 strict MTP validation result: learned_greedy_B4_width3 PASS
+00:57:50 strict MTP validation: actual_prefix_B4_width3
+00:57:52 strict MTP validation result: actual_prefix_B4_width3 PASS
+00:57:52 strict MTP validation: learned_greedy_B4_width4
+00:57:53 strict MTP validation result: learned_greedy_B4_width4 PASS
+00:57:53 strict MTP validation: actual_prefix_B4_width4
+00:57:55 strict MTP validation result: actual_prefix_B4_width4 PASS
+00:57:55 strict MTP validation: learned_greedy_B4_width5
+00:57:56 strict MTP validation result: learned_greedy_B4_width5 PASS
+00:57:56 strict MTP validation: actual_prefix_B4_width5
+00:57:59 strict MTP validation result: actual_prefix_B4_width5 PASS
+00:57:59 strict MTP validation: forced_prefix_B4_P127
+00:58:05 strict MTP validation result: forced_prefix_B4_P127 PASS
+00:58:05 strict MTP validation: forced_prefix_B4_inactive_P127
+00:58:09 strict MTP validation result: forced_prefix_B4_inactive_P127 PASS
+00:58:09 strict MTP validation: forced_prefix_B4_P128
+00:58:16 strict MTP validation result: forced_prefix_B4_P128 PASS
+00:58:16 strict MTP validation: forced_prefix_B4_inactive_P128
+00:58:21 strict MTP validation result: forced_prefix_B4_inactive_P128 PASS
+00:58:21 strict MTP validation: forced_prefix_B4_P127_width5
+00:58:27 strict MTP validation result: forced_prefix_B4_P127_width5 PASS
+00:58:27 strict MTP validation: forced_prefix_B4_inactive_P127_width5
+00:58:32 strict MTP validation result: forced_prefix_B4_inactive_P127_width5 PASS
+00:58:32 strict MTP validation: forced_prefix_B4_P128_width5
+00:58:38 strict MTP validation result: forced_prefix_B4_P128_width5 PASS
+00:58:38 strict MTP validation: forced_prefix_B4_inactive_P128_width5
+00:58:44 strict MTP validation result: forced_prefix_B4_inactive_P128_width5 PASS
+00:58:44 strict MTP validation: snapshot_restore_branch_B4_P128
+00:58:46 strict MTP validation result: snapshot_restore_branch_B4_P128 PASS
+00:58:46 strict MTP validation: snapshot_restore_branch_B4_P129
+00:58:48 strict MTP validation result: snapshot_restore_branch_B4_P129 PASS
+00:58:48 strict MTP validation: snapshot_restore_branch_B4_P130
+00:58:50 strict MTP validation result: snapshot_restore_branch_B4_P130 PASS
+00:58:50 strict MTP validation: all_inactive_B4
+00:58:51 strict MTP validation result: all_inactive_B4 PASS
+00:58:51 strict MTP validation: padded_slot_alias_B4
+00:58:52 strict MTP validation result: padded_slot_alias_B4 PASS
+00:58:52 strict MTP validation: stale_generation_slot_alias_B4
+00:58:53 strict MTP validation result: stale_generation_slot_alias_B4 PASS
+00:58:53 strict MTP validation: sm70_prefill_attention_injected_status
+00:58:54 strict MTP validation result: sm70_prefill_attention_injected_status PASS
+00:58:54 strict MTP validation: sm70_decode_attention_nonfinite_probe
+00:58:57 strict MTP validation result: sm70_decode_attention_nonfinite_probe PASS
+00:58:57 strict MTP validation: restore_pre_export_state
+00:58:58 strict MTP validation result: restore_pre_export_state PASS
+00:58:59 long MTP invariance: ordinary_B1_code-00 (512 tokens, 128-token prefill chunks)
+00:59:25 long MTP invariance result: ordinary_B1_code-00 PASS
+00:59:25 long MTP invariance: ordinary_B1_code-01 (512 tokens, 128-token prefill chunks)
+00:59:47 long MTP invariance result: ordinary_B1_code-01 PASS
+00:59:47 long MTP invariance: ordinary_B1_code-02 (512 tokens, 128-token prefill chunks)
+01:00:08 long MTP invariance result: ordinary_B1_code-02 PASS
+01:00:08 long MTP invariance: ordinary_B1_code-03 (512 tokens, 128-token prefill chunks)
+01:00:30 long MTP invariance result: ordinary_B1_code-03 PASS
+01:00:30 long MTP invariance: ordinary_B4_code-00_code-01_code-02_code-03 (512 tokens, 128-token prefill chunks)
+01:00:57 long MTP invariance result: ordinary_B4_code-00_code-01_code-02_code-03 PASS
+01:00:57 long MTP invariance: depth3_B1_code-00 (512 tokens, 128-token prefill chunks)
+01:01:06 long MTP invariance result: depth3_B1_code-00 PASS
+01:01:06 long MTP invariance: depth3_B1_code-01 (512 tokens, 128-token prefill chunks)
+01:01:14 long MTP invariance result: depth3_B1_code-01 PASS
+01:01:14 long MTP invariance: depth3_B1_code-02 (512 tokens, 128-token prefill chunks)
+01:01:23 long MTP invariance result: depth3_B1_code-02 PASS
+01:01:23 long MTP invariance: depth3_B1_code-03 (512 tokens, 128-token prefill chunks)
+01:01:32 long MTP invariance result: depth3_B1_code-03 PASS
+01:01:32 long MTP invariance: depth3_B4_code-00_code-01_code-02_code-03 (512 tokens, 128-token prefill chunks)
+01:01:46 long MTP invariance result: depth3_B4_code-00_code-01_code-02_code-03 PASS
+01:01:46 long MTP invariance: depth4_B1_code-00 (512 tokens, 128-token prefill chunks)
+01:01:55 long MTP invariance result: depth4_B1_code-00 PASS
+01:01:55 long MTP invariance: depth4_B1_code-01 (512 tokens, 128-token prefill chunks)
+01:02:04 long MTP invariance result: depth4_B1_code-01 PASS
+01:02:04 long MTP invariance: depth4_B1_code-02 (512 tokens, 128-token prefill chunks)
+01:02:12 long MTP invariance result: depth4_B1_code-02 PASS
+01:02:12 long MTP invariance: depth4_B1_code-03 (512 tokens, 128-token prefill chunks)
+01:02:22 long MTP invariance result: depth4_B1_code-03 PASS
+01:02:22 long MTP invariance: depth4_B4_code-00_code-01_code-02_code-03 (512 tokens, 128-token prefill chunks)
+01:02:37 long MTP invariance result: depth4_B4_code-00_code-01_code-02_code-03 PASS
+01:02:37 long MTP invariance comparison: alone_vs_coscheduled_ordinary_code-00 PASS
+01:02:37 long MTP invariance comparison: alone_vs_coscheduled_depth3_code-00 PASS
+01:02:37 long MTP invariance comparison: alone_vs_coscheduled_depth4_code-00 PASS
+01:02:37 long MTP invariance comparison: speculative_vs_no_mtp_depth3_B1_code-00 PASS
+01:02:37 long MTP invariance comparison: speculative_vs_no_mtp_depth3_B4_code-00 PASS
+01:02:37 long MTP invariance comparison: speculative_vs_no_mtp_depth4_B1_code-00 PASS
+01:02:37 long MTP invariance comparison: speculative_vs_no_mtp_depth4_B4_code-00 PASS
+01:02:37 long MTP invariance comparison: alone_vs_coscheduled_ordinary_code-01 PASS
+01:02:37 long MTP invariance comparison: alone_vs_coscheduled_depth3_code-01 PASS
+01:02:37 long MTP invariance comparison: alone_vs_coscheduled_depth4_code-01 PASS
+01:02:37 long MTP invariance comparison: speculative_vs_no_mtp_depth3_B1_code-01 PASS
+01:02:37 long MTP invariance comparison: speculative_vs_no_mtp_depth3_B4_code-01 PASS
+01:02:37 long MTP invariance comparison: speculative_vs_no_mtp_depth4_B1_code-01 PASS
+01:02:37 long MTP invariance comparison: speculative_vs_no_mtp_depth4_B4_code-01 PASS
+01:02:37 long MTP invariance comparison: alone_vs_coscheduled_ordinary_code-02 PASS
+01:02:37 long MTP invariance comparison: alone_vs_coscheduled_depth3_code-02 PASS
+01:02:37 long MTP invariance comparison: alone_vs_coscheduled_depth4_code-02 PASS
+01:02:37 long MTP invariance comparison: speculative_vs_no_mtp_depth3_B1_code-02 PASS
+01:02:37 long MTP invariance comparison: speculative_vs_no_mtp_depth3_B4_code-02 PASS
+01:02:37 long MTP invariance comparison: speculative_vs_no_mtp_depth4_B1_code-02 PASS
+01:02:37 long MTP invariance comparison: speculative_vs_no_mtp_depth4_B4_code-02 PASS
+01:02:37 long MTP invariance comparison: alone_vs_coscheduled_ordinary_code-03 PASS
+01:02:37 long MTP invariance comparison: alone_vs_coscheduled_depth3_code-03 PASS
+01:02:37 long MTP invariance comparison: alone_vs_coscheduled_depth4_code-03 PASS
+01:02:37 long MTP invariance comparison: speculative_vs_no_mtp_depth3_B1_code-03 PASS
+01:02:37 long MTP invariance comparison: speculative_vs_no_mtp_depth3_B4_code-03 PASS
+01:02:37 long MTP invariance comparison: speculative_vs_no_mtp_depth4_B1_code-03 PASS
+01:02:37 long MTP invariance comparison: speculative_vs_no_mtp_depth4_B4_code-03 PASS
+srpt-on gates exit 0

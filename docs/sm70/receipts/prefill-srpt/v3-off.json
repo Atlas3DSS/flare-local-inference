@@ -1,0 +1,1819 @@
+{
+ "exp": "v3-off",
+ "args": {
+  "exp": "v3-off",
+  "executable": "<release-host>/flare/src-prefill-lab/flare-lab-srpt3",
+  "package": "<release-host>/packages/prefill-lab/release/model.safetensors",
+  "port": "8581",
+  "prefix_cache": "8G",
+  "scheduler_policy": "balanced",
+  "depth": "4",
+  "memory_limit": "31G",
+  "plan": "2048x1,30720x1,2048x4,30720x4",
+  "warmups": "1",
+  "reps": "1",
+  "output_tokens": "2",
+  "greedy": "['code-00', 'code-01', 'code-02', 'long-00']",
+  "greedy_tokens": "64",
+  "greedy_reference": "<release-host>/flare/prefill-lab/exp1a-pc8G-nvme.json",
+  "server_cpus": "None",
+  "wrap": "",
+  "extra": "[]",
+  "env": "[]",
+  "warm_probe": "0",
+  "keys": "<release-host>/flare/release-signing/development-publisher.json",
+  "output": "<release-host>/flare/prefill-lab/v3-off.json",
+  "ready_timeout": "1200"
+ },
+ "started": 1792825065.901314,
+ "executable_sha256": "dd7533f18112f632c343a76178a7ae0228e478e79b9fe1f573be4211f9764845",
+ "cuda_visible_devices": "GPU-8747fa38-17e6-3fb3-f9da-4ebb5ac128a1",
+ "tool_sha256": {
+  "benchmark_prefill.py": "c64786794779f4df4d22d3078fdbc5b947180bcadaf6af7ff514249a18a38af1",
+  "native.py": "32f1d6de9eda1f0891ff1366d3fd0778b75f45c84dfa6735fa94e9e4ba4aacfa",
+  "benchmark_mtp.py": "a4656afb11c6f7ef4acb065324106a0da8a43adc129d95710bded4d3c5157c2b"
+ },
+ "batches": [
+  {
+   "status": "complete",
+   "phase": "warmup",
+   "prompt_length": 2048,
+   "concurrency": 1,
+   "repetition": 0,
+   "output_tokens": 2,
+   "metric_deltas": {
+    "prefill_tokens": 2048,
+    "generated_tokens": 2,
+    "completed": 1,
+    "failed": 0,
+    "reused_tokens": 0
+   },
+   "request_metric_deltas": {
+    "flare_requests_admitted_total": 1,
+    "flare_requests_cancelled_total": 0
+   },
+   "first_token_wall_window_seconds": 2.590698871004861,
+   "effective_prefill_tokens_per_second": 790.520281195644,
+   "prefill_rate_basis": "successful server prefill-token counter delta / batch first-token wall window; includes queueing, prefill, first-token generation and transport; not pure GPU prefill",
+   "pure_gpu_prefill_tokens_per_second": null,
+   "pure_gpu_prefill_unavailable_reason": "native release exposes prefill token counters but no isolated prefill GPU duration",
+   "per_request": [
+    {
+     "case_id": "prefill-lab-v3-off/warmup/2048/1/0/0",
+     "status": "complete",
+     "error": null,
+     "start_offset_s": 0.0,
+     "ttft_s": 2.590698871004861,
+     "first_token_wall_s": 2.590698871004861,
+     "cached_tokens": 0,
+     "output_tokens": 2,
+     "elapsed_s": 2.6389495840121526
+    }
+   ]
+  },
+  {
+   "status": "complete",
+   "phase": "measured",
+   "prompt_length": 2048,
+   "concurrency": 1,
+   "repetition": 0,
+   "output_tokens": 2,
+   "metric_deltas": {
+    "prefill_tokens": 2048,
+    "generated_tokens": 2,
+    "completed": 1,
+    "failed": 0,
+    "reused_tokens": 0
+   },
+   "request_metric_deltas": {
+    "flare_requests_admitted_total": 1,
+    "flare_requests_cancelled_total": 0
+   },
+   "first_token_wall_window_seconds": 2.542071661009686,
+   "effective_prefill_tokens_per_second": 805.6421191472448,
+   "prefill_rate_basis": "successful server prefill-token counter delta / batch first-token wall window; includes queueing, prefill, first-token generation and transport; not pure GPU prefill",
+   "pure_gpu_prefill_tokens_per_second": null,
+   "pure_gpu_prefill_unavailable_reason": "native release exposes prefill token counters but no isolated prefill GPU duration",
+   "per_request": [
+    {
+     "case_id": "prefill-lab-v3-off/measured/2048/1/0/0",
+     "status": "complete",
+     "error": null,
+     "start_offset_s": 0.0,
+     "ttft_s": 2.542071661009686,
+     "first_token_wall_s": 2.542071661009686,
+     "cached_tokens": 0,
+     "output_tokens": 2,
+     "elapsed_s": 2.5938679130049422
+    }
+   ]
+  },
+  {
+   "status": "complete",
+   "phase": "warmup",
+   "prompt_length": 30720,
+   "concurrency": 1,
+   "repetition": 0,
+   "output_tokens": 2,
+   "metric_deltas": {
+    "prefill_tokens": 30720,
+    "generated_tokens": 2,
+    "completed": 1,
+    "failed": 0,
+    "reused_tokens": 0
+   },
+   "request_metric_deltas": {
+    "flare_requests_admitted_total": 1,
+    "flare_requests_cancelled_total": 0
+   },
+   "first_token_wall_window_seconds": 42.776438703003805,
+   "effective_prefill_tokens_per_second": 718.1523504864094,
+   "prefill_rate_basis": "successful server prefill-token counter delta / batch first-token wall window; includes queueing, prefill, first-token generation and transport; not pure GPU prefill",
+   "pure_gpu_prefill_tokens_per_second": null,
+   "pure_gpu_prefill_unavailable_reason": "native release exposes prefill token counters but no isolated prefill GPU duration",
+   "per_request": [
+    {
+     "case_id": "prefill-lab-v3-off/warmup/30720/1/0/0",
+     "status": "complete",
+     "error": null,
+     "start_offset_s": 0.0,
+     "ttft_s": 42.776438703003805,
+     "first_token_wall_s": 42.776438703003805,
+     "cached_tokens": 0,
+     "output_tokens": 2,
+     "elapsed_s": 42.91120259399759
+    }
+   ]
+  },
+  {
+   "status": "complete",
+   "phase": "measured",
+   "prompt_length": 30720,
+   "concurrency": 1,
+   "repetition": 0,
+   "output_tokens": 2,
+   "metric_deltas": {
+    "prefill_tokens": 30720,
+    "generated_tokens": 2,
+    "completed": 1,
+    "failed": 0,
+    "reused_tokens": 0
+   },
+   "request_metric_deltas": {
+    "flare_requests_admitted_total": 1,
+    "flare_requests_cancelled_total": 0
+   },
+   "first_token_wall_window_seconds": 42.77425634500105,
+   "effective_prefill_tokens_per_second": 718.1889908786268,
+   "prefill_rate_basis": "successful server prefill-token counter delta / batch first-token wall window; includes queueing, prefill, first-token generation and transport; not pure GPU prefill",
+   "pure_gpu_prefill_tokens_per_second": null,
+   "pure_gpu_prefill_unavailable_reason": "native release exposes prefill token counters but no isolated prefill GPU duration",
+   "per_request": [
+    {
+     "case_id": "prefill-lab-v3-off/measured/30720/1/0/0",
+     "status": "complete",
+     "error": null,
+     "start_offset_s": 0.0,
+     "ttft_s": 42.77425634500105,
+     "first_token_wall_s": 42.77425634500105,
+     "cached_tokens": 0,
+     "output_tokens": 2,
+     "elapsed_s": 42.908174016018165
+    }
+   ]
+  },
+  {
+   "status": "complete",
+   "phase": "warmup",
+   "prompt_length": 2048,
+   "concurrency": 4,
+   "repetition": 0,
+   "output_tokens": 2,
+   "metric_deltas": {
+    "prefill_tokens": 8192,
+    "generated_tokens": 8,
+    "completed": 4,
+    "failed": 0,
+    "reused_tokens": 0
+   },
+   "request_metric_deltas": {
+    "flare_requests_admitted_total": 4,
+    "flare_requests_cancelled_total": 0
+   },
+   "first_token_wall_window_seconds": 10.225607311003841,
+   "effective_prefill_tokens_per_second": 801.1260114775322,
+   "prefill_rate_basis": "successful server prefill-token counter delta / batch first-token wall window; includes queueing, prefill, first-token generation and transport; not pure GPU prefill",
+   "pure_gpu_prefill_tokens_per_second": null,
+   "pure_gpu_prefill_unavailable_reason": "native release exposes prefill token counters but no isolated prefill GPU duration",
+   "per_request": [
+    {
+     "case_id": "prefill-lab-v3-off/warmup/2048/4/0/0",
+     "status": "complete",
+     "error": null,
+     "start_offset_s": 0.0003232940216548741,
+     "ttft_s": 9.684405670996057,
+     "first_token_wall_s": 9.684728965017712,
+     "cached_tokens": 0,
+     "output_tokens": 2,
+     "elapsed_s": 10.065843566990225
+    },
+    {
+     "case_id": "prefill-lab-v3-off/warmup/2048/4/0/1",
+     "status": "complete",
+     "error": null,
+     "start_offset_s": 0.001037564012221992,
+     "ttft_s": 10.22456974699162,
+     "first_token_wall_s": 10.225607311003841,
+     "cached_tokens": 0,
+     "output_tokens": 2,
+     "elapsed_s": 10.278478377993451
+    },
+    {
+     "case_id": "prefill-lab-v3-off/warmup/2048/4/0/2",
+     "status": "complete",
+     "error": null,
+     "start_offset_s": 0.0006752530171070248,
+     "ttft_s": 9.844342555996263,
+     "first_token_wall_s": 9.84501780901337,
+     "cached_tokens": 0,
+     "output_tokens": 2,
+     "elapsed_s": 10.065609237994067
+    },
+    {
+     "case_id": "prefill-lab-v3-off/warmup/2048/4/0/3",
+     "status": "complete",
+     "error": null,
+     "start_offset_s": 0.0,
+     "ttft_s": 10.005323607998434,
+     "first_token_wall_s": 10.005323607998434,
+     "cached_tokens": 0,
+     "output_tokens": 2,
+     "elapsed_s": 10.279633514001034
+    }
+   ]
+  },
+  {
+   "status": "complete",
+   "phase": "measured",
+   "prompt_length": 2048,
+   "concurrency": 4,
+   "repetition": 0,
+   "output_tokens": 2,
+   "metric_deltas": {
+    "prefill_tokens": 8192,
+    "generated_tokens": 8,
+    "completed": 4,
+    "failed": 0,
+    "reused_tokens": 0
+   },
+   "request_metric_deltas": {
+    "flare_requests_admitted_total": 4,
+    "flare_requests_cancelled_total": 0
+   },
+   "first_token_wall_window_seconds": 10.198416714993073,
+   "effective_prefill_tokens_per_second": 803.2619404497009,
+   "prefill_rate_basis": "successful server prefill-token counter delta / batch first-token wall window; includes queueing, prefill, first-token generation and transport; not pure GPU prefill",
+   "pure_gpu_prefill_tokens_per_second": null,
+   "pure_gpu_prefill_unavailable_reason": "native release exposes prefill token counters but no isolated prefill GPU duration",
+   "per_request": [
+    {
+     "case_id": "prefill-lab-v3-off/measured/2048/4/0/0",
+     "status": "complete",
+     "error": null,
+     "start_offset_s": 0.0003619649796746671,
+     "ttft_s": 9.823808663000818,
+     "first_token_wall_s": 9.824170627980493,
+     "cached_tokens": 0,
+     "output_tokens": 2,
+     "elapsed_s": 10.038487646001158
+    },
+    {
+     "case_id": "prefill-lab-v3-off/measured/2048/4/0/1",
+     "status": "complete",
+     "error": null,
+     "start_offset_s": 0.0006972049886826426,
+     "ttft_s": 9.984251279995078,
+     "first_token_wall_s": 9.98494848498376,
+     "cached_tokens": 0,
+     "output_tokens": 2,
+     "elapsed_s": 10.2518889530038
+    },
+    {
+     "case_id": "prefill-lab-v3-off/measured/2048/4/0/2",
+     "status": "complete",
+     "error": null,
+     "start_offset_s": 0.001088264980353415,
+     "ttft_s": 9.663333328004228,
+     "first_token_wall_s": 9.664421592984581,
+     "cached_tokens": 0,
+     "output_tokens": 2,
+     "elapsed_s": 10.037883532000706
+    },
+    {
+     "case_id": "prefill-lab-v3-off/measured/2048/4/0/3",
+     "status": "complete",
+     "error": null,
+     "start_offset_s": 0.0,
+     "ttft_s": 10.198416714993073,
+     "first_token_wall_s": 10.198416714993073,
+     "cached_tokens": 0,
+     "output_tokens": 2,
+     "elapsed_s": 10.252471781976055
+    }
+   ]
+  },
+  {
+   "status": "complete",
+   "phase": "warmup",
+   "prompt_length": 30720,
+   "concurrency": 4,
+   "repetition": 0,
+   "output_tokens": 2,
+   "metric_deltas": {
+    "prefill_tokens": 122880,
+    "generated_tokens": 8,
+    "completed": 4,
+    "failed": 0,
+    "reused_tokens": 0
+   },
+   "request_metric_deltas": {
+    "flare_requests_admitted_total": 4,
+    "flare_requests_cancelled_total": 0
+   },
+   "first_token_wall_window_seconds": 170.90891352499602,
+   "effective_prefill_tokens_per_second": 718.9794696227378,
+   "prefill_rate_basis": "successful server prefill-token counter delta / batch first-token wall window; includes queueing, prefill, first-token generation and transport; not pure GPU prefill",
+   "pure_gpu_prefill_tokens_per_second": null,
+   "pure_gpu_prefill_unavailable_reason": "native release exposes prefill token counters but no isolated prefill GPU duration",
+   "per_request": [
+    {
+     "case_id": "prefill-lab-v3-off/warmup/30720/4/0/0",
+     "status": "complete",
+     "error": null,
+     "start_offset_s": 0.00035262401797808707,
+     "ttft_s": 170.15659708398744,
+     "first_token_wall_s": 170.1569497080054,
+     "cached_tokens": 0,
+     "output_tokens": 2,
+     "elapsed_s": 170.6058153649792
+    },
+    {
+     "case_id": "prefill-lab-v3-off/warmup/30720/4/0/1",
+     "status": "complete",
+     "error": null,
+     "start_offset_s": 0.0010018479952123016,
+     "ttft_s": 170.55383869900834,
+     "first_token_wall_s": 170.55484054700355,
+     "cached_tokens": 0,
+     "output_tokens": 2,
+     "elapsed_s": 170.66673091001576
+    },
+    {
+     "case_id": "prefill-lab-v3-off/warmup/30720/4/0/2",
+     "status": "complete",
+     "error": null,
+     "start_offset_s": 0.0007158330117817968,
+     "ttft_s": 170.35598778698477,
+     "first_token_wall_s": 170.35670361999655,
+     "cached_tokens": 0,
+     "output_tokens": 2,
+     "elapsed_s": 170.6668785639922
+    },
+    {
+     "case_id": "prefill-lab-v3-off/warmup/30720/4/0/3",
+     "status": "complete",
+     "error": null,
+     "start_offset_s": 0.0,
+     "ttft_s": 170.90891352499602,
+     "first_token_wall_s": 170.90891352499602,
+     "cached_tokens": 0,
+     "output_tokens": 2,
+     "elapsed_s": 171.05844796801102
+    }
+   ]
+  },
+  {
+   "status": "complete",
+   "phase": "measured",
+   "prompt_length": 30720,
+   "concurrency": 4,
+   "repetition": 0,
+   "output_tokens": 2,
+   "metric_deltas": {
+    "prefill_tokens": 122880,
+    "generated_tokens": 8,
+    "completed": 4,
+    "failed": 0,
+    "reused_tokens": 0
+   },
+   "request_metric_deltas": {
+    "flare_requests_admitted_total": 4,
+    "flare_requests_cancelled_total": 0
+   },
+   "first_token_wall_window_seconds": 170.7814442809904,
+   "effective_prefill_tokens_per_second": 719.5161073695037,
+   "prefill_rate_basis": "successful server prefill-token counter delta / batch first-token wall window; includes queueing, prefill, first-token generation and transport; not pure GPU prefill",
+   "pure_gpu_prefill_tokens_per_second": null,
+   "pure_gpu_prefill_unavailable_reason": "native release exposes prefill token counters but no isolated prefill GPU duration",
+   "per_request": [
+    {
+     "case_id": "prefill-lab-v3-off/measured/30720/4/0/0",
+     "status": "complete",
+     "error": null,
+     "start_offset_s": 0.0024076759873423725,
+     "ttft_s": 170.31381937200786,
+     "first_token_wall_s": 170.3162270479952,
+     "cached_tokens": 0,
+     "output_tokens": 2,
+     "elapsed_s": 170.58184567501303
+    },
+    {
+     "case_id": "prefill-lab-v3-off/measured/30720/4/0/1",
+     "status": "complete",
+     "error": null,
+     "start_offset_s": 0.00045988798956386745,
+     "ttft_s": 170.78098439300084,
+     "first_token_wall_s": 170.7814442809904,
+     "cached_tokens": 0,
+     "output_tokens": 2,
+     "elapsed_s": 170.91851702300482
+    },
+    {
+     "case_id": "prefill-lab-v3-off/measured/30720/4/0/2",
+     "status": "complete",
+     "error": null,
+     "start_offset_s": 0.004404136998346075,
+     "ttft_s": 170.1125149599975,
+     "first_token_wall_s": 170.11691909699584,
+     "cached_tokens": 0,
+     "output_tokens": 2,
+     "elapsed_s": 170.5797291699855
+    },
+    {
+     "case_id": "prefill-lab-v3-off/measured/30720/4/0/3",
+     "status": "complete",
+     "error": null,
+     "start_offset_s": 0.0,
+     "ttft_s": 170.51566561197978,
+     "first_token_wall_s": 170.51566561197978,
+     "cached_tokens": 0,
+     "output_tokens": 2,
+     "elapsed_s": 170.91885364198242
+    }
+   ]
+  }
+ ],
+ "status": "complete",
+ "server_command": [
+  "<release-host>/flare/src-prefill-lab/flare-lab-srpt3",
+  "run",
+  "<release-host>/packages/prefill-lab/release/model.safetensors",
+  "--publisher-keys",
+  "<release-host>/flare/release-signing/development-publisher.json",
+  "--trust-store",
+  "<release-host>/flare/prefill-lab/v3-off-work/trust.toml",
+  "--verify-weights",
+  "--gpus",
+  "0",
+  "--prefix-cache-memory",
+  "8G",
+  "--embedding-table-storage",
+  "ram",
+  "--memory-limit",
+  "31G",
+  "--scheduler-policy",
+  "balanced",
+  "--kv-cache-limit",
+  "concurrency",
+  "--max-concurrency",
+  "4",
+  "--mtp-draft-tokens",
+  "4",
+  "--no-mtp-adaptive-verification",
+  "--host",
+  "127.0.0.1",
+  "--port",
+  "8581",
+  "--dangerously-approve-key",
+  "ef39a0be57c2916c486172fa23d44f0031879e954250765ac1a1a835977f18ab",
+  "--dangerously-accept-publisher",
+  "local-development"
+ ],
+ "server_env_extra": [],
+ "server_pid": 3584450,
+ "ready_seconds": 85.64991968701361,
+ "model": "checkpoint",
+ "greedy": {
+  "code-00": {
+   "token_ids": [
+    71093,
+    12305,
+    198,
+    727,
+    10562,
+    39914,
+    36053,
+    7080,
+    16,
+    11,
+    1103,
+    17,
+    1590,
+    198,
+    262,
+    4071,
+    198,
+    262,
+    38754,
+    1330,
+    10300,
+    11140,
+    1083,
+    264,
+    3074,
+    10300,
+    1103,
+    1973,
+    44504,
+    2892,
+    1879,
+    13,
+    198,
+    1031,
+    262,
+    17167,
+    25,
+    198,
+    285,
+    1103,
+    16,
+    25,
+    357,
+    10300,
+    1103,
+    314,
+    28092,
+    5255,
+    13,
+    198,
+    285,
+    1103,
+    17,
+    25,
+    357,
+    10300,
+    1103,
+    314,
+    28092,
+    5255,
+    13,
+    198,
+    1031,
+    262
+   ],
+   "text": "```python\ndef merge_sorted_lists(list1, list2):\n    \"\"\"\n    Merge two sorted lists into a single sorted list without modifying either input.\n    \n    Args:\n        list1: A sorted list of comparable elements.\n        list2: A sorted list of comparable elements.\n    \n   ",
+   "finish_reason": "length",
+   "usage": {
+    "prompt_tokens": 582,
+    "completion_tokens": 64,
+    "total_tokens": 646,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "seconds": 1.6441806750081014,
+   "raw_keys": [
+    "finish_reason",
+    "index",
+    "message",
+    "token_ids"
+   ]
+  },
+  "code-01": {
+   "token_ids": [
+    71093,
+    34602,
+    198,
+    2490,
+    55781,
+    7620,
+    2624,
+    383,
+    264,
+    10300,
+    15511,
+    13,
+    198,
+    2490,
+    198,
+    2490,
+    653,
+    733,
+    15497,
+    198,
+    2490,
+    561,
+    15511,
+    1510,
+    1082,
+    63,
+    1902,
+    381,
+    10300,
+    303,
+    2397,
+    6596,
+    72887,
+    1906,
+    13,
+    198,
+    2490,
+    561,
+    55687,
+    17852,
+    2261,
+    279,
+    2624,
+    369,
+    25,
+    198,
+    2490,
+    471,
+    1510,
+    379,
+    63,
+    369,
+    279,
+    4570,
+    6608,
+    314,
+    279,
+    2624,
+    2020,
+    318,
+    94964,
+    8,
+    198,
+    2490
+   ],
+   "text": "```rust\n/// Performs binary search on a sorted slice.\n///\n/// # Invariant\n/// The slice `arr` must be sorted in non-decreasing order.\n/// The invariant maintained during the search is:\n/// - `lo` is the lower bound of the search range (inclusive)\n///",
+   "finish_reason": "length",
+   "usage": {
+    "prompt_tokens": 578,
+    "completion_tokens": 64,
+    "total_tokens": 642,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "seconds": 1.8540354050055612,
+   "raw_keys": [
+    "finish_reason",
+    "index",
+    "message",
+    "token_ids"
+   ]
+  },
+  "code-02": {
+   "token_ids": [
+    71093,
+    47887,
+    198,
+    3537,
+    198,
+    348,
+    14147,
+    364,
+    279,
+    21979,
+    12755,
+    13,
+    198,
+    621,
+    198,
+    1479,
+    3622,
+    76176,
+    3670,
+    313,
+    198,
+    220,
+    4029,
+    198,
+    256,
+    348,
+    25749,
+    1324,
+    314,
+    13161,
+    318,
+    15693,
+    279,
+    2763,
+    1562,
+    553,
+    198,
+    256,
+    348,
+    34797,
+    310,
+    220,
+    18,
+    13,
+    198,
+    256,
+    621,
+    198,
+    220,
+    1866,
+    78706,
+    4666,
+    1324,
+    26,
+    198,
+    220,
+    4029,
+    198,
+    256,
+    348,
+    3991,
+    7383,
+    303,
+    29508
+   ],
+   "text": "```typescript\n/**\n * Options for the retry helper.\n */\nexport interface RetryOptions {\n  /**\n   * Maximum number of attempts (including the initial call).\n   * Defaults to 3.\n   */\n  maxAttempts?: number;\n  /**\n   * Initial delay in milliseconds",
+   "finish_reason": "length",
+   "usage": {
+    "prompt_tokens": 579,
+    "completion_tokens": 64,
+    "total_tokens": 643,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "seconds": 1.7157056569994893,
+   "raw_keys": [
+    "finish_reason",
+    "index",
+    "message",
+    "token_ids"
+   ]
+  },
+  "long-00": {
+   "token_ids": [
+    71093,
+    12305,
+    198,
+    727,
+    10562,
+    39914,
+    36053,
+    7080,
+    16,
+    11,
+    1103,
+    17,
+    1590,
+    198,
+    262,
+    4071,
+    198,
+    262,
+    38754,
+    1330,
+    10300,
+    11140,
+    1083,
+    264,
+    3074,
+    10300,
+    1103,
+    1973,
+    44504,
+    2892,
+    1879,
+    13
+   ],
+   "text": "```python\ndef merge_sorted_lists(list1, list2):\n    \"\"\"\n    Merge two sorted lists into a single sorted list without modifying either input.",
+   "finish_reason": "length",
+   "usage": {
+    "prompt_tokens": 28654,
+    "completion_tokens": 32,
+    "total_tokens": 28686,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "seconds": 40.23972700399463,
+   "raw_keys": [
+    "finish_reason",
+    "index",
+    "message",
+    "token_ids"
+   ]
+  }
+ },
+ "greedy_match": {
+  "code-00": true,
+  "code-01": true,
+  "code-02": true,
+  "long-00": true
+ },
+ "metrics_end": {
+  "prefill_tokens": 358073,
+  "generated_tokens": 264,
+  "draft_steps": 284,
+  "verify_steps": 71,
+  "verification_drafts": 284,
+  "accepted_drafts": 162,
+  "draft_rounds": 58,
+  "active": 0,
+  "pending": 0,
+  "completed": 24,
+  "failed": 0,
+  "reused_tokens": 0,
+  "cached_pages": 239,
+  "free_pages": 529,
+  "total_pages": 1028,
+  "page_tokens": 128,
+  "host_hits": 0,
+  "host_reused_tokens": 0,
+  "host_memory_records": 12,
+  "host_disk_records": 0,
+  "host_bytes_out": 33135320832,
+  "host_bytes_in": 0,
+  "decode_weight_bytes": 0,
+  "learned_drafter": true,
+  "input_decoded_images_total": 0,
+  "input_prepared_images_total": 0,
+  "input_decoded_source_bytes": 0,
+  "input_decoded_source_capacity": 0,
+  "input_cache_metadata_hits_total": 0,
+  "input_cache_metadata_misses_total": 0,
+  "input_cache_payload_hits_total": 0,
+  "input_cache_payload_misses_total": 0,
+  "input_cache_memory_hits_total": 0,
+  "input_cache_disk_hits_total": 0,
+  "input_cache_failures_total": 0,
+  "input_cache_stored_total": 0,
+  "input_cache_skipped_total": 0,
+  "input_cache_queued": 0,
+  "input_cache_pending_writes": 0,
+  "input_cache_staging_bytes": 0,
+  "input_cache_staging_limit": 0,
+  "input_cache_index_bytes": 0,
+  "input_cache_memory_limit": 0,
+  "input_cache_memory_records": 0,
+  "input_cache_memory_bytes": 0,
+  "input_cache_disk_records": 0,
+  "input_cache_disk_bytes": 0
+ },
+ "smi": [
+  [
+   1792825151.7646434,
+   "1342, 877, 228.26, 69, 100, 17730, 0x0000000000000000\n1230, 877, 37.40, 32, 0, 31632, 0x0000000000000000\n1230, 877, 146.15, 32, 0, 31282, 0x0000000000000000\n1230, 877, 35.07, 33, 0, 29342, 0x0000000000000000\n1230, 877, 36.45, 31, 2, 10376, 0x0000000000000000\n1230, 877, 37.61, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825153.9720185,
+   "1350, 877, 245.13, 69, 99, 17730, 0x0000000000000000\n1230, 877, 37.39, 32, 0, 31632, 0x0000000000000000\n1380, 877, 193.28, 41, 100, 31282, 0x0000000000000000\n1230, 877, 35.05, 33, 0, 29342, 0x0000000000000000\n1230, 877, 36.72, 31, 7, 10890, 0x0000000000000000\n1230, 877, 37.51, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825156.1312215,
+   "1327, 877, 169.39, 68, 99, 17730, 0x0000000000000004\n1230, 877, 37.19, 32, 0, 31632, 0x0000000000000000\n1380, 877, 203.18, 42, 100, 31282, 0x0000000000000000\n1230, 877, 35.15, 33, 0, 29342, 0x0000000000000000\n1230, 877, 39.74, 31, 3, 11532, 0x0000000000000000\n1230, 877, 37.42, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825158.3048077,
+   "1357, 877, 252.95, 69, 100, 17730, 0x0000000000000000\n1230, 877, 37.38, 32, 0, 31632, 0x0000000000000000\n1380, 877, 203.11, 43, 100, 31282, 0x0000000000000000\n1230, 877, 34.96, 33, 0, 29342, 0x0000000000000000\n1230, 877, 36.44, 31, 3, 14164, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825160.5013258,
+   "1357, 877, 245.91, 69, 99, 17730, 0x0000000000000004\n1230, 877, 37.39, 32, 0, 31632, 0x0000000000000000\n1380, 877, 203.76, 45, 100, 31282, 0x0000000000000000\n1230, 877, 35.15, 33, 10, 29462, 0x0000000000000000\n1230, 877, 36.43, 31, 2, 14164, 0x0000000000000000\n1230, 877, 37.52, 29, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825162.6208498,
+   "1342, 877, 194.57, 69, 100, 17730, 0x0000000000000000\n1230, 877, 37.30, 32, 0, 31632, 0x0000000000000000\n1380, 877, 205.01, 46, 100, 31282, 0x0000000000000000\n1230, 877, 34.86, 33, 0, 29462, 0x0000000000000000\n1230, 877, 36.35, 31, 2, 14164, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825164.734268,
+   "1357, 877, 233.85, 68, 99, 17730, 0x0000000000000000\n1230, 877, 37.39, 32, 0, 31632, 0x0000000000000000\n1380, 877, 199.69, 46, 100, 31282, 0x0000000000000000\n1230, 877, 35.05, 33, 0, 29522, 0x0000000000000000\n1230, 877, 36.34, 31, 2, 14164, 0x0000000000000000\n1230, 877, 37.52, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825166.8671079,
+   "1342, 877, 216.10, 69, 100, 17730, 0x0000000000000000\n1230, 877, 37.38, 32, 0, 31632, 0x0000000000000000\n1380, 877, 205.75, 47, 100, 31282, 0x0000000000000000\n1230, 877, 34.95, 33, 0, 29526, 0x0000000000000000\n1230, 877, 36.35, 31, 2, 14164, 0x0000000000000000\n1230, 877, 37.62, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825168.9884956,
+   "1342, 877, 180.31, 69, 100, 17730, 0x0000000000000000\n1230, 877, 37.40, 32, 0, 31632, 0x0000000000000000\n1380, 877, 208.49, 48, 100, 31282, 0x0000000000000000\n1230, 877, 35.05, 33, 0, 29704, 0x0000000000000000\n1230, 877, 36.53, 31, 6, 14318, 0x0000000000000000\n1230, 877, 37.60, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825171.1244457,
+   "1372, 877, 235.04, 67, 93, 17730, 0x0000000000000004\n1230, 877, 37.39, 32, 0, 31632, 0x0000000000000000\n1380, 877, 209.13, 49, 100, 31282, 0x0000000000000000\n1230, 877, 35.05, 33, 0, 29704, 0x0000000000000000\n1230, 877, 36.16, 31, 5, 14778, 0x0000000000000000\n1230, 877, 37.70, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825173.2318704,
+   "1380, 877, 221.33, 68, 96, 17730, 0x0000000000000000\n1230, 877, 37.39, 32, 0, 31632, 0x0000000000000000\n1380, 877, 207.08, 50, 100, 31282, 0x0000000000000000\n1230, 877, 34.96, 33, 0, 29704, 0x0000000000000000\n1230, 877, 36.15, 31, 4, 15288, 0x0000000000000000\n1230, 877, 37.60, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825175.3344457,
+   "1380, 877, 230.19, 68, 96, 17730, 0x0000000000000000\n1230, 877, 37.28, 32, 0, 31632, 0x0000000000000000\n1380, 877, 206.56, 51, 100, 31282, 0x0000000000000000\n1230, 877, 35.14, 33, 0, 29704, 0x0000000000000000\n1230, 877, 36.15, 31, 2, 15778, 0x0000000000000000\n1230, 877, 37.61, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825177.43903,
+   "1380, 877, 219.20, 68, 96, 17730, 0x0000000000000000\n1230, 877, 37.38, 32, 0, 31632, 0x0000000000000000\n1380, 877, 206.77, 51, 100, 31282, 0x0000000000000000\n1230, 877, 35.05, 33, 0, 29704, 0x0000000000000000\n1230, 877, 36.15, 31, 0, 16170, 0x0000000000000000\n1230, 877, 37.40, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825179.5342646,
+   "1380, 877, 214.91, 68, 96, 17730, 0x0000000000000000\n1230, 877, 37.47, 32, 0, 31632, 0x0000000000000000\n1380, 877, 212.49, 52, 100, 31282, 0x0000000000000000\n1230, 877, 34.95, 33, 2, 29704, 0x0000000000000000\n1230, 877, 36.44, 31, 5, 16520, 0x0000000000000000\n1230, 877, 37.40, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825181.6332319,
+   "1380, 877, 221.03, 68, 96, 17730, 0x0000000000000000\n1230, 877, 37.39, 32, 0, 31632, 0x0000000000000000\n1380, 877, 212.59, 53, 100, 31282, 0x0000000000000000\n1230, 877, 35.05, 33, 0, 29704, 0x0000000000000000\n1230, 877, 36.14, 31, 6, 16978, 0x0000000000000000\n1230, 877, 37.60, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825183.734867,
+   "1380, 877, 226.12, 68, 97, 17730, 0x0000000000000000\n1230, 877, 37.49, 32, 0, 31632, 0x0000000000000000\n1380, 877, 213.00, 53, 100, 31282, 0x0000000000000000\n1230, 877, 35.15, 33, 0, 29704, 0x0000000000000000\n1230, 877, 36.15, 31, 4, 17394, 0x0000000000000000\n1230, 877, 37.40, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825185.8215744,
+   "1380, 877, 224.24, 68, 96, 17730, 0x0000000000000000\n1230, 877, 37.29, 32, 0, 31632, 0x0000000000000000\n1380, 877, 210.04, 54, 100, 31282, 0x0000000000000000\n1230, 877, 34.85, 33, 0, 29704, 0x0000000000000000\n1230, 877, 36.04, 31, 1, 17712, 0x0000000000000000\n1230, 877, 37.40, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825187.9159977,
+   "1380, 877, 222.26, 69, 97, 17730, 0x0000000000000000\n1230, 877, 37.29, 32, 0, 31632, 0x0000000000000000\n1380, 877, 213.70, 54, 100, 31282, 0x0000000000000000\n1230, 877, 34.86, 33, 0, 29704, 0x0000000000000000\n1230, 877, 36.16, 31, 5, 18128, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825190.04946,
+   "1380, 877, 54.23, 63, 0, 17730, 0x0000000000000000\n1230, 877, 37.32, 32, 0, 31632, 0x0000000000000000\n1380, 877, 215.24, 55, 100, 31282, 0x0000000000000000\n1230, 877, 34.98, 33, 0, 29704, 0x0000000000000000\n1230, 877, 36.18, 31, 4, 18522, 0x0000000000000000\n1230, 877, 37.53, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825192.1964865,
+   "1327, 877, 245.72, 65, 84, 17730, 0x0000000000000004\n1230, 877, 37.48, 32, 0, 31632, 0x0000000000000000\n1380, 877, 215.05, 56, 100, 31282, 0x0000000000000000\n1230, 877, 35.05, 33, 0, 29704, 0x0000000000000000\n1230, 877, 36.34, 31, 5, 18936, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825194.383053,
+   "1335, 877, 248.24, 68, 100, 17730, 0x0000000000000004\n1230, 877, 37.39, 32, 0, 31632, 0x0000000000000000\n1380, 877, 217.46, 56, 100, 31282, 0x0000000000000000\n1230, 877, 35.05, 33, 0, 29704, 0x0000000000000000\n1230, 877, 36.34, 31, 3, 19884, 0x0000000000000000\n1230, 877, 37.60, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825196.5146418,
+   "1327, 877, 246.90, 69, 99, 17730, 0x0000000000000004\n1230, 877, 37.40, 32, 0, 31632, 0x0000000000000000\n1380, 877, 219.13, 57, 100, 31282, 0x0000000000000000\n1230, 877, 35.05, 33, 0, 29704, 0x0000000000000000\n1230, 877, 36.15, 31, 2, 19960, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825198.6470428,
+   "1365, 877, 253.18, 69, 100, 17730, 0x0000000000000004\n1230, 877, 37.38, 32, 0, 31632, 0x0000000000000000\n1380, 877, 218.52, 57, 100, 31282, 0x0000000000000000\n1230, 877, 35.15, 33, 0, 29704, 0x0000000000000000\n1380, 877, 41.87, 31, 3, 20478, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825200.8179145,
+   "1342, 877, 228.72, 69, 100, 17730, 0x0000000000000000\n1230, 877, 37.49, 32, 0, 31632, 0x0000000000000000\n1380, 877, 211.36, 57, 100, 31282, 0x0000000000000000\n1230, 877, 35.06, 33, 0, 29704, 0x0000000000000000\n1230, 877, 36.43, 31, 1, 21510, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825202.9416456,
+   "1335, 877, 244.21, 69, 100, 17730, 0x0000000000000000\n1230, 877, 37.47, 32, 0, 31632, 0x0000000000000000\n1380, 877, 210.21, 58, 100, 31282, 0x0000000000000000\n1230, 877, 35.04, 33, 0, 29704, 0x0000000000000000\n1230, 877, 36.44, 31, 1, 21522, 0x0000000000000000\n1230, 877, 37.51, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825205.0544205,
+   "1357, 877, 255.76, 69, 100, 17730, 0x0000000000000004\n1230, 877, 37.39, 32, 0, 31632, 0x0000000000000000\n1380, 877, 210.87, 58, 100, 31282, 0x0000000000000000\n1230, 877, 35.05, 33, 0, 29704, 0x0000000000000000\n1230, 877, 36.44, 31, 6, 21682, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825207.2198126,
+   "1342, 877, 222.99, 69, 100, 17730, 0x0000000000000004\n1230, 877, 37.49, 32, 0, 31632, 0x0000000000000000\n1380, 877, 213.07, 58, 100, 31282, 0x0000000000000000\n1230, 877, 34.86, 33, 0, 29704, 0x0000000000000000\n1230, 877, 37.31, 31, 13, 21786, 0x0000000000000000\n1230, 877, 37.42, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825209.3653538,
+   "1342, 877, 192.89, 69, 100, 17730, 0x0000000000000000\n1230, 877, 37.39, 32, 0, 31632, 0x0000000000000000\n1380, 877, 207.90, 59, 100, 31282, 0x0000000000000000\n1230, 877, 34.85, 33, 0, 29704, 0x0000000000000000\n1230, 877, 36.53, 31, 0, 21234, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825211.4643095,
+   "1350, 877, 201.35, 69, 100, 17730, 0x0000000000000000\n1230, 877, 37.39, 32, 0, 31632, 0x0000000000000000\n1380, 877, 214.50, 59, 100, 31282, 0x0000000000000000\n1230, 877, 34.86, 33, 0, 29704, 0x0000000000000000\n1230, 877, 36.53, 31, 0, 21234, 0x0000000000000000\n1230, 877, 37.60, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825213.5914214,
+   "1365, 877, 252.25, 69, 99, 17730, 0x0000000000000004\n1230, 877, 37.39, 32, 0, 31632, 0x0000000000000000\n1380, 877, 215.15, 59, 100, 31282, 0x0000000000000000\n1230, 877, 34.95, 33, 0, 29704, 0x0000000000000000\n1230, 877, 36.34, 31, 0, 21234, 0x0000000000000000\n1230, 877, 37.40, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825215.7055867,
+   "1357, 877, 246.81, 69, 100, 17730, 0x0000000000000000\n1230, 877, 37.48, 32, 0, 31632, 0x0000000000000000\n1380, 877, 215.32, 60, 100, 31282, 0x0000000000000000\n1230, 877, 34.95, 33, 0, 29704, 0x0000000000000000\n1230, 877, 36.36, 31, 0, 21234, 0x0000000000000000\n1230, 877, 37.41, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825217.8463624,
+   "1357, 877, 241.21, 69, 100, 17730, 0x0000000000000000\n1230, 877, 37.38, 32, 0, 31632, 0x0000000000000000\n1380, 877, 219.11, 60, 100, 31282, 0x0000000000000000\n1230, 877, 34.95, 33, 0, 29704, 0x0000000000000000\n1230, 877, 36.44, 31, 0, 21236, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825220.0084162,
+   "1320, 877, 213.35, 69, 100, 17730, 0x0000000000000000\n1230, 877, 37.38, 32, 0, 31632, 0x0000000000000000\n1380, 877, 216.70, 61, 100, 31282, 0x0000000000000000\n1230, 877, 34.95, 33, 0, 29704, 0x0000000000000000\n1230, 877, 36.43, 31, 0, 21236, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825222.125155,
+   "1327, 877, 231.47, 69, 100, 17730, 0x0000000000000000\n1230, 877, 37.29, 32, 0, 31632, 0x0000000000000000\n1380, 877, 218.33, 61, 100, 31282, 0x0000000000000000\n1230, 877, 34.95, 33, 0, 29704, 0x0000000000000000\n1230, 877, 36.36, 31, 0, 22160, 0x0000000000000000\n1230, 877, 37.52, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825224.2421753,
+   "1357, 877, 222.61, 69, 99, 17730, 0x0000000000000000\n1230, 877, 37.39, 32, 0, 31632, 0x0000000000000000\n1380, 877, 219.44, 61, 100, 31282, 0x0000000000000000\n1230, 877, 35.15, 33, 0, 29704, 0x0000000000000000\n1230, 877, 36.43, 31, 0, 22776, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825226.3901393,
+   "1357, 877, 221.70, 69, 100, 17730, 0x0000000000000000\n1230, 877, 37.39, 32, 0, 31632, 0x0000000000000000\n1380, 877, 212.86, 62, 100, 31282, 0x0000000000000000\n1230, 877, 35.05, 33, 0, 29704, 0x0000000000000000\n1230, 877, 36.44, 31, 0, 23086, 0x0000000000000000\n1230, 877, 37.40, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825228.5185964,
+   "1335, 877, 214.50, 69, 100, 17730, 0x0000000000000000\n1230, 877, 37.38, 32, 0, 31632, 0x0000000000000000\n1380, 877, 218.93, 62, 100, 31282, 0x0000000000000000\n1230, 877, 35.14, 33, 0, 29704, 0x0000000000000000\n1230, 877, 36.43, 31, 0, 23086, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825230.6259944,
+   "1372, 877, 223.35, 69, 100, 17730, 0x0000000000000000\n1230, 877, 37.48, 32, 0, 31632, 0x0000000000000000\n1380, 877, 219.69, 62, 100, 31282, 0x0000000000000000\n1230, 877, 35.05, 33, 0, 29704, 0x0000000000000000\n1230, 877, 36.44, 31, 0, 23394, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825232.7518811,
+   "1357, 877, 215.11, 69, 100, 17730, 0x0000000000000004\n1230, 877, 37.39, 32, 0, 31632, 0x0000000000000000\n1380, 877, 219.07, 62, 100, 31282, 0x0000000000000000\n1230, 877, 34.85, 33, 0, 29704, 0x0000000000000000\n1230, 877, 36.44, 31, 0, 23702, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825234.8587346,
+   "1342, 877, 58.41, 68, 100, 17730, 0x0000000000000000\n1230, 877, 37.31, 32, 0, 31632, 0x0000000000000000\n1380, 877, 219.69, 63, 100, 31282, 0x0000000000000000\n1230, 877, 34.96, 33, 0, 29704, 0x0000000000000000\n1230, 877, 36.35, 31, 0, 24010, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825236.958024,
+   "1380, 877, 228.02, 68, 96, 17730, 0x0000000000000000\n1230, 877, 37.49, 32, 0, 31632, 0x0000000000000000\n1380, 877, 211.21, 63, 100, 31282, 0x0000000000000000\n1230, 877, 34.95, 33, 0, 29704, 0x0000000000000000\n1230, 877, 36.44, 31, 0, 24012, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825239.067743,
+   "1380, 877, 221.04, 69, 97, 17730, 0x0000000000000000\n1230, 877, 37.49, 32, 0, 31632, 0x0000000000000000\n1380, 877, 222.15, 63, 100, 31282, 0x0000000000000000\n1230, 877, 34.95, 33, 0, 29704, 0x0000000000000000\n1230, 877, 36.24, 31, 0, 24012, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825241.1713698,
+   "1380, 877, 226.98, 69, 96, 17730, 0x0000000000000000\n1230, 877, 37.57, 32, 0, 31632, 0x0000000000000000\n1380, 877, 222.96, 64, 100, 31282, 0x0000000000000000\n1230, 877, 35.05, 33, 0, 29704, 0x0000000000000000\n1230, 877, 36.34, 31, 0, 24012, 0x0000000000000000\n1230, 877, 37.70, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825243.2768965,
+   "1380, 877, 221.37, 69, 96, 17730, 0x0000000000000000\n1230, 877, 37.39, 32, 0, 31632, 0x0000000000000000\n1380, 877, 217.14, 63, 100, 31282, 0x0000000000000000\n1230, 877, 35.14, 33, 0, 29704, 0x0000000000000000\n1230, 877, 36.34, 31, 0, 24012, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825245.374241,
+   "1380, 877, 228.34, 69, 97, 17730, 0x0000000000000000\n1230, 877, 37.39, 32, 0, 31632, 0x0000000000000000\n1380, 877, 215.75, 63, 100, 31282, 0x0000000000000000\n1230, 877, 35.14, 33, 0, 29704, 0x0000000000000000\n1230, 877, 36.43, 31, 0, 24012, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825247.4775252,
+   "1380, 877, 229.22, 69, 97, 17730, 0x0000000000000000\n1230, 877, 37.37, 32, 0, 31632, 0x0000000000000000\n1380, 877, 216.33, 64, 100, 31282, 0x0000000000000000\n1230, 877, 34.95, 33, 0, 29704, 0x0000000000000000\n1230, 877, 36.25, 31, 0, 24012, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825249.5754044,
+   "1380, 877, 217.93, 69, 97, 17730, 0x0000000000000000\n1230, 877, 37.38, 32, 0, 31632, 0x0000000000000000\n1380, 877, 216.94, 64, 100, 31282, 0x0000000000000000\n1230, 877, 34.96, 33, 0, 29704, 0x0000000000000000\n1230, 877, 36.44, 31, 0, 24012, 0x0000000000000000\n1230, 877, 37.51, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825251.6768503,
+   "1380, 877, 227.59, 69, 97, 17730, 0x0000000000000000\n1230, 877, 37.47, 32, 0, 31632, 0x0000000000000000\n1380, 877, 210.35, 64, 100, 31282, 0x0000000000000000\n1230, 877, 35.05, 33, 0, 29704, 0x0000000000000000\n1230, 877, 36.35, 31, 0, 24012, 0x0000000000000000\n1230, 877, 37.40, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825253.7780445,
+   "1380, 877, 54.42, 63, 0, 17730, 0x0000000000000000\n1230, 877, 37.42, 32, 0, 31632, 0x0000000000000000\n1380, 877, 218.59, 64, 100, 31282, 0x0000000000000000\n1230, 877, 34.98, 33, 0, 29704, 0x0000000000000000\n1230, 877, 36.36, 31, 0, 24012, 0x0000000000000000\n1230, 877, 37.53, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825255.9549623,
+   "1335, 877, 248.01, 66, 100, 17730, 0x0000000000000004\n1230, 877, 37.38, 32, 0, 31632, 0x0000000000000000\n1380, 877, 211.81, 64, 100, 31282, 0x0000000000000000\n1230, 877, 35.05, 33, 0, 29704, 0x0000000000000000\n1230, 877, 36.44, 31, 0, 24012, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825258.0954113,
+   "1320, 877, 235.24, 69, 100, 17730, 0x0000000000000000\n1230, 877, 37.29, 32, 0, 31632, 0x0000000000000000\n1380, 877, 215.95, 64, 100, 31282, 0x0000000000000000\n1230, 877, 34.95, 33, 0, 29704, 0x0000000000000000\n1230, 877, 36.44, 31, 0, 24012, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825260.225138,
+   "1335, 877, 246.23, 69, 100, 17730, 0x0000000000000000\n1230, 877, 37.56, 32, 0, 31632, 0x0000000000000000\n1380, 877, 215.09, 64, 100, 31282, 0x0000000000000000\n1230, 877, 34.95, 33, 0, 29704, 0x0000000000000000\n1230, 877, 36.33, 31, 0, 24012, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825262.3992076,
+   "1335, 877, 239.36, 69, 100, 17730, 0x0000000000000000\n1230, 877, 37.38, 32, 0, 31632, 0x0000000000000000\n1380, 877, 218.56, 64, 100, 31282, 0x0000000000000000\n1230, 877, 34.86, 33, 0, 29704, 0x0000000000000000\n1230, 877, 36.34, 31, 0, 24012, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825264.5182846,
+   "1327, 877, 242.89, 69, 100, 17730, 0x0000000000000000\n1230, 877, 37.58, 32, 0, 31632, 0x0000000000000000\n1380, 877, 215.95, 64, 100, 31282, 0x0000000000000000\n1230, 877, 34.86, 33, 0, 29704, 0x0000000000000000\n1230, 877, 36.43, 31, 0, 24070, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825266.6456814,
+   "1327, 877, 235.25, 69, 100, 17730, 0x0000000000000000\n1230, 877, 37.49, 32, 0, 31632, 0x0000000000000000\n1380, 877, 217.69, 65, 100, 31282, 0x0000000000000000\n1230, 877, 34.95, 33, 0, 29704, 0x0000000000000000\n1230, 877, 36.33, 31, 0, 24128, 0x0000000000000000\n1230, 877, 37.40, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825268.7848513,
+   "1342, 877, 229.91, 69, 100, 17730, 0x0000000000000000\n1230, 877, 37.38, 32, 0, 31632, 0x0000000000000000\n1380, 877, 218.45, 65, 100, 31282, 0x0000000000000000\n1230, 877, 35.05, 33, 0, 29704, 0x0000000000000000\n1230, 877, 36.24, 31, 0, 24186, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825270.890123,
+   "1342, 877, 225.26, 69, 100, 17730, 0x0000000000000000\n1230, 877, 37.39, 32, 0, 31632, 0x0000000000000000\n1380, 877, 215.71, 65, 100, 31282, 0x0000000000000000\n1230, 877, 35.05, 33, 0, 29704, 0x0000000000000000\n1230, 877, 36.44, 31, 0, 24186, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825273.0030987,
+   "1335, 877, 242.28, 69, 100, 17730, 0x0000000000000000\n1230, 877, 37.58, 32, 0, 31632, 0x0000000000000000\n1380, 877, 218.67, 65, 100, 31282, 0x0000000000000000\n1230, 877, 34.95, 33, 0, 29704, 0x0000000000000000\n1230, 877, 36.33, 31, 0, 24186, 0x0000000000000000\n1230, 877, 37.60, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825275.1264002,
+   "1327, 877, 179.28, 69, 100, 17730, 0x0000000000000000\n1230, 877, 37.48, 32, 0, 31632, 0x0000000000000000\n1380, 877, 218.19, 65, 100, 31282, 0x0000000000000000\n1230, 877, 35.04, 33, 0, 29704, 0x0000000000000000\n1230, 877, 36.34, 31, 0, 24186, 0x0000000000000000\n1230, 877, 37.60, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825277.249475,
+   "1342, 877, 246.57, 69, 99, 17730, 0x0000000000000000\n1230, 877, 37.39, 32, 0, 31632, 0x0000000000000000\n1380, 877, 218.80, 65, 100, 31282, 0x0000000000000000\n1230, 877, 34.94, 33, 0, 29704, 0x0000000000000000\n1230, 877, 36.33, 31, 0, 24244, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825279.3819726,
+   "1327, 877, 208.03, 69, 100, 17730, 0x0000000000000000\n1230, 877, 37.30, 32, 0, 31632, 0x0000000000000000\n1380, 877, 214.46, 65, 100, 31282, 0x0000000000000000\n1230, 877, 35.06, 33, 0, 29704, 0x0000000000000000\n1230, 877, 36.34, 31, 0, 24418, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825281.5017362,
+   "1357, 877, 221.68, 70, 100, 17730, 0x0000000000000000\n1230, 877, 37.49, 32, 0, 31632, 0x0000000000000000\n1380, 877, 216.54, 65, 100, 31282, 0x0000000000000000\n1230, 877, 35.04, 33, 0, 29704, 0x0000000000000000\n1230, 877, 36.53, 31, 0, 24476, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825283.6103017,
+   "1342, 877, 176.43, 69, 99, 17730, 0x0000000000000000\n1230, 877, 37.49, 32, 0, 31632, 0x0000000000000000\n1380, 877, 214.13, 66, 100, 31282, 0x0000000000000000\n1230, 877, 35.15, 33, 0, 29704, 0x0000000000000000\n1230, 877, 36.45, 31, 0, 24476, 0x0000000000000000\n1230, 877, 37.40, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825286.5913546,
+   "1350, 877, 211.85, 69, 100, 17730, 0x0000000000000004\n1230, 877, 37.39, 32, 0, 31632, 0x0000000000000000\n1380, 877, 211.75, 66, 100, 31282, 0x0000000000000000\n1230, 877, 35.05, 33, 0, 29704, 0x0000000000000000\n1230, 877, 36.34, 31, 8, 21238, 0x0000000000000000\n1230, 877, 37.60, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825288.805446,
+   "1372, 877, 242.13, 69, 99, 17730, 0x0000000000000004\n1230, 877, 37.29, 32, 0, 31632, 0x0000000000000000\n1380, 877, 218.35, 66, 100, 31282, 0x0000000000000000\n1230, 877, 35.06, 33, 0, 29704, 0x0000000000000000\n1230, 877, 36.34, 31, 0, 21806, 0x0000000000000000\n1230, 877, 37.60, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825290.9339113,
+   "1357, 877, 171.92, 69, 100, 17730, 0x0000000000000000\n1230, 877, 37.39, 32, 0, 31632, 0x0000000000000000\n1380, 877, 220.57, 66, 100, 31282, 0x0000000000000000\n1230, 877, 35.04, 33, 0, 29704, 0x0000000000000000\n1230, 877, 36.34, 31, 0, 21806, 0x0000000000000000\n1230, 877, 37.60, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825293.1080973,
+   "1365, 877, 167.40, 69, 99, 17730, 0x0000000000000000\n1230, 877, 37.47, 32, 0, 31632, 0x0000000000000000\n1380, 877, 219.16, 66, 100, 31282, 0x0000000000000000\n1230, 877, 35.15, 33, 0, 22366, 0x0000000000000000\n1230, 877, 36.54, 31, 0, 21806, 0x0000000000000000\n1230, 877, 37.60, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825295.2117112,
+   "1342, 877, 201.27, 69, 100, 17730, 0x0000000000000000\n1230, 877, 37.30, 32, 0, 31632, 0x0000000000000000\n1380, 877, 217.62, 66, 100, 31282, 0x0000000000000000\n1230, 877, 35.15, 33, 0, 24112, 0x0000000000000000\n1230, 877, 36.64, 31, 12, 21806, 0x0000000000000000\n1230, 877, 37.60, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825297.3360598,
+   "1365, 877, 203.05, 69, 100, 17730, 0x0000000000000000\n1230, 877, 37.29, 32, 0, 31632, 0x0000000000000000\n1380, 877, 218.48, 66, 100, 31282, 0x0000000000000000\n1230, 877, 39.72, 33, 18, 24198, 0x0000000000000000\n1230, 877, 36.44, 31, 0, 21806, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825299.4712322,
+   "1380, 877, 228.83, 69, 97, 17730, 0x0000000000000000\n1230, 877, 37.39, 32, 0, 31632, 0x0000000000000000\n1380, 877, 221.26, 66, 100, 31282, 0x0000000000000000\n1230, 877, 35.05, 33, 0, 24112, 0x0000000000000000\n1230, 877, 36.14, 31, 0, 21808, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825301.5683444,
+   "1380, 877, 231.65, 69, 97, 17730, 0x0000000000000000\n1230, 877, 37.38, 32, 0, 31632, 0x0000000000000000\n1380, 877, 219.48, 66, 100, 31282, 0x0000000000000000\n1230, 877, 34.85, 33, 0, 24112, 0x0000000000000000\n1230, 877, 36.24, 31, 0, 21808, 0x0000000000000000\n1230, 877, 37.60, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825303.6654482,
+   "1380, 877, 228.44, 69, 97, 17730, 0x0000000000000000\n1230, 877, 37.47, 32, 0, 31632, 0x0000000000000000\n1380, 877, 218.81, 66, 100, 31282, 0x0000000000000000\n1230, 877, 35.14, 33, 0, 24114, 0x0000000000000000\n1230, 877, 36.24, 31, 0, 21808, 0x0000000000000000\n1230, 877, 37.51, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825305.7642274,
+   "1380, 877, 218.80, 69, 97, 17730, 0x0000000000000000\n1230, 877, 37.47, 32, 0, 31632, 0x0000000000000000\n1380, 877, 221.21, 67, 100, 31282, 0x0000000000000000\n1230, 877, 34.95, 33, 0, 24114, 0x0000000000000000\n1230, 877, 49.56, 31, 3, 21812, 0x0000000000000000\n1230, 877, 37.60, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825307.8768985,
+   "1380, 877, 231.94, 69, 97, 17730, 0x0000000000000000\n1230, 877, 37.29, 32, 0, 31632, 0x0000000000000000\n1380, 877, 224.52, 67, 100, 31282, 0x0000000000000000\n1230, 877, 34.95, 33, 0, 24114, 0x0000000000000000\n1230, 877, 46.55, 31, 0, 21812, 0x0000000000000000\n1230, 877, 37.60, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825309.9729357,
+   "1380, 877, 230.71, 69, 97, 17730, 0x0000000000000000\n1230, 877, 37.49, 32, 0, 31632, 0x0000000000000000\n1380, 877, 225.69, 67, 100, 31282, 0x0000000000000000\n1230, 877, 35.05, 33, 0, 24114, 0x0000000000000000\n1230, 877, 36.34, 31, 0, 21888, 0x0000000000000000\n1230, 877, 37.60, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825312.0759192,
+   "1380, 877, 225.79, 69, 97, 17730, 0x0000000000000000\n1230, 877, 37.49, 32, 0, 31632, 0x0000000000000000\n1380, 877, 220.25, 67, 100, 31282, 0x0000000000000000\n1230, 877, 35.06, 33, 3, 24114, 0x0000000000000000\n1230, 877, 36.34, 31, 0, 21972, 0x0000000000000000\n1230, 877, 37.60, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825314.1919312,
+   "1380, 877, 226.09, 69, 97, 17730, 0x0000000000000000\n1230, 877, 37.47, 32, 0, 31632, 0x0000000000000000\n1380, 877, 227.02, 67, 100, 31282, 0x0000000000000000\n1230, 877, 34.76, 33, 17, 24114, 0x0000000000000000\n1230, 877, 36.35, 31, 0, 21972, 0x0000000000000000\n1230, 877, 37.60, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825316.290979,
+   "1380, 877, 219.77, 69, 98, 17730, 0x0000000000000000\n1230, 877, 37.39, 32, 0, 31632, 0x0000000000000000\n1380, 877, 224.95, 67, 100, 31282, 0x0000000000000000\n1230, 877, 35.15, 33, 7, 24116, 0x0000000000000000\n1230, 877, 36.44, 31, 0, 21972, 0x0000000000000000\n1230, 877, 37.60, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825318.388461,
+   "1380, 877, 52.88, 62, 0, 17730, 0x0000000000000000\n1230, 877, 37.32, 32, 0, 31632, 0x0000000000000000\n1380, 877, 221.70, 68, 100, 31282, 0x0000000000000000\n1230, 877, 34.98, 33, 0, 24114, 0x0000000000000000\n1230, 877, 36.36, 31, 0, 21972, 0x0000000000000000\n1230, 877, 37.54, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825320.4941564,
+   "1380, 877, 220.65, 67, 97, 17730, 0x0000000000000000\n1230, 877, 37.29, 32, 0, 31632, 0x0000000000000000\n1380, 877, 225.99, 67, 100, 31282, 0x0000000000000000\n1230, 877, 35.24, 33, 0, 24116, 0x0000000000000000\n1230, 877, 36.44, 31, 0, 21972, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825322.6163144,
+   "1380, 877, 223.34, 68, 97, 17730, 0x0000000000000000\n1230, 877, 37.29, 32, 0, 31632, 0x0000000000000000\n1380, 877, 225.16, 68, 100, 31282, 0x0000000000000000\n1230, 877, 35.05, 33, 0, 24116, 0x0000000000000000\n1230, 877, 36.44, 31, 0, 21972, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825324.7208524,
+   "1342, 877, 242.79, 67, 52, 17730, 0x0000000000000004\n1230, 877, 37.38, 32, 0, 31632, 0x0000000000000000\n1380, 877, 226.28, 68, 100, 31282, 0x0000000000000000\n1230, 877, 35.04, 33, 2, 24116, 0x0000000000000000\n1380, 877, 51.30, 33, 97, 26462, 0x0000000000000000\n1230, 877, 37.59, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825326.821225,
+   "1380, 877, 223.43, 67, 97, 17730, 0x0000000000000000\n1230, 877, 37.38, 32, 0, 31632, 0x0000000000000000\n1380, 877, 225.40, 68, 100, 31282, 0x0000000000000000\n1230, 877, 51.16, 33, 0, 24142, 0x0000000000000000\n1380, 877, 159.48, 35, 97, 26462, 0x0000000000000000\n1230, 877, 37.59, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825328.9215243,
+   "1380, 877, 225.34, 68, 97, 17730, 0x0000000000000000\n1230, 877, 37.37, 32, 0, 31632, 0x0000000000000000\n1380, 877, 220.73, 68, 100, 31282, 0x0000000000000000\n1230, 877, 35.04, 33, 0, 24118, 0x0000000000000000\n1380, 877, 149.21, 36, 63, 26462, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825331.0317295,
+   "1380, 877, 221.22, 67, 97, 17730, 0x0000000000000000\n1230, 877, 37.37, 32, 0, 31632, 0x0000000000000000\n1380, 877, 214.85, 68, 100, 31282, 0x0000000000000000\n1230, 877, 35.04, 33, 0, 24118, 0x0000000000000000\n1380, 877, 150.84, 37, 63, 26462, 0x0000000000000000\n1230, 877, 37.60, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825333.1333454,
+   "1380, 877, 221.05, 68, 97, 17730, 0x0000000000000000\n1230, 877, 37.36, 32, 0, 31632, 0x0000000000000000\n1380, 877, 219.04, 68, 100, 31282, 0x0000000000000000\n1230, 877, 35.04, 33, 0, 24118, 0x0000000000000000\n1380, 877, 150.17, 37, 80, 26462, 0x0000000000000000\n1230, 877, 37.49, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825335.2305236,
+   "1380, 877, 209.61, 65, 70, 17730, 0x0000000000000000\n1230, 877, 37.49, 32, 0, 31632, 0x0000000000000000\n1380, 877, 214.55, 68, 100, 31282, 0x0000000000000000\n1230, 877, 34.95, 33, 11, 24118, 0x0000000000000000\n1380, 877, 147.06, 37, 54, 26462, 0x0000000000000000\n1230, 877, 37.49, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825337.3324182,
+   "1380, 877, 227.64, 67, 97, 17730, 0x0000000000000000\n1230, 877, 37.56, 32, 0, 31632, 0x0000000000000000\n1380, 877, 223.53, 68, 100, 31282, 0x0000000000000000\n1230, 877, 35.04, 33, 0, 24120, 0x0000000000000000\n1380, 877, 159.10, 38, 66, 26462, 0x0000000000000000\n1230, 877, 37.49, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825339.416426,
+   "1380, 877, 220.64, 67, 97, 17730, 0x0000000000000000\n1230, 877, 37.09, 32, 0, 31632, 0x0000000000000000\n1380, 877, 222.04, 68, 100, 31282, 0x0000000000000000\n1230, 877, 35.04, 33, 0, 24120, 0x0000000000000000\n1380, 877, 153.86, 38, 81, 26462, 0x0000000000000000\n1230, 877, 37.60, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825341.5037374,
+   "1380, 877, 52.58, 61, 2, 312, 0x0000000000000000\n1230, 877, 37.20, 32, 0, 31632, 0x0000000000000000\n1380, 877, 223.71, 68, 100, 31282, 0x0000000000000000\n1230, 877, 35.07, 33, 0, 24120, 0x0000000000000000\n1380, 877, 158.04, 38, 87, 26462, 0x0000000000000000\n1230, 877, 37.62, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825343.6099539,
+   "1380, 877, 52.75, 59, 40, 15088, 0x0000000000000000\n1230, 877, 37.50, 32, 0, 31632, 0x0000000000000000\n1380, 877, 223.06, 68, 100, 31282, 0x0000000000000000\n1230, 877, 34.98, 33, 1, 24120, 0x0000000000000000\n1380, 877, 154.67, 40, 95, 26462, 0x0000000000000000\n1230, 877, 37.61, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825345.705863,
+   "1380, 877, 52.28, 58, 38, 15088, 0x0000000000000000\n1230, 877, 37.39, 32, 0, 31632, 0x0000000000000000\n1380, 877, 228.34, 68, 100, 31282, 0x0000000000000000\n1230, 877, 34.97, 33, 0, 24120, 0x0000000000000000\n1380, 877, 161.42, 40, 96, 26462, 0x0000000000000000\n1230, 877, 37.42, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825347.8213525,
+   "1380, 877, 50.82, 57, 0, 17652, 0x0000000000000000\n1230, 877, 37.42, 32, 0, 31632, 0x0000000000000000\n1380, 877, 226.73, 69, 100, 31282, 0x0000000000000000\n1230, 877, 48.20, 33, 0, 24122, 0x0000000000000000\n1380, 877, 118.50, 41, 77, 26462, 0x0000000000000000\n1230, 877, 37.51, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825349.9302597,
+   "1230, 877, 43.64, 55, 0, 17652, 0x0000000000000000\n1230, 877, 37.32, 32, 0, 31632, 0x0000000000000000\n1380, 877, 227.33, 69, 100, 31282, 0x0000000000000000\n1230, 877, 34.98, 33, 0, 24120, 0x0000000000000000\n1380, 877, 140.39, 41, 79, 26462, 0x0000000000000000\n1230, 877, 37.52, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825352.0065746,
+   "1230, 877, 43.13, 54, 0, 17652, 0x0000000000000000\n1230, 877, 37.40, 32, 0, 31632, 0x0000000000000000\n1380, 877, 227.11, 69, 100, 31282, 0x0000000000000000\n1230, 877, 35.06, 33, 0, 24122, 0x0000000000000000\n1380, 877, 150.98, 42, 95, 26462, 0x0000000000000000\n1230, 877, 37.42, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825354.10228,
+   "1230, 877, 42.57, 53, 0, 17652, 0x0000000000000000\n1230, 877, 37.32, 32, 0, 31632, 0x0000000000000000\n1380, 877, 223.56, 69, 100, 31282, 0x0000000000000000\n1230, 877, 34.88, 33, 0, 24122, 0x0000000000000000\n1380, 877, 78.33, 41, 61, 26462, 0x0000000000000000\n1230, 877, 37.53, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825356.2049367,
+   "1230, 877, 42.85, 52, 37, 18766, 0x0000000000000000\n1230, 877, 37.41, 32, 0, 31632, 0x0000000000000000\n1380, 877, 230.14, 69, 100, 31282, 0x0000000000000000\n1230, 877, 34.88, 33, 0, 24122, 0x0000000000000000\n1380, 877, 87.64, 42, 96, 26462, 0x0000000000000000\n1230, 877, 37.52, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825358.3165438,
+   "1372, 877, 50.24, 57, 76, 19426, 0x0000000000000000\n1230, 877, 37.50, 32, 0, 31632, 0x0000000000000000\n1380, 877, 227.65, 69, 100, 31282, 0x0000000000000000\n1230, 877, 35.74, 33, 1, 24300, 0x0000000000000000\n1380, 877, 162.76, 43, 62, 26462, 0x0000000000000000\n1230, 877, 37.51, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825360.4443185,
+   "1327, 877, 63.84, 58, 100, 19446, 0x0000000000000000\n1230, 877, 37.42, 32, 0, 31632, 0x0000000000000000\n1380, 877, 229.14, 69, 100, 31282, 0x0000000000000000\n1230, 877, 34.98, 33, 0, 24426, 0x0000000000000000\n1380, 877, 44.15, 41, 0, 26462, 0x0000000000000000\n1230, 877, 37.53, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825362.5449421,
+   "1380, 877, 227.12, 60, 93, 19446, 0x0000000000000000\n1230, 877, 37.47, 32, 0, 31632, 0x0000000000000000\n1380, 877, 228.17, 69, 100, 31282, 0x0000000000000000\n1230, 877, 34.84, 33, 0, 24576, 0x0000000000000000\n1380, 877, 163.49, 43, 80, 26462, 0x0000000000000000\n1230, 877, 37.58, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825364.657842,
+   "1342, 877, 57.90, 57, 12, 19448, 0x0000000000000000\n1230, 877, 37.39, 32, 0, 31632, 0x0000000000000000\n1380, 877, 228.89, 69, 100, 31282, 0x0000000000000000\n1230, 877, 35.05, 33, 0, 24606, 0x0000000000000000\n1380, 877, 92.75, 43, 79, 26462, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825366.7544882,
+   "1380, 877, 226.53, 61, 95, 19448, 0x0000000000000000\n1230, 877, 37.38, 32, 0, 31632, 0x0000000000000000\n1380, 877, 228.74, 69, 100, 31282, 0x0000000000000000\n1230, 877, 35.23, 33, 0, 24606, 0x0000000000000000\n1380, 877, 137.85, 43, 67, 26462, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825368.8466113,
+   "1342, 877, 105.57, 57, 22, 19448, 0x0000000000000000\n1230, 877, 37.38, 32, 0, 31632, 0x0000000000000000\n1380, 877, 226.86, 69, 100, 31282, 0x0000000000000000\n1380, 877, 95.38, 35, 91, 24608, 0x0000000000000000\n1380, 877, 154.39, 43, 58, 26462, 0x0000000000000000\n1230, 877, 37.48, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825370.9435015,
+   "1380, 877, 206.91, 61, 90, 19448, 0x0000000000000000\n1230, 877, 37.37, 32, 0, 31632, 0x0000000000000000\n1380, 877, 228.73, 69, 100, 31282, 0x0000000000000000\n1380, 877, 83.96, 36, 74, 24608, 0x0000000000000000\n1380, 877, 128.35, 42, 38, 26462, 0x0000000000000000\n1230, 877, 37.49, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825373.0453982,
+   "1372, 877, 51.48, 59, 72, 19448, 0x0000000000000004\n1230, 877, 37.39, 32, 0, 31632, 0x0000000000000000\n1380, 877, 228.38, 69, 100, 31282, 0x0000000000000000\n1380, 877, 97.61, 36, 85, 24608, 0x0000000000000000\n1380, 877, 159.88, 44, 72, 26462, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825375.131893,
+   "1380, 877, 225.77, 61, 94, 19448, 0x0000000000000000\n1230, 877, 37.45, 32, 0, 31632, 0x0000000000000000\n1380, 877, 229.40, 69, 100, 31282, 0x0000000000000000\n1380, 877, 96.99, 36, 93, 24608, 0x0000000000000000\n1380, 877, 161.85, 44, 89, 26462, 0x0000000000000000\n1230, 877, 37.57, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825377.2466984,
+   "1342, 877, 239.41, 61, 100, 19448, 0x0000000000000000\n1230, 877, 37.44, 32, 0, 31632, 0x0000000000000000\n1380, 877, 229.02, 69, 100, 31282, 0x0000000000000000\n1380, 877, 102.02, 37, 93, 24608, 0x0000000000000000\n1380, 877, 168.45, 45, 78, 26462, 0x0000000000000000\n1230, 877, 37.67, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825379.3523045,
+   "1380, 877, 229.70, 61, 93, 19448, 0x0000000000000000\n1230, 877, 37.37, 32, 0, 31632, 0x0000000000000000\n1380, 877, 229.98, 69, 100, 31282, 0x0000000000000000\n1380, 877, 96.05, 37, 87, 24608, 0x0000000000000000\n1380, 877, 155.70, 44, 49, 26462, 0x0000000000000000\n1230, 877, 37.57, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825381.4490097,
+   "1342, 877, 244.25, 61, 100, 19448, 0x0000000000000004\n1230, 877, 37.37, 32, 0, 31632, 0x0000000000000000\n1380, 877, 224.56, 69, 100, 31282, 0x0000000000000000\n1380, 877, 97.62, 37, 88, 24608, 0x0000000000000000\n1380, 877, 44.59, 42, 0, 26462, 0x0000000000000000\n1230, 877, 37.40, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825383.5329425,
+   "1380, 877, 214.43, 62, 94, 19448, 0x0000000000000000\n1230, 877, 37.54, 32, 0, 31632, 0x0000000000000000\n1380, 877, 230.22, 69, 100, 31282, 0x0000000000000000\n1380, 877, 97.51, 38, 93, 24608, 0x0000000000000000\n1380, 877, 151.86, 44, 78, 26462, 0x0000000000000000\n1230, 877, 37.48, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825385.6449358,
+   "1350, 877, 249.02, 60, 54, 19448, 0x0000000000000004\n1230, 877, 37.35, 32, 0, 31632, 0x0000000000000000\n1380, 877, 229.89, 70, 100, 31282, 0x0000000000000000\n1380, 877, 97.18, 38, 90, 24608, 0x0000000000000000\n1380, 877, 157.74, 44, 73, 26462, 0x0000000000000000\n1230, 877, 37.48, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825387.7627358,
+   "1380, 877, 195.86, 61, 90, 19448, 0x0000000000000000\n1230, 877, 37.37, 32, 0, 31632, 0x0000000000000000\n1380, 877, 228.65, 70, 100, 31282, 0x0000000000000000\n1380, 877, 40.87, 37, 0, 24608, 0x0000000000000000\n1380, 877, 59.46, 44, 68, 26462, 0x0000000000000000\n1230, 877, 37.60, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825389.8609328,
+   "1380, 877, 52.65, 57, 92, 19448, 0x0000000000000000\n1230, 877, 37.30, 32, 0, 31632, 0x0000000000000000\n1380, 877, 225.22, 70, 100, 31282, 0x0000000000000000\n1380, 877, 40.61, 36, 9, 24608, 0x0000000000000000\n1380, 877, 160.00, 45, 97, 26462, 0x0000000000000000\n1230, 877, 37.61, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825391.9647112,
+   "1380, 877, 226.77, 62, 95, 19448, 0x0000000000000000\n1230, 877, 37.33, 32, 0, 31632, 0x0000000000000000\n1380, 877, 228.56, 70, 100, 31282, 0x0000000000000000\n1380, 877, 209.01, 43, 100, 24608, 0x0000000000000000\n1380, 877, 164.37, 46, 97, 26462, 0x0000000000000000\n1230, 877, 37.56, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825394.0738106,
+   "1380, 877, 202.55, 60, 69, 19448, 0x0000000000000000\n1230, 877, 37.33, 32, 0, 31632, 0x0000000000000000\n1380, 877, 230.03, 70, 100, 31282, 0x0000000000000000\n1380, 877, 207.25, 45, 100, 24608, 0x0000000000000000\n1380, 877, 157.00, 45, 56, 26462, 0x0000000000000000\n1230, 877, 37.56, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825396.1704938,
+   "1380, 877, 220.40, 62, 94, 19448, 0x0000000000000000\n1230, 877, 37.44, 32, 0, 31632, 0x0000000000000000\n1380, 877, 230.76, 70, 100, 31282, 0x0000000000000000\n1380, 877, 119.20, 41, 79, 24608, 0x0000000000000000\n1380, 877, 145.07, 45, 55, 26462, 0x0000000000000000\n1230, 877, 37.49, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825398.2672157,
+   "1380, 877, 52.42, 57, 0, 19448, 0x0000000000000000\n1230, 877, 37.47, 32, 0, 31632, 0x0000000000000000\n1380, 877, 231.11, 70, 100, 31282, 0x0000000000000000\n1380, 877, 208.81, 45, 94, 24608, 0x0000000000000000\n1380, 877, 166.68, 46, 97, 26462, 0x0000000000000000\n1230, 877, 37.58, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825400.3537145,
+   "1380, 877, 229.71, 62, 95, 19448, 0x0000000000000000\n1230, 877, 37.52, 32, 0, 31632, 0x0000000000000000\n1380, 877, 230.46, 70, 100, 31282, 0x0000000000000000\n1380, 877, 209.94, 46, 100, 24608, 0x0000000000000000\n1380, 877, 156.66, 45, 77, 26462, 0x0000000000000000\n1230, 877, 37.46, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825402.4352822,
+   "1380, 877, 52.35, 58, 0, 19448, 0x0000000000000000\n1230, 877, 37.39, 32, 0, 31632, 0x0000000000000000\n1380, 877, 229.30, 70, 100, 31282, 0x0000000000000000\n1380, 877, 118.10, 43, 61, 24608, 0x0000000000000000\n1380, 877, 156.21, 45, 54, 26462, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825404.5252626,
+   "1380, 877, 228.85, 61, 94, 19448, 0x0000000000000000\n1230, 877, 37.43, 32, 0, 31632, 0x0000000000000000\n1380, 877, 224.05, 70, 100, 31282, 0x0000000000000000\n1380, 877, 208.60, 45, 100, 24608, 0x0000000000000000\n1380, 877, 102.43, 45, 62, 26462, 0x0000000000000000\n1230, 877, 37.57, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825406.611489,
+   "1380, 877, 52.63, 58, 0, 19448, 0x0000000000000000\n1230, 877, 37.36, 32, 0, 31632, 0x0000000000000000\n1380, 877, 232.24, 70, 100, 31282, 0x0000000000000000\n1380, 877, 212.93, 48, 100, 24608, 0x0000000000000000\n1380, 877, 154.24, 45, 61, 26462, 0x0000000000000000\n1230, 877, 37.59, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825408.7000542,
+   "1380, 877, 198.92, 62, 93, 19448, 0x0000000000000000\n1230, 877, 37.38, 32, 0, 31632, 0x0000000000000000\n1380, 877, 230.77, 70, 100, 31282, 0x0000000000000000\n1380, 877, 108.75, 46, 72, 24608, 0x0000000000000000\n1380, 877, 140.74, 45, 60, 26462, 0x0000000000000000\n1230, 877, 37.47, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825410.8020115,
+   "1380, 877, 53.03, 59, 65, 19448, 0x0000000000000000\n1230, 877, 37.31, 32, 0, 31632, 0x0000000000000000\n1380, 877, 233.04, 70, 100, 31282, 0x0000000000000000\n1380, 877, 42.85, 44, 38, 24608, 0x0000000000000000\n1380, 877, 64.17, 46, 62, 26462, 0x0000000000000000\n1230, 877, 37.52, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825412.9157305,
+   "1380, 877, 222.72, 61, 92, 19448, 0x0000000000000000\n1230, 877, 37.46, 32, 0, 31632, 0x0000000000000000\n1380, 877, 231.51, 70, 100, 31282, 0x0000000000000000\n1380, 877, 154.20, 49, 100, 24608, 0x0000000000000000\n1380, 877, 131.36, 45, 43, 26462, 0x0000000000000000\n1230, 877, 37.57, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825415.0193439,
+   "1380, 877, 218.47, 63, 95, 19448, 0x0000000000000000\n1230, 877, 37.44, 32, 0, 31632, 0x0000000000000000\n1380, 877, 231.20, 70, 100, 31282, 0x0000000000000000\n1380, 877, 111.98, 50, 100, 24608, 0x0000000000000000\n1380, 877, 122.24, 46, 57, 26462, 0x0000000000000000\n1230, 877, 37.48, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825417.098607,
+   "1380, 877, 217.25, 63, 94, 19448, 0x0000000000000000\n1230, 877, 37.24, 32, 0, 31632, 0x0000000000000000\n1380, 877, 229.96, 70, 100, 31282, 0x0000000000000000\n1380, 877, 152.04, 46, 70, 24608, 0x0000000000000000\n1380, 877, 162.34, 46, 56, 26462, 0x0000000000000000\n1230, 877, 37.57, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825419.201639,
+   "1380, 877, 230.57, 63, 94, 19448, 0x0000000000000000\n1230, 877, 37.33, 32, 0, 31632, 0x0000000000000000\n1380, 877, 233.28, 70, 100, 31282, 0x0000000000000000\n1380, 877, 215.78, 50, 93, 24608, 0x0000000000000000\n1380, 877, 86.83, 46, 61, 26462, 0x0000000000000000\n1230, 877, 37.57, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825421.3353803,
+   "1380, 877, 226.21, 63, 93, 19448, 0x0000000000000000\n1230, 877, 37.43, 32, 0, 31632, 0x0000000000000000\n1380, 877, 233.55, 70, 100, 31282, 0x0000000000000000\n1380, 877, 214.75, 51, 94, 24608, 0x0000000000000000\n1380, 877, 142.34, 46, 97, 26462, 0x0000000000000000\n1230, 877, 37.65, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825423.420011,
+   "1380, 877, 53.91, 59, 49, 19448, 0x0000000000000000\n1230, 877, 37.39, 32, 0, 31632, 0x0000000000000000\n1380, 877, 232.24, 70, 100, 31282, 0x0000000000000000\n1380, 877, 148.88, 47, 71, 24608, 0x0000000000000000\n1380, 877, 119.41, 46, 65, 26462, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825425.524415,
+   "1380, 877, 220.86, 63, 95, 19448, 0x0000000000000000\n1230, 877, 37.43, 32, 0, 31632, 0x0000000000000000\n1380, 877, 233.04, 70, 100, 31282, 0x0000000000000000\n1380, 877, 215.83, 51, 100, 24608, 0x0000000000000000\n1380, 877, 141.78, 45, 81, 26462, 0x0000000000000000\n1230, 877, 37.65, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825427.6288023,
+   "1380, 877, 210.53, 64, 93, 19448, 0x0000000000000000\n1230, 877, 37.43, 32, 0, 31632, 0x0000000000000000\n1380, 877, 232.41, 70, 100, 31282, 0x0000000000000000\n1380, 877, 214.00, 52, 100, 24608, 0x0000000000000000\n1380, 877, 162.22, 47, 66, 26462, 0x0000000000000000\n1230, 877, 37.56, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825429.7218704,
+   "1380, 877, 230.89, 64, 94, 19448, 0x0000000000000000\n1230, 877, 37.36, 32, 0, 31632, 0x0000000000000000\n1380, 877, 232.62, 70, 100, 31282, 0x0000000000000000\n1380, 877, 145.25, 48, 71, 24608, 0x0000000000000000\n1380, 877, 57.20, 46, 55, 26462, 0x0000000000000000\n1230, 877, 37.48, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825431.8063166,
+   "1380, 877, 227.21, 64, 91, 19448, 0x0000000000000000\n1230, 877, 37.27, 32, 0, 31632, 0x0000000000000000\n1380, 877, 230.91, 70, 100, 31282, 0x0000000000000000\n1380, 877, 41.83, 45, 0, 24608, 0x0000000000000000\n1380, 877, 150.40, 46, 62, 26462, 0x0000000000000000\n1230, 877, 37.40, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825433.8853261,
+   "1380, 877, 220.29, 64, 91, 19448, 0x0000000000000000\n1230, 877, 37.39, 32, 0, 31632, 0x0000000000000000\n1380, 877, 232.60, 71, 100, 31282, 0x0000000000000000\n1380, 877, 42.42, 44, 15, 24608, 0x0000000000000000\n1380, 877, 110.73, 46, 80, 26462, 0x0000000000000000\n1230, 877, 37.58, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825435.9737968,
+   "1327, 877, 245.75, 64, 100, 19448, 0x0000000000000004\n1230, 877, 37.46, 32, 0, 31632, 0x0000000000000000\n1380, 877, 226.28, 70, 100, 31282, 0x0000000000000000\n1230, 877, 36.49, 43, 0, 24608, 0x0000000000000000\n1380, 877, 155.70, 46, 53, 26462, 0x0000000000000000\n1230, 877, 37.58, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825438.0734801,
+   "1380, 877, 225.21, 64, 95, 19448, 0x0000000000000000\n1230, 877, 37.28, 32, 0, 31632, 0x0000000000000000\n1380, 877, 226.54, 70, 100, 31282, 0x0000000000000000\n1230, 877, 36.60, 42, 0, 24608, 0x0000000000000000\n1380, 877, 44.72, 43, 0, 26462, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825440.166758,
+   "1380, 877, 232.01, 64, 91, 19448, 0x0000000000000000\n1230, 877, 37.38, 32, 0, 31632, 0x0000000000000000\n1380, 877, 223.94, 70, 100, 31282, 0x0000000000000000\n1230, 877, 36.60, 41, 0, 24608, 0x0000000000000000\n1380, 877, 149.26, 46, 95, 26462, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825442.2479239,
+   "1380, 877, 214.01, 64, 93, 19448, 0x0000000000000000\n1230, 877, 37.37, 32, 0, 31632, 0x0000000000000000\n1380, 877, 225.14, 70, 100, 31282, 0x0000000000000000\n1230, 877, 36.40, 41, 0, 24608, 0x0000000000000000\n1380, 877, 146.86, 46, 43, 26462, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825444.4034758,
+   "1380, 877, 232.26, 65, 94, 19448, 0x0000000000000000\n1230, 877, 37.49, 32, 0, 31632, 0x0000000000000000\n1380, 877, 224.06, 70, 100, 31282, 0x0000000000000000\n1230, 877, 36.21, 40, 0, 24608, 0x0000000000000000\n1380, 877, 163.78, 47, 81, 26462, 0x0000000000000000\n1230, 877, 37.59, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825446.5049937,
+   "1380, 877, 53.45, 60, 0, 19448, 0x0000000000000000\n1230, 877, 37.31, 32, 0, 31632, 0x0000000000000000\n1380, 877, 225.46, 70, 100, 31282, 0x0000000000000000\n1230, 877, 36.35, 40, 0, 24608, 0x0000000000000000\n1380, 877, 67.07, 47, 53, 26462, 0x0000000000000000\n1230, 877, 37.42, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825448.609319,
+   "1380, 877, 232.08, 64, 94, 19448, 0x0000000000000000\n1230, 877, 37.38, 32, 0, 31632, 0x0000000000000000\n1380, 877, 225.41, 70, 100, 31282, 0x0000000000000000\n1230, 877, 36.20, 40, 0, 24608, 0x0000000000000000\n1380, 877, 162.49, 46, 0, 26462, 0x0000000000000000\n1230, 877, 37.58, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825450.6995144,
+   "1380, 877, 228.14, 65, 94, 19448, 0x0000000000000000\n1230, 877, 37.37, 32, 0, 31632, 0x0000000000000000\n1380, 877, 227.73, 70, 100, 31282, 0x0000000000000000\n1230, 877, 36.21, 39, 0, 24608, 0x0000000000000000\n1380, 877, 163.57, 47, 95, 26462, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825452.7965531,
+   "1380, 877, 231.45, 65, 92, 19448, 0x0000000000000000\n1230, 877, 37.37, 32, 0, 31632, 0x0000000000000000\n1380, 877, 227.76, 70, 100, 31282, 0x0000000000000000\n1230, 877, 35.82, 39, 0, 24608, 0x0000000000000000\n1380, 877, 149.72, 47, 81, 26462, 0x0000000000000000\n1230, 877, 37.48, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825454.895037,
+   "1380, 877, 223.03, 65, 93, 19448, 0x0000000000000000\n1230, 877, 37.55, 32, 0, 31632, 0x0000000000000000\n1380, 877, 220.42, 70, 100, 31282, 0x0000000000000000\n1230, 877, 35.92, 38, 0, 24608, 0x0000000000000000\n1380, 877, 100.00, 47, 63, 26462, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825456.992081,
+   "1380, 877, 232.81, 65, 94, 19448, 0x0000000000000000\n1230, 877, 37.38, 32, 0, 31632, 0x0000000000000000\n1380, 877, 225.80, 70, 100, 31282, 0x0000000000000000\n1230, 877, 36.10, 38, 14, 24608, 0x0000000000000000\n1380, 877, 166.10, 48, 97, 26462, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825459.0930629,
+   "1327, 877, 246.13, 65, 100, 19448, 0x0000000000000000\n1230, 877, 37.46, 32, 0, 31632, 0x0000000000000000\n1380, 877, 226.72, 70, 100, 31282, 0x0000000000000000\n1230, 877, 36.01, 38, 3, 24608, 0x0000000000000000\n1380, 877, 80.88, 47, 56, 26462, 0x0000000000000000\n1230, 877, 37.60, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825461.2154732,
+   "1350, 877, 67.03, 65, 96, 19448, 0x0000000000000000\n1230, 877, 37.40, 32, 0, 31632, 0x0000000000000000\n1380, 877, 227.52, 70, 100, 31282, 0x0000000000000000\n1230, 877, 35.85, 37, 3, 24608, 0x0000000000000000\n1380, 877, 163.17, 48, 86, 26462, 0x0000000000000000\n1230, 877, 37.71, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825463.3362343,
+   "1327, 877, 236.81, 66, 100, 19448, 0x0000000000000000\n1230, 877, 37.38, 32, 0, 31632, 0x0000000000000000\n1380, 877, 228.42, 70, 100, 31282, 0x0000000000000000\n1230, 877, 35.92, 37, 3, 24608, 0x0000000000000000\n1380, 877, 82.14, 47, 64, 26462, 0x0000000000000000\n1230, 877, 37.49, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825465.4707637,
+   "1342, 877, 237.72, 67, 100, 19448, 0x0000000000000000\n1230, 877, 37.37, 32, 0, 31632, 0x0000000000000000\n1380, 877, 226.13, 70, 100, 31282, 0x0000000000000000\n1230, 877, 35.72, 37, 2, 24608, 0x0000000000000000\n1380, 877, 70.83, 48, 97, 26462, 0x0000000000000000\n1230, 877, 37.60, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825467.6164696,
+   "1342, 877, 244.89, 67, 99, 19448, 0x0000000000000004\n1230, 877, 37.39, 32, 0, 31632, 0x0000000000000000\n1380, 877, 225.07, 70, 100, 31282, 0x0000000000000000\n1230, 877, 35.63, 37, 2, 24608, 0x0000000000000000\n1380, 877, 50.82, 47, 62, 26462, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825469.739725,
+   "1380, 877, 243.18, 66, 72, 19448, 0x0000000000000000\n1230, 877, 37.36, 32, 0, 31632, 0x0000000000000000\n1380, 877, 224.22, 70, 100, 31282, 0x0000000000000000\n1230, 877, 35.52, 37, 2, 24608, 0x0000000000000000\n1380, 877, 162.91, 48, 94, 26462, 0x0000000000000000\n1230, 877, 37.58, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825471.8811371,
+   "1342, 877, 240.30, 67, 100, 19448, 0x0000000000000000\n1230, 877, 37.37, 32, 0, 31632, 0x0000000000000000\n1380, 877, 226.70, 70, 100, 31282, 0x0000000000000000\n1230, 877, 35.62, 36, 2, 24608, 0x0000000000000000\n1380, 877, 129.43, 48, 95, 26462, 0x0000000000000000\n1230, 877, 37.49, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825473.9967997,
+   "1350, 877, 203.19, 67, 100, 19448, 0x0000000000000000\n1230, 877, 37.38, 32, 0, 31632, 0x0000000000000000\n1380, 877, 226.65, 70, 100, 31282, 0x0000000000000000\n1230, 877, 35.44, 36, 2, 24608, 0x0000000000000000\n1380, 877, 60.35, 48, 45, 26462, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825476.1495006,
+   "1372, 877, 225.90, 68, 100, 19448, 0x0000000000000004\n1230, 877, 37.36, 32, 0, 31632, 0x0000000000000000\n1380, 877, 228.16, 70, 100, 31282, 0x0000000000000000\n1230, 877, 35.42, 36, 5, 24608, 0x0000000000000000\n1380, 877, 165.54, 49, 97, 26462, 0x0000000000000000\n1230, 877, 37.58, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825478.262384,
+   "1357, 877, 242.93, 67, 98, 19448, 0x0000000000000000\n1230, 877, 37.47, 32, 0, 31632, 0x0000000000000000\n1380, 877, 222.67, 70, 100, 31282, 0x0000000000000000\n1230, 877, 35.51, 36, 2, 24608, 0x0000000000000000\n1380, 877, 163.49, 47, 23, 26462, 0x0000000000000000\n1230, 877, 37.59, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825480.4294717,
+   "1357, 877, 244.71, 68, 100, 19448, 0x0000000000000000\n1230, 877, 37.36, 32, 0, 31632, 0x0000000000000000\n1380, 877, 226.72, 70, 100, 31282, 0x0000000000000000\n1230, 877, 35.34, 35, 3, 24608, 0x0000000000000000\n1380, 877, 112.94, 48, 50, 26462, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825482.6080966,
+   "1357, 877, 225.25, 67, 100, 19448, 0x0000000000000000\n1230, 877, 37.28, 32, 0, 31632, 0x0000000000000000\n1380, 877, 228.44, 70, 100, 31282, 0x0000000000000000\n1230, 877, 35.34, 35, 3, 24608, 0x0000000000000000\n1380, 877, 153.89, 48, 87, 26462, 0x0000000000000000\n1230, 877, 37.49, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825484.7437792,
+   "1350, 877, 183.23, 68, 99, 19448, 0x0000000000000000\n1230, 877, 37.38, 32, 0, 31632, 0x0000000000000000\n1380, 877, 227.58, 70, 100, 31282, 0x0000000000000000\n1230, 877, 35.33, 35, 3, 24608, 0x0000000000000000\n1380, 877, 165.81, 48, 87, 26462, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825486.8715138,
+   "1342, 877, 182.24, 68, 100, 19448, 0x0000000000000004\n1230, 877, 37.38, 32, 0, 31632, 0x0000000000000000\n1380, 877, 229.12, 70, 100, 31282, 0x0000000000000000\n1230, 877, 35.33, 35, 2, 24608, 0x0000000000000000\n1380, 877, 69.86, 48, 52, 26462, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825488.9747717,
+   "1372, 877, 220.24, 67, 78, 19448, 0x0000000000000000\n1230, 877, 37.39, 32, 0, 31632, 0x0000000000000000\n1380, 877, 222.48, 70, 100, 31282, 0x0000000000000000\n1230, 877, 35.43, 35, 5, 24608, 0x0000000000000000\n1380, 877, 157.58, 47, 63, 26462, 0x0000000000000000\n1230, 877, 37.59, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825491.1047084,
+   "1342, 877, 242.35, 68, 100, 19448, 0x0000000000000004\n1230, 877, 37.29, 32, 0, 31632, 0x0000000000000000\n1380, 877, 227.93, 70, 100, 31282, 0x0000000000000000\n1230, 877, 35.34, 35, 6, 24608, 0x0000000000000000\n1380, 877, 70.31, 48, 78, 26462, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825493.2307453,
+   "1365, 877, 239.29, 67, 100, 19448, 0x0000000000000000\n1230, 877, 37.37, 32, 0, 31632, 0x0000000000000000\n1380, 877, 228.41, 70, 100, 31282, 0x0000000000000000\n1230, 877, 35.42, 35, 3, 24608, 0x0000000000000000\n1380, 877, 98.64, 49, 89, 26462, 0x0000000000000000\n1230, 877, 37.60, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825495.3387468,
+   "1365, 877, 176.83, 68, 99, 19448, 0x0000000000000000\n1230, 877, 37.28, 32, 0, 31632, 0x0000000000000000\n1380, 877, 229.27, 70, 100, 31282, 0x0000000000000000\n1230, 877, 35.22, 35, 2, 24608, 0x0000000000000000\n1380, 877, 167.77, 49, 63, 26462, 0x0000000000000000\n1230, 877, 37.59, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825497.4712162,
+   "1365, 877, 247.45, 68, 100, 19448, 0x0000000000000004\n1230, 877, 37.36, 32, 0, 31632, 0x0000000000000000\n1380, 877, 229.10, 70, 100, 31282, 0x0000000000000000\n1230, 877, 35.34, 35, 2, 24608, 0x0000000000000000\n1380, 877, 78.67, 49, 97, 26462, 0x0000000000000000\n1230, 877, 37.60, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825499.599398,
+   "1357, 877, 237.83, 68, 100, 19448, 0x0000000000000000\n1230, 877, 37.37, 32, 0, 31632, 0x0000000000000000\n1380, 877, 227.93, 70, 100, 31282, 0x0000000000000000\n1230, 877, 35.32, 34, 4, 24608, 0x0000000000000000\n1380, 877, 166.16, 49, 48, 26462, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825501.7113934,
+   "1365, 877, 218.62, 68, 100, 19448, 0x0000000000000000\n1230, 877, 37.28, 32, 0, 31632, 0x0000000000000000\n1380, 877, 229.98, 70, 100, 31282, 0x0000000000000000\n1230, 877, 35.14, 34, 3, 24608, 0x0000000000000000\n1380, 877, 163.77, 49, 95, 26462, 0x0000000000000000\n1230, 877, 37.48, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825503.8512435,
+   "1357, 877, 176.99, 67, 100, 19448, 0x0000000000000000\n1230, 877, 37.48, 32, 0, 31632, 0x0000000000000000\n1380, 877, 228.21, 70, 100, 31282, 0x0000000000000000\n1230, 877, 35.34, 34, 5, 24608, 0x0000000000000000\n1380, 877, 167.51, 49, 97, 26462, 0x0000000000000000\n1230, 877, 37.60, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825505.9497874,
+   "1380, 877, 241.44, 68, 94, 19448, 0x0000000000000000\n1230, 877, 37.37, 32, 0, 31632, 0x0000000000000000\n1380, 877, 231.23, 70, 100, 31282, 0x0000000000000000\n1230, 877, 35.34, 34, 3, 24608, 0x0000000000000000\n1380, 877, 109.90, 49, 58, 26462, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825508.0465274,
+   "1380, 877, 242.90, 68, 93, 19448, 0x0000000000000000\n1230, 877, 37.37, 32, 0, 31632, 0x0000000000000000\n1380, 877, 229.30, 70, 100, 31282, 0x0000000000000000\n1230, 877, 35.13, 34, 2, 24608, 0x0000000000000000\n1380, 877, 148.24, 47, 1, 26462, 0x0000000000000000\n1230, 877, 37.48, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825510.149458,
+   "1380, 877, 213.27, 68, 91, 19448, 0x0000000000000000\n1230, 877, 37.28, 32, 0, 31632, 0x0000000000000000\n1380, 877, 231.30, 70, 100, 31282, 0x0000000000000000\n1230, 877, 35.04, 34, 2, 24608, 0x0000000000000000\n1380, 877, 141.65, 48, 78, 26462, 0x0000000000000000\n1230, 877, 37.48, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825512.2432654,
+   "1380, 877, 234.96, 68, 94, 19448, 0x0000000000000000\n1230, 877, 37.37, 32, 0, 31632, 0x0000000000000000\n1380, 877, 228.86, 70, 100, 31282, 0x0000000000000000\n1230, 877, 35.13, 34, 4, 24608, 0x0000000000000000\n1380, 877, 158.07, 49, 71, 26462, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825514.3470888,
+   "1380, 877, 234.21, 68, 93, 19448, 0x0000000000000000\n1230, 877, 37.37, 32, 0, 31632, 0x0000000000000000\n1380, 877, 227.90, 70, 100, 31282, 0x0000000000000000\n1230, 877, 35.33, 34, 3, 24608, 0x0000000000000000\n1380, 877, 72.48, 49, 80, 26462, 0x0000000000000000\n1230, 877, 37.60, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825516.4677846,
+   "1380, 877, 52.08, 61, 0, 19448, 0x0000000000000000\n1230, 877, 37.31, 32, 0, 31632, 0x0000000000000000\n1380, 877, 230.65, 70, 100, 31282, 0x0000000000000000\n1230, 877, 35.18, 34, 6, 24608, 0x0000000000000000\n1380, 877, 68.45, 49, 97, 26462, 0x0000000000000000\n1230, 877, 37.62, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825518.6638706,
+   "1335, 877, 247.21, 66, 100, 19448, 0x0000000000000000\n1230, 877, 37.46, 32, 0, 31632, 0x0000000000000000\n1380, 877, 228.69, 70, 100, 31282, 0x0000000000000000\n1230, 877, 35.23, 34, 2, 24608, 0x0000000000000000\n1380, 877, 71.61, 48, 47, 26462, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825520.8378868,
+   "1335, 877, 240.06, 68, 100, 19448, 0x0000000000000000\n1230, 877, 37.37, 32, 0, 31632, 0x0000000000000000\n1380, 877, 230.84, 70, 100, 31282, 0x0000000000000000\n1230, 877, 35.13, 34, 2, 24608, 0x0000000000000000\n1380, 877, 152.69, 49, 79, 26462, 0x0000000000000000\n1230, 877, 37.48, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825522.9789596,
+   "1327, 877, 225.76, 67, 100, 19448, 0x0000000000000000\n1230, 877, 37.27, 32, 0, 31632, 0x0000000000000000\n1380, 877, 229.43, 70, 100, 31282, 0x0000000000000000\n1230, 877, 34.94, 34, 3, 24608, 0x0000000000000000\n1380, 877, 102.64, 49, 97, 26462, 0x0000000000000000\n1230, 877, 37.49, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825525.133653,
+   "1320, 877, 236.82, 68, 99, 19448, 0x0000000000000000\n1230, 877, 37.36, 32, 0, 31632, 0x0000000000000000\n1380, 877, 228.72, 70, 100, 31282, 0x0000000000000000\n1230, 877, 35.13, 34, 3, 24608, 0x0000000000000000\n1380, 877, 165.43, 49, 53, 26462, 0x0000000000000000\n1230, 877, 37.39, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825527.350706,
+   "1342, 877, 230.56, 68, 99, 19448, 0x0000000000000004\n1230, 877, 37.27, 32, 0, 31632, 0x0000000000000000\n1380, 877, 229.82, 70, 100, 31282, 0x0000000000000000\n1230, 877, 35.04, 34, 4, 24608, 0x0000000000000000\n1380, 877, 61.02, 49, 64, 26462, 0x0000000000000000\n1230, 877, 37.39, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825529.4989269,
+   "1342, 877, 207.50, 68, 99, 19448, 0x0000000000000004\n1230, 877, 37.36, 32, 0, 31632, 0x0000000000000000\n1380, 877, 229.15, 70, 100, 31282, 0x0000000000000000\n1230, 877, 35.42, 33, 2, 24608, 0x0000000000000000\n1380, 877, 153.40, 49, 95, 26462, 0x0000000000000000\n1230, 877, 37.49, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825531.6419594,
+   "1357, 877, 211.61, 68, 80, 19448, 0x0000000000000004\n1230, 877, 37.37, 32, 0, 31632, 0x0000000000000000\n1380, 877, 231.76, 70, 100, 31282, 0x0000000000000000\n1230, 877, 35.13, 33, 4, 24608, 0x0000000000000000\n1380, 877, 120.79, 48, 62, 26462, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825533.7999275,
+   "1357, 877, 204.45, 68, 100, 19448, 0x0000000000000000\n1230, 877, 37.37, 32, 0, 31632, 0x0000000000000000\n1380, 877, 230.16, 70, 100, 31282, 0x0000000000000000\n1230, 877, 35.22, 33, 3, 24608, 0x0000000000000000\n1380, 877, 166.54, 49, 80, 26462, 0x0000000000000000\n1230, 877, 37.59, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825535.9915855,
+   "1357, 877, 203.67, 69, 100, 19448, 0x0000000000000000\n1230, 877, 37.38, 32, 0, 31632, 0x0000000000000000\n1380, 877, 229.42, 70, 100, 31282, 0x0000000000000000\n1230, 877, 35.03, 33, 2, 24608, 0x0000000000000000\n1380, 877, 167.71, 49, 75, 26462, 0x0000000000000000\n1230, 877, 37.58, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825538.1328847,
+   "1342, 877, 242.74, 68, 100, 19448, 0x0000000000000004\n1230, 877, 37.39, 32, 0, 31632, 0x0000000000000000\n1380, 877, 231.28, 70, 100, 31282, 0x0000000000000000\n1230, 877, 35.05, 33, 2, 24608, 0x0000000000000000\n1380, 877, 45.87, 47, 0, 26462, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825540.2655416,
+   "1357, 877, 238.01, 69, 99, 19448, 0x0000000000000000\n1230, 877, 37.18, 32, 0, 31632, 0x0000000000000000\n1380, 877, 230.42, 70, 100, 31282, 0x0000000000000000\n1230, 877, 35.23, 33, 2, 24608, 0x0000000000000000\n1380, 877, 163.80, 49, 78, 26462, 0x0000000000000000\n1230, 877, 37.49, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825542.4719834,
+   "1342, 877, 237.92, 68, 100, 19448, 0x0000000000000000\n1230, 877, 37.47, 32, 0, 31632, 0x0000000000000000\n1380, 877, 230.26, 71, 100, 31282, 0x0000000000000000\n1230, 877, 35.14, 33, 2, 24608, 0x0000000000000000\n1380, 877, 167.00, 50, 97, 26462, 0x0000000000000000\n1230, 877, 37.48, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825544.617262,
+   "1342, 877, 240.50, 68, 98, 19448, 0x0000000000000000\n1230, 877, 37.47, 32, 0, 31632, 0x0000000000000000\n1380, 877, 230.94, 70, 100, 31282, 0x0000000000000000\n1230, 877, 35.03, 33, 5, 24608, 0x0000000000000000\n1380, 877, 161.95, 50, 97, 26462, 0x0000000000000000\n1230, 877, 37.57, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825546.714354,
+   "1342, 877, 240.22, 69, 100, 19448, 0x0000000000000000\n1230, 877, 37.37, 32, 0, 31632, 0x0000000000000000\n1380, 877, 228.31, 71, 100, 31282, 0x0000000000000000\n1230, 877, 35.24, 33, 2, 24608, 0x0000000000000000\n1380, 877, 98.16, 49, 51, 26462, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825548.8393567,
+   "1357, 877, 174.29, 69, 99, 19448, 0x0000000000000000\n1230, 877, 37.37, 32, 0, 31632, 0x0000000000000000\n1380, 877, 230.35, 71, 100, 31282, 0x0000000000000000\n1230, 877, 34.84, 33, 3, 24608, 0x0000000000000000\n1380, 877, 163.97, 49, 52, 26462, 0x0000000000000000\n1230, 877, 37.57, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825551.0012467,
+   "1357, 877, 220.97, 68, 100, 19448, 0x0000000000000000\n1230, 877, 37.37, 32, 0, 31632, 0x0000000000000000\n1380, 877, 231.37, 70, 100, 31282, 0x0000000000000000\n1230, 877, 35.22, 33, 2, 24608, 0x0000000000000000\n1380, 877, 167.19, 50, 61, 26462, 0x0000000000000000\n1230, 877, 37.60, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825553.1340127,
+   "1372, 877, 189.91, 69, 100, 19448, 0x0000000000000004\n1230, 877, 37.29, 32, 0, 31632, 0x0000000000000000\n1380, 877, 232.26, 71, 100, 31282, 0x0000000000000000\n1230, 877, 35.33, 33, 3, 24608, 0x0000000000000000\n1380, 877, 167.46, 50, 81, 26462, 0x0000000000000000\n1230, 877, 37.49, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825555.2738206,
+   "1365, 877, 249.33, 68, 94, 19448, 0x0000000000000000\n1230, 877, 37.18, 32, 0, 31632, 0x0000000000000000\n1380, 877, 230.10, 71, 100, 31282, 0x0000000000000000\n1230, 877, 35.23, 33, 6, 24608, 0x0000000000000000\n1380, 877, 167.45, 50, 97, 26462, 0x0000000000000000\n1230, 877, 37.49, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825557.3856323,
+   "1357, 877, 246.43, 68, 100, 19448, 0x0000000000000000\n1230, 877, 37.37, 32, 0, 31632, 0x0000000000000000\n1380, 877, 229.15, 71, 100, 31282, 0x0000000000000000\n1230, 877, 35.06, 33, 3, 24608, 0x0000000000000000\n1380, 877, 45.87, 48, 0, 26462, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825559.5213165,
+   "1380, 877, 226.60, 68, 100, 19448, 0x0000000000000000\n1230, 877, 37.27, 32, 0, 31632, 0x0000000000000000\n1380, 877, 229.91, 71, 100, 31282, 0x0000000000000000\n1230, 877, 35.03, 33, 2, 24608, 0x0000000000000000\n1380, 877, 151.08, 49, 78, 26462, 0x0000000000000000\n1230, 877, 37.59, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825561.628094,
+   "1350, 877, 133.40, 66, 100, 19448, 0x0000000000000000\n1230, 877, 37.39, 32, 0, 31632, 0x0000000000000000\n1380, 877, 230.17, 71, 100, 31282, 0x0000000000000000\n1230, 877, 35.04, 33, 2, 24608, 0x0000000000000000\n1380, 877, 144.66, 49, 86, 26462, 0x0000000000000000\n1230, 877, 37.51, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825563.7047837,
+   "1380, 877, 213.79, 68, 94, 19448, 0x0000000000000000\n1230, 877, 37.36, 32, 0, 31632, 0x0000000000000000\n1380, 877, 229.68, 71, 100, 31282, 0x0000000000000000\n1230, 877, 35.03, 33, 2, 24608, 0x0000000000000000\n1380, 877, 155.89, 49, 79, 26462, 0x0000000000000000\n1230, 877, 37.58, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825565.8107605,
+   "1380, 877, 234.57, 68, 93, 19448, 0x0000000000000000\n1230, 877, 37.37, 32, 0, 31632, 0x0000000000000000\n1380, 877, 230.04, 71, 100, 31282, 0x0000000000000000\n1230, 877, 34.94, 33, 3, 24608, 0x0000000000000000\n1380, 877, 79.93, 49, 80, 26462, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825567.906119,
+   "1380, 877, 240.68, 68, 94, 19448, 0x0000000000000000\n1230, 877, 37.27, 32, 0, 31632, 0x0000000000000000\n1380, 877, 231.32, 71, 100, 31282, 0x0000000000000000\n1230, 877, 35.04, 33, 4, 24608, 0x0000000000000000\n1380, 877, 121.23, 49, 76, 26462, 0x0000000000000000\n1230, 877, 37.60, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825569.9877787,
+   "1380, 877, 237.15, 68, 94, 19448, 0x0000000000000000\n1230, 877, 37.37, 32, 0, 31632, 0x0000000000000000\n1380, 877, 230.18, 71, 100, 31282, 0x0000000000000000\n1230, 877, 34.94, 33, 6, 24608, 0x0000000000000000\n1380, 877, 159.10, 49, 63, 26462, 0x0000000000000000\n1230, 877, 37.60, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825572.085696,
+   "1380, 877, 242.27, 69, 93, 19448, 0x0000000000000000\n1230, 877, 37.37, 32, 0, 31632, 0x0000000000000000\n1380, 877, 231.22, 71, 100, 31282, 0x0000000000000000\n1230, 877, 35.13, 33, 5, 24608, 0x0000000000000000\n1380, 877, 167.71, 50, 97, 26462, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825574.1723363,
+   "1380, 877, 56.63, 66, 94, 19448, 0x0000000000000000\n1230, 877, 37.30, 32, 0, 31632, 0x0000000000000000\n1380, 877, 232.51, 71, 100, 31282, 0x0000000000000000\n1230, 877, 34.97, 33, 3, 24608, 0x0000000000000000\n1380, 877, 119.67, 50, 97, 26462, 0x0000000000000000\n1230, 877, 37.62, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825576.2779977,
+   "1380, 877, 53.43, 61, 22, 19448, 0x0000000000000000\n1230, 877, 37.39, 32, 0, 31632, 0x0000000000000000\n1380, 877, 233.48, 71, 100, 31282, 0x0000000000000000\n1230, 877, 34.96, 33, 2, 24608, 0x0000000000000000\n1380, 877, 165.89, 50, 97, 26462, 0x0000000000000000\n1230, 877, 37.51, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825578.4288356,
+   "1327, 877, 234.35, 67, 100, 19448, 0x0000000000000004\n1230, 877, 37.27, 32, 0, 31632, 0x0000000000000000\n1380, 877, 232.21, 71, 100, 31282, 0x0000000000000000\n1230, 877, 35.12, 33, 2, 24608, 0x0000000000000000\n1380, 877, 170.97, 50, 95, 26462, 0x0000000000000000\n1230, 877, 37.58, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825580.5417979,
+   "1327, 877, 246.65, 68, 100, 19448, 0x0000000000000004\n1230, 877, 37.37, 32, 0, 31632, 0x0000000000000000\n1380, 877, 231.93, 71, 100, 31282, 0x0000000000000000\n1230, 877, 35.32, 33, 3, 24608, 0x0000000000000000\n1380, 877, 165.20, 50, 65, 26462, 0x0000000000000000\n1230, 877, 37.57, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825582.699179,
+   "1327, 877, 235.41, 68, 100, 19448, 0x0000000000000004\n1230, 877, 37.26, 32, 0, 31632, 0x0000000000000000\n1380, 877, 234.59, 71, 100, 31282, 0x0000000000000000\n1230, 877, 35.12, 33, 6, 24608, 0x0000000000000000\n1380, 877, 166.78, 50, 64, 26462, 0x0000000000000000\n1230, 877, 37.49, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825584.804835,
+   "1350, 877, 194.66, 67, 100, 19448, 0x0000000000000000\n1230, 877, 37.38, 32, 0, 31632, 0x0000000000000000\n1380, 877, 231.28, 71, 100, 31282, 0x0000000000000000\n1230, 877, 35.03, 33, 6, 24608, 0x0000000000000000\n1380, 877, 163.32, 50, 85, 26462, 0x0000000000000000\n1230, 877, 37.60, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825586.9261467,
+   "1335, 877, 216.21, 68, 100, 19448, 0x0000000000000000\n1230, 877, 37.39, 32, 0, 31632, 0x0000000000000000\n1380, 877, 232.07, 71, 100, 31282, 0x0000000000000000\n1230, 877, 34.94, 33, 3, 24608, 0x0000000000000000\n1380, 877, 45.98, 48, 0, 26462, 0x0000000000000000\n1230, 877, 37.60, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825589.0268729,
+   "1357, 877, 219.64, 69, 100, 19448, 0x0000000000000004\n1230, 877, 37.37, 32, 0, 31632, 0x0000000000000000\n1380, 877, 232.24, 71, 100, 31282, 0x0000000000000000\n1230, 877, 35.04, 33, 3, 24608, 0x0000000000000000\n1380, 877, 67.62, 49, 62, 26462, 0x0000000000000000\n1230, 877, 37.60, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825591.1433659,
+   "1327, 877, 230.15, 69, 100, 19448, 0x0000000000000000\n1230, 877, 37.39, 32, 0, 31632, 0x0000000000000000\n1380, 877, 233.37, 71, 100, 31282, 0x0000000000000000\n1230, 877, 35.03, 33, 2, 24608, 0x0000000000000000\n1380, 877, 57.03, 49, 50, 26462, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825593.2915776,
+   "1342, 877, 242.88, 69, 100, 19448, 0x0000000000000000\n1230, 877, 37.37, 32, 0, 31632, 0x0000000000000000\n1380, 877, 232.76, 71, 100, 31282, 0x0000000000000000\n1230, 877, 35.12, 33, 1, 24608, 0x0000000000000000\n1380, 877, 168.16, 50, 90, 26462, 0x0000000000000000\n1230, 877, 37.57, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825595.4097595,
+   "1335, 877, 196.13, 69, 99, 19448, 0x0000000000000000\n1230, 877, 37.37, 32, 0, 31632, 0x0000000000000000\n1380, 877, 231.49, 71, 100, 31282, 0x0000000000000000\n1230, 877, 34.93, 33, 4, 24608, 0x0000000000000000\n1380, 877, 166.12, 50, 65, 26462, 0x0000000000000000\n1230, 877, 37.49, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825597.5629447,
+   "1357, 877, 220.96, 69, 100, 19448, 0x0000000000000000\n1230, 877, 37.47, 32, 0, 31632, 0x0000000000000000\n1380, 877, 232.37, 71, 100, 31282, 0x0000000000000000\n1230, 877, 34.93, 33, 2, 24608, 0x0000000000000000\n1380, 877, 153.24, 48, 54, 26462, 0x0000000000000000\n1230, 877, 37.68, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825599.707353,
+   "1357, 877, 253.72, 69, 100, 19448, 0x0000000000000004\n1230, 877, 37.28, 32, 0, 31632, 0x0000000000000000\n1380, 877, 227.43, 71, 100, 31282, 0x0000000000000000\n1230, 877, 34.94, 33, 2, 24608, 0x0000000000000000\n1380, 877, 92.91, 49, 52, 26462, 0x0000000000000000\n1230, 877, 37.70, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825601.8436055,
+   "1372, 877, 184.75, 69, 99, 19448, 0x0000000000000004\n1230, 877, 37.18, 32, 0, 31632, 0x0000000000000000\n1380, 877, 232.38, 71, 100, 31282, 0x0000000000000000\n1230, 877, 35.12, 33, 2, 24608, 0x0000000000000000\n1380, 877, 153.32, 50, 97, 26462, 0x0000000000000000\n1230, 877, 37.67, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825603.96126,
+   "1342, 877, 214.48, 69, 100, 19448, 0x0000000000000000\n1230, 877, 37.36, 32, 0, 31632, 0x0000000000000000\n1380, 877, 235.41, 71, 100, 31282, 0x0000000000000000\n1230, 877, 35.13, 33, 3, 24608, 0x0000000000000000\n1380, 877, 166.62, 50, 97, 26462, 0x0000000000000000\n1230, 877, 37.38, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825606.1449578,
+   "1327, 877, 240.83, 68, 100, 19448, 0x0000000000000000\n1230, 877, 37.28, 32, 0, 31632, 0x0000000000000000\n1380, 877, 225.91, 70, 100, 31282, 0x0000000000000000\n1230, 877, 34.85, 33, 1, 24608, 0x0000000000000000\n1380, 877, 46.15, 48, 0, 26462, 0x0000000000000000\n1230, 877, 37.40, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825608.2593882,
+   "1372, 877, 198.81, 69, 100, 19448, 0x0000000000000004\n1230, 877, 37.38, 32, 0, 31632, 0x0000000000000000\n1380, 877, 178.34, 67, 100, 31282, 0x0000000000000000\n1230, 877, 34.86, 33, 1, 24608, 0x0000000000000000\n1380, 877, 166.49, 50, 49, 26462, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825610.375914,
+   "1357, 877, 239.18, 69, 100, 19448, 0x0000000000000000\n1230, 877, 37.39, 32, 0, 31632, 0x0000000000000000\n1380, 877, 182.79, 67, 100, 31282, 0x0000000000000000\n1230, 877, 35.25, 33, 4, 24608, 0x0000000000000000\n1380, 877, 53.65, 50, 95, 26462, 0x0000000000000000\n1230, 877, 37.61, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825612.5067337,
+   "1357, 877, 222.10, 69, 99, 19448, 0x0000000000000004\n1230, 877, 37.38, 32, 0, 31632, 0x0000000000000000\n1380, 877, 226.06, 69, 100, 31282, 0x0000000000000000\n1230, 877, 35.04, 33, 3, 24608, 0x0000000000000000\n1380, 877, 75.38, 50, 91, 26462, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825614.690555,
+   "1372, 877, 198.18, 69, 100, 19448, 0x0000000000000004\n1230, 877, 37.37, 32, 0, 31632, 0x0000000000000000\n1380, 877, 224.70, 70, 100, 31282, 0x0000000000000000\n1230, 877, 34.84, 33, 8, 24608, 0x0000000000000000\n1380, 877, 164.52, 51, 78, 26462, 0x0000000000000000\n1230, 877, 37.60, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825616.82418,
+   "1342, 877, 247.34, 69, 100, 19448, 0x0000000000000000\n1230, 877, 37.47, 32, 0, 31632, 0x0000000000000000\n1380, 877, 227.59, 70, 100, 31282, 0x0000000000000000\n1230, 877, 35.04, 33, 4, 24608, 0x0000000000000000\n1380, 877, 165.68, 50, 70, 26462, 0x0000000000000000\n1230, 877, 37.59, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825618.9689047,
+   "1342, 877, 232.49, 68, 100, 19448, 0x0000000000000000\n1230, 877, 37.26, 32, 0, 31632, 0x0000000000000000\n1380, 877, 225.14, 70, 100, 31282, 0x0000000000000000\n1230, 877, 34.93, 33, 0, 24608, 0x0000000000000000\n1380, 877, 162.13, 50, 95, 26462, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825621.068418,
+   "1380, 877, 246.46, 67, 25, 19448, 0x0000000000000000\n1230, 877, 37.36, 32, 0, 31632, 0x0000000000000000\n1380, 877, 227.55, 70, 100, 31282, 0x0000000000000000\n1230, 877, 35.03, 33, 0, 24608, 0x0000000000000000\n1380, 877, 159.10, 50, 67, 26462, 0x0000000000000000\n1230, 877, 37.49, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825623.1535213,
+   "1380, 877, 231.83, 68, 95, 19448, 0x0000000000000000\n1230, 877, 37.37, 32, 0, 31632, 0x0000000000000000\n1380, 877, 226.24, 70, 100, 31282, 0x0000000000000000\n1230, 877, 34.94, 33, 0, 24608, 0x0000000000000000\n1380, 877, 104.61, 50, 57, 26462, 0x0000000000000000\n1230, 877, 37.59, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825625.2623613,
+   "1380, 877, 214.45, 69, 94, 19448, 0x0000000000000000\n1230, 877, 37.38, 32, 0, 31632, 0x0000000000000000\n1380, 877, 228.67, 70, 100, 31282, 0x0000000000000000\n1230, 877, 34.94, 32, 0, 24608, 0x0000000000000000\n1380, 877, 46.16, 48, 0, 26462, 0x0000000000000000\n1230, 877, 37.60, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825627.3634346,
+   "1380, 877, 239.28, 69, 94, 19448, 0x0000000000000000\n1230, 877, 37.27, 32, 0, 31632, 0x0000000000000000\n1380, 877, 228.57, 70, 100, 31282, 0x0000000000000000\n1230, 877, 34.94, 33, 0, 24608, 0x0000000000000000\n1380, 877, 156.87, 50, 95, 26462, 0x0000000000000000\n1230, 877, 37.58, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825629.4619265,
+   "1380, 877, 231.41, 69, 95, 19448, 0x0000000000000000\n1230, 877, 37.29, 32, 0, 31632, 0x0000000000000000\n1380, 877, 229.11, 70, 100, 31282, 0x0000000000000000\n1230, 877, 34.85, 33, 0, 24608, 0x0000000000000000\n1380, 877, 46.65, 49, 16, 26462, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825631.5903866,
+   "1380, 877, 214.61, 69, 92, 19448, 0x0000000000000000\n1230, 877, 37.29, 32, 0, 31632, 0x0000000000000000\n1380, 877, 230.03, 70, 100, 31282, 0x0000000000000000\n1230, 877, 34.85, 33, 0, 24608, 0x0000000000000000\n1380, 877, 45.47, 46, 0, 26462, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825633.7003706,
+   "1380, 877, 54.81, 63, 0, 19448, 0x0000000000000000\n1230, 877, 37.32, 32, 0, 31632, 0x0000000000000000\n1380, 877, 229.97, 70, 100, 31282, 0x0000000000000000\n1230, 877, 34.98, 32, 0, 24608, 0x0000000000000000\n1230, 877, 39.09, 45, 0, 26462, 0x0000000000000000\n1230, 877, 37.62, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825635.8036203,
+   "1380, 877, 67.43, 60, 16, 19448, 0x0000000000000000\n1230, 877, 37.29, 32, 0, 31632, 0x0000000000000000\n1380, 877, 228.62, 70, 100, 31282, 0x0000000000000000\n1230, 877, 34.95, 32, 0, 24608, 0x0000000000000000\n1230, 877, 38.87, 44, 0, 26462, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825637.9310336,
+   "1312, 877, 240.12, 68, 99, 19448, 0x0000000000000000\n1230, 877, 37.47, 32, 0, 31632, 0x0000000000000000\n1380, 877, 229.25, 70, 100, 31282, 0x0000000000000000\n1230, 877, 34.94, 32, 0, 24608, 0x0000000000000000\n1230, 877, 38.77, 44, 0, 26462, 0x0000000000000000\n1230, 877, 37.60, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825640.0709321,
+   "1327, 877, 240.52, 68, 100, 19448, 0x0000000000000000\n1230, 877, 37.37, 32, 0, 31632, 0x0000000000000000\n1380, 877, 230.57, 70, 100, 31282, 0x0000000000000000\n1230, 877, 34.95, 33, 0, 24608, 0x0000000000000000\n1230, 877, 38.48, 43, 7, 26462, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825642.214304,
+   "1342, 877, 244.99, 69, 100, 19448, 0x0000000000000000\n1230, 877, 37.39, 32, 0, 31632, 0x0000000000000000\n1380, 877, 231.59, 70, 100, 31282, 0x0000000000000000\n1230, 877, 34.85, 33, 0, 24608, 0x0000000000000000\n1230, 877, 38.39, 42, 0, 26462, 0x0000000000000000\n1230, 877, 37.60, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825644.3388667,
+   "1327, 877, 232.16, 69, 100, 19448, 0x0000000000000000\n1230, 877, 37.38, 32, 0, 31632, 0x0000000000000000\n1380, 877, 231.12, 70, 100, 31282, 0x0000000000000000\n1230, 877, 34.95, 32, 0, 24608, 0x0000000000000000\n1230, 877, 38.29, 42, 0, 26462, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825646.459014,
+   "1327, 877, 234.35, 69, 100, 19448, 0x0000000000000000\n1230, 877, 37.29, 32, 0, 31632, 0x0000000000000000\n1380, 877, 231.74, 70, 100, 31282, 0x0000000000000000\n1230, 877, 34.95, 32, 0, 24608, 0x0000000000000000\n1230, 877, 38.11, 41, 0, 26462, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825648.6157665,
+   "1342, 877, 238.86, 69, 100, 19448, 0x0000000000000000\n1230, 877, 37.37, 32, 0, 31632, 0x0000000000000000\n1380, 877, 227.83, 70, 100, 31282, 0x0000000000000000\n1230, 877, 34.86, 32, 0, 24608, 0x0000000000000000\n1230, 877, 38.09, 41, 0, 26462, 0x0000000000000000\n1230, 877, 37.50, 30, 0, 31632, 0x0000000000000000"
+  ],
+  [
+   1792825650.7496085,
+   "1365, 877, 249.50, 69, 100, 19448, 0x0000000000000004\n1230, 877, 37.39, 32, 0, 31632, 0x0000000000000000\n1380, 877, 196.72, 68, 100, 31282, 0x0000000000000000\n1230, 877, 34.95, 32, 0, 24608, 0x0000000000000000\n1230, 877, 38.00, 41, 0, 26462, 0x0000000000000000\n1230, 877, 37.51, 30, 0, 31632, 0x0000000000000000"
+  ]
+ ],
+ "server_returncode": 0,
+ "ended": 1792825652.9090228
+}
