@@ -200,6 +200,31 @@ upstream. Read this before you rely on the port.
   This is pre-existing behaviour of the shared pool, not of the ordering
   options. Evicting cached prefix pages before preempting a decoder would
   avoid some of it; that is not implemented.
+- **Preemption under KV pressure is not output-exact.** When concurrent long
+  requests outgrow the KV pool (for example four ~29k-token contexts with long
+  outputs on the 976-page G128 package, where each prefix-checkpoint row also
+  borrows about 22 KV pages), the server preempts a decoding request and
+  readmits it once pages free up: the prompt prefix is restored from a
+  checkpoint (from the host prefix cache with --prefix-cache-restore-wait,
+  otherwise often recomputed) and the tokens the request had already generated
+  are prefilled again. Those tokens' KV is then produced by the prefill path
+  rather than by the decode/verification path that generated them, so a greedy
+  request can continue differently from an uninterrupted run: in every
+  preempted request we compared, output diverged 5-31 tokens after the resume
+  point, while unpreempted requests stayed token-identical to same-seed runs.
+  No request is truncated and restored bytes are the original ones; only the
+  continuation after a preemption can differ. To avoid preemption, keep the
+  concurrent contexts plus their output lengths within the reported KV
+  capacity (fewer concurrent long requests or shorter outputs).
+- **`--prefix-cache-restore-wait` (opt-in, default off; server configuration
+  key `host_restore_wait`).** After such a preemption, a request whose prefix
+  the host prefix cache holds waits for its restore while other requests run,
+  at most as long as recomputing that prefix would take, instead of prefilling
+  it again. Arithmetic is unchanged. In a lab measurement on package
+  `f21b9abb` (four 28.7k-token agents, 2,048 output tokens, default ordering;
+  server binary `48b69ed4` without the option against a lab build of it), the
+  tokens prefilled again after preemptions fell from 117k to 1.8k per run
+  ([LEDGER-R3.md](receipts/kv-pressure/LEDGER-R3.md), rows M1 and AB1).
 - **Profiling issue under investigation.** Node-level CUDA-graph tracing with
   Nsight Systems (`nsys --cuda-graph-trace=node`) made the server fail with CUDA
   error 719 (`unspecified launch failure`) after about 127 cumulative 128-token
