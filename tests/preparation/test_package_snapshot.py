@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import time
 
 import pytest
 
@@ -241,6 +242,98 @@ def test_cached_blob_corruption_is_rejected_without_replacement(tmp_path):
     assert path.read_bytes()[4096:] == b'nope'
     with pytest.raises(ValueError, match='64G'):
         store.put(64 << 30, lambda: [])
+
+
+def _wait_for_filesystem_timestamp_tick(path):
+    """Advance the mutation stimulus past the inode's tick, without changing the blob or retrying verification."""
+    before = path.stat()
+    deadline = time.monotonic() + 2
+    # The probe uses the same filesystem's actual timestamp resolution; a wall-clock nanosecond increment alone
+    # does not guarantee a distinct inode ctime. Bound the wait and fail explicitly if the stimulus cannot be made.
+    with tempfile.TemporaryFile(dir=path.parent) as probe:
+        while time.monotonic() < deadline:
+            os.utime(probe.fileno(), None)
+            if os.fstat(probe.fileno()).st_ctime_ns > before.st_ctime_ns:
+                return before
+            time.sleep(.01)
+    pytest.fail('filesystem timestamp did not advance within two seconds')
+
+
+def _link_with_changed_ctime(path, target):
+    before = _wait_for_filesystem_timestamp_tick(path)
+    os.link(path, target)
+    after = path.stat()
+    assert after.st_ctime_ns != before.st_ctime_ns, 'hardlink stimulus did not change ctime'
+    assert after.st_mtime_ns == before.st_mtime_ns
+    assert after.st_nlink == before.st_nlink + 1
+
+
+def test_blob_verification_retries_metadata_changes_from_a_concurrent_link(tmp_path, monkeypatch):
+    from ignition.preparation.package_snapshot import BlobStore
+
+    store = BlobStore(tmp_path)
+    name = store.put(4, lambda: [b'data'])
+    path = store.root / name
+    original = hashlib.file_digest
+    calls = []
+
+    def digest(source, algorithm):
+        result = original(source, algorithm)
+        calls.append(1)
+        if len(calls) == 1:
+            _link_with_changed_ctime(path, tmp_path / 'rank-payload')
+        return result
+
+    monkeypatch.setattr(hashlib, 'file_digest', digest)
+    BlobStore.verify(path, bytes.fromhex(name[:-12]), path.stat().st_size)
+    assert len(calls) == 2
+
+
+def test_blob_verification_retry_still_rejects_changed_content(tmp_path, monkeypatch):
+    from ignition.preparation.package_snapshot import BlobStore
+
+    store = BlobStore(tmp_path)
+    name = store.put(4, lambda: [b'data'])
+    path = store.root / name
+    path.chmod(0o644)
+    original = hashlib.file_digest
+    calls = []
+
+    def digest(source, algorithm):
+        result = original(source, algorithm)
+        calls.append(1)
+        if len(calls) == 1:
+            _wait_for_filesystem_timestamp_tick(path)
+            with path.open('r+b') as output:
+                output.seek(4096)
+                output.write(b'nope')
+        return result
+
+    monkeypatch.setattr(hashlib, 'file_digest', digest)
+    with pytest.raises(ValueError, match='cached blob content'):
+        BlobStore.verify(path, bytes.fromhex(name[:-12]), path.stat().st_size)
+    assert len(calls) == 2
+
+
+def test_blob_verification_retries_are_bounded(tmp_path, monkeypatch):
+    from ignition.preparation.package_snapshot import BlobStore
+
+    store = BlobStore(tmp_path)
+    name = store.put(4, lambda: [b'data'])
+    path = store.root / name
+    original = hashlib.file_digest
+    calls = []
+
+    def digest(source, algorithm):
+        result = original(source, algorithm)
+        calls.append(1)
+        _link_with_changed_ctime(path, tmp_path / f'rank-payload-{len(calls)}')
+        return result
+
+    monkeypatch.setattr(hashlib, 'file_digest', digest)
+    with pytest.raises(ValueError, match='cached blob changed during verification'):
+        BlobStore.verify(path, bytes.fromhex(name[:-12]), path.stat().st_size)
+    assert len(calls) == 3
 
 
 def test_logical_reads_seek_to_overlapping_blobs_and_preserve_padding(tmp_path):
