@@ -328,3 +328,91 @@ def test_dense_mtp_compiles_and_replays_with_existing_sm70_operators():
             assert torch.equal(key.cpu(), expected[3].view(torch.uint16))
             assert torch.equal(value.cpu(), expected[4].view(torch.uint16))
         graph.reset()
+
+
+@pytest.mark.skipif(os.environ.get("FLARE_RUN_CUDA_TESTS") != "1", reason="requires an assigned V100")
+@pytest.mark.parametrize("batch", [1, 4])
+@torch.inference_mode()
+def test_dense_mtp_captured_dynamic_draft_rows_pages_and_empty_replay(batch):
+    """One row/request as in PreparedRound; replay changes packed row ownership and physical page mapping."""
+    from b12x.preparation import PreparationSession
+    from ignition.components.paged_batch import Metadata
+    from ignition.preparation.compilation import compile_forward
+    from ignition.preparation.scratch import ScratchArena
+
+    assert os.environ.get("CUDA_VISIBLE_DEVICES"), "assign the test V100 explicitly"
+    if torch.cuda.get_device_capability() != (7, 0):
+        pytest.skip("requires V100")
+    device = torch.device("cuda", torch.cuda.current_device())
+    config = _config(attention=True)
+    weights, cpu_weights = _weights(config, device), _weights(config)
+    metadata, cpu_metadata = (Metadata.allocate(batch, batch, 2, where) for where in (device, "cpu"))
+    scratch = mtp.MTPScratch.allocate(batch, batch, config, device)
+    hidden = torch.zeros((batch, config.hidden), device=device)
+    generator = torch.Generator().manual_seed(3884 + batch)
+    initial_k = (torch.randn((2 * batch + 1, 128, 4, 256), generator=generator) * .2).bfloat16()
+    initial_v = (torch.randn(initial_k.shape, generator=generator) * .2).bfloat16()
+    key, value = initial_k.view(torch.uint16).to(device), initial_v.view(torch.uint16).to(device)
+    workspace = ScratchArena(device)
+    with PreparationSession(device=device, autotune=False, compile_workers=0) as session:
+        operation = mtp.PreparedMTP(weights, scratch, metadata.token_ids, hidden, metadata, key, value, workspace,
+            output_indices=metadata.sample_indices, session=session, name="dynamic-mtp")
+        compiled = compile_forward(operation)
+    workspace.freeze()
+    # Materialize the same complete forward before capture; initially every metadata row is inactive.
+    compiled()
+    torch.cuda.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        compiled()
+
+    all_live = [1] * batch
+    middle_inactive = [1, 0, 1, 1] if batch == 4 else [0]
+    suffix_live = [0, 1, 0, 1] if batch == 4 else [1]
+    # Full -> ragged -> sparse -> empty -> full: positions 127/128 cross the draft page boundary.
+    cases = [(127, all_live), (128, middle_inactive), (129, suffix_live),
+             (130, [0] * batch), (131, all_live)]
+    for ordinal, (position, lengths) in enumerate(cases):
+        pages = torch.randperm(2 * batch, generator=generator).int().view(batch, 2)
+        starts = torch.tensor([position - row for row in range(batch)], dtype=torch.int64)
+        lengths_cpu = torch.tensor(lengths, dtype=torch.int32)
+        ids = torch.arange(batch, dtype=torch.int64)[:, None] + ordinal + 2
+        cpu_metadata.set(starts, lengths_cpu, torch.arange(1, batch + 1), pages, ids, torch.tensor([batch]))
+        for field in cpu_metadata.__dataclass_fields__:
+            source = getattr(cpu_metadata, field)
+            if isinstance(source, torch.Tensor):
+                getattr(metadata, field).copy_(source)
+        feedback = torch.randn((batch, config.hidden), generator=generator).bfloat16().float()
+        hidden.copy_(feedback[cpu_metadata.requests])
+        before_k, before_v = key.cpu().view(torch.bfloat16), value.cpu().view(torch.bfloat16)
+        expected = _reference(cpu_weights, cpu_metadata.token_ids, hidden.cpu(), cpu_metadata,
+                              before_k, before_v, cpu_metadata.sample_indices)
+        allocations = torch.cuda.memory_stats()["allocation.all.allocated"]
+        graph.replay()
+        torch.cuda.synchronize()
+        assert torch.cuda.memory_stats()["allocation.all.allocated"] == allocations
+        captured = (scratch.hidden.clone(), scratch.logits.clone(), key.clone(), value.clone())
+        # Independent BF16 arithmetic keeps the existing operator-specific bounds. Complete cache comparisons
+        # additionally establish that inactive, old-prefix and unmapped sentinel bytes are untouched.
+        torch.testing.assert_close(scratch.hidden.cpu(), expected[1], rtol=.02, atol=.015625)
+        live_requests = lengths_cpu.bool()
+        torch.testing.assert_close(scratch.logits.cpu()[live_requests], expected[2][live_requests],
+                                   rtol=.02, atol=.015625)
+        assert torch.equal(key.cpu(), expected[3].view(torch.uint16))
+        assert torch.equal(value.cpu(), expected[4].view(torch.uint16))
+        active = sum(lengths)
+        assert torch.equal(scratch.hidden[active:].view(torch.int32),
+                           torch.zeros_like(scratch.hidden[active:], dtype=torch.int32))
+        agents = operation.attention.agents
+        assert agents.cu.cpu().tolist() == [*cpu_metadata.query_start_loc.tolist(), *([active] * (4 - batch))]
+        assert agents.lengths.cpu().tolist() == [
+            *[int(starts[row]) + length if length else 0 for row, length in enumerate(lengths)],
+            *([0] * (4 - batch))]
+        # Same compiled operators, inputs and initial state: captured and eager executions must agree in bytes.
+        key.copy_(before_k.view(torch.uint16))
+        value.copy_(before_v.view(torch.uint16))
+        compiled()
+        torch.cuda.synchronize()
+        for actual, saved in zip((scratch.hidden, scratch.logits, key, value), captured, strict=True):
+            assert torch.equal(actual.view(torch.uint8), saved.view(torch.uint8))
+    graph.reset()

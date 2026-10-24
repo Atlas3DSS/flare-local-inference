@@ -127,3 +127,128 @@ def test_refuses_page_tables_beyond_the_admitted_context():
     with pytest.raises(ValueError, match="--context 32768"):
         PreparedDecodeAttention(q, kc, kc.clone(), agents, torch.zeros_like(q), session=None, name="too-wide",
                                 rows_per_agent=1)
+
+
+@pytest.mark.parametrize("width", [1, 5])
+@torch.inference_mode()
+def test_maximum_context_captured_row_identity_and_poisoned_tails(width):
+    """The full 64-partition endpoint and shrinking tails, without duplicating the short-context reference matrix.
+
+    Four agents share read-only pages to bound fixture memory. Metadata packing is inside the captured forward.
+    Every live row is compared with the same kernel's one-row launch at its own visible length, as its ABI promises.
+    """
+    from b12x.preparation import PreparationSession
+    from ignition.preparation.compilation import compile_forward
+    from ignition.preparation.scratch import ScratchArena
+
+    assert os.environ.get("CUDA_VISIBLE_DEVICES"), "assign the test V100 explicitly"
+    if torch.cuda.get_device_capability() != (7, 0):
+        pytest.skip("requires V100")
+    device = torch.device("cuda", torch.cuda.current_device())
+    torch.manual_seed(32768 + width)
+    blocks, rows = component.MAX_LENGTH // PAGE, 4 * width
+    # One extra physical page is never mapped. It and every inaccessible cache tail contain NaNs.
+    k = (torch.randn((blocks + 1, PAGE, KV, DIM), device=device) * .2).bfloat16()
+    v = torch.randn(k.shape, device=device).bfloat16()
+    finite_k, finite_v = k.clone(), v.clone()
+    kc, vc = k.view(torch.uint16), v.view(torch.uint16)
+    q = torch.zeros((rows, HEADS, DIM), device=device)
+    output = torch.full_like(q, float("nan"))
+    lengths = torch.zeros(4, dtype=torch.int32, device=device)
+    starts = torch.zeros(4, dtype=torch.int64, device=device)
+    cu = torch.zeros(5, dtype=torch.int32, device=device)
+    pages = torch.full((4, blocks), -1, dtype=torch.int32, device=device)
+    agents = DecodeAgents.allocate(rows, blocks, device)
+    single_q = torch.zeros((1, HEADS, DIM), device=device)
+    single_output = torch.zeros_like(single_q)
+    single_agents = DecodeAgents.allocate(1, blocks, device)
+    arena = ScratchArena(device, overlap=False)
+    with PreparationSession(device=device, autotune=False, compile_workers=0) as session:
+        attention = PreparedDecodeAttention(q, kc, vc, agents, output, session=session, name="max-context",
+                                            workspace=arena, rows_per_agent=width)
+        single = PreparedDecodeAttention(single_q, kc, vc, single_agents, single_output, session=session,
+                                         name="max-context-single", workspace=arena, rows_per_agent=1)
+
+        def forward():
+            agents.pack(lengths, starts, cu, pages)
+            attention()
+
+        compiled, compiled_single = compile_forward(forward), compile_forward(single)
+    arena.freeze()
+    attention.bind()
+    single.bind()
+    compiled()
+    compiled_single()
+    torch.cuda.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        compiled()
+
+    cases = [(32768, [width, 0, width, 1]), (32767, [1, width, 0, width]),
+             (129, [width] * 4), (128, [0] * 4), (127, [width] * 4)]
+    for ordinal, (total, counts) in enumerate(cases):
+        permutation = torch.randperm(blocks, device=device)
+        pages.copy_(permutation.int()[None, :].expand(4, -1))
+        # Positive stale starts for inactive requests must still produce packed length zero.
+        starts.copy_(torch.tensor([total - count for count in counts], device=device))
+        lengths.copy_(torch.tensor(counts, dtype=torch.int32, device=device))
+        boundaries = [0]
+        for count in counts:
+            boundaries.append(boundaries[-1] + count)
+        cu.copy_(torch.tensor(boundaries, dtype=torch.int32, device=device))
+        live = boundaries[-1]
+        q.fill_(float("nan"))
+        q[:live].copy_((torch.randn((live, HEADS, DIM), device=device) * .2).bfloat16().float())
+        k.copy_(finite_k)
+        v.copy_(finite_v)
+        used = (total + PAGE - 1) // PAGE
+        k[permutation[used:]] = float("nan")
+        v[permutation[used:]] = float("nan")
+        if total % PAGE:
+            last_page = int(permutation[used - 1])
+            k[last_page, total % PAGE:] = float("nan")
+            v[last_page, total % PAGE:] = float("nan")
+        k[-1].fill_(float("nan"))
+        v[-1].fill_(float("nan"))
+        before_k, before_v = kc.clone(), vc.clone()
+        output.fill_(float("nan"))
+        allocations = torch.cuda.memory_stats()["allocation.all.allocated"]
+        graph.replay()
+        torch.cuda.synchronize()
+        assert torch.cuda.memory_stats()["allocation.all.allocated"] == allocations
+        captured = output.clone()
+        assert torch.isfinite(captured[:live]).all(), (total, counts)
+        assert torch.equal(captured[live:].view(torch.int32), torch.zeros_like(captured[live:], dtype=torch.int32))
+        assert agents.lengths.cpu().tolist() == [total if count else 0 for count in counts]
+        output.fill_(float("nan"))
+        compiled()
+        torch.cuda.synchronize()
+        assert torch.equal(captured.view(torch.int32), output.view(torch.int32))
+        for request, count in enumerate(counts):
+            for column in range(count):
+                row = boundaries[request] + column
+                visible = total - count + column + 1
+                single_q.copy_(q[row:row + 1])
+                single_agents.lengths.zero_()
+                single_agents.lengths[0] = visible
+                single_agents.cu.fill_(1)
+                single_agents.cu[0] = 0
+                single_agents.pages.fill_(-1)
+                single_agents.pages[0].copy_(pages[request])
+                compiled_single()
+                torch.cuda.synchronize()
+                assert torch.equal(captured[row:row + 1].view(torch.int32), single_output.view(torch.int32)), (
+                    total, request, column)
+        # One FP64 reference at the maximum endpoint; the existing test already covers the short-context matrix.
+        if width == 1 and ordinal == 0:
+            expected = _reference(q[:1], kc, vc, pages[:1], torch.tensor([total]), torch.tensor([0, 1]))
+            torch.testing.assert_close(captured[:1].double().cpu(), expected.cpu(), rtol=2e-5, atol=2e-6)
+        assert torch.equal(kc, before_k) and torch.equal(vc, before_v), "attention mutated canonical cache bytes"
+
+    # Visible non-finite V must propagate; a finite result would silently hide corrupt state. All live rows see token 0.
+    first_page = int(pages[0, 0])
+    v[first_page, 0, 0, 0] = float("nan")
+    graph.replay()
+    torch.cuda.synchronize()
+    assert not torch.isfinite(output[:, :HEADS // KV, 0]).any()
+    graph.reset()

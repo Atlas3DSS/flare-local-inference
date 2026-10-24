@@ -11,6 +11,7 @@ outputs as the candidate-column sequence, and the replay commit reproduces every
 import math
 import os
 import re
+from dataclasses import fields, replace
 from types import SimpleNamespace
 
 import pytest
@@ -55,6 +56,72 @@ def _operands(convolved, a, b, a_log, dt_bias, token):
 
 def test_operand_width_is_the_documented_33152_bytes():
     assert OPERAND == 8288 and OPERAND * 4 == 33_152
+
+
+@pytest.mark.parametrize("width", [1, 4, 5])
+def test_generic_gdn_replay_history_capacity_admission(monkeypatch, width):
+    """Exercise PreparedGDN's real admission before any CUDA compilation or allocation.
+
+    Meta tensors carry production shapes/strides with a CUDA device label. Only hardware detection and the downstream sequence
+    constructor are replaced; the generic geometry, history, token and column checks run unchanged.
+    """
+    from ignition.components import sm70_gdn, sm70_projection
+    from ignition.components.gated_delta import GDNScratch, PreparedGDN
+    from ignition.components.recurrent import DeltaMetadata
+
+    monkeypatch.setattr(torch.cuda, "_lazy_init", lambda: pytest.fail("admission test initialized CUDA"))
+    monkeypatch.setattr(sm70_projection, "is_sm70", lambda device: True)
+    reached = []
+    sentinel = object()
+
+    def prepare_sequence(*args, **kwargs):
+        reached.append(kwargs["replay"])
+        return sentinel
+
+    monkeypatch.setattr(sm70_gdn, "PreparedSM70GDNSequence", prepare_sequence)
+    class CudaMetadata:
+        # Admission reads metadata only. Avoid constructing FakeTensor(cuda), which can initialize CUDA on a
+        # GPU-equipped test runner even though this test must run entirely on the CPU.
+        device = torch.device("cuda:0")
+
+        def __init__(self, tensor):
+            self.tensor = tensor
+
+        def __getattr__(self, name):
+            return getattr(self.tensor, name)
+
+    def fake(shape, dtype=torch.float32):
+        return CudaMetadata(torch.empty(shape, dtype=dtype, device="meta"))
+
+    module = SimpleNamespace(hidden_size=32, num_k_heads=KEYS, num_v_heads=VALUES, head_k_dim=DIM,
+        head_v_dim=DIM, conv_dim=CHANNELS, conv_kernel_size=4, activation="silu", norm_weight_bf16=True,
+        conv1d=SimpleNamespace(weight=fake((CHANNELS, 1, 4)), bias=None), A_log=fake((VALUES,)),
+        dt_bias=fake((VALUES,)), norm=SimpleNamespace(weight=fake((DIM,)), activation="silu"))
+    requests = 4
+    state = SimpleNamespace(convolution=fake((requests + 1, CHANNELS, width + 2)),
+                            recurrent=fake((requests + 1, VALUES, DIM, DIM)))
+
+    def construct(tokens, columns, replay):
+        scratch = GDNScratch.allocate(tokens, torch.device("meta"), hidden_size=32, dtype=torch.float32)
+        scratch = replace(scratch, **{field.name: CudaMetadata(getattr(scratch, field.name)) for field in fields(scratch)})
+        metadata = DeltaMetadata.allocate(requests, "cpu", verification_columns=columns)
+        operands = fake((tokens, OPERAND)) if replay else None
+        return PreparedGDN(module, dict.fromkeys(("in_proj_qkv", "in_proj_z", "in_proj_ba", "out_proj")),
+            fake((tokens, 32)), scratch, state, metadata, mode="decode", session=None, name="admission",
+            prepare_projections=False, replay=operands)
+
+    accepted = construct(requests * width, 1, True)
+    assert accepted.sm70_sequence is sentinel and reached[-1] is not None
+    assert accepted.tokens == requests * width and accepted.speculative_tokens == width - 1
+    ordinary = construct(requests * width, width, False)
+    assert ordinary.sm70_sequence is sentinel and reached[-1] is None
+    calls = len(reached)
+    for tokens, columns, replay in ((requests * width + 1, 1, True), (requests, 2, True),
+                                    (requests * width + 1, width, False), (requests + 1, 1, False),
+                                    (requests, width + 1, False)):
+        with pytest.raises(ValueError, match="decode token/verification capacity exceeds its convolution history"):
+            construct(tokens, columns, replay)
+    assert len(reached) == calls, "invalid capacities reached kernel preparation"
 
 
 @pytest.mark.parametrize("fresh", [(False, False, True, False), (True, True, True, True)])
