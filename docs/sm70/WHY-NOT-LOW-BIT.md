@@ -315,7 +315,27 @@ are on NVLink-connected V100-SXM2 cards, which is different hardware.
 | --- | ---: | ---: | ---: | ---: |
 | 1Cat-vLLM TP4, 1 user (measured, greedy) | 1 | 63.0 | 63.0 | 15.8 |
 | 1Cat-vLLM TP4, 4 users (measured, greedy) | 4 | 50.3 | 203.4 | n/a |
-| This port, four independent single-card servers | | pending: measurement not yet published | | |
+| This port, four independent single-card servers, 4 agents each (measured, sampled at 0.7) | 16 | 61.7 | 571.1 | 35.5 (one prompt per card, from the single-card run) |
+| This port, same, `--prefill-srpt` | 16 | 63.6 | 575.5 | 35.5 (as above) |
+
+The two designs differ. 1Cat-vLLM shards one model over four cards with tensor
+parallelism, so all four cards work on each token and talk over PCIe. This port
+runs four separate servers, one model copy per card, with no traffic between
+cards; one request uses one card, and a router spreads users across them
+([SERVE.md](SERVE.md#several-cards-behind-a-router)). So the rows do not have
+the same number of users: 16 against 1 and 4. At 4 users 1Cat-vLLM is
+slower per user than at 1; ours per user stays within a few percent of the
+one-card value as cards are added (61.7 to 63.9 tok/s at 2 to 6 cards, against
+64.9 on one). Our first-token figure is the single-card measurement: the
+four-card run used 578-token prompts, not 30,720-token ones, so it has no
+30,720-token first token, and a 30,720-token prompt on its own card takes what it
+takes on one card. Aggregates are end to end as each run recorded them (ours
+854.4 tok/s over the decode window alone). Our cards are PCIe too, but the
+layout needs no link between them, so NVLink-connected SXM2 cards would not
+change our figures; it would help a tensor-parallel setup such as 1Cat's
+published four-card runs. The 2 to 6 card series is in
+[BENCHMARKS-SM70.md](../../BENCHMARKS-SM70.md#several-cards-independent-servers-2-to-6-v100s)
+([N4-summary.json](receipts/multicard/N4-summary.json)).
 
 ## Strata and Project Maya
 

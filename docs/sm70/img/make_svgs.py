@@ -362,6 +362,7 @@ def kv_pool(c):
 # a2-spec-results.json, a1-flare-d0-run.json (decode, 2026-10-23), a1-summary.json (llama.cpp TTFT and four agents),
 # a1-llamacpp-kl.json and reference-kl.json (KL, 141 positions), g128/default-short-native-depth4.json,
 # g128/default-prefill-summary.json and g128/srpt-prefill-summary.json (this port, package f21b9abb, 2026-10-24);
+# docs/sm70/receipts/multicard/N2..N6-summary.json (several cards, 2026-10-24);
 # docs/sm70/receipts/engines/ (vLLM family, greedy, 2026-10-24): c3-1cat151-tp1-fp16kv-u088-b4096-results.json,
 # g1b-vllm0180-gptq-results.json, kl-vllm0180-gptq.json, engines-summary.json.
 DECODE = [  # label, 1 agent, 4 agents (per agent), family, speculation on?
@@ -374,6 +375,12 @@ DECODE = [  # label, 1 agent, 4 agents (per agent), family, speculation on?
 ]
 KL = [("This port (NVFP4 weights unchanged)", 0.0011, "port"), ("llama.cpp Q8_0", 0.0013, "llama"),
       ("llama.cpp Q4_K_M", 0.0088, "llama"), ("vLLM 0.18.0, GPTQ-Int4", 0.0383, "vllm")]
+# job9 multi-card series (docs/sm70/receipts/multicard/N<N>-summary.json): default prefill, short prompts, aggregate
+# output tokens/s summed over cards (end to end); 1Cat-vLLM TP4 with 4 users from receipts/engines/.
+MULTI = [("This port, 2 cards x 4 agents", 284.2, "port"), ("This port, 3 cards x 4 agents", 430.0, "port"),
+         ("This port, 4 cards x 4 agents", 571.1, "port"), ("This port, 5 cards x 4 agents", 726.6, "port"),
+         ("This port, 6 cards x 4 agents", 867.5, "port"),
+         ("1Cat-vLLM TP4, 4 users, NVFP4", 203.4, "vllm")]
 FAMILY = {"port": "accent", "llama": "context", "vllm": "vllm"}
 
 
@@ -492,6 +499,23 @@ def comparison(c):
         body.append(t(kx(v), yy + 12, lab, 14, c["secondary"], anchor="middle", extra=num))
     body.append(t(lx, yy + 44, "Top-1 agreement with the FP32 run: this port 135, llama.cpp 136-137, vLLM 0.18.0 GPTQ 130 of 141 "
                   "positions; not drawn.", 15, c["secondary"]))
+    # ---- panel D: several cards, independent servers (job9 multicard series)
+    y = yy + 98
+    body.append(f'<line x1="{PAD}" y1="{y - 24}" x2="{W - PAD}" y2="{y - 24}" stroke="{c["grid"]}" stroke-width="1"/>')
+    body.append(t(lx, y, "Several cards: aggregate output, tokens/s (higher is better)", 21, c["primary"], 650))
+    body.append(t(lx, y + 24, "Independent single-card servers, 4 agents per card, short prompts, end to end; "
+                  "per agent 61.7 to 63.9 tok/s", 16, c["secondary"]))
+    amax = 1000
+    ax = lambda v: x0 + (x1 - x0) * v / amax
+    yy = y + 50
+    for label, v, fam in MULTI:
+        body.append(t(x0 - 16, yy + 19, escape(label), 16, c["primary"], 400, "end"))
+        body.append(hbar(x0, yy, ax(v) - x0, bh, c[FAMILY[fam]], f"{label}: {v} tok/s aggregate"))
+        body.append(t(ax(v) + 10, yy + 19, f"{v:.1f}", 17, c["primary"], 650, extra=num))
+        yy += bh + gap
+    for v in range(0, amax + 1, 250):
+        body.append(t(ax(v), yy + 12, str(v), 14, c["secondary"], anchor="middle", extra=num))
+    yy += 20
     # ---- footnotes
     notes = [
         "Official vLLM 0.32.0 and SGLang 0.5.22 cannot serve this checkpoint on a V100 today (no sm_70 support).",
@@ -503,8 +527,10 @@ def comparison(c):
         "GPTQ-Int4 of the BF16 base model (Max73333 @ c7ed2123), a different quantisation source. Without speculation, decode",
         "on one card is similar across engines; this port's lead is MTP verification and batching (acceptance about 0.70 on both",
         "MTP engines), and the 1Cat-vLLM fork prefills faster on one card. Strata and Project Maya cannot serve this 27B model.",
+        "Several cards (2026-10-24, package g128-release-prepare, six V100 PCIe): one server per card, no tensor parallelism, no NVLink",
+        "needed; 1Cat-vLLM TP4 runs tensor parallel over four PCIe cards. Different designs, one number each, not a like-for-like race.",
     ]
-    fy = yy + 110
+    fy = yy + 70
     h = fy + 22 * len(notes) + 30
     body.append(f'<line x1="{PAD}" y1="{fy - 30}" x2="{W - PAD}" y2="{fy - 30}" stroke="{c["grid"]}" stroke-width="1"/>')
     for i, n in enumerate(notes):
@@ -518,7 +544,10 @@ def comparison(c):
             "llama.cpp Q8_0 0.0013, llama.cpp Q4_K_M 0.0088. vLLM family, greedy, no speculation: 1Cat-vLLM fork with the same "
             "NVFP4 file 29.3 and 27.9 tokens per second, first token 32.9 s; official vLLM 0.18.0 with a GPTQ-Int4 checkpoint "
             "39.9 and 30.7, first token 191.2 s, mean KL 0.0383. Official vLLM 0.32.0 and SGLang 0.5.22 cannot serve this "
-            "checkpoint on a V100. Sources: WHY-NOT-LOW-BIT.md and BENCHMARKS-SM70.md.")
+            "checkpoint on a V100. Several cards, independent single-card servers with 4 agents each, aggregate output tokens per second "
+            "end to end on short prompts: 2 cards 284.2, 3 cards 430.0, 4 cards 571.1, 5 cards 726.6, 6 cards 867.5; per agent 61.7 to "
+            "63.9 against 64.9 on one card; 1Cat-vLLM with tensor parallelism over four PCIe cards, 4 users, 203.4. "
+            "Sources: WHY-NOT-LOW-BIT.md and BENCHMARKS-SM70.md.")
     return frame(c, h, "Same model, same card: Qwen3.8-27B on one Tesla V100 32 GB", desc, "\n".join(body))
 
 

@@ -313,6 +313,77 @@ cold batch's mean last token was 159.8 s with a budget of 4,096, 175.2 s with
 
 The refinements stay opt-in, and round-robin stays the default.
 
+## Several cards: independent servers, 2 to 6 V100s
+
+Measured on 2026-10-24 on one host with six Tesla V100 PCIe 32 GB cards. Each
+card ran its own `flare run` server (no tensor parallelism, no traffic between
+cards, as in [SERVE.md](docs/sm70/SERVE.md#several-cards-behind-a-router)) with
+package `f21b9abb` and server binary `48b69ed4` of the section above, and four agents talked to
+each server: the short-prompt protocol (128 output tokens, 3 repetitions) and
+the long-context protocol (four prompts of 28.7k tokens, 512 output tokens,
+3 repetitions), each with the default prefill ordering and with
+`--prefill-srpt`. The series ran N = 2, 3, 4, 5 and 6 cards, all servers of one
+step at the same time, so N = 6 is 24 agents on 6 cards. Per-step summaries are
+in [docs/sm70/receipts/multicard/](docs/sm70/receipts/multicard/)
+([N2](docs/sm70/receipts/multicard/N2-summary.json),
+[N3](docs/sm70/receipts/multicard/N3-summary.json),
+[N4](docs/sm70/receipts/multicard/N4-summary.json),
+[N5](docs/sm70/receipts/multicard/N5-summary.json),
+[N6](docs/sm70/receipts/multicard/N6-summary.json)).
+
+Aggregate tok/s is the sum over cards of the output tokens divided by each
+card's batch wall time, so it is end to end and includes prefill and HTTP.
+Per agent is the mean over cards of the per-agent decode rate. First token is
+the p50 over the cards' requests (median of the cards' p50). The one-card
+reference is the 64.9 tok/s per agent of the four-agent short leg above.
+
+| Cards | Short, default: aggregate / per agent | Short, `--prefill-srpt`: aggregate / per agent | First token, short, p50 | Long, default: aggregate / first token p50 | Long, `--prefill-srpt`: aggregate / first token p50 |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 2 | 284.2 / 61.9 | 288.6 / 63.6 | 0.03 s | 38.0 / 57.5 s | 37.7 / 38.6 s |
+| 3 | 430.0 / 62.8 | 432.3 / 63.5 | 0.03 s | 65.9 / 23.9 s | 57.5 / 40.0 s |
+| 4 | 571.1 / 61.7 | 575.5 / 63.6 | 0.03 s | 81.4 / 68.6 s | 76.1 / 26.3 s |
+| 5 | 726.6 / 63.9 | 721.2 / 63.5 | 0.03 s | 104.7 / 38.5 s | 99.0 / 35.0 s |
+| 6 | 867.5 / 63.7 | 865.6 / 63.6 | 0.02 s | 127.3 / 62.2 s | 116.8 / 38.1 s |
+
+What the table shows:
+
+- **Short prompts scale in a straight line.** Each added card adds about
+  143 tok/s end to end. Over the decode window alone the sum is 427.8, 641.2,
+  854.4, 1,068.6 and 1,281.4 tok/s for 2 to 6 cards, about 214 per card,
+  against 213.1 for one card in the four-agent leg above.
+- **Per-agent speed stays near the one-card value.** Default per-agent means
+  are 61.7 to 63.9 tok/s against 64.9 on one card; individual cards range
+  from 6.1 % below to 0.3 % below (up to 4.6 % at N = 2, 3 and 6, and 6.1 % at
+  N = 4). The gaps were not isolated. All cards of a step shared one CPU
+  set (the launcher pinned every card to the same cores), and the N = 4 step
+  also overlapped an unrelated GPU job on another card of the host, which added
+  host load. The `--prefill-srpt` runs stayed within 2.3 % of 64.9
+  throughout, but they are shown for scale only: 64.9 is the default-ordering
+  number.
+- **First tokens on short prompts are immediate** (p50 0.02 to 0.03 s at
+  every N), with a p95 of about 3.9 s (default) or 4.2 s (`--prefill-srpt`),
+  probably the first, cold repetition of each server.
+- **The long-context columns are noisy and do not rank the two orderings.**
+  Four 28.7k-token prompts on one server stagger the agents' prefills, so the
+  per-agent decode rate (12.9 to 43.4 tok/s) and first-token p50 depend on
+  which agent is measured. `--prefill-srpt` has the lower first-token p50 at
+  N = 2, 4, 5 and 6, and the higher at N = 3; its p95 is lower at every N (120.5
+  to 124.6 s against 139.2 to 141.5 s). Its aggregate is lower at four of the
+  five N and about equal at N = 2. Treat these as the spread of a
+  small sample, not as a result for either ordering. The single-server
+  numbers in the long-context section above remain the reference.
+- **The end-to-end short aggregate per card (142 to 145 tok/s) is lower than
+  the 220.5 of the one-card leg.** A fresh server prefills the first repetition
+  cold, while the one-card leg's repeated prompts reuse prefixes; this was not
+  isolated.
+
+Every step finished all requests on all cards. Per-card values, utilisation
+samples and the exact configuration are in the summaries. The cards are PCIe
+cards, and this layout needs no card-to-card link, so NVLink or SXM2 would not
+change these numbers. For tensor-parallel results on the same checkpoint class
+see [WHY-NOT-LOW-BIT.md](docs/sm70/WHY-NOT-LOW-BIT.md#same-model-on-llamacpp)
+(four PCIe cards, 1Cat-vLLM, tensor parallel), which compares this series with it.
+
 ## Previous package fd7c24dc on release binary d4ffb1fa (128-token prefill chunks)
 
 These are the results of the previous release package, which prefills in
