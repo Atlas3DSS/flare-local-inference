@@ -227,11 +227,15 @@ checkpoint's `tokenizer.json` and the model ID returned by `/v1/models`.
 The complete matrix is **2,048, 8,192, 22,528 and 30,720 prompt tokens**, each at
 **concurrency 1 and 4**. Raw `/v1/completions` token-ID inputs avoid chat-template
 length ambiguity, but every final server `usage.prompt_tokens` must still match
-the requested length exactly. These are deterministic, newly authored generic
-coding inputs, not the historical prompts. A new `--run-id` changes the early
-prompt tokens for every warmup/repetition/slot; reuse of a namespace is permitted
-only if cache checks still prove zero reuse. The tool does not flush or change
-server caches.
+the requested length exactly. Completions requests carry no token observation
+extensions (`return_token_ids`, `return_token_timestamps`): the server accepts
+those only on `/v1/chat/completions` and rejects them on `/v1/completions` with
+HTTP 400. The client requests continuous usage statistics instead and derives
+first-output time and output-token counts from the SSE stream itself. These
+are deterministic, newly authored generic coding inputs, not the historical
+prompts. A new `--run-id` changes the early prompt tokens for every
+warmup/repetition/slot; reuse of a namespace is permitted only if cache checks
+still prove zero reuse. The tool does not flush or change server caches.
 
 There is one separately recorded warmup batch before three measured batches for
 each matrix cell: 20 warmup requests and 60 measured requests. Warmups never enter
@@ -244,20 +248,23 @@ snapshots, including failed batches. A failed report is not a comparison result.
 
 Keep these fields in separate columns:
 
-- `transport_ttft_seconds.p50` / `.p95`: client POST start to the first observed
-  native output token, including transport, queueing and first-token generation.
+- `transport_ttft_seconds.p50` / `.p95`: client POST start to the first SSE chunk
+  carrying output (non-empty `choices[0].text`, or continuous usage showing at
+  least one completion token); includes queueing, transport and first sampling.
 - `effective_prefill_tokens_per_second_median`: native prefill-token counter
   delta divided by the batch's first-token wall window. This includes queueing,
   first-token generation and transport. It is an effective wall-time rate,
   **not pure GPU prefill throughput**.
 - `median_request_decode_tokens_per_second`: tokens after each request's first
-  observation divided by its subsequent decode window.
+  observation divided by its subsequent decode window, counted from per-chunk
+  usage. A request whose whole output arrives in one chunk has no decode window;
+  it is counted in `decode_rate_unavailable_requests` instead.
 
 The current release exposes prefill-token counters but no isolated prefill GPU
 execution-duration counter. Therefore `pure_gpu_prefill_tokens_per_second` stays
 `null`; do not substitute prompt tokens / TTFT and label it a CUDA-only rate.
 Record the exact binary/package identities and server flags beside the table.
-Only the CPU stub-server tests have run for this added client. Real V100 results
+Only the CPU stub-server tests have passed for this added client. Real V100 results
 and all prefill comparison claims remain pending until the complete matrix passes.
 
 ## Reporting your numbers

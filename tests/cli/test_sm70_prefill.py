@@ -1,10 +1,17 @@
-"""Exercise the real HTTP client against a CPU-only SSE/metrics fixture."""
+"""Exercise the real HTTP client against a CPU-only SSE/metrics fixture.
+
+The fixture follows the native /v1/completions stream contract: token-ID prompts,
+text chunks carrying continuous usage, a finish chunk, a usage-only chunk and
+[DONE]; token observation extensions are rejected with HTTP 400 as on the server.
+"""
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import threading
 import time
 from types import SimpleNamespace
 import unittest
+import urllib.error
+import urllib.request
 
 from tools import benchmark_prefill as bench
 
@@ -32,9 +39,14 @@ class PrefillTests(unittest.TestCase):
                 body=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
                 self.assert_path=self.path
                 if self.path!='/v1/completions':self.send_error(404);return
+                with owner.lock:owner.received.append(body)
+                if body.get('return_token_ids') or body.get('return_token_timestamps'):
+                    raw=json.dumps({'error':{'message':'token observation extensions require /v1/chat/completions'}}).encode()
+                    self.send_response(400);self.send_header('Content-Type','application/json')
+                    self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw);return
                 count=len(body['prompt']);output=body['max_tokens']
                 with owner.lock:
-                    owner.received.append(body);owner.counters['active']+=1
+                    owner.counters['active']+=1
                     owner.counters['flare_requests_admitted_total']+=1
                     if owner.mode=='foreign_cancelled':
                         owner.counters['flare_requests_admitted_total']+=1
@@ -43,19 +55,32 @@ class PrefillTests(unittest.TestCase):
                     owner.counters['prefill_tokens']+=count
                     if owner.mode=='metric_cache':owner.counters['reused_tokens']+=1
                 self.send_response(200);self.send_header('Content-Type','text/event-stream');self.end_headers()
+                def usage(generated):
+                    prompt=count+(owner.mode=='wrong_length')
+                    return {'prompt_tokens':prompt,'completion_tokens':generated,'total_tokens':prompt+generated,
+                            'prompt_tokens_details':{'cached_tokens':int(owner.mode=='cache')}}
+                def send(event):
+                    event={'id':'cmpl-fixture','object':'text_completion','created':0,'model':body['model'],**event}
+                    self.wfile.write(b'data: '+json.dumps(event).encode()+b'\n\n');self.wfile.flush()
                 try:
-                    for i in range(output):
+                    # One text chunk per token, or all output merged into one chunk, as the detokenizer may do.
+                    steps=[output] if owner.mode=='merged' else range(1,output+1)
+                    for generated in steps:
                         time.sleep(.025)
-                        event={'choices':[{'index':0,'token_ids':[100+i],'text':'x'}],
-                               'usage':{'prompt_tokens':count+(owner.mode=='wrong_length'),
-                                        'completion_tokens':i+1,'prompt_tokens_details':{'cached_tokens':int(owner.mode=='cache')}}}
+                        event={'choices':[{'index':0,'text':'x'*(generated if owner.mode=='merged' else 1),
+                                           'logprobs':None,'finish_reason':None}]}
+                        if owner.mode!='no_usage':event['usage']=usage(generated)
                         if owner.mode=='top_level_cache':event['reused_prompt_tokens']=1
-                        self.wfile.write(b'data: '+json.dumps(event).encode()+b'\n\n');self.wfile.flush()
+                        if owner.mode=='performance_cache':event['performance']={'reused_prompt_tokens':16}
+                        send(event)
+                    send({'choices':[{'index':0,'text':'','logprobs':None,'finish_reason':'length'}],'usage':usage(output)})
+                    send({'choices':[],'usage':usage(output)})
                 except (BrokenPipeError,ConnectionResetError):pass
                 finally:
                     with owner.lock:
                         owner.counters['active']-=1;owner.counters['generated_tokens']+=output
                         owner.counters['completed']+=1+int(owner.mode=='foreign')
+                if owner.mode=='missing_done':return
                 try:self.wfile.write(b'data: [DONE]\n\n');self.wfile.flush()
                 except (BrokenPipeError,ConnectionResetError):pass
         self.server=ThreadingHTTPServer(('127.0.0.1',0),Handler)
@@ -82,6 +107,49 @@ class PrefillTests(unittest.TestCase):
                 self.assertIn('not pure GPU',batch['prefill_rate_basis'])
         self.assertGreaterEqual(self.max_active,2)
         self.assertEqual(len(bench.summarize(batches)),8)
+        for body in self.received:
+            self.assertNotIn('return_token_ids',body);self.assertNotIn('return_token_timestamps',body)
+            self.assertEqual(body['stream_options'],{'include_usage':True,'continuous_usage_stats':True})
+            self.assertTrue(all(type(token) is int for token in body['prompt']))
+
+    def test_one_and_four_concurrent_requests_time_first_output_chunk(self):
+        for concurrency in bench.CONCURRENCIES:
+            batch=self.run_batch(concurrency=concurrency)
+            self.assertEqual(batch['status'],'complete',batch.get('error'))
+            self.assertEqual(len(batch['requests']),concurrency)
+            for request in batch['requests']:
+                first=next(e for e in request['raw_events'] if e['event']['choices'] and e['event']['choices'][0]['text'])
+                self.assertEqual(request['transport_ttft_seconds'],first['seconds'])
+                self.assertEqual((request['output_tokens'],request['first_observed_tokens'],request['cached_tokens']),(2,1,0))
+                self.assertEqual(request['finish_reasons'],['length'])
+            self.assertGreater(batch['effective_prefill_tokens_per_second'],0)
+        self.assertGreaterEqual(self.max_active,2)
+
+    def test_merged_output_chunk_keeps_ttft_without_decode_rate(self):
+        self.mode='merged';batch=self.run_batch(concurrency=4)
+        self.assertEqual(batch['status'],'complete',batch.get('error'))
+        self.assertTrue(all(r['first_observed_tokens']==2 and r['decode_tokens_per_second'] is None
+                            and r['transport_ttft_seconds']>0 for r in batch['requests']))
+        summary=bench.summarize([batch])[0]
+        self.assertIsNone(summary['median_request_decode_tokens_per_second'])
+        self.assertEqual(summary['decode_rate_unavailable_requests'],4)
+        self.assertIsNotNone(summary['transport_ttft_seconds']['p50'])
+
+    def test_missing_done_or_continuous_usage_fails(self):
+        for mode,message in (('missing_done','[DONE]'),('no_usage','continuous usage')):
+            self.mode=mode;batch=self.run_batch()
+            self.assertEqual(batch['status'],'failed',mode)
+            self.assertIn(message,batch['requests'][0]['error']['message'])
+
+    def test_fixture_rejects_token_observation_extensions_like_the_server(self):
+        body={'model':'cpu-fixture','prompt':[1,2],'max_tokens':2,'stream':True,
+              'return_token_ids':True,'return_token_timestamps':True}
+        request=urllib.request.Request(self.base+'/v1/completions',data=json.dumps(body).encode(),
+                                       headers={'Content-Type':'application/json'})
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            urllib.request.urlopen(request,timeout=5)
+        self.assertEqual(caught.exception.code,400)
+        self.assertIn('require /v1/chat/completions',caught.exception.read().decode())
 
     def test_wrong_server_prompt_length_fails_and_preserves_raw_events(self):
         self.mode='wrong_length';batch=self.run_batch()
@@ -91,13 +159,16 @@ class PrefillTests(unittest.TestCase):
         self.assertEqual(request['usage']['prompt_tokens'],2049)
 
     def test_cached_usage_or_metric_cache_credit_fails(self):
-        for mode in ('cache','metric_cache','top_level_cache'):
+        for mode in ('cache','metric_cache','top_level_cache','performance_cache'):
             self.mode=mode
+            deadline=time.monotonic()+5
+            while self.counters['active'] and time.monotonic()<deadline:time.sleep(.01)
             batch=self.run_batch()
             self.assertEqual(batch['status'],'failed',mode)
             self.assertIn('metrics_before',batch);self.assertIn('metrics_after',batch)
-            if mode=='top_level_cache':
+            if mode in ('top_level_cache','performance_cache'):
                 self.assertTrue(batch['requests'][0]['raw_events'])
+                self.assertIn('prefix-cache credit',batch['requests'][0]['error']['message'])
 
     def test_other_traffic_counter_mismatch_fails(self):
         self.mode='foreign';batch=self.run_batch()
