@@ -116,6 +116,18 @@ for the transfer budget and progress contract.
 
 ## Tensor-parallel compilation
 
+PCIe communication declarations participate in b12x preparation alongside local
+kernels. Components submit the actual operation, shape, dtypes, layouts, and
+serving bindings. b12x owns the candidate benchmark operands, resets, arithmetic
+checks, captured timing, and selection cache. Equivalent declarations share a
+winner; component names do not identify separate tuning workloads.
+
+`CollectivePreparation` relays b12x's collective tuning contributions in TP rank
+order. Each candidate executes on the whole TP group and is scored by the slowest
+rank. `ReplicaPreparation` keeps these exchanges within each serving TP replica;
+independent kernel candidates retain corresponding-rank sharding across replicas.
+No tuning coordination runs after graph handoff.
+
 - **Compile tensor-parallel forwards once, sharded across ranks.** Pass the
   preparation coordinator to `capture_forwards`. Each forward variant compiles
   once, on a rank that selects it, from that rank's own forward; on one host, a

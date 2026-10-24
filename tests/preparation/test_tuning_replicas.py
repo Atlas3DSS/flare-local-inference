@@ -9,8 +9,8 @@ import pytest
 from ignition.preparation.tuning_replicas import ReplicaPreparation, TuningReplica, authorization
 
 
-def state(*, cache=None, races=(), collective=(), done=False):
-    return done, collective, None, cache, races
+def state(*, cache=None, races=(), collective=(), done=False, collective_tuning=None):
+    return done, collective, None, cache, races, collective_tuning
 
 
 def race(key, latency, candidate):
@@ -36,6 +36,19 @@ def test_collectives_only_wait_for_their_own_replica():
     assert authorization(values, replica=1, rank=0, tensor_parallel=2, ranks=(0, 1)) == {"collective_key": None}
     with pytest.raises(ValueError, match="serving TP group"):
         authorization(values, replica=0, rank=0, tensor_parallel=2, ranks=(0, 2))
+
+
+def test_collective_samples_stay_within_their_tp_replica():
+    contributions = [SimpleNamespace(ranks=(0, 1), latency=value) for value in (2., 3., 7., 5.)]
+    values = [state(collective_tuning=value) for value in contributions]
+    for replica in range(2):
+        for rank in range(2):
+            assert authorization(values, replica=replica, rank=rank, tensor_parallel=2, ranks=(0, 1)) == {
+                "collective_tuning": tuple(contributions[replica * 2:(replica + 1) * 2])}
+    values[3] = state()
+    assert authorization(values, replica=0, rank=0, tensor_parallel=2, ranks=(0, 1)) == {
+        "collective_tuning": tuple(contributions[:2])}
+    assert authorization(values, replica=1, rank=0, tensor_parallel=2, ranks=(0, 1)) == {"collective_key": None}
 
 
 def test_mismatched_tuning_races_fail_before_selecting_another_ranks_kernel():
@@ -70,7 +83,7 @@ def _transport(directory, member):
     closed = []
     job = SimpleNamespace(
         advance=lambda **allowed: SimpleNamespace(done=False, ready_collectives=(),
-                                                   ready_cache=None, ready_tuning=()),
+                                                   ready_cache=None, ready_tuning=(), ready_collective_tuning=None),
         close=lambda: closed.append(True))
 
     def begin(requests, **options):

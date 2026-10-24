@@ -212,10 +212,17 @@ class CollectivePreparation:
         if progress.ready_cache is not None or progress.ready_tuning:
             raise ValueError("collective preparation does not shard tuning candidates")
         pending = tuple((item.key, item.ranks) for item in progress.ready_collectives)
+        local = (pending, progress.ready_collective_tuning)
         states = [None] * len(self.ranks)
-        dist.all_gather_object(states, pending, group=self.group)
-        if not all(states):
+        dist.all_gather_object(states, local, group=self.group)
+        if not all(item[0] or item[1] is not None for item in states):
             return None
+        if all(item[1] is not None for item in states):
+            values = tuple(item[1] for item in states)
+            if any(item.ranks != self.ranks for item in values):
+                raise ValueError("collective tuning requires the complete control group")
+            return values
+        states = [item[0] for item in states]
         if any(state != states[0] for state in states[1:]):
             raise RuntimeError(f"collective preparation declarations differ across ranks: {states}")
         key, ranks = states[0][0]
@@ -248,7 +255,8 @@ class CollectivePreparation:
                 pending = () if state is None else tuple((item.key, item.ranks) for item in state.ready_collectives)
                 local = (state is not None and state.done, pending,
                          None if error is None else f"{type(error).__name__}: {error}",
-                         None if state is None else state.ready_cache, () if state is None else tuple(state.ready_tuning))
+                         None if state is None else state.ready_cache, () if state is None else tuple(state.ready_tuning),
+                         None if state is None else state.ready_collective_tuning)
                 states = [None] * len(self.ranks)
                 dist.all_gather_object(states, local, group=self.group)
                 failures = [(rank, item[2]) for rank, item in zip(self.ranks, states, strict=True) if item[2] is not None]
@@ -256,9 +264,15 @@ class CollectivePreparation:
                     raise RuntimeError(f"rank preparation failed: {failures}") from error
                 if all(item[0] for item in states):
                     return job.result()
-                if any(item[0] for item in states) and any(item[1] or item[3] is not None or item[4] for item in states):
+                if any(item[0] for item in states) and any(item[1] or item[3] is not None or item[4] or item[5] is not None
+                                                        for item in states):
                     raise RuntimeError("a rank finished before its peer's collective declaration")
                 authorization = {"collective_key": None}
+                if all(item[5] is not None for item in states):
+                    if any(item[5].ranks != self.ranks for item in states):
+                        raise ValueError("collective tuning requires the complete control group")
+                    authorization = {"collective_tuning": tuple(item[5] for item in states)}
+                    continue
                 if all(item[3] is not None for item in states):
                     # Each rank reconciles every rank's cached selections, rank zero's first.
                     authorization = {"cache": tuple(item[3] for item in states)}
@@ -286,6 +300,8 @@ class CollectivePreparation:
                     if tuple(ranks) != self.ranks:
                         raise ValueError("collective preparation requires the complete control group")
                     authorization = {"collective_key": key}
+                elif all(item[1] or item[3] is not None or item[4] or item[5] is not None for item in states):
+                    raise RuntimeError("ranks reached incompatible preparation exchanges")
         except BaseException as failure:
             try:
                 if job is not None:

@@ -42,6 +42,10 @@ def authorization(states, *, replica, rank, tensor_parallel, ranks):
     if any(item[0] for item in peers) and any(item[3] is not None or item[4] for item in peers):
         raise RuntimeError("a tuning replica finished before its corresponding rank")
     local = states[replica * tensor_parallel:(replica + 1) * tensor_parallel]
+    if all(item[5] is not None for item in local):
+        if any(item[5].ranks != tuple(ranks) for item in local):
+            raise ValueError("collective tuning must span its serving TP group")
+        return {"collective_tuning": tuple(item[5] for item in local)}
     ready = [item[1] for item in local]
     if all(ready):
         if any(item != ready[0] for item in ready[1:]):
@@ -50,7 +54,7 @@ def authorization(states, *, replica, rank, tensor_parallel, ranks):
         if tuple(members) != tuple(ranks):
             raise ValueError("a tuning replica collective must span its serving TP group")
         return {"collective_key": key}
-    if any(item[0] for item in local) and any(ready):
+    if any(item[0] for item in local) and (any(ready) or any(item[5] is not None for item in local)):
         raise RuntimeError("a tuning rank finished before its replica's collective")
     return {"collective_key": None}
 
@@ -98,7 +102,8 @@ class ReplicaPreparation:
                 states = self.gather((state is not None and state.done, pending,
                     None if error is None else f"{type(error).__name__}: {error}",
                     None if state is None else state.ready_cache,
-                    () if state is None else tuple(state.ready_tuning)))
+                    () if state is None else tuple(state.ready_tuning),
+                    None if state is None else state.ready_collective_tuning))
                 if failures := [(index, item[2]) for index, item in enumerate(states) if item[2] is not None]:
                     raise RuntimeError(f"local tuning preparation failed: {failures}") from error
                 if all(item[0] for item in states):
