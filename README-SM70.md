@@ -153,7 +153,7 @@ All results are for the release tree (`0e4c81f`) and its package on one V100
 | Consumer identity, components, accuracy (full-vocabulary KL) | pass |
 | Fixed coding-token goldens, exact identity against the prior package | pass |
 | Native server, MTP depth 4, 1 agent and 4 agents | 24/24 requests ok |
-| Long context, 4 agents x 22.4k-30.2k prompts at 31G | 24/24 ok, all four resident, no eviction |
+| Long context, 22.4k-30.2k prompts at 31G | 24/24 ok across 1- and 4-agent runs; at 4 agents all four resident, no eviction |
 | CPU suites (`tests/recipes`, `tests/preparation`, `tests/cli`, replay tests) | no new failures against the `718a187` base |
 
 The CPU suites had 16 failures, 1,544 passes, 860 skips and 100 errors, against
