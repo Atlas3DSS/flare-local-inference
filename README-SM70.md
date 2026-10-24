@@ -74,8 +74,8 @@ together at about four times the single-request TTFT.
 An opt-in scheduler option orders concurrent prompts shortest-remaining first
 instead, so they finish prefill one after another. With four 30,720-token
 prompts the first tokens arrive at 42.7 / 85.5 / 128.2 / 171.0 s instead of all
-at about 170 s. That is 37 % lower on average, with the same last first token
-and the same total prefill time. Round-robin stays the default. Enable the
+at about 170 s. That is 37 % lower on average, with about the same last first
+token and total prefill time. Round-robin stays the default. Enable the
 option with `flare run --prefill-srpt`, or with the `"prefill_srpt"` boolean in
 the server configuration; a flag on the command line overrides the
 configuration file. Aging bounds how long a long prompt can wait behind shorter
@@ -217,8 +217,10 @@ detail and the sources.
 - **Given up:** extra decode work per weight compared with native FP4/FP8 tensor
   cores; prefill at 720-810 tok/s, one request at a time, so long prompts are
   prefill-bound (a 30,720-token prompt waits 42.7 s for its first token, and
-  four arriving together wait 170-171 s each, or 43-171 s one after another
-  with the opt-in prefill ordering); one recipe, TP1, at most 4 requests of
+  four arriving together wait 170-171 s each, or 43-172 s one after another
+  with the opt-in prefill ordering, which in a 45-minute mixed-traffic soak
+  traded short-prompt tail latency for long-prompt and worst-case latency and
+  is therefore off by default); one recipe, TP1, at most 4 requests of
   32,768 tokens; subsequent upstream work to assess and port (136 commits as of
   `e19549a`, beyond 680 whose content the history audit identifies in the
   squashed base; see [history accounting](docs/sm70/LIMITATIONS.md#upstream-divergence));

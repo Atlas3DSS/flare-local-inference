@@ -92,8 +92,8 @@ and 32 tokens of the table above.
 With the option on, the four prompts finish prefill one after another. The
 first 30,720-token prompt gets its first token after 42.7 s instead of about
 170 s, and the last at 171.0 s as before. The mean first-token time falls 36-37
-%. The worst case, the single-request rate and the aggregate rate stay
-unchanged within 0.7 %. Greedy outputs matched the release binary on 4 of 4
+%. In this 2-output-token protocol, the worst case, the single-request rate and
+the aggregate rate stay unchanged within 0.7 %. Greedy outputs matched the release binary on 4 of 4
 prompts with the option off and on. With the option off, the build reproduces
 the release: 805.6 and 718.2 tok/s at one request against 807 and 719, and
 170.11-170.78 s for four 30,720-token prompts against 170.15-170.96 s.
@@ -112,6 +112,31 @@ groups passed (A: 223 and 17 subtests, B: 245;
 with the option set: strict 47/47 and invariance 28/28
 ([gates.log](docs/sm70/receipts/prefill-srpt/gates.log)). The export gates run in Python and never enter
 the Helios scheduler, so they confirm the package path, not the ordering.
+
+The same option measured with the public protocol, `tools/benchmark_prefill.py`
+at `c6478679` with 1 warmup and 3 measured batches and 32 output tokens. The
+server is a build of the release Rust sources plus this change (`79ae7b1f`),
+run as `flare run --prefill-srpt` with the release package and flags
+([public-prefill-srpt-on-summary.json](docs/sm70/receipts/prefill-srpt/public-prefill-srpt-on-summary.json)).
+The default column repeats the release table above:
+
+| Prompt tokens | Concurrency | TTFT p50 / p95 (s), `--prefill-srpt` | TTFT p50 / p95 (s), default | Effective prefill tok/s, `--prefill-srpt` / default |
+| ---: | ---: | ---: | ---: | ---: |
+| 2,048 | 1 | 2.54 / 2.54 | 2.54 / 2.54 | 806 / 807 |
+| 2,048 | 4 | 6.40 / 10.82 | 9.89 / 10.30 | 758 / 796 |
+| 8,192 | 1 | 10.44 / 10.44 | 10.43 / 10.44 | 785 / 785 |
+| 8,192 | 4 | 26.21 / 42.41 | 41.44 / 41.88 | 773 / 782 |
+| 22,528 | 1 | 30.37 / 30.37 | 30.39 / 30.39 | 742 / 741 |
+| 22,528 | 4 | 76.03 / 122.24 | 121.11 / 121.67 | 737 / 741 |
+| 30,720 | 1 | 42.70 / 42.71 | 42.75 / 42.75 | 719 / 719 |
+| 30,720 | 4 | 106.94 / 171.74 | 170.49 / 170.95 | 716 / 719 |
+
+Single-request rates match the release. At four requests the p50 falls by 35-37
+%. With 32 output tokens, the earlier requests decode while the last prompt is
+still in prefill, so the last first token arrives slightly later than with
+round-robin: 10.72-10.85 s against at most 10.31 s at 2,048 tokens, and
+171.68-171.76 s against at most 170.96 s at 30,720 tokens. For the same reason
+the effective rate over the first-token window is lower at four requests.
 
 To enable the option, start the server with `flare run --prefill-srpt`. The
 flag sets the top-level server configuration key `prefill_srpt` (a JSON

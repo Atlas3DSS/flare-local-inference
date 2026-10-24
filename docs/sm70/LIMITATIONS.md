@@ -107,12 +107,33 @@ upstream. Read this before you rely on the port.
   only 1.4-1.9 % of the time, so the cost is in the kernels, not in gaps between
   them ([prefill-profile.json](receipts/measurements/prefill-profile.json)).
 - **Opt-in prefill ordering.** The shortest-remaining-first prefill option is
-  off by default and is not in the release binary `d4ffb1fa`. Its evidence is
-  the lab benchmark batches, the greedy comparison with the release and the
-  scheduler's CPU unit tests; it has not had a long soak run under mixed
-  traffic. It lowers the mean first-token time, not the worst case: the last of
-  four concurrent prompts waits as long as with round-robin
+  off by default and is not in the release binary `d4ffb1fa`. In a burst of
+  equal prompts it lowers the mean first-token time, not the worst case
   ([BENCHMARKS-SM70.md](../../BENCHMARKS-SM70.md#opt-in-prefill-ordering-shortest-remaining-prompt-first)).
+  A soak used mixed-length Poisson arrivals: one request every 6 s on average,
+  50 % 512, 30 % 2,048, 15 % 8,192 and 5 % 30,720-token prompts, 4 client
+  workers and 8 output tokens. With the option on it ran 45 minutes and
+  completed 475 of 475 requests; with it off it ran 15 minutes and completed
+  157 of 157. Neither run had an error or a stall
+  ([soak-on.json](receipts/prefill-srpt/soak-on.json), [soak-off.json](receipts/prefill-srpt/soak-off.json)). On
+  the 157 arrivals both runs share, time from send to first token (mean / p95 /
+  max) was:
+  - 512-token prompts: 1.65 / 2.73 / 3.11 s off, 8.09 / 43.92 / 46.42 s on.
+    Short prompts wait behind a long prompt already in prefill, because a
+    started prompt is not preempted;
+  - 30,720-token prompts: 103.9 / 157.4 / 157.4 s off, 48.7 / 65.7 / 65.7 s on;
+  - all requests: a mean of 11.40 s off and 11.99 s on, and a worst case of
+    157.4 s off and 65.7 s on.
+
+  Measured from arrival instead, which adds the wait for one of the 4 client
+  workers, the mean over all requests is 17.46 s off and 26.15 s on, and the
+  worst 161.9 s off and 103.7 s on. The option trades short-prompt tail latency
+  under mixed streaming for long-prompt and worst-case latency. It is the right
+  choice for bursts of agents on long contexts, but it is not a free win for
+  mixed traffic, which is why it is off by default. The 256-chunk aging bound
+  moves a waiting prompt into arrival order; it does not cap the total wait. The
+  soak estimates the longest wait at about 353 chunks with the option on and 710
+  with it off.
 - **Profiling issue under investigation.** Node-level CUDA-graph tracing with
   Nsight Systems (`nsys --cuda-graph-trace=node`) made the server fail with CUDA
   error 719 (`unspecified launch failure`) after about 127 cumulative 128-token

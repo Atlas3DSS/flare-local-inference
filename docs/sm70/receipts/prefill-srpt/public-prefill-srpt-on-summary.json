@@ -1,0 +1,256 @@
+{
+ "source": "prefill-lab public-prefill-srpt-on.json (tools/benchmark_prefill.py c6478679, 1 warmup + 3 measured, 32 output tokens)",
+ "server": "lab build 79ae7b1f = release Rust sources + srpt-v3-public.diff, flare run --prefill-srpt, release package fd7c24dc (NVMe copy), release chain flags",
+ "summary": [
+  {
+   "prompt_tokens": 2048,
+   "concurrency": 1,
+   "measured_batches": 3,
+   "successful_requests": 3,
+   "failed_batches": 0,
+   "transport_ttft_seconds": {
+    "p50": 2.541660507005872,
+    "p95": 2.5434315827937097
+   },
+   "effective_prefill_tokens_per_second_median": 805.7724445711224,
+   "prefill_rate_basis": "successful server prefill-token counter delta / batch first-token wall window; includes queueing, prefill, first-token generation and transport; not pure GPU prefill",
+   "pure_gpu_prefill_tokens_per_second": null,
+   "median_request_decode_tokens_per_second": 94.04515141905642,
+   "decode_rate_unavailable_requests": 0
+  },
+  {
+   "prompt_tokens": 2048,
+   "concurrency": 4,
+   "measured_batches": 3,
+   "successful_requests": 12,
+   "failed_batches": 0,
+   "transport_ttft_seconds": {
+    "p50": 6.39574475750851,
+    "p95": 10.823608141277509
+   },
+   "effective_prefill_tokens_per_second_median": 758.3091062628473,
+   "prefill_rate_basis": "successful server prefill-token counter delta / batch first-token wall window; includes queueing, prefill, first-token generation and transport; not pure GPU prefill",
+   "pure_gpu_prefill_tokens_per_second": null,
+   "median_request_decode_tokens_per_second": 16.331006743038195,
+   "decode_rate_unavailable_requests": 0
+  },
+  {
+   "prompt_tokens": 8192,
+   "concurrency": 1,
+   "measured_batches": 3,
+   "successful_requests": 3,
+   "failed_batches": 0,
+   "transport_ttft_seconds": {
+    "p50": 10.441856913006632,
+    "p95": 10.44250691998459
+   },
+   "effective_prefill_tokens_per_second_median": 784.5347880409896,
+   "prefill_rate_basis": "successful server prefill-token counter delta / batch first-token wall window; includes queueing, prefill, first-token generation and transport; not pure GPU prefill",
+   "pure_gpu_prefill_tokens_per_second": null,
+   "median_request_decode_tokens_per_second": 87.99444347653619,
+   "decode_rate_unavailable_requests": 0
+  },
+  {
+   "prompt_tokens": 8192,
+   "concurrency": 4,
+   "measured_batches": 3,
+   "successful_requests": 12,
+   "failed_batches": 0,
+   "transport_ttft_seconds": {
+    "p50": 26.208899587509222,
+    "p95": 42.405046906559434
+   },
+   "effective_prefill_tokens_per_second_median": 772.7587188677016,
+   "prefill_rate_basis": "successful server prefill-token counter delta / batch first-token wall window; includes queueing, prefill, first-token generation and transport; not pure GPU prefill",
+   "pure_gpu_prefill_tokens_per_second": null,
+   "median_request_decode_tokens_per_second": 13.580639141033679,
+   "decode_rate_unavailable_requests": 0
+  },
+  {
+   "prompt_tokens": 22528,
+   "concurrency": 1,
+   "measured_batches": 3,
+   "successful_requests": 3,
+   "failed_batches": 0,
+   "transport_ttft_seconds": {
+    "p50": 30.374329941987526,
+    "p95": 30.374409977192407
+   },
+   "effective_prefill_tokens_per_second_median": 741.6789125233915,
+   "prefill_rate_basis": "successful server prefill-token counter delta / batch first-token wall window; includes queueing, prefill, first-token generation and transport; not pure GPU prefill",
+   "pure_gpu_prefill_tokens_per_second": null,
+   "median_request_decode_tokens_per_second": 72.67896870965897,
+   "decode_rate_unavailable_requests": 0
+  },
+  {
+   "prompt_tokens": 22528,
+   "concurrency": 4,
+   "measured_batches": 3,
+   "successful_requests": 12,
+   "failed_batches": 0,
+   "transport_ttft_seconds": {
+    "p50": 76.03271244950884,
+    "p95": 122.24070633915544
+   },
+   "effective_prefill_tokens_per_second_median": 737.2724126278212,
+   "prefill_rate_basis": "successful server prefill-token counter delta / batch first-token wall window; includes queueing, prefill, first-token generation and transport; not pure GPU prefill",
+   "pure_gpu_prefill_tokens_per_second": null,
+   "median_request_decode_tokens_per_second": 11.233897626018601,
+   "decode_rate_unavailable_requests": 0
+  },
+  {
+   "prompt_tokens": 30720,
+   "concurrency": 1,
+   "measured_batches": 3,
+   "successful_requests": 3,
+   "failed_batches": 0,
+   "transport_ttft_seconds": {
+    "p50": 42.704550640977686,
+    "p95": 42.70532887100999
+   },
+   "effective_prefill_tokens_per_second_median": 719.3612750609824,
+   "prefill_rate_basis": "successful server prefill-token counter delta / batch first-token wall window; includes queueing, prefill, first-token generation and transport; not pure GPU prefill",
+   "pure_gpu_prefill_tokens_per_second": null,
+   "median_request_decode_tokens_per_second": 65.60036087464661,
+   "decode_rate_unavailable_requests": 0
+  },
+  {
+   "prompt_tokens": 30720,
+   "concurrency": 4,
+   "measured_batches": 3,
+   "successful_requests": 12,
+   "failed_batches": 0,
+   "transport_ttft_seconds": {
+    "p50": 106.94124338398979,
+    "p95": 171.73563932795076
+   },
+   "effective_prefill_tokens_per_second_median": 715.6096728504895,
+   "prefill_rate_basis": "successful server prefill-token counter delta / batch first-token wall window; includes queueing, prefill, first-token generation and transport; not pure GPU prefill",
+   "pure_gpu_prefill_tokens_per_second": null,
+   "median_request_decode_tokens_per_second": 10.009537387570711,
+   "decode_rate_unavailable_requests": 0
+  }
+ ],
+ "c4_first_tokens_s": [
+  {
+   "prompt_tokens": 2048,
+   "repetition": 0,
+   "first_tokens": [
+    2.552,
+    5.082,
+    7.712,
+    10.717
+   ]
+  },
+  {
+   "prompt_tokens": 2048,
+   "repetition": 1,
+   "first_tokens": [
+    2.55,
+    5.084,
+    7.717,
+    10.85
+   ]
+  },
+  {
+   "prompt_tokens": 2048,
+   "repetition": 2,
+   "first_tokens": [
+    2.541,
+    5.074,
+    7.708,
+    10.803
+   ]
+  },
+  {
+   "prompt_tokens": 8192,
+   "repetition": 0,
+   "first_tokens": [
+    10.457,
+    20.952,
+    31.489,
+    42.404
+   ]
+  },
+  {
+   "prompt_tokens": 8192,
+   "repetition": 1,
+   "first_tokens": [
+    10.463,
+    20.955,
+    31.497,
+    42.409
+   ]
+  },
+  {
+   "prompt_tokens": 8192,
+   "repetition": 2,
+   "first_tokens": [
+    10.454,
+    20.937,
+    31.463,
+    42.364
+   ]
+  },
+  {
+   "prompt_tokens": 22528,
+   "repetition": 0,
+   "first_tokens": [
+    30.363,
+    60.797,
+    91.255,
+    122.22
+   ]
+  },
+  {
+   "prompt_tokens": 22528,
+   "repetition": 1,
+   "first_tokens": [
+    30.364,
+    60.8,
+    91.258,
+    122.223
+   ]
+  },
+  {
+   "prompt_tokens": 22528,
+   "repetition": 2,
+   "first_tokens": [
+    30.37,
+    60.811,
+    91.273,
+    122.264
+   ]
+  },
+  {
+   "prompt_tokens": 30720,
+   "repetition": 0,
+   "first_tokens": [
+    42.718,
+    85.549,
+    128.413,
+    171.714
+   ]
+  },
+  {
+   "prompt_tokens": 30720,
+   "repetition": 1,
+   "first_tokens": [
+    42.724,
+    85.526,
+    128.33,
+    171.683
+   ]
+  },
+  {
+   "prompt_tokens": 30720,
+   "repetition": 2,
+   "first_tokens": [
+    42.734,
+    85.554,
+    128.36,
+    171.762
+   ]
+  }
+ ]
+}
