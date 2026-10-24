@@ -1,7 +1,7 @@
 # Direct execution: reproducing model faults without Helios
 
 `ignition serve --direct` is a diagnostic and qualification path, requested by
-project owner Luke Alonso, for reproducing and bisecting model-level faults. It
+the project owner, for reproducing and bisecting model-level faults. It
 is not production serving and never replaces it. Production serving loads an
 exported package in Helios, which owns scheduling, input packing, graph replay
 and output without Python ([AGENTS.md](../AGENTS.md), "Python prepares; Helios

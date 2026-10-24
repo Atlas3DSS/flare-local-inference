@@ -52,7 +52,7 @@ Installed-Size: $installed_size
 Depends: $dependencies, ca-certificates
 Section: utils
 Priority: optional
-Homepage: https://github.com/NVIDIA/flare-local-inference
+Homepage: https://github.com/Atlas3DSS/flare-local-inference
 Description: native inference server for prepared Flare model packages
  Runs prepared CUDA graphs on supported NVIDIA GPUs. Includes the Flare
  command, the host agent, and Orbit multi-host management. ARM64 builds

@@ -9,15 +9,8 @@ Heliopause depend on Helios; Helios has no Python or preparation-tool dependency
 
 ## Required setup and commit review
 
-On entering a clone or worktree, and after pulling changes, re-read this file and
-[the design self-review](docs/design-review.md). Before committing, ensure the
-repository's `.githooks/commit-msg` hook is enabled by following that document's
-installation instructions. Preserve any existing active hooks when installing.
-
-Before every commit, follow the staged-diff review and acknowledgment instructions
-in `docs/design-review.md`. A rejected acknowledgment requires reading that
-document and reviewing the staged change before retrying; do not treat the
-rejection as a formatting repair.
+Before committing, review the staged diff against the self-review checklist in `docs/design-review.md`.
+Every change is reviewed by someone who did not write it; name the reviewer in the commit message.
 
 ## Contribution scope and rejection criteria
 
@@ -173,7 +166,7 @@ architectural boundary before committing the change.
   scheduler path. Validate affected cache schemes and request lifecycles, and
   report untested models separately from implementation restrictions.
 - Introducing a captured-graph operation family requires prior explicit approval
-  from project owner Luke Alonso <lalonso@gmail.com>. Shape and capacity variants
+  from the project owner. Shape and capacity variants
   of an existing family do not constitute a new type when its operation contract
   stays unchanged. A new operation contract requires approval even if it reuses
   an existing graph kind or enum value. A design acknowledgment does not grant

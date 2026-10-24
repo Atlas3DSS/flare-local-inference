@@ -19,7 +19,7 @@ before committing; a design acknowledgment cannot authorize them.
    schemes and prepared layout metadata reusable across models. Native code
    manages declared model-state storage without implementing per-model algorithms.
    Introducing a captured-graph operation family requires prior explicit approval
-   from project owner **Luke Alonso <lalonso@gmail.com>**. Shape and capacity
+   from the project owner. Shape and capacity
    variants are allowed within an unchanged operation contract. A new operation
    contract requires approval even if it reuses a graph kind or enum value.
    A design acknowledgment does not grant approval.
@@ -129,55 +129,5 @@ before committing; a design acknowledgment cannot authorize them.
    and obtain any required graph-family approval before committing. State validation
    performed and material limitations in the commit message. Validation requirements
    apply to the affected behavior; documentation changes do not require GPU tests.
-2. Read the staged checklist with `git show :docs/design-review.md`. When changing
-   this document, stage the intended version before reviewing and acknowledging it.
-3. Compute SHA-256 over the exact staged document bytes and take its first two
-   bytes as four lowercase hex characters:
 
-   ```sh
-   python3 - <<'PY'
-   import hashlib
-   import subprocess
-
-   document = subprocess.check_output(["git", "show", ":docs/design-review.md"])
-   print(hashlib.sha256(document).hexdigest()[:4])
-   PY
-   ```
-
-4. Add exactly one acknowledgment to the final commit-message trailer block,
-   separated from the body by a blank line:
-
-   ```text
-   Design-Signed-Off-By: <reviewer identity>; design-review=<four lowercase hex digits>
-   ```
-
-   Use the reviewing agent's name and model, or the human reviewer's identity.
-   The acknowledgment means: **I read the staged checklist, reviewed the staged
-   diff against every applicable principle, found no unapproved design violations,
-   and accurately disclosed validation and material limitations.**
-
-Read and review before acknowledging. Do not automatically insert the footer or
-copy an acknowledgment from another commit. A missing or rejected acknowledgment
-requires completing this workflow before retrying.
-
-## Hook installation
-
-Cloning carries the tracked `.githooks/` files but does not activate them. Agents
-must check installation on entering a clone or worktree and after pulling changes.
-Linked worktrees normally share hook configuration with their main clone.
-
-The executable `.githooks/commit-msg` requires Python 3 and Git. Inspect
-`git config --show-origin --get core.hooksPath` and the directory reported by
-`git rev-parse --git-path hooks` for active hooks. If none need preserving, enable
-the repository hook in the clone with:
-
-```sh
-git config --local core.hooksPath .githooks
-```
-
-Preserve existing active hooks by integrating the design check instead of
-overwriting or disabling them. The hook checks the final trailer against the
-staged checklist, rejects absent or invalid
-acknowledgments, and leaves the message unchanged. Its errors do not supply the
-expected digest or a ready-to-paste acknowledgment. Local hooks can be bypassed
-with `--no-verify`; the acknowledgment is an attention check, not proof of review.
+This fork does not install a commit hook; reviewers are named in commit messages.

@@ -306,11 +306,9 @@ These exist in the fork's history but are not part of this branch:
   Claude Opus, as their headers and commit messages state: `sm70_pgemm.cuh`
   (`8ad725c`), `ca16f00`, `0aea71a`, and the kernels integrated in `6b808ef` and
   `f8af352`. Under upstream's rule they are not contributable as they are.
-- **Commit trailers.** Upstream's commit hook requires a
-  `Design-Signed-Off-By: ...; design-review=<hex4>` trailer, where hex4 is the
-  start of the SHA-256 of the staged `docs/design-review.md`. Because `fd5109b`
-  changes that file, commits after it acknowledge `45e8`, not upstream's `6aeb`.
-  Nine early commits (`88a888a` to `8fdc604`) carry no trailer.
+- **Commit trailers.** Upstream used a `Design-Signed-Off-By` trailer checked by a
+  commit hook. This fork does not install that hook; reviewers are named in commit
+  messages. Nine early commits (`88a888a` to `8fdc604`) carry no trailer.
 - **No upstream pull requests** have been opened from this branch.
 
 ## Reporting issues
@@ -332,5 +330,4 @@ Include:
 - for performance numbers, the columns listed in
   [BENCHMARK.md](BENCHMARK.md#reporting-your-numbers).
 
-Do not report security vulnerabilities in public. For upstream code, follow
-[SECURITY.md](../../SECURITY.md).
+Do not report security vulnerabilities in public.

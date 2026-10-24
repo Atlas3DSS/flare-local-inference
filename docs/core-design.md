@@ -272,7 +272,7 @@ same boundary; violations must be resolved before committing.
   requirements and graph cache bindings. Cache schemes and prepared layout
   metadata express those differences through contracts reusable by every model
   with the same requirements. Introducing a captured-graph operation family requires
-  prior explicit approval from project owner Luke Alonso <lalonso@gmail.com>.
+  prior explicit approval from the project owner.
   Shape and capacity variants preserve an existing family's operation contract;
   a new operation contract requires approval even when it reuses an existing
   graph kind or enum value.

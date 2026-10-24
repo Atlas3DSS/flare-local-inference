@@ -1,9 +1,6 @@
 name: Native serving
 
 on:
-  push:
-    branches: [main, feature/windows-serving]
-  pull_request:
   workflow_dispatch:
 
 permissions:
