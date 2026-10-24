@@ -340,9 +340,9 @@ reference exists here for those models. Details:
 
 On a Linux host with one V100 32 GB, CUDA 12.9, Rust, `uv` and the build
 packages from [BUILD.md](docs/sm70/BUILD.md), run from an empty directory. The
-export gates need FP32 references, generated once as described in
-[EXPORT.md](docs/sm70/EXPORT.md#2-prepare-public-inputs-and-fp32-references)
-section 2; the long reference needs a separate 96 GB GPU. Set `THREADS` to
+export gates need FP32 references. With one V100, download the published ones
+(`tools/fetch_references.sh`, below); making them yourself needs a separate 96 GB GPU
+([EXPORT.md](docs/sm70/EXPORT.md#one-v100-only)). Set `THREADS` to
 the CPU threads you allocate and `V100_GPU_UUID` to the card
 ([EXPORT.md](docs/sm70/EXPORT.md#3-prepare-and-export) section 3):
 
@@ -356,7 +356,8 @@ git clone --depth 1 --branch v4.8.1 https://github.com/NVIDIA/cutlass.git /data/
 .venv/bin/hf download nvidia/Qwen3.8-27B-NVFP4 --revision 482ca0f3832238542f8f5295dde86b5f22711d80 --local-dir /data/models/Qwen3.8-27B-NVFP4
 mkdir -p /data/flare-run /data/flare-refs /data/flare-keys /data/flare-cache
 .venv/bin/python tools/generate_prompts.py --output /data/flare-run/prompts.jsonl
-# Generate /data/flare-refs/reference.safetensors and long-code-reference.safetensors: docs/sm70/EXPORT.md section 2.
+# The FP32 references (about 426 MB, SHA-256 checked); to make them yourself instead: docs/sm70/EXPORT.md section 2.
+bash tools/fetch_references.sh /data/flare-refs
 CUDA_VISIBLE_DEVICES="$V100_GPU_UUID" bash tools/prepare_replay.sh .venv/bin/python --root /data/flare-run --checkpoint /data/models/Qwen3.8-27B-NVFP4 --prompts /data/flare-run/prompts.jsonl --compile-workers "$THREADS" --cutlass-include /data/src/cutlass/include --kernel-cache /data/flare-cache --signing-dir /data/flare-keys --short-reference /data/flare-refs/reference.safetensors --long-reference /data/flare-refs/long-code-reference.safetensors --measure /data/flare-run/tau.json --output /data/flare-run/model.safetensors --report /data/flare-run/prepare.json
 ./flare/target/release/flare run /data/flare-run/model.safetensors --publisher-keys /data/flare-keys/development-publisher.json --trust-store /data/flare-keys/trust.toml --verify-weights --gpus 0 --memory-limit 31G --max-concurrency 4 --mtp-draft-tokens 3 --no-mtp-adaptive-verification --prefix-cache-memory 16G --host 127.0.0.1 --port 8300
 ```

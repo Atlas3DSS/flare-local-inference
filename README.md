@@ -28,11 +28,12 @@ dates and caveats are in [WHY-NOT-LOW-BIT.md](docs/sm70/WHY-NOT-LOW-BIT.md#same-
   prepared package.
 - Rust, `uv` and the build packages listed in [BUILD.md](docs/sm70/BUILD.md).
 - A one-time preparation step checks the V100 output against full-precision
-  (FP32) reference outputs. Making the long reference needs a 96 GB GPU
-  (an RTX PRO 6000) for that one step
-  ([EXPORT.md](docs/sm70/EXPORT.md#2-prepare-public-inputs-and-fp32-references)).
-  EXPORT.md describes no way to do it without one, and the package is only
-  written if those checks pass.
+  (FP32) reference outputs. Making those references yourself needs a 96 GB GPU
+  (an RTX PRO 6000) for one step. With only one V100, download the references
+  the fork used instead (about 426 MB, from
+  [Atlas3D/flare-sm70-references](https://huggingface.co/datasets/Atlas3D/flare-sm70-references)),
+  as step 5 shows. The package is only written if every check passes
+  ([EXPORT.md](docs/sm70/EXPORT.md#one-v100-only)).
 
 Two values appear in the commands below. Set `THREADS` to the number of CPU
 threads you want to use (leave one core free), and `V100_GPU_UUID` to your
@@ -78,7 +79,14 @@ them if you cannot write there.
      --checkpoint /data/models/Qwen3.8-27B-NVFP4 --target-tokens 4096
    ```
 
-5. Make the FP32 references, once, on the 96 GB GPU (`REFERENCE_GPU_UUID` is that card's ID).
+5. Get the FP32 references. With one V100, download them; the script checks every
+   file's SHA-256:
+
+   ```sh
+   bash tools/fetch_references.sh /data/flare-refs
+   ```
+
+   Or make them yourself, once, on a 96 GB GPU (`REFERENCE_GPU_UUID` is that card's ID):
 
    ```sh
    CUDA_VISIBLE_DEVICES="$REFERENCE_GPU_UUID" .venv/bin/python tools/reference_model.py \
@@ -103,6 +111,11 @@ them if you cannot write there.
      --measure /data/flare-run/tau.json --output /data/flare-run/model.safetensors \
      --report /data/flare-run/prepare.json
    ```
+
+   If you cannot get the references at all, `--skip-reference-gates` (without the two
+   `--...-reference` options) runs every other check and writes a package marked as unqualified.
+   Its accuracy against the FP32 model is then unmeasured
+   ([EXPORT.md](docs/sm70/EXPORT.md#one-v100-only)).
 
 7. Start the server. Loading takes several minutes (about 8 minutes from a spinning disk in the
    fork's runs, [EXPORT.md](docs/sm70/EXPORT.md#loading-several-packages-at-once)).

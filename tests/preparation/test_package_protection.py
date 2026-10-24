@@ -14,7 +14,7 @@ import pytest
 from helios.tests.signing import publisher
 from ignition.preparation import runtime_package_pb2 as proto
 from ignition.preparation.package_file import align, publish, read_index
-from ignition.preparation.protection import CHUNK, License, Publisher, signature_message
+from ignition.preparation.protection import CHUNK, License, Publisher, Qualification, signature_message
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -480,6 +480,69 @@ def test_license_is_disclosed_and_accepted_by_name(flare, tmp_path):
     result = launch(flare, plain, profile, directory / 'trust.toml', *approval(signer))
     assert 'License:' not in result.stderr and 'license terms' not in result.stderr
     assert 'model rank count must match distinct selected devices' in result.stderr
+
+
+SKIPPED = Qualification('skipped', '--skip-reference-gates')
+NOTICE = 'Unqualified package: reference gates skipped (--skip-reference-gates)'
+
+
+def test_skipped_reference_gates_are_signed_and_announced_at_start(flare, tmp_path):
+    base = publisher()
+    signer = Publisher(base.key, base.namespace, base.official_source, qualification=SKIPPED)
+    path, _ = fixture(tmp_path, size=41, signer=signer)
+    value, _ = envelope(path)
+    metadata = proto.PublisherMetadata.FromString(value.groups[0].body)
+    assert metadata.HasField('qualification')
+    assert (metadata.qualification.reference_gates, metadata.qualification.reason) == (
+        'skipped', '--skip-reference-gates')
+    profile = profiles(tmp_path / 'publisher.json', signer)
+    result = launch(flare, path, profile, tmp_path / 'trust.toml', *approval(signer))
+    assert NOTICE in result.stderr
+    assert 'model rank count must match distinct selected devices' in result.stderr
+    # A package whose every gate ran records no qualification, so its signed bytes are unchanged.
+    directory = tmp_path / 'qualified'
+    directory.mkdir()
+    plain, _ = fixture(directory, size=41)
+    value, _ = envelope(plain)
+    assert not proto.PublisherMetadata.FromString(value.groups[0].body).HasField('qualification')
+    result = launch(flare, plain, profile, directory / 'trust.toml', *approval(signer))
+    assert 'Unqualified package' not in result.stderr
+    assert 'model rank count must match distinct selected devices' in result.stderr
+
+
+def test_invalid_qualification_metadata_is_rejected(native, tmp_path):
+    path, _ = fixture(tmp_path, size=41)
+    value, payload = envelope(path)
+    metadata = proto.PublisherMetadata.FromString(value.groups[0].body)
+    metadata.qualification.reference_gates, metadata.qualification.reason = 'skipped\x1b[31m', 'reason'
+    value.groups[0].body = metadata.SerializeToString(deterministic=True)
+    signer = publisher()
+    for group in chain(value.groups, value.ranks):
+        group.signature = signer.key.sign(signature_message(value.package_id, value.signer, group.kind, group.body))
+    replace_envelope(path, value, payload)
+    result = read(native, path)
+    assert result.returncode != 0 and 'invalid package qualification metadata' in result.stderr
+    for fields in [('', 'reason'), ('skipped', ''), ('skipped\x1b[31m', 'reason'), ('x' * 129, 'reason')]:
+        with pytest.raises(ValueError, match='printable'):
+            Qualification(*fields)
+    with pytest.raises(ValueError, match='Qualification'):
+        Publisher(signer.key, signer.namespace, signer.official_source,
+                  qualification={'reference_gates': 'skipped', 'reason': '--skip-reference-gates'})
+
+
+def test_promotion_keeps_the_skipped_gate_record(native, tmp_path):
+    from dataclasses import replace
+    from ignition.preparation.resign import resign as promote
+
+    original = replace(development_publisher(), qualification=SKIPPED)
+    source, _ = fixture(tmp_path, signer=original)
+    output = tmp_path / 'production.safetensors'
+    promote(source, output, publisher=publisher(), development_profile=development_profile(original))
+    assert read(native, output, weights=True).returncode == 0
+    new, _ = envelope(output)
+    metadata = proto.PublisherMetadata.FromString(new.groups[0].body)
+    assert not metadata.development and metadata.HasField('qualification')
+    assert metadata.qualification.reason == '--skip-reference-gates'
 
 
 def test_remembered_acceptance_keeps_the_key_and_needs_no_profile(flare, tmp_path):

@@ -349,6 +349,14 @@ pub fn load(
             );
         }
     }
+    // A package exported with skipped gates says so on every start, including unattended ones.
+    if let Some(qualification) = package.qualification() {
+        progress.finish_animation();
+        eprintln!(
+            "\nUnqualified package: reference gates {} ({}); accuracy against the FP32 reference was not measured at export.",
+            qualification.reference_gates, qualification.reason
+        );
+    }
     let publisher = package.publisher().clone();
     let authorized = authorize(package, &claim, args, progress, &path, remembered, identity)?;
     Ok((authorized, publisher))

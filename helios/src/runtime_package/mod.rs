@@ -25,7 +25,9 @@ mod protobuf;
 mod publishers;
 #[cfg(any(test, feature = "test-tools"))]
 pub mod test_support;
-pub use protection::{AuthorizedPackage, PackageClaim, PackageLicense, Publisher, VerifiedPackage};
+pub use protection::{
+    AuthorizedPackage, PackageClaim, PackageLicense, PackageQualification, Publisher, VerifiedPackage,
+};
 mod selection;
 mod serving;
 #[cfg(test)]

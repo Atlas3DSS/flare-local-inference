@@ -1,5 +1,8 @@
 """Portable input/CLI and gate admission tests; no CUDA/model qualification claimed."""
+import argparse
+from contextlib import redirect_stderr
 import copy
+import io
 import hashlib
 import json
 from pathlib import Path
@@ -8,6 +11,7 @@ import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest import mock
 
 from tools import benchmark_mtp, benchmark_long, generate_prompts, native, prepare_replay
 
@@ -51,6 +55,94 @@ class HarnessTests(unittest.TestCase):
         for name in required:
             with self.subTest(missing=name),self.assertRaisesRegex(ValueError,'every'):
                 prepare_replay.require_export_gates(SimpleNamespace(**{**options,name:False}))
+
+    def test_skip_reference_gates_drops_only_the_accuracy_gate(self):
+        structural=('validate','check_invariance','check_commit_growth','check_consumers',
+                    'measure_components','measure','signing_dir')
+        options=dict(output='package.safetensors',skip_reference_gates=True,measure_accuracy=False,
+                     short_reference=None,long_reference=None,**{name:True for name in structural})
+        prepare_replay.require_export_gates(SimpleNamespace(**options))
+        for name in structural:
+            with self.subTest(missing=name),self.assertRaisesRegex(ValueError,'still requires'):
+                prepare_replay.require_export_gates(SimpleNamespace(**{**options,name:False}))
+        record={'reference_gates':'skipped','reason':'--skip-reference-gates'}
+        self.assertEqual(prepare_replay.qualification(SimpleNamespace(**options)),record)
+        stamp=prepare_replay.export_qualification(SimpleNamespace(**options))['qualification']
+        self.assertEqual((stamp.reference_gates,stamp.reason),('skipped','--skip-reference-gates'))
+        # Without the option nothing is recorded or stamped, as before.
+        self.assertIsNone(prepare_replay.qualification(SimpleNamespace(output=None)))
+        self.assertEqual(prepare_replay.export_qualification(SimpleNamespace(output=None)),{})
+
+    def parse_prepare(self,*extra):
+        """Run prepare_replay's argument checks; a missing --root stops it before any import or GPU."""
+        captured=[];parse=argparse.ArgumentParser.parse_args
+        def spy(parser,*args,**kwargs):
+            captured.append(parse(parser,*args,**kwargs));return captured[-1]
+        argv=['prepare_replay.py','--root','/nonexistent/flare-root','--prompts','p','--kernel-cache','k',
+              '--checkpoint','c','--compile-workers','1','--report','r',*extra]
+        stderr=io.StringIO()
+        with mock.patch.object(argparse.ArgumentParser,'parse_args',spy),mock.patch.object(sys,'argv',argv),\
+                redirect_stderr(stderr),self.assertRaises(SystemExit) as stop:
+            prepare_replay.main()
+        self.assertEqual(stop.exception.code,2)
+        return captured[0],stderr.getvalue()
+
+    def test_skip_reference_gates_flag_parsing(self):
+        args,error=self.parse_prepare()
+        self.assertNotIn('skip_reference_gates',vars(args))  # default reports keep their exact keys
+        self.assertIn('--root must be an existing output directory',error)
+        args,error=self.parse_prepare('--skip-reference-gates')
+        self.assertIs(args.skip_reference_gates,True)
+        self.assertIn('--root must be an existing output directory',error)
+        for given in (['--measure-accuracy'],['--short-reference','s.safetensors'],['--long-reference','l.safetensors']):
+            with self.subTest(given=given):
+                _,error=self.parse_prepare('--skip-reference-gates',*given)
+                self.assertIn('omit --measure-accuracy',error)
+        _,error=self.parse_prepare('--skip-reference-gates','--output','o.safetensors','--measure','t.json',
+                                   '--signing-dir','keys','--check-invariance','--check-commit-growth',
+                                   '--check-consumers','--measure-components')
+        self.assertIn('still requires',error)  # --validate missing
+
+    def test_shell_helper_default_arguments_are_unchanged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            echo=Path(tmp)/'python';echo.write_text('#!/bin/sh\nshift\nfor a in "$@"; do printf "%s\\n" "$a"; done\n')
+            echo.chmod(0o755)
+            run=lambda *extra:subprocess.run(['bash',str(ROOT/'tools/prepare_replay.sh'),str(echo),*extra],
+                capture_output=True,text=True,timeout=15,check=True).stdout.splitlines()
+            helper=('--context 32768 --concurrency 4 --depth 4 --lease-gib 30 --chunk 512 --validate '
+                    '--check-invariance --check-commit-growth --check-consumers --measure-components').split()
+            tail='--measure-batches 1 4 --measure-prompt-ids code-00 code-01 code-02 code-03 --root /r'.split()
+            self.assertEqual(run('--root','/r'),helper+['--measure-accuracy']+tail)
+            self.assertEqual(run('--root','/r','--skip-reference-gates'),helper+tail+['--skip-reference-gates'])
+
+    def test_native_refuses_skipped_reference_package_unless_allowed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            package=Path(tmp)/'package.safetensors';package.write_bytes(b'synthetic signed primary')
+            gates=('validation','long_sequence','consumer_identity','commit_capacity_growth')
+            report=dict(status='exported',package=str(package),components={'status':'complete'},
+                        qualification={'reference_gates':'skipped','reason':'--skip-reference-gates'},
+                        **{key:{'passed':True} for key in gates},
+                        measurement={'status':'complete','qualification_passed':True,
+                                     'runs':[{'status':'complete'}],'summary':[{'tau':2.0}]},
+                        package_primary_sha256=hashlib.sha256(package.read_bytes()).hexdigest())
+            with self.assertRaisesRegex(RuntimeError,'--allow-unqualified'):
+                native.require_qualification(report,package)
+            self.assertEqual(native.require_qualification(report,package,True),
+                {'reference_gates':'skipped','reason':'--skip-reference-gates','allowed_by':'--allow-unqualified'})
+            for field in (*gates,'components','measurement'):
+                changed=copy.deepcopy(report);changed.pop(field)
+                with self.subTest(field=field),self.assertRaisesRegex(RuntimeError,'qualification'):
+                    native.require_qualification(changed,package,True)
+            changed=copy.deepcopy(report);changed['qualification']={'reference_gates':'skipped','reason':'other'}
+            with self.assertRaisesRegex(RuntimeError,'unknown package qualification'):
+                native.require_qualification(changed,package,True)
+            # A fully qualified report is accepted with or without the option and records nothing.
+            full=copy.deepcopy(report);full.pop('qualification');full['accuracy']={'status':'complete'}
+            self.assertIsNone(native.require_qualification(full,package))
+            self.assertIsNone(native.require_qualification(full,package,True))
+            full.pop('accuracy')
+            with self.assertRaisesRegex(RuntimeError,'qualification'):
+                native.require_qualification(full,package,True)
 
     def test_native_requires_all_qualification_results_and_exact_primary(self):
         with tempfile.TemporaryDirectory() as tmp:

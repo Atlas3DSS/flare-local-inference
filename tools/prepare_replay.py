@@ -13,14 +13,44 @@ import time
 import traceback
 
 
+# --skip-reference-gates skips only the gate that reads the FP32 reference*.safetensors files: the
+# full-vocabulary accuracy (KL/top-1) gate, tools/accuracy.py. Every other gate runs and must pass.
+REFERENCE_GATE_INPUTS = ('measure_accuracy', 'short_reference', 'long_reference')
+SKIPPED_REFERENCE_GATES = {'reference_gates': 'skipped', 'reason': '--skip-reference-gates'}
+
+
+def skips_reference_gates(args):
+    # The option is absent from the parsed arguments unless given, so default reports keep their keys.
+    return getattr(args, 'skip_reference_gates', False) is True
+
+
+def qualification(args):
+    """The skipped-gate record for the report and the signed package, or None when every gate runs."""
+    return dict(SKIPPED_REFERENCE_GATES) if skips_reference_gates(args) else None
+
+
+def export_qualification(args):
+    """Publisher fields that stamp the signed package; none unless reference gates are skipped."""
+    if not skips_reference_gates(args):
+        return {}
+    from ignition.preparation.protection import Qualification
+    return {'qualification': Qualification(**SKIPPED_REFERENCE_GATES)}
+
+
 def require_export_gates(args):
-    if args.output and not all((args.validate, args.check_invariance, args.check_commit_growth,
-                               args.check_consumers, args.measure_components, args.measure_accuracy,
-                               args.measure, args.signing_dir, args.short_reference, args.long_reference)):
+    if not args.output:
+        return
+    if skips_reference_gates(args):
+        if not all((args.validate, args.check_invariance, args.check_commit_growth, args.check_consumers,
+                    args.measure_components, args.measure, args.signing_dir)):
+            raise ValueError('export with --skip-reference-gates still requires every strict/invariance/commit/consumer/component/tau gate and signing inputs')
+    elif not all((args.validate, args.check_invariance, args.check_commit_growth,
+                  args.check_consumers, args.measure_components, args.measure_accuracy,
+                  args.measure, args.signing_dir, args.short_reference, args.long_reference)):
         raise ValueError('export requires every strict/invariance/commit/consumer/component/accuracy/tau gate and signing inputs')
 
 
-def main():
+def build_parser():
     parser = argparse.ArgumentParser()
     parser.add_argument('--root', type=Path, required=True, help='existing directory for flat validation outputs')
     parser.add_argument('--prompts', type=Path, required=True)
@@ -47,6 +77,9 @@ def main():
     parser.add_argument('--measure-components', action='store_true')
     parser.add_argument('--measure-accuracy', action='store_true',
         help='full-vocabulary KL/top1 on the published short and long references')
+    parser.add_argument('--skip-reference-gates', action='store_true', default=argparse.SUPPRESS,
+        help='skip only the accuracy gate, which needs the FP32 reference files; every other gate still '
+             'runs, and the report and signed package record the skip')
     parser.add_argument('--check-consumers', action='store_true')
     parser.add_argument('--check-invariance', action='store_true',
         help='512-token ordinary/speculative and solo/co-scheduled greedy checks')
@@ -63,7 +96,15 @@ def main():
         help='target verification widths for --diagnose-long; default: available widths 4 and 5')
     parser.add_argument('--diagnostic-uncompiled', action='store_true',
         help='capture prepared eager operators for numerical diagnosis; never export this run')
+    return parser
+
+
+def main():
+    parser = build_parser()
     args = parser.parse_args()
+    if skips_reference_gates(args) and any(getattr(args, name) for name in REFERENCE_GATE_INPUTS):
+        parser.error('--skip-reference-gates skips the accuracy gate; omit --measure-accuracy, '
+                     '--short-reference and --long-reference')
     try: require_export_gates(args)
     except ValueError as error: parser.error(str(error))
     if args.legacy_dense and args.output:
@@ -97,6 +138,8 @@ def main():
         print(time.strftime('%H:%M:%S'), message, flush=True)
 
     result = {'status': 'started', 'args': vars(args), 'torch': torch.__version__}
+    if qualification(args) is not None:
+        result['qualification'] = qualification(args)
     start = time.monotonic()
     try:
         torch.cuda.set_device(0)
@@ -209,7 +252,8 @@ def main():
                     raise ValueError('export requires the SPEC addendum long-sequence invariance checks')
                 if not (args.check_consumers and args.check_commit_growth and args.measure_components):
                     raise ValueError('export requires the reviewed consumer, commit growth and component gates')
-                if not args.measure_accuracy or result.get('accuracy', {}).get('status') != 'complete':
+                if not skips_reference_gates(args) and (
+                        not args.measure_accuracy or result.get('accuracy', {}).get('status') != 'complete'):
                     raise ValueError('export requires the SPEC addendum full-vocabulary accuracy measurements')
                 from dataclasses import replace
                 from types import SimpleNamespace
@@ -218,7 +262,8 @@ def main():
                 from ignition.preparation.model_package import export_package
                 signer = replace(publisher(SimpleNamespace(path=args.signing_dir / 'config.toml')),
                     license=model_license(args.checkpoint, 'nvidia/Qwen3.8-27B-NVFP4',
-                                          '482ca0f3832238542f8f5295dde86b5f22711d80'))
+                                          '482ca0f3832238542f8f5295dde86b5f22711d80'),
+                    **export_qualification(args))
                 export_package(prepared, recorder, storage, args.output, options={}, publisher=signer,
                                progress=progress, staging=args.root)
                 with args.output.open('rb') as primary:

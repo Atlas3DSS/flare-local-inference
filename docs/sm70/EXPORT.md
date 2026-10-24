@@ -57,8 +57,8 @@ They are not the unpublished historical prompts or agent traces. Their results
 must establish a new baseline, not be presented as reproduction of the old scores.
 The four hardcoded strict-validator prompts remain unchanged.
 
-Accuracy references are generated locally from the pinned checkpoint; no binary
-reference download is required. The short reference streams FP32 layers using
+Accuracy references can be generated locally from the pinned checkpoint, as below,
+or downloaded already made ([One V100 only](#one-v100-only)). The short reference streams FP32 layers using
 canonical Transformers arithmetic. The long-reference helper retains its original
 GPU-resident checkpoint implementation and PRO 6000 device check: use a separately
 allocated RTX PRO 6000 96 GB for that step. It is not a V100-memory-fit claim.
@@ -81,6 +81,54 @@ bind the model ID, revision, checkpoint config/index hashes and exact token
 contexts. They report FP64-reduced full-vocabulary KL and top-1 differences;
 `complete` means the measurement completed, not an invented numerical threshold.
 Reference generation is expensive GPU work and has not been rerun for this port.
+
+### One V100 only
+
+Without a 96 GB GPU you cannot make the long reference. You have two choices.
+
+**Download the published references and run every gate (recommended).** The
+fork publishes the exact reference files its own export gates used, with their
+provenance JSON files, in the public dataset
+[Atlas3D/flare-sm70-references](https://huggingface.co/datasets/Atlas3D/flare-sm70-references)
+(about 426 MB; Apache-2.0). Its README gives the generation commands, script
+hashes and environment. The helper downloads a pinned revision and checks every
+file's SHA-256; it keeps nothing that does not match:
+
+```sh
+bash tools/fetch_references.sh /data/flare-refs
+```
+
+| File | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `reference.safetensors` | 140,054,888 | `30dd669b1baf6a1ec517b635c083b275dd72417ca07521bf33cecdd954f02a3f` |
+| `long-code-reference.safetensors` | 286,266,648 | `d4479957d5ec101c8274d7a7fe59032d0171423ebacd8607a6aeb61e00f1afc9` |
+
+The two companion JSON files come with them. The accuracy gate checks that your
+checkpoint's `config.json` and `model.safetensors.index.json` match the ones the
+references were made from, so download the checkpoint at the pinned revision.
+Then run section 3 unchanged. You still need `/data/flare-refs/prompts.jsonl` only
+if you want to remake the references yourself.
+
+**Or skip the reference gates.** Add `--skip-reference-gates` to the
+`prepare_replay.sh` command in section 3 and leave out `--short-reference` and
+`--long-reference`. This skips exactly one gate, the accuracy gate
+(`tools/accuracy.py`: full-vocabulary KL and top-1 against the FP32 references),
+which is the only gate that reads the reference files. Strict validation,
+long-sequence invariance, commit growth, consumer identity, components and the
+tau goldens all still run and must pass. The consequences:
+
+- Nobody has measured how far your package's outputs are from the FP32 model.
+  The other gates show that the package is self-consistent and exact against its
+  own greedy decode, not that it is accurate.
+- The report (`prepare.json`) and the signed package both record
+  `"qualification": {"reference_gates": "skipped", "reason": "--skip-reference-gates"}`.
+  Re-signing keeps the record. `flare run` prints
+  `Unqualified package: reference gates skipped (--skip-reference-gates); ...` on every start.
+- `tools/native.py` refuses to benchmark such a package unless you also pass
+  `--allow-unqualified`, and then every report it writes carries the record, so
+  the numbers cannot be mistaken for those of a fully qualified package.
+
+Without the option, nothing changes: the helper turns on every gate, as before.
 
 ## 3. Prepare and export
 
@@ -271,6 +319,10 @@ full-vocabulary KL and top-1 agreement and sets no pass threshold. For the
 component packages before the release merge, the commit messages record short
 `kld_mean` 0.0011443 and long 0.0024010, bit for bit equal to the previous
 package (`8ad725c`, `ca16f00`).
+
+Only the accuracy gate reads the reference files. `--skip-reference-gates` skips
+that gate alone and stamps the package as unqualified
+([One V100 only](#one-v100-only)).
 
 [VALIDATE.md](VALIDATE.md) lists every gate in run order, including the serving
 checks after export.

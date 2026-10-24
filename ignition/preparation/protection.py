@@ -77,18 +77,39 @@ class License:
 
 
 @dataclass(frozen=True)
+class Qualification:
+    """Export gates the exporter skipped, and why; Flare prints both when it serves the package.
+
+    Packages whose every gate ran carry none. Both fields are bounded printable text, because
+    they reach a terminal.
+    """
+
+    reference_gates: str
+    reason: str
+
+    def __post_init__(self):
+        for value in (self.reference_gates, self.reason):
+            if (not isinstance(value, str) or not 0 < len(value) <= 128
+                    or any(unicodedata.category(c) == 'Cc' for c in value)):
+                raise ValueError('qualification fields must be 1 to 128 printable characters')
+
+
+@dataclass(frozen=True)
 class Publisher:
     key: Ed25519PrivateKey
     namespace: str
     official_source: str
     development: bool = False
     license: License | None = None
+    qualification: Qualification | None = None
 
     def __post_init__(self):
         if not isinstance(self.key, Ed25519PrivateKey):
             raise ValueError('publishing requires an Ed25519 private key')
         if self.license is not None and not isinstance(self.license, License):
             raise ValueError('publisher license must be a License')
+        if self.qualification is not None and not isinstance(self.qualification, Qualification):
+            raise ValueError('publisher qualification must be a Qualification')
         if self.development:
             if self.namespace != 'local-development' or self.official_source != 'local-development':
                 raise ValueError('invalid local development publisher')
@@ -348,6 +369,9 @@ class Protection:
         if self.publisher.license is not None:
             metadata.license.name = self.publisher.license.name
             metadata.license.link = self.publisher.license.link
+        if self.publisher.qualification is not None:
+            metadata.qualification.reference_gates = self.publisher.qualification.reference_gates
+            metadata.qualification.reason = self.publisher.qualification.reason
         bodies.insert(0, metadata.SerializeToString(deterministic=True))
         for kind, body in enumerate(bodies, 1):
             sign(result.groups, kind, body)

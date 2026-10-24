@@ -25,9 +25,15 @@ message PublisherMetadata {
   // The license governing use of the model, whose terms acceptance agrees to; absent in packages
   // exported before it was recorded.
   License license = 7;
+  // Present only when the exporter skipped export gates; absent when every gate ran, and in
+  // packages exported before it was recorded.
+  Qualification qualification = 8;
 }
 // A license named for the acceptance prompt and linked for reading; the link may be empty.
 message License { string name = 1; string link = 2; }
+// Which export gates were skipped and why, for example reference_gates "skipped" with reason
+// "--skip-reference-gates"; Flare prints both when it serves the package.
+message Qualification { string reference_gates = 1; string reason = 2; }
 message ResourceCatalog { repeated ProtectedResource resources = 1; }
 message ProtectedResource {
   uint64 offset = 1;

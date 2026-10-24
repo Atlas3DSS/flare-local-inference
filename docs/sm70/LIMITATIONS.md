@@ -63,6 +63,12 @@ upstream. Read this before you rely on the port.
   [groups-B](receipts/g128/groups-B-release-g128-tree.log)). On the merged commit `4acbecf0`, with the committed group lists, group A passed 225 tests with 17 subtests and group B 218 tests; the committed B list does not include `tests/preparation/test_module_images.py` (27 tests), which the lab run above did, hence 218 rather than 245. The prefill-rows identity tests ran separately on the same commit, 74 passed; that run predates the line that adds them to group A ([groups-A-merged-4acbecf0.log](receipts/g128/groups-A-merged-4acbecf0.log), [groups-B-merged-4acbecf0.log](receipts/g128/groups-B-merged-4acbecf0.log), [groups-A-rows-merged-4acbecf0.log](receipts/g128/groups-A-rows-merged-4acbecf0.log), [tests-replay-merged-4acbecf0.out](receipts/g128/tests-replay-merged-4acbecf0.out)).
   These component tests are separate from the full-model export gates and the
   native serving measurements.
+- **`--skip-reference-gates` packages are unqualified.** The option, for users who
+  cannot make or download the FP32 references, skips the accuracy gate, so nobody has
+  measured that package's KL or top-1 agreement against the FP32 model. The package says so
+  at every `flare run` start, and `tools/native.py` benchmarks it only with
+  `--allow-unqualified`. The published references
+  ([EXPORT.md](EXPORT.md#one-v100-only)) let a single-V100 user run the full gates instead.
 - **Export qualification is complete; serving qualification is not.** The
   current package `f21b9abb` passed every gate on 2026-10-24: strict 47/47,
   long-sequence invariance, commit-capacity growth, consumer identity,

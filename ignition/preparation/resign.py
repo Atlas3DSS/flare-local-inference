@@ -15,7 +15,8 @@ from ignition.progress import phase
 from . import runtime_package_pb2 as proto
 from .package_file import (DEFAULT_SHARD_SIZE, MAX_INDEX_BYTES, PackageFiles, _publish,
                            _validate_spans, align, read_index, stored_parts)
-from .protection import CHUNK, License, Protection, chunk_aad, resource_key, resource_roles, signature_message
+from .protection import (CHUNK, License, Protection, Qualification, chunk_aad, resource_key, resource_roles,
+                         signature_message)
 
 
 def _authenticate(source, profile, *, development_only=True):
@@ -108,7 +109,7 @@ def _authenticate(source, profile, *, development_only=True):
         if kind != 4 and any(not name and span.offset < end and offset < span.offset + span.nbytes
                              for name, offset, end in ranges):
             raise ValueError('protected resource overlaps stored data')
-    return index, base, envelope.package_id, public, resources, stored, (License(metadata.license.name, metadata.license.link) if metadata.HasField('license') else None)
+    return index, base, envelope.package_id, public, resources, stored, (License(metadata.license.name, metadata.license.link) if metadata.HasField('license') else None), (Qualification(metadata.qualification.reference_gates, metadata.qualification.reason) if metadata.HasField('qualification') else None)
 
 
 class _SourceVerifier:
@@ -175,10 +176,14 @@ def resign(source, destination, *, publisher, development_profile, progress=None
     destination.parent.mkdir(parents=True, exist_ok=True)
     with Path(source).open('rb') as contents, TemporaryDirectory(prefix='.flare-resign-', dir=destination.parent) as temporary:
         with phase(progress, 'Authenticate development package'):
-            index, base, package_id, public, resources, stored, license = _authenticate(contents, development_profile)
+            index, base, package_id, public, resources, stored, license, qualification = _authenticate(
+                contents, development_profile)
         # The model's license travels with the model; the production publisher may override it.
         if publisher.license is None and license is not None:
             publisher = replace(publisher, license=license)
+        # Skipped export gates travel with the package; re-signing cannot remove the record.
+        if qualification is not None:
+            publisher = replace(publisher, qualification=qualification)
         contents.seek(8)
         length = json.loads(contents.read(base - 8))['flare.payload']['shape'][0]
         with PackageFiles(source, contents, base, length) as files:

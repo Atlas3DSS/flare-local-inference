@@ -100,6 +100,29 @@ impl PackageLicense {
         })
     }
 }
+/// Export gates the exporter skipped and why, as the package records them; absent when every
+/// gate ran.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PackageQualification {
+    /// Which gates were skipped, for example `skipped` for the FP32-reference accuracy gates.
+    pub reference_gates: String,
+    /// Why, for example the exporter option `--skip-reference-gates`.
+    pub reason: String,
+}
+impl PackageQualification {
+    fn validated(qualification: &wire::Qualification) -> Result<Self> {
+        let printable = |value: &str| {
+            !value.is_empty() && value.len() <= 128 && !value.chars().any(char::is_control)
+        };
+        if !printable(&qualification.reference_gates) || !printable(&qualification.reason) {
+            return Err(invalid("invalid package qualification metadata"));
+        }
+        Ok(Self {
+            reference_gates: qualification.reference_gates.clone(),
+            reason: qualification.reason.clone(),
+        })
+    }
+}
 /// What a package claims before any signature is verified: which key signed it and where it says
 /// it was published. The caller resolves the signer's identity from the claim, then verifies the
 /// package with the resolved profile; nothing here is trusted until that verification.
@@ -257,6 +280,9 @@ impl VerifiedPackage {
     pub fn license(&self) -> Option<&PackageLicense> {
         self.archive.protection.license.as_ref()
     }
+    pub fn qualification(&self) -> Option<&PackageQualification> {
+        self.archive.protection.qualification.as_ref()
+    }
     /// Digest the stored data of every verified rank against the signed index.
     pub fn verify_stored_data(&self) -> Result<()> {
         self.archive.protection.verify_data(&self.archive)
@@ -280,6 +306,7 @@ pub(super) struct Protection {
     publisher: Publisher,
     official_source: String,
     license: Option<PackageLicense>,
+    qualification: Option<PackageQualification>,
     /// The acceptance string, once applied; executable keys derive from it.
     accepted: Option<String>,
     package_id: Vec<u8>,
@@ -453,6 +480,12 @@ impl Protection {
             .as_ref()
             .map(PackageLicense::validated)
             .transpose()?;
+        // Packages whose every export gate ran, and older packages, carry no qualification.
+        let qualification = metadata
+            .qualification
+            .as_ref()
+            .map(PackageQualification::validated)
+            .transpose()?;
         let mut index = metadata
             .index
             .ok_or_else(|| invalid("missing signed model index"))?;
@@ -513,6 +546,7 @@ impl Protection {
             publisher,
             official_source: metadata.official_source,
             license,
+            qualification,
             accepted: None,
             package_id: envelope.package_id,
             resources,

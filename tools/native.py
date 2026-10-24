@@ -26,6 +26,8 @@ import urllib.request
 
 DEST = None
 GPU = None
+QUALIFICATION = None   # set when --allow-unqualified admits a package exported with --skip-reference-gates
+SKIPPED_REFERENCE_GATES = {'reference_gates': 'skipped', 'reason': '--skip-reference-gates'}
 
 
 def query(*command, timeout=30):
@@ -236,6 +238,8 @@ def run_depth(args, depth, supervisor, help_text):
         "executable_help": help_text, "artifacts": {key: str(path) for key, path in paths.items()},
         "client_protocol": "benchmark_mtp.py protocol; explicit input file" if args.mode == "native" else "external replay client",
         "package": str(args.package), "executable": str(args.executable)}
+    if QUALIFICATION is not None:
+        report["qualification"] = QUALIFICATION
     with args.executable.open('rb') as executable:
         report['executable_sha256'] = hashlib.file_digest(executable, 'sha256').hexdigest()
     with paths["report"].open("x"):
@@ -385,14 +389,26 @@ def run_depth(args, depth, supervisor, help_text):
         raise RuntimeError("benchmark or server cleanup failed; see " + str(paths["report"]))
 
 
-def require_qualification(qualification, package):
+def require_qualification(qualification, package, allow_unqualified=False):
+    """Refuse a package whose prepare report lacks any final export gate.
+
+    A package exported with --skip-reference-gates has no accuracy gate; it is refused unless
+    allow_unqualified, and then its skipped-gate record is returned for every report.
+    """
     measurement = qualification.get('measurement', {})
+    skipped = qualification.get('qualification')
+    if skipped is not None:
+        if skipped != SKIPPED_REFERENCE_GATES:
+            raise RuntimeError(f'unknown package qualification record: {skipped!r}')
+        if not allow_unqualified:
+            raise RuntimeError('package was exported with --skip-reference-gates, so its accuracy gate '
+                               'did not run; pass --allow-unqualified to benchmark it, and every report records that')
     if (qualification.get('status') != 'exported'
             or qualification.get('package') != str(package)
             or any(not qualification.get(key, {}).get('passed') for key in
                    ('validation', 'long_sequence', 'consumer_identity', 'commit_capacity_growth'))
             or qualification.get('components', {}).get('status') != 'complete'
-            or qualification.get('accuracy', {}).get('status') != 'complete'
+            or (skipped is None and qualification.get('accuracy', {}).get('status') != 'complete')
             or measurement.get('status') != 'complete' or measurement.get('qualification_passed') is not True
             or not measurement.get('runs') or not measurement.get('summary')
             or any(run.get('status') != 'complete' for run in measurement.get('runs', []))):
@@ -401,6 +417,7 @@ def require_qualification(qualification, package):
         digest = hashlib.file_digest(primary, 'sha256').hexdigest()
     if qualification.get('package_primary_sha256') != digest:
         raise RuntimeError('qualified signed package primary hash mismatch')
+    return None if skipped is None else {**skipped, 'allowed_by': '--allow-unqualified'}
 
 
 def main():
@@ -428,13 +445,15 @@ def main():
     parser.add_argument("--tag", default="", help="artifact name prefix (for example '32k-' for the S1L package)")
     parser.add_argument("--prefix-cache", default="64G", help="host prefix cache (--prefix-cache-memory); 24G fallback when cuMemCreate fails")
     parser.add_argument("--qualification", type=Path, help="prepare report of the package (default: <package dir>/prepare.json)")
+    parser.add_argument('--allow-unqualified', action='store_true',
+                        help='benchmark a package exported with --skip-reference-gates; every report records it')
     # Native client, prompt file/ids and concurrency order are parameters (defaults = the short-prompt protocol)
     parser.add_argument("--client", type=Path, default=Path(__file__).resolve().with_name("benchmark_mtp.py"))
     parser.add_argument("--prompts", type=Path, required=True)
     parser.add_argument("--prompt-ids", nargs="+", default=["code-00", "code-01", "code-02", "code-03"])
     parser.add_argument("--concurrencies", type=int, nargs="+", default=[1, 4])
     args = parser.parse_args()
-    global TAG, DEST, GPU
+    global TAG, DEST, GPU, QUALIFICATION
     TAG, DEST, GPU = args.tag, args.output_dir, args.gpu_uuid
     if not DEST.is_dir():
         parser.error('--output-dir must exist')
@@ -455,7 +474,7 @@ def main():
         if not path.is_file():
             raise FileNotFoundError(path)
     qualification = json.loads((args.qualification or (args.package.parent / 'prepare.json')).read_text())
-    require_qualification(qualification, args.package)
+    QUALIFICATION = require_qualification(qualification, args.package, args.allow_unqualified)
     for depth in args.depths:
         for path in artifacts(args.mode, depth).values():
             if path.exists():

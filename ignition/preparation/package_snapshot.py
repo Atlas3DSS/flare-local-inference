@@ -472,7 +472,7 @@ def convert(source, destination, *, profiles, cache=None, shard_size=DEFAULT_SHA
         profile = next((p for p in profiles if hashlib.sha256(bytes(p['public_key'])).digest() == envelope.signer), None)
         if profile is None:
             raise ValueError('package publisher is unknown; supply its public profile with --publisher-keys')
-        index, _, _, _, resources, stored, _ = _authenticate(primary, profile, development_only=False)
+        index, _, _, _, resources, stored, _, _ = _authenticate(primary, profile, development_only=False)
         groups = _plan_groups(index, shard_size)
         length = header['flare.payload']['shape'][0]
         with PackageFiles(source, primary, base, length) as files:
