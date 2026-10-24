@@ -112,9 +112,14 @@ pool as the 31G run on line 65.
 
 | Measurement | Value | Hardware | Memory limit | Concurrency | Package | Date | Source |
 | --- | ---: | --- | --- | --- | --- | --- | --- |
-| KV pool (BF16) at the 31G run's cache cap (`--kv-cache-limit concurrency`) | 131,584 tokens | V100 PCIe 32 GB | 31G | 4 | `model-32k-tonight-a` | 2026-10-22 | STATUS.md lines 65, 66 |
+| KV pool, BF16 (b), at the 31G run's cache cap (`--kv-cache-limit concurrency`) | 131,584 tokens | V100 PCIe 32 GB | 31G | 4 | `model-32k-tonight-a` | 2026-10-22 | STATUS.md lines 65, 66 |
 | KV pool before replay-commit | 98,304 tokens | V100 PCIe 32 GB | 31G | 4 | baseline package of 2026-10-21 | 2026-10-21 | as cited on STATUS.md line 49 |
 | Four prompts of 22.4k-30.2k tokens (110,022 in total) | all resident, no eviction or restore | V100 PCIe 32 GB | 31G | 4 | `model-32k-tonight-a` | 2026-10-22 | STATUS.md line 65 |
+
+(b) On SM70, BF16 is a 2-byte storage format. Volta has no native BF16
+arithmetic or BF16 tensor-core instructions, so the kernels convert BF16 KV
+values to FP16 or FP32 in registers before computing
+([ARCHITECTURE.md](docs/sm70/ARCHITECTURE.md#why-volta-needs-its-own-path)).
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/sm70/img/kv-pool-dark.svg">
@@ -185,7 +190,12 @@ Strata and Project Maya serve much larger MoE models by tiering experts across
 VRAM, RAM and NVMe. Their published V100 decode rates are lower per card than
 this port's, so they show no speed bought by lower precision. Their strength is
 fitting 125-748 B models on old cards; this port's is serving 4 agents per card
-on a 27B model. Prefill and TTFT are not yet compared with either engine:
+on a 27B model. Strata's V100 support is a community-tested build with the
+compile-time experimental flag `STRATA_EXPERIMENTAL_SM60`, outside its
+supported cards; only that build contains its sm_70 tensor-core prompt
+attention and chunked GDN path
+([sources](docs/sm70/WHY-NOT-LOW-BIT.md#strata-and-project-maya)). Prefill and
+TTFT are not yet compared with either engine:
 release-binary prefill is being measured now at fixed prompt lengths of 2,048
 to 30,720 tokens ([BENCHMARKS-SM70.md](BENCHMARKS-SM70.md#release-binary-d4ffb1fa-built-from-71029458-production-source-unchanged-through-c6fdc120)).
 The KL figures are not on one scale: ours compares the port with

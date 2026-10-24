@@ -280,7 +280,7 @@ def run_depth(args, depth, supervisor, help_text):
         report["readiness_seconds"] = time.monotonic() - started
         live = processes()
         if len(live) != 1 or live[0]["pid"] != server.pid:
-            raise RuntimeError(f"expected only owned native server on V100-0: {live}")
+            raise RuntimeError(f"expected only the owned native server on the selected V100: {live}")
         if Path(f"/proc/{server.pid}/exe").resolve() != args.executable.resolve():
             raise RuntimeError("unexpected serving executable")
         report["cpu_spread"] = query("ps", "-L", "-p", str(server.pid), "-o", "pid,tid,psr,pcpu,comm")

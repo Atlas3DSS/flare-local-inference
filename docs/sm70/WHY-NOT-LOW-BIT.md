@@ -122,6 +122,16 @@ all experts in RAM, and computes RAM-resident experts on the CPU
 - **Volta.** A community-tested build, outside its supported cards, compiled
   with CUDA 12.x because CUDA 13 dropped Volta
   ([NVIDIA_V100.md](https://github.com/Niko1221/Strata/blob/main/docs/NVIDIA_V100.md)).
+  The V100 build sets the compile-time experimental flag
+  `-DSTRATA_EXPERIMENTAL_SM60=ON`. Strata's sm_70 tensor-core prompt attention
+  (`prompt_attn_v70_kernel` on `mma.m8n8k4`) and its chunked GDN path are
+  compiled only under that flag. Builds without it, including the ready-made
+  engine for compute capability 7.5 and newer, contain neither
+  ([qsa_prompt_attn.cu](https://github.com/Niko1221/Strata/blob/main/src/kernels/cuda/qsa_prompt_attn.cu),
+  [gdn_chunk.cu](https://github.com/Niko1221/Strata/blob/main/src/prefill/gdn_chunk.cu)).
+  In the V100 build the tensor-core prompt attention is the default for int8,
+  FP16 and K8V4 KV, and `STRATA_PROMPT_ATTN_OLD=1` selects the older kernel
+  (NVIDIA_V100.md).
 - **Weights.** GGUF quantizations: Strata's own 1- to 3-bit sizes and
   Unsloth's 4- to 8-bit files
   ([MODELS.md](https://github.com/Niko1221/Strata/blob/main/docs/MODELS.md)).
@@ -145,8 +155,11 @@ all experts in RAM, and computes RAM-resident experts on the CPU
   A multi-card figure is one stream, not a sum of streams. Strata answers one
   request at a time by default; `--parallel N` serves several (its README).
 - **Our own run.** On 2026-10-20 this fork ran Strata with Qwen3.8-Flash-Next
-  on three V100s: 56-64 tok/s decode with MTP, one stream. The quantization used
-  was not recorded. Divided by three cards, that is 18.7-21.3 tok/s per card.
+  on three V100s: 56-64 tok/s total across a 3-V100 layer split, single stream,
+  decoding with MTP. The quantization used was not recorded. Divided by three
+  cards, that is 18.7-21.3 tok/s per card, but in a layer split the cards take
+  turns on one stream, so the division understates Strata. Its own 1-card V100
+  figure is 38-51 tok/s.
 - **Shared design.** Strata already commits its Gated DeltaNet state by
   replaying accepted tokens. Its verify half writes no state, and its commit half
   replays the first accepted tokens from stored inputs
@@ -193,7 +206,7 @@ on the GPU, the next in RAM and the rest on NVMe.
 | This port | Qwen3.8-27B | NVIDIA NVFP4 + FP8, unchanged | 1 / 1 | 90.4 | 90.4 | KL 0.0011 / 0.0024 vs an FP32 forward of the same checkpoint | STATUS.md line 66 |
 | This port | Qwen3.8-27B | same | 1 / 4 | 70.7 per stream | 70.7 per stream | same | STATUS.md line 66 |
 | Strata | Qwen3.8-Flash-Next, 125 B | UD-IQ4_XS GGUF, int8 KV | 1 / 1 | 38-51 | 38-51 | 88.91 % top token vs Q8_0 | NVIDIA_V100.md, QUANTS.md |
-| Strata (our run, 2026-10-20) | Qwen3.8-Flash-Next | not recorded | 3 / 1 | 56-64 | 18.7-21.3 | not measured | fork notes |
+| Strata (our run, 2026-10-20) | Qwen3.8-Flash-Next | not recorded | 3 / 1 | 56-64 tok/s total across a 3-V100 layer split, single stream | 18.7-21.3 if divided by 3; Strata's own 1-card figure is 38-51 | not measured | fork notes |
 | Project Maya | GLM-5.3-Flash, 321 B (18 B active) | Maya-S24, about 2.4 bits/param | 1 / `--bench` | 26.8 | 26.8 | 83 % next token vs FP8 | #171 |
 | Project Maya | GLM-5.3-Flash | Maya-S v2 (IQ2_XXS) | 4 / `--bench` | 69.3 | 17.3 | 83 % (Maya-S) | #327 |
 | Project Maya | GLM-5.3-Flash | Maya-L (IQ3_S), about 3.9 bits/param | 4 / 1 | 48.25 | 12.1 | 90 % | #130 |

@@ -70,7 +70,7 @@ Set `THREADS` to the allocated CPU thread count, reserving one physical core.
 CUDA_VISIBLE_DEVICES="$REFERENCE_GPU_UUID" .venv/bin/python tools/reference_model.py \
   --root /data/flare-refs --checkpoint /data/models/Qwen3.8-27B-NVFP4 \
   --device cuda:0 --threads "$THREADS"
-CUDA_VISIBLE_DEVICES="$REFERENCE_GPU_UUID" .venv/bin/python tools/john_reference.py long \
+CUDA_VISIBLE_DEVICES="$REFERENCE_GPU_UUID" .venv/bin/python tools/gpu_reference.py long \
   --root /data/flare-refs --out /data/flare-refs --calib-out /data/flare-refs \
   --checkpoint /data/models/Qwen3.8-27B-NVFP4 --prompts /data/flare-refs/prompts.jsonl \
   --threads "$THREADS" --count 6 --new-tokens 32 --positions 48

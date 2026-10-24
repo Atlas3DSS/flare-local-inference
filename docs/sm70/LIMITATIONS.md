@@ -78,7 +78,7 @@ upstream. Read this before you rely on the port.
   `benchmark_prefill.py`, `benchmark_mtp.py`, `benchmark_long.py`), the
   architecture comparison (`compare_architectures.py`), public prompt
   generation (`generate_prompts.py`) and the FP32 reference generators
-  (`reference_model.py`, `john_reference.py`), documented in
+  (`reference_model.py`, `gpu_reference.py`), documented in
   [EXPORT.md](EXPORT.md), [VALIDATE.md](VALIDATE.md) and
   [BENCHMARK.md](BENCHMARK.md), plus the run receipts in [receipts/](receipts/).
   References and tau goldens are generated locally by these tools, not

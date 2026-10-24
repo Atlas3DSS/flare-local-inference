@@ -160,6 +160,10 @@ The SM70 base port therefore:
 - holds BF16 values in FP32 tensors and rounds them to BF16 with integer
   round-to-nearest-even, so the model's BF16 rounding points are kept without
   BF16 storage (`ignition/components/sm70_precision.py`);
+- keeps the KV cache in BF16 as a 2-byte storage format only. Volta has no
+  native BF16 arithmetic, so kernels convert BF16 K/V to FP16 or FP32 in
+  registers before computing; the S1L kernel's conversion to power-of-two-scaled
+  FP16 is exact for every admitted value (section 3);
 - runs NVFP4 weight-only and tensor-FP8 projections from packed weights on FP16
   tensor-core tiles with FP32 accumulation. NVFP4 weights are E2M1 times the
   E4M3 block scale, then the checkpoint's global scale. Tensor-FP8 keeps the E4M3

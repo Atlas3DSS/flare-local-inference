@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""John-lane FP32 references, reusing Astra's reference_model.py arithmetic unchanged.
+"""GPU-resident FP32 references, reusing reference_model.py arithmetic unchanged.
 
 Only weight *placement* differs from astra-1/reference_model.py: the raw checkpoint rows (packed
 E2M1 bytes, E4M3 block scales, E4M3 FP8 weights, BF16 tensors) are copied to the GPU once, and
@@ -323,7 +323,7 @@ def run_long(args):
         "prompts_jsonl_sha256": ref.sha256(args.prompts),
         "hf_model_source_sha256": ref.sha256(Path(inspect.getsourcefile(hf))),
         "reference_model_py_sha256": ref.sha256(Path(ref.__file__)),
-        "john_reference_py_sha256": ref.sha256(Path(__file__)),
+        "gpu_reference_py_sha256": ref.sha256(Path(__file__)),
         "checkpoint_files": checkpoint.provenance, "gpu_decode_self_check": checked,
         "options": {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
         "elapsed_seconds": time.monotonic() - started,
@@ -418,10 +418,10 @@ def main():
     import torch
 
     if not os.environ.get("CUDA_VISIBLE_DEVICES"):
-        raise RuntimeError("assign CUDA_VISIBLE_DEVICES (John's UUID) through the lease wrapper")
+        raise RuntimeError("assign CUDA_VISIBLE_DEVICES (the allocated RTX PRO 6000's UUID) through your allocation wrapper")
     name = torch.cuda.get_device_name(0)
     if "PRO 6000" not in name:
-        raise RuntimeError(f"expected John (RTX PRO 6000), got {name}")
+        raise RuntimeError(f"expected an RTX PRO 6000, got {name}")
     if args.vram_fraction:
         torch.cuda.set_per_process_memory_fraction(args.vram_fraction, 0)
     progress(f"device {name}, CUDA_VISIBLE_DEVICES={os.environ['CUDA_VISIBLE_DEVICES']}, torch {torch.__version__}")
