@@ -1,13 +1,13 @@
-"""Strict dense MTP qualification using retained production CUDA graphs (flare2 replay-commit copy of
-astra-10/validate_mtp.py; same 47 checks, same byte comparisons, same 28 long-sequence identities).
+"""Strict dense MTP qualification using retained production CUDA graphs (replay-commit copy of the
+earlier MTP validator; same 47 checks, same byte comparisons, same 28 long-sequence identities).
 
 Replay-commit layout: each request owns ONE committed continuation row (request_state_rows[slot, 0]); verification
 writes no candidate rows, the round replays the accepted prefix into that row. What changed here and nothing else:
   - fixtures place one row per slot (reset) and the snapshot row right after the live rows;
   - the forced-prefix check restores the committed rows to their pre-round bytes before every accepted count and
-    drives the round's replay commit (counts) instead of the sol12 column copy (sources);
+    drives the round's replay commit (counts) instead of the earlier column copy (sources);
   - the commit-growth gate admits the last backed row instead of row 20 and has no descriptor bound to assert;
-  - evidence goes to flare2/validation-attempts.jsonl.
+  - evidence goes to <root>/validation-attempts.jsonl.
 
 The forced-prefix diagnostic invokes an already prepared target decoder and
 its replay-commit operations eagerly; it is never a serving fallback. Ordinary
@@ -124,7 +124,7 @@ class _Harness:
         self.startup = self._save_mutable()
         self.linear = [i for i, kind in enumerate(self.owner.weights.config.layers) if kind == "linear_attention"]
         self.full = [i for i, kind in enumerate(self.owner.weights.config.layers) if kind == "full_attention"]
-        # astra-10: SM70 prefill attention (Sol-11s) status accumulators of the retained prefill decoders; every prefill
+        # SM70 prefill attention status accumulators of the retained prefill decoders; every prefill
         # replay with a live row asserts status == 0 (bit 0 non-finite K/V, bit 1 V range > 2^80, bit 2 inadmissible plan).
         self.prefill_status = {}
         for name, forward in self.catalog.items():
@@ -324,7 +324,7 @@ class _Harness:
         return any(getattr(getattr(f, "decoder", None), "decode_agents", None) is not None for f in self.catalog.values())
 
     def injected_status(self, ids):
-        """astra-10: poison one visible K page of the first full-attention layer before the last prefill chunk. The chunk
+        """Poison one visible K page of the first full-attention layer before the last prefill chunk. The chunk
         must report status bit 0 and the completion record must carry ERROR (3) / error code 34 (requests.status /
         error_code likewise); after restoring the page the same prompt must prefill cleanly again."""
         self.reset()
@@ -394,12 +394,12 @@ class _Harness:
         return record, int(self.requests.status[slot]), int(self.requests.error_code[slot])
 
     def decode_nonfinite_probe(self, ids, *, width):
-        """astra-10 (S1L gate 3): NaN K words in a VISIBLE page must fail the request with the samplers' non-finite code 1
+        """S1L gate 3: NaN K words in a VISIBLE page must fail the request with the samplers' non-finite code 1
         (status 3) on an ordinary decode step and with speculation's code 6 on a speculative round; NaN in a physical page
         no table references must leave the emitted tokens unchanged.
 
         Every replay starts from the SAME complete state (``branch``: mutable buffers + pool backing rows + every pool
-        page, as ``forced`` does) - astra-7's ``_save_mutable`` left the pool out, so the speculative round's committed
+        page, as ``forced`` does) - an earlier ``_save_mutable`` left the pool out, so the speculative round's committed
         K/V and recurrent state leaked from the clean replay into the next one and the comparison was not like for like
         (prepare-32k.json attempt 1: speculative unreferenced_identical False with the kernel untouched). A second clean
         replay (``clean_repeat``) is recorded as the idempotence control; the full completion records are kept."""

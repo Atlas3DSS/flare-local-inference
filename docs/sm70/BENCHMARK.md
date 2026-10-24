@@ -114,6 +114,13 @@ There are 24 requests total: 12 at concurrency one and 12 at concurrency four.
 The client requires the exact output-token budget, complete SSE termination and
 consistent native token observations. Partial streams fail the measurement.
 
+The release-binary benchmark chain ran `tools/native.py` at SHA-256 `32f1d6de`,
+before its GPU labels were renamed (behaviour identical), with
+`benchmark_prefill.py` at `c6478679`, `benchmark_mtp.py` at `a4656afb` and
+`benchmark_long.py` at `0f3ee504`. Later label-only edits change the current
+hashes of `native.py` and `benchmark_long.py`; match these prefixes against the
+chain manifest.
+
 ## Reproduce each row
 
 To measure a long-context workload, first generate deterministic example modules

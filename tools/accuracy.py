@@ -72,7 +72,7 @@ def measure(prepared, root, progress=print, *, short_reference, long_reference):
                     if ids.tolist() != item['prompt_ids'] + item['generated_ids'] or positions.tolist() != item['saved_positions']:
                         raise ValueError('long reference JSON contexts/positions disagree with artifact')
             result = {'reference': str(path), 'reference_sha256': digest, 'metadata': metadata,
-                      'execution': ('one live token per retained prefill128 replay at every position, matching Astra-1 sequential mode'
+                      'execution': ('one live token per retained prefill128 replay at every position, matching the original sequential reference mode'
                                     if chunk == 1 else 'retained 128-token prefill to first measured position, then ordinary decode on published tokens'),
                       'prompts': []}
             report['references'][label] = result

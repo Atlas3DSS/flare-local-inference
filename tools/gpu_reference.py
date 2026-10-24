@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """GPU-resident FP32 references, reusing reference_model.py arithmetic unchanged.
 
-Only weight *placement* differs from astra-1/reference_model.py: the raw checkpoint rows (packed
+Only weight *placement* differs from reference_model.py: the raw checkpoint rows (packed
 E2M1 bytes, E4M3 block scales, E4M3 FP8 weights, BF16 tensors) are copied to the GPU once, and
 RawCheckpoint.materialize runs the identical decode ops there (same table, same multiply order,
 FP32 throughout).  Every op in that decode is exact or a single IEEE FP32 multiply, so the decoded
 weights are bit-identical to the CPU decode; --self-check asserts this on sample tensors.  The
-canonical HF forward, DynamicCache, FP8 activation hooks and vocabulary projection are Astra's own
-functions (imported, not copied).
+canonical HF forward, DynamicCache, FP8 activation hooks and vocabulary projection are reference_model.py's
+own functions (imported, not copied).
 
 Modes
-  repro  run Astra's main() unmodified (her prompts, batch, greedy loop, output schema) with the
+  repro  run reference_model.py's main() unmodified (its prompts, batch, greedy loop, output schema) with the
          GPU-resident checkpoint; writes <root>/reference.{safetensors,json}.
   long   six longest non-thinking code prompts of mtp-accept/prompts.jsonl rendered with the
          checkpoint chat template (enable_thinking=False, add_generation_prompt=True, as the
@@ -32,7 +32,7 @@ import time
 
 import reference_model as ref  # noqa: E402
 
-CPU_RAW_CHECKPOINT = ref.RawCheckpoint  # Astra's original class, kept for the self-check
+CPU_RAW_CHECKPOINT = ref.RawCheckpoint  # reference_model.py's original class, kept for the self-check
 
 
 
@@ -49,7 +49,7 @@ def sha256_file(path):
 
 
 class GpuRawCheckpoint(CPU_RAW_CHECKPOINT):
-    """Astra's RawCheckpoint with decoder/head rows resident on the GPU."""
+    """reference_model.py's RawCheckpoint with decoder/head rows resident on the GPU."""
 
     def __init__(self, path, device=None):
         import torch
@@ -81,7 +81,7 @@ class GpuRawCheckpoint(CPU_RAW_CHECKPOINT):
         return super().raw(name, rows)
 
     def materialize(self, name, shape, rows=None):
-        """Astra's materialize() verbatim, with temporaries created on the raw tensor's device."""
+        """reference_model.py's materialize() verbatim, with temporaries created on the raw tensor's device."""
         import torch
 
         raw = self.raw(name, rows)
@@ -117,7 +117,7 @@ class GpuRawCheckpoint(CPU_RAW_CHECKPOINT):
 
 
 def self_check(checkpoint):
-    """GPU decode must equal Astra's CPU decode bit for bit."""
+    """GPU decode must equal reference_model.py's CPU decode bit for bit."""
     import torch
 
     cpu = CPU_RAW_CHECKPOINT(checkpoint.path)
@@ -208,7 +208,7 @@ def run_long(args):
         for order, row in enumerate(selected):
             prompt = rendered[row["id"]]
             prompt_len = len(prompt)
-            # 1) greedy continuation with Astra's cached-decode loop shape (batch 1)
+            # 1) greedy continuation with reference_model.py's cached-decode loop shape (batch 1)
             inputs = torch.tensor([prompt], dtype=torch.int64, device=device)
             cache, generated, decode_logits = None, [], []
             t0 = time.monotonic()
@@ -409,7 +409,7 @@ def main():
     parser.add_argument("--positions", type=int, default=48)
     parser.add_argument("--head-tile", type=int, default=2048)
     parser.add_argument("--noise-batch", type=int, default=2)
-    parser.add_argument("--prompt-batch-size", type=int, default=3, help="repro: Astra's batch (3 = her run)")
+    parser.add_argument("--prompt-batch-size", type=int, default=3, help="repro: reference_model.py's batch (3 = its original run)")
     parser.add_argument("--diagnostic-no-fp8-act", action="store_true",
                         help="DIAGNOSTIC ONLY: replace the calibrated FP8 activation hook by identity")
     args = parser.parse_args()

@@ -36,7 +36,7 @@ def write_json(path, value):
     path.write_text(json.dumps(value, indent=2, allow_nan=False) + "\n")
 
 
-TAG = ""   # astra-10: --tag prefixes every artifact name (e.g. "32k-" for the S1L package at --context 32768)
+TAG = ""   # --tag prefixes every artifact name (e.g. "32k-" for the S1L package at --context 32768)
 
 
 def artifacts(mode, depth):
@@ -417,10 +417,10 @@ def main():
     parser.add_argument("--duration", type=float, default=1200)
     parser.add_argument("--ready-timeout", type=float, default=900)
     parser.add_argument("--dry-run", action="store_true", help="print exact commands; no server, GPU or files")
-    parser.add_argument("--tag", default="", help="artifact name prefix (astra-10: '32k-' for the S1L package)")
+    parser.add_argument("--tag", default="", help="artifact name prefix (for example '32k-' for the S1L package)")
     parser.add_argument("--prefix-cache", default="64G", help="host prefix cache (--prefix-cache-memory); 24G fallback when cuMemCreate fails")
     parser.add_argument("--qualification", type=Path, help="prepare report of the package (default: <package dir>/prepare.json)")
-    # astra-10 LONGCTX: native client, prompt file/ids and concurrency order are parameters (defaults = Astra's protocol)
+    # Native client, prompt file/ids and concurrency order are parameters (defaults = the short-prompt protocol)
     parser.add_argument("--client", type=Path, default=Path(__file__).resolve().with_name("benchmark_mtp.py"))
     parser.add_argument("--prompts", type=Path, required=True)
     parser.add_argument("--prompt-ids", nargs="+", default=["code-00", "code-01", "code-02", "code-03"])

@@ -246,7 +246,7 @@ def measure(prepared, root, *, checkpoint, prompts_path, qualification, depths=(
     started, h = time.monotonic(), None
     report = {"status": "running", "runs": [],
         "method": "CUDA events around replay of separately captured prepared-component graphs; restoration, output poisoning and byte comparisons are outside events. These are not production-graph subgraph timings and retain eager pointwise kernel topology.",
-        "comparison": "Each preparation is compared to its own retained whole-round graph, not bitwise between Sol-9 and legacy cuBLAS reductions.",
+        "comparison": "Each preparation is compared to its own retained whole-round graph, not bitwise between the SM70 dense kernels and legacy cuBLAS reductions.",
         "cache_note": "CPU restoration touches draft caches and source buffers before each replay; no L2 eviction is performed. Use identical settings for the before/after runs.",
         "repetitions": repetitions, "warmups": warmups}
     try:

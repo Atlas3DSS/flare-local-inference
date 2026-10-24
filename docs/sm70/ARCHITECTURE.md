@@ -17,7 +17,7 @@ integrated MTP attention routing (`0aea71a`) and generic GDN replay-capacity
 change (`7cb1bc7`) at source commit
 `1dc36936eab1ff8bf1d678f559d4c39152852505`. The verdict was **cleared for GPU
 testing**, with no required production-source changes. This reviewed the current
-Sol-21 r2 attention integration, its callers and replay kernels, including
+r2 attention integration, its callers and replay kernels, including
 packed/ragged rows, inactive writes, page addressing, synchronization, the
 history-capacity bound and numerical contracts. It was not release approval,
 a performance endorsement, or a cross-architecture bit-identity claim.

@@ -1,4 +1,4 @@
-"""Full-target Sol-10 consumer equality using identical fused/member reductions.
+"""Full-target consumer equality of the reviewed decode projections, using identical fused/member reductions.
 
 Call check(prepared, root, progress=print) inside the retained preparation. This
 diagnostic uses existing checkpoint weights and kernels; it never prepares a
@@ -138,7 +138,7 @@ def check(prepared, root, progress=print):
                         "prompt_tokens": [len(ids) for ids in prompts[:batch]], "passed": False}
                 report["cases"].append(case)
                 if progress is not None:
-                    progress(f"Sol-10 full-target consumer equality: M={batch * width}")
+                    progress(f"full-target consumer equality: M={batch * width}")
                 # Keep the decoder metadata/candidates left by the retained
                 # graph, but restore its input continuation before each decoder.
                 h.replay(name, slots)
@@ -217,9 +217,9 @@ def check(prepared, root, progress=print):
                 torch.cuda.synchronize(h.device)
                 del scratch, saved, captured, fused, members
                 if not case["passed"]:
-                    raise RuntimeError(f"Sol-10 full-target consumer equality failed at M={batch * width}")
+                    raise RuntimeError(f"full-target consumer equality failed at M={batch * width}")
                 if progress is not None:
-                    progress(f"Sol-10 full-target consumer equality: M={batch * width} PASS")
+                    progress(f"full-target consumer equality: M={batch * width} PASS")
             report["passed"] = True
     except Exception as error:
         report["error"] = {"type": type(error).__name__, "message": str(error)}
@@ -234,5 +234,5 @@ def check(prepared, root, progress=print):
                 report["cleanup_error"] = {"type": type(error).__name__, "message": str(error)}
     (root / 'consumer-identity.json').write_text(json.dumps(report, indent=2) + '\n')
     if not report['passed']:
-        raise RuntimeError('Sol-10 consumer identity failed; see consumer-identity.json')
+        raise RuntimeError('consumer identity failed; see consumer-identity.json')
     return report

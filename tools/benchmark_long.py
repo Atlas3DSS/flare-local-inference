@@ -120,7 +120,7 @@ class TokenObservations:
 def request_body(model, prompt, output_tokens, seed, *, logprobs):
     body = {"model": model, "messages": prompt["messages"], "max_tokens": output_tokens,
         "stream": True, "ignore_eos": True, "seed": seed,
-        "temperature": 0., "top_p": 1., "top_k": 1, "min_p": 0.,   # astra-10 LONGCTX: greedy
+        "temperature": 0., "top_p": 1., "top_k": 1, "min_p": 0.,   # long-context protocol: greedy
         "repetition_penalty": 1., "presence_penalty": 0., "frequency_penalty": 0.,
         "return_token_ids": True, "return_token_timestamps": True,
         "chat_template_kwargs": {"enable_thinking": bool(prompt.get("thinking", False))},
