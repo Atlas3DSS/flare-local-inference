@@ -69,6 +69,9 @@ The JPEG decoder builds its bundled libjpeg-turbo source. Preparation requires
 the CUDA toolkit, including `nvcc` and CUPTI; configure `[paths] cuda` when it
 is not supplied by the Python environment.
 
+The `prepare` extra installs `cuda-tile[tileiras]`, including the `tileiras`
+compiler toolchain required by cuTile kernels during model preparation.
+
 The DeepSeek Rust crates share a pinned revision of
 [`local-inference-lab/deepseek-recipe`](https://github.com/local-inference-lab/deepseek-recipe)
 in `helios/Cargo.toml`. Its `flare` branch exposes normalized-message byte
