@@ -9,15 +9,77 @@ not compare a number from one table with a number from the other.
 - **Decode-only** numbers are per-request decode rates (tokens per second while
   the request is decoding) or GPU step times. They exclude prefill and queueing.
 
+## Release binary d4ffb1fa (built from 71029458; production source unchanged through c6fdc120)
+
+pending: results land here when the chain completes.
+
+- **Server binary.** SHA-256
+  `d4ffb1fa3453bf37f2017a7b58d09559010881311b2d9afcdfb33b4011caa667`, built from
+  `71029458`; production source is unchanged through `c6fdc120`.
+- **Package.** The release export qualified on 2026-10-23
+  ([validation record](docs/sm70/ARCHITECTURE.md#export-qualification-of-the-release-package)).
+  Its package SHA-256 and the server flags are recorded with the results.
+- **Hardware.** One Tesla V100 PCIe 32 GB.
+- **Inputs.** Newly authored public prompts, generated as described in
+  [BENCHMARK.md](docs/sm70/BENCHMARK.md). They are not the historical prompt
+  sets, so these rows start a new baseline and do not compare row for row with
+  the historical measurements below.
+
+### Prefill and time to first token (end to end)
+
+Fixed prompt lengths of 2,048, 8,192, 22,528 and 30,720 tokens, each at
+concurrency 1 and 4. Each cell has 1 warmup batch and 3 measured repetitions,
+with 32 output tokens per request. TTFT runs from client POST start to the first
+SSE chunk carrying output. The effective prefill rate is the server's prefill
+tokens divided by the batch's first-token wall window, which includes queueing,
+transport and first sampling. Pure-GPU prefill duration is `null` by design: the
+release exposes no isolated prefill GPU-time counter
+([BENCHMARK.md](docs/sm70/BENCHMARK.md#fixed-length-prefill-and-ttft)).
+
+| Prompt tokens | Concurrency | TTFT p50 / p95 (s) | Effective prefill tok/s (first-token wall window) | Pure-GPU prefill (null) | Repetitions |
+| ---: | ---: | ---: | ---: | --- | ---: |
+
+### Short-prompt native decode, MTP depth 4
+
+128 output tokens per request, concurrency 1 then 4, 3 repetitions. Tok/s per
+agent p50 is decode-only: the median request decode rate after its first token.
+Aggregate tok/s divides output tokens by batch wall time, including prefill and
+HTTP, so it is an end-to-end figure. Do not compare the two columns.
+
+| Concurrency | Output tokens | Tok/s per agent, p50 | Aggregate tok/s | Repetitions |
+| ---: | ---: | ---: | ---: | ---: |
+
+### Long-context native serving
+
+Four public coding prompts of about 28.7k tokens each, 512 output tokens per
+request, concurrency 4 first and then 1, 3 repetitions. Each row is labelled
+cold or cache-credited. A row is cold only when its requests completed, their
+usage and stream events carry no prefix-cache credit, and the server's
+reused-token counter did not move for the batch. First-token times are given for
+cold rows only; decode rates are given for every row.
+
+| Concurrency | Prompt tokens | Output tokens | Cold or cache-credited | First-token s (cold rows only) | Decode tok/s per agent | KV tokens resident | Evictions |
+| ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: |
+
+## Historical measurements (older binary 2c792073, 2026-10-22)
+
+The serving rows for package `model-32k-tonight-a` were measured with the older
+`flare` binary `2c792073`, built before this branch's Helios commits, on the
+fork's historical prompt sets (STATUS.md line 63;
+[BENCHMARK.md](docs/sm70/BENCHMARK.md#what-was-run)). Rows for other packages or
+dates, such as `best24`, `model-32k-replay` and the 2026-10-21 baseline, are
+older context and name their package. None of these are this release's numbers.
+They remain as context until the release-binary section above is complete.
+
 Every row names its hardware, memory limit (`flare run --memory-limit`),
 package, concurrency, date and the line of the fork's run log (`STATUS.md`) that
 records it. That log is held with the fork; quoted fragments are listed under
 [Sources](#sources). All runs used Qwen3.8-27B NVFP4 (`qwen3.8-27b`) with MTP
 draft depth 4 (verification width 5), TP1, prepared for a 32,768-token context.
 
-`model-32k-tonight-a` is the package of the release tree (`0e4c81f`).
+`model-32k-tonight-a` is the package of the 2026-10-22 release tree (`0e4c81f`).
 
-## End-to-end, real coding-agent traces
+### End-to-end, real coding-agent traces
 
 | Measurement | Value | Hardware | Memory limit | Package | Concurrency | Date | Source |
 | --- | ---: | --- | --- | --- | --- | --- | --- |
@@ -29,7 +91,7 @@ cited sources. The `best24` row is listed only because it is the real-trace
 figure the run log reports for the fleet at that time. It does not describe
 this release.
 
-## End-to-end, fixed short prompts (not real traces)
+### End-to-end, fixed short prompts (not real traces)
 
 | Measurement | Value | Hardware | Memory limit | Package | Concurrency | Date | Source |
 | --- | ---: | --- | --- | --- | --- | --- | --- |
@@ -38,7 +100,7 @@ this release.
 The aggregate rate divides output tokens by batch wall time, including prefill
 and HTTP overhead. It is not a decode-only throughput measurement.
 
-## End-to-end, fixed long prompts (not real traces)
+### End-to-end, fixed long prompts (not real traces)
 
 Four fixed prompts of 22.4k to 30.2k tokens (110,022 prompt tokens in total),
 512 output tokens each, 3 repetitions at each of 1 and 4 agents, 24 requests
@@ -50,7 +112,7 @@ across both concurrency settings.
 | Requests completed | 24/24 across the combined runs | V100 PCIe 32 GB | 31G | `model-32k-tonight-a` | 1 and 4 | 2026-10-22 | STATUS.md line 65 (19:57) |
 | Residency | all four prompts resident, no eviction or restore | V100 PCIe 32 GB | 31G | `model-32k-tonight-a` | 4 | 2026-10-22 | STATUS.md line 65 (19:57) |
 
-## Decode-only
+### Decode-only
 
 | Workload | Value | Hardware | Memory limit | Package | Concurrency | Date | Source |
 | --- | ---: | --- | --- | --- | --- | --- | --- |
@@ -70,7 +132,7 @@ Per-agent decode rates at 4 agents vary with prefill interleaving. In the
 The 13.0 tok/s agent had the shortest prompt and decoded while the other three
 were still in chunked prefill (STATUS.md line 65).
 
-## Memory and capacity
+### Memory and capacity
 
 | Measurement | Value | Hardware | Memory limit | Package | Concurrency | Date | Source |
 | --- | ---: | --- | --- | --- | --- | --- | --- |
@@ -85,7 +147,7 @@ Replay-commit keeps one committed recurrent-state row per request instead of
 one per verification position. The candidate rows it returns
 (16 x 166 MiB) become KV pages (STATUS.md line 59, 17:45).
 
-## Sources
+### Sources
 
 Quoted fragments of the cited `STATUS.md` lines (2026-10-22 unless noted):
 

@@ -1,5 +1,7 @@
 # Flare on SM70 (Tesla V100 PCIe 32 GB)
 
+> Figures below are from the 2026-10-22 binary 2c792073; release-binary measurements are in [BENCHMARKS-SM70.md](BENCHMARKS-SM70.md#release-binary-d4ffb1fa-built-from-71029458-production-source-unchanged-through-c6fdc120) (release section) and will replace these once complete.
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/sm70/img/hero-dark.svg">
   <source media="(prefers-color-scheme: light)" srcset="docs/sm70/img/hero-light.svg">
@@ -25,9 +27,12 @@ than 4 concurrent requests or contexts above 32,768 tokens, use upstream Flare.
 
 **Historical baseline.** The results below refer to release tree `0e4c81f` and
 its named packages, measured on 2026-10-22. Later fixes and public harness
-changes do not inherit those results; fresh validation of the current public
-checkout is pending. On top of the SM70 base port, that release carried four
-changes, explained in [ARCHITECTURE.md](docs/sm70/ARCHITECTURE.md):
+changes do not inherit those results. For the current public checkout, export
+qualification, an independent rebuild and an SM70/SM120 comparison are complete
+([validation record](docs/sm70/ARCHITECTURE.md#public-release-review-and-current-validation));
+its native serving and TTFT benchmarks are running. On top of the SM70 base
+port, that release carried four changes, explained in
+[ARCHITECTURE.md](docs/sm70/ARCHITECTURE.md):
 
 - the scheduler hang fix (`e81534a`, `718a187`);
 - prefill projections on the pgemm kernel (`8ad725c`);
@@ -47,8 +52,8 @@ at `--memory-limit 31G`, `--max-concurrency 4` and `--mtp-draft-tokens 4` with
 fixed-width verification.
 Each source is a line of the fork's run log (`STATUS.md`). The quoted fragments
 are in [BENCHMARK.md](docs/sm70/BENCHMARK.md#sources), which also explains how
-to reproduce each row. The full tables are in
-[BENCHMARKS-SM70.md](BENCHMARKS-SM70.md).
+to reproduce each row. The full historical tables are in
+[BENCHMARKS-SM70.md](BENCHMARKS-SM70.md#historical-measurements-older-binary-2c792073-2026-10-22).
 
 The two tables measure different things. Do not compare a number from one table
 with a number from the other.
@@ -107,21 +112,21 @@ pool as the 31G run on line 65.
 
 | Measurement | Value | Hardware | Memory limit | Concurrency | Package | Date | Source |
 | --- | ---: | --- | --- | --- | --- | --- | --- |
-| KV pool | 131,584 tokens | V100 PCIe 32 GB | 31G | 4 | `model-32k-tonight-a` | 2026-10-22 | STATUS.md lines 65, 66 |
+| KV pool (BF16) at the 31G run's cache cap (`--kv-cache-limit concurrency`) | 131,584 tokens | V100 PCIe 32 GB | 31G | 4 | `model-32k-tonight-a` | 2026-10-22 | STATUS.md lines 65, 66 |
 | KV pool before replay-commit | 98,304 tokens | V100 PCIe 32 GB | 31G | 4 | baseline package of 2026-10-21 | 2026-10-21 | as cited on STATUS.md line 49 |
 | Four prompts of 22.4k-30.2k tokens (110,022 in total) | all resident, no eviction or restore | V100 PCIe 32 GB | 31G | 4 | `model-32k-tonight-a` | 2026-10-22 | STATUS.md line 65 |
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/sm70/img/kv-pool-dark.svg">
   <source media="(prefers-color-scheme: light)" srcset="docs/sm70/img/kv-pool-light.svg">
-  <img alt="KV pool at memory limit 31G with 4 agents: 98,304 tokens before replay-commit and 131,584 tokens with it, +33,280 tokens (+33.9 %). Four prompts of 22.4k to 30.2k tokens (110,022 prompt tokens) stay resident with zero evictions." src="docs/sm70/img/kv-pool-light.svg">
+  <img alt="BF16 KV pool at memory limit 31G with 4 agents: 98,304 tokens before replay-commit, limited by memory, and 131,584 tokens with it, the runs' --kv-cache-limit concurrency cap: +33,280 tokens (+33.9 %). Four prompts of 22.4k to 30.2k tokens (110,022 prompt tokens) stay resident with zero evictions." src="docs/sm70/img/kv-pool-light.svg">
 </picture>
 
 The graphics illustrate the cited numbers. The tables and their sources are the
 authoritative text.
 
-These runs used a `flare` binary built before this branch's Helios commits, and
-a benchmark harness that is not in this repository. See
+These runs used a `flare` binary (`2c792073`) built before this branch's Helios
+commits, and a benchmark harness that is not in this repository. See
 [BENCHMARK.md](docs/sm70/BENCHMARK.md#what-was-run) before comparing your own
 numbers.
 
@@ -137,22 +142,27 @@ detail and the sources.
 
 - **Given up:** extra decode work per weight compared with native FP4/FP8 tensor
   cores; prefill-bound long prompts (TTFT p50 90.7 s for four 22.4k-30.2k
-  prompts at 4 agents, STATUS.md line 65); one recipe, TP1, at most 4 requests of
+  prompts at 4 agents on the older binary, STATUS.md line 65; release-binary
+  prefill and TTFT are being measured now); one recipe, TP1, at most 4 requests of
   32,768 tokens; subsequent upstream work to assess and port (136 commits as of
   `e19549a`, beyond 680 whose content the history audit identifies in the
   squashed base; see [history accounting](docs/sm70/LIMITATIONS.md#upstream-divergence));
   old cards, with power not measured; no real-trace end-to-end number for the release.
 - **Gained:** no requantization, calibration or retraining; speculative
   decoding that emits exactly the ordinary greedy tokens (strict 47/47,
-  invariance 28/28, line 62); a 131,584-token unquantized BF16 KV pool at 31G
-  that holds four 22-30k-token agents with zero evictions (lines 49, 65);
+  invariance 28/28, line 62); an unquantized BF16 KV pool that reached the
+  runs' 131,584-token `--kv-cache-limit` cap at 31G and holds four
+  22-30k-token agents with zero evictions (lines 49, 65);
   70.7 tok/s per agent at 4 agents, decode-only (line 66); prefix caching; 32 GB
   cards at used-market prices.
 
 **What makes it useful** is the combination: upstream's NVFP4 package on
 hardware without FP4 instructions, with its outputs measured against an
 independent FP32 forward of the same checkpoint (KL 0.0011 short, 0.0024 long;
-not bit-identical, and not compared with SM120); one committed recurrent row per
+not bit-exact), and a separately measured SM70/SM120 comparison of ordinary
+graphs that shows small, non-zero divergence
+([comparison](docs/sm70/ARCHITECTURE.md#sm70-and-sm120-comparison-ordinary-graphs));
+one committed recurrent row per
 request, so long multi-agent contexts stay resident (the accepted-token GDN
 state replay idea is credited to Strata above); exact MTP verification with the draft
 attention on tensor cores; every package the fork measured gated before export;
@@ -175,7 +185,10 @@ Strata and Project Maya serve much larger MoE models by tiering experts across
 VRAM, RAM and NVMe. Their published V100 decode rates are lower per card than
 this port's, so they show no speed bought by lower precision. Their strength is
 fitting 125-748 B models on old cards; this port's is serving 4 agents per card
-on a 27B model. The KL figures are not on one scale: ours compares the port with
+on a 27B model. Prefill and TTFT are not yet compared with either engine:
+release-binary prefill is being measured now at fixed prompt lengths of 2,048
+to 30,720 tokens ([BENCHMARKS-SM70.md](BENCHMARKS-SM70.md#release-binary-d4ffb1fa-built-from-71029458-production-source-unchanged-through-c6fdc120)).
+The KL figures are not on one scale: ours compares the port with
 the same 4-bit checkpoint, theirs compare a quantization with a higher-precision
 release. Details:
 [WHY-NOT-LOW-BIT.md](docs/sm70/WHY-NOT-LOW-BIT.md#strata-and-project-maya).
@@ -222,7 +235,7 @@ explains what that means.
 | [ARCHITECTURE.md](docs/sm70/ARCHITECTURE.md) | Why Volta needs its own path, and the four changes: hang fix, pgemm, S1L attention, GDN replay-commit |
 | [LIMITATIONS.md](docs/sm70/LIMITATIONS.md) | What does not work or was not tested, upstream divergence, reporting issues |
 | [WHY-NOT-LOW-BIT.md](docs/sm70/WHY-NOT-LOW-BIT.md) | This port against the usual low-bit routes on V100-class cards: trade-offs, benefits, sources |
-| [BENCHMARKS-SM70.md](BENCHMARKS-SM70.md) | Every measured number, with its source line |
+| [BENCHMARKS-SM70.md](BENCHMARKS-SM70.md) | Release-binary tables (filled when the benchmark chain completes) and the historical measurements, each with its source |
 
 For everything that is not SM70-specific, the upstream documents apply:
 [model preparation and serving](docs/model-preparation.md),
