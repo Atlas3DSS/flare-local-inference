@@ -172,6 +172,147 @@ Four 28.7k-token contexts fit in the 124,928-token pool; four contexts at the
 32,768-token maximum (131,072 tokens) would not, and that case was not
 measured.
 
+### Refined prefill ordering (opt-in, not in the release binaries)
+
+The opt-in ordering above gets four long prompts their first tokens earlier,
+but it slows the decoding of requests that have finished prefill (21.0 against
+38.2 tok/s per agent). The cause is in how the shipped option prices a prefill
+step: it values the step like the best-priced waiting prompt. Under
+shortest-first ordering the waiting prompts are not served, so their price
+keeps rising and every prefill step outvalues decoding. A request that has
+finished prefill then gets about one speculative round per 512-token chunk
+(about 0.52 s), which is the 6.5 tok/s seen above. Its boundary snapshot step
+loses the same way. Separately, a prompt whose prefill has started is not
+preempted, so in mixed traffic short prompts wait behind a started long prompt
+([LIMITATIONS.md](docs/sm70/LIMITATIONS.md#not-validated-or-validated-only-in-part)).
+
+This tree adds two knobs that refine the option. Both act only with
+`--prefill-srpt`, both default to 0, and 0 keeps the shipped behaviour:
+
+- `--prefill-srpt-short-tokens S` (configuration key
+  `prefill_srpt_short_tokens`): a prompt with at most S uncached tokens left
+  takes one prefill chunk ahead of the prompt being served, alternating chunk
+  by chunk, and its first step is not held behind prompt chunks. The served
+  prompt still gets at least every other chunk, so it finishes within twice its
+  own chunk count, and a prompt with more than S tokens left never preempts it.
+- `--prefill-srpt-decode-priority-tokens B` (configuration key
+  `prefill_srpt_decode_priority_tokens`): while a request that has emitted
+  fewer than B tokens is decoding, or in the boundary snapshot that resumes its
+  decoding, no prompt chunk is offered. Each request therefore delays waiting
+  prompts by at most one boundary snapshot plus B output tokens. A non-zero B
+  also values each prefill step by the prompt that runs. When nothing else is
+  runnable, prefill runs, so the GPU is never held idle.
+
+As for the other prefill-ordering options, a flag given on the command line
+overrides the configuration file's key. With both knobs at 0, a Helios test
+replays the shipped option's schedules (default, `--prefill-srpt`, and
+`--prefill-srpt` with an aging bound of 16 chunks) and requires every committed
+step and outcome to match. On the GPU, a lab build of this change with both
+knobs at 0 reproduced the first tokens of four 30,720-token prompts: 127.39 /
+137.29 / 141.61 / 142.52 s without a flag and 35.78 / 72.09 / 107.59 /
+143.11 s with `--prefill-srpt`, with greedy outputs equal to the previous
+package on 4 of 4 prompts in both runs
+([equiv-off.json](docs/sm70/receipts/prefill-srpt-r2/equiv-off.json),
+[equiv-srpt.json](docs/sm70/receipts/prefill-srpt-r2/equiv-srpt.json)).
+Helios library tests pass, 810 with 19 ignored, and `flare` 104 + 4 + 4
+([public-helios-lib-tests.log](docs/sm70/receipts/prefill-srpt-r2/public-helios-lib-tests.log),
+[public-flare-tests.log](docs/sm70/receipts/prefill-srpt-r2/public-flare-tests.log)).
+The scheduler change does not touch arithmetic, graphs or chunk cuts. It was
+reviewed independently (Argon, `gemini-4-argon`) and cleared in two rounds.
+
+The configuration measured here, Y, is `--prefill-srpt
+--prefill-srpt-short-tokens 2048 --prefill-srpt-decode-priority-tokens 4096`:
+up to four 512-token chunks count as short, and the decode priority covers the
+512-token and 2,048-token outputs of these runs. It ran on 2026-10-24 with a
+lab build of this change (`83b71a1c`, the sources of `48b69ed4` plus the
+change; this commit differs from it only in a configuration-parsing helper
+with the same parsing and in the name of the test module), package `f21b9abb`
+and the release server flags, on one Tesla V100 PCIe 32 GB per run. The
+default and shipped-option columns repeat the package `f21b9abb` chains above,
+which ran earlier on other cards.
+
+| Measurement, package `f21b9abb` | Default | `--prefill-srpt` | Y |
+| --- | ---: | ---: | ---: |
+| Prefill, 1 request, 2,048 / 30,720 tokens (tok/s) | 994 / 866 | 964 / 849 | 965 / 867 |
+| Four 30,720-token prompts, TTFT p50 / p95 (s) | 141.38 / 142.36 | 89.71 / 145.73 | 89.98 / 144.21 |
+| Short prompts, decode per agent at 1 / 4 agents (tok/s) | 83.2 / 64.9 | 83.2 / 64.7 | 83.3 / 64.8 |
+| Long, cold four-agent batch, first tokens (s) | 123.65 / 125.49 / 138.65 / 142.08 | 33.45 / 66.72 / 99.77 / 145.80 | 33.36 / 74.30 / 114.84 / 154.19 |
+| Long, cold four-agent batch, last token mean / worst (s) | 145.4 / 150.1 | 139.6 / 153.1 | 101.1 / 160.6 |
+| Long, decode per agent at 4 agents, median of 12 requests (tok/s) | 38.2 | 21.0 | 73.3 |
+| Long, decode per agent at 1 agent, median of 12 requests (tok/s) | 73.5 | 71.1 | 73.4 |
+| Greedy outputs equal to the previous package | 4 of 4 | 4 of 4 | 4 of 4 |
+
+Y's receipts: [y-pub-prefill-summary.json](docs/sm70/receipts/prefill-srpt-r2/y-pub-prefill-summary.json)
+and [y-pub-short-native-depth4.json](docs/sm70/receipts/prefill-srpt-r2/y-pub-short-native-depth4.json)
+(public prefill protocol, 1 warmup and 3 measured batches, and the short leg),
+[y-long-native-depth4.json](docs/sm70/receipts/prefill-srpt-r2/y-long-native-depth4.json)
+and [y-long-native-depth4-requests-summary.json](docs/sm70/receipts/prefill-srpt-r2/y-long-native-depth4-requests-summary.json)
+(long leg; the first four-agent batch has no cache credit in usage and no
+change in the reused-token counter), and
+[y-chain-prefill.json](docs/sm70/receipts/prefill-srpt-r2/y-chain-prefill.json)
+(greedy check).
+
+In the cold long batch with Y, each agent decodes at 70-80 tok/s once its
+prefill ends, and the batch's mean last token comes 38.5 s earlier than with
+the shipped option. Prefill rates and the four-prompt TTFT stay those of the
+shipped option, and the short-prompt rates those of the release.
+
+The mixed-traffic soaks used seeded Poisson arrivals, one every 6 s on average
+for 15 minutes, 50 % 512, 30 % 2,048, 15 % 8,192 and 5 % 30,720-token
+prompts, 4 client workers, and 8 or 128 output tokens, with two seeds (157 and
+154 arrivals). TTFT "from send" starts when a client worker sends the request;
+"from arrival" adds the wait for a worker. Every soak completed every request
+with no failure and no stall.
+
+| Soak | Measurement | Default | `--prefill-srpt` | Y |
+| --- | --- | ---: | ---: | ---: |
+| 8 tokens, seed 2 | 512-token TTFT p95 from send (s) | 2.81 | 39.14 | 1.29 |
+| 8 tokens, seed 2 | 8,192-token TTFT p95 from send (s) | 37.53 | 45.92 | 56.82 |
+| 8 tokens, seed 2 | Mean TTFT from arrival, all requests (s) | 15.94 | 24.20 | 10.58 |
+| 8 tokens, seed 2 | 30,720-token TTFT max from arrival (s) | 134.7 | 91.1 | 116.8 |
+| 128 tokens, seed 1 | Mean TTFT from arrival, all requests (s) | 18.16 | 22.80 | 12.96 |
+| 128 tokens, seed 1 | Decode per request, p50 (tok/s) | 38.6 | 42.5 | 79.2 |
+| 128 tokens, seed 1 | 30,720-token TTFT max from arrival (s) | 138.3 | 86.4 | 200.4 |
+| 128 tokens, seed 2 | Mean TTFT from arrival, all requests (s) | 27.71 | 35.27 | 23.29 |
+| 128 tokens, seed 2 | Decode per request, p50 (tok/s) | 32.5 | 34.7 | 77.6 |
+| 128 tokens, seed 2 | 30,720-token TTFT max from arrival (s) | 173.1 | 122.2 | 184.8 |
+| 128 tokens, seed 2 | 8,192-token TTFT max from arrival (s) | 125.4 | 135.0 | 187.3 |
+
+Receipts: `s2-*`, `soakdec-*` and `sd2-*` in
+[docs/sm70/receipts/prefill-srpt-r2/](docs/sm70/receipts/prefill-srpt-r2/).
+On the 8-token soak of the first seed Y itself was not run; the default gave a
+512-token p95 from send of 2.72 s and the shipped option 35.90 s, against
+1.05 s with short-tokens 1024 and 1.15 s with short-tokens 2048, each with a
+decode priority of 1024 tokens (`soak-*-g128.json`).
+
+**Costs.** These come with the benefits above:
+
+- In the cold four-agent long batch, the second to fourth agents get their
+  first tokens 7.6, 15.1 and 8.4 s later than with the shipped option, because
+  each waits while the agents before it decode; the batch's last token arrives
+  at 160.6 s, against 153.1 s with the shipped option and 150.1 s by default.
+- Under decode-heavy mixed load (128 output tokens), the longest prompts wait
+  longer in the worst case: the 30,720-token TTFT maximum is 184.8-200.4 s with
+  Y, against 86.4-122.2 s with the shipped option and 138.3-173.1 s by default.
+  On the second seed the 8,192-token maximum was 187.3 s with Y. On the
+  8-token soak of the second seed, the 8,192-token p95 rose to 56.8 s.
+- The option's aging bound of 256 chunks was sized when prefill ran in
+  128-token chunks, where 256 chunks take about 41 s. At this package's
+  512-token chunks they take about 133 s at short context, and time a prompt
+  spends held behind decoding does not count toward it. A tighter bound
+  (`--prefill-srpt-max-wait-chunks 64`, with short-tokens and decode priority
+  of 1024) moved the tail onto 8,192-token prompts (maximum 173.5 s) and raised
+  the mean TTFT from arrival from 13.56 to 20.44 s on the 128-token soak
+  (`soakdec-x2-g128.json`, `soakdec-x2mw64-g128.json`), so it is not
+  recommended.
+
+The decode-priority budget matters when outputs are long. With 2,048 output
+tokens on the four long prompts (short-tokens 1024 in both refined runs), the
+cold batch's mean last token was 159.8 s with a budget of 4,096, 175.2 s with
+1,024, 195.6 s by default and 242.5 s with the shipped option (`l2k-*`).
+
+The refinements stay opt-in, and round-robin stays the default.
+
 ## Previous package fd7c24dc on release binary d4ffb1fa (128-token prefill chunks)
 
 These are the results of the previous release package, which prefills in

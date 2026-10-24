@@ -1,0 +1,7 @@
+variant l2k-x2b1024 flags: --prefill-srpt --prefill-srpt-short-tokens=1024 --prefill-srpt-decode-priority-tokens=1024
+83b71a1c04c18a6170163f5bb39eef200c1625ae93b22e66c58f75f597406433  <release-host>/flare/prefill-lab-r2/flare-lab-r2-v2
+f21b9abbe3e9d5a1c033e5fccdcdd0b5317c295af52345c983ad1264534c5d0d  <release-host>/packages/prefill-lab/g128-f21b9abb/model.safetensors
+98b74fcd702ff41655ff305c36b91523687ff3fbb7730e7ce95bd64991844fcf  <release-host>/flare/prefill-lab-r2/lab_prefill_r2.py
+4647f3a60027216236f926515c20c2b7fc5046187ab45ccfc110cfdc1a992c93  <release-host>/flare/prefill-lab-r2/native_r2.py
+ac7827d0da07ee4bb88b023775d3fd6d450c81b31392b361870118e51f6b7906  <release-host>/flare/<lab>/tools-public-g128/benchmark_long.py
+Sat Oct 24 05:15:55 PDT 2026

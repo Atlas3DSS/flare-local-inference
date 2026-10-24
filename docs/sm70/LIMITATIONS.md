@@ -148,6 +148,17 @@ upstream. Read this before you rely on the port.
   per-agent decode median over the 12 four-agent requests fell from 38.2 to
   21.0 tok/s (previous package 41.5)
   ([BENCHMARKS-SM70.md](../../BENCHMARKS-SM70.md#long-context-native-serving-package-f21b9abb)).
+  The refinement knobs `--prefill-srpt-short-tokens` and
+  `--prefill-srpt-decode-priority-tokens`, in this tree but not in the release
+  binaries, removed that decode cost and the short-prompt wait in the lab
+  (73.3 tok/s per agent; a 512-token p95 of 1.29 s from send). They make the
+  later agents' first tokens later, and under decode-heavy load they make the
+  longest prompts' worst case worse: a 30,720-token TTFT of up to 200 s,
+  against 86-122 s with the shipped option and 138-173 s by default
+  ([refined ordering](../../BENCHMARKS-SM70.md#refined-prefill-ordering-opt-in-not-in-the-release-binaries)). The option's
+  aging bound of 256 chunks was sized at 128-token chunks, where it is about
+  41 s; at 512-token chunks it is about 133 s at short context, and time a
+  prompt spends held behind decoding does not count toward it.
   A soak on the previous package, with a lab build of the option, used
   mixed-length Poisson arrivals: one request every 6 s on average,
   50 % 512, 30 % 2,048, 15 % 8,192 and 5 % 30,720-token prompts, 4 client
@@ -174,6 +185,21 @@ upstream. Read this before you rely on the port.
   moves a waiting prompt into arrival order; it does not cap the total wait. The
   soak estimates the longest wait at about 353 chunks with the option on and 710
   with it off.
+- **KV pressure can preempt a decoding request.** Package `f21b9abb`'s pool
+  is 976 pages (124,928 tokens). Four 28.7k-token agents need about 912 pages
+  of context, and cached prefixes or long outputs take the rest. When the pool
+  runs out, the server preempts a decoding request and later prefills its
+  context again (about 33 s for 28.7k tokens), so that request stalls
+  mid-decode. With 512 output tokens this happened once in the measured runs,
+  with `--prefill-srpt`: a 72.0 s stall after token 480 in a batch whose
+  server prefill counter shows one context prefilled twice
+  ([g128-long-token-gaps.json](receipts/prefill-srpt-r2/g128-long-token-gaps.json));
+  not in the default chain and not with configuration Y. With 2,048 output
+  tokens it happened in every policy, the default included, with stalls of up
+  to 190 s (`l2k-*` in [receipts/prefill-srpt-r2/](receipts/prefill-srpt-r2/)).
+  This is pre-existing behaviour of the shared pool, not of the ordering
+  options. Evicting cached prefix pages before preempting a decoder would
+  avoid some of it; that is not implemented.
 - **Profiling issue under investigation.** Node-level CUDA-graph tracing with
   Nsight Systems (`nsys --cuda-graph-trace=node`) made the server fail with CUDA
   error 719 (`unspecified launch failure`) after about 127 cumulative 128-token

@@ -214,7 +214,7 @@ fn decode_priority_holds_prompt_chunks_only_within_the_budget() {
 // ---------------------------------------------------------------------------------------------------------------------
 // Event simulation with measured G128 costs.
 
-/// Measured costs, prefill-lab receipts (package f21b9abb, one V100): 512/256/128-row chunks at short context
+/// Measured costs from the prefill lab (package f21b9abb, one V100): 512/256/128-row chunks at short context
 /// (991.5 / 958 / 860 tok/s c1), +5.4 us per context token per 512 rows (30.7k c1 = 866 tok/s), width-5 speculative
 /// rounds 53 / 62.5 / 77.6 ms at batch 1 / 2 / 4 (long-c4 counters), small Init/Resume.
 fn cost(kind: GraphKind, batch: usize, tokens: usize) -> u64 {
@@ -586,7 +586,7 @@ fn simulate_sensitivity() {
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// Tests Argon required (kevin/PROMPT-prefill-r2-srpt-ab.answer.md, required change 5).
+// Tests required by the independent review (required change 5).
 
 fn small_aging(short: u64, budget: u64, max_wait: u64) -> RequestScheduler {
     let mut s = small(true, short, budget);
@@ -753,8 +753,8 @@ fn trace_jobs() -> Vec<Job> {
 
 #[test]
 fn default_knobs_reproduce_the_v3_schedule_bit_for_bit() {
-    // Digests computed with the same simulation on the v3 tree (src-public = 48b69ed4 sources; prefill-lab r2
-    // trace_v3.rs): every committed step and every outcome must match.
+    // Digests computed with the same simulation on the tree of the shipped option (the sources of binary 48b69ed4):
+    // every committed step and every outcome must match.
     let v3 = [("default", PolicyConfig::default()), ("srpt", PolicyConfig { prefill_srpt: true, ..PolicyConfig::default() }),
               ("srpt-aging16", PolicyConfig { prefill_srpt: true, prefill_srpt_max_wait_chunks: 16, ..PolicyConfig::default() })];
     for (name, policy) in v3 {

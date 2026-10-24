@@ -91,7 +91,13 @@ at about 141.38 s (previous package: 42.7 / 85.5 / 128.2 /
 with about the same last first token and total prefill time. The cost shows at
 four long agents: the early finishers decode while the others' 512-token
 prefill chunks run, and the per-agent decode median over 12 requests at 28.7k
-tokens falls from 38.2 to 21.0 tok/s. Round-robin stays the default. Enable the
+tokens falls from 38.2 to 21.0 tok/s. Two further opt-in knobs in this tree,
+not in the release binaries, remove most of that cost: with
+`--prefill-srpt-short-tokens 2048 --prefill-srpt-decode-priority-tokens 4096`
+the median is 73.3 tok/s, at the price of later first tokens for the later
+agents and a worse worst case for the longest prompts under decode-heavy load
+([refined ordering](BENCHMARKS-SM70.md#refined-prefill-ordering-opt-in-not-in-the-release-binaries)). Round-robin stays the
+default. Enable the
 option with `flare run --prefill-srpt`, or with the `"prefill_srpt"` boolean in
 the server configuration; a flag on the command line overrides the
 configuration file. Aging bounds how long a long prompt can wait behind shorter

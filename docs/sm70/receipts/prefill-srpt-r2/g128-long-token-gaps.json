@@ -1,0 +1,585 @@
+{
+ "note": "Longest gap between consecutive output tokens per request (from token_timestamps_ns) and the server prefill-token counter per repetition, long leg of package f21b9abb, 512 output tokens, both chains of 2026-10-24 (full receipts: docs/sm70/receipts/g128/*-long-*). A repetition whose prefill counter exceeds its uncached prompt tokens re-prefilled a context.",
+ "chains": {
+  "default": [
+   {
+    "concurrency": 4,
+    "repetition": 0,
+    "server_prefill_tokens_delta": 114664,
+    "uncached_prompt_tokens": 114664,
+    "requests": [
+     {
+      "prompt_id": "long-00",
+      "prompt_tokens": 28654,
+      "cached_tokens": 0,
+      "max_inter_token_gap_seconds": 0.755,
+      "after_token": 16
+     },
+     {
+      "prompt_id": "long-01",
+      "prompt_tokens": 28669,
+      "cached_tokens": 0,
+      "max_inter_token_gap_seconds": 0.264,
+      "after_token": 76
+     },
+     {
+      "prompt_id": "long-02",
+      "prompt_tokens": 28670,
+      "cached_tokens": 0,
+      "max_inter_token_gap_seconds": 0.398,
+      "after_token": 341
+     },
+     {
+      "prompt_id": "long-03",
+      "prompt_tokens": 28671,
+      "cached_tokens": 0,
+      "max_inter_token_gap_seconds": 0.089,
+      "after_token": 5
+     }
+    ]
+   },
+   {
+    "concurrency": 4,
+    "repetition": 1,
+    "server_prefill_tokens_delta": 57338,
+    "uncached_prompt_tokens": 57338,
+    "requests": [
+     {
+      "prompt_id": "long-00",
+      "prompt_tokens": 28654,
+      "cached_tokens": 0,
+      "max_inter_token_gap_seconds": 0.239,
+      "after_token": 11
+     },
+     {
+      "prompt_id": "long-01",
+      "prompt_tokens": 28669,
+      "cached_tokens": 28662,
+      "max_inter_token_gap_seconds": 0.337,
+      "after_token": 491
+     },
+     {
+      "prompt_id": "long-02",
+      "prompt_tokens": 28670,
+      "cached_tokens": 0,
+      "max_inter_token_gap_seconds": 0.064,
+      "after_token": 1
+     },
+     {
+      "prompt_id": "long-03",
+      "prompt_tokens": 28671,
+      "cached_tokens": 28664,
+      "max_inter_token_gap_seconds": 0.337,
+      "after_token": 379
+     }
+    ]
+   },
+   {
+    "concurrency": 4,
+    "repetition": 2,
+    "server_prefill_tokens_delta": 29093,
+    "uncached_prompt_tokens": 28669,
+    "requests": [
+     {
+      "prompt_id": "long-00",
+      "prompt_tokens": 28654,
+      "cached_tokens": 28654,
+      "max_inter_token_gap_seconds": 4.8,
+      "after_token": 424
+     },
+     {
+      "prompt_id": "long-01",
+      "prompt_tokens": 28669,
+      "cached_tokens": 0,
+      "max_inter_token_gap_seconds": 0.054,
+      "after_token": 1
+     },
+     {
+      "prompt_id": "long-02",
+      "prompt_tokens": 28670,
+      "cached_tokens": 28670,
+      "max_inter_token_gap_seconds": 0.239,
+      "after_token": 507
+     },
+     {
+      "prompt_id": "long-03",
+      "prompt_tokens": 28671,
+      "cached_tokens": 28671,
+      "max_inter_token_gap_seconds": 0.228,
+      "after_token": 360
+     }
+    ]
+   },
+   {
+    "concurrency": 1,
+    "repetition": 0,
+    "server_prefill_tokens_delta": 0,
+    "uncached_prompt_tokens": 0,
+    "requests": [
+     {
+      "prompt_id": "long-00",
+      "prompt_tokens": 28654,
+      "cached_tokens": 28654,
+      "max_inter_token_gap_seconds": 0.053,
+      "after_token": 496
+     }
+    ]
+   },
+   {
+    "concurrency": 1,
+    "repetition": 0,
+    "server_prefill_tokens_delta": 0,
+    "uncached_prompt_tokens": 0,
+    "requests": [
+     {
+      "prompt_id": "long-01",
+      "prompt_tokens": 28669,
+      "cached_tokens": 28669,
+      "max_inter_token_gap_seconds": 0.053,
+      "after_token": 506
+     }
+    ]
+   },
+   {
+    "concurrency": 1,
+    "repetition": 0,
+    "server_prefill_tokens_delta": 0,
+    "uncached_prompt_tokens": 0,
+    "requests": [
+     {
+      "prompt_id": "long-02",
+      "prompt_tokens": 28670,
+      "cached_tokens": 28670,
+      "max_inter_token_gap_seconds": 0.062,
+      "after_token": 196
+     }
+    ]
+   },
+   {
+    "concurrency": 1,
+    "repetition": 0,
+    "server_prefill_tokens_delta": 28671,
+    "uncached_prompt_tokens": 28671,
+    "requests": [
+     {
+      "prompt_id": "long-03",
+      "prompt_tokens": 28671,
+      "cached_tokens": 0,
+      "max_inter_token_gap_seconds": 0.054,
+      "after_token": 1
+     }
+    ]
+   },
+   {
+    "concurrency": 1,
+    "repetition": 1,
+    "server_prefill_tokens_delta": 28654,
+    "uncached_prompt_tokens": 28654,
+    "requests": [
+     {
+      "prompt_id": "long-00",
+      "prompt_tokens": 28654,
+      "cached_tokens": 0,
+      "max_inter_token_gap_seconds": 0.054,
+      "after_token": 1
+     }
+    ]
+   },
+   {
+    "concurrency": 1,
+    "repetition": 1,
+    "server_prefill_tokens_delta": 7,
+    "uncached_prompt_tokens": 7,
+    "requests": [
+     {
+      "prompt_id": "long-01",
+      "prompt_tokens": 28669,
+      "cached_tokens": 28662,
+      "max_inter_token_gap_seconds": 0.089,
+      "after_token": 1
+     }
+    ]
+   },
+   {
+    "concurrency": 1,
+    "repetition": 1,
+    "server_prefill_tokens_delta": 28670,
+    "uncached_prompt_tokens": 28670,
+    "requests": [
+     {
+      "prompt_id": "long-02",
+      "prompt_tokens": 28670,
+      "cached_tokens": 0,
+      "max_inter_token_gap_seconds": 0.054,
+      "after_token": 1
+     }
+    ]
+   },
+   {
+    "concurrency": 1,
+    "repetition": 1,
+    "server_prefill_tokens_delta": 7,
+    "uncached_prompt_tokens": 7,
+    "requests": [
+     {
+      "prompt_id": "long-03",
+      "prompt_tokens": 28671,
+      "cached_tokens": 28664,
+      "max_inter_token_gap_seconds": 0.089,
+      "after_token": 1
+     }
+    ]
+   },
+   {
+    "concurrency": 1,
+    "repetition": 2,
+    "server_prefill_tokens_delta": 7,
+    "uncached_prompt_tokens": 7,
+    "requests": [
+     {
+      "prompt_id": "long-00",
+      "prompt_tokens": 28654,
+      "cached_tokens": 28647,
+      "max_inter_token_gap_seconds": 0.089,
+      "after_token": 1
+     }
+    ]
+   },
+   {
+    "concurrency": 1,
+    "repetition": 2,
+    "server_prefill_tokens_delta": 28669,
+    "uncached_prompt_tokens": 28669,
+    "requests": [
+     {
+      "prompt_id": "long-01",
+      "prompt_tokens": 28669,
+      "cached_tokens": 0,
+      "max_inter_token_gap_seconds": 0.054,
+      "after_token": 1
+     }
+    ]
+   },
+   {
+    "concurrency": 1,
+    "repetition": 2,
+    "server_prefill_tokens_delta": 7,
+    "uncached_prompt_tokens": 7,
+    "requests": [
+     {
+      "prompt_id": "long-02",
+      "prompt_tokens": 28670,
+      "cached_tokens": 28663,
+      "max_inter_token_gap_seconds": 0.09,
+      "after_token": 1
+     }
+    ]
+   },
+   {
+    "concurrency": 1,
+    "repetition": 2,
+    "server_prefill_tokens_delta": 28671,
+    "uncached_prompt_tokens": 28671,
+    "requests": [
+     {
+      "prompt_id": "long-03",
+      "prompt_tokens": 28671,
+      "cached_tokens": 0,
+      "max_inter_token_gap_seconds": 0.054,
+      "after_token": 1
+     }
+    ]
+   }
+  ],
+  "--prefill-srpt": [
+   {
+    "concurrency": 4,
+    "repetition": 0,
+    "server_prefill_tokens_delta": 115065,
+    "uncached_prompt_tokens": 114664,
+    "requests": [
+     {
+      "prompt_id": "long-00",
+      "prompt_tokens": 28654,
+      "cached_tokens": 0,
+      "max_inter_token_gap_seconds": 34.809,
+      "after_token": 394
+     },
+     {
+      "prompt_id": "long-01",
+      "prompt_tokens": 28669,
+      "cached_tokens": 0,
+      "max_inter_token_gap_seconds": 0.064,
+      "after_token": 1
+     },
+     {
+      "prompt_id": "long-02",
+      "prompt_tokens": 28670,
+      "cached_tokens": 0,
+      "max_inter_token_gap_seconds": 31.172,
+      "after_token": 9
+     },
+     {
+      "prompt_id": "long-03",
+      "prompt_tokens": 28671,
+      "cached_tokens": 0,
+      "max_inter_token_gap_seconds": 17.637,
+      "after_token": 5
+     }
+    ]
+   },
+   {
+    "concurrency": 4,
+    "repetition": 1,
+    "server_prefill_tokens_delta": 57840,
+    "uncached_prompt_tokens": 28691,
+    "requests": [
+     {
+      "prompt_id": "long-00",
+      "prompt_tokens": 28654,
+      "cached_tokens": 28647,
+      "max_inter_token_gap_seconds": 0.229,
+      "after_token": 406
+     },
+     {
+      "prompt_id": "long-01",
+      "prompt_tokens": 28669,
+      "cached_tokens": 28662,
+      "max_inter_token_gap_seconds": 71.996,
+      "after_token": 480
+     },
+     {
+      "prompt_id": "long-02",
+      "prompt_tokens": 28670,
+      "cached_tokens": 0,
+      "max_inter_token_gap_seconds": 0.391,
+      "after_token": 21
+     },
+     {
+      "prompt_id": "long-03",
+      "prompt_tokens": 28671,
+      "cached_tokens": 28664,
+      "max_inter_token_gap_seconds": 0.665,
+      "after_token": 510
+     }
+    ]
+   },
+   {
+    "concurrency": 4,
+    "repetition": 2,
+    "server_prefill_tokens_delta": 28992,
+    "uncached_prompt_tokens": 28668,
+    "requests": [
+     {
+      "prompt_id": "long-00",
+      "prompt_tokens": 28654,
+      "cached_tokens": 0,
+      "max_inter_token_gap_seconds": 0.551,
+      "after_token": 484
+     },
+     {
+      "prompt_id": "long-01",
+      "prompt_tokens": 28669,
+      "cached_tokens": 28662,
+      "max_inter_token_gap_seconds": 7.008,
+      "after_token": 78
+     },
+     {
+      "prompt_id": "long-02",
+      "prompt_tokens": 28670,
+      "cached_tokens": 28670,
+      "max_inter_token_gap_seconds": 7.008,
+      "after_token": 62
+     },
+     {
+      "prompt_id": "long-03",
+      "prompt_tokens": 28671,
+      "cached_tokens": 28664,
+      "max_inter_token_gap_seconds": 3.721,
+      "after_token": 263
+     }
+    ]
+   },
+   {
+    "concurrency": 1,
+    "repetition": 0,
+    "server_prefill_tokens_delta": 28654,
+    "uncached_prompt_tokens": 28654,
+    "requests": [
+     {
+      "prompt_id": "long-00",
+      "prompt_tokens": 28654,
+      "cached_tokens": 0,
+      "max_inter_token_gap_seconds": 0.057,
+      "after_token": 1
+     }
+    ]
+   },
+   {
+    "concurrency": 1,
+    "repetition": 0,
+    "server_prefill_tokens_delta": 28669,
+    "uncached_prompt_tokens": 28669,
+    "requests": [
+     {
+      "prompt_id": "long-01",
+      "prompt_tokens": 28669,
+      "cached_tokens": 0,
+      "max_inter_token_gap_seconds": 0.057,
+      "after_token": 1
+     }
+    ]
+   },
+   {
+    "concurrency": 1,
+    "repetition": 0,
+    "server_prefill_tokens_delta": 28670,
+    "uncached_prompt_tokens": 28670,
+    "requests": [
+     {
+      "prompt_id": "long-02",
+      "prompt_tokens": 28670,
+      "cached_tokens": 0,
+      "max_inter_token_gap_seconds": 0.057,
+      "after_token": 1
+     }
+    ]
+   },
+   {
+    "concurrency": 1,
+    "repetition": 0,
+    "server_prefill_tokens_delta": 28671,
+    "uncached_prompt_tokens": 28671,
+    "requests": [
+     {
+      "prompt_id": "long-03",
+      "prompt_tokens": 28671,
+      "cached_tokens": 0,
+      "max_inter_token_gap_seconds": 0.056,
+      "after_token": 375
+     }
+    ]
+   },
+   {
+    "concurrency": 1,
+    "repetition": 1,
+    "server_prefill_tokens_delta": 28654,
+    "uncached_prompt_tokens": 28654,
+    "requests": [
+     {
+      "prompt_id": "long-00",
+      "prompt_tokens": 28654,
+      "cached_tokens": 0,
+      "max_inter_token_gap_seconds": 0.057,
+      "after_token": 508
+     }
+    ]
+   },
+   {
+    "concurrency": 1,
+    "repetition": 1,
+    "server_prefill_tokens_delta": 28669,
+    "uncached_prompt_tokens": 28669,
+    "requests": [
+     {
+      "prompt_id": "long-01",
+      "prompt_tokens": 28669,
+      "cached_tokens": 0,
+      "max_inter_token_gap_seconds": 0.062,
+      "after_token": 498
+     }
+    ]
+   },
+   {
+    "concurrency": 1,
+    "repetition": 1,
+    "server_prefill_tokens_delta": 28670,
+    "uncached_prompt_tokens": 28670,
+    "requests": [
+     {
+      "prompt_id": "long-02",
+      "prompt_tokens": 28670,
+      "cached_tokens": 0,
+      "max_inter_token_gap_seconds": 0.057,
+      "after_token": 1
+     }
+    ]
+   },
+   {
+    "concurrency": 1,
+    "repetition": 1,
+    "server_prefill_tokens_delta": 28671,
+    "uncached_prompt_tokens": 28671,
+    "requests": [
+     {
+      "prompt_id": "long-03",
+      "prompt_tokens": 28671,
+      "cached_tokens": 0,
+      "max_inter_token_gap_seconds": 0.056,
+      "after_token": 161
+     }
+    ]
+   },
+   {
+    "concurrency": 1,
+    "repetition": 2,
+    "server_prefill_tokens_delta": 28654,
+    "uncached_prompt_tokens": 28654,
+    "requests": [
+     {
+      "prompt_id": "long-00",
+      "prompt_tokens": 28654,
+      "cached_tokens": 0,
+      "max_inter_token_gap_seconds": 0.057,
+      "after_token": 1
+     }
+    ]
+   },
+   {
+    "concurrency": 1,
+    "repetition": 2,
+    "server_prefill_tokens_delta": 28669,
+    "uncached_prompt_tokens": 28669,
+    "requests": [
+     {
+      "prompt_id": "long-01",
+      "prompt_tokens": 28669,
+      "cached_tokens": 0,
+      "max_inter_token_gap_seconds": 0.057,
+      "after_token": 1
+     }
+    ]
+   },
+   {
+    "concurrency": 1,
+    "repetition": 2,
+    "server_prefill_tokens_delta": 28670,
+    "uncached_prompt_tokens": 28670,
+    "requests": [
+     {
+      "prompt_id": "long-02",
+      "prompt_tokens": 28670,
+      "cached_tokens": 0,
+      "max_inter_token_gap_seconds": 0.057,
+      "after_token": 1
+     }
+    ]
+   },
+   {
+    "concurrency": 1,
+    "repetition": 2,
+    "server_prefill_tokens_delta": 28671,
+    "uncached_prompt_tokens": 28671,
+    "requests": [
+     {
+      "prompt_id": "long-03",
+      "prompt_tokens": 28671,
+      "cached_tokens": 0,
+      "max_inter_token_gap_seconds": 0.053,
+      "after_token": 479
+     }
+    ]
+   }
+  ]
+ }
+}
