@@ -553,6 +553,8 @@ pub struct RequestScheduler {
     prefill_chunks_scheduled: u64,
     /// The request whose prompt is mid-prefill (SRPT non-preemption).
     active_prefill: Option<RequestHandle>,
+    /// The request of the last committed prefill lane (SRPT short-prompt alternation).
+    last_prefill: Option<RequestHandle>,
     candidates: std::cell::RefCell<Vec<policy::Candidate>>,
     stats: SchedulerStats,
     speculative_widths: Vec<usize>,
@@ -634,6 +636,7 @@ impl RequestScheduler {
             policy: PolicyConfig::default(),
             prefill_chunks_scheduled: 0,
             active_prefill: None,
+            last_prefill: None,
             candidates: policy::scratch(),
             stats: SchedulerStats::default(),
             speculative_widths: Vec::new(),
@@ -1924,10 +1927,17 @@ impl RequestScheduler {
         for (row, lane) in step.lanes.iter().enumerate() {
             if step.lane_kind(row) == GraphKind::Prefill {
                 self.prefill_chunks_scheduled += 1;
-                let request = self.request_mut(lane.request)?;
-                request.accounting.served_prefill_chunks += 1;
+                let request = self.request(lane.request)?;
+                let remaining = (request.prompt_tokens as u64).saturating_sub(lane.start_position);
                 let unfinished = lane.start_position + (lane.tokens as u64) < request.prompt_tokens as u64;
-                self.active_prefill = unfinished.then_some(lane.request);
+                // SRPT short-prompt interleave: a short prompt's chunk ahead of a live leader keeps that leader.
+                let short = self.policy.prefill_srpt_short_tokens;
+                let keeps_leader = short > 0 && remaining <= short && self.live_leader_other_than(lane.request);
+                self.request_mut(lane.request)?.accounting.served_prefill_chunks += 1;
+                if !keeps_leader {
+                    self.active_prefill = unfinished.then_some(lane.request);
+                }
+                self.last_prefill = Some(lane.request);
             }
         }
         self.refresh.commit(origin, fence, step);

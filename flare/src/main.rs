@@ -200,6 +200,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(tokens) = args.prefill_srpt_aging_tokens_per_chunk {
         config["prefill_srpt_aging_tokens_per_chunk"] = tokens.into();
     }
+    if let Some(tokens) = args.prefill_srpt_short_tokens {
+        config["prefill_srpt_short_tokens"] = tokens.into();
+    }
+    if let Some(tokens) = args.prefill_srpt_decode_priority_tokens {
+        config["prefill_srpt_decode_priority_tokens"] = tokens.into();
+    }
     config["unclamped_sampling"] = args.unclamped_sampling.into();
     if let Some(name) = args.served_model_name {
         config["served_names"] = serde_json::json!([name]);

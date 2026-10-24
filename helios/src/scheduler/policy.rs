@@ -30,6 +30,19 @@ pub struct PolicyConfig {
     pub prefill_srpt_max_wait_chunks: u64,
     /// SRPT aging: remaining-token credit per other prompt's prefill chunk waited.
     pub prefill_srpt_aging_tokens_per_chunk: u64,
+    /// With `prefill_srpt`: a prompt with at most this many uncached prompt tokens left (and no chunk in flight) takes
+    /// one prefill chunk ahead of the active leader when the leader's chunk was the last prefill committed, and its
+    /// Init/Restore step is not held behind prompt chunks. Short prompts and the leader alternate chunk by chunk, so the
+    /// leader receives at least every other prefill chunk (finishing within twice its own chunk count) and keeps its
+    /// place; a prompt with more tokens left never preempts it. 0 = off (the v3 order).
+    pub prefill_srpt_short_tokens: u64,
+    /// With `prefill_srpt`: bounded decode priority. While a request that has emitted fewer than this many output tokens
+    /// is decoding (or in the boundary snapshot that resumes its decoding) and has a round in flight or runnable, no
+    /// prompt chunk is offered; each request therefore delays waiting prompts by at most one boundary snapshot plus this
+    /// many output tokens. A non-zero value also values each SRPT prefill step by the prompt that runs (v3: the
+    /// best-priced waiting prompt, whose unserved price keeps rising), so decoders past the budget compete with the
+    /// running prompt. 0 = off (v3).
+    pub prefill_srpt_decode_priority_tokens: u64,
 }
 
 impl Default for PolicyConfig {
@@ -46,6 +59,8 @@ impl Default for PolicyConfig {
             prefill_srpt: false,
             prefill_srpt_max_wait_chunks: 256,
             prefill_srpt_aging_tokens_per_chunk: 32,
+            prefill_srpt_short_tokens: 0,
+            prefill_srpt_decode_priority_tokens: 0,
         }
     }
 }
@@ -203,7 +218,7 @@ impl RequestScheduler {
     }
 
     /// SRPT order of a prompt in its prefill phase (smaller first); see `PolicyConfig::prefill_srpt`.
-    pub(super) fn srpt_key(&self, slot: usize, r: &LiveRequest) -> (bool, bool, u64, u64, usize) {
+    pub(super) fn srpt_key(&self, slot: usize, r: &LiveRequest) -> (bool, bool, bool, u64, u64, usize) {
         let remaining = (r.prompt_tokens as u64).saturating_sub(r.consumed_tokens);
         let waited = self
             .prefill_chunks_scheduled
@@ -217,7 +232,60 @@ impl RequestScheduler {
             remaining.saturating_sub(waited.saturating_mul(self.policy.prefill_srpt_aging_tokens_per_chunk))
         };
         let leader = self.active_prefill == Some(r.handle) && r.phase == RequestPhase::Prefill;
-        (!leader, !aged_out, effective, r.accounting.arrival_ns, slot)
+        let preempt = !leader && r.pending == 0 && self.short_prompt_may_preempt(r.handle, remaining);
+        (!preempt, !leader, !aged_out, effective, r.accounting.arrival_ns, slot)
+    }
+
+    /// Whether a prompt with `remaining` uncached tokens left may take the next chunk ahead of a live leader: it is
+    /// short, and the leader's chunk was the last prefill committed (leader and short prompts alternate).
+    pub(super) fn short_prompt_may_preempt(&self, handle: RequestHandle, remaining: u64) -> bool {
+        let limit = self.policy.prefill_srpt_short_tokens;
+        limit > 0 && remaining <= limit && self.live_leader_other_than(handle)
+            && self.last_prefill == self.active_prefill
+    }
+
+    /// The active prefill leader exists, is not `handle`, and still has prompt tokens to schedule (a stale handle of a
+    /// finished request never matches: handles carry the slot generation).
+    pub(super) fn live_leader_other_than(&self, handle: RequestHandle) -> bool {
+        self.active_prefill.is_some_and(|leader| {
+            leader != handle
+                && self.request(leader).is_ok_and(|l| {
+                    l.phase == RequestPhase::Prefill && l.scheduled_consumed < l.prompt_tokens as u64
+                })
+        })
+    }
+
+    /// A short prompt that may take the next chunk ahead of the leader is in its Init/Restore step: prompt chunks are
+    /// held so that step runs next (it needs completion feedback, so it runs once the window drains).
+    pub(super) fn short_prompt_preparing(&self) -> bool {
+        self.policy.prefill_srpt
+            && self.policy.prefill_srpt_short_tokens > 0
+            && self.slots.iter().filter_map(|e| e.request.as_ref()).any(|r| {
+                matches!(r.phase, RequestPhase::Initialize | RequestPhase::Restore)
+                    && (r.pending > 0 || self.eligible(r))
+                    && self.short_prompt_may_preempt(
+                        r.handle,
+                        (r.prompt_tokens as u64).saturating_sub(r.consumed_tokens),
+                    )
+            })
+    }
+
+    /// Bounded decode priority: a decoding request within its budget is runnable or has a round in flight.
+    pub(super) fn decode_priority_holds_prefill(&self) -> bool {
+        let budget = self.policy.prefill_srpt_decode_priority_tokens;
+        self.policy.prefill_srpt
+            && budget > 0
+            && self.slots.iter().filter_map(|e| e.request.as_ref()).any(|r| {
+                // A boundary snapshot that resumes decoding counts as decoding (it runs before the next round).
+                let decoding = matches!(r.phase, RequestPhase::Decode | RequestPhase::Resume)
+                    || (r.phase == RequestPhase::Snapshot
+                        && r.boundary_capture.is_some_and(|c| {
+                            matches!(c.resume, RequestPhase::Decode | RequestPhase::Resume)
+                        }));
+                decoding
+                    && u64::from(r.generated_tokens) < budget
+                    && (r.pending > 0 || self.eligible(r))
+            })
     }
 
     /// The first prompt with prompt tokens left in SRPT order, in flight or not.
@@ -839,7 +907,13 @@ impl RequestScheduler {
                     .min_by_key(|&s| self.srpt_key(s, self.slots[s].request.as_ref().unwrap()))
                     .unwrap(),
             };
-            (1u64 << slot, offers[..count].iter().map(|(_, v)| *v).fold(0.0f64, f64::max))
+            let value = if self.policy.prefill_srpt_decode_priority_tokens > 0 {
+                // Bounded decode priority: value the step by the prompt that runs.
+                offers[..count].iter().find(|(s, _)| *s == slot).map_or(0.0, |(_, v)| *v)
+            } else {
+                offers[..count].iter().map(|(_, v)| *v).fold(0.0f64, f64::max)
+            };
+            (1u64 << slot, value)
         } else {
             let selected = best_cohort::<REQUEST_LANES>(&offers[..count], batch);
             let expected = offers[..count]
@@ -909,8 +983,25 @@ impl RequestScheduler {
         values: &[LaneValue; REQUEST_LANES],
         age_price: f64,
     ) {
+        let hold_prefill = self.decode_priority_holds_prefill() || self.short_prompt_preparing();
+        self.candidates_with(output, values, age_price, hold_prefill);
+        // A hold never withholds every plan from an idle GPU: if nothing else can run, prompt chunks are offered.
+        if hold_prefill && output.is_empty() && self.submissions.is_empty() {
+            self.candidates_with(output, values, age_price, false);
+        }
+    }
+
+    /// Candidates; `hold_prefill` removes prompt lanes (standalone prefill and the prompt of mixed graphs). Split
+    /// speculation candidates are Proposal/Verification only and are not affected.
+    fn candidates_with(
+        &self,
+        output: &mut Vec<Candidate>,
+        values: &[LaneValue; REQUEST_LANES],
+        age_price: f64,
+        hold_prefill: bool,
+    ) {
         output.clear();
-        self.mixed_candidates(output, values, age_price);
+        self.mixed_candidates(output, values, age_price, hold_prefill);
         if self.split.is_some() {
             self.split_candidates(output, values, age_price);
         }
@@ -936,7 +1027,7 @@ impl RequestScheduler {
                         .map(|_| 1u64 << slot)
                 })
                 .fold(0, |a, b| a | b);
-            if mask == 0 {
+            if mask == 0 || (kind == GraphKind::Prefill && hold_prefill) {
                 continue;
             }
             if kind == GraphKind::Prefill {
@@ -971,6 +1062,7 @@ impl RequestScheduler {
         output: &mut Vec<Candidate>,
         values: &[LaneValue; REQUEST_LANES],
         age_price: f64,
+        hold_prefill: bool,
     ) {
         if !self.submissions.is_empty() {
             return;
@@ -995,7 +1087,7 @@ impl RequestScheduler {
                     continue;
                 };
                 match self.request_kind(r) {
-                    Some(GraphKind::Prefill) if self.prefill_work(r, prefill) > 0 => {
+                    Some(GraphKind::Prefill) if !hold_prefill && self.prefill_work(r, prefill) > 0 => {
                         if duration_ns == 0 && self.mixed_catalog.iter().any(|&(b, w, smaller)| {
                             b == batch && w == width && smaller < prefill
                                 && self.prefill_work(r, smaller) == self.prefill_work(r, prefill)
@@ -1274,3 +1366,7 @@ pub(super) fn scratch() -> std::cell::RefCell<Vec<Candidate>> {
 #[cfg(test)]
 #[path = "prefill_srpt_tests.rs"]
 mod prefill_srpt_tests;
+
+#[cfg(test)]
+#[path = "prefill_srpt_refinement_tests.rs"]
+mod prefill_srpt_refinement_tests;

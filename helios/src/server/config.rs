@@ -330,6 +330,10 @@ impl Bootstrap {
                     None => crate::scheduler::PolicyConfig::default().prefill_srpt_aging_tokens_per_chunk,
                     Some(value) => value.as_u64().ok_or("prefill_srpt_aging_tokens_per_chunk must be a non-negative integer")?,
                 },
+                prefill_srpt_short_tokens: srpt_tokens(object.get("prefill_srpt_short_tokens"),
+                                                       "prefill_srpt_short_tokens must be a non-negative integer")?,
+                prefill_srpt_decode_priority_tokens: srpt_tokens(object.get("prefill_srpt_decode_priority_tokens"),
+                                                                 "prefill_srpt_decode_priority_tokens must be a non-negative integer")?,
                 ..match object.get("scheduler_policy") {
                     None => crate::scheduler::PolicyConfig::default(),
                     Some(Value::String(value)) if value == "balanced" => crate::scheduler::PolicyConfig::default(),
@@ -654,9 +658,30 @@ fn prefill_srpt(value: Option<&Value>) -> Result<bool> {
     }
 }
 
+/// A token-count SRPT refinement option (`prefill_srpt_short_tokens`, `prefill_srpt_decode_priority_tokens`): a
+/// non-negative JSON integer, 0 (off) when absent.
+fn srpt_tokens(value: Option<&Value>, error: &'static str) -> Result<u64> {
+    match value {
+        None => Ok(0),
+        Some(value) => value.as_u64().ok_or_else(|| error.into()),
+    }
+}
+
 #[cfg(test)]
 mod prefill_srpt_option_tests {
-    use super::prefill_srpt;
+    use super::{prefill_srpt, srpt_tokens};
+
+    #[test]
+    fn srpt_token_options_default_off_and_reject_non_integers() {
+        assert_eq!(srpt_tokens(None, "e").unwrap(), 0);
+        assert_eq!(srpt_tokens(Some(&serde_json::json!(1024)), "e").unwrap(), 1024);
+        assert_eq!(srpt_tokens(Some(&serde_json::json!(0)), "e").unwrap(), 0);
+        for bad in [serde_json::json!(-1), serde_json::json!(1.5), serde_json::json!("1024"), serde_json::json!(true)] {
+            assert!(srpt_tokens(Some(&bad), "e").is_err(), "{bad}");
+        }
+        assert_eq!((crate::scheduler::PolicyConfig::default().prefill_srpt_short_tokens,
+                    crate::scheduler::PolicyConfig::default().prefill_srpt_decode_priority_tokens), (0, 0));
+    }
     use serde_json::Value;
 
     #[test]

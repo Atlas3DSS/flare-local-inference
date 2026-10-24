@@ -273,6 +273,8 @@ impl OrbitPush {
             prefill_srpt: false,
             prefill_srpt_max_wait_chunks: None,
             prefill_srpt_aging_tokens_per_chunk: None,
+            prefill_srpt_short_tokens: None,
+            prefill_srpt_decode_priority_tokens: None,
             unclamped_sampling: false,
             serving: self.serving.clone(),
         }
@@ -422,6 +424,8 @@ impl OrbitRun {
             prefill_srpt: false,
             prefill_srpt_max_wait_chunks: None,
             prefill_srpt_aging_tokens_per_chunk: None,
+            prefill_srpt_short_tokens: None,
+            prefill_srpt_decode_priority_tokens: None,
             unclamped_sampling: false,
             serving: self.serving.clone(),
         }
@@ -511,6 +515,16 @@ pub struct Run {
     /// With --prefill-srpt: remaining-token credit per other prompt's prefill chunk waited [default: 32].
     #[arg(long, value_name = "TOKENS", help_heading = "Serving options")]
     pub prefill_srpt_aging_tokens_per_chunk: Option<u64>,
+
+    /// With --prefill-srpt: a prompt with at most this many tokens left takes one prefill chunk ahead of the prompt
+    /// being served, alternating with it, so the served prompt still gets every other chunk [default: 0 = off].
+    #[arg(long, value_name = "TOKENS", help_heading = "Serving options")]
+    pub prefill_srpt_short_tokens: Option<u64>,
+
+    /// With --prefill-srpt: a request decodes ahead of waiting prompts until it has emitted this many tokens; each
+    /// request delays waiting prompts by at most this many output tokens [default: 0 = off].
+    #[arg(long, value_name = "TOKENS", help_heading = "Serving options")]
+    pub prefill_srpt_decode_priority_tokens: Option<u64>,
 
     /// Validation only: accept request sampling values outside the package's model-author
     /// ranges, e.g. top_k 1 for greedy token-for-token comparisons. Not for serving.
@@ -937,6 +951,10 @@ mod tests {
                          "--prefill-srpt-aging-tokens-per-chunk", "8"]);
         assert!(args.prefill_srpt);
         assert_eq!((args.prefill_srpt_max_wait_chunks, args.prefill_srpt_aging_tokens_per_chunk), (Some(64), Some(8)));
+        assert_eq!((args.prefill_srpt_short_tokens, args.prefill_srpt_decode_priority_tokens), (None, None));
+        let args = run(&["flare", "run", "model.safetensors", "--prefill-srpt", "--prefill-srpt-short-tokens", "1024",
+                         "--prefill-srpt-decode-priority-tokens", "512"]);
+        assert_eq!((args.prefill_srpt_short_tokens, args.prefill_srpt_decode_priority_tokens), (Some(1024), Some(512)));
     }
 
     #[test]
