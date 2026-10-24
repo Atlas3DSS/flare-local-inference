@@ -20,10 +20,10 @@ MONO = "ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', 'DejaV
 MODES = {
     "light": dict(surface="#f3f5f4", tile="#ffffff", border="rgba(37,41,43,0.14)",
                   primary="#25292b", secondary="#596166", grid="#dde2e0", axis="#b3babd",
-                  accent="#5f9524", context="#858d91"),
+                  accent="#5f9524", context="#858d91", vllm="#2a78d6"),
     "dark": dict(surface="#222629", tile="#2a2f33", border="rgba(255,255,255,0.10)",
                  primary="#f3f5f4", secondary="#b0b8bc", grid="#353b3f", axis="#50585d",
-                 accent="#6c9f27", context="#737b80"),
+                 accent="#6c9f27", context="#737b80", vllm="#3987e5"),
 }
 
 HW = "Tesla V100 PCIe 32 GB"
@@ -361,19 +361,24 @@ def kv_pool(c):
 # docs/sm70/receipts/measurements/speculation-a1-summary.json, speculation-a2-summary.json, a1-spec-results.json,
 # a2-spec-results.json, a1-flare-d0-run.json (decode, 2026-10-23), a1-summary.json (llama.cpp TTFT and four agents),
 # a1-llamacpp-kl.json and reference-kl.json (KL, 141 positions), g128/default-short-native-depth4.json,
-# g128/default-prefill-summary.json and g128/srpt-prefill-summary.json (this port, package f21b9abb, 2026-10-24).
-DECODE = [  # label, 1 agent, 4 agents (per agent), this port?, speculation on?
-    ("This port, MTP speculation", 83.2, 64.9, True, True),
-    ("llama.cpp Q4_K_M, checkpoint MTP head", 64.6, 31.8, False, True),
-    ("This port, speculation off", 30.9, 28.3, True, False),
-    ("llama.cpp Q4_K_M, no speculation", 33.2, 20.5, False, False),
+# g128/default-prefill-summary.json and g128/srpt-prefill-summary.json (this port, package f21b9abb, 2026-10-24);
+# docs/sm70/receipts/engines/ (vLLM family, greedy, 2026-10-24): c3-1cat151-tp1-fp16kv-u088-b4096-results.json,
+# g1b-vllm0180-gptq-results.json, kl-vllm0180-gptq.json, engines-summary.json.
+DECODE = [  # label, 1 agent, 4 agents (per agent), family, speculation on?
+    ("This port, MTP speculation", 83.2, 64.9, "port", True),
+    ("llama.cpp Q4_K_M, checkpoint MTP head", 64.6, 31.8, "llama", True),
+    ("This port, speculation off", 30.9, 28.3, "port", False),
+    ("llama.cpp Q4_K_M, no speculation", 33.2, 20.5, "llama", False),
+    ("1Cat-vLLM fork, same NVFP4, no speculation", 29.3, 27.9, "vllm", False),
+    ("vLLM 0.18.0, GPTQ-Int4, no speculation", 39.9, 30.7, "vllm", False),
 ]
-KL = [("This port (NVFP4 weights unchanged)", 0.0011, True), ("llama.cpp Q8_0", 0.0013, False),
-      ("llama.cpp Q4_K_M", 0.0088, False)]
+KL = [("This port (NVFP4 weights unchanged)", 0.0011, "port"), ("llama.cpp Q8_0", 0.0013, "llama"),
+      ("llama.cpp Q4_K_M", 0.0088, "llama"), ("vLLM 0.18.0, GPTQ-Int4", 0.0383, "vllm")]
+FAMILY = {"port": "accent", "llama": "context", "vllm": "vllm"}
 
 
-def bar_h(c, x0, y, w, h, this_port, spec_on, tip):
-    fill = c["accent"] if this_port else c["context"]
+def bar_h(c, x0, y, w, h, family, spec_on, tip):
+    fill = c[FAMILY[family]]
     if spec_on:
         return hbar(x0, y, w, h, fill, tip)
     # speculation off: outlined bar (shape encoding in addition to colour)
@@ -406,10 +411,10 @@ def comparison(c):
     for gi, (gname, idx) in enumerate((("1 user", 1), ("4 users at once", 2))):
         body.append(t(lx, yy + 18, gname, 18, c["primary"], 650))
         yy += 30
-        for label, one, four, port, spec in DECODE:
+        for label, one, four, fam, spec in DECODE:
             v = (one, four)[idx - 1]
             body.append(t(x0 - 16, yy + 19, escape(label), 16, c["primary"], 400, "end"))
-            body.append(bar_h(c, x0, yy, sx(v) - x0, bh, port, spec, f"{label}, {gname}: {v} tok/s"))
+            body.append(bar_h(c, x0, yy, sx(v) - x0, bh, fam, spec, f"{label}, {gname}: {v} tok/s"))
             body.append(t(sx(v) + 10, yy + 19, f"{v:.1f}", 17, c["primary"], 650, extra=num))
             yy += bh + gap
         yy += 14
@@ -425,8 +430,10 @@ def comparison(c):
     body.append(t(lx + 38, ly, "this port", 15, c["primary"]))
     body.append(hbar(lx + 140, ly - 13, 28, 16, c["context"], "llama.cpp"))
     body.append(t(lx + 178, ly, "llama.cpp", 15, c["primary"]))
-    body.append(f'<rect x="{lx + 291}" y="{ly - 12}" width="26" height="14" rx="3" fill="{c["surface"]}" stroke="{c["secondary"]}" stroke-width="2"/>')
-    body.append(t(lx + 328, ly, "outlined = speculation off", 15, c["primary"]))
+    body.append(hbar(lx + 290, ly - 13, 28, 16, c["vllm"], "vLLM family"))
+    body.append(t(lx + 328, ly, "vLLM family (greedy)", 15, c["primary"]))
+    body.append(f'<rect x="{lx + 511}" y="{ly - 12}" width="26" height="14" rx="3" fill="{c["surface"]}" stroke="{c["secondary"]}" stroke-width="2"/>')
+    body.append(t(lx + 548, ly, "outlined = speculation off", 15, c["primary"]))
     # ---- panel B: time to first token, 30,720-token prompts
     y = ly + 46
     body.append(f'<line x1="{PAD}" y1="{y - 24}" x2="{W - PAD}" y2="{y - 24}" stroke="{c["grid"]}" stroke-width="1"/>')
@@ -437,9 +444,10 @@ def comparison(c):
     yy = y + 56
     body.append(t(lx, yy + 18, "1 prompt", 18, c["primary"], 650))
     yy += 30
-    for label, v, port in (("This port", 35.46, True), ("llama.cpp Q4_K_M", 49.27, False)):
+    for label, v, fam in (("1Cat-vLLM fork, same NVFP4", 32.9, "vllm"), ("This port", 35.46, "port"),
+                          ("llama.cpp Q4_K_M", 49.27, "llama"), ("vLLM 0.18.0, GPTQ-Int4", 191.2, "vllm")):
         body.append(t(x0 - 16, yy + 19, label, 16, c["primary"], 400, "end"))
-        body.append(hbar(x0, yy, tx(v) - x0, bh, c["accent"] if port else c["context"], f"{label}, one 30,720-token prompt: {v} s"))
+        body.append(hbar(x0, yy, tx(v) - x0, bh, c[FAMILY[fam]], f"{label}, one 30,720-token prompt: {v} s"))
         body.append(t(tx(v) + 10, yy + 19, f"{v:.1f} s", 17, c["primary"], 650, extra=num))
         yy += bh + gap
     yy += 14
@@ -471,38 +479,46 @@ def comparison(c):
     body.append(t(lx, y, "Distance from a full-precision (FP32) run of the same checkpoint (lower is better)", 21, c["primary"], 650))
     body.append(t(lx, y + 24, "Mean KL divergence over 141 positions of 3 public prompts, log scale; this port: SM70 capture", 16, c["secondary"]))
     import math
-    lo, hi = 0.0005, 0.02
+    lo, hi = 0.0005, 0.05
     kx = lambda v: x0 + (x1 - x0) * (math.log10(v) - math.log10(lo)) / (math.log10(hi) - math.log10(lo))
     yy = y + 50
-    for label, v, port in KL:
+    for label, v, fam in KL:
         body.append(t(x0 - 16, yy + 19, escape(label), 16, c["primary"], 400, "end"))
-        body.append(hbar(x0, yy, kx(v) - x0, bh, c["accent"] if port else c["context"], f"{label}: mean KL {v}"))
+        body.append(hbar(x0, yy, kx(v) - x0, bh, c[FAMILY[fam]], f"{label}: mean KL {v}"))
         body.append(t(kx(v) + 10, yy + 19, f"{v:.4f}", 17, c["primary"], 650, extra=num))
         yy += bh + gap
-    for v, lab in ((0.0005, "0.0005"), (0.001, "0.001"), (0.002, "0.002"), (0.005, "0.005"), (0.01, "0.01"), (0.02, "0.02")):
+    for v, lab in ((0.0005, "0.0005"), (0.001, "0.001"), (0.002, "0.002"), (0.005, "0.005"), (0.01, "0.01"), (0.02, "0.02"),
+                   (0.05, "0.05")):
         body.append(t(kx(v), yy + 12, lab, 14, c["secondary"], anchor="middle", extra=num))
-    body.append(t(lx, yy + 44, "Top-1 agreement with the FP32 run is 135-137 of 141 positions for all three, so it is not drawn.",
-                  15, c["secondary"]))
+    body.append(t(lx, yy + 44, "Top-1 agreement with the FP32 run: this port 135, llama.cpp 136-137, vLLM 0.18.0 GPTQ 130 of 141 "
+                  "positions; not drawn.", 15, c["secondary"]))
     # ---- footnotes
     notes = [
+        "Official vLLM 0.32.0 and SGLang 0.5.22 cannot serve this checkpoint on a V100 today (no sm_70 support).",
         "All numbers on one Tesla V100 PCIe 32 GB. llama.cpp: commit 8e5a58df built for sm_70, GGUFs converted from the same",
         "checkpoint (head kept NVFP4), 2026-10-23; speculation off and KL for this port: previous package, 2026-10-23; this port",
         "with MTP and first-token times: package f21b9abb, 2026-10-24. Four-prompt runs: 256 output tokens on llama.cpp, 32 here.",
-        "Acceptance is similar on both engines (about 0.70 at depth 4): this port's lead comes from the cost of each verification",
-        "step and from batching. Strata and Project Maya cannot serve this 27B model, so they are not drawn (WHY-NOT-LOW-BIT.md).",
+        "vLLM family, 2026-10-24, greedy (this port and llama.cpp sampled at temperature 0.7): 1Cat-vLLM is a community fork",
+        "(v1.5.1, 589a5d1e) running the same NVFP4 file; vLLM 0.18.0 (official, bcf2be96) refuses NVFP4 and serves a community",
+        "GPTQ-Int4 of the BF16 base model (Max73333 @ c7ed2123), a different quantisation source. Without speculation, decode",
+        "on one card is similar across engines; this port's lead is MTP verification and batching (acceptance about 0.70 on both",
+        "MTP engines), and the 1Cat-vLLM fork prefills faster on one card. Strata and Project Maya cannot serve this 27B model.",
     ]
     fy = yy + 110
     h = fy + 22 * len(notes) + 30
     body.append(f'<line x1="{PAD}" y1="{fy - 30}" x2="{W - PAD}" y2="{fy - 30}" stroke="{c["grid"]}" stroke-width="1"/>')
     for i, n in enumerate(notes):
-        body.append(t(PAD, fy + 22 * i, escape(n), 15, c["secondary"]))
+        body.append(t(PAD, fy + 22 * i, escape(n), 15, c["primary"] if i == 0 else c["secondary"], 650 if i == 0 else 400))
     desc = ("Same model, same card: Qwen3.8-27B on one Tesla V100 PCIe 32 GB. Decode speed per user, tokens per second: "
             "1 user: this port with MTP speculation 83.2, llama.cpp Q4_K_M with the checkpoint MTP head 64.6, this port with "
             "speculation off 30.9, llama.cpp Q4_K_M without speculation 33.2. 4 users at once, per user: 64.9, 31.8, 28.3 and "
             "20.5. First token for a 30,720-token prompt: this port 35.5 s, llama.cpp Q4_K_M 49.3 s. Four such prompts at "
             "once: llama.cpp first tokens at 60, 108, 157 and 200 s; this port all four at 140 to 142 s by default, or 36, 72, "
             "108 and 145 s with --prefill-srpt. Mean KL from a full-precision run of the same checkpoint: this port 0.0011, "
-            "llama.cpp Q8_0 0.0013, llama.cpp Q4_K_M 0.0088. Sources: WHY-NOT-LOW-BIT.md and BENCHMARKS-SM70.md.")
+            "llama.cpp Q8_0 0.0013, llama.cpp Q4_K_M 0.0088. vLLM family, greedy, no speculation: 1Cat-vLLM fork with the same "
+            "NVFP4 file 29.3 and 27.9 tokens per second, first token 32.9 s; official vLLM 0.18.0 with a GPTQ-Int4 checkpoint "
+            "39.9 and 30.7, first token 191.2 s, mean KL 0.0383. Official vLLM 0.32.0 and SGLang 0.5.22 cannot serve this "
+            "checkpoint on a V100. Sources: WHY-NOT-LOW-BIT.md and BENCHMARKS-SM70.md.")
     return frame(c, h, "Same model, same card: Qwen3.8-27B on one Tesla V100 32 GB", desc, "\n".join(body))
 
 

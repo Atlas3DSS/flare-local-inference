@@ -11,10 +11,11 @@ that adds a V100 path; everything else is upstream, whose README is kept as
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/sm70/img/comparison-dark.svg">
   <source media="(prefers-color-scheme: light)" srcset="docs/sm70/img/comparison-light.svg">
-  <img alt="Same model, same card: Qwen3.8-27B on one Tesla V100 PCIe 32 GB. Decode speed per user: with one user, this port with MTP speculation 83.2 tokens per second, llama.cpp Q4_K_M with the checkpoint's MTP head 64.6, this port without speculation 30.9, llama.cpp without speculation 33.2; with four users at once, 64.9, 31.8, 28.3 and 20.5 per user. First token for a 30,720-token prompt: this port 35.5 s, llama.cpp 49.3 s. Four such prompts at once: llama.cpp first tokens at 60, 108, 157 and 200 s; this port all four at 140 to 142 s by default, or 36, 72, 108 and 145 s with --prefill-srpt. Mean KL from a full-precision run of the same checkpoint: this port 0.0011, llama.cpp Q8_0 0.0013, llama.cpp Q4_K_M 0.0088." src="docs/sm70/img/comparison-light.svg">
+  <img alt="Same model, same card: Qwen3.8-27B on one Tesla V100 PCIe 32 GB. Decode speed per user: with one user, this port with MTP speculation 83.2 tokens per second, llama.cpp Q4_K_M with the checkpoint's MTP head 64.6, this port without speculation 30.9, llama.cpp without speculation 33.2; with four users at once, 64.9, 31.8, 28.3 and 20.5 per user. First token for a 30,720-token prompt: this port 35.5 s, llama.cpp 49.3 s. Four such prompts at once: llama.cpp first tokens at 60, 108, 157 and 200 s; this port all four at 140 to 142 s by default, or 36, 72, 108 and 145 s with --prefill-srpt. Mean KL from a full-precision run of the same checkpoint: this port 0.0011, llama.cpp Q8_0 0.0013, llama.cpp Q4_K_M 0.0088. vLLM family, greedy, no speculation: the 1Cat-vLLM fork with the same NVFP4 file 29.3 and 27.9 tokens per second and a 32.9 s first token; official vLLM 0.18.0 with a GPTQ-Int4 checkpoint 39.9 and 30.7, a 191.2 s first token and mean KL 0.0383. Official vLLM 0.32.0 and SGLang 0.5.22 cannot serve this checkpoint on a V100." src="docs/sm70/img/comparison-light.svg">
 </picture>
 
-The same checkpoint on the same card against llama.cpp, with and without speculation; methods,
+The same checkpoint on the same card against llama.cpp and the vLLM family, with and without
+speculation; official vLLM 0.32.0 and SGLang 0.5.22 cannot serve it on a V100 today. Methods,
 dates and caveats are in [WHY-NOT-LOW-BIT.md](docs/sm70/WHY-NOT-LOW-BIT.md#same-model-on-llamacpp).
 
 ## Before you start

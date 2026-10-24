@@ -252,6 +252,71 @@ decode windows overlap only partly.
 - No shared-prefix run was possible: the four public long prompts share only a
   95-character prefix, about 20 tokens.
 
+### vLLM and SGLang on the same card
+
+On 2026-10-24 the fork also tried vLLM and SGLang with this checkpoint on the
+same card type ([engines-README.md](receipts/engines/engines-README.md),
+[engines-summary.json](receipts/engines/engines-summary.json); one results file per
+attempt in [receipts/engines/](receipts/engines/)). "Official" means the project's own
+release wheel; "fork" means a community project.
+
+- **Cannot serve on V100 today: official vLLM 0.32.0 and SGLang 0.5.22.**
+  vLLM 0.32.0 stops before loading with `The quantization method
+  modelopt_mixed is not supported for the current GPU. Minimum capability: 75.
+  Current capability: 70.` SGLang 0.5.22 fails at its first CUDA operation with
+  `CUDA error: no kernel image is available for execution on the device`. Their
+  kernels and the PyTorch builds they pin contain no `sm_70` code
+  ([kernel-archs.txt](receipts/engines/kernel-archs.txt)).
+- **Official vLLM 0.18.0** (`bcf2be96`), the last release wheel with `sm_70`
+  kernels, refuses this NVFP4 checkpoint (`Minimum capability: 89`). It does
+  serve a community GPTQ-Int4 quantisation of the BF16 base model
+  (`Max73333/Qwen3.8-27B-GPTQ-Int4-V100` at `c7ed2123`) on one card. That is a
+  different quantisation source from the checkpoint the other rows run.
+- **1Cat-vLLM v1.5.1** (`589a5d1e`), a community fork, serves the same NVFP4
+  file as this port on one card. Its load uses almost the whole card: with its
+  MTP head, and in both KL captures, the load peaked at 32,114-32,242 MiB,
+  above the 31,744 MiB per-card cap the fork's measurements run under, so its
+  MTP and KL runs could not complete there. In the measured run the driver's
+  sampler saw 32,266 MiB in use, so that run may also have passed the cap
+  briefly. A V100 owner without that cap is not bound by it; whether MTP and
+  the KL capture then fit was not measured.
+
+| Engine, one V100 PCIe 32 GB | Weights | Decode, 1 user (tok/s) | Decode per user, 4 users (tok/s) | TTFT, one 30,720-token prompt (s) | Mean KL to the FP32 reference |
+| --- | --- | ---: | ---: | ---: | ---: |
+| This port, MTP depth 4 (package `f21b9abb`, sampled at T 0.7) | NVFP4 checkpoint | 83.2 | 64.9 | 35.5 | 0.0011 |
+| This port, speculation off (previous package, sampled at T 0.7) | NVFP4 checkpoint | 30.9 | 28.3 | n/a | same as above |
+| llama.cpp `8e5a58df`, no speculation (sampled at T 0.7) | Q4_K_M from the checkpoint | 33.2 | 20.5 | 49.3 | 0.0088 |
+| 1Cat-vLLM v1.5.1 (fork), no speculation, greedy | NVFP4 checkpoint | 29.3 | 27.9 | 32.9 | not measured (memory cap) |
+| vLLM 0.18.0 (official), no speculation, greedy | GPTQ-Int4 of the BF16 base model | 39.9 | 30.7 | 191.2 | 0.0383 |
+| vLLM 0.32.0 (official) | NVFP4 checkpoint | cannot serve on V100 | | | |
+| SGLang 0.5.22 (official) | NVFP4 checkpoint | cannot serve on V100 | | | |
+
+The vLLM-family rows are greedy; this port's and llama.cpp's rows were
+sampled at temperature 0.7 ([same-model results above](#same-model-on-llamacpp)).
+The vLLM 0.18.0 KL compares a different quantisation of the base model, run on
+a kernel that vLLM itself logs as buggy, with a reference made from the NVFP4
+checkpoint ([kl-vllm0180-gptq.json](receipts/engines/kl-vllm0180-gptq.json)). Its first
+answer after launch took about 15.5 minutes (Triton compilation).
+
+In plain words: without speculation, single-card decode is similar across
+these engines (29-33 tok/s for the NVFP4 and Q4_K_M runs, 39.9 for the
+GPTQ-Int4 checkpoint). This port's lead comes from its MTP speculation. For
+prefill, the 1Cat-vLLM fork is ahead on one card: 32.9 s against this port's
+35.5 s for a 30,720-token prompt.
+
+**Four PCIe V100s.** 1Cat-vLLM with tensor parallelism over four
+V100-PCIE-32GB cards on one PCIe switch, without NVLink, gave 63.0 tok/s for
+one user, 50.3 per user with four (203.4 aggregate) and a 15.8 s first token
+at 30,720 tokens ([t1-1cat151-tp4-fp16kv-results.json](receipts/engines/t1-1cat151-tp4-fp16kv-results.json),
+[host-facts.txt](receipts/engines/host-facts.txt)). 1Cat's own published four-card numbers
+are on NVLink-connected V100-SXM2 cards, which is different hardware.
+
+| Four V100 PCIe 32 GB | Users | Decode per user (tok/s) | Aggregate (tok/s) | TTFT, 30,720 tokens (s) |
+| --- | ---: | ---: | ---: | ---: |
+| 1Cat-vLLM TP4, 1 user (measured, greedy) | 1 | 63.0 | 63.0 | 15.8 |
+| 1Cat-vLLM TP4, 4 users (measured, greedy) | 4 | 50.3 | 203.4 | n/a |
+| This port, four independent single-card servers | | pending: measurement not yet published | | |
+
 ## Strata and Project Maya
 
 Two public engines serve large models on V100s. Neither serves Qwen3.8-27B, and

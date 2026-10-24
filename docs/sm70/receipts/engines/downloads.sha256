@@ -1,0 +1,17 @@
+757f2200ba6bd20f7e3e5c8fc68c7e05461df6d284baf676ac0c16ce19434959  dl-1cat-v1.5.1/1cat_vllm-1.5.1-cp312-cp312-linux_x86_64.whl
+0bc51491598f4bcd161b693b27cbe2864082d6c49fa9065965d94b371f6ae8ef  dl-vllm-0.18.0/vllm-0.18.0-cp38-abi3-manylinux_2_31_x86_64.whl
+2f6e0ff697da88de7682638d123c77902ab1cffbbd4d092da12d99af75d924d0  dl-pmaxx73-8b15e9e4/kv-cache-v100.patch
+568a3906c8384de7d7f7d72710c1f4857e0c73600c7100cf71c94068dd229354  dl-pmaxx73-8b15e9e4/qwen38-text-only.patch
+4472df0dfa0e438a298cc4d69a5fd623e0735b1645f72f0487839a083feefe8d  dl-pmaxx73-8b15e9e4/requirements-runtime.txt
+616baccfabaca60447bbe8148492795aee7cfd6ad132231d36299d2d62491167  models/Max73333-Qwen3.8-27B-GPTQ-Int4-V100/config.json
+477f11fe8f40945690a1df951acb82bfc75c68502aa10a02f436b25aea41b483  models/Max73333-Qwen3.8-27B-GPTQ-Int4-V100/generation_config.json
+19b0484568c9b19956bdfbd9b432891639e67189bf0c2116f28538b06bff61fd  models/Max73333-Qwen3.8-27B-GPTQ-Int4-V100/model.safetensors.index.json
+d89ef49ce9cd37fbf510158e13c1ef063d9286411c1ec9049932dbe0487143b1  models/Max73333-Qwen3.8-27B-GPTQ-Int4-V100/processor_config.json
+515ed6f03d788c9b3c6ff4894f9eaf4745fffbbbbe378fda73198c0ac512e7f7  models/Max73333-Qwen3.8-27B-GPTQ-Int4-V100/quantize_config.json
+06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523  models/Max73333-Qwen3.8-27B-GPTQ-Int4-V100/tokenizer.json
+90f8b2a1c274d6dc7bf9ef5172dfe221894f81691e00a2b52d4c32bf9ccfd283  models/Max73333-Qwen3.8-27B-GPTQ-Int4-V100/tokenizer_config.json
+16cc514d3d10b94e1ab78e66a6999c5a28c397ba133177dd09edb74c58b49eec  models/Max73333-Qwen3.8-27B-GPTQ-Int4-V100/model-00001-of-00005.safetensors
+183f562c8b83aa2657abf79fc94851bc0e9bb98c4140491ea14bfb80c7a41dc1  models/Max73333-Qwen3.8-27B-GPTQ-Int4-V100/model-00002-of-00005.safetensors
+b15ab7e674ad7516b9b3fab118e134f6a2d87032260930f77a2818b7157c6eee  models/Max73333-Qwen3.8-27B-GPTQ-Int4-V100/model-00003-of-00005.safetensors
+ebe994fadf6742b2becfb3f02b5234112fc16406e1fcfb2c5e4d4317a466bdcf  models/Max73333-Qwen3.8-27B-GPTQ-Int4-V100/model-00004-of-00005.safetensors
+94255ae07c522af038d0bb327e081a98af72916fac20bedae6142e7ecc0bccd6  models/Max73333-Qwen3.8-27B-GPTQ-Int4-V100/model-00005-of-00005.safetensors

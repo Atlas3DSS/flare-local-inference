@@ -1,0 +1,30 @@
+	[4mGPU0	GPU1	GPU2	GPU3	GPU4	GPU5	CPU Affinity	NUMA Affinity	GPU NUMA ID[0m
+GPU0	 X 	PIX	PIX	PIX	SYS	SYS	0-21,44-65	0		N/A
+GPU1	PIX	 X 	PIX	PIX	SYS	SYS	0-21,44-65	0		N/A
+GPU2	PIX	PIX	 X 	PIX	SYS	SYS	0-21,44-65	0		N/A
+GPU3	PIX	PIX	PIX	 X 	SYS	SYS	0-21,44-65	0		N/A
+GPU4	SYS	SYS	SYS	SYS	 X 	PIX	22-43,66-87	1		N/A
+GPU5	SYS	SYS	SYS	SYS	PIX	 X 	22-43,66-87	1		N/A
+
+Legend:
+
+  X    = Self
+  SYS  = Connection traversing PCIe as well as the SMP interconnect between NUMA nodes (e.g., QPI/UPI)
+  NODE = Connection traversing PCIe as well as the interconnect between PCIe Host Bridges within a NUMA node
+  PHB  = Connection traversing PCIe as well as a PCIe Host Bridge (typically the CPU)
+  PXB  = Connection traversing multiple PCIe bridges (without traversing the PCIe Host Bridge)
+  PIX  = Connection traversing at most a single PCIe bridge
+  NV#  = Connection traversing a bonded set of # NVLinks
+index, uuid, name, pcie.link.gen.max, pcie.link.width.max, pcie.link.gen.current, pcie.link.width.current, power.limit [W], clocks.max.sm [MHz]
+0, GPU-5b95eabd-c3e3-a8bf-e8a0-f2717e731f07, Tesla V100-PCIE-32GB, 3, 16, 3, 16, 250.00 W, 1380 MHz
+1, GPU-725106e3-11df-e1fc-003e-99f071a4e353, Tesla V100-PCIE-32GB, 3, 16, 3, 16, 250.00 W, 1380 MHz
+2, GPU-8747fa38-17e6-3fb3-f9da-4ebb5ac128a1, Tesla V100-PCIE-32GB, 3, 16, 3, 16, 250.00 W, 1380 MHz
+3, GPU-30ab07ae-8f44-df0e-ce62-9b6b088f1d00, Tesla V100-PCIE-32GB, 3, 16, 3, 16, 250.00 W, 1380 MHz
+4, GPU-f2b6541e-8121-c7fd-8a73-78d4b1743d3e, Tesla V100-PCIE-32GB, 3, 16, 3, 16, 250.00 W, 1380 MHz
+5, GPU-6f2541c5-80ed-71d7-5892-8fe9af1398eb, Tesla V100-PCIE-32GB, 3, 16, 3, 16, 250.00 W, 1380 MHz
+CPU(s):                                  88
+Model name:                              Intel(R) Xeon(R) Gold 6152 CPU @ 2.10GHz
+Socket(s):                               2
+CPU(s) scaling MHz:                      29%
+NUMA node0 CPU(s):                       0-21,44-65
+NUMA node1 CPU(s):                       22-43,66-87
