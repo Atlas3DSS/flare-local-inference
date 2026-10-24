@@ -169,9 +169,102 @@ extern "C" int atlas_prefill(const half*x,const uint4*w,const uint32_t*s,const f
  #undef CALL
 }
 
-// astra-18: Sol-20 r4 register-B projection (sm70_pgemm.cuh, byte-identical to the reviewed Sol-20 pgemm.cuh, sha256 60a4ed9f...;
-// cleared by Argon PROMPT44/45/46/49 and Astra R1-R4) with a device live-row count. For rows < *live every output bit
-// equals atlas_prefill above (same pinned split, same per-element mma.m8n8k4 operand sequence, same epilogue/finish);
-// rows in [*live, M) are written +0.0. Serving calls atlas_pgemm4 with one reviewed instantiation per (capacity, shape).
+// astra-18: Sol-20 r4 register-B projection (sm70_pgemm.cuh = sol-20/kernel/pgemm.cuh sha256 60a4ed9f... plus astra-21's
+// output row stride `ldy` on the r4 path; cleared by Argon PROMPT44/45/46/49 and Astra R1-R4) with a device live-row
+// count. For rows < *live every output bit equals atlas_prefill above (same pinned split, same per-element mma.m8n8k4
+// operand sequence, same epilogue/finish); rows in [*live, M) are written +0.0. Serving calls atlas_pgemm4 with one reviewed instantiation per (capacity, shape).
 #include "sm70_pgemm_configs.inc"
 #include "sm70_pgemm.cuh"
+
+// astra-21: SwiGLU fused into the NVFP4 down-projection producer of prefill graphs. Replaces, bit for bit, the
+// Inductor pointwise kernel of SM70DecoderLayer (product = round_bf16(round_bf16(silu(round_bf16(gate))) *
+// round_bf16(up)), written as FP32) followed by kernels14.cuh `produce` reading that product. Arithmetic contract:
+//  * round_bf16 is sm70_precision.round_bf16 (integer nearest-even; NaN -> (bits & 0xffff0000) | 0x00400000).
+//  * silu is the instruction sequence the production Inductor/Triton kernel compiles to on sm_70 (enable_fp_fusion
+//    False; libdevice expf with FTZ; `/` = div.full.f32), copied from its PTX (astra-21/REVIEW-REQUEST-R2.md) and
+//    issued as the same PTX instructions, so ptxas emits the same SASS for every element.
+//  * the product multiply is mul.rn.f32 (Inductor: tmp36 * tmp49, no contraction).
+//  * the producer is `produce` verbatim per row: amax = fmaxf over fabsf of the row (order-independent: every operand
+//    is >= 0 or NaN, fmaxf drops NaN and starts from +0), e = ilogbf(amax) if 0 < amax finite else 14,
+//    shift = clamp(14 - e, -126, 126), inverse = scalbnf(1, -shift), half = __float2half_rn(scalbnf(p, shift)).
+// Tiling: one 512-thread CTA per row (16 warps spread over the row's columns, 2 CTAs per SM: all 128 rows of a prefill
+// chunk resident in one wave); each thread keeps its 2 x STEPS products as BF16 bit pairs in registers between the row
+// maximum and the conversion, so gate/up are read once and only the FP16 row and its inverse scale are written.
+// Rows >= *live (padded rows of the graph) are skipped: atlas_pgemm4 never reads their activations or inverse scales.
+__device__ __forceinline__ uint32_t a21_round_bf16(uint32_t b) {
+  return (b & 0x7fffffffu) > 0x7f800000u ? (b & 0xffff0000u) | 0x00400000u : (b + 0x7fffu + ((b >> 16) & 1u)) & 0xffff0000u;
+}
+__device__ __forceinline__ float a21_silu(float x) {   // x = round_bf16(gate); Triton silu PTX, same instructions
+  float n, t, c, j, r, e, d, y;
+  asm("neg.f32 %0, %1;" : "=f"(n) : "f"(x));
+  asm("fma.rn.ftz.f32 %0, %1, 0f3BBB989D, 0f3F000000;" : "=f"(t) : "f"(n));
+  asm("cvt.ftz.sat.f32.f32 %0, %1;" : "=f"(t) : "f"(t));
+  asm("fma.rm.ftz.f32 %0, %1, 0f437C0000, 0f4B400001;" : "=f"(c) : "f"(t));
+  asm("add.rn.f32 %0, %1, 0fCB40007F;" : "=f"(j) : "f"(c));
+  asm("neg.f32 %0, %1;" : "=f"(j) : "f"(j));
+  asm("fma.rn.ftz.f32 %0, %1, 0f3FB8AA3B, %2;" : "=f"(r) : "f"(n), "f"(j));
+  asm("fma.rn.ftz.f32 %0, %1, 0f32A57060, %2;" : "=f"(r) : "f"(n), "f"(r));
+  asm("ex2.approx.ftz.f32 %0, %1;" : "=f"(e) : "f"(r));
+  const float s = __uint_as_float(__float_as_uint(c) << 23);
+  asm("mul.rn.f32 %0, %1, %2;" : "=f"(e) : "f"(e), "f"(s));
+  asm("add.rn.f32 %0, %1, 0f3F800000;" : "=f"(d) : "f"(e));
+  asm("div.full.f32 %0, %1, %2;" : "=f"(y) : "f"(x), "f"(d));
+  return y;
+}
+__device__ __forceinline__ uint32_t a21_swiglu(float gate, float up) {   // BF16 bits of the canonical product
+  const float a = __uint_as_float(a21_round_bf16(__float_as_uint(a21_silu(__uint_as_float(a21_round_bf16(__float_as_uint(gate)))))));
+  const float u = __uint_as_float(a21_round_bf16(__float_as_uint(up)));
+  float p;
+  asm("mul.rn.f32 %0, %1, %2;" : "=f"(p) : "f"(a), "f"(u));
+  return a21_round_bf16(__float_as_uint(p)) >> 16;
+}
+template<int THREADS,int STEPS>
+__global__ __launch_bounds__(THREADS,2) void produce_swiglu(const float*__restrict__ gu,int ld,half*__restrict__ y,
+    float*__restrict__ inverse,int M,int K,const int*__restrict__ live) {
+  __shared__ float maxima[THREADS/32];
+  const int L=live?min(max(__ldg(live),0),M):M,row=blockIdx.x,t=threadIdx.x;
+  if(row>=L)return;                                   // CTA-uniform, before any barrier
+  const float*g=gu+(int64_t)row*ld,*u=g+K;
+  uint32_t p[STEPS];                                  // BF16 bits of products k and k+1 (k = 2t + 2*THREADS*s)
+  float a=0;
+  #pragma unroll
+  for(int s=0;s<STEPS;s++) {
+    const int k=2*t+2*THREADS*s;
+    p[s]=0;
+    if(k<K) {
+      const float2 gv=*reinterpret_cast<const float2*>(g+k),uv=*reinterpret_cast<const float2*>(u+k);
+      const uint32_t lo=a21_swiglu(gv.x,uv.x),hi=a21_swiglu(gv.y,uv.y);
+      a=fmaxf(a,fabsf(__uint_as_float(lo<<16)));a=fmaxf(a,fabsf(__uint_as_float(hi<<16)));
+      p[s]=lo|(hi<<16);
+    }
+  }
+  #pragma unroll
+  for(int o=16;o;o>>=1)a=fmaxf(a,__shfl_xor_sync(0xffffffffu,a,o));
+  if((t&31)==0)maxima[t>>5]=a;
+  __syncthreads();
+  a=maxima[0];
+  #pragma unroll
+  for(int w=1;w<THREADS/32;w++)a=fmaxf(a,maxima[w]);
+  const int e=a>0&&isfinite(a)?ilogbf(a):14;
+  const int shift=max(-126,min(126,14-e));          // produce: both the scale and the inverse stay normal FP32
+  if(t==0)inverse[row]=scalbnf(1.f,-shift);
+  #pragma unroll
+  for(int s=0;s<STEPS;s++) {
+    const int k=2*t+2*THREADS*s;
+    if(k<K) {
+      const half2 h=__halves2half2(__float2half_rn(scalbnf(__uint_as_float(p[s]<<16),shift)),
+                                   __float2half_rn(scalbnf(__uint_as_float(p[s]&0xffff0000u),shift)));
+      *reinterpret_cast<half2*>(y+(int64_t)row*K+k)=h;
+    }
+  }
+}
+// gu: [m, ld] FP32 parent output of the fused gate|up projection (gate = columns [0, k), up = [k, 2k)); y: [m, k] FP16
+// rows and inverse: [m] FP32, exactly as atlas_produce(x = product, ..., fp8 = 0) writes them for rows < *live.
+extern "C" int atlas_produce_swiglu(const float*gu,int ld,half*y,float*inverse,int m,int k,const int*live,
+                                    cudaStream_t stream) {
+  constexpr int THREADS=512,STEPS=17;                 // k <= 2*512*17 = 17408 (Qwen3.8 intermediate size)
+  if(!gu||!y||!inverse||m<1||m>512||k<64||k%64||k>2*THREADS*STEPS||ld<2*k||ld%2||(uintptr_t)gu%8||(uintptr_t)y%4||
+     (uintptr_t)live%4||(int64_t)(m-1)*ld+2*k>2147483647LL||(int64_t)m*k>2147483647LL)return cudaErrorInvalidValue;
+  produce_swiglu<THREADS,STEPS><<<m,THREADS,0,stream>>>(gu,ld,y,inverse,m,k,live);
+  return cudaGetLastError();
+}

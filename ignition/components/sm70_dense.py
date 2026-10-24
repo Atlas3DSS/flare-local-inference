@@ -21,6 +21,15 @@ PINNED = {
     (17408, 5120): 42,
 }
 MAX_ROWS = 20
+# astra-21: (rows per CTA R, warps W, channels per warp/CTA C) of the single-pass multi-row instantiation per tactic,
+# used by graphs with more than MAX_ROWS rows (prefill: GDN in_proj_ba = 22; MTP absorption: fc = 42, k/v = 54).
+# C = 0 selects R1's dense_vec/dense_cta instantiation (DENSE_ROWS_CONFIGS), C >= 2 R3's channel-blocked kernels
+# (DENSE_CB_CONFIGS). Same per-element reduction as the tactic's decode instantiation; the choice only sets weight /
+# activation reuse and occupancy.
+# Fastest bit-identical points of the reviewed R1 + R3 spaces at 128 rows (v100-5; astra-21/bench-r1.json, bench-r3.json,
+# every point checked against the 20-row decode calls): GDN in_proj_ba R4 W4 C2 37.6 us (20-row calls 99.9 us, R1's
+# R4 W8 58.9 us); MTP fc R8 W4 C4 1.96 ms (4.64 ms; R1 R4 W4 4.52 ms); MTP k/v R4 C8 384 us (576 us; R1's best R8 649 us).
+ROWS = {22: (4, 4, 2), 42: (8, 4, 4), 54: (4, 4, 8)}
 
 
 def tactic(query):
@@ -64,6 +73,8 @@ def library(kernel_cache=None):
     lib = C.CDLL(compile_library(kernel_cache))
     lib.sol9_dense.argtypes = [C.c_void_p] * 5 + [C.c_int] * 8 + [C.c_void_p]
     lib.sol9_dense.restype = C.c_int
+    lib.sol9_dense_rows.argtypes = [C.c_void_p] * 3 + [C.c_int] * 7 + [C.c_void_p]
+    lib.sol9_dense_rows.restype = C.c_int
     return lib
 
 
@@ -88,6 +99,19 @@ def run(query, selected, source, values, output, bias=None, *, kernel_cache=None
     stream = C.c_void_p(torch.cuda.current_stream(source.device).cuda_stream)
     # Prefill and absorption retain the same row-local reduction as decode and
     # verification; no scratch, padding, conversion or output-copy launches.
+    if query.rows > MAX_ROWS and selected[1] in ROWS:
+        # astra-21: one launch per 512 rows (one per prefill/absorption graph), weights streamed once per R rows.
+        rows, warps, channels = ROWS[selected[1]]
+        for begin in range(0, query.rows, 512):
+            live = min(512, query.rows - begin)
+            status = lib.sol9_dense_rows(
+                C.c_void_p(source.data_ptr() + begin * source.stride(0) * 4), C.c_void_p(values.data_ptr()),
+                C.c_void_p(output.data_ptr() + begin * output.stride(0) * 4),
+                live, n, k, source.stride(0), output.stride(0), selected[1], rows | warps << 8 | channels << 16,
+                stream)
+            if status:
+                raise RuntimeError(f"SM70 dense CUDA launch failed: {status}")
+        return output
     for begin in range(0, query.rows, MAX_ROWS):
         live = min(MAX_ROWS, query.rows - begin)
         status = lib.sol9_dense(

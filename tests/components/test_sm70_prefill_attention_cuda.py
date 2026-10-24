@@ -113,3 +113,67 @@ def test_captured_graph_matches_host_bits_and_fails_loudly():
     expected = _host(lib, q[:64].contiguous(), kc, vc, pages[:, :perm.numel()].contiguous(), 64, 777)
     assert int(attention.status) == 0 and torch.equal(output[:64].view(torch.int32), expected.view(torch.int32))
     graph.reset()
+
+
+@torch.no_grad()
+def test_g128_group_rows_equal_standalone_128_row_chunks():
+    """prefill-lab EXP-10 (G128): in a capacity-512 graph, rows [128g, 128g + M_g) of a chunk of M rows at `context`
+    are bit-identical to the shipped host path run on those rows alone as an M_g-row chunk at context + 128g, i.e. to
+    a 128-token-chunk prefill of the same prompt. Includes page-unaligned contexts (straddling pages)."""
+    from b12x.preparation import PreparationSession
+    from ignition.preparation.compilation import compile_forward
+    from ignition.preparation.scratch import ScratchArena
+
+    if torch.cuda.get_device_capability() != (7, 0):
+        pytest.skip("requires V100")
+    torch.manual_seed(13)
+    device = torch.device("cuda")
+    capacity, physical, table = 512, 40, 36
+    q = torch.full((capacity, HEADS, DIM), float("nan"), device=device)
+    output = torch.full_like(q, float("nan"))
+    kc = (torch.randn((physical, PAGE, KV, DIM), device=device) * .2).bfloat16().view(torch.uint16)
+    vc = torch.randn((physical, PAGE, KV, DIM), device=device).bfloat16().view(torch.uint16)
+    pages = torch.full((1, table), -1, dtype=torch.int32, device=device)
+    lengths = torch.zeros(1, dtype=torch.int32, device=device)
+    cu = torch.zeros(2, dtype=torch.int32, device=device)
+    assert admits(q, kc, pages)
+    arena = ScratchArena(device, overlap=False)
+    with PreparationSession(device=device, autotune=False, compile_workers=0) as session:
+        attention = PreparedPrefillAttention(q, kc, vc, pages, lengths, cu, output, session=session,
+                                             name="prefill-attention-g128", workspace=arena)
+        compiled = compile_forward(attention)
+    arena.freeze()
+    attention.bind()
+    lib = library(getattr(session, "kernel_cache", None))
+
+    def load(M, context):
+        length = context + M
+        npg = (length + PAGE - 1) // PAGE
+        perm = torch.randperm(physical, device=device)[:npg].to(torch.int32)
+        q.fill_(float("nan"))
+        q[:M] = (torch.randn((M, HEADS, DIM), device=device) * .2).bfloat16().float()
+        pages.fill_(-1)
+        pages[0, :npg] = perm
+        lengths[0], cu[0], cu[1] = length, 0, M
+        output.fill_(float("nan"))
+        return perm
+
+    graph = torch.cuda.CUDAGraph()
+    load(300, 777)
+    compiled()
+    torch.cuda.synchronize()
+    with torch.cuda.graph(graph):
+        compiled()
+    for M, context in ((512, 0), (512, 1024), (300, 777), (256, 128), (200, 2047), (129, 3000), (128, 1000), (37, 300)):
+        perm = load(M, context)
+        graph.replay()
+        torch.cuda.synchronize()
+        assert int(attention.status) == 0
+        for g in range((M + 127) // 128):
+            rows = min(128, M - 128 * g)
+            npg = (context + 128 * g + rows + PAGE - 1) // PAGE
+            expected = _host(lib, q[128 * g:128 * g + rows].contiguous(), kc, vc, pages[:, :npg].contiguous(),
+                             rows, context + 128 * g)
+            assert torch.equal(output[128 * g:128 * g + rows].view(torch.int32), expected.view(torch.int32)), (M, context, g)
+        assert torch.equal(output[M:].view(torch.int32), torch.zeros_like(output[M:], dtype=torch.int32))
+    graph.reset()

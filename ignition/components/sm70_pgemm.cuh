@@ -324,7 +324,8 @@ __device__ __forceinline__ void pgemm_decode(const BStep<F,NG>&b,int j,const uin
 template<bool F,int MT,int NG,int W,int BK,int PF>
 __device__ __forceinline__ void pgemm_body4(half*sa,const int mb,const int L,const half*__restrict__ x,
     const uint4*__restrict__ w,const uint32_t*__restrict__ s,const float*__restrict__ inv,float gain,int rec,
-    const float*__restrict__ bias,float*__restrict__ y,float*__restrict__ partial,int M,int N,int K,int PK,int split) {
+    const float*__restrict__ bias,float*__restrict__ y,float*__restrict__ partial,int M,int N,int K,int PK,int split,
+    int ldy) {
   using C_=PgemmCfg<F,MT,NG,W,BK>;
   constexpr int Q=C_::Q,LD=C_::LD,TILE=C_::TILE,AV=C_::AV,AC=C_::AC;
   const int tid=threadIdx.x,lane=tid&31,warp=tid>>5,quad=(lane>>2)&3,local=(lane&3)+(lane>>4)*4;
@@ -421,13 +422,13 @@ __device__ __forceinline__ void pgemm_body4(half*sa,const int mb,const int L,con
       for(int e=0;e<8;e++) {
         int row=mb+r*8+(lane&1)+(e&2)+(lane>>4)*4,n=(nw0+g)*32+quad*8+(e&4)+(lane&2)+(e&1);
         if(row<M) {
-          int64_t idx=(int64_t)row*N+n;
+          int64_t idx=(int64_t)row*N+n,out=(int64_t)row*ldy+n;   // partials stay [split][M][N]; y has row stride ldy
           if(split>1) {
             if(row<L){float v=c[r][g][e];if constexpr(F)v*=128.f;partial[(int64_t)blockIdx.z*M*N+idx]=v;}
           } else if(row<L) {
             float v=c[r][g][e];if constexpr(F)v*=128.f;
-            store_output(y,idx,epilogue(v,inv[row],gain,rec,bias?bias[n]:0,0,bias!=nullptr),0);
-          } else store_output(y,idx,0.f,0);
+            store_output(y,out,epilogue(v,inv[row],gain,rec,bias?bias[n]:0,0,bias!=nullptr),0);
+          } else store_output(y,out,0.f,0);
         }
       }
     }
@@ -437,7 +438,8 @@ __device__ __forceinline__ void pgemm_body4(half*sa,const int mb,const int L,con
 template<bool F,int MT,int NG,int W,int BK,int PF,int MINB>
 __global__ __launch_bounds__(W*32,MINB) void pgemm4(const half*__restrict__ x,const uint4*__restrict__ w,
     const uint32_t*__restrict__ s,const float*__restrict__ inv,float gain,int rec,const float*__restrict__ bias,
-    float*__restrict__ y,float*__restrict__ partial,int M,int N,int K,int PK,int split,const int*__restrict__ live) {
+    float*__restrict__ y,float*__restrict__ partial,int M,int N,int K,int PK,int split,const int*__restrict__ live,
+    int ldy) {
   extern __shared__ __align__(16) half sa[];
   const int L=live?min(max(__ldg(live),0),M):M;
   const int mb=blockIdx.x*MT*8;
@@ -449,34 +451,35 @@ __global__ __launch_bounds__(W*32,MINB) void pgemm4(const half*__restrict__ x,co
         const int rows=min(MT*8,M-mb);
         for(int i=lane;i<rows*NG*32;i+=32) {
           int row=mb+i/(NG*32),n=nw0*32+i%(NG*32);
-          store_output(y,(int64_t)row*N+n,0.f,0);
+          store_output(y,(int64_t)row*ldy+n,0.f,0);
         }
       }
     }
     return;
   }
-  pgemm_body4<F,MT,NG,W,BK,PF>(sa,mb,L,x,w,s,inv,gain,rec,bias,y,partial,M,N,K,PK,split);
+  pgemm_body4<F,MT,NG,W,BK,PF>(sa,mb,L,x,w,s,inv,gain,rec,bias,y,partial,M,N,K,PK,split,ldy);
 }
 
 __global__ void finish_live(const float*p,const float*inv,const float*bias,float*y,int M,int N,int split,float gain,
-    int rec,int dtype,const int*live) {
+    int rec,int dtype,const int*live,int ldy) {
   int64_t i=(int64_t)blockIdx.x*blockDim.x+threadIdx.x;if(i>=(int64_t)M*N)return;
   const int L=live?min(max(__ldg(live),0),M):M;
-  if(i/N>=L){store_output(y,i,0.f,dtype);return;}
+  const int64_t out=i/N*ldy+i%N;                                // partial index i = row*N+n; y row stride ldy
+  if(i/N>=L){store_output(y,out,0.f,dtype);return;}
   float v=0;for(int s=0;s<split;s++)v+=p[(int64_t)s*M*N+i];   // Sol-8 `finish` arithmetic for live rows
-  store_output(y,i,epilogue(v,inv[i/N],gain,rec,bias?bias[i%N]:0,dtype,bias!=nullptr),dtype);
+  store_output(y,out,epilogue(v,inv[i/N],gain,rec,bias?bias[i%N]:0,dtype,bias!=nullptr),dtype);
 }
 
 template<bool F,int MT,int NG,int W,int BK,int PF,int MINB>
 int pgemm4_launch(const half*x,const uint4*w,const uint32_t*s,const float*inv,float g,int rec,const float*b,float*y,
-    float*p,int m,int n,int k,int pk,int split,const int*live,cudaStream_t stream) {
+    float*p,int m,int n,int k,int pk,int split,const int*live,int ldy,cudaStream_t stream) {
   using C_=PgemmCfg<F,MT,NG,W,BK>;
   static_assert((PF==1||PF==2)&&MINB>=1&&MINB<=8,"reviewed template space");
   if((n/32)%NG||k%(split*BK)||k%(split*64))return cudaErrorInvalidValue;
   dim3 grid((m+MT*8-1)/(MT*8),((n/32)/NG+W-1)/W,split);
   if(grid.y>65535)return cudaErrorInvalidValue;
-  pgemm4<F,MT,NG,W,BK,PF,MINB><<<grid,W*32,C_::SMEM,stream>>>(x,w,s,inv,g,rec,b,y,p,m,n,k,pk,split,live);
-  if(split>1)finish_live<<<((int64_t)m*n+255)/256,256,0,stream>>>(p,inv,b,y,m,n,split,g,rec,0,live);
+  pgemm4<F,MT,NG,W,BK,PF,MINB><<<grid,W*32,C_::SMEM,stream>>>(x,w,s,inv,g,rec,b,y,p,m,n,k,pk,split,live,ldy);
+  if(split>1)finish_live<<<((int64_t)m*n+255)/256,256,0,stream>>>(p,inv,b,y,m,n,split,g,rec,0,live,ldy);
   return cudaGetLastError();
 }
 
@@ -486,18 +489,22 @@ int pgemm4_launch(const half*x,const uint4*w,const uint32_t*s,const float*inv,fl
 #endif
 constexpr int pgemm4_cfg(int mt,int ng,int w,int bk,int pf,int minb){return mt|(ng<<4)|(w<<8)|((bk/32)<<12)|(pf<<16)|(minb<<20)|(1<<28);}
 
-// Same contract as atlas_pgemm plus `live` (device int32, may be null = all M rows live).
+// Same contract as atlas_pgemm plus `live` (device int32, may be null = all M rows live) and `ldy` (astra-21): the
+// output row stride in floats (ldy >= n), so a fused member writes its column slice of the parent output in place
+// (element (row, n) at y[row*ldy+n]); split partials stay a dense [split][m][n] scratch. ldy == n is the r4 layout.
 extern "C" int atlas_pgemm4(const half*x,const uint4*w,const uint32_t*s,const float*inv,float g,int rec,
-    const float*b,float*y,float*p,int m,int n,int k,int pk,int split,int fp4,int cfg,const int*live,cudaStream_t stream) {
+    const float*b,float*y,float*p,int m,int n,int k,int pk,int split,int fp4,int cfg,const int*live,int ldy,
+    cudaStream_t stream) {
   if(m<1||m>512||n<1||n%32||k<64||k%64||pk<k||pk%64||!x||!w||!inv||!y||
-     (uintptr_t)x%16||(uintptr_t)w%16||(uintptr_t)live%4||split<1||split>4||(split>1&&!p)||
+     (uintptr_t)x%16||(uintptr_t)w%16||(uintptr_t)y%4||(uintptr_t)live%4||split<1||split>4||(split>1&&!p)||
+     ldy<n||(int64_t)(m-1)*ldy+n>2147483647LL||
      (int64_t)n*pk>2147483647LL||(int64_t)m*n*split>2147483647LL) return cudaErrorInvalidValue;
   bool pinned=fp4 ? ((k==5120&&(n==17408||n==248320)&&split==1)||(k==17408&&n==5120&&split==2)) :
     ((k==6144&&n==5120&&split==1)||(k==5120&&(n==10240||n==6144||n==12288)&&split==1)||(k==5120&&n==1024&&split==4));
   if(!pinned||(fp4&&!s))return cudaErrorInvalidValue;
   #define SOL20_TRY4(F_,MT_,NG_,W_,BK_,PF_,MINB_) \
     if(bool(fp4)==F_&&cfg==pgemm4_cfg(MT_,NG_,W_,BK_,PF_,MINB_)) \
-      return pgemm4_launch<F_,MT_,NG_,W_,BK_,PF_,MINB_>(x,w,s,inv,g,rec,b,y,p,m,n,k,pk,split,live,stream);
+      return pgemm4_launch<F_,MT_,NG_,W_,BK_,PF_,MINB_>(x,w,s,inv,g,rec,b,y,p,m,n,k,pk,split,live,ldy,stream);
   SOL20_CONFIGS4(SOL20_TRY4)
   #undef SOL20_TRY4
   return cudaErrorInvalidValue;

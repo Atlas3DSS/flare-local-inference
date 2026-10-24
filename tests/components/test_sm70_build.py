@@ -61,7 +61,8 @@ class BuildPathsTest(unittest.TestCase):
                 CDLL=lambda path: SimpleNamespace(**{symbol: (lambda *args: 0) for symbol in
                     ('sol9_dense', 'sol12_commit', 'atlas_prefill', 'atlas_prefill_init', 'atlas_produce',
                      'atlas_project', 'atlas_repack', 'atlas_position_exact', 'atlas_fp8_exact', 'atlas_init',
-                     'atlas_tuple_status', 'atlas_pgemm_init', 'atlas_pgemm4', 'atlas_pgemm4_describe')}),
+                     'atlas_tuple_status', 'atlas_pgemm_init', 'atlas_pgemm4', 'atlas_pgemm4_describe',
+                     'sol9_dense_rows', 'atlas_produce_swiglu')}),
                 c_void_p=ctypes.c_void_p, c_int=ctypes.c_int, c_float=ctypes.c_float))
         patch.dict(sys.modules, {module.__name__: module}).start()
         exec(compile(tree, str(path), 'exec'), module.__dict__)
@@ -125,11 +126,11 @@ class BuildPathsTest(unittest.TestCase):
     def test_served_sol20_tiles_are_compiled_reviewed_instantiations(self):
         # astra-18: every served (capacity, shape) id is one of the pgemm4 instantiations compiled into the library
         # (sm70_pgemm_configs.inc), of the right format, inside the reviewed r4 template space, and the kernel header
-        # is byte-identical to the reviewed Sol-20 pgemm.cuh (r4).
+        # is the reviewed sol-20/kernel/pgemm.cuh (r4, sha256 60a4ed9f...) plus astra-21's output row stride `ldy`.
         module = self.load('sm70_prefill')
         directory = ROOT / 'ignition/components'
         self.assertEqual(hashlib.sha256((directory / 'sm70_pgemm.cuh').read_bytes()).hexdigest(),
-                         '60a4ed9fe3af17cebddf6ae47c44c1d8d1f234c57a1a27a894a2ff81ebb23e02')
+                         '7d979e47d804aedbc63c8ad343448f4ab0e3a85c49aa5af3cee8002159592735')
         configs = (directory / 'sm70_pgemm_configs.inc').read_text()
         self.assertRegex(configs, r'#define SOL20_CONFIGS\(X\)\n')
         self.assertRegex(configs, r'#define SOL20_CONFIGS2\(X\)\n')

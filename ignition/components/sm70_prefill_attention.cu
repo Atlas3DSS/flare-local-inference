@@ -155,12 +155,18 @@ template<bool DEV> __global__ __launch_bounds__(NT,1) void tc_attention(const fl
  float*__restrict__ partial,float*__restrict__ stats,int M,int context,int span,const int*__restrict__ plan){
  if constexpr(DEV){   // Flare: the graph is captured at token capacity; the real (M, context, span, splits) come from plan_kernel
   if(plan[6])return;
-  M=plan[0];context=plan[1];span=plan[2];
-  if((int)blockIdx.x*QTILE>=M||(int)blockIdx.z>=plan[3])return;   // whole CTA, before any barrier
+  M=plan[0];context=plan[1];
+  // prefill-lab EXP-10 (G128): a query tile of group g = rows [128g, 128g+128) runs group g's own split plan, i.e.
+  // exactly the (span, splits) a standalone 128-row chunk at context + 128g would run (128 % QTILE == 0).
+  if((int)blockIdx.x*QTILE>=M)return;                               // whole CTA, before any barrier
+  const int g=(int)blockIdx.x*QTILE/128;
+  span=plan[8+2*g];
+  if((int)blockIdx.z>=plan[9+2*g])return;
  }
  extern __shared__ __align__(128) unsigned char smem_raw[];
  const int tid=threadIdx.x,lane=tid&31,warp=tid>>5,hd=warp>>1,mh=warp&1,kh=blockIdx.y,split=blockIdx.z;
- const int first=blockIdx.x*QTILE,len=context+M;
+ // G128: in Flare graphs a tile's key range ends where its group's standalone chunk would end (context + min(M, 128(g+1))).
+ const int first=blockIdx.x*QTILE,len=context+(DEV?min(M,((int)blockIdx.x*QTILE/128+1)*128):M);
  const int qd=(lane>>2)&3,hh=lane>>4,ii=lane&3,q0=(lane>>2)&1,q1=(lane>>3)&1,jj=lane&3;
  const uint32_t sK0=(uint32_t)__cvta_generic_to_shared(smem_raw),sV0=sK0+2*SKB;
  const uint32_t pw=sV0+3*SKB+warp*PW,sqt=sV0+3*SKB+NW*PW+warp*32;
@@ -373,8 +379,9 @@ template<bool DEV> __global__ void combine_kernel(const float*__restrict__ parti
  int pos=blockIdx.x,qh=blockIdx.y,d=threadIdx.x;
  if constexpr(DEV){
   if(plan[6]){out[((size_t)pos*24+qh)*256+d]=__int_as_float(0x7fc00000);return;}   // inadmissible (M, context): loud NaN
-  M=plan[0];splits=plan[3];
+  M=plan[0];
   if(pos>=M){out[((size_t)pos*24+qh)*256+d]=0.f;return;}                            // padded capacity rows are defined
+  splits=plan[9+2*(pos/128)];                                                       // G128: the row's group plan
  }
  if(*status){out[((size_t)pos*24+qh)*256+d]=__int_as_float(0x7fc00000);return;}
  float mx=-INFINITY;int E=-100000;
@@ -439,15 +446,17 @@ extern "C" int sol11s_attention(const float*q,const uint16_t*k,const uint16_t*v,
 // and the split plan must come from device memory and every grid is sized for the graph's token capacity.
 // plan_kernel reproduces the host split selection above bit for bit (same integer/double arithmetic) from the
 // request metadata the prefill graph already owns: lengths[0] = context + M, cu[1] - cu[0] = M (one request per
-// prefill graph). plan = int32[8]: {M, context, span, splits, npages, len, invalid, 0}.
+// prefill graph). plan = int32[16]: {M, context, span, splits, npages, len, invalid, 0, then per 128-row group g = 0..3:
+// span_g, splits_g} (prefill-lab EXP-10: group g's plan = sol11s_split_plan(min(128, M - 128g), context + 128g); 0 if empty).
 // ---------------------------------------------------------------------------------------------------------
 namespace {
 __global__ void plan_kernel(const int*__restrict__ lengths,const int*__restrict__ cu,int*__restrict__ plan,int capacity,int max_pages){
  const int M=cu[1]-cu[0],len=lengths[0],context=len-M;
  const bool ok=M>=1&&M<=capacity&&M<=512&&context>=0&&context<=MAX_CONTEXT_TOKENS&&(len+127)/128<=max_pages;
- if(!ok){plan[0]=0;plan[1]=0;plan[2]=0;plan[3]=0;plan[4]=0;plan[5]=0;plan[6]=1;plan[7]=0;return;}
+ if(!ok){for(int i=0;i<16;i++)plan[i]=0;plan[6]=1;return;}
  int splits,span;sol11s_split_plan(M,context,0,splits,span);
  plan[0]=M;plan[1]=context;plan[2]=span;plan[3]=splits;plan[4]=(len+127)/128;plan[5]=len;plan[6]=0;plan[7]=0;
+ for(int g=0;g<4;g++){const int Mg=min(128,M-128*g);int sg=0,pg=0;if(Mg>0)sol11s_split_plan(Mg,context+128*g,0,sg,pg);plan[8+2*g]=pg;plan[9+2*g]=sg;}
 }
 }  // namespace
 // Derive the per-chunk plan from device request metadata. capacity = graph token capacity (<= 512).

@@ -59,6 +59,10 @@ class ProjectionQuery:
     member_gains: tuple = ()
     gain_value: float = 1.0
     input_scale_value: float = 1.0
+    # astra-21: "" (the source is the projection input) or "swiglu_bf16": the source is the [rows, 2K] FP32 output of
+    # the fused gate|up projection and the input is round_bf16(round_bf16(silu(round_bf16(gate))) * round_bf16(up)),
+    # computed inside the prefill tactic's producer (sm70_prefill.cu atlas_produce_swiglu). Prefill tactic only.
+    input_transform: str = ""
 
 
 def _tiles(query):
@@ -427,7 +431,11 @@ class _Projection:
                     bias=None, session, name, workspace, live_count=None):
         query = replace(query, input_dtype=str(source.dtype).removeprefix("torch."),
                         output_dtype=str(output.dtype).removeprefix("torch."), has_bias=bias is not None)
-        _check_operands(source, values, output, bias, query.in_features, query.out_features)
+        if query.input_transform not in ("", "swiglu_bf16"):
+            raise ValueError(f"unknown SM70 projection input transform {query.input_transform!r}")
+        # A SwiGLU-transformed projection reads the [rows, 2K] gate|up parent output (astra-21).
+        _check_operands(source, values, output, bias, query.in_features * (2 if query.input_transform else 1),
+                        query.out_features)
         for tensor in (scales, gain, input_scale):
             if tensor is not None and tensor.device != source.device:
                 raise ValueError("SM70 projection scales must share the source device")
@@ -436,6 +444,11 @@ class _Projection:
             if scalar is not None and (scalar.dtype != torch.float32 or scalar.numel() != expected
                     or not bool((torch.isfinite(scalar) & (scalar > 0)).all())):
                 raise ValueError("SM70 projection scales must be positive finite FP32 scalars")
+        if query.input_transform:
+            from .sm70_projection_tc import tactic as tc_tactic
+            if (not query.repacked or query.kind != "nvfp4" or bias is not None
+                    or tc_tactic(query)[0] != "prefill_tc"):
+                raise ValueError("the SwiGLU input transform is a reviewed SM70 NVFP4 prefill-tactic option")
         if query.repacked:
             if source.dtype != torch.float32 or output.dtype != torch.float32:
                 raise ValueError("reviewed SM70 tensor-core preparation requires FP32 physical input/output")
@@ -567,7 +580,7 @@ class PackedProjection(_Projection):
     """Checkpoint NVFP4 with legal W4A16 arithmetic; no activation requantization."""
 
     def __init__(self, source, weight, output, *, session, name, activation_mode="auto",
-                 bias=None, workspace=None, row_invariant=False, live_count=None):
+                 bias=None, workspace=None, row_invariant=False, live_count=None, input_transform=None):
         from b12x.gemm.blockscaled._a16 import NVFP4LinearWeight, scale_storage
 
         if not isinstance(weight, NVFP4LinearWeight):
@@ -588,7 +601,8 @@ class PackedProjection(_Projection):
                                 weight.global_scale_kind, row_invariant=row_invariant, repacked=repacked,
                                 column_gains=repacked and weight.global_scale.numel() > 1,
                                 member_widths=weight.member_widths if repacked else (),
-                                member_gains=weight.member_gains if repacked else ())
+                                member_gains=weight.member_gains if repacked else (),
+                                input_transform=input_transform or "")
         self._initialize(query, source, weight.values, output, scales=scales, gain=weight.global_scale,
                          bias=bias, session=session, name=name, workspace=workspace, live_count=live_count)
 

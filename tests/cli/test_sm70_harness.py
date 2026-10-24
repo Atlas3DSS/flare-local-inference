@@ -89,6 +89,19 @@ class HarnessTests(unittest.TestCase):
             self.assertIn('agent',row['server']);self.assertIn('/input/prompts.jsonl',row['client'])
             self.assertEqual(list(Path(tmp).iterdir()),[])
 
+    def test_native_prefill_srpt_flag_reaches_the_server_command_only_when_given(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base=[sys.executable,str(ROOT/'tools/native.py'),'--dry-run','--mode','native',
+                  '--depths','4','--package','/input/package.safetensors','--executable','/input/flare',
+                  '--publisher-keys','/input/publisher.json','--trust-store','/input/trust.toml',
+                  '--prompts','/input/prompts.jsonl','--gpu-uuid','GPU-test','--output-dir',tmp]
+            off=json.loads(subprocess.run(base,capture_output=True,text=True,timeout=15,check=True).stdout)[0]
+            on=json.loads(subprocess.run(base+['--prefill-srpt'],capture_output=True,text=True,timeout=15,check=True).stdout)[0]
+            self.assertNotIn('--prefill-srpt',off['server']);self.assertIn('--prefill-srpt',on['server'])
+            self.assertEqual(list(Path(tmp).iterdir()),[])
+        self.assertNotIn('--prefill-srpt',native.server_command(SimpleNamespace(mode='native',executable='/x',package='/p',
+            publisher_keys='/k',trust_store='/t',prefix_cache='8G',memory_limit='31G',scheduler_policy='balanced',port=8383),4))
+
     def test_prompt_generator_refuses_to_overwrite_input(self):
         with tempfile.TemporaryDirectory() as tmp:
             output=Path(tmp)/'prompts.jsonl';output.write_text('preserved')

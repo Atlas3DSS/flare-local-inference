@@ -96,17 +96,18 @@ class QuantizedProjection:
         workspace: ScratchArena | torch.Tensor | None = None,
         row_invariant: bool = False,
         live_count: torch.Tensor | None = None,
+        input_transform: str | None = None,
     ) -> None:
         self.sm70 = None
         if sm70_projection.is_sm70(source.device):
             self.sm70 = sm70_projection.PackedProjection(source, weight, output, session=session,
                 name=name, activation_mode=activation_mode, bias=bias, workspace=workspace, row_invariant=row_invariant,
-                live_count=live_count)
+                live_count=live_count, input_transform=input_transform)
             self.weight, self.output, self.bias, self.plan = weight, output, bias, self.sm70.plan
             self.activation_mode, self.sm103 = self.sm70.activation_mode, False
             return
-        if live_count is not None:
-            raise ValueError("a projection device live count is an SM70 prefill option")
+        if live_count is not None or input_transform is not None:
+            raise ValueError("a projection device live count or input transform is an SM70 prefill option")
         from b12x.gemm.blockscaled._a16 import NVFP4LinearWeight, _overlap, _weight_parts
         from b12x.gemm.blockscaled._linear import MXFP8LinearWeight, _validate_bias
 

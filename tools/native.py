@@ -53,20 +53,26 @@ def port_for(args, depth):
     return args.port + (depth - 3)
 
 
+def prefill_srpt(args):
+    """`flare run --prefill-srpt` (opt-in shortest-remaining prefill ordering) when requested; callers that build
+    their own argument namespace without the option keep the default ordering."""
+    return ["--prefill-srpt"] if getattr(args, "prefill_srpt", False) else []
+
+
 def server_command(args, depth):
     if args.mode == "real":
         # Exactly the leaderboard's standard server (agentbench/prep-mtp/run_fixed.sh).
         return [str(args.executable), "run", str(args.package), "--publisher-keys",
             str(args.publisher_keys), "--trust-store", str(args.trust_store),
             "--verify-weights", "--gpus", "0", "--memory-limit", args.memory_limit, *(["--scheduler-policy", args.scheduler_policy] if args.scheduler_policy else []), "--max-concurrency", "4",
-            "--mtp-draft-tokens", str(depth), "--no-mtp-adaptive-verification",
+            "--mtp-draft-tokens", str(depth), "--no-mtp-adaptive-verification", *prefill_srpt(args),
             "--prefix-cache-memory", args.prefix_cache, "--host", "127.0.0.1", "--port", str(port_for(args, depth))]
     return [str(args.executable), "run", str(args.package), "--publisher-keys",
         str(args.publisher_keys), "--trust-store", str(args.trust_store),
         "--verify-weights", "--gpus", "0", "--prefix-cache-memory", args.prefix_cache,
         "--embedding-table-storage", "ram", "--memory-limit", args.memory_limit, *(["--scheduler-policy", args.scheduler_policy] if args.scheduler_policy else []),
         "--kv-cache-limit", "concurrency", "--max-concurrency", "4",
-        "--mtp-draft-tokens", str(depth), "--no-mtp-adaptive-verification",
+        "--mtp-draft-tokens", str(depth), "--no-mtp-adaptive-verification", *prefill_srpt(args),
         "--host", "127.0.0.1", "--port", str(port_for(args, depth))]
 
 
@@ -410,6 +416,8 @@ def main():
     parser.add_argument('--trust-store', type=Path, required=True)
     parser.add_argument('--memory-limit', default='29.5G')
     parser.add_argument('--scheduler-policy')
+    parser.add_argument('--prefill-srpt', action='store_true',
+                        help='serve with flare run --prefill-srpt (opt-in shortest-remaining prefill ordering)')
     parser.add_argument('--real-client', type=Path, help='external agent replay client; not bundled')
     parser.add_argument("--port", type=int, default=8185)
     parser.add_argument("--tokens", type=int, default=128)

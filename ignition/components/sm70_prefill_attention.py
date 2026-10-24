@@ -32,7 +32,7 @@ MAX_TOKENS = 512          # graph token capacity admitted by the kernel
 MAX_CONTEXT = 34816       # cached tokens admitted by plan_kernel (the served context of the real-world package)
 MAX_PAGES = 276           # page-table width admitted: ceil((MAX_CONTEXT + MAX_TOKENS) / PAGE_TOKENS)
 HEADS, KV_HEADS, DIM = 24, 4, 256
-PLAN_WORDS = 8
+PLAN_WORDS = 16        # prefill-lab EXP-10 (G128): 8 header words + (span, splits) for 4 groups of 128 rows
 STATUS_BYTES = 16         # workspace header holding the sticky int32 status word
 ALIGN = 256
 

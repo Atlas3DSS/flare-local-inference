@@ -119,8 +119,10 @@ def library(kernel_cache=None, cutlass_include=None):
     lib = C.CDLL(str(output))
     lib.atlas_prefill.argtypes = [C.c_void_p] * 4 + [C.c_float, C.c_int] + [C.c_void_p] * 3 + [C.c_int] * 7 + [C.c_void_p]
     lib.atlas_pgemm4.argtypes = ([C.c_void_p] * 4 + [C.c_float, C.c_int] + [C.c_void_p] * 3 + [C.c_int] * 7
-                                 + [C.c_void_p] * 2)
+                                 + [C.c_void_p, C.c_int, C.c_void_p])
     lib.atlas_pgemm4_describe.argtypes = [C.c_int, C.c_int, C.c_void_p]
+    lib.atlas_produce_swiglu.argtypes = [C.c_void_p, C.c_int, C.c_void_p, C.c_void_p, C.c_int, C.c_int, C.c_void_p,
+                                         C.c_void_p]
     checked(lib.atlas_prefill_init())
     checked(lib.atlas_pgemm_init())
     # Fail closed: every served (capacity, shape) id must resolve to a compiled instantiation of its format.
@@ -142,8 +144,8 @@ def workspace_layout(query):
     m, k = min(query.rows, 512), query.in_features
     shapes = [(n, PINNED[query.kind, k, n][1]) for n, _ in members(query)]
     partial = max((n * split for n, split in shapes if split > 1), default=0)
-    return ((torch.float32, (m, k)), (torch.float16, (m, k)), (torch.float32, (m,)),
-            (torch.float32, (m * partial,)), (torch.float32, (m, max(n for n, _ in shapes))))
+    # astra-21: no member-output scratch; members write their column slices of the output in place.
+    return ((torch.float32, (m, k)), (torch.float16, (m, k)), (torch.float32, (m,)), (torch.float32, (m * partial,)))
 
 
 def run(query, source, values, scales, output, workspace, bias, *, live_count=None, kernel_cache=None,
@@ -153,7 +155,7 @@ def run(query, source, values, scales, output, workspace, bias, *, live_count=No
         size = math.prod(shape) * dtype.itemsize
         views.append(workspace[offset:offset + size].view(dtype).view(shape))
         offset += (size + 255) // 256 * 256
-    staging, half, inverse, partial, result = views
+    staging, half, inverse, partial = views
     lib, producer = library(kernel_cache, cutlass_include), projection_library(kernel_cache)
     stream = C.c_void_p(torch.cuda.current_stream(source.device).cuda_stream)
     k, pk = query.in_features, query.padded_in_features
@@ -164,25 +166,30 @@ def run(query, source, values, scales, output, workspace, bias, *, live_count=No
     for begin in range(0, query.rows, 512):
         m = min(512, query.rows - begin)
         x = source[begin:begin + m]
-        if not x.is_contiguous():
-            staging[:m].copy_(x)
-            x = staging[:m]
-        checked(producer.atlas_produce(ptr(x), ptr(half), ptr(inverse), m, k,
-            query.kind == 'tensor_fp8', query.input_scale_value, stream))
+        if query.input_transform == 'swiglu_bf16':
+            # astra-21: x is the [m, 2k] gate|up parent output; the fused producer applies the canonical BF16 SwiGLU
+            # and writes the same FP16 rows / inverse scales `produce` writes from the FP32 product, for rows < live.
+            checked(lib.atlas_produce_swiglu(ptr(x), x.stride(0), ptr(half), ptr(inverse), m, k, ptr(live_count),
+                                             stream))
+        else:
+            if not x.is_contiguous():
+                staging[:m].copy_(x)
+                x = staging[:m]
+            checked(producer.atlas_produce(ptr(x), ptr(half), ptr(inverse), m, k,
+                query.kind == 'tensor_fp8', query.input_scale_value, stream))
         column = 0
         for n, gain in members(query):
             split = PINNED[query.kind, k, n][1]
             w = values[column:column + n]
             scale = None if scales is None else scales[column * (pk // 16):(column + n) * (pk // 16)]
+            # astra-21: every member writes its column slice of the parent output in place (row stride
+            # output.stride(0)); the former contiguous scratch + destination.copy_ launch per member is gone. Same bits:
+            # the stores change address only, never value.
             destination = output[begin:begin + m, column:column + n]
-            direct = destination.is_contiguous()
-            y = destination if direct else result.view(-1)[:m * n].view(m, n)
             member_bias = None if bias is None else bias[column:column + n]
             checked(lib.atlas_pgemm4(ptr(half), ptr(w), ptr(scale), ptr(inverse), gain,
-                query.global_scale_kind == 'reciprocal', ptr(member_bias), ptr(y), ptr(partial),
+                query.global_scale_kind == 'reciprocal', ptr(member_bias), ptr(destination), ptr(partial),
                 m, n, k, pk, split, query.kind == 'nvfp4', tile(query.kind, k, n, query.rows), ptr(live_count),
-                stream))
-            if not direct:
-                destination.copy_(y)
+                destination.stride(0), stream))
             column += n
     return output

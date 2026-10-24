@@ -69,10 +69,13 @@ class RecurrentAttention(torch.nn.Module):
 class SM70DecoderLayer(torch.nn.Module):
     """Canonical Qwen layer arithmetic with BF16 values stored as FP32."""
 
-    def __init__(self, layer, norms=None):
+    def __init__(self, layer, norms=None, swiglu=False):
         super().__init__()
         self.layer = layer
         self.norms = norms
+        # astra-21 (SM70 prefill graphs): the down projection reads the gate|up output and applies the BF16 SwiGLU in
+        # its producer (input_transform="swiglu_bf16"), bit-identical to the pointwise path below.
+        self.swiglu = swiglu
 
     def forward(self, hidden_states, position_embeddings):
         layer = self.layer
@@ -90,6 +93,8 @@ class SM70DecoderLayer(torch.nn.Module):
         norm = layer.post_attention_layernorm
         hidden_states = (self.norms[1](hidden_states) if self.norms is not None
                          else rms_norm(hidden_states, norm.weight, norm.eps))
+        if self.swiglu:
+            return round_bf16(residual + round_bf16(layer.mlp.down_proj(layer.mlp.gate_up_proj(hidden_states))))
         if hasattr(layer.mlp, 'gate_up_proj'):
             gate, up = layer.mlp.gate_up_proj(hidden_states).chunk(2, dim=-1)
             gate, up = round_bf16(gate), round_bf16(up)
@@ -284,7 +289,10 @@ class PreparedDecoder:
         if fused_projections:
             mlp_buffers['gate_up_proj'] = torch.zeros((source.shape[0], 2 * config.text['intermediate_size']),
                 dtype=source.dtype, device=source.device)
-        mlp_input = torch.zeros_like(mlp_buffers["gate_proj"])
+        # astra-21: SM70 prefill graphs fuse the SwiGLU into the down projection's producer (sm70_prefill.cu
+        # atlas_produce_swiglu); its source is the gate|up parent output and no FP32 product buffer exists.
+        swiglu = self.sm70 and mode == "prefill" and fused_projections
+        mlp_input = None if swiglu else torch.zeros_like(mlp_buffers["gate_proj"])
         norm_buffers = [torch.zeros_like(source) for _ in range(2)] if self.sm70 and row_invariant else None
         self.layers, ordinal = [], 0
         for index, original in enumerate(weights.tree.layers):
@@ -307,11 +315,12 @@ class PreparedDecoder:
             layer.mlp = module_copy(original.mlp)
             for field in (("gate_up_proj", "down_proj") if fused_projections else ("gate_proj", "up_proj", "down_proj")):
                 weight = weights.projections[prefix + "mlp." + field]
-                inputs = source if field != "down_proj" else mlp_input
+                transform = "swiglu_bf16" if swiglu and field == "down_proj" else None
+                inputs = source if field != "down_proj" else (mlp_buffers["gate_up_proj"] if transform else mlp_input)
                 output = mlp_buffers[field]
                 setattr(layer.mlp, field, Projection(QuantizedProjection(inputs, weight, output,
                     activation_mode="auto", session=session, workspace=workspace, name=name + "." + prefix + field, row_invariant=row_invariant,
-                    live_count=live_count)))
+                    live_count=live_count, input_transform=transform)))
             norms = None
             if norm_buffers is not None:
                 from ignition.components.sm70_norm import PreparedRMSNorm
@@ -319,7 +328,7 @@ class PreparedDecoder:
                     session=session, name=name + "." + prefix + field) for norm, output, field in zip(
                         (layer.input_layernorm, layer.post_attention_layernorm), norm_buffers,
                         ("input_norm", "post_attention_norm"), strict=True))
-            self.layers.append(SM70DecoderLayer(layer, norms) if self.sm70 else layer)
+            self.layers.append(SM70DecoderLayer(layer, norms, swiglu=swiglu) if self.sm70 else layer)
         rotary = config.text["rope_parameters"]
         dim = int(config.text["head_dim"] * rotary["partial_rotary_factor"])
         self.inverse_frequency = 1.0 / (rotary["rope_theta"] ** (
