@@ -1,0 +1,1051 @@
+{
+ "format": "measurement-speculation-summary-v1",
+ "llama": {
+  "c1-none": {
+   "command": "<release-host>/flare/engines/llama.cpp-sm70-bench/build-sm70/bin/llama-server -m <release-host>/flare/<measurements>/qwen38-27b-nvfp4-q4_k_m.gguf --host 127.0.0.1 --port 8501 --fit off --gpu-layers all -fa on --threads 16 --threads-batch 16 --jinja --metrics --no-webui -c 32768 -np 1 -ctk f16 -ctv f16",
+   "peak_vram_mib": 17730,
+   "draft_tokens": 0,
+   "draft_accepted": 0,
+   "acceptance": null,
+   "short128": {
+    "n": 12,
+    "all_ok": true,
+    "client_tok_s_median": 33.17872734953844,
+    "server_tok_s_median": 33.17694891317956
+   },
+   "short512": {
+    "n": 4,
+    "all_ok": true,
+    "client_tok_s_median": 33.17284287693287,
+    "server_tok_s_median": 33.172525575487526
+   },
+   "long": {
+    "n": 4,
+    "all_ok": true,
+    "client_tok_s_median": 28.24420559478294,
+    "server_tok_s_median": 28.244032629441328
+   },
+   "greedy_vs_c1_none": [
+    {
+     "prompt_id": "code-00",
+     "n": 128,
+     "identical_to_c1_none": true,
+     "first_divergence": null,
+     "draft_n": null,
+     "draft_n_accepted": null
+    },
+    {
+     "prompt_id": "code-01",
+     "n": 128,
+     "identical_to_c1_none": true,
+     "first_divergence": null,
+     "draft_n": null,
+     "draft_n_accepted": null
+    },
+    {
+     "prompt_id": "code-02",
+     "n": 128,
+     "identical_to_c1_none": true,
+     "first_divergence": null,
+     "draft_n": null,
+     "draft_n_accepted": null
+    },
+    {
+     "prompt_id": "code-03",
+     "n": 128,
+     "identical_to_c1_none": true,
+     "first_divergence": null,
+     "draft_n": null,
+     "draft_n_accepted": null
+    }
+   ]
+  },
+  "c1-mtp1": {
+   "status": "server_failed",
+   "error": "llama-server exited before readiness: 1",
+   "log_tail": "I common_speculative_init_result: loading draft model '<release-host>/flare/<measurements>/mtp-qwen38-27b-nvfp4-q8_0.gguf'\n0.06.951.112 E llama_model_load: error loading model: check_tensor_dims: tensor 'output.weight' has wrong shape; expected   5120, 248320, got   2560, 248320,      1,      1\n0.06.951.131 E llama_model_load_from_file_impl: failed to load model\n0.06.951.139 E common_speculative_init_result: failed to load draft model, '<release-host>/flare/<measurements>/mtp-qwen38-27b-nvfp4-q8_0.gguf'\n0.06.951.156 E srv    load_model: failed to load draft model, '<release-host>/flare/<measurements>/mtp-qwen38-27b-nvfp4-q8_0.gguf'\n0.06.951.167 I srv    operator(): operator(): cleaning up before exit...\n0.06.956.234 E srv  llama_server: exiting due to model loading error\n"
+  },
+  "c1-mtp2": {
+   "status": "server_failed",
+   "error": "llama-server exited before readiness: 1",
+   "log_tail": "I common_speculative_init_result: loading draft model '<release-host>/flare/<measurements>/mtp-qwen38-27b-nvfp4-q8_0.gguf'\n0.06.987.936 E llama_model_load: error loading model: check_tensor_dims: tensor 'output.weight' has wrong shape; expected   5120, 248320, got   2560, 248320,      1,      1\n0.06.987.956 E llama_model_load_from_file_impl: failed to load model\n0.06.987.964 E common_speculative_init_result: failed to load draft model, '<release-host>/flare/<measurements>/mtp-qwen38-27b-nvfp4-q8_0.gguf'\n0.06.987.983 E srv    load_model: failed to load draft model, '<release-host>/flare/<measurements>/mtp-qwen38-27b-nvfp4-q8_0.gguf'\n0.06.987.993 I srv    operator(): operator(): cleaning up before exit...\n0.06.991.830 E srv  llama_server: exiting due to model loading error\n"
+  },
+  "c1-mtp3": {
+   "status": "server_failed",
+   "error": "llama-server exited before readiness: 1",
+   "log_tail": "I common_speculative_init_result: loading draft model '<release-host>/flare/<measurements>/mtp-qwen38-27b-nvfp4-q8_0.gguf'\n0.07.026.268 E llama_model_load: error loading model: check_tensor_dims: tensor 'output.weight' has wrong shape; expected   5120, 248320, got   2560, 248320,      1,      1\n0.07.026.300 E llama_model_load_from_file_impl: failed to load model\n0.07.026.310 E common_speculative_init_result: failed to load draft model, '<release-host>/flare/<measurements>/mtp-qwen38-27b-nvfp4-q8_0.gguf'\n0.07.026.319 E srv    load_model: failed to load draft model, '<release-host>/flare/<measurements>/mtp-qwen38-27b-nvfp4-q8_0.gguf'\n0.07.026.333 I srv    operator(): operator(): cleaning up before exit...\n0.07.030.914 E srv  llama_server: exiting due to model loading error\n"
+  },
+  "c1-mtp4": {
+   "status": "server_failed",
+   "error": "llama-server exited before readiness: 1",
+   "log_tail": "I common_speculative_init_result: loading draft model '<release-host>/flare/<measurements>/mtp-qwen38-27b-nvfp4-q8_0.gguf'\n0.07.037.096 E llama_model_load: error loading model: check_tensor_dims: tensor 'output.weight' has wrong shape; expected   5120, 248320, got   2560, 248320,      1,      1\n0.07.037.115 E llama_model_load_from_file_impl: failed to load model\n0.07.037.123 E common_speculative_init_result: failed to load draft model, '<release-host>/flare/<measurements>/mtp-qwen38-27b-nvfp4-q8_0.gguf'\n0.07.037.132 E srv    load_model: failed to load draft model, '<release-host>/flare/<measurements>/mtp-qwen38-27b-nvfp4-q8_0.gguf'\n0.07.037.141 I srv    operator(): operator(): cleaning up before exit...\n0.07.040.410 E srv  llama_server: exiting due to model loading error\n"
+  },
+  "c1-mtp4bf16": {
+   "status": "server_failed",
+   "error": "llama-server exited before readiness: 1",
+   "log_tail": ".06.181.509 I common_speculative_init_result: loading draft model '<release-host>/flare/<measurements>/qwen38-27b-nvfp4-bf16.gguf'\n0.06.695.710 E llama_model_load: error loading model: check_tensor_dims: tensor 'output.weight' has wrong shape; expected   5120, 248320, got   2560, 248320,      1,      1\n0.06.695.731 E llama_model_load_from_file_impl: failed to load model\n0.06.695.739 E common_speculative_init_result: failed to load draft model, '<release-host>/flare/<measurements>/qwen38-27b-nvfp4-bf16.gguf'\n0.06.695.764 E srv    load_model: failed to load draft model, '<release-host>/flare/<measurements>/qwen38-27b-nvfp4-bf16.gguf'\n0.06.695.774 I srv    operator(): operator(): cleaning up before exit...\n0.06.699.297 E srv  llama_server: exiting due to model loading error\n"
+  },
+  "c1-ngram": {
+   "command": "<release-host>/flare/engines/llama.cpp-sm70-bench/build-sm70/bin/llama-server -m <release-host>/flare/<measurements>/qwen38-27b-nvfp4-q4_k_m.gguf --host 127.0.0.1 --port 8507 --fit off --gpu-layers all -fa on --threads 16 --threads-batch 16 --jinja --metrics --no-webui -c 32768 -np 1 -ctk f16 -ctv f16 --spec-type ngram-simple",
+   "peak_vram_mib": 17734,
+   "draft_tokens": 432,
+   "draft_accepted": 185,
+   "acceptance": 0.42824074074074076,
+   "short128": {
+    "n": 12,
+    "all_ok": true,
+    "client_tok_s_median": 32.77811247762983,
+    "server_tok_s_median": 32.77637159148556
+   },
+   "short512": {
+    "n": 4,
+    "all_ok": true,
+    "client_tok_s_median": 32.77454116429264,
+    "server_tok_s_median": 32.77454905795364
+   },
+   "long": {
+    "n": 4,
+    "all_ok": true,
+    "client_tok_s_median": 28.020004252197236,
+    "server_tok_s_median": 28.01988022869649
+   },
+   "greedy_vs_c1_none": [
+    {
+     "prompt_id": "code-00",
+     "n": 128,
+     "identical_to_c1_none": true,
+     "first_divergence": null,
+     "draft_n": null,
+     "draft_n_accepted": null
+    },
+    {
+     "prompt_id": "code-01",
+     "n": 128,
+     "identical_to_c1_none": true,
+     "first_divergence": null,
+     "draft_n": null,
+     "draft_n_accepted": null
+    },
+    {
+     "prompt_id": "code-02",
+     "n": 128,
+     "identical_to_c1_none": true,
+     "first_divergence": null,
+     "draft_n": null,
+     "draft_n_accepted": null
+    },
+    {
+     "prompt_id": "code-03",
+     "n": 128,
+     "identical_to_c1_none": true,
+     "first_divergence": null,
+     "draft_n": null,
+     "draft_n_accepted": null
+    }
+   ]
+  },
+  "c4-none": {
+   "command": "<release-host>/flare/engines/llama.cpp-sm70-bench/build-sm70/bin/llama-server -m <release-host>/flare/<measurements>/qwen38-27b-nvfp4-q4_k_m.gguf --host 127.0.0.1 --port 8508 --fit off --gpu-layers all -fa on --threads 16 --threads-batch 16 --jinja --metrics --no-webui -c 131072 -np 4 -ctk f16 -ctv f16",
+   "peak_vram_mib": 24352,
+   "draft_tokens": 0,
+   "draft_accepted": 0,
+   "acceptance": null,
+   "short128": {
+    "n": 12,
+    "all_ok": true,
+    "client_tok_s_median": 20.543181671803126,
+    "server_tok_s_median": 20.54293571523754,
+    "aggregate_tok_s_median": 82.06663533168731
+   },
+   "short512": {
+    "n": 4,
+    "all_ok": true,
+    "client_tok_s_median": 20.635085714825316,
+    "server_tok_s_median": 20.63604073616097,
+    "aggregate_tok_s_median": 82.54055874114081
+   },
+   "long": {
+    "n": 4,
+    "all_ok": true,
+    "client_tok_s_median": 5.62943553047513,
+    "server_tok_s_median": 5.629435433340687,
+    "aggregate_tok_s_median": 29.111743591348667
+   },
+   "greedy_vs_c1_none": []
+  },
+  "c4-mtp4": {
+   "status": "server_failed",
+   "error": "llama-server exited before readiness: 1",
+   "log_tail": "I common_speculative_init_result: loading draft model '<release-host>/flare/<measurements>/mtp-qwen38-27b-nvfp4-q8_0.gguf'\n0.06.280.039 E llama_model_load: error loading model: check_tensor_dims: tensor 'output.weight' has wrong shape; expected   5120, 248320, got   2560, 248320,      1,      1\n0.06.280.058 E llama_model_load_from_file_impl: failed to load model\n0.06.280.062 E common_speculative_init_result: failed to load draft model, '<release-host>/flare/<measurements>/mtp-qwen38-27b-nvfp4-q8_0.gguf'\n0.06.280.070 E srv    load_model: failed to load draft model, '<release-host>/flare/<measurements>/mtp-qwen38-27b-nvfp4-q8_0.gguf'\n0.06.280.082 I srv    operator(): operator(): cleaning up before exit...\n0.06.284.260 E srv  llama_server: exiting due to model loading error\n"
+  },
+  "c4-ngram": {
+   "command": "<release-host>/flare/engines/llama.cpp-sm70-bench/build-sm70/bin/llama-server -m <release-host>/flare/<measurements>/qwen38-27b-nvfp4-q4_k_m.gguf --host 127.0.0.1 --port 8510 --fit off --gpu-layers all -fa on --threads 16 --threads-batch 16 --jinja --metrics --no-webui -c 131072 -np 4 -ctk f16 -ctv f16 --spec-type ngram-simple",
+   "peak_vram_mib": 24434,
+   "draft_tokens": 567,
+   "draft_accepted": 92,
+   "acceptance": 0.16225749559082892,
+   "short128": {
+    "n": 12,
+    "all_ok": true,
+    "client_tok_s_median": 20.77479714297541,
+    "server_tok_s_median": 20.77498424468689,
+    "aggregate_tok_s_median": 83.09828138911473
+   },
+   "short512": {
+    "n": 4,
+    "all_ok": true,
+    "client_tok_s_median": 19.11568528865343,
+    "server_tok_s_median": 19.11633026960395,
+    "aggregate_tok_s_median": 77.08848216927288
+   },
+   "long": {
+    "n": 4,
+    "all_ok": true,
+    "client_tok_s_median": 5.508515170497525,
+    "server_tok_s_median": 5.508639052775097,
+    "aggregate_tok_s_median": 27.616502798575922
+   },
+   "greedy_vs_c1_none": []
+  }
+ },
+ "flare_short": {
+  "d0_summary": [
+   {
+    "concurrency": 1,
+    "successful_requests": 12,
+    "failed_requests": 0,
+    "per_agent": [
+     {
+      "prompt_id": "code-00",
+      "successful_requests": 3,
+      "median_decode_tokens_per_second": 30.87812487996276
+     },
+     {
+      "prompt_id": "code-01",
+      "successful_requests": 3,
+      "median_decode_tokens_per_second": 30.875609080419128
+     },
+     {
+      "prompt_id": "code-02",
+      "successful_requests": 3,
+      "median_decode_tokens_per_second": 30.879366370511242
+     },
+     {
+      "prompt_id": "code-03",
+      "successful_requests": 3,
+      "median_decode_tokens_per_second": 30.879491937293285
+     }
+    ],
+    "median_per_agent_decode_tokens_per_second": 30.878125608108725,
+    "aggregate_output_tokens_per_second": 28.945194186038613,
+    "aggregate_basis": "successful native output tokens / measured batch wall time, including prefill and HTTP",
+    "median_aggregate_decode_window_tokens_per_second": 30.878125608108725,
+    "decode_window_basis": "sum of tokens after each request's first observation / earliest first to latest last observation",
+    "latency_seconds": {
+     "p50": 4.1280023394938326,
+     "p95": 5.022685413646104
+    },
+    "first_token_seconds": {
+     "p50": 0.013303859523148276,
+     "p95": 0.9072790636040736
+    },
+    "tau": null,
+    "tau_unavailable_reason": "Native verify_steps counts graphs, including terminal no-ops, rather than progressing request rounds. draft_rounds excludes width-one/no-offer request rounds. generated-minus-accepted also misses budget-clipped rounds with no bonus. Use measure_mtp.measure on retained graphs for exact tau."
+   },
+   {
+    "concurrency": 4,
+    "successful_requests": 12,
+    "failed_requests": 0,
+    "per_agent": [
+     {
+      "prompt_id": "code-00",
+      "successful_requests": 3,
+      "median_decode_tokens_per_second": 28.251817922654155
+     },
+     {
+      "prompt_id": "code-01",
+      "successful_requests": 3,
+      "median_decode_tokens_per_second": 28.276271284175685
+     },
+     {
+      "prompt_id": "code-02",
+      "successful_requests": 3,
+      "median_decode_tokens_per_second": 28.274315776736653
+     },
+     {
+      "prompt_id": "code-03",
+      "successful_requests": 3,
+      "median_decode_tokens_per_second": 28.28212691584399
+     }
+    ],
+    "median_per_agent_decode_tokens_per_second": 28.271101782798922,
+    "aggregate_output_tokens_per_second": 113.32424525853966,
+    "aggregate_basis": "successful native output tokens / measured batch wall time, including prefill and HTTP",
+    "median_aggregate_decode_window_tokens_per_second": 112.99766883196061,
+    "decode_window_basis": "sum of tokens after each request's first observation / earliest first to latest last observation",
+    "latency_seconds": {
+     "p50": 4.516576154012,
+     "p95": 4.518376965794596
+    },
+    "first_token_seconds": {
+     "p50": 0.021665167005266994,
+     "p95": 0.02403256825200515
+    },
+    "tau": null,
+    "tau_unavailable_reason": "Native verify_steps counts graphs, including terminal no-ops, rather than progressing request rounds. draft_rounds excludes width-one/no-offer request rounds. generated-minus-accepted also misses budget-clipped rounds with no bonus. Use measure_mtp.measure on retained graphs for exact tau."
+   }
+  ],
+  "chain_d4_summary": [
+   {
+    "concurrency": 1,
+    "successful_requests": 12,
+    "failed_requests": 0,
+    "per_agent": [
+     {
+      "prompt_id": "code-00",
+      "successful_requests": 3,
+      "median_decode_tokens_per_second": 94.42165276784907
+     },
+     {
+      "prompt_id": "code-01",
+      "successful_requests": 3,
+      "median_decode_tokens_per_second": 68.44171453188969
+     },
+     {
+      "prompt_id": "code-02",
+      "successful_requests": 3,
+      "median_decode_tokens_per_second": 82.9886089974773
+     },
+     {
+      "prompt_id": "code-03",
+      "successful_requests": 3,
+      "median_decode_tokens_per_second": 74.02443815212771
+     }
+    ],
+    "median_per_agent_decode_tokens_per_second": 82.9628809189208,
+    "aggregate_output_tokens_per_second": 67.61555824877132,
+    "aggregate_basis": "successful native output tokens / measured batch wall time, including prefill and HTTP",
+    "median_aggregate_decode_window_tokens_per_second": 82.9628809189208,
+    "decode_window_basis": "sum of tokens after each request's first observation / earliest first to latest last observation",
+    "latency_seconds": {
+     "p50": 1.7977773635066114,
+     "p95": 2.645446755593002
+    },
+    "first_token_seconds": {
+     "p50": 0.011852344512590207,
+     "p95": 0.9368198618481983
+    },
+    "tau": null,
+    "tau_unavailable_reason": "Native verify_steps counts graphs, including terminal no-ops, rather than progressing request rounds. draft_rounds excludes width-one/no-offer request rounds. generated-minus-accepted also misses budget-clipped rounds with no bonus. Use measure_mtp.measure on retained graphs for exact tau."
+   },
+   {
+    "concurrency": 4,
+    "successful_requests": 12,
+    "failed_requests": 0,
+    "per_agent": [
+     {
+      "prompt_id": "code-00",
+      "successful_requests": 3,
+      "median_decode_tokens_per_second": 72.80204110087483
+     },
+     {
+      "prompt_id": "code-01",
+      "successful_requests": 3,
+      "median_decode_tokens_per_second": 54.38615613159138
+     },
+     {
+      "prompt_id": "code-02",
+      "successful_requests": 3,
+      "median_decode_tokens_per_second": 64.50894142225773
+     },
+     {
+      "prompt_id": "code-03",
+      "successful_requests": 3,
+      "median_decode_tokens_per_second": 59.3660306907636
+     }
+    ],
+    "median_per_agent_decode_tokens_per_second": 64.83711635976402,
+    "aggregate_output_tokens_per_second": 220.5549110784353,
+    "aggregate_basis": "successful native output tokens / measured batch wall time, including prefill and HTTP",
+    "median_aggregate_decode_window_tokens_per_second": 212.87635250442642,
+    "decode_window_basis": "sum of tokens after each request's first observation / earliest first to latest last observation",
+    "latency_seconds": {
+     "p50": 1.9817654174985364,
+     "p95": 2.4022021750948626
+    },
+    "first_token_seconds": {
+     "p50": 0.017518220498459414,
+     "p95": 0.047506723331753126
+    },
+    "tau": null,
+    "tau_unavailable_reason": "Native verify_steps counts graphs, including terminal no-ops, rather than progressing request rounds. draft_rounds excludes width-one/no-offer request rounds. generated-minus-accepted also misses budget-clipped rounds with no bonus. Use measure_mtp.measure on retained graphs for exact tau."
+   }
+  ],
+  "sampled_token_identity": {
+   "compared": 24,
+   "identical": 0,
+   "rows": [
+    {
+     "key": [
+      1,
+      0,
+      "code-00",
+      7035
+     ],
+     "identical": false,
+     "first_divergence": 42
+    },
+    {
+     "key": [
+      1,
+      0,
+      "code-01",
+      7036
+     ],
+     "identical": false,
+     "first_divergence": 4
+    },
+    {
+     "key": [
+      1,
+      0,
+      "code-02",
+      7037
+     ],
+     "identical": false,
+     "first_divergence": 3
+    },
+    {
+     "key": [
+      1,
+      0,
+      "code-03",
+      7038
+     ],
+     "identical": false,
+     "first_divergence": 8
+    },
+    {
+     "key": [
+      1,
+      1,
+      "code-00",
+      7039
+     ],
+     "identical": false,
+     "first_divergence": 42
+    },
+    {
+     "key": [
+      1,
+      1,
+      "code-01",
+      7040
+     ],
+     "identical": false,
+     "first_divergence": 4
+    },
+    {
+     "key": [
+      1,
+      1,
+      "code-02",
+      7041
+     ],
+     "identical": false,
+     "first_divergence": 17
+    },
+    {
+     "key": [
+      1,
+      1,
+      "code-03",
+      7042
+     ],
+     "identical": false,
+     "first_divergence": 4
+    },
+    {
+     "key": [
+      1,
+      2,
+      "code-00",
+      7043
+     ],
+     "identical": false,
+     "first_divergence": 42
+    },
+    {
+     "key": [
+      1,
+      2,
+      "code-01",
+      7044
+     ],
+     "identical": false,
+     "first_divergence": 6
+    },
+    {
+     "key": [
+      1,
+      2,
+      "code-02",
+      7045
+     ],
+     "identical": false,
+     "first_divergence": 3
+    },
+    {
+     "key": [
+      1,
+      2,
+      "code-03",
+      7046
+     ],
+     "identical": false,
+     "first_divergence": 4
+    },
+    {
+     "key": [
+      4,
+      0,
+      "code-00",
+      7035
+     ],
+     "identical": false,
+     "first_divergence": 42
+    },
+    {
+     "key": [
+      4,
+      0,
+      "code-01",
+      7036
+     ],
+     "identical": false,
+     "first_divergence": 4
+    },
+    {
+     "key": [
+      4,
+      0,
+      "code-02",
+      7037
+     ],
+     "identical": false,
+     "first_divergence": 3
+    },
+    {
+     "key": [
+      4,
+      0,
+      "code-03",
+      7038
+     ],
+     "identical": false,
+     "first_divergence": 8
+    },
+    {
+     "key": [
+      4,
+      1,
+      "code-00",
+      7039
+     ],
+     "identical": false,
+     "first_divergence": 42
+    },
+    {
+     "key": [
+      4,
+      1,
+      "code-01",
+      7040
+     ],
+     "identical": false,
+     "first_divergence": 4
+    },
+    {
+     "key": [
+      4,
+      1,
+      "code-02",
+      7041
+     ],
+     "identical": false,
+     "first_divergence": 17
+    },
+    {
+     "key": [
+      4,
+      1,
+      "code-03",
+      7042
+     ],
+     "identical": false,
+     "first_divergence": 4
+    },
+    {
+     "key": [
+      4,
+      2,
+      "code-00",
+      7043
+     ],
+     "identical": false,
+     "first_divergence": 42
+    },
+    {
+     "key": [
+      4,
+      2,
+      "code-01",
+      7044
+     ],
+     "identical": false,
+     "first_divergence": 6
+    },
+    {
+     "key": [
+      4,
+      2,
+      "code-02",
+      7045
+     ],
+     "identical": false,
+     "first_divergence": 3
+    },
+    {
+     "key": [
+      4,
+      2,
+      "code-03",
+      7046
+     ],
+     "identical": false,
+     "first_divergence": 4
+    }
+   ]
+  }
+ },
+ "flare_long": {
+  "d0_summary": [
+   {
+    "concurrency": 4,
+    "successful_requests": 12,
+    "failed_requests": 0,
+    "per_agent": [
+     {
+      "prompt_id": "long-00",
+      "successful_requests": 3,
+      "median_decode_tokens_per_second": 19.468116429495037
+     },
+     {
+      "prompt_id": "long-01",
+      "successful_requests": 3,
+      "median_decode_tokens_per_second": 19.122178691481174
+     },
+     {
+      "prompt_id": "long-02",
+      "successful_requests": 3,
+      "median_decode_tokens_per_second": 19.122998514787742
+     },
+     {
+      "prompt_id": "long-03",
+      "successful_requests": 3,
+      "median_decode_tokens_per_second": 19.196511762365816
+     }
+    ],
+    "median_per_agent_decode_tokens_per_second": 19.159755138576777,
+    "aggregate_output_tokens_per_second": 21.82784416470198,
+    "aggregate_basis": "successful native output tokens / measured batch wall time, including prefill and HTTP",
+    "median_aggregate_decode_window_tokens_per_second": 75.71199266104774,
+    "decode_window_basis": "sum of tokens after each request's first observation / earliest first to latest last observation",
+    "latency_seconds": {
+     "p50": 30.517144464494777,
+     "p95": 180.1170984869008
+    },
+    "first_token_seconds": {
+     "p50": 0.7976813114946708,
+     "p95": 153.77950247605477
+    },
+    "tau": null,
+    "tau_unavailable_reason": "Native verify_steps counts graphs, including terminal no-ops, rather than progressing request rounds. draft_rounds excludes width-one/no-offer request rounds. generated-minus-accepted also misses budget-clipped rounds with no bonus. Use measure_mtp.measure on retained graphs for exact tau."
+   },
+   {
+    "concurrency": 1,
+    "successful_requests": 12,
+    "failed_requests": 0,
+    "per_agent": [
+     {
+      "prompt_id": "long-00",
+      "successful_requests": 3,
+      "median_decode_tokens_per_second": 26.966704880118726
+     },
+     {
+      "prompt_id": "long-01",
+      "successful_requests": 3,
+      "median_decode_tokens_per_second": 26.977706577036024
+     },
+     {
+      "prompt_id": "long-02",
+      "successful_requests": 3,
+      "median_decode_tokens_per_second": 26.970600042592658
+     },
+     {
+      "prompt_id": "long-03",
+      "successful_requests": 3,
+      "median_decode_tokens_per_second": 26.65002772027415
+     }
+    ],
+    "median_per_agent_decode_tokens_per_second": 26.968211040565023,
+    "aggregate_output_tokens_per_second": 13.330697565854557,
+    "aggregate_basis": "successful native output tokens / measured batch wall time, including prefill and HTTP",
+    "median_aggregate_decode_window_tokens_per_second": 26.968211040565023,
+    "decode_window_basis": "sum of tokens after each request's first observation / earliest first to latest last observation",
+    "latency_seconds": {
+     "p50": 38.445081277997815,
+     "p95": 57.67563622275047
+    },
+    "first_token_seconds": {
+     "p50": 19.374786579501233,
+     "p95": 38.50466673894844
+    },
+    "tau": null,
+    "tau_unavailable_reason": "Native verify_steps counts graphs, including terminal no-ops, rather than progressing request rounds. draft_rounds excludes width-one/no-offer request rounds. generated-minus-accepted also misses budget-clipped rounds with no bonus. Use measure_mtp.measure on retained graphs for exact tau."
+   }
+  ],
+  "chain_d4_summary": [
+   {
+    "concurrency": 4,
+    "successful_requests": 12,
+    "failed_requests": 0,
+    "per_agent": [
+     {
+      "prompt_id": "long-00",
+      "successful_requests": 3,
+      "median_decode_tokens_per_second": 41.96761350075721
+     },
+     {
+      "prompt_id": "long-01",
+      "successful_requests": 3,
+      "median_decode_tokens_per_second": 41.09569248773564
+     },
+     {
+      "prompt_id": "long-02",
+      "successful_requests": 3,
+      "median_decode_tokens_per_second": 46.075443420596585
+     },
+     {
+      "prompt_id": "long-03",
+      "successful_requests": 3,
+      "median_decode_tokens_per_second": 40.201960757117526
+     }
+    ],
+    "median_per_agent_decode_tokens_per_second": 41.53165299424643,
+    "aggregate_output_tokens_per_second": 18.676322980436954,
+    "aggregate_basis": "successful native output tokens / measured batch wall time, including prefill and HTTP",
+    "median_aggregate_decode_window_tokens_per_second": 35.77684116850329,
+    "decode_window_basis": "sum of tokens after each request's first observation / earliest first to latest last observation",
+    "latency_seconds": {
+     "p50": 77.61462918150937,
+     "p95": 171.8931701014473
+    },
+    "first_token_seconds": {
+     "p50": 69.72749722001026,
+     "p95": 159.58576603264228
+    },
+    "tau": null,
+    "tau_unavailable_reason": "Native verify_steps counts graphs, including terminal no-ops, rather than progressing request rounds. draft_rounds excludes width-one/no-offer request rounds. generated-minus-accepted also misses budget-clipped rounds with no bonus. Use measure_mtp.measure on retained graphs for exact tau."
+   },
+   {
+    "concurrency": 1,
+    "successful_requests": 12,
+    "failed_requests": 0,
+    "per_agent": [
+     {
+      "prompt_id": "long-00",
+      "successful_requests": 3,
+      "median_decode_tokens_per_second": 69.9741919458259
+     },
+     {
+      "prompt_id": "long-01",
+      "successful_requests": 3,
+      "median_decode_tokens_per_second": 73.86894057768191
+     },
+     {
+      "prompt_id": "long-02",
+      "successful_requests": 3,
+      "median_decode_tokens_per_second": 71.66557153733368
+     },
+     {
+      "prompt_id": "long-03",
+      "successful_requests": 3,
+      "median_decode_tokens_per_second": 72.15573705687426
+     }
+    ],
+    "median_per_agent_decode_tokens_per_second": 72.40977026032411,
+    "aggregate_output_tokens_per_second": 18.8678313890704,
+    "aggregate_basis": "successful native output tokens / measured batch wall time, including prefill and HTTP",
+    "median_aggregate_decode_window_tokens_per_second": 72.40977026032411,
+    "decode_window_basis": "sum of tokens after each request's first observation / earliest first to latest last observation",
+    "latency_seconds": {
+     "p50": 27.269865576003212,
+     "p95": 47.07164050514111
+    },
+    "first_token_seconds": {
+     "p50": 20.04759333950642,
+     "p95": 39.86255588134081
+    },
+    "tau": null,
+    "tau_unavailable_reason": "Native verify_steps counts graphs, including terminal no-ops, rather than progressing request rounds. draft_rounds excludes width-one/no-offer request rounds. generated-minus-accepted also misses budget-clipped rounds with no bonus. Use measure_mtp.measure on retained graphs for exact tau."
+   }
+  ],
+  "sampled_token_identity": {
+   "compared": 24,
+   "identical": 0,
+   "rows": [
+    {
+     "key": [
+      4,
+      0,
+      "long-00",
+      7035
+     ],
+     "identical": false,
+     "first_divergence": 81
+    },
+    {
+     "key": [
+      4,
+      0,
+      "long-01",
+      7036
+     ],
+     "identical": false,
+     "first_divergence": 3
+    },
+    {
+     "key": [
+      4,
+      0,
+      "long-02",
+      7037
+     ],
+     "identical": false,
+     "first_divergence": 3
+    },
+    {
+     "key": [
+      4,
+      0,
+      "long-03",
+      7038
+     ],
+     "identical": false,
+     "first_divergence": 8
+    },
+    {
+     "key": [
+      4,
+      1,
+      "long-00",
+      7039
+     ],
+     "identical": false,
+     "first_divergence": 53
+    },
+    {
+     "key": [
+      4,
+      1,
+      "long-01",
+      7040
+     ],
+     "identical": false,
+     "first_divergence": 3
+    },
+    {
+     "key": [
+      4,
+      1,
+      "long-02",
+      7041
+     ],
+     "identical": false,
+     "first_divergence": 3
+    },
+    {
+     "key": [
+      4,
+      1,
+      "long-03",
+      7042
+     ],
+     "identical": false,
+     "first_divergence": 4
+    },
+    {
+     "key": [
+      4,
+      2,
+      "long-00",
+      7043
+     ],
+     "identical": false,
+     "first_divergence": 42
+    },
+    {
+     "key": [
+      4,
+      2,
+      "long-01",
+      7044
+     ],
+     "identical": false,
+     "first_divergence": 6
+    },
+    {
+     "key": [
+      4,
+      2,
+      "long-02",
+      7045
+     ],
+     "identical": false,
+     "first_divergence": 9
+    },
+    {
+     "key": [
+      4,
+      2,
+      "long-03",
+      7046
+     ],
+     "identical": false,
+     "first_divergence": 4
+    },
+    {
+     "key": [
+      1,
+      0,
+      "long-00",
+      7035
+     ],
+     "identical": false,
+     "first_divergence": 81
+    },
+    {
+     "key": [
+      1,
+      0,
+      "long-01",
+      7036
+     ],
+     "identical": false,
+     "first_divergence": 3
+    },
+    {
+     "key": [
+      1,
+      0,
+      "long-02",
+      7037
+     ],
+     "identical": false,
+     "first_divergence": 3
+    },
+    {
+     "key": [
+      1,
+      0,
+      "long-03",
+      7038
+     ],
+     "identical": false,
+     "first_divergence": 8
+    },
+    {
+     "key": [
+      1,
+      1,
+      "long-00",
+      7039
+     ],
+     "identical": false,
+     "first_divergence": 53
+    },
+    {
+     "key": [
+      1,
+      1,
+      "long-01",
+      7040
+     ],
+     "identical": false,
+     "first_divergence": 3
+    },
+    {
+     "key": [
+      1,
+      1,
+      "long-02",
+      7041
+     ],
+     "identical": false,
+     "first_divergence": 3
+    },
+    {
+     "key": [
+      1,
+      1,
+      "long-03",
+      7042
+     ],
+     "identical": false,
+     "first_divergence": 4
+    },
+    {
+     "key": [
+      1,
+      2,
+      "long-00",
+      7043
+     ],
+     "identical": false,
+     "first_divergence": 42
+    },
+    {
+     "key": [
+      1,
+      2,
+      "long-01",
+      7044
+     ],
+     "identical": false,
+     "first_divergence": 6
+    },
+    {
+     "key": [
+      1,
+      2,
+      "long-02",
+      7045
+     ],
+     "identical": false,
+     "first_divergence": 9
+    },
+    {
+     "key": [
+      1,
+      2,
+      "long-03",
+      7046
+     ],
+     "identical": false,
+     "first_divergence": 4
+    }
+   ]
+  }
+ }
+}

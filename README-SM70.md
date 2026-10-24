@@ -236,12 +236,16 @@ decode-only results published apart. It suits multi-agent, long-context and
 prefix-heavy serving on V100 32 GB cards. It is not for training, BF16
 workloads, other models, or speed records.
 
-On the same model and card type, llama.cpp Q4_K_M decodes at 33.2 tok/s per
-request without speculative decoding, against this port's 83.0 with depth-4
-MTP. That gap is engine plus speculation, not kernels alone; a 2 x 2 table with
-speculation on and off for both engines will replace it. Its TTFT at 30,720
-tokens is 49.3 s against 42.75 s, and its mean KL from the FP32 reference is
-0.0088 for Q4_K_M and 0.0013 for Q8_0 against this port's 0.0011
+On the same model and card type, with speculation on and off for both engines,
+llama.cpp Q4_K_M is 4-7 % faster than this port at one agent with speculation
+off (33.2 against 30.9 tok/s on short prompts), and this port is 1.34-1.38 times
+faster at four agents. With each engine's MTP speculation on, this port is
+1.28-1.30 times faster at one agent (83.0 against 64.6 tok/s) and 1.86-2.04
+times faster at four. Acceptance is similar (about 0.70 at depth 4 on both), so
+the advantage comes from the cost of each verification step and from batching,
+not from acceptance. llama.cpp's TTFT at 30,720 tokens is 49.3 s against
+42.75 s, and its mean KL from the FP32 reference is 0.0088 for Q4_K_M and 0.0013
+for Q8_0 against this port's 0.0011
 ([same model on llama.cpp](docs/sm70/WHY-NOT-LOW-BIT.md#same-model-on-llamacpp)).
 
 | Route | Numerics relative to the NVFP4 checkpoint | Measured here? | Source |

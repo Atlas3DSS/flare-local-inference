@@ -125,21 +125,63 @@ sampling and FP32 reference as the release benchmarks. Receipts:
   Q4_K_M (`d4e22cb3…`, 4.82 bits per weight) and Q8_0 (`9f335777…`, 8.31 bits
   per weight) requantized from it. The head stays NVFP4 in both, because
   upstream llama.cpp loads the head's per-tensor scale (`output.scale`) only for
-  an NVFP4 head and would drop it from a requantized one. The MTP head is not
-  converted.
+  an NVFP4 head and would drop it from a requantized one. The main GGUFs leave
+  out the MTP head. For speculation, the MTP head was exported separately as a
+  draft GGUF, repaired as described in
+  [BENCHMARK.md](BENCHMARK.md#llamacpp-with-this-checkpoints-mtp-head)
+  ([mtp-fixed.sha256](receipts/measurements/mtp-fixed.sha256)).
 
-Decode, tokens per second per request after the first token:
+Decode with speculation on and off for both engines, in tokens per second per
+request after the first token
+([speculation-a1-summary.json](receipts/measurements/speculation-a1-summary.json),
+[speculation-a2-summary.json](receipts/measurements/speculation-a2-summary.json),
+[a1-spec-results.json](receipts/measurements/a1-spec-results.json),
+[a2-spec-results.json](receipts/measurements/a2-spec-results.json),
+[a1-flare-d0-run.json](receipts/measurements/a1-flare-d0-run.json)):
 
-| Configuration | 1 agent, short prompts, 128 tokens | 4 agents, short prompts, per agent | 1 agent, 28.7k-token context, 512 tokens |
-| --- | ---: | ---: | ---: |
-| This port, depth-4 MTP (speculative) | 83.0 | 64.8 | 72.4 |
-| This port, speculation off (pending: speculation on/off comparison for both engines) | not yet measured | not yet measured | not yet measured |
-| llama.cpp Q4_K_M, no speculative decoding | 33.2 | 20.8 | 28.4 |
-| llama.cpp + speculation (pending: speculation on/off comparison for both engines) | not yet measured | not yet measured | not yet measured |
+| Engine and speculation | 1 agent, short prompts | 1 agent, 28.7k-token context | 4 agents, short prompts, per agent | 4 agents, 28.7k-token context, per agent (a) |
+| --- | ---: | ---: | ---: | ---: |
+| This port, depth-4 MTP | 83.0 | 72.4 | 64.8 | 41.5 |
+| This port, speculation off (`--mtp-draft-tokens 0`) | 30.9 | 27.0 | 28.3 | 19.2 |
+| llama.cpp Q4_K_M with the checkpoint's MTP head (`--spec-type draft-mtp`), best depth | 64.6 (depth 3) | 55.9 (depth 3) | 31.8 (depth 4) | 22.3 (depth 4) |
+| llama.cpp Q4_K_M, no speculation | 33.2 | 28.2 | 20.5 | 14.3 |
+| llama.cpp Q4_K_M, n-gram speculation (`ngram-simple`) | 32.8 | 28.0 | 20.8 | 13.1-14.7 |
 
-The current decode gap is engine plus speculation, not kernels alone: this port
-decodes with its MTP head at depth 4 and llama.cpp decodes without speculation.
-A 2 x 2 table with speculation on and off for both engines will replace it.
+Short prompts generate 128 tokens and long ones 512. (a) llama.cpp prefills the
+four long prompts one after another, so its four-agent long value is the steady
+per-agent rate while all four decode; this port's is the median decode rate of
+the 12 long requests. The no-speculation llama.cpp row was measured again in
+this run; the earlier same-model run gave 28.4 and 20.8 where this run gives
+28.2 and 20.5.
+
+In plain words:
+
+- **Speculation off.** llama.cpp is 4-7 % faster at one agent (33.2 against
+  30.9, 28.2 against 27.0). This port is 1.34-1.38 times faster at four agents
+  (28.3 against 20.5, 19.2 against 14.3).
+- **Speculation on.** This port is 1.28-1.30 times faster at one agent and
+  1.86-2.04 times faster at four. Speculation speeds this port up 2.16-2.69
+  times and llama.cpp 1.55-1.98 times. Both engines use the same MTP head and
+  accept drafts at a similar rate at depth 4: 0.70 on short and 0.72 on long
+  prompts on this port's server counters, against 0.69 at one agent and 0.70
+  at four on llama.cpp. This port's advantage with speculation therefore comes
+  from the cost of each verification step and from batching four agents, not
+  from a higher acceptance rate.
+- **n-gram speculation** gave no gain on these prompts.
+
+Checks:
+
+- llama.cpp's greedy output with every speculative variant (MTP depth 1-4, the
+  BF16 draft head and n-gram) matched the run without speculation on 4 of 4
+  short prompts, 128 tokens each.
+- This port's sampled outputs with speculation off and at depth 4 cannot be
+  compared token for token, because speculative sampling consumes randomness
+  differently (0 of 24 short and 0 of 24 long requests matched). Its greedy
+  identity with speculation rests on the export gates (strict validation and
+  long-sequence invariance).
+- The speculation-off run used the same depth-4 package with
+  `--mtp-draft-tokens 0`, which the release server accepts. Its counters
+  record no draft or verification steps and a 131,072-token pool.
 
 Prefill and numerics, which speculation does not affect:
 
@@ -456,7 +498,7 @@ Not for:
 | Route | Numerics relative to the NVFP4 checkpoint | Measured here? | Source |
 | --- | --- | --- | --- |
 | This port (SM70 Flare) | Checkpoint weights unchanged. Speculative decoding exact. KL to an FP32 reference 0.0011 / 0.0024 (short / long). | Yes | STATUS.md lines 49-66; commits `8ad725c`, `ca16f00` |
-| llama.cpp GGUF K-quants | Requantized from this checkpoint (head kept NVFP4); KL to the same FP32 reference 0.0088 (Q4_K_M) and 0.0013 (Q8_0) | Yes, same model and card type: Q4_K_M 33.2 tok/s decode without speculation (this port 83.0 with depth-4 MTP), TTFT 49.3 s at 30,720 tokens (this port 42.75 s) | [same model on llama.cpp](#same-model-on-llamacpp) |
+| llama.cpp GGUF K-quants | Requantized from this checkpoint (head kept NVFP4); KL to the same FP32 reference 0.0088 (Q4_K_M) and 0.0013 (Q8_0) | Yes, same model and card type: Q4_K_M 33.2 tok/s decode without speculation and 64.6 with the checkpoint's MTP head (this port 30.9 and 83.0), TTFT 49.3 s at 30,720 tokens (this port 42.75 s) | [same model on llama.cpp](#same-model-on-llamacpp) |
 | INT8 DP4A (superl8) | 3-bit GGUF weights on INT8 `dp4a` kernels; Qwen3.6-27B Q3_K_S: 21.3 tok/s steady decode, 7.2 tok/s end to end, CMP 100-210 | No | [qwen3-scoreboard.json](https://github.com/jajmangold/superl8/blob/main/bench/qwen3-scoreboard.json) |
 | Strata | Different model (125 B MoE) as GGUF, UD-IQ4_XS on V100: 88.91 % top token vs Q8_0; 38-51 tok/s on one V100, one stream | No (our 2026-10-20 run: 56-64 tok/s on 3 V100s, one stream) | [Strata](https://github.com/Niko1221/Strata), [QUANTS.md](https://github.com/Niko1221/Strata/blob/main/docs/QUANTS.md) |
 | Project Maya | Different model (321 B MoE) as its own 2-4-bit GGUF: 83-90 % next token vs FP8; 26.8 tok/s Maya-S24 on one V100, 48.25 tok/s Maya-L on four | No | [Project Maya](https://github.com/mw00/project-maya), [#130](https://github.com/mw00/project-maya/issues/130) |

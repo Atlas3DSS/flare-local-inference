@@ -1,0 +1,390 @@
+{
+ "format": "measurement-speculation-summary-v1",
+ "llama": {
+  "c1-none": {
+   "command": "<release-host>/flare/engines/llama.cpp-sm70-bench/build-sm70/bin/llama-server -m <release-host>/flare/<measurements>/qwen38-27b-nvfp4-q4_k_m.gguf --host 127.0.0.1 --port 8501 --fit off --gpu-layers all -fa on --threads 16 --threads-batch 16 --jinja --metrics --no-webui -c 32768 -np 1 -ctk f16 -ctv f16",
+   "peak_vram_mib": 17730,
+   "draft_tokens": 0,
+   "draft_accepted": 0,
+   "acceptance": null,
+   "short128": {
+    "n": 12,
+    "all_ok": true,
+    "client_tok_s_median": 33.204463038475176,
+    "server_tok_s_median": 33.202983529898106
+   },
+   "short512": {
+    "n": 4,
+    "all_ok": true,
+    "client_tok_s_median": 33.16727331471611,
+    "server_tok_s_median": 33.16700510156495
+   },
+   "long": {
+    "n": 4,
+    "all_ok": true,
+    "client_tok_s_median": 28.200494712524883,
+    "server_tok_s_median": 28.20055392776206
+   },
+   "greedy_vs_c1_none": [
+    {
+     "prompt_id": "code-00",
+     "n": 128,
+     "identical_to_c1_none": true,
+     "first_divergence": null,
+     "draft_n": null,
+     "draft_n_accepted": null
+    },
+    {
+     "prompt_id": "code-01",
+     "n": 128,
+     "identical_to_c1_none": true,
+     "first_divergence": null,
+     "draft_n": null,
+     "draft_n_accepted": null
+    },
+    {
+     "prompt_id": "code-02",
+     "n": 128,
+     "identical_to_c1_none": true,
+     "first_divergence": null,
+     "draft_n": null,
+     "draft_n_accepted": null
+    },
+    {
+     "prompt_id": "code-03",
+     "n": 128,
+     "identical_to_c1_none": true,
+     "first_divergence": null,
+     "draft_n": null,
+     "draft_n_accepted": null
+    }
+   ]
+  },
+  "c1-mtp1": {
+   "command": "<release-host>/flare/engines/llama.cpp-sm70-bench/build-sm70/bin/llama-server -m <release-host>/flare/<measurements>/qwen38-27b-nvfp4-q4_k_m.gguf --host 127.0.0.1 --port 8502 --fit off --gpu-layers all -fa on --threads 16 --threads-batch 16 --jinja --metrics --no-webui -c 32768 -np 1 -ctk f16 -ctv f16 -md <release-host>/flare/<measurements>/mtp-fixed-qwen38-27b-nvfp4-q8_0.gguf --spec-type draft-mtp --spec-draft-n-max 1",
+   "peak_vram_mib": 19448,
+   "draft_tokens": 2917,
+   "draft_accepted": 2685,
+   "acceptance": 0.9204662324305793,
+   "short128": {
+    "n": 12,
+    "all_ok": true,
+    "client_tok_s_median": 51.23383236122225,
+    "server_tok_s_median": 51.22956641911087
+   },
+   "short512": {
+    "n": 4,
+    "all_ok": true,
+    "client_tok_s_median": 51.76143403371984,
+    "server_tok_s_median": 51.76098465253538
+   },
+   "long": {
+    "n": 4,
+    "all_ok": true,
+    "client_tok_s_median": 46.2466481239488,
+    "server_tok_s_median": 46.247009696222875
+   },
+   "greedy_vs_c1_none": [
+    {
+     "prompt_id": "code-00",
+     "n": 128,
+     "identical_to_c1_none": true,
+     "first_divergence": null,
+     "draft_n": 65,
+     "draft_n_accepted": 62
+    },
+    {
+     "prompt_id": "code-01",
+     "n": 128,
+     "identical_to_c1_none": true,
+     "first_divergence": null,
+     "draft_n": 67,
+     "draft_n_accepted": 60
+    },
+    {
+     "prompt_id": "code-02",
+     "n": 128,
+     "identical_to_c1_none": true,
+     "first_divergence": null,
+     "draft_n": 64,
+     "draft_n_accepted": 62
+    },
+    {
+     "prompt_id": "code-03",
+     "n": 128,
+     "identical_to_c1_none": true,
+     "first_divergence": null,
+     "draft_n": 65,
+     "draft_n_accepted": 62
+    }
+   ]
+  },
+  "c1-mtp2": {
+   "command": "<release-host>/flare/engines/llama.cpp-sm70-bench/build-sm70/bin/llama-server -m <release-host>/flare/<measurements>/qwen38-27b-nvfp4-q4_k_m.gguf --host 127.0.0.1 --port 8503 --fit off --gpu-layers all -fa on --threads 16 --threads-batch 16 --jinja --metrics --no-webui -c 32768 -np 1 -ctk f16 -ctv f16 -md <release-host>/flare/<measurements>/mtp-fixed-qwen38-27b-nvfp4-q8_0.gguf --spec-type draft-mtp --spec-draft-n-max 2",
+   "peak_vram_mib": 19596,
+   "draft_tokens": 4186,
+   "draft_accepted": 3510,
+   "acceptance": 0.8385093167701864,
+   "short128": {
+    "n": 12,
+    "all_ok": true,
+    "client_tok_s_median": 62.64913667134786,
+    "server_tok_s_median": 62.64796948101625
+   },
+   "short512": {
+    "n": 4,
+    "all_ok": true,
+    "client_tok_s_median": 60.12733244580902,
+    "server_tok_s_median": 60.12890382505802
+   },
+   "long": {
+    "n": 4,
+    "all_ok": true,
+    "client_tok_s_median": 54.40279326013254,
+    "server_tok_s_median": 54.40205577787486
+   },
+   "greedy_vs_c1_none": [
+    {
+     "prompt_id": "code-00",
+     "n": 128,
+     "identical_to_c1_none": true,
+     "first_divergence": null,
+     "draft_n": 91,
+     "draft_n_accepted": 81
+    },
+    {
+     "prompt_id": "code-01",
+     "n": 128,
+     "identical_to_c1_none": true,
+     "first_divergence": null,
+     "draft_n": 97,
+     "draft_n_accepted": 78
+    },
+    {
+     "prompt_id": "code-02",
+     "n": 128,
+     "identical_to_c1_none": true,
+     "first_divergence": null,
+     "draft_n": 86,
+     "draft_n_accepted": 83
+    },
+    {
+     "prompt_id": "code-03",
+     "n": 128,
+     "identical_to_c1_none": true,
+     "first_divergence": null,
+     "draft_n": 95,
+     "draft_n_accepted": 79
+    }
+   ]
+  },
+  "c1-mtp3": {
+   "command": "<release-host>/flare/engines/llama.cpp-sm70-bench/build-sm70/bin/llama-server -m <release-host>/flare/<measurements>/qwen38-27b-nvfp4-q4_k_m.gguf --host 127.0.0.1 --port 8504 --fit off --gpu-layers all -fa on --threads 16 --threads-batch 16 --jinja --metrics --no-webui -c 32768 -np 1 -ctk f16 -ctv f16 -md <release-host>/flare/<measurements>/mtp-fixed-qwen38-27b-nvfp4-q8_0.gguf --spec-type draft-mtp --spec-draft-n-max 3",
+   "peak_vram_mib": 19746,
+   "draft_tokens": 5098,
+   "draft_accepted": 3901,
+   "acceptance": 0.7652020400156925,
+   "short128": {
+    "n": 12,
+    "all_ok": true,
+    "client_tok_s_median": 64.63262288334437,
+    "server_tok_s_median": 64.62977637132656
+   },
+   "short512": {
+    "n": 4,
+    "all_ok": true,
+    "client_tok_s_median": 61.05989546723062,
+    "server_tok_s_median": 61.05998347488003
+   },
+   "long": {
+    "n": 4,
+    "all_ok": true,
+    "client_tok_s_median": 55.877687670465505,
+    "server_tok_s_median": 55.878975191398155
+   },
+   "greedy_vs_c1_none": [
+    {
+     "prompt_id": "code-00",
+     "n": 128,
+     "identical_to_c1_none": true,
+     "first_divergence": null,
+     "draft_n": 103,
+     "draft_n_accepted": 92
+    },
+    {
+     "prompt_id": "code-01",
+     "n": 128,
+     "identical_to_c1_none": true,
+     "first_divergence": null,
+     "draft_n": 121,
+     "draft_n_accepted": 86
+    },
+    {
+     "prompt_id": "code-02",
+     "n": 128,
+     "identical_to_c1_none": true,
+     "first_divergence": null,
+     "draft_n": 104,
+     "draft_n_accepted": 92
+    },
+    {
+     "prompt_id": "code-03",
+     "n": 128,
+     "identical_to_c1_none": true,
+     "first_divergence": null,
+     "draft_n": 111,
+     "draft_n_accepted": 89
+    }
+   ]
+  },
+  "c1-mtp4": {
+   "command": "<release-host>/flare/engines/llama.cpp-sm70-bench/build-sm70/bin/llama-server -m <release-host>/flare/<measurements>/qwen38-27b-nvfp4-q4_k_m.gguf --host 127.0.0.1 --port 8505 --fit off --gpu-layers all -fa on --threads 16 --threads-batch 16 --jinja --metrics --no-webui -c 32768 -np 1 -ctk f16 -ctv f16 -md <release-host>/flare/<measurements>/mtp-fixed-qwen38-27b-nvfp4-q8_0.gguf --spec-type draft-mtp --spec-draft-n-max 4",
+   "peak_vram_mib": 19896,
+   "draft_tokens": 5988,
+   "draft_accepted": 4102,
+   "acceptance": 0.6850367401469606,
+   "short128": {
+    "n": 12,
+    "all_ok": true,
+    "client_tok_s_median": 60.662252295629905,
+    "server_tok_s_median": 60.66942044070567
+   },
+   "short512": {
+    "n": 4,
+    "all_ok": true,
+    "client_tok_s_median": 59.02366440895205,
+    "server_tok_s_median": 59.02370068655307
+   },
+   "long": {
+    "n": 4,
+    "all_ok": true,
+    "client_tok_s_median": 55.41274426590307,
+    "server_tok_s_median": 55.41316488436036
+   },
+   "greedy_vs_c1_none": [
+    {
+     "prompt_id": "code-00",
+     "n": 128,
+     "identical_to_c1_none": true,
+     "first_divergence": null,
+     "draft_n": 112,
+     "draft_n_accepted": 98
+    },
+    {
+     "prompt_id": "code-01",
+     "n": 128,
+     "identical_to_c1_none": true,
+     "first_divergence": null,
+     "draft_n": 140,
+     "draft_n_accepted": 91
+    },
+    {
+     "prompt_id": "code-02",
+     "n": 128,
+     "identical_to_c1_none": true,
+     "first_divergence": null,
+     "draft_n": 120,
+     "draft_n_accepted": 96
+    },
+    {
+     "prompt_id": "code-03",
+     "n": 128,
+     "identical_to_c1_none": true,
+     "first_divergence": null,
+     "draft_n": 125,
+     "draft_n_accepted": 95
+    }
+   ]
+  },
+  "c1-mtp4bf16": {
+   "command": "<release-host>/flare/engines/llama.cpp-sm70-bench/build-sm70/bin/llama-server -m <release-host>/flare/<measurements>/qwen38-27b-nvfp4-q4_k_m.gguf --host 127.0.0.1 --port 8506 --fit off --gpu-layers all -fa on --threads 16 --threads-batch 16 --jinja --metrics --no-webui -c 32768 -np 1 -ctk f16 -ctv f16 -md <release-host>/flare/<measurements>/mtp-fixed-qwen38-27b-nvfp4-bf16.gguf --spec-type draft-mtp --spec-draft-n-max 4",
+   "peak_vram_mib": 20430,
+   "draft_tokens": 5991,
+   "draft_accepted": 4101,
+   "acceptance": 0.684526790185278,
+   "short128": {
+    "n": 12,
+    "all_ok": true,
+    "client_tok_s_median": 58.1596547089484,
+    "server_tok_s_median": 58.164577421109875
+   },
+   "short512": {
+    "n": 4,
+    "all_ok": true,
+    "client_tok_s_median": 58.00913253951655,
+    "server_tok_s_median": 58.01039320253026
+   },
+   "long": {
+    "n": 4,
+    "all_ok": true,
+    "client_tok_s_median": 53.717535344504284,
+    "server_tok_s_median": 53.717970204782745
+   },
+   "greedy_vs_c1_none": [
+    {
+     "prompt_id": "code-00",
+     "n": 128,
+     "identical_to_c1_none": true,
+     "first_divergence": null,
+     "draft_n": 112,
+     "draft_n_accepted": 98
+    },
+    {
+     "prompt_id": "code-01",
+     "n": 128,
+     "identical_to_c1_none": true,
+     "first_divergence": null,
+     "draft_n": 140,
+     "draft_n_accepted": 91
+    },
+    {
+     "prompt_id": "code-02",
+     "n": 128,
+     "identical_to_c1_none": true,
+     "first_divergence": null,
+     "draft_n": 120,
+     "draft_n_accepted": 96
+    },
+    {
+     "prompt_id": "code-03",
+     "n": 128,
+     "identical_to_c1_none": true,
+     "first_divergence": null,
+     "draft_n": 125,
+     "draft_n_accepted": 95
+    }
+   ]
+  },
+  "c4-mtp4": {
+   "command": "<release-host>/flare/engines/llama.cpp-sm70-bench/build-sm70/bin/llama-server -m <release-host>/flare/<measurements>/qwen38-27b-nvfp4-q4_k_m.gguf --host 127.0.0.1 --port 8509 --fit off --gpu-layers all -fa on --threads 16 --threads-batch 16 --jinja --metrics --no-webui -c 131072 -np 4 -ctk f16 -ctv f16 -md <release-host>/flare/<measurements>/mtp-fixed-qwen38-27b-nvfp4-q8_0.gguf --spec-type draft-mtp --spec-draft-n-max 4",
+   "peak_vram_mib": 28738,
+   "draft_tokens": 5870,
+   "draft_accepted": 4131,
+   "acceptance": 0.703747870528109,
+   "short128": {
+    "n": 12,
+    "all_ok": true,
+    "client_tok_s_median": 31.758672215327902,
+    "server_tok_s_median": 31.760302057855057,
+    "aggregate_tok_s_median": 124.69555245578077
+   },
+   "short512": {
+    "n": 4,
+    "all_ok": true,
+    "client_tok_s_median": 30.68173996326133,
+    "server_tok_s_median": 30.68234472826784,
+    "aggregate_tok_s_median": 127.05528808819591
+   },
+   "long": {
+    "n": 4,
+    "all_ok": true,
+    "client_tok_s_median": 6.4324557825481286,
+    "server_tok_s_median": 6.432482639113058,
+    "aggregate_tok_s_median": 40.35923621040159
+   },
+   "greedy_vs_c1_none": []
+  }
+ },
+ "flare_short": null,
+ "flare_long": null
+}

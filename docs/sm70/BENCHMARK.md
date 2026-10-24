@@ -276,6 +276,22 @@ Record the exact binary/package identities and server flags beside the table.
 Only the CPU stub-server tests have passed for this added client. Real V100 results
 and all prefill comparison claims remain pending until the complete matrix passes.
 
+### llama.cpp with this checkpoint's MTP head
+
+To compare speculation on llama.cpp, the checkpoint's MTP head has to be
+exported as a draft model. Upstream `convert_hf_to_gguf.py --mtp` writes this
+checkpoint's NVFP4 lm_head as packed bytes labelled BF16, with shape
+[2560, 248320] and no scales, and `llama-server` then refuses the draft with
+`check_tensor_dims: tensor 'output.weight' has wrong shape; expected 5120,
+248320, got 2560, 248320`
+([speculation-a1-summary.json](receipts/measurements/speculation-a1-summary.json)).
+The same-model measurement repaired the draft GGUF by copying in the correctly
+converted NVFP4 lm_head and its scales from the BF16-outtype GGUF made by the
+same converter, leaving the MTP layer unchanged. llama.cpp itself was not
+modified (commit `8e5a58df`). The hashes of the exported and repaired files are
+in [mtp.sha256](receipts/measurements/mtp.sha256) and
+[mtp-fixed.sha256](receipts/measurements/mtp-fixed.sha256).
+
 ## Reporting your numbers
 
 For each number, give the GPU model and memory, `--memory-limit`, concurrency,
