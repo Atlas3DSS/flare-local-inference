@@ -316,7 +316,13 @@ Read the table with these limits:
   same 4-bit checkpoint, so it measures kernel arithmetic. Strata's and Maya's
   figures compare their quantizations with a higher-precision release, so they
   measure quantization error. The numbers are not on one scale. All three routes
-  serve weights of about 2 to 4 bits.
+  serve weights of about 2 to 4 bits. A same-model quality run on Strata is not
+  possible: Strata loads only Qwen3.8-Flash-Next and Qwen3.6-35B-A3B
+  ([MODELS.md](https://github.com/Niko1221/Strata/blob/main/docs/MODELS.md)), and its Qwen3.6 engine refuses any other file
+  ([q36_engine.cu](https://github.com/Niko1221/Strata/blob/main/src/qwen35/q36_engine.cu), "runs Qwen3.6-35B-A3B (qwen35moe) files only"), so it
+  cannot load this 27B model. No FP32 reference exists here for those two models,
+  so the scales cannot be joined that way either. The same-model comparison that
+  is possible is [llama.cpp](#same-model-on-llamacpp).
 - **Different concurrency.** This port serves up to 4 requests per card
   together, with a shared KV pool and prefix cache. The Strata and Maya V100
   figures are one stream where stated; their multi-card figures are one stream

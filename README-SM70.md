@@ -269,7 +269,9 @@ has not been compared with either engine on the same model, so these figures do
 not rank prefill across engines.
 The KL figures are not on one scale: ours compares the port with
 the same 4-bit checkpoint, theirs compare a quantization with a higher-precision
-release. Details:
+release. A same-model run cannot join them: Strata loads only
+Qwen3.8-Flash-Next and Qwen3.6-35B-A3B, not this 27B model, and no FP32
+reference exists here for those models. Details:
 [WHY-NOT-LOW-BIT.md](docs/sm70/WHY-NOT-LOW-BIT.md#strata-and-project-maya).
 
 ## Quickstart
