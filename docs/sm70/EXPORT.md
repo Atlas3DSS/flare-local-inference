@@ -101,6 +101,16 @@ CUDA_VISIBLE_DEVICES="$V100_GPU_UUID" bash tools/prepare_replay.sh .venv/bin/pyt
   --output /data/flare-run/model.safetensors --report /data/flare-run/prepare.json
 ```
 
+The helper prepares 512-token prefill chunks: prefill graphs at capacities
+128, 256 and 512, 48 graphs in all. To prepare the previous 128-token catalog
+(44 graphs) instead, add `--chunk 128` after the helper's arguments; the later
+value wins. At `--memory-limit 31G` the 512-token package leaves a
+124,928-token KV pool, limited by memory, against 131,584 tokens (the
+`--kv-cache-limit concurrency` cap) for the 128-token package
+([LIMITATIONS.md](LIMITATIONS.md#not-validated-or-validated-only-in-part)).
+Both prefill the same tokens
+([ARCHITECTURE.md](ARCHITECTURE.md#5-512-token-prefill-exact-fusions-and-the-g128-split-plan)).
+
 The first successful run creates `tau.json` for the new public inputs. Preserve
 it. A subsequent preparation using that same file must match its prompt-file
 hash, per-run token IDs and complete tau summary exactly before export. Use a
@@ -125,6 +135,9 @@ The port has CPU-only validation so far; it does not assert a new GPU pass.
 | Loaded footprint at server startup (`Plan cache` line) | 21.15 GiB | STATUS.md line 63 |
 | Package primary (`.safetensors`, metadata only) | 958 KB | STATUS.md line 63 |
 | Whole package (primary plus payload blobs) | about 20 GB | STATUS.md line 63 |
+| Preparation time with every export gate, package `f21b9abb` | 36.2 min, with the rebuild running on another card of the same host; the rebuild 29.4 min | [gate-summary.json](receipts/g128/gate-summary.json) |
+| Peak device allocation during preparation, package `f21b9abb` | 21.22 GiB (previous package 20.77 GiB) | [gate-summary.json](receipts/g128/gate-summary.json) |
+| Loaded footprint at server startup (`Plan cache` line), package `f21b9abb` | 21.93 GiB, KV pool 124,928 tokens | [default-short-server.log](receipts/g128/default-short-server.log) |
 
 The primary file is small. Weights, kernels and graphs are immutable payload
 blobs named by their SHA-256, written beside it. Copy the primary and every blob
@@ -171,6 +184,10 @@ Stop it once it is ready (Ctrl-C). The acceptance is now in
 flag. The `fingerprint` in `/data/flare-run/prepare.json` must match `$FP`. To withdraw
 trust, run `flare trust revoke FINGERPRINT --trust-store /data/flare-keys/trust.toml`.
 
+Package `f21b9abb` and its rebuild `ad848aaa…` are signed with the
+development key that signed the previous package `fd7c24dc` (fingerprint
+`ef39a0be…`), so a trust store that accepted that key accepts them.
+
 Development keys are for your own packages. To publish packages for others,
 create a production key with `ignition keygen` ([signing](../signing.md)).
 
@@ -178,19 +195,20 @@ create a production key with `ignition keygen` ([signing](../signing.md)).
 
 The fork exported a package only after every gate below passed. They run on the
 retained production CUDA graphs inside the preparation process, after `prepare`
-and before `export_package`. They now ship in `tools/`. The table's release
-results describe the historical package; the newly generated public inputs
-require fresh results and a fresh token/tau baseline.
+and before `export_package`. They now ship in `tools/`. The second-to-last
+column describes the historical package. The last column is the current
+package `f21b9abb`, prepared on the public inputs with 512-token prefill chunks
+([gate-summary.json](receipts/g128/gate-summary.json)).
 
-| Gate | What it checks | Pass criterion | Release package (`0e4c81f`, STATUS.md line 62) |
-| --- | --- | --- | --- |
-| Strict validation | 47 checks at batch 1 and 4 (below) | All 47 pass, byte for byte | 47/47, including every `forced_prefix_*` |
-| Long-sequence invariance | 28 identities over 512 greedy tokens per coding prompt, 128-token prefill chunks | All 28 identical | 28/28 |
-| Commit growth | Recurrent commit into a row admitted after logical capacity growth | All 4 checks pass | 4/4, including the negative capacity round |
-| Consumer identity | Fused projection outputs equal their member projections | All pass | pass |
-| Components | Isolated MTP draft and absorb/save graphs measured | Measurement completes | complete |
-| Accuracy | Full-vocabulary KL(reference ‖ candidate) and top-1 on fixed short and long references | Measurement completes; there is no threshold | complete |
-| Coding-token (tau) goldens | Fixed coding prompts at batch 1 and 4, draft depths 3 and 4 | Token IDs and summary identical to the golden file | identical |
+| Gate | What it checks | Pass criterion | Release package (`0e4c81f`, STATUS.md line 62) | Package `f21b9abb` (2026-10-24) |
+| --- | --- | --- | --- | --- |
+| Strict validation | 47 checks at batch 1 and 4 (below) | All 47 pass, byte for byte | 47/47, including every `forced_prefix_*` | 47/47 |
+| Long-sequence invariance | 28 identities over 512 greedy tokens per coding prompt, 128-token prefill chunks | All 28 identical | 28/28 | 28/28 |
+| Commit growth | Recurrent commit into a row admitted after logical capacity growth | All 4 checks pass | 4/4, including the negative capacity round | 4/4 |
+| Consumer identity | Fused projection outputs equal their member projections | All pass | pass | pass |
+| Components | Isolated MTP draft and absorb/save graphs measured | Measurement completes | complete | complete |
+| Accuracy | Full-vocabulary KL(reference ‖ candidate) and top-1 on fixed short and long references | Measurement completes; there is no threshold | complete | complete; output byte-identical to the previous package's |
+| Coding-token (tau) goldens | Fixed coding prompts at batch 1 and 4, draft depths 3 and 4 | Token IDs and summary identical to the golden file | identical | identical to the previous package's goldens |
 
 **The 47 strict checks.** For batch 1 and batch 4 each:
 
@@ -211,7 +229,10 @@ require fresh results and a fresh token/tau baseline.
 
 Then `sm70_prefill_attention_injected_status` (a poisoned K page must fail the
 prefill with an error code, and the prompt must prefill cleanly again after the
-page is restored), `sm70_decode_attention_nonfinite_probe` (NaN K/V in a visible
+page is restored; at prefill capacities above 128 the harness first backs the
+pages the probe's longer prompt needs, see
+[VALIDATE.md](VALIDATE.md#the-injected-status-probe-at-chunks-above-128)),
+`sm70_decode_attention_nonfinite_probe` (NaN K/V in a visible
 page must fail the request with non-finite code 1), and
 `restore_pre_export_state`. That is 19 checks at batch 1, 25 at batch 4 and
 3 more: 47. The `forced_prefix_*` checks are the ones that prove speculative

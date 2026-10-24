@@ -38,7 +38,10 @@ are different workloads, so historical scores below are context, not expected re
 
 **Package.** `model-32k-tonight-a`, prepared from the release tree `0e4c81f`:
 `--context 32768`, 4 requests, draft depth 4 (widths 1 to 5), 128-token
-prefill chunks (STATUS.md line 62).
+prefill chunks (STATUS.md line 62). The previous release package `fd7c24dc`
+also prefills in 128-token chunks; the current package `f21b9abb` prefills in
+512-token chunks
+([BENCHMARKS-SM70.md](../../BENCHMARKS-SM70.md#package-f21b9abb-512-token-prefill-chunks-on-server-binary-48b69ed4)).
 
 **Server flags**, identical for every serving leg:
 
@@ -59,7 +62,9 @@ flare run model-32k-tonight-a.safetensors --publisher-keys development-publisher
   stopped at 98,304 tokens, `limited by memory` in its server log. So +33,280 tokens is what
   replay-commit freed **up to the cap**. The fork's plan estimated about
   +39.5k to +40.1k tokens without a cap. The pool at the default
-  `--kv-cache-limit memory` was not measured.
+  `--kv-cache-limit memory` was not measured. With the current package's
+  512-token prefill graphs the pool stops below the cap, at 124,928 tokens,
+  `limited by memory`.
 - `--memory-limit 31G` comes from the chain script, which sets it for every leg.
   Lines 64 and 66 of the run log do not restate it.
 
@@ -120,6 +125,14 @@ before its GPU labels were renamed (behaviour identical), with
 `benchmark_long.py` at `0f3ee504`. Later label-only edits change the current
 hashes of `native.py` and `benchmark_long.py`; match these prefixes against the
 chain manifest.
+
+The package `f21b9abb` chains ran server binary `48b69ed4`. The default chain's
+short and long legs ran `tools/native.py` at `d04a9150`, the version before its
+`--prefill-srpt` option; the ordering chain's ran the current `tools/native.py`
+(`37b8a36a`) with `--prefill-srpt`, which adds the flag to the server command
+and is otherwise unchanged. They ran `benchmark_prefill.py` at `c6478679`, `benchmark_mtp.py`
+at `a4656afb` and `benchmark_long.py` at `ac7827d0`, the current versions
+([default-chain-identity.txt](receipts/g128/default-chain-identity.txt), [srpt-chain-identity.txt](receipts/g128/srpt-chain-identity.txt)).
 
 ## Reproduce each row
 
@@ -209,7 +222,8 @@ The 47.23 tok/s figure came from the fork's replay of real coding-agent traces
 (STATUS.md line 68). `best24` is the run tag. Its run report gives the
 2026-10-22 release-tree package `model-32k-tonight-a`, a pre-release binary
 `2f9128e4`, MTP depth 3, `--memory-limit 31G`, a 32G prefix cache and 4 agents;
-the release binary `d4ffb1fa` was not run on traces. Neither the traces nor the
+neither the release binary `d4ffb1fa` nor the server binary `48b69ed4` was
+run on traces. Neither the traces nor the
 replay tool is in this repository; the traces are not public. To measure end to end on your own traces, replay recorded agent
 conversations against the server with their real tool-call delays. Report
 generated tokens over wall time, with the number of agents, the memory limit,

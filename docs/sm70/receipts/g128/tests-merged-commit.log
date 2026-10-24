@@ -1,0 +1,974 @@
+# Tests on the merged G128 code tree (runner notes, not pytest output)
+# commit: 4acbecf0 (tree b95b21fc530fbf6b0b9b77a47916c14a61948fed, parent f2f86cff), tested as a git archive of the tree
+# environment: CPU only, CUDA_VISIBLE_DEVICES empty; Python 3.12.3; torch 2.14.1+cpu; transformers at the locked revision 1d9654e7; flashinfer-python and b12x not installed (GPU packages)
+# the same commands on parent f2f86cff: run 1 = 5 failed, 317 passed, 63 subtests passed (the same 5 failures); run 2 = 29 passed
+# the 5 failures are environmental and occur identically on the parent: 4 x PackageNotFoundError for flashinfer-python metadata (tests/cli/test_serve.py package cache keys), 1 x argparse message quoting of this Python patch release (tests/cli/test_help.py)
+# GPU tests (tests/components/test_sm70_prefill_attention_cuda.py, test_sm70_prefill_rows_cuda.py) need a V100 and b12x and are not part of this CPU run
+
+## run 1: python -m pytest -q -rA -p no:cacheprovider tests/cli tests/components/test_sm70_build.py tests/components/test_sm70_dense.py tests/test_public_tools_http_contract.py
+........................................................................ [ 22%]
+................................................F....................... [ 44%]
+........................................................................ [ 66%]
+....................................FF..F.F.................................................................                                              [100%]
+=================================== FAILURES ===================================
+_______ test_invalid_compression_is_rejected_with_the_supported_encoding _______
+
+capsys = <_pytest.capture.CaptureFixture object at 0x7641f8284710>
+
+    def test_invalid_compression_is_rejected_with_the_supported_encoding(capsys):
+        with pytest.raises(SystemExit) as error:
+            main(["export", "step5-preview-nvfp4", "--expert-scale-compression", "zip", "--output", "model"])
+        assert error.value.code == 2
+>       assert "invalid choice: 'zip' (choose from csf)" in capsys.readouterr().err
+E       assert "invalid choice: 'zip' (choose from csf)" in "usage: ignition export [MODEL] [options]\nignition export: error: argument --expert-scale-compression: invalid choice: 'zip' (choose from 'csf')\n"
+E        +  where "usage: ignition export [MODEL] [options]\nignition export: error: argument --expert-scale-compression: invalid choice: 'zip' (choose from 'csf')\n" = CaptureResult(out='', err="usage: ignition export [MODEL] [options]\nignition export: error: argument --expert-scale-compression: invalid choice: 'zip' (choose from 'csf')\n").err
+E        +    where CaptureResult(out='', err="usage: ignition export [MODEL] [options]\nignition export: error: argument --expert-scale-compression: invalid choice: 'zip' (choose from 'csf')\n") = readouterr()
+E        +      where readouterr = <_pytest.capture.CaptureFixture object at 0x7641f8284710>.readouterr
+
+tests/cli/test_help.py:104: AssertionError
+_____________ test_package_cache_key_includes_mixed_capture[False] _____________
+
+cls = <class 'importlib.metadata.Distribution'>, name = 'flashinfer-python'
+
+    @classmethod
+    def from_name(cls, name: str):
+        """Return the Distribution for the given package name.
+    
+        :param name: The name of the distribution package to search for.
+        :return: The Distribution instance (or subclass thereof) for the named
+            package, if found.
+        :raises PackageNotFoundError: When the named package's distribution
+            metadata cannot be found.
+        :raises ValueError: When an invalid value is supplied for name.
+        """
+        if not name:
+            raise ValueError("A distribution name is required.")
+        try:
+>           return next(cls.discover(name=name))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           StopIteration
+
+/usr/lib/python3.12/importlib/metadata/__init__.py:397: StopIteration
+
+During handling of the above exception, another exception occurred:
+
+overlap = False
+
+    @pytest.mark.parametrize("overlap", [False, True])
+    def test_package_cache_key_includes_mixed_capture(overlap):
+        model = resolve("qwen3.8-flash")
+        gpu = planning.Gpu(0, "NVIDIA RTX PRO 6000 Blackwell", "GPU-test", 96 * GIB, FREE, (12, 0))
+        plan = planning.fit(model.recipe, model.checkpoint, (gpu,), concurrency=4,
+                            reserve_bytes=0, speculation=model.recipe.speculation, stream_overlap=overlap)
+>       assert runtime.package_key(model, plan, False) != runtime.package_key(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+            model, replace(plan, mixed_prefill=True), False)
+
+tests/cli/test_serve.py:358: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+ignition/cli/runtime.py:41: in package_key
+    inputs["libraries"] = {name: metadata.version(name) for name in
+                                 ^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3.12/importlib/metadata/__init__.py:889: in version
+    return distribution(distribution_name).version
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3.12/importlib/metadata/__init__.py:862: in distribution
+    return Distribution.from_name(distribution_name)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+cls = <class 'importlib.metadata.Distribution'>, name = 'flashinfer-python'
+
+    @classmethod
+    def from_name(cls, name: str):
+        """Return the Distribution for the given package name.
+    
+        :param name: The name of the distribution package to search for.
+        :return: The Distribution instance (or subclass thereof) for the named
+            package, if found.
+        :raises PackageNotFoundError: When the named package's distribution
+            metadata cannot be found.
+        :raises ValueError: When an invalid value is supplied for name.
+        """
+        if not name:
+            raise ValueError("A distribution name is required.")
+        try:
+            return next(cls.discover(name=name))
+        except StopIteration:
+>           raise PackageNotFoundError(name)
+E           importlib.metadata.PackageNotFoundError: No package metadata was found for flashinfer-python
+
+/usr/lib/python3.12/importlib/metadata/__init__.py:399: PackageNotFoundError
+_____________ test_package_cache_key_includes_mixed_capture[True] ______________
+
+cls = <class 'importlib.metadata.Distribution'>, name = 'flashinfer-python'
+
+    @classmethod
+    def from_name(cls, name: str):
+        """Return the Distribution for the given package name.
+    
+        :param name: The name of the distribution package to search for.
+        :return: The Distribution instance (or subclass thereof) for the named
+            package, if found.
+        :raises PackageNotFoundError: When the named package's distribution
+            metadata cannot be found.
+        :raises ValueError: When an invalid value is supplied for name.
+        """
+        if not name:
+            raise ValueError("A distribution name is required.")
+        try:
+>           return next(cls.discover(name=name))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           StopIteration
+
+/usr/lib/python3.12/importlib/metadata/__init__.py:397: StopIteration
+
+During handling of the above exception, another exception occurred:
+
+overlap = True
+
+    @pytest.mark.parametrize("overlap", [False, True])
+    def test_package_cache_key_includes_mixed_capture(overlap):
+        model = resolve("qwen3.8-flash")
+        gpu = planning.Gpu(0, "NVIDIA RTX PRO 6000 Blackwell", "GPU-test", 96 * GIB, FREE, (12, 0))
+        plan = planning.fit(model.recipe, model.checkpoint, (gpu,), concurrency=4,
+                            reserve_bytes=0, speculation=model.recipe.speculation, stream_overlap=overlap)
+>       assert runtime.package_key(model, plan, False) != runtime.package_key(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+            model, replace(plan, mixed_prefill=True), False)
+
+tests/cli/test_serve.py:358: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+ignition/cli/runtime.py:41: in package_key
+    inputs["libraries"] = {name: metadata.version(name) for name in
+                                 ^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3.12/importlib/metadata/__init__.py:889: in version
+    return distribution(distribution_name).version
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3.12/importlib/metadata/__init__.py:862: in distribution
+    return Distribution.from_name(distribution_name)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+cls = <class 'importlib.metadata.Distribution'>, name = 'flashinfer-python'
+
+    @classmethod
+    def from_name(cls, name: str):
+        """Return the Distribution for the given package name.
+    
+        :param name: The name of the distribution package to search for.
+        :return: The Distribution instance (or subclass thereof) for the named
+            package, if found.
+        :raises PackageNotFoundError: When the named package's distribution
+            metadata cannot be found.
+        :raises ValueError: When an invalid value is supplied for name.
+        """
+        if not name:
+            raise ValueError("A distribution name is required.")
+        try:
+            return next(cls.discover(name=name))
+        except StopIteration:
+>           raise PackageNotFoundError(name)
+E           importlib.metadata.PackageNotFoundError: No package metadata was found for flashinfer-python
+
+/usr/lib/python3.12/importlib/metadata/__init__.py:399: PackageNotFoundError
+___________ test_package_cache_key_includes_expert_scale_compression ___________
+
+cls = <class 'importlib.metadata.Distribution'>, name = 'flashinfer-python'
+
+    @classmethod
+    def from_name(cls, name: str):
+        """Return the Distribution for the given package name.
+    
+        :param name: The name of the distribution package to search for.
+        :return: The Distribution instance (or subclass thereof) for the named
+            package, if found.
+        :raises PackageNotFoundError: When the named package's distribution
+            metadata cannot be found.
+        :raises ValueError: When an invalid value is supplied for name.
+        """
+        if not name:
+            raise ValueError("A distribution name is required.")
+        try:
+>           return next(cls.discover(name=name))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           StopIteration
+
+/usr/lib/python3.12/importlib/metadata/__init__.py:397: StopIteration
+
+During handling of the above exception, another exception occurred:
+
+    def test_package_cache_key_includes_expert_scale_compression():
+        model = resolve("step5-preview-nvfp4")
+        gpus = tuple(planning.Gpu(i, "NVIDIA RTX PRO 6000 Blackwell", f"GPU-{i}", 96 * GIB, FREE, (12, 0))
+                     for i in range(4))
+        plan = planning.fit(model.recipe, model.checkpoint, gpus, concurrency=4,
+                            reserve_bytes=0, speculation=model.recipe.speculation)
+>       assert runtime.package_key(model, plan, False) != runtime.package_key(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+            model, replace(plan, expert_scale_compression="csf"), False)
+
+tests/cli/test_serve.py:385: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+ignition/cli/runtime.py:41: in package_key
+    inputs["libraries"] = {name: metadata.version(name) for name in
+                                 ^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3.12/importlib/metadata/__init__.py:889: in version
+    return distribution(distribution_name).version
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3.12/importlib/metadata/__init__.py:862: in distribution
+    return Distribution.from_name(distribution_name)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+cls = <class 'importlib.metadata.Distribution'>, name = 'flashinfer-python'
+
+    @classmethod
+    def from_name(cls, name: str):
+        """Return the Distribution for the given package name.
+    
+        :param name: The name of the distribution package to search for.
+        :return: The Distribution instance (or subclass thereof) for the named
+            package, if found.
+        :raises PackageNotFoundError: When the named package's distribution
+            metadata cannot be found.
+        :raises ValueError: When an invalid value is supplied for name.
+        """
+        if not name:
+            raise ValueError("A distribution name is required.")
+        try:
+            return next(cls.discover(name=name))
+        except StopIteration:
+>           raise PackageNotFoundError(name)
+E           importlib.metadata.PackageNotFoundError: No package metadata was found for flashinfer-python
+
+/usr/lib/python3.12/importlib/metadata/__init__.py:399: PackageNotFoundError
+___________ test_package_cache_keys_distinguish_serialized_branches ____________
+
+cls = <class 'importlib.metadata.Distribution'>, name = 'flashinfer-python'
+
+    @classmethod
+    def from_name(cls, name: str):
+        """Return the Distribution for the given package name.
+    
+        :param name: The name of the distribution package to search for.
+        :return: The Distribution instance (or subclass thereof) for the named
+            package, if found.
+        :raises PackageNotFoundError: When the named package's distribution
+            metadata cannot be found.
+        :raises ValueError: When an invalid value is supplied for name.
+        """
+        if not name:
+            raise ValueError("A distribution name is required.")
+        try:
+>           return next(cls.discover(name=name))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           StopIteration
+
+/usr/lib/python3.12/importlib/metadata/__init__.py:397: StopIteration
+
+During handling of the above exception, another exception occurred:
+
+    def test_package_cache_keys_distinguish_serialized_branches():
+        model = resolve("glm-5.3-flash")
+        sparks = tuple(planning.Gpu(index, "NVIDIA GB10", f"GPU-{index}", 121 * GIB, 110 * GIB, (12, 1))
+                       for index in range(2))
+        settings = dict(concurrency=4, reserve_bytes=0, speculation=model.recipe.speculation)
+        overlapped = planning.fit(model.recipe, model.checkpoint, sparks, **settings)
+        serial = planning.fit(model.recipe, model.checkpoint, sparks, stream_overlap=False, **settings)
+        assert overlapped.stream_overlap and not serial.stream_overlap
+>       assert runtime.package_key(model, overlapped, False) != runtime.package_key(model, serial, False)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/cli/test_serve.py:405: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+ignition/cli/runtime.py:41: in package_key
+    inputs["libraries"] = {name: metadata.version(name) for name in
+                                 ^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3.12/importlib/metadata/__init__.py:889: in version
+    return distribution(distribution_name).version
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3.12/importlib/metadata/__init__.py:862: in distribution
+    return Distribution.from_name(distribution_name)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+cls = <class 'importlib.metadata.Distribution'>, name = 'flashinfer-python'
+
+    @classmethod
+    def from_name(cls, name: str):
+        """Return the Distribution for the given package name.
+    
+        :param name: The name of the distribution package to search for.
+        :return: The Distribution instance (or subclass thereof) for the named
+            package, if found.
+        :raises PackageNotFoundError: When the named package's distribution
+            metadata cannot be found.
+        :raises ValueError: When an invalid value is supplied for name.
+        """
+        if not name:
+            raise ValueError("A distribution name is required.")
+        try:
+            return next(cls.discover(name=name))
+        except StopIteration:
+>           raise PackageNotFoundError(name)
+E           importlib.metadata.PackageNotFoundError: No package metadata was found for flashinfer-python
+
+/usr/lib/python3.12/importlib/metadata/__init__.py:399: PackageNotFoundError
+==================================== PASSES ====================================
+___ test_run_exports_then_replaces_python_with_flare_and_reuses_the_package ____
+----------------------------- Captured stdout call -----------------------------
+Load cached runtime package. <pytest-tmp>/pytest-31/test_run_exports_then_replaces0/.cache/flare/packages/snapshots/cea0971fa5bc2cacefa47a6535dbb9587156a1d6107426fbfdcb84478e39e1e4/model.safetensors
+----------------------------- Captured stderr call -----------------------------
+[━━━━━━━━━━] Resolve checkpoint.  0.0s
+[    OK    ] Resolve checkpoint.  qwen3.8-flash · dc5b8ab2 · cached  0.0s
+[━━━━━━━━━━] Select GPUs.  0.0s
+[    OK    ] Select GPUs.  GPU 0 · concurrency 4 · images 4 · up to 5 draft tokens · speculative token capacity 6 · mixed prefill off · expert scales native · compile workers auto per host  0.0s
+[━━━━━━━━━━] Export native package.  0.0s
+[    OK    ] Export native package.  <pytest-tmp>/pytest-31/test_run_exports_then_replaces0/.cache/flare/packages/snapshots/cea0971fa5bc2cacefa47a6535dbb9587156a1d6107426fbfdcb84478e39e…  0.0s
+__ test_runtime_memory_flags_are_forwarded_without_preparing_another_package ___
+----------------------------- Captured stdout call -----------------------------
+Load cached runtime package. <pytest-tmp>/pytest-31/test_runtime_memory_flags_are_0/.cache/flare/packages/snapshots/bb567e7c12c59fafa00f48d4b7ff865ffca455f12429f44edd3f41688f0e37e8/model.safetensors
+Load cached runtime package. <pytest-tmp>/pytest-31/test_runtime_memory_flags_are_0/.cache/flare/packages/snapshots/bb567e7c12c59fafa00f48d4b7ff865ffca455f12429f44edd3f41688f0e37e8/model.safetensors
+Load cached runtime package. <pytest-tmp>/pytest-31/test_runtime_memory_flags_are_0/.cache/flare/packages/snapshots/bb567e7c12c59fafa00f48d4b7ff865ffca455f12429f44edd3f41688f0e37e8/model.safetensors
+----------------------------- Captured stderr call -----------------------------
+[━━━━━━━━━━] Resolve checkpoint.  0.0s
+[    OK    ] Resolve checkpoint.  qwen3.8-flash · dc5b8ab2 · cached  0.0s
+[━━━━━━━━━━] Select GPUs.  0.0s
+[    OK    ] Select GPUs.  GPU 0 · concurrency 4 · images 4 · up to 5 draft tokens · speculative token capacity 6 · mixed prefill off · expert scales native · compile workers auto per host  0.0s
+[━━━━━━━━━━] Export native package.  0.0s
+[    OK    ] Export native package.  <pytest-tmp>/pytest-31/test_runtime_memory_flags_are_0/.cache/flare/packages/snapshots/bb567e7c12c59fafa00f48d4b7ff865ffca455f12429f44edd3f41688f0e3…  0.0s
+____ test_served_model_name_is_forwarded_without_changing_the_package_alias ____
+----------------------------- Captured stdout call -----------------------------
+Load cached runtime package. <pytest-tmp>/pytest-31/test_served_model_name_is_forw0/.cache/flare/packages/snapshots/9f8e74cd5b084acd4e54587358f90a1abb5ae5bd78b337acf607936741a4ce80/model.safetensors
+Load cached runtime package. <pytest-tmp>/pytest-31/test_served_model_name_is_forw0/.cache/flare/packages/snapshots/9f8e74cd5b084acd4e54587358f90a1abb5ae5bd78b337acf607936741a4ce80/model.safetensors
+Load cached runtime package. <pytest-tmp>/pytest-31/test_served_model_name_is_forw0/.cache/flare/packages/snapshots/9f8e74cd5b084acd4e54587358f90a1abb5ae5bd78b337acf607936741a4ce80/model.safetensors
+----------------------------- Captured stderr call -----------------------------
+[━━━━━━━━━━] Resolve checkpoint.  0.0s
+[    OK    ] Resolve checkpoint.  qwen3.8-flash · dc5b8ab2 · cached  0.0s
+[━━━━━━━━━━] Select GPUs.  0.0s
+[    OK    ] Select GPUs.  GPU 0 · concurrency 4 · images 4 · up to 5 draft tokens · speculative token capacity 6 · mixed prefill off · expert scales native · compile workers auto per host  0.0s
+[━━━━━━━━━━] Export native package.  0.0s
+[    OK    ] Export native package.  <pytest-tmp>/pytest-31/test_served_model_name_is_forw0/.cache/flare/packages/snapshots/9f8e74cd5b084acd4e54587358f90a1abb5ae5bd78b337acf607936741a4c…  0.0s
+________ test_diagnostic_serving_retains_storage_until_native_shutdown _________
+----------------------------- Captured stdout call -----------------------------
+Stopped; every rank drained and released its resources.
+----------------------------- Captured stderr call -----------------------------
+{"plan": {"alias": "qwen3.8-flash", "repository": "local-inference-lab/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD", "revision": "dc5b8ab2fa14bc4fecd6886273b7ebc6095662e2", "architecture": "Qwen4ExpForConditionalGeneration", "gpus": [{"index": 0, "name": "NVIDIA RTX PRO 6000 Blackwell", "uuid": "GPU-0000", "free_bytes": 102005473280, "total_bytes": 103079215104}], "tensor_parallel": 1, "max_concurrency": 4, "image_concurrency": 4, "prefill_chunk": 4096, "roce_ring": false, "context_parallel": false, "stream_overlap": true, "mixed_prefill": false, "expert_scale_compression": null, "mla_compute_mode": "auto", "compile_workers": null, "tuning_gpus": [], "speculative_token_capacity": 6, "online_mxfp8": false, "language_model_only": false, "speculation": {"draft_tokens": 5, "adaptive": true, "packed_verification": false, "proposal_source": "mtp", "history_drafts": false}, "context": 262144, "checkpoint_context": 262144, "weights_bytes": 76922648536, "mapped_host_bytes": 0, "graph_bytes": 7516192768, "mixed_shapes": [], "live_bytes": 610073600, "prefix_cache_states": 32, "prefix_cache_target": 32, "snapshot_virtual_bytes": 3904471040, "snapshots": 32, "pages": 17545, "demand_pages": 16384, "page_tokens": 64, "page_bytes": 15882014720, "tokens": 1122880, "guaranteed_tokens": 262144, "free_bytes": 102005473280, "headroom_bytes": 1073741824, "reserve_bytes": 0, "supply_bytes": 100931731456}}
+________ test_diagnostic_startup_failure_retains_undrained_host_storage ________
+----------------------------- Captured stderr call -----------------------------
+{"plan": {"alias": "qwen3.8-flash", "repository": "local-inference-lab/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD", "revision": "dc5b8ab2fa14bc4fecd6886273b7ebc6095662e2", "architecture": "Qwen4ExpForConditionalGeneration", "gpus": [{"index": 0, "name": "NVIDIA RTX PRO 6000 Blackwell", "uuid": "GPU-0000", "free_bytes": 102005473280, "total_bytes": 103079215104}], "tensor_parallel": 1, "max_concurrency": 4, "image_concurrency": 4, "prefill_chunk": 4096, "roce_ring": false, "context_parallel": false, "stream_overlap": true, "mixed_prefill": false, "expert_scale_compression": null, "mla_compute_mode": "auto", "compile_workers": null, "tuning_gpus": [], "speculative_token_capacity": 6, "online_mxfp8": false, "language_model_only": false, "speculation": {"draft_tokens": 5, "adaptive": true, "packed_verification": false, "proposal_source": "mtp", "history_drafts": false}, "context": 262144, "checkpoint_context": 262144, "weights_bytes": 76922648536, "mapped_host_bytes": 0, "graph_bytes": 7516192768, "mixed_shapes": [], "live_bytes": 610073600, "prefix_cache_states": 32, "prefix_cache_target": 32, "snapshot_virtual_bytes": 3904471040, "snapshots": 32, "pages": 17545, "demand_pages": 16384, "page_tokens": 64, "page_bytes": 15882014720, "tokens": 1122880, "guaranteed_tokens": 262144, "free_bytes": 102005473280, "headroom_bytes": 1073741824, "reserve_bytes": 0, "supply_bytes": 100931731456}}
+{"memory": [{}]}
+{"diagnostic_capacity": {"pages": 17545, "snapshots": 32}}
+_______________ test_preparation_flags_select_distinct_packages ________________
+----------------------------- Captured stderr call -----------------------------
+[━━━━━━━━━━] Resolve checkpoint.  0.0s
+[    OK    ] Resolve checkpoint.  qwen3.8-flash · dc5b8ab2 · cached  0.0s
+[━━━━━━━━━━] Select GPUs.  0.0s
+[    OK    ] Select GPUs.  GPU 0 · concurrency 2 · images 2 · exactly 2 draft tokens with history drafts · speculative token capacity 3 · mixed prefill off · expert scales native · compile work…  0.0s
+[━━━━━━━━━━] Export native package.  0.0s
+[    OK    ] Export native package.  <pytest-tmp>/pytest-31/test_preparation_flags_select_0/.cache/flare/packages/snapshots/1da34c860818e7f4ba47c18cec2733f957d67eb33951811d1245e03117161…  0.0s
+[━━━━━━━━━━] Resolve checkpoint.  0.0s
+[    OK    ] Resolve checkpoint.  qwen3.8-flash · dc5b8ab2 · cached  0.0s
+[━━━━━━━━━━] Select GPUs.  0.0s
+[    OK    ] Select GPUs.  GPU 0 · concurrency 4 · images 4 · speculation off · mixed prefill off · expert scales native · compile workers auto per host  0.0s
+[━━━━━━━━━━] Export native package.  0.0s
+[    OK    ] Export native package.  <pytest-tmp>/pytest-31/test_preparation_flags_select_0/.cache/flare/packages/snapshots/b64da8d0a6f5b74e33a98300b070b88e975fc1c734bb222873f29c7a229dd…  0.0s
+___ test_mixed_prefill_opt_in_prepares_and_reuses_a_separate_package[False] ____
+----------------------------- Captured stdout call -----------------------------
+Load cached runtime package. <pytest-tmp>/pytest-31/test_mixed_prefill_opt_in_prep0/.cache/flare/packages/snapshots/bf7a2e7a0df3d3bfa9b3759f7e242fe8d942302578c935ea9bd1063c9aad22f1/model.safetensors
+----------------------------- Captured stderr call -----------------------------
+[━━━━━━━━━━] Resolve checkpoint.  0.0s
+[    OK    ] Resolve checkpoint.  qwen3.8-flash · dc5b8ab2 · cached  0.0s
+[━━━━━━━━━━] Select GPUs.  0.0s
+[    OK    ] Select GPUs.  GPU 0 · concurrency 4 · images 4 · speculation off · branches serialized · mixed prefill on · expert scales native · compile workers auto per host  0.0s
+[━━━━━━━━━━] Export native package.  0.0s
+[    OK    ] Export native package.  <pytest-tmp>/pytest-31/test_mixed_prefill_opt_in_prep0/.cache/flare/packages/snapshots/7bf497e9f3aa9b06e01b151f230241e8fd0a456d134fb7fd375ee67fe7c60…  0.0s
+____ test_mixed_prefill_opt_in_prepares_and_reuses_a_separate_package[True] ____
+----------------------------- Captured stdout call -----------------------------
+Load cached runtime package. <pytest-tmp>/pytest-31/test_mixed_prefill_opt_in_prep1/.cache/flare/packages/snapshots/9fb3236efbae54e86148b3d1647fb1b16df0d3f4402133ed8dd824b389c7dc93/model.safetensors
+----------------------------- Captured stderr call -----------------------------
+[━━━━━━━━━━] Resolve checkpoint.  0.0s
+[    OK    ] Resolve checkpoint.  qwen3.8-flash · dc5b8ab2 · cached  0.0s
+[━━━━━━━━━━] Select GPUs.  0.0s
+[    OK    ] Select GPUs.  GPU 0 · concurrency 4 · images 4 · speculation off · mixed prefill on · expert scales native · compile workers auto per host  0.0s
+[━━━━━━━━━━] Export native package.  0.0s
+[    OK    ] Export native package.  <pytest-tmp>/pytest-31/test_mixed_prefill_opt_in_prep1/.cache/flare/packages/snapshots/8b97ae49b203e1f29fb47957eceab43f60fc5c9d1359846547d373da1dd20…  0.0s
+_ test_expert_scale_compression_reaches_preparation_and_package_cache[compression0] _
+----------------------------- Captured stdout call -----------------------------
+Load cached runtime package. <pytest-tmp>/pytest-31/test_expert_scale_compression_0/.cache/flare/packages/snapshots/fde1ff9a36f7067c3920cfe714f70c14db21b140d9de3e9432d92e0fd1855de0/model.safetensors
+_ test_expert_scale_compression_reaches_preparation_and_package_cache[compression1] _
+----------------------------- Captured stdout call -----------------------------
+Load cached runtime package. <pytest-tmp>/pytest-31/test_expert_scale_compression_1/.cache/flare/packages/snapshots/a7039e0a2d16d4a8f668adcd4554fdeeaeec45b48f7c601571851a30d6889e25/model.safetensors
+_ test_export_does_not_launch_a_server_and_preserves_the_serving_plan[False-False-0] _
+----------------------------- Captured stdout call -----------------------------
+Exported package: <pytest-tmp>/pytest-31/test_export_does_not_launch_a_0/package.safetensors
+----------------------------- Captured stderr call -----------------------------
+[━━━━━━━━━━] Resolve checkpoint.  0.0s
+[    OK    ] Resolve checkpoint.  qwen3.8-flash · dc5b8ab2 · cached  0.0s
+[━━━━━━━━━━] Select GPUs.  0.0s
+[    OK    ] Select GPUs.  GPU 0 · concurrency 4 · images 4 · up to 5 draft tokens · speculative token capacity 6 · branches serialized · mixed prefill off · expert scales native · compile work…  0.0s
+[━━━━━━━━━━] Export native package.  0.0s
+[    OK    ] Export native package.  <pytest-tmp>/pytest-31/test_export_does_not_launch_a_0/package.safetensors  0.0s
+error: export destination already exists: <pytest-tmp>/pytest-31/test_export_does_not_launch_a_0/package.safetensors
+_ test_export_does_not_launch_a_server_and_preserves_the_serving_plan[False-False-2147483648] _
+----------------------------- Captured stdout call -----------------------------
+Exported package: <pytest-tmp>/pytest-31/test_export_does_not_launch_a_1/package.safetensors
+----------------------------- Captured stderr call -----------------------------
+[━━━━━━━━━━] Resolve checkpoint.  0.0s
+[    OK    ] Resolve checkpoint.  qwen3.8-flash · dc5b8ab2 · cached  0.0s
+[━━━━━━━━━━] Select GPUs.  0.0s
+[    OK    ] Select GPUs.  GPU 0 · concurrency 4 · images 4 · up to 5 draft tokens · speculative token capacity 6 · branches serialized · mixed prefill off · expert scales native · compile work…  0.0s
+[━━━━━━━━━━] Export native package.  0.0s
+[    OK    ] Export native package.  <pytest-tmp>/pytest-31/test_export_does_not_launch_a_1/package.safetensors  0.0s
+error: export destination already exists: <pytest-tmp>/pytest-31/test_export_does_not_launch_a_1/package.safetensors
+_ test_export_does_not_launch_a_server_and_preserves_the_serving_plan[False-True-0] _
+----------------------------- Captured stdout call -----------------------------
+Exported package: <pytest-tmp>/pytest-31/test_export_does_not_launch_a_2/package.safetensors
+----------------------------- Captured stderr call -----------------------------
+[━━━━━━━━━━] Resolve checkpoint.  0.0s
+[    OK    ] Resolve checkpoint.  qwen3.8-flash · dc5b8ab2 · cached  0.0s
+[━━━━━━━━━━] Select GPUs.  0.0s
+[    OK    ] Select GPUs.  GPU 0 · concurrency 4 · images 4 · up to 5 draft tokens · speculative token capacity 6 · branches serialized · mixed prefill on · expert scales native · compile worke…  0.0s
+[━━━━━━━━━━] Export native package.  0.0s
+[    OK    ] Export native package.  <pytest-tmp>/pytest-31/test_export_does_not_launch_a_2/package.safetensors  0.0s
+error: export destination already exists: <pytest-tmp>/pytest-31/test_export_does_not_launch_a_2/package.safetensors
+_ test_export_does_not_launch_a_server_and_preserves_the_serving_plan[False-True-2147483648] _
+----------------------------- Captured stdout call -----------------------------
+Exported package: <pytest-tmp>/pytest-31/test_export_does_not_launch_a_3/package.safetensors
+----------------------------- Captured stderr call -----------------------------
+[━━━━━━━━━━] Resolve checkpoint.  0.0s
+[    OK    ] Resolve checkpoint.  qwen3.8-flash · dc5b8ab2 · cached  0.0s
+[━━━━━━━━━━] Select GPUs.  0.0s
+[    OK    ] Select GPUs.  GPU 0 · concurrency 4 · images 4 · up to 5 draft tokens · speculative token capacity 6 · branches serialized · mixed prefill on · expert scales native · compile worke…  0.0s
+[━━━━━━━━━━] Export native package.  0.0s
+[    OK    ] Export native package.  <pytest-tmp>/pytest-31/test_export_does_not_launch_a_3/package.safetensors  0.0s
+error: export destination already exists: <pytest-tmp>/pytest-31/test_export_does_not_launch_a_3/package.safetensors
+_ test_export_does_not_launch_a_server_and_preserves_the_serving_plan[True-False-0] _
+----------------------------- Captured stdout call -----------------------------
+Exported package: <pytest-tmp>/pytest-31/test_export_does_not_launch_a_4/package.safetensors
+----------------------------- Captured stderr call -----------------------------
+[━━━━━━━━━━] Resolve checkpoint.  0.0s
+[    OK    ] Resolve checkpoint.  qwen3.8-flash · dc5b8ab2 · cached  0.0s
+[━━━━━━━━━━] Select GPUs.  0.0s
+[    OK    ] Select GPUs.  GPU 0 · concurrency 4 · images 4 · up to 5 draft tokens · speculative token capacity 6 · mixed prefill off · expert scales native · compile workers auto per host  0.0s
+[━━━━━━━━━━] Export native package.  0.0s
+[    OK    ] Export native package.  <pytest-tmp>/pytest-31/test_export_does_not_launch_a_4/package.safetensors  0.0s
+error: export destination already exists: <pytest-tmp>/pytest-31/test_export_does_not_launch_a_4/package.safetensors
+_ test_export_does_not_launch_a_server_and_preserves_the_serving_plan[True-False-2147483648] _
+----------------------------- Captured stdout call -----------------------------
+Exported package: <pytest-tmp>/pytest-31/test_export_does_not_launch_a_5/package.safetensors
+----------------------------- Captured stderr call -----------------------------
+[━━━━━━━━━━] Resolve checkpoint.  0.0s
+[    OK    ] Resolve checkpoint.  qwen3.8-flash · dc5b8ab2 · cached  0.0s
+[━━━━━━━━━━] Select GPUs.  0.0s
+[    OK    ] Select GPUs.  GPU 0 · concurrency 4 · images 4 · up to 5 draft tokens · speculative token capacity 6 · mixed prefill off · expert scales native · compile workers auto per host  0.0s
+[━━━━━━━━━━] Export native package.  0.0s
+[    OK    ] Export native package.  <pytest-tmp>/pytest-31/test_export_does_not_launch_a_5/package.safetensors  0.0s
+error: export destination already exists: <pytest-tmp>/pytest-31/test_export_does_not_launch_a_5/package.safetensors
+_ test_export_does_not_launch_a_server_and_preserves_the_serving_plan[True-True-0] _
+----------------------------- Captured stdout call -----------------------------
+Exported package: <pytest-tmp>/pytest-31/test_export_does_not_launch_a_6/package.safetensors
+----------------------------- Captured stderr call -----------------------------
+[━━━━━━━━━━] Resolve checkpoint.  0.0s
+[    OK    ] Resolve checkpoint.  qwen3.8-flash · dc5b8ab2 · cached  0.0s
+[━━━━━━━━━━] Select GPUs.  0.0s
+[    OK    ] Select GPUs.  GPU 0 · concurrency 4 · images 4 · up to 5 draft tokens · speculative token capacity 6 · mixed prefill on · expert scales native · compile workers auto per host  0.0s
+[━━━━━━━━━━] Export native package.  0.0s
+[    OK    ] Export native package.  <pytest-tmp>/pytest-31/test_export_does_not_launch_a_6/package.safetensors  0.0s
+error: export destination already exists: <pytest-tmp>/pytest-31/test_export_does_not_launch_a_6/package.safetensors
+_ test_export_does_not_launch_a_server_and_preserves_the_serving_plan[True-True-2147483648] _
+----------------------------- Captured stdout call -----------------------------
+Exported package: <pytest-tmp>/pytest-31/test_export_does_not_launch_a_7/package.safetensors
+----------------------------- Captured stderr call -----------------------------
+[━━━━━━━━━━] Resolve checkpoint.  0.0s
+[    OK    ] Resolve checkpoint.  qwen3.8-flash · dc5b8ab2 · cached  0.0s
+[━━━━━━━━━━] Select GPUs.  0.0s
+[    OK    ] Select GPUs.  GPU 0 · concurrency 4 · images 4 · up to 5 draft tokens · speculative token capacity 6 · mixed prefill on · expert scales native · compile workers auto per host  0.0s
+[━━━━━━━━━━] Export native package.  0.0s
+[    OK    ] Export native package.  <pytest-tmp>/pytest-31/test_export_does_not_launch_a_7/package.safetensors  0.0s
+error: export destination already exists: <pytest-tmp>/pytest-31/test_export_does_not_launch_a_7/package.safetensors
+__________ test_listener_and_authentication_are_supplied_after_export __________
+----------------------------- Captured stderr call -----------------------------
+[━━━━━━━━━━] Resolve checkpoint.  0.0s
+[    OK    ] Resolve checkpoint.  qwen3.8-flash · dc5b8ab2 · cached  0.0s
+[━━━━━━━━━━] Select GPUs.  0.0s
+[    OK    ] Select GPUs.  GPU 0 · concurrency 4 · images 4 · up to 5 draft tokens · speculative token capacity 6 · mixed prefill off · expert scales native · compile workers auto per host  0.0s
+[━━━━━━━━━━] Export native package.  0.0s
+[    OK    ] Export native package.  <pytest-tmp>/pytest-31/test_listener_and_authenticati0/.cache/flare/packages/snapshots/6c5ba4760372b729cd9ddecc1ccb7dfa8a6805d28613c39fded260fed5455…  0.0s
+__________________ test_listener_flags_override_configuration __________________
+----------------------------- Captured stderr call -----------------------------
+[━━━━━━━━━━] Resolve checkpoint.  0.0s
+[    OK    ] Resolve checkpoint.  qwen3.8-flash · dc5b8ab2 · cached  0.0s
+[━━━━━━━━━━] Select GPUs.  0.0s
+[    OK    ] Select GPUs.  GPU 0 · concurrency 4 · images 4 · up to 5 draft tokens · speculative token capacity 6 · mixed prefill off · expert scales native · compile workers auto per host  0.0s
+[━━━━━━━━━━] Export native package.  0.0s
+[    OK    ] Export native package.  <pytest-tmp>/pytest-31/test_listener_flags_override_c0/.cache/flare/packages/snapshots/7062959343d7838debe7fd299233182087b58ee428627f7332c0ba119b5c1…  0.0s
+____________ test_prefix_cache_settings_are_forwarded_only_when_set ____________
+----------------------------- Captured stderr call -----------------------------
+[━━━━━━━━━━] Resolve checkpoint.  0.0s
+[    OK    ] Resolve checkpoint.  qwen3.8-flash · dc5b8ab2 · cached  0.0s
+[━━━━━━━━━━] Select GPUs.  0.0s
+[    OK    ] Select GPUs.  GPU 0 · concurrency 4 · images 4 · up to 5 draft tokens · speculative token capacity 6 · mixed prefill off · expert scales native · compile workers auto per host  0.0s
+[━━━━━━━━━━] Export native package.  0.0s
+[    OK    ] Export native package.  <pytest-tmp>/pytest-31/test_prefix_cache_settings_are0/.cache/flare/packages/snapshots/60b80d1b04a00772208549424ad5a2d7c66ded26605a9e62fd956a11c4c1c…  0.0s
+[━━━━━━━━━━] Resolve checkpoint.  0.0s
+[    OK    ] Resolve checkpoint.  qwen3.8-flash · dc5b8ab2 · cached  0.0s
+[━━━━━━━━━━] Select GPUs.  0.0s
+[    OK    ] Select GPUs.  GPU 0 · concurrency 4 · images 4 · up to 5 draft tokens · speculative token capacity 6 · mixed prefill off · expert scales native · compile workers auto per host  0.0s
+[━━━━━━━━━━] Export native package.  0.0s
+[    OK    ] Export native package.  <pytest-tmp>/pytest-31/test_prefix_cache_settings_are0/.cache/flare/packages/snapshots/689ef575b59c52ab68545c66a0bf44af582c7514047581503469bfc87dede…  0.0s
+_______________ test_an_address_in_use_fails_before_preparation ________________
+----------------------------- Captured stderr call -----------------------------
+error: --host must be an IP address; got 'localhost'
+_______________ test_uncached_checkpoint_downloads_before_export _______________
+----------------------------- Captured stderr call -----------------------------
+[━━━━━━━━━━] Resolve checkpoint.  0.0s
+[    OK    ] Resolve checkpoint.  qwen3.8-flash · dc5b8ab2 · not cached  0.0s
+[━━━━━━━━━━] Select GPUs.  0.0s
+[    OK    ] Select GPUs.  GPU 0 · concurrency 4 · images 4 · up to 5 draft tokens · speculative token capacity 6 · mixed prefill off · expert scales native · compile workers auto per host  0.0s
+[━━━━━━━━━━] Download checkpoint.  0.0s
+[    OK    ] Download checkpoint.  0.0s
+[━━━━━━━━━━] Export native package.  0.0s
+[    OK    ] Export native package.  <pytest-tmp>/pytest-31/test_uncached_checkpoint_downl0/.cache/flare/packages/snapshots/1d4a0f1517aabd18a32edfa62eb79f59d4e57c4a6cd1e68f38266cafac51b…  0.0s
+______ test_tensor_parallel_run_preserves_rank_selection_in_native_launch ______
+----------------------------- Captured stderr call -----------------------------
+[━━━━━━━━━━] Resolve checkpoint.  0.0s
+[    OK    ] Resolve checkpoint.  qwen3.8-flash · dc5b8ab2 · cached  0.0s
+[━━━━━━━━━━] Select GPUs.  0.0s
+[    OK    ] Select GPUs.  GPUs 0-1 · concurrency 4 · images 4 · up to 5 draft tokens · speculative token capacity 6 · mixed prefill off · expert scales native · compile workers auto per host  0.0s
+[━━━━━━━━━━] Export native package.  0.0s
+[    OK    ] Export native package.  <pytest-tmp>/pytest-31/test_tensor_parallel_run_prese0/.cache/flare/packages/snapshots/b3cef0897e4f6f9f4de18bfb74059d88aa0fa61c019df1e4f711be435b17d…  0.0s
+____________ test_run_approves_only_its_export_signer_and_namespace ____________
+----------------------------- Captured stderr call -----------------------------
+[━━━━━━━━━━] Resolve checkpoint.  0.0s
+[    OK    ] Resolve checkpoint.  qwen3.8-flash · dc5b8ab2 · cached  0.0s
+[━━━━━━━━━━] Select GPUs.  0.0s
+[    OK    ] Select GPUs.  GPU 0 · concurrency 4 · images 4 · up to 5 draft tokens · speculative token capacity 6 · mixed prefill off · expert scales native · compile workers auto per host  0.0s
+[━━━━━━━━━━] Export native package.  0.0s
+[    OK    ] Export native package.  <pytest-tmp>/pytest-31/test_run_approves_only_its_exp0/.cache/flare/packages/snapshots/573ef84f3be5030cf6891e6b4b304afaae9a074c102ed8729322d49bf06c1…  0.0s
+________ test_shard_policy_reaches_export_and_separates_cached_packages ________
+----------------------------- Captured stdout call -----------------------------
+Load cached runtime package. <pytest-tmp>/pytest-31/test_shard_policy_reaches_expo0/.cache/flare/packages/snapshots/d7e9dd29823bc121cae31a0d25db48055f845212b221767a9d2f5a664a7c2070/model.safetensors
+----------------------------- Captured stderr call -----------------------------
+[━━━━━━━━━━] Resolve checkpoint.  0.0s
+[    OK    ] Resolve checkpoint.  qwen3.8-flash · dc5b8ab2 · cached  0.0s
+[━━━━━━━━━━] Select GPUs.  0.0s
+[    OK    ] Select GPUs.  GPU 0 · concurrency 4 · images 4 · up to 5 draft tokens · speculative token capacity 6 · mixed prefill off · expert scales native · compile workers auto per host  0.0s
+[━━━━━━━━━━] Export native package.  0.0s
+[    OK    ] Export native package.  <pytest-tmp>/pytest-31/test_shard_policy_reaches_expo0/.cache/flare/packages/snapshots/d7e9dd29823bc121cae31a0d25db48055f845212b221767a9d2f5a664a7c2…  0.0s
+[━━━━━━━━━━] Resolve checkpoint.  0.0s
+[    OK    ] Resolve checkpoint.  qwen3.8-flash · dc5b8ab2 · cached  0.0s
+[━━━━━━━━━━] Select GPUs.  0.0s
+[    OK    ] Select GPUs.  GPU 0 · concurrency 4 · images 4 · up to 5 draft tokens · speculative token capacity 6 · mixed prefill off · expert scales native · compile workers auto per host  0.0s
+[━━━━━━━━━━] Export native package.  0.0s
+[    OK    ] Export native package.  <pytest-tmp>/pytest-31/test_shard_policy_reaches_expo0/.cache/flare/packages/snapshots/e2a4dee3b04257bc489177cce6368ee3866570b03bed6cfb91657432daa90…  0.0s
+_____ test_export_defaults_to_local_recipe_namespace_and_honors_repository _____
+----------------------------- Captured stdout call -----------------------------
+Exported package: <pytest-tmp>/pytest-31/test_export_defaults_to_local_0/.cache/flare/packages/models--example--custom/snapshots/167423fb942d41aca3412aa3ea940593/model.safetensors
+Hugging Face target: example/custom
+----------------------------- Captured stderr call -----------------------------
+[━━━━━━━━━━] Resolve checkpoint.  0.0s
+[    OK    ] Resolve checkpoint.  qwen3.8-flash · dc5b8ab2 · cached  0.0s
+[━━━━━━━━━━] Select GPUs.  0.0s
+[    OK    ] Select GPUs.  GPU 0 · concurrency 4 · images 4 · up to 5 draft tokens · speculative token capacity 6 · mixed prefill off · expert scales native · compile workers auto per host  0.0s
+[━━━━━━━━━━] Export native package.  0.0s
+[    OK    ] Export native package.  <pytest-tmp>/pytest-31/test_export_defaults_to_local_0/.cache/flare/packages/models--example--custom/snapshots/167423fb942d41aca3412aa3ea940593/mode…  0.0s
+______________ test_no_weights_requires_cache_before_preparation _______________
+----------------------------- Captured stderr call -----------------------------
+error: export repository must be a portable namespace/repository identifier
+___ ArchitectureTests.test_artifact_hash_and_incomplete_capture_fail_closed ____
+----------------------------- Captured stdout call -----------------------------
+uu [ 88%]
+u
+_ ArchitectureTests.test_capability_default_stays_sm70_and_explicit_sm120_is_required _
+----------------------------- Captured stdout call -----------------------------
+uuuu
+_ ArchitectureTests.test_comparison_rejects_mismatched_source_checkpoint_and_reference _
+----------------------------- Captured stdout call -----------------------------
+uuuu
+_ ArchitectureTests.test_context_partial_vocabulary_nonfinite_and_forged_greedy_rejected _
+----------------------------- Captured stdout call -----------------------------
+uuuuu
+_ ArchitectureTests.test_mtp_catalog_selects_only_ordinary_graphs_and_rejects_missing_ordinary_variants _
+----------------------------- Captured stdout call -----------------------------
+uuuuuu
+____________ HarnessTests.test_export_cannot_omit_any_release_gate _____________
+----------------------------- Captured stdout call -----------------------------
+uuuuuuuuuu
+_ HarnessTests.test_native_requires_all_qualification_results_and_exact_primary _
+----------------------------- Captured stdout call -----------------------------
+uuuuuuuuuuuuuu
+__ BuildPathsTest.test_explicit_and_default_caches_are_used_by_every_library ___
+----------------------------- Captured stdout call -----------------------------
+u [ 96%]
+uuu
+_ DensePlanTest.test_unqualified_precision_bias_padding_and_shapes_are_not_admitted _
+----------------------------- Captured stdout call -----------------------------
+uuuuuuuuuuuuu
+=========================== short test summary info ============================
+PASSED tests/cli/test_commands.py::test_run_uses_the_configured_model
+PASSED tests/cli/test_commands.py::test_failures_use_the_documented_exit_codes[arguments0-2-supported models: qwen3.8-flash, qwen3.8-27b, glm-5.3-flash]
+PASSED tests/cli/test_commands.py::test_failures_use_the_documented_exit_codes[arguments1-2---gpus expects indices]
+PASSED tests/cli/test_commands.py::test_failures_use_the_documented_exit_codes[arguments2-2-does not have]
+PASSED tests/cli/test_commands.py::test_failures_use_the_documented_exit_codes[arguments3-2-1 through 64]
+PASSED tests/cli/test_commands.py::test_failures_use_the_documented_exit_codes[arguments4-4-needs 1 or 2 or 4 GPUs; 3 selected; use --gpus 0-3]
+PASSED tests/cli/test_commands.py::test_failures_use_the_documented_exit_codes[arguments5-2---mixed-prefill: glm-5.3-flash does not capture mixed prefill/decode graphs]
+PASSED tests/cli/test_commands.py::test_capacity_errors_exit_four_with_aligned_continuation_lines
+PASSED tests/cli/test_commands.py::test_unknown_commands_flags_and_abbreviations_are_usage_errors
+PASSED tests/cli/test_commands.py::test_multi_host_ranks_parse_for_rank_zero_and_its_peers
+PASSED tests/cli/test_commands.py::test_runtime_memory_flags_accept_both_value_spellings[30g]
+PASSED tests/cli/test_commands.py::test_runtime_memory_flags_accept_both_value_spellings[-30g]
+PASSED tests/cli/test_commands.py::test_runtime_memory_flags_accept_both_value_spellings[0.8]
+PASSED tests/cli/test_commands.py::test_runtime_memory_flags_accept_both_value_spellings[1]
+PASSED tests/cli/test_commands.py::test_runtime_memory_flags_accept_both_value_spellings[1.5GiB]
+PASSED tests/cli/test_commands.py::test_runtime_memory_flags_accept_both_value_spellings[0.001K]
+PASSED tests/cli/test_commands.py::test_invalid_runtime_memory_limits_fail_before_preparation[0]
+PASSED tests/cli/test_commands.py::test_invalid_runtime_memory_limits_fail_before_preparation[0G]
+PASSED tests/cli/test_commands.py::test_invalid_runtime_memory_limits_fail_before_preparation[-0G]
+PASSED tests/cli/test_commands.py::test_invalid_runtime_memory_limits_fail_before_preparation[-0.8]
+PASSED tests/cli/test_commands.py::test_invalid_runtime_memory_limits_fail_before_preparation[1.1]
+PASSED tests/cli/test_commands.py::test_invalid_runtime_memory_limits_fail_before_preparation[30]
+PASSED tests/cli/test_commands.py::test_invalid_runtime_memory_limits_fail_before_preparation[NaN]
+PASSED tests/cli/test_commands.py::test_invalid_runtime_memory_limits_fail_before_preparation[inf]
+PASSED tests/cli/test_commands.py::test_invalid_runtime_memory_limits_fail_before_preparation[1e-1]
+PASSED tests/cli/test_commands.py::test_invalid_runtime_memory_limits_fail_before_preparation[--2G]
+PASSED tests/cli/test_commands.py::test_invalid_runtime_memory_limits_fail_before_preparation[2P]
+PASSED tests/cli/test_commands.py::test_runtime_memory_flags_do_not_select_preparation_or_diagnostic_behavior
+PASSED tests/cli/test_commands.py::test_empty_served_model_name_is_rejected_before_preparation[]
+PASSED tests/cli/test_commands.py::test_empty_served_model_name_is_rejected_before_preparation[ ]
+PASSED tests/cli/test_commands.py::test_empty_served_model_name_is_rejected_before_preparation[\t]
+PASSED tests/cli/test_commands.py::test_served_model_name_is_a_runtime_override
+PASSED tests/cli/test_commands.py::test_stream_overlap_flag_is_a_preparation_flag_that_overlapping_recipes_accept
+PASSED tests/cli/test_commands.py::test_direct_execution_is_an_explicit_serve_diagnostic
+PASSED tests/cli/test_commands.py::test_speculation_flags_override_the_recipe
+PASSED tests/cli/test_commands.py::test_deepseek_defaults_to_five_adaptive_drafts_and_accepts_explicit_overrides
+PASSED tests/cli/test_commands.py::test_invalid_speculation_flags_are_usage_errors[arguments0---no-mtp disables speculation; --mtp-draft-tokens cannot]
+PASSED tests/cli/test_commands.py::test_invalid_speculation_flags_are_usage_errors[arguments1---no-mtp disables speculation; --no-mtp-adaptive-verification cannot accompany it]
+PASSED tests/cli/test_commands.py::test_invalid_speculation_flags_are_usage_errors[arguments2---no-mtp disables speculation; --history-drafts cannot accompany it]
+PASSED tests/cli/test_commands.py::test_invalid_speculation_flags_are_usage_errors[arguments3---mtp-draft-tokens must be 0 through 7; --no-mtp disables speculation]
+PASSED tests/cli/test_commands.py::test_invalid_speculation_flags_are_usage_errors[arguments4---mtp-draft-tokens must be 0 through 7]
+PASSED tests/cli/test_commands.py::test_speculation_flags_have_one_spelling
+PASSED tests/cli/test_commands.py::test_history_copy_flags_apply_only_to_recipes_that_support_them
+PASSED tests/cli/test_commands.py::test_fetch_downloads_the_pinned_revision_into_the_hub_cache
+PASSED tests/cli/test_commands.py::test_deepseek_v4_vision_uses_only_checkpoint_integrated_dspark
+PASSED tests/cli/test_commands.py::test_roce_ring_requires_multiple_hosts_before_model_or_gpu_work
+PASSED tests/cli/test_config.py::test_absent_default_file_yields_built_in_values
+PASSED tests/cli/test_config.py::test_an_explicit_missing_file_is_a_usage_error
+PASSED tests/cli/test_config.py::test_flags_override_the_file_which_overrides_the_recipe
+PASSED tests/cli/test_config.py::test_prefix_cache_settings_validate_and_forward
+PASSED tests/cli/test_config.py::test_recipe_supplies_concurrency_when_the_file_is_silent
+PASSED tests/cli/test_config.py::test_image_concurrency_configuration_is_scoped_to_vision_and_flags_win
+PASSED tests/cli/test_config.py::test_compiler_worker_flag_overrides_configured_host_budget
+PASSED tests/cli/test_config.py::test_invalid_files_are_usage_errors[[memory]\nfraction = 0.9\n-unknown key fraction]
+PASSED tests/cli/test_config.py::test_invalid_files_are_usage_errors[[engine]\npages = 4\n-unknown section]
+PASSED tests/cli/test_config.py::test_invalid_files_are_usage_errors[[server]\nport = "8000"\n-port in .* must be int]
+PASSED tests/cli/test_config.py::test_invalid_files_are_usage_errors[[server]\nport = 70000\n-1 through 65535]
+PASSED tests/cli/test_config.py::test_invalid_files_are_usage_errors[[defaults]\nmax_concurrency = true\n-must be int]
+PASSED tests/cli/test_config.py::test_invalid_files_are_usage_errors[[defaults]\nmax_concurrency = 0\n-at least 1]
+PASSED tests/cli/test_config.py::test_invalid_files_are_usage_errors[[defaults]\nspeculative_token_capacity = 0\n-at least 1]
+PASSED tests/cli/test_config.py::test_invalid_files_are_usage_errors[[memory]\nconversation_cache = 16\n-unknown key conversation_cache]
+PASSED tests/cli/test_config.py::test_invalid_files_are_usage_errors[[memory]\nreserve = "lots"\n-memory size]
+PASSED tests/cli/test_config.py::test_invalid_files_are_usage_errors[[memory]\nreserve = 16\n-must be str]
+PASSED tests/cli/test_config.py::test_invalid_files_are_usage_errors[[models."qwen3.8-flash"]\ncontext = 4096\n-unknown key context]
+PASSED tests/cli/test_config.py::test_invalid_files_are_usage_errors[server = 3\n-must be a table]
+PASSED tests/cli/test_config.py::test_invalid_files_are_usage_errors[[server\n-config.toml]
+PASSED tests/cli/test_config.py::test_sizes_use_binary_units[0-0]
+PASSED tests/cli/test_config.py::test_sizes_use_binary_units[4096-4096]
+PASSED tests/cli/test_config.py::test_sizes_use_binary_units[16G-17179869184]
+PASSED tests/cli/test_config.py::test_sizes_use_binary_units[16g-17179869184]
+PASSED tests/cli/test_config.py::test_sizes_use_binary_units[1.5G-1610612736]
+PASSED tests/cli/test_config.py::test_sizes_use_binary_units[512M-536870912]
+PASSED tests/cli/test_config.py::test_sizes_use_binary_units[8 GiB-8589934592]
+PASSED tests/cli/test_config.py::test_sizes_use_binary_units[2T-2199023255552]
+PASSED tests/cli/test_config.py::test_sizes_use_binary_units[64K-65536]
+PASSED tests/cli/test_config.py::test_malformed_sizes_are_usage_errors[]
+PASSED tests/cli/test_config.py::test_malformed_sizes_are_usage_errors[G]
+PASSED tests/cli/test_config.py::test_malformed_sizes_are_usage_errors[-1G]
+PASSED tests/cli/test_config.py::test_malformed_sizes_are_usage_errors[16X]
+PASSED tests/cli/test_config.py::test_malformed_sizes_are_usage_errors[1e3]
+PASSED tests/cli/test_config.py::test_shard_size_uses_binary_units_and_flags_override_configuration
+PASSED tests/cli/test_development_signing.py::test_development_key_is_private_stable_and_has_a_separate_public_profile
+PASSED tests/cli/test_development_signing.py::test_insecure_existing_development_key_is_not_silently_replaced
+PASSED tests/cli/test_draft_checkpoints.py::test_draft_preparation_selects_local_or_hub_snapshot[False-False-nemotron_h-False]
+PASSED tests/cli/test_draft_checkpoints.py::test_draft_preparation_selects_local_or_hub_snapshot[False-False-kimi3-False]
+PASSED tests/cli/test_draft_checkpoints.py::test_draft_preparation_selects_local_or_hub_snapshot[False-False-kimi3-True]
+PASSED tests/cli/test_draft_checkpoints.py::test_draft_preparation_selects_local_or_hub_snapshot[False-True-nemotron_h-False]
+PASSED tests/cli/test_draft_checkpoints.py::test_draft_preparation_selects_local_or_hub_snapshot[False-True-kimi3-False]
+PASSED tests/cli/test_draft_checkpoints.py::test_draft_preparation_selects_local_or_hub_snapshot[False-True-kimi3-True]
+PASSED tests/cli/test_draft_checkpoints.py::test_draft_preparation_selects_local_or_hub_snapshot[True-False-nemotron_h-False]
+PASSED tests/cli/test_draft_checkpoints.py::test_draft_preparation_selects_local_or_hub_snapshot[True-False-kimi3-False]
+PASSED tests/cli/test_draft_checkpoints.py::test_draft_preparation_selects_local_or_hub_snapshot[True-False-kimi3-True]
+PASSED tests/cli/test_draft_checkpoints.py::test_draft_preparation_selects_local_or_hub_snapshot[True-True-nemotron_h-False]
+PASSED tests/cli/test_draft_checkpoints.py::test_draft_preparation_selects_local_or_hub_snapshot[True-True-kimi3-False]
+PASSED tests/cli/test_draft_checkpoints.py::test_draft_preparation_selects_local_or_hub_snapshot[True-True-kimi3-True]
+PASSED tests/cli/test_gpu_discovery.py::test_discrete_discovery_does_not_initialize_cuda
+PASSED tests/cli/test_gpu_discovery.py::test_non_cuda_nvml_devices_are_skipped_without_renumbering_gpus[0]
+PASSED tests/cli/test_gpu_discovery.py::test_non_cuda_nvml_devices_are_skipped_without_renumbering_gpus[1]
+PASSED tests/cli/test_gpu_discovery.py::test_integrated_discovery_uses_available_dram_without_swap[100-100]
+PASSED tests/cli/test_gpu_discovery.py::test_integrated_discovery_uses_available_dram_without_swap[128-121]
+PASSED tests/cli/test_gpu_discovery.py::test_missing_vram_report_requires_an_integrated_device
+PASSED tests/cli/test_gpu_discovery.py::test_integrated_discovery_requires_available_memory
+PASSED tests/cli/test_gpu_discovery.py::test_windows_integrated_budget_includes_shared_memory_and_releases_context[False]
+PASSED tests/cli/test_gpu_discovery.py::test_windows_integrated_budget_includes_shared_memory_and_releases_context[True]
+PASSED tests/cli/test_gpu_discovery.py::test_windows_discrete_gpu_uses_nvml_without_creating_context
+PASSED tests/cli/test_help.py::test_mla_arithmetic_flag_defaults_and_override[run]
+PASSED tests/cli/test_help.py::test_mla_arithmetic_flag_defaults_and_override[export]
+PASSED tests/cli/test_help.py::test_mla_arithmetic_flag_defaults_and_override[serve]
+PASSED tests/cli/test_help.py::test_help_lists_every_recipe[command0]
+PASSED tests/cli/test_help.py::test_help_lists_every_recipe[command1]
+PASSED tests/cli/test_help.py::test_help_lists_every_recipe[command2]
+PASSED tests/cli/test_help.py::test_help_lists_every_recipe[command3]
+PASSED tests/cli/test_help.py::test_model_help_explains_step5_limits_and_compression[run]
+PASSED tests/cli/test_help.py::test_model_help_explains_step5_limits_and_compression[export]
+PASSED tests/cli/test_help.py::test_model_help_explains_step5_limits_and_compression[serve]
+PASSED tests/cli/test_help.py::test_help_for_all_aliases_and_repositories_needs_no_model_dependencies
+PASSED tests/cli/test_help.py::test_optional_features_follow_the_selected_recipe
+PASSED tests/cli/test_help.py::test_export_command_accepts_bare_and_explicit_compression[flag0]
+PASSED tests/cli/test_help.py::test_export_command_accepts_bare_and_explicit_compression[flag1]
+PASSED tests/cli/test_help.py::test_export_command_accepts_bare_and_explicit_compression[flag2]
+PASSED tests/cli/test_help.py::test_mistyped_alias_suggests_step5
+PASSED tests/cli/test_models.py::test_declarations_import_without_model_dependencies
+PASSED tests/cli/test_models.py::test_alias_and_repository_resolve_to_the_declared_checkpoint
+PASSED tests/cli/test_models.py::test_a_directory_is_served_by_the_recipe_for_its_architecture
+PASSED tests/cli/test_models.py::test_another_repository_is_served_by_the_recipe_for_its_architecture
+PASSED tests/cli/test_models.py::test_a_different_revision_of_a_declared_repository_is_not_the_pinned_checkpoint
+PASSED tests/cli/test_models.py::test_unknown_aliases_list_the_supported_aliases[qwen]
+PASSED tests/cli/test_models.py::test_unknown_aliases_list_the_supported_aliases[Qwen3.8-Flash]
+PASSED tests/cli/test_models.py::test_unknown_aliases_list_the_supported_aliases[qwen3.8-flash@main]
+PASSED tests/cli/test_models.py::test_repositories_that_are_missing_unsupported_or_unreachable_are_rejected
+PASSED tests/cli/test_models.py::test_directories_without_a_supported_architecture_are_usage_errors
+PASSED tests/cli/test_models.py::test_cached_requires_the_index_and_every_tensor_file
+PASSED tests/cli/test_models.py::test_cached_snapshot_matches_repository_case_and_prefers_complete_shards[absent]
+PASSED tests/cli/test_models.py::test_cached_snapshot_matches_repository_case_and_prefers_complete_shards[partial]
+PASSED tests/cli/test_models.py::test_cached_snapshot_matches_repository_case_and_prefers_complete_shards[complete]
+PASSED tests/cli/test_models.py::test_cache_lookup_requires_the_requested_repository_revision_and_all_shards[revision]
+PASSED tests/cli/test_models.py::test_cache_lookup_requires_the_requested_repository_revision_and_all_shards[repository]
+PASSED tests/cli/test_models.py::test_cache_lookup_requires_the_requested_repository_revision_and_all_shards[missing_shard]
+PASSED tests/cli/test_models.py::test_cache_lookup_requires_the_requested_repository_revision_and_all_shards[invalid_index]
+PASSED tests/cli/test_models.py::test_declared_repository_casing_preserves_the_pinned_checkpoint_without_hub_requests[False]
+PASSED tests/cli/test_models.py::test_declared_repository_casing_preserves_the_pinned_checkpoint_without_hub_requests[True]
+PASSED tests/cli/test_models.py::test_local_export_size_is_validated_by_recipe
+PASSED tests/cli/test_models.py::test_named_checkpoint_allows_different_export_size
+PASSED tests/cli/test_models.py::test_local_export_requires_valid_size[None]
+PASSED tests/cli/test_models.py::test_local_export_requires_valid_size[0]
+PASSED tests/cli/test_models.py::test_local_export_requires_valid_size[-1]
+PASSED tests/cli/test_models.py::test_local_export_requires_valid_size[True]
+PASSED tests/cli/test_models.py::test_local_export_requires_valid_size[7]
+PASSED tests/cli/test_models.py::test_declared_ranges_are_consistent
+PASSED tests/cli/test_models.py::test_local_checkpoint_alias_uses_actual_directory
+PASSED tests/cli/test_models.py::test_alias_preserves_selected_checkpoint_when_directory_is_shared
+PASSED tests/cli/test_planning.py::test_pages_take_all_remaining_supply
+PASSED tests/cli/test_planning.py::test_mla_arithmetic_is_explicit_plan_metadata_without_changing_capacity
+PASSED tests/cli/test_planning.py::test_explicit_mla_arithmetic_selects_a_distinct_package_cache_entry
+PASSED tests/cli/test_planning.py::test_image_concurrency_defaults_and_explicit_capacity
+PASSED tests/cli/test_planning.py::test_expert_scale_compression_changes_weight_budget_and_preserves_native_default
+PASSED tests/cli/test_planning.py::test_live_state_counts_only_null_live_and_speculative_rows
+PASSED tests/cli/test_planning.py::test_snapshot_slots_share_the_page_budget
+PASSED tests/cli/test_planning.py::test_speculation_settings_select_weights_rows_and_pages
+PASSED tests/cli/test_planning.py::test_speculation_settings_are_validated_and_described
+PASSED tests/cli/test_planning.py::test_headroom_grows_with_prefill_chunk_tokens_past_4096
+PASSED tests/cli/test_planning.py::test_prefill_chunk_defaults_to_the_recipe_and_accepts_an_override
+PASSED tests/cli/test_planning.py::test_context_parallel_pages_hold_every_rank_share_unless_disabled
+PASSED tests/cli/test_planning.py::test_context_parallelism_follows_the_flag
+PASSED tests/cli/test_planning.py::test_serialized_branches_are_planned_and_recorded_without_changing_memory
+PASSED tests/cli/test_planning.py::test_stream_overlap_flag_applies_only_to_recipes_that_overlap_branches
+PASSED tests/cli/test_planning.py::test_language_model_only_plans_no_images_for_recipes_that_declare_it
+PASSED tests/cli/test_planning.py::test_first_fitting_gpus_and_smallest_supported_tensor_parallel_size
+PASSED tests/cli/test_planning.py::test_explicit_gpus_set_the_tensor_parallel_size
+PASSED tests/cli/test_planning.py::test_concurrency_outside_the_recipe_range_is_a_usage_error[0]
+PASSED tests/cli/test_planning.py::test_concurrency_outside_the_recipe_range_is_a_usage_error[65]
+PASSED tests/cli/test_planning.py::test_every_capacity_error_option_fits_on_its_own[arguments0-expected0]
+PASSED tests/cli/test_planning.py::test_every_capacity_error_option_fits_on_its_own[arguments1-expected1]
+PASSED tests/cli/test_planning.py::test_every_capacity_error_option_fits_on_its_own[arguments2-expected2]
+PASSED tests/cli/test_planning.py::test_every_capacity_error_option_fits_on_its_own[arguments3-expected3]
+PASSED tests/cli/test_planning.py::test_every_capacity_error_option_fits_on_its_own[arguments4-expected4]
+PASSED tests/cli/test_planning.py::test_every_capacity_error_option_fits_on_its_own[arguments5-expected5]
+PASSED tests/cli/test_planning.py::test_capacity_error_states_requirement_and_supply
+PASSED tests/cli/test_planning.py::test_capacity_error_without_a_working_setting_says_so
+PASSED tests/cli/test_planning.py::test_automatic_selection_explains_the_closest_tensor_parallel_size
+PASSED tests/cli/test_planning.py::test_estimate_record
+PASSED tests/cli/test_planning.py::test_gpu_lists_and_restrictions
+PASSED tests/cli/test_planning.py::test_unified_memory_gpus_plan_from_their_reported_free_memory
+PASSED tests/cli/test_planning.py::test_tuning_devices_keep_serving_capacity_and_tensor_parallel_size
+PASSED tests/cli/test_planning.py::test_tuning_devices_reject_invalid_replica_groups[1,0-start with the serving GPUs]
+PASSED tests/cli/test_planning.py::test_tuning_devices_reject_invalid_replica_groups[0-2-complete TP replicas]
+PASSED tests/cli/test_planning.py::test_tuning_devices_reject_invalid_replica_groups[0,1,6,7-outside the visible device list]
+PASSED tests/cli/test_planning.py::test_tuning_devices_require_matching_hardware_and_memory[helper0-model and architecture]
+PASSED tests/cli/test_planning.py::test_tuning_devices_require_matching_hardware_and_memory[helper1-model and architecture]
+PASSED tests/cli/test_planning.py::test_tuning_devices_require_matching_hardware_and_memory[helper2-needs at least]
+PASSED tests/cli/test_planning.py::test_compiler_budget_rejects_more_local_ranks_than_workers[model0-1-None-local serving rank]
+PASSED tests/cli/test_planning.py::test_compiler_budget_rejects_more_local_ranks_than_workers[model1-1-0,1-local tuning rank]
+PASSED tests/cli/test_planning.py::test_recipe_b12x_settings_name_b12x_variables
+PASSED tests/cli/test_production_signing.py::test_encrypted_key_and_public_profile
+PASSED tests/cli/test_production_signing.py::test_no_passphrase_fallback_to_piped_input
+PASSED tests/cli/test_production_signing.py::test_invalid_generation_leaves_no_directory
+PASSED tests/cli/test_production_signing.py::test_terminal_echo_failure_cannot_expose_passphrase
+PASSED tests/cli/test_production_signing.py::test_key_password_cli_preserves_identity_and_signed_messages
+PASSED tests/cli/test_production_signing.py::test_password_change_failure_preserves_original_key[wrong_password]
+PASSED tests/cli/test_production_signing.py::test_password_change_failure_preserves_original_key[mismatch]
+PASSED tests/cli/test_production_signing.py::test_password_change_failure_preserves_original_key[short]
+PASSED tests/cli/test_production_signing.py::test_password_change_failure_preserves_original_key[replace]
+PASSED tests/cli/test_production_signing.py::test_password_change_failure_preserves_original_key[interrupted]
+PASSED tests/cli/test_production_signing.py::test_password_change_refuses_to_overwrite_a_replaced_key
+PASSED tests/cli/test_production_signing.py::test_password_change_reports_replacement_when_directory_sync_fails
+PASSED tests/cli/test_progress.py::test_a_wide_console_prints_the_whole_row
+PASSED tests/cli/test_progress.py::test_a_narrow_console_shortens_the_detail_and_keeps_status_and_timing
+PASSED tests/cli/test_serve.py::test_run_exports_then_replaces_python_with_flare_and_reuses_the_package
+PASSED tests/cli/test_serve.py::test_runtime_memory_flags_are_forwarded_without_preparing_another_package
+PASSED tests/cli/test_serve.py::test_server_options_advertise_canonical_names_independently_of_checkpoint_source[checkpoint-qwen3.8-flash-Qwen3.8-Flash-Next]
+PASSED tests/cli/test_serve.py::test_server_options_advertise_canonical_names_independently_of_checkpoint_source[checkpoint-qwen3.8-27b-Qwen3.8-27B]
+PASSED tests/cli/test_serve.py::test_server_options_advertise_canonical_names_independently_of_checkpoint_source[checkpoint-glm-5.3-flash-GLM-5.3-Flash]
+PASSED tests/cli/test_serve.py::test_server_options_advertise_canonical_names_independently_of_checkpoint_source[checkpoint-deepseek-v4.1-flash-DeepSeek-V4.1-Flash]
+PASSED tests/cli/test_serve.py::test_server_options_advertise_canonical_names_independently_of_checkpoint_source[checkpoint-deepseek-v4-flash-DeepSeek-V4-Flash-Vision-Exp]
+PASSED tests/cli/test_serve.py::test_server_options_advertise_canonical_names_independently_of_checkpoint_source[checkpoint-mimo-v2.6-pro-mopd-MiMo-V2.6-Pro-MOPD]
+PASSED tests/cli/test_serve.py::test_server_options_advertise_canonical_names_independently_of_checkpoint_source[checkpoint-kimi-k3-mxfp4-csf-Kimi-K3]
+PASSED tests/cli/test_serve.py::test_server_options_advertise_canonical_names_independently_of_checkpoint_source[checkpoint-kimi-k3-Kimi-K3]
+PASSED tests/cli/test_serve.py::test_server_options_advertise_canonical_names_independently_of_checkpoint_source[checkpoint-kimi-k3-dspark-Kimi-K3]
+PASSED tests/cli/test_serve.py::test_server_options_advertise_canonical_names_independently_of_checkpoint_source[checkpoint-step5-preview-nvfp4-Step-5-Preview]
+PASSED tests/cli/test_serve.py::test_server_options_advertise_canonical_names_independently_of_checkpoint_source[checkpoint-nemotron-bolt-24gb-NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB]
+PASSED tests/cli/test_serve.py::test_server_options_advertise_canonical_names_independently_of_checkpoint_source[local-directory-qwen3.8-flash-Qwen3.8-Flash-Next]
+PASSED tests/cli/test_serve.py::test_server_options_advertise_canonical_names_independently_of_checkpoint_source[local-directory-qwen3.8-27b-Qwen3.8-27B]
+PASSED tests/cli/test_serve.py::test_server_options_advertise_canonical_names_independently_of_checkpoint_source[local-directory-glm-5.3-flash-GLM-5.3-Flash]
+PASSED tests/cli/test_serve.py::test_server_options_advertise_canonical_names_independently_of_checkpoint_source[local-directory-deepseek-v4.1-flash-DeepSeek-V4.1-Flash]
+PASSED tests/cli/test_serve.py::test_server_options_advertise_canonical_names_independently_of_checkpoint_source[local-directory-deepseek-v4-flash-DeepSeek-V4-Flash-Vision-Exp]
+PASSED tests/cli/test_serve.py::test_server_options_advertise_canonical_names_independently_of_checkpoint_source[local-directory-mimo-v2.6-pro-mopd-MiMo-V2.6-Pro-MOPD]
+PASSED tests/cli/test_serve.py::test_server_options_advertise_canonical_names_independently_of_checkpoint_source[local-directory-kimi-k3-mxfp4-csf-Kimi-K3]
+PASSED tests/cli/test_serve.py::test_server_options_advertise_canonical_names_independently_of_checkpoint_source[local-directory-kimi-k3-Kimi-K3]
+PASSED tests/cli/test_serve.py::test_server_options_advertise_canonical_names_independently_of_checkpoint_source[local-directory-kimi-k3-dspark-Kimi-K3]
+PASSED tests/cli/test_serve.py::test_server_options_advertise_canonical_names_independently_of_checkpoint_source[local-directory-step5-preview-nvfp4-Step-5-Preview]
+PASSED tests/cli/test_serve.py::test_server_options_advertise_canonical_names_independently_of_checkpoint_source[local-directory-nemotron-bolt-24gb-NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB]
+PASSED tests/cli/test_serve.py::test_served_model_name_is_forwarded_without_changing_the_package_alias
+PASSED tests/cli/test_serve.py::test_diagnostic_serving_requires_native_http_before_preparation[None]
+PASSED tests/cli/test_serve.py::test_diagnostic_serving_requires_native_http_before_preparation[extension1]
+PASSED tests/cli/test_serve.py::test_direct_serving_does_not_require_native_http
+PASSED tests/cli/test_serve.py::test_diagnostic_serving_retains_storage_until_native_shutdown
+PASSED tests/cli/test_serve.py::test_diagnostic_startup_failure_retains_undrained_host_storage
+PASSED tests/cli/test_serve.py::test_diagnostic_admission_uses_backed_rows_without_changing_export[64-6-512-449-64-False]
+PASSED tests/cli/test_serve.py::test_diagnostic_admission_uses_backed_rows_without_changing_export[64-6-512-449-64-True]
+PASSED tests/cli/test_serve.py::test_diagnostic_admission_uses_backed_rows_without_changing_export[1-6-512-8-1-False]
+PASSED tests/cli/test_serve.py::test_diagnostic_admission_uses_backed_rows_without_changing_export[1-6-512-8-1-True]
+PASSED tests/cli/test_serve.py::test_diagnostic_admission_uses_backed_rows_without_changing_export[4-1-16-21-16-False]
+PASSED tests/cli/test_serve.py::test_diagnostic_admission_uses_backed_rows_without_changing_export[4-1-16-21-16-True]
+PASSED tests/cli/test_serve.py::test_diagnostic_admission_uses_backed_rows_without_changing_export[3-6-512-33-8-False]
+PASSED tests/cli/test_serve.py::test_diagnostic_admission_uses_backed_rows_without_changing_export[3-6-512-33-8-True]
+PASSED tests/cli/test_serve.py::test_diagnostic_admission_uses_backed_rows_without_changing_export[4-1-32-9-4-False]
+PASSED tests/cli/test_serve.py::test_diagnostic_admission_uses_backed_rows_without_changing_export[4-1-32-9-4-True]
+PASSED tests/cli/test_serve.py::test_diagnostic_admission_rejects_insufficient_execution_backing
+PASSED tests/cli/test_serve.py::test_preparation_flags_select_distinct_packages
+PASSED tests/cli/test_serve.py::test_mixed_prefill_opt_in_prepares_and_reuses_a_separate_package[False]
+PASSED tests/cli/test_serve.py::test_mixed_prefill_opt_in_prepares_and_reuses_a_separate_package[True]
+PASSED tests/cli/test_serve.py::test_expert_scale_compression_reaches_preparation_and_package_cache[compression0]
+PASSED tests/cli/test_serve.py::test_expert_scale_compression_reaches_preparation_and_package_cache[compression1]
+PASSED tests/cli/test_serve.py::test_serialized_branches_reach_the_plan_and_the_startup_line
+PASSED tests/cli/test_serve.py::test_export_does_not_launch_a_server_and_preserves_the_serving_plan[False-False-0]
+PASSED tests/cli/test_serve.py::test_export_does_not_launch_a_server_and_preserves_the_serving_plan[False-False-2147483648]
+PASSED tests/cli/test_serve.py::test_export_does_not_launch_a_server_and_preserves_the_serving_plan[False-True-0]
+PASSED tests/cli/test_serve.py::test_export_does_not_launch_a_server_and_preserves_the_serving_plan[False-True-2147483648]
+PASSED tests/cli/test_serve.py::test_export_does_not_launch_a_server_and_preserves_the_serving_plan[True-False-0]
+PASSED tests/cli/test_serve.py::test_export_does_not_launch_a_server_and_preserves_the_serving_plan[True-False-2147483648]
+PASSED tests/cli/test_serve.py::test_export_does_not_launch_a_server_and_preserves_the_serving_plan[True-True-0]
+PASSED tests/cli/test_serve.py::test_export_does_not_launch_a_server_and_preserves_the_serving_plan[True-True-2147483648]
+PASSED tests/cli/test_serve.py::test_listener_and_authentication_are_supplied_after_export
+PASSED tests/cli/test_serve.py::test_listener_flags_override_configuration
+PASSED tests/cli/test_serve.py::test_prefix_cache_settings_are_forwarded_only_when_set
+PASSED tests/cli/test_serve.py::test_an_address_in_use_fails_before_preparation
+PASSED tests/cli/test_serve.py::test_export_failures_prevent_native_launch[exception0-5-preparation failed: RuntimeError: kernel tuning failed]
+PASSED tests/cli/test_serve.py::test_export_failures_prevent_native_launch[exception1-4-insufficient memory during model preparation]
+PASSED tests/cli/test_serve.py::test_exhausted_gpu_memory_is_a_capacity_error
+PASSED tests/cli/test_serve.py::test_preparation_preserves_the_configured_reserve
+PASSED tests/cli/test_serve.py::test_uncached_checkpoint_downloads_before_export
+PASSED tests/cli/test_serve.py::test_environment_selects_gpus_by_uuid_and_places_caches
+PASSED tests/cli/test_serve.py::test_environment_sets_the_recipe_b12x_settings_over_inherited_values
+PASSED tests/cli/test_serve.py::test_flashinfer_workspaces_separate_checkouts_without_importing_them
+PASSED tests/cli/test_serve.py::test_tensor_parallel_run_preserves_rank_selection_in_native_launch
+PASSED tests/cli/test_serve.py::test_run_approves_only_its_export_signer_and_namespace
+PASSED tests/cli/test_serve.py::test_local_tuning_gpus_cannot_change_multihost_sharding[export]
+PASSED tests/cli/test_serve.py::test_local_tuning_gpus_cannot_change_multihost_sharding[serve]
+PASSED tests/cli/test_serve.py::test_shard_policy_reaches_export_and_separates_cached_packages
+PASSED tests/cli/test_serve.py::test_export_defaults_to_local_recipe_namespace_and_honors_repository
+PASSED tests/cli/test_serve.py::test_no_weights_requires_cache_before_preparation
+PASSED tests/cli/test_sm70_architectures.py::ArchitectureTests::test_artifact_hash_and_incomplete_capture_fail_closed
+PASSED tests/cli/test_sm70_architectures.py::ArchitectureTests::test_capability_default_stays_sm70_and_explicit_sm120_is_required
+PASSED tests/cli/test_sm70_architectures.py::ArchitectureTests::test_checkpoint_pin_is_bound_to_file_bytes
+PASSED tests/cli/test_sm70_architectures.py::ArchitectureTests::test_comparison_rejects_mismatched_source_checkpoint_and_reference
+PASSED tests/cli/test_sm70_architectures.py::ArchitectureTests::test_context_partial_vocabulary_nonfinite_and_forged_greedy_rejected
+PASSED tests/cli/test_sm70_architectures.py::ArchitectureTests::test_full_vocabulary_kl_includes_tail_and_greedy_divergence_is_separate
+PASSED tests/cli/test_sm70_architectures.py::ArchitectureTests::test_mtp_catalog_selects_only_ordinary_graphs_and_rejects_missing_ordinary_variants
+PASSED tests/cli/test_sm70_architectures.py::ArchitectureTests::test_prepared_catalog_preserves_sm70_history_without_claiming_mtp_execution
+PASSED tests/cli/test_sm70_harness.py::HarnessTests::test_export_cannot_omit_any_release_gate
+PASSED tests/cli/test_sm70_harness.py::HarnessTests::test_native_dry_run_uses_explicit_paths_and_does_not_launch
+PASSED tests/cli/test_sm70_harness.py::HarnessTests::test_native_prefill_srpt_flag_reaches_the_server_command_only_when_given
+PASSED tests/cli/test_sm70_harness.py::HarnessTests::test_native_requires_all_qualification_results_and_exact_primary
+PASSED tests/cli/test_sm70_harness.py::HarnessTests::test_prompt_generator_refuses_to_overwrite_input
+PASSED tests/cli/test_sm70_harness.py::HarnessTests::test_public_prompts_are_deterministic_and_consumed_by_both_clients
+PASSED tests/cli/test_sm70_harness.py::HarnessTests::test_target_length_uses_explicit_token_list_and_bounded_search
+PASSED tests/cli/test_sm70_prefill.py::PrefillTests::test_all_exact_lengths_at_both_concurrencies_with_native_usage_proof
+PASSED tests/cli/test_sm70_prefill.py::PrefillTests::test_cached_usage_or_metric_cache_credit_fails
+PASSED tests/cli/test_sm70_prefill.py::PrefillTests::test_fixture_rejects_token_observation_extensions_like_the_server
+PASSED tests/cli/test_sm70_prefill.py::PrefillTests::test_foreign_admission_cancelled_before_prefill_fails
+PASSED tests/cli/test_sm70_prefill.py::PrefillTests::test_merged_output_chunk_keeps_ttft_without_decode_rate
+PASSED tests/cli/test_sm70_prefill.py::PrefillTests::test_missing_cancellation_counter_fails_before_requests
+PASSED tests/cli/test_sm70_prefill.py::PrefillTests::test_missing_done_or_continuous_usage_fails
+PASSED tests/cli/test_sm70_prefill.py::PrefillTests::test_one_and_four_concurrent_requests_time_first_output_chunk
+PASSED tests/cli/test_sm70_prefill.py::PrefillTests::test_other_traffic_counter_mismatch_fails
+PASSED tests/cli/test_sm70_prefill.py::PrefillTests::test_warmup_is_separate_from_summary_and_early_prefixes_are_distinct
+PASSED tests/cli/test_sm70_prefill.py::PrefillTests::test_wrong_server_prompt_length_fails_and_preserves_raw_events
+PASSED tests/components/test_sm70_build.py::BuildPathsTest::test_cutlass_is_explicit_and_transitive_headers_change_the_cache_key
+PASSED tests/components/test_sm70_build.py::BuildPathsTest::test_explicit_and_default_caches_are_used_by_every_library
+PASSED tests/components/test_sm70_build.py::BuildPathsTest::test_prepared_projection_serializes_paths_and_routes_both_backends
+PASSED tests/components/test_sm70_build.py::BuildPathsTest::test_served_sol20_tiles_are_compiled_reviewed_instantiations
+PASSED tests/components/test_sm70_dense.py::DensePlanTest::test_every_matrix_has_one_tactic_across_decode_verification_and_prefill
+PASSED tests/components/test_sm70_dense.py::DensePlanTest::test_single_pass_instantiations_are_compiled_defaults_in_the_reviewed_space
+PASSED tests/components/test_sm70_dense.py::DensePlanTest::test_unqualified_precision_bias_padding_and_shapes_are_not_admitted
+PASSED tests/test_public_tools_http_contract.py::test_fixtures_follow_the_endpoint_rules
+PASSED tests/test_public_tools_http_contract.py::test_mock_rejects_completions_contract_violations
+PASSED tests/test_public_tools_http_contract.py::test_prefill_client_stays_within_the_completions_contract
+PASSED tests/test_public_tools_http_contract.py::test_decode_clients_run_from_the_native_dry_run_plan[benchmark_mtp.py-code-concurrencies0-chat-benchmark-mtp.json]
+PASSED tests/test_public_tools_http_contract.py::test_decode_clients_run_from_the_native_dry_run_plan[benchmark_long.py-long-concurrencies1-chat-benchmark-long.json]
+FAILED tests/cli/test_help.py::test_invalid_compression_is_rejected_with_the_supported_encoding
+FAILED tests/cli/test_serve.py::test_package_cache_key_includes_mixed_capture[False]
+FAILED tests/cli/test_serve.py::test_package_cache_key_includes_mixed_capture[True]
+FAILED tests/cli/test_serve.py::test_package_cache_key_includes_expert_scale_compression
+FAILED tests/cli/test_serve.py::test_package_cache_keys_distinguish_serialized_branches
+5 failed, 319 passed, 63 subtests passed in 18.62s
+
+## run 2: python -m pytest -q -rA -p no:cacheprovider tests/test_prefill_capacities.py tests/test_design_review_hook.py tests/reference/test_qualification_entrypoints.py
+.............................                                            [100%]
+==================================== PASSES ====================================
+_______ test_http_request_bytes_and_results_preserve_utf8_and_sse[False] _______
+----------------------------- Captured stdout call -----------------------------
+PASS completion.http_completion
+PASS completion.prompt_token_count
+PASS completion.terminal_reason
+=========================== short test summary info ============================
+PASSED tests/test_prefill_capacities.py::test_prefill_capacities_step_after_doubling_and_end_at_the_chunk
+PASSED tests/test_design_review_hook.py::test_valid_trailer_preserves_message_and_other_trailers
+PASSED tests/test_design_review_hook.py::test_missing_or_malformed_acknowledgment_is_rejected[]
+PASSED tests/test_design_review_hook.py::test_missing_or_malformed_acknowledgment_is_rejected[Hook Tester]
+PASSED tests/test_design_review_hook.py::test_missing_or_malformed_acknowledgment_is_rejected[Hook Tester; design-review=]
+PASSED tests/test_design_review_hook.py::test_missing_or_malformed_acknowledgment_is_rejected[Hook Tester; design-review=xyz!]
+PASSED tests/test_design_review_hook.py::test_missing_or_malformed_acknowledgment_is_rejected[Hook Tester; design-review=123]
+PASSED tests/test_design_review_hook.py::test_missing_or_malformed_acknowledgment_is_rejected[Hook Tester; design-review=12345]
+PASSED tests/test_design_review_hook.py::test_missing_or_malformed_acknowledgment_is_rejected[Hook Tester; design-review=ABCD]
+PASSED tests/test_design_review_hook.py::test_missing_or_malformed_acknowledgment_is_rejected[ ; design-review=1234]
+PASSED tests/test_design_review_hook.py::test_missing_or_malformed_acknowledgment_is_rejected[Hook Tester; core-design=1234]
+PASSED tests/test_design_review_hook.py::test_absent_trailer_is_rejected
+PASSED tests/test_design_review_hook.py::test_editor_comments_after_trailers_are_ignored
+PASSED tests/test_design_review_hook.py::test_body_occurrence_is_not_an_acknowledgment
+PASSED tests/test_design_review_hook.py::test_duplicate_acknowledgments_are_rejected
+PASSED tests/test_design_review_hook.py::test_changed_staged_checklist_rejects_prior_acknowledgment
+PASSED tests/test_design_review_hook.py::test_unstaged_checklist_changes_do_not_change_required_digest
+PASSED tests/test_design_review_hook.py::test_missing_staged_document_is_rejected
+PASSED tests/test_design_review_hook.py::test_linked_worktree_uses_shared_hook_configuration
+PASSED tests/reference/test_qualification_entrypoints.py::test_script_and_module_clis_have_identical_help_outside_checkout[server]
+PASSED tests/reference/test_qualification_entrypoints.py::test_script_and_module_clis_have_identical_help_outside_checkout[graph_execution]
+PASSED tests/reference/test_qualification_entrypoints.py::test_http_dependents_import_package_outside_checkout[prefill_capacity]
+PASSED tests/reference/test_qualification_entrypoints.py::test_http_dependents_import_package_outside_checkout[context_limit]
+PASSED tests/reference/test_qualification_entrypoints.py::test_http_dependents_import_package_outside_checkout[vision_aggregate]
+PASSED tests/reference/test_qualification_entrypoints.py::test_package_import_has_no_runtime_initialization_or_path_mutation
+PASSED tests/reference/test_qualification_entrypoints.py::test_cli_validation_precedes_runtime_and_output_creation[server-arguments0-timeout, response byte bound and image repetitions must be positive]
+PASSED tests/reference/test_qualification_entrypoints.py::test_cli_validation_precedes_runtime_and_output_creation[graph_execution-arguments1-qualification requires a 64-aligned prefill chunk size of at least 512]
+PASSED tests/reference/test_qualification_entrypoints.py::test_http_request_bytes_and_results_preserve_utf8_and_sse[False]
+PASSED tests/reference/test_qualification_entrypoints.py::test_http_request_bytes_and_results_preserve_utf8_and_sse[True]
+29 passed in 1.74s

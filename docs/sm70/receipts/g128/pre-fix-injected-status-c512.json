@@ -1,0 +1,26 @@
+{
+  "note": "Strict validation alone (tools/prepare_replay.py --validate) at --chunk 512 on a tree whose ignition sources are the previous release package's (no prefill fusions, no G128 plan, harness before the probe-page fix), 2026-10-24. Every other strict check passed; the injected-status probe failed with status 4 because its clean re-prefill was refused by the row validator before reaching the poisoned page. Lines copied from validation-attempts.jsonl.",
+  "sm70_prefill_attention_cu_sha256": "7d9887ebfb8f3eadf90201f595a68aefc6a44cc7facf93a80f770dd2f12725a6",
+  "checks_logged": 47,
+  "checks_passed": 46,
+  "events": [
+    {
+      "run_id": 1792827936780524705,
+      "event": "check",
+      "name": "sm70_prefill_attention_injected_status",
+      "passed": false,
+      "error_type": "RuntimeError",
+      "error": "prefill512: SM70 prefill attention status 4 after the chunk (bit 0 non-finite K/V, bit 1 V range > 2^80, bit 2 inadmissible plan)",
+      "traceback": "Traceback (most recent call last):\n  File \"<release-host>/flare/<lab>/release-srpt3-tree/tools/validate_replay.py\", line 1399, in check\n    result = function()\n             ^^^^^^^^^^\n  File \"<release-host>/flare/<lab>/release-srpt3-tree/tools/validate_replay.py\", line 1466, in <lambda>\n    check(\"sm70_prefill_attention_injected_status\", lambda: harness.injected_status(prompts[0]))\n                                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"<release-host>/flare/<lab>/release-srpt3-tree/tools/validate_replay.py\", line 359, in injected_status\n    self.replay(name, [slot])\n  File \"<release-host>/flare/<lab>/release-srpt3-tree/tools/validate_replay.py\", line 215, in replay\n    raise RuntimeError(f\"{name}: SM70 prefill attention status {value} after the chunk \"\nRuntimeError: prefill512: SM70 prefill attention status 4 after the chunk (bit 0 non-finite K/V, bit 1 V range > 2^80, bit 2 inadmissible plan)\n"
+    },
+    {
+      "run_id": 1792827936780524705,
+      "event": "summary",
+      "passed": false,
+      "failures": [
+        "sm70_prefill_attention_injected_status"
+      ],
+      "elapsed_seconds": 121.24581018098979
+    }
+  ]
+}

@@ -18,7 +18,8 @@ CPU CLI/gate tests do not qualify a model, export, or GPU execution.
 Release results below are for the release tree `0e4c81f` and its package
 `model-32k-tonight-a`, on one Tesla V100 PCIe 32 GB, 2026-10-22. Sources are
 lines of the fork's run log (`STATUS.md`), quoted in
-[BENCHMARK.md](BENCHMARK.md#sources).
+[BENCHMARK.md](BENCHMARK.md#sources). Results for the current package
+`f21b9abb` (2026-10-24) are labelled with its name.
 
 ## Gate 1: unit and regression tests
 
@@ -73,7 +74,13 @@ every test, and group B failed only its 2 known failures (STATUS.md lines 43,
 group A with 223 tests and 17 subtests and group B with 218 tests, with no
 failures, exemptions or skips; production source is unchanged through
 `c6fdc120` ([tests-A.log](receipts/tests-A.log), [tests-B.log](receipts/tests-B.log),
-[release-tests-FINAL.json](receipts/release-tests-FINAL.json)).
+[release-tests-FINAL.json](receipts/release-tests-FINAL.json)). For the
+512-token prefill change, both groups on a tree with the same kernel and test
+changes passed 225 tests with 17 subtests (A) and 245 tests (B), with no
+failures ([groups-A](receipts/g128/groups-A-release-g128-tree.log),
+[groups-B](receipts/g128/groups-B-release-g128-tree.log)).
+On the merged commit `4acbecf0`, with the committed group lists, group A passed 225 tests with 17 subtests and group B 218 tests; the committed B list does not include `tests/preparation/test_module_images.py` (27 tests), which the lab run above did, hence 218 rather than 245. The prefill-rows identity tests ran separately on the same commit, 74 passed; that run predates the line that adds them to group A ([groups-A-merged-4acbecf0.log](receipts/g128/groups-A-merged-4acbecf0.log), [groups-B-merged-4acbecf0.log](receipts/g128/groups-B-merged-4acbecf0.log), [groups-A-rows-merged-4acbecf0.log](receipts/g128/groups-A-rows-merged-4acbecf0.log), [tests-replay-merged-4acbecf0.out](receipts/g128/tests-replay-merged-4acbecf0.out)). Group A now also runs the prefill-rows identity tests,
+`tests/components/test_sm70_prefill_rows_cuda.py`.
 
 **CPU suites.** The fork also runs the broad CPU suites and compares their
 failure set with the base commit:
@@ -122,6 +129,17 @@ Prepare with `--context 32768`, 4 requests and draft depth 4, as in
 The package is exported only after all of them pass. The release preparation
 took 54.6 min, including CPU contention from the CPU suites (line 62).
 
+**Result for package `f21b9abb`** (512-token prefill chunks, 2026-10-24): every
+gate passed. Strict validation 47/47, long-sequence invariance 28/28 over 15
+runs, commit growth 4/4, consumer identity, components complete, accuracy
+complete, and the tau measurement qualified with
+`prior_measurement_identity: true` against the previous package's goldens. An
+independent rebuild on another card passed the same gates with the same
+identity ([gate-summary.json](receipts/g128/gate-summary.json),
+[validation record](ARCHITECTURE.md#export-qualification-of-package-f21b9abb)).
+The preparation took 36.2 min while the rebuild ran on another card of the
+same host; the rebuild took 29.4 min.
+
 **How to read a failure.** A strict-check failure names the check and the first
 mismatching bytes of each field. Read it this way:
 
@@ -141,6 +159,30 @@ Do not skip the byte-level checks in favor of native serving. The first public
 fixture run establishes a new tau baseline; subsequent runs must match the
 preserved baseline exactly. Neither a first baseline nor an `accuracy: complete`
 measurement establishes an unreported numerical tolerance or the historical scores.
+
+### The injected-status probe at chunks above 128
+
+`sm70_prefill_attention_injected_status` poisons one visible K page, runs the
+last prefill chunk, and requires the prefill to fail with an error code. It
+then restores the page and requires the same prompt to prefill cleanly. To
+reach the last chunk, the probe extends its prompt past the prefill capacity.
+The strict harness's reset backs two KV pages and two MTP draft pages per slot,
+256 tokens. At capacity 128 that covers the probe's prompt. At capacity 512 the
+probe needs five pages, so the batch row validator refused its prefill (error
+32) before attention ran, and the check saw status 4 with no rows instead of
+the poisoned-page error. The previous package's unmodified kernels fail the
+same way at `--chunk 512`
+([pre-fix-injected-status-c512.json](receipts/g128/pre-fix-injected-status-c512.json)),
+so the failure came from the harness, not from the new kernels.
+
+`tools/validate_replay.py` now backs, before each prefill, only the KV and
+draft blocks that the slot's tables leave unbacked, with backed pool pages that
+no table references, and refuses if the tables or the pool are too small. The
+check's criterion is unchanged: the probe now reaches the page it poisons and
+must still fail with an error and then recover. Where every block is already
+backed, at capacity 128 and in the long-sequence harness, the change does
+nothing. Package `f21b9abb` gives the previous package's result: prefill
+status 1, error code 34, recovered.
 
 ## Gates 3 to 5: native serving
 

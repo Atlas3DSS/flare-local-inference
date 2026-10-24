@@ -31,19 +31,24 @@ upstream. Read this before you rely on the port.
   were run only on SM70: the `qwen38_dense` recipe declaration (MTP on by
   default with 3 draft tokens, at most 4, and concurrency capped at 4) and the
   Helios scheduler changes.
-- **Real traces.** The release binary `d4ffb1fa` has no real-trace end-to-end
-  measurement. The real-trace figures in the run log (best 47.23 tok/s, run
+- **Real traces.** Neither the server binary `48b69ed4` (package `f21b9abb`)
+  nor the release binary `d4ffb1fa` (previous package) has a real-trace
+  end-to-end measurement. The real-trace figures in the run log (best 47.23 tok/s, run
   `best24`) used the 2026-10-22 release-tree package with a pre-release binary,
   `2f9128e4` ([measurement history](../../BENCHMARKS-SM70.md#measurement-history-2026-10-20-to-2026-10-23)).
 - **Serving binary.** The published serving numbers were measured with a `flare`
   binary built before this branch's Helios commits
-  ([BENCHMARK.md](BENCHMARK.md#what-was-run)). The fresh server binary has SHA-256
+  ([BENCHMARK.md](BENCHMARK.md#what-was-run)). The current package `f21b9abb`
+  was benchmarked on 2026-10-24 with the server binary `48b69ed4`
+  (`48b69ed46f5183ff0b62f1906b5e80819e370408f035a3643be4db68c83d7342`, built
+  from `4528c220`)
+  ([section](../../BENCHMARKS-SM70.md#package-f21b9abb-512-token-prefill-chunks-on-server-binary-48b69ed4)). The previous package
+  `fd7c24dc` was benchmarked on 2026-10-23 with the release binary
   `d4ffb1fa3453bf37f2017a7b58d09559010881311b2d9afcdfb33b4011caa667`, built
-  from `71029458`; production source is unchanged through `c6fdc120`. Its
-  native serving, prefill/TTFT and long-context benchmarks completed on
-  2026-10-23 on newly authored public prompts
-  ([release section](../../BENCHMARKS-SM70.md#release-binary-d4ffb1fa-built-from-71029458-production-source-unchanged-through-c6fdc120)).
-  Figures labelled historical come from older binaries and internal prompts.
+  from `71029458`, whose production source is unchanged through `c6fdc120`
+  ([previous-package section](../../BENCHMARKS-SM70.md#previous-package-fd7c24dc-on-release-binary-d4ffb1fa-128-token-prefill-chunks)). Both ran
+  on newly authored public prompts. Figures labelled historical come from older
+  binaries and internal prompts.
 - **Release-tree component evidence.** The public GPU runner at `b4987de5`
   (production source unchanged through `c6fdc120`) passed A: 223 tests plus
   17 subtests; B: 218 tests, with zero failures, exemptions or skips
@@ -52,22 +57,30 @@ upstream. Read this before you rely on the port.
   Maximum-context attention, dynamic draft metadata and generic GDN admission
   tests passed. The separate CPU package suite passed 88 tests with 9
   intentional GPU skips; the signed shared-memory native fixture separately
-  passed on V100. These component tests are separate from the full-model
-  export gates and the native serving measurements.
+  passed on V100. For the 512-token prefill change, groups A and B on a tree
+  with the same kernel and test changes passed 225 tests with 17 subtests and
+  245 tests ([groups-A](receipts/g128/groups-A-release-g128-tree.log),
+  [groups-B](receipts/g128/groups-B-release-g128-tree.log)). On the merged commit `4acbecf0`, with the committed group lists, group A passed 225 tests with 17 subtests and group B 218 tests; the committed B list does not include `tests/preparation/test_module_images.py` (27 tests), which the lab run above did, hence 218 rather than 245. The prefill-rows identity tests ran separately on the same commit, 74 passed; that run predates the line that adds them to group A ([groups-A-merged-4acbecf0.log](receipts/g128/groups-A-merged-4acbecf0.log), [groups-B-merged-4acbecf0.log](receipts/g128/groups-B-merged-4acbecf0.log), [groups-A-rows-merged-4acbecf0.log](receipts/g128/groups-A-rows-merged-4acbecf0.log), [tests-replay-merged-4acbecf0.out](receipts/g128/tests-replay-merged-4acbecf0.out)).
+  These component tests are separate from the full-model export gates and the
+  native serving measurements.
 - **Export qualification is complete; serving qualification is not.** The
-  release export passed every gate on 2026-10-23: strict 47/47, long-sequence
-  invariance, commit-capacity growth, consumer identity, components and
-  measurement qualification
-  ([release-tests-PREPAREAPI.json](receipts/release-tests-PREPAREAPI.json)). An
-  independent rebuild on a separate GPU reproduced its coding-token/tau goldens
-  and measurement (`prior_measurement_identity: true`,
-  [release-tests-REBUILD.json](receipts/release-tests-REBUILD.json)). These
-  gates run retained CUDA graphs, not the native server
-  ([validation record](ARCHITECTURE.md#export-qualification-of-the-release-package)).
+  current package `f21b9abb` passed every gate on 2026-10-24: strict 47/47,
+  long-sequence invariance, commit-capacity growth, consumer identity,
+  components, accuracy and measurement qualification, with
+  `prior_measurement_identity: true` against the previous package's goldens. An
+  independent rebuild on a separate GPU did the same
+  ([gate-summary.json](receipts/g128/gate-summary.json),
+  [validation record](ARCHITECTURE.md#export-qualification-of-package-f21b9abb)).
+  The previous package passed every gate on 2026-10-23
+  ([release-tests-PREPAREAPI.json](receipts/release-tests-PREPAREAPI.json),
+  [release-tests-REBUILD.json](receipts/release-tests-REBUILD.json),
+  [validation record](ARCHITECTURE.md#export-qualification-of-the-previous-package-fd7c24dc)).
+  These gates run retained CUDA graphs, not the native server.
   The new public inputs do not reproduce or validate the historical results
   ([VALIDATE.md](VALIDATE.md#gate-2-preparation-with-every-export-gate)).
-- **SM70 and SM120 outputs differ slightly.** A measured comparison of
-  ordinary graphs on 3 public prompts found small, non-zero full-vocabulary KL
+- **SM70 and SM120 outputs differ slightly.** Measured on the previous
+  package's tree and not repeated on the current one, a comparison of ordinary
+  graphs on 3 public prompts found small, non-zero full-vocabulary KL
   (mean 0.0015 to 0.0024 per prompt), and one of the three independent greedy
   continuations parts after 9 tokens. Against a shared FP32 reference, 30
   public prompts (3,840 positions) show no measurable difference between the two
@@ -93,24 +106,50 @@ upstream. Read this before you rely on the port.
 - **Adaptive verification.** `--mtp-adaptive-verification` makes sampled outputs
   depend on which requests share a batch. Serve with fixed width when outputs must
   not depend on co-scheduled requests ([SERVE.md](SERVE.md#fixed-width-verification)).
-- **Long prompts are prefill-bound.** On the release binary, effective
-  prefill is 719-807 tok/s at 2,048 to 30,720 tokens, and concurrent prefills do
-  not overlap: a 30,720-token prompt waits 42.7 s for its first token alone, and
-  170.2-171.0 s when four arrive together
-  ([release section](../../BENCHMARKS-SM70.md#release-binary-d4ffb1fa-built-from-71029458-production-source-unchanged-through-c6fdc120)).
+- **Long prompts are prefill-bound.** With package `f21b9abb`, effective
+  prefill is 866-994 tok/s at 2,048 to 30,720 tokens (previous package
+  719-807), and concurrent prefills do not overlap: a 30,720-token prompt waits
+  35.46 s for its first token alone, and 139.7-142.4 s when four arrive
+  together (previous package 42.7 s and 170.2-171.0 s;
+  [BENCHMARKS-SM70.md](../../BENCHMARKS-SM70.md#package-f21b9abb-512-token-prefill-chunks-on-server-binary-48b69ed4)).
   There is no isolated GPU prefill timer, so these are wall-time rates. A
-  profile of one release-binary prefill shows where the time goes. Prefill runs
-  in 128-token chunks, 240 of them for a 30,720-token prompt. The projection
+  profile of one prefill of the previous package on the release binary shows
+  where the time goes. That package prefills in 128-token chunks, 240 of them
+  for a 30,720-token prompt. The projection
   GEMMs take 63-66 % of the time (the NVFP4 MLP alone 44 % at 8,192 tokens), the
   GDN recurrence about 11 % and attention 7-10 %. Attention grows with context,
   to about 12 % extrapolated over a whole 30,720-token prompt. The GPU is idle
   only 1.4-1.9 % of the time, so the cost is in the kernels, not in gaps between
   them ([prefill-profile.json](receipts/measurements/prefill-profile.json)).
+  The current package was not profiled.
+- **A smaller KV pool with 512-token prefill.** At `--memory-limit 31G` the
+  current package's prefill graphs (capacities 128, 256 and 512) leave a
+  124,928-token KV pool, limited by memory, 6,656 tokens (5.1 %) below the
+  previous package's 131,584-token `--kv-cache-limit concurrency` cap. Four
+  30,720-token contexts fit (122,880 tokens); four 32,768-token contexts
+  (131,072) do not, and how the server schedules that case was not measured.
+  Preparing with `--chunk 128` gives the previous catalog, pool and prefill
+  rate ([EXPORT.md](EXPORT.md#3-prepare-and-export)).
+- **512-token prefill chunks.** A prefill chunk of the current package holds
+  up to 512 tokens, four times the previous package's. While it runs, other
+  active requests wait for their next decode step: at the measured 30,720-token
+  rate a 512-token chunk takes about 0.59 s on average, against about
+  0.18 s for a 128-token chunk of the previous package. The four-agent
+  long-context decode rates include that effect
+  ([BENCHMARKS-SM70.md](../../BENCHMARKS-SM70.md#package-f21b9abb-512-token-prefill-chunks-on-server-binary-48b69ed4)).
 - **Opt-in prefill ordering.** The shortest-remaining-first prefill option is
-  off by default and is not in the release binary `d4ffb1fa`. In a burst of
+  off by default. It is in the server binary `48b69ed4` and not in the release
+  binary `d4ffb1fa`. In a burst of
   equal prompts it lowers the mean first-token time, not the worst case
   ([BENCHMARKS-SM70.md](../../BENCHMARKS-SM70.md#opt-in-prefill-ordering-shortest-remaining-prompt-first)).
-  A soak used mixed-length Poisson arrivals: one request every 6 s on average,
+  With package `f21b9abb` and four cold 28.7k-token agents it brought the
+  first-token p50 from 132.1 s to 83.2 s, but it costs decode speed: the early
+  finishers decode while the others' 512-token prefill chunks run, so the
+  per-agent decode median over the 12 four-agent requests fell from 38.2 to
+  21.0 tok/s (previous package 41.5)
+  ([BENCHMARKS-SM70.md](../../BENCHMARKS-SM70.md#long-context-native-serving-package-f21b9abb)).
+  A soak on the previous package, with a lab build of the option, used
+  mixed-length Poisson arrivals: one request every 6 s on average,
   50 % 512, 30 % 2,048, 15 % 8,192 and 5 % 30,720-token prompts, 4 client
   workers and 8 output tokens. With the option on it ran 45 minutes and
   completed 475 of 475 requests; with it off it ran 15 minutes and completed
@@ -128,21 +167,22 @@ upstream. Read this before you rely on the port.
   Measured from arrival instead, which adds the wait for one of the 4 client
   workers, the mean over all requests is 17.46 s off and 26.15 s on, and the
   worst 161.9 s off and 103.7 s on. The option trades short-prompt tail latency
-  under mixed streaming for long-prompt and worst-case latency. It is the right
-  choice for bursts of agents on long contexts, but it is not a free win for
-  mixed traffic, which is why it is off by default. The 256-chunk aging bound
+  under mixed streaming for long-prompt and worst-case latency. It suits bursts
+  of agents on long contexts when the first token matters more than decode
+  speed, but it is not a free win for mixed traffic or for decode speed, which
+  is why it is off by default. The 256-chunk aging bound
   moves a waiting prompt into arrival order; it does not cap the total wait. The
   soak estimates the longest wait at about 353 chunks with the option on and 710
   with it off.
 - **Profiling issue under investigation.** Node-level CUDA-graph tracing with
   Nsight Systems (`nsys --cuda-graph-trace=node`) made the server fail with CUDA
   error 719 (`unspecified launch failure`) after about 127 cumulative 128-token
-  prefill chunks, in 3 of 3 attempts. Unprofiled runs and graph-level tracing
+  prefill chunks of the previous package, in 3 of 3 attempts. Unprofiled runs and graph-level tracing
   completed every request. The cause is not established; a compute-sanitizer
   run is the next check ([prefill-profile.json](receipts/measurements/prefill-profile.json)).
 - **Default KV limit.** All measurements used `--kv-cache-limit concurrency`.
   The KV pool at the default `memory` setting was not measured.
-- **Flags not measured on the release package:** `--mtp-draft-tokens 3` (the
+- **Flags not measured on either package:** `--mtp-draft-tokens 3` (the
   production setting; the tables use 4), `--scheduler-policy agent`,
   `--mtp-pipeline`, `--prefix-cache-memory 16G` (the benchmarks used 8G) and the
   host prefix store's disk tier.
@@ -166,8 +206,10 @@ These exist in the fork's history but are not part of this branch:
 - **A fused decode-stack variant.** The fork built SM70 decode and verification
   on fused per-row kernels. It was correct but slower in the fork's measurements,
   because the one-CTA-per-row kernels were latency-bound, and it was parked.
-- **Chunk-256 prefill with deterministic chunking** (`7ffb3cf`). Prefill in this
-  tree runs 128-token chunks.
+- **Chunk-256 prefill with deterministic chunking** (`7ffb3cf`). This tree
+  prefills in 512-token chunks by a different route: exact fusions and a
+  per-128-row attention split plan
+  ([ARCHITECTURE.md](ARCHITECTURE.md#5-512-token-prefill-exact-fusions-and-the-g128-split-plan)).
 - **Two scheduler fixes from another fork branch.** One makes greedy readmission
   re-derive delivered tokens when the preempted checkpoint cannot be kept
   (`b25e756`). The other fixes a host-store admission deadlock in a one-context

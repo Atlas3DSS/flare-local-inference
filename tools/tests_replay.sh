@@ -16,6 +16,7 @@ A=(tests/components/test_sm70_gdn_replay.py tests/components/test_sm70_gdn_cuda.
    tests/components/test_sm70_build.py tests/components/test_sm70_dense.py tests/components/test_sm70_precision.py
    tests/components/test_sm70_projection_cuda.py tests/components/test_sm70_sampling_cuda.py
    tests/components/test_sm70_attention_cuda.py tests/components/test_sm70_prefill_attention_cuda.py
+   tests/components/test_sm70_prefill_rows_cuda.py
    tests/components/test_sm70_gdn_prefill_cuda.py tests/components/test_sm70_decode_attention_cuda.py
    tests/components/test_sm70_embedding_cuda.py tests/components/test_conditional_scores_cuda.py
    tests/components/test_sampling_scratch.py)

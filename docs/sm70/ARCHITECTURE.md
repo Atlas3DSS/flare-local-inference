@@ -1,6 +1,6 @@
 # SM70 architecture
 
-This page explains why a V100 needs its own execution path, and the four
+This page explains why a V100 needs its own execution path, and the five
 changes in the release tree on top of the SM70 base port. Each change section
 gives the problem, the change, the tests that guard it, and its review history.
 Commit messages hold the detailed validation records; they are cited by hash.
@@ -8,8 +8,8 @@ Performance and timing figures here are historical observations for those
 commits and packages. Fresh component, export-qualification, rebuild and
 SM70/SM120 comparison results for the release tree are recorded below, with
 receipts under [receipts/](receipts/). Native serving, prefill/TTFT and
-long-context results for the release binary are in
-[BENCHMARKS-SM70.md](../../BENCHMARKS-SM70.md).
+long-context results for the current package `f21b9abb` and the previous
+package `fd7c24dc` are in [BENCHMARKS-SM70.md](../../BENCHMARKS-SM70.md).
 
 ## Public release review and current validation
 
@@ -45,9 +45,84 @@ suite separately passed **88 tests**, with **9 intentional GPU skips**; those
 skips are not GPU evidence. The signed shared-memory native fixture also passed
 separately on an actual V100.
 
-### Export qualification of the release package
+### Export qualification of package f21b9abb
 
-The release export ran `tools/prepare_replay.sh` with every export gate at
+The current package prefills in 512-token chunks (section 5). It was prepared
+on 2026-10-24 with `tools/prepare_replay.sh` and every export gate at
+`--chunk 512`, on one Tesla V100 PCIe 32 GB, from production source identical
+to `4acbecf0`, and completed with return code 0
+([prepare-wrapper.json](receipts/g128/prepare-wrapper.json); the four kernel
+sources' SHA-256 digests are recorded there). Its preparation report has status
+`exported`
+([gate-summary.json](receipts/g128/gate-summary.json)):
+
+| Gate | Package `f21b9abb` | Previous package `fd7c24dc` |
+| --- | --- | --- |
+| Strict checks | 47/47 passed, no failures | 47/47 |
+| Long-sequence invariance | passed: 28 comparisons over 15 runs | passed: 28 over 15 runs |
+| Commit-capacity growth | passed (4 checks) | passed (4 checks) |
+| Consumer identity | passed (M = 1, 16 and 20) | passed (M = 1, 16 and 20) |
+| Components | complete | complete |
+| Accuracy | complete; `accuracy.safetensors` byte-identical to the previous package's | complete |
+| MTP measurement (coding-token/tau goldens) | qualification passed; `prior_measurement_identity: true` against the previous package's `tau.json` | qualification passed (first baseline) |
+
+The preparation compared its coding-token measurement with a copy of the
+previous package's `tau.json`, so the identity flag means that this package
+emits the previous package's coding-token IDs and tau summary on the four
+coding prompts at batch 1 and 4 and draft depths 3 and 4. Its
+`accuracy.safetensors`, which holds the candidate logits of the short and long
+accuracy references (9 FP32 tensors, 106,529,280 logits), has the same
+SHA-256 (`aadec343…`) as the previous package's. The package is signed with the
+key that signed the previous package (fingerprint `ef39a0be…`).
+
+The strict injected-status check now runs with 512-row prefill graphs. Before
+the harness change in `4acbecf0`, that probe could not reach the page it
+poisons at chunks above 128, and it failed the same way on the previous
+package's unmodified kernels
+([pre-fix-injected-status-c512.json](receipts/g128/pre-fix-injected-status-c512.json));
+[VALIDATE.md](VALIDATE.md#the-injected-status-probe-at-chunks-above-128)
+explains the change and why it does not relax the check. The long-sequence
+identities prefill in 128-token chunks in both packages (the harness's
+`prefill_chunk_tokens` is 128); the 512-row prefill graphs are exercised by
+the strict checks (108 `prefill512` replays) and the greedy checks of the
+benchmark chain.
+
+An independent rebuild ran at the same time on a different V100 with the same
+prompts, references and a copy of the same `tau.json`
+([rebuild-wrapper.json](receipts/g128/rebuild-wrapper.json)). It exported
+package `ad848aaaaa3d0213ca37ee14a424e1beceddfad87af07e2aa4588123c18bf6fe`,
+passed every gate, and also reports `prior_measurement_identity: true` and a
+byte-identical `accuracy.safetensors`. The two packages differ in bytes
+because each export is signed independently.
+
+GPU groups A and B on a tree with these kernel and test changes and the prefill
+ordering passed 225 tests with 17 subtests, and 245 tests, with no failures
+([groups-A](receipts/g128/groups-A-release-g128-tree.log),
+[groups-B](receipts/g128/groups-B-release-g128-tree.log)). Before the
+preparation, a component guard on the lab tree passed 83 tests with 17
+subtests: the new prefill-rows identity tests, the prefill attention tests
+including the per-group identity test, and the build and dense tests
+([guard-components-c512.log](receipts/g128/guard-components-c512.log)). On
+`4acbecf0` itself the CPU suites passed
+([tests-merged-commit.log](receipts/g128/tests-merged-commit.log)):
+`tests/cli`, the build, dense and HTTP-contract tests 319 passed with 63
+subtests, with 5 failures that occur identically on the parent commit and come
+from the CPU-only environment (missing FlashInfer package metadata, and the
+argument-parser message wording of this Python release). On the merged commit `4acbecf0`, with the committed group lists, group A passed 225 tests with 17 subtests and group B 218 tests; the committed B list does not include `tests/preparation/test_module_images.py` (27 tests), which the lab run above did, hence 218 rather than 245. The prefill-rows identity tests ran separately on the same commit, 74 passed; that run predates the line that adds them to group A ([groups-A-merged-4acbecf0.log](receipts/g128/groups-A-merged-4acbecf0.log), [groups-B-merged-4acbecf0.log](receipts/g128/groups-B-merged-4acbecf0.log), [groups-A-rows-merged-4acbecf0.log](receipts/g128/groups-A-rows-merged-4acbecf0.log), [tests-replay-merged-4acbecf0.out](receipts/g128/tests-replay-merged-4acbecf0.out)).
+
+### Native serving of package f21b9abb
+
+Server binary `48b69ed4` (built from `4528c220`) served the package on
+2026-10-24 in two benchmark chains, with and without `--prefill-srpt`
+([section](../../BENCHMARKS-SM70.md#package-f21b9abb-512-token-prefill-chunks-on-server-binary-48b69ed4),
+receipts under [receipts/g128/](receipts/g128/)). All 24 short-prompt and 24 long-context requests completed in each chain, and every prefill batch completed. Short public prompts decoded at a median 83.2 tok/s at 1 agent and 64.9 tok/s per agent at 4 (previous package 83.0 and 64.8). Effective prefill ran at 866-994 tok/s, one request at a time (previous package 719-807), and a cold 28.7k-token request reached its first token after 33.04 s (p50; previous package 39.85 s).
+At `--memory-limit 31G` the KV pool is 124,928 tokens, limited by memory,
+against the previous package's 131,584-token cap. These are benchmark
+completions on public inputs, not a further qualification gate.
+
+### Export qualification of the previous package fd7c24dc
+
+The previous release package prefills in 128-token chunks. Its export ran `tools/prepare_replay.sh` with every export gate at
 source `b4987de5`, on one Tesla V100 PCIe 32 GB, and completed on 2026-10-23
 with return code 0 and no recorded failure
 ([release-tests-PREPAREAPI.json](receipts/release-tests-PREPAREAPI.json)). Its
@@ -67,7 +142,7 @@ results above are fields of that run's preparation report. Export qualification
 is not native serving qualification: these gates run retained CUDA graphs, and
 the report records `native_runtime_tested: false`.
 
-### Independent rebuild
+### Independent rebuild of the previous package
 
 A second export ran as a separate job on a different V100 at `c6fdc120`, with
 the same prompts and references, against a copy of the primary export's
@@ -82,12 +157,12 @@ the two reports match. The two packages differ in bytes, as expected, because
 each export is signed independently. The rebuild criterion is golden and
 measurement identity, not package-byte equality.
 
-### Native serving on the release binary
+### Native serving of the previous package on the release binary
 
-The release binary (SHA-256 prefix `d4ffb1fa`) served the qualified package on
+The release binary (SHA-256 prefix `d4ffb1fa`) served the previous package on
 2026-10-23 in one benchmark chain. All 24 short-prompt and 24 long-context
 requests completed, and every prefill batch completed
-([release section](../../BENCHMARKS-SM70.md#release-binary-d4ffb1fa-built-from-71029458-production-source-unchanged-through-c6fdc120),
+([previous-package section](../../BENCHMARKS-SM70.md#previous-package-fd7c24dc-on-release-binary-d4ffb1fa-128-token-prefill-chunks),
 receipts under [receipts/release-binary/](receipts/release-binary/)). Short
 public prompts decoded at a median 83.0 tok/s at 1 agent and 64.8 tok/s per agent
 at 4. Four 28.7k-token contexts decoded together within the 131,584-token pool
@@ -96,6 +171,12 @@ request at a time. These are benchmark completions on new public inputs, not a
 further qualification gate.
 
 ## SM70 and SM120 comparison (ordinary graphs)
+
+This comparison and the distance from the FP32 reference below were measured
+on the previous package's tree, before the prefill change of section 5. They
+were not repeated on the current tree. Its export-accuracy logits are
+bit-identical to the previous package's, but these captures use their own
+graphs.
 
 On 2026-10-23, [tools/compare_architectures.py](../../tools/compare_architectures.py)
 captured the ordinary (non-MTP) retained Flare graphs on one Tesla V100 PCIe
@@ -361,9 +442,10 @@ registers for FP16 tensor cores.
 **Tests.**
 
 - `tests/components/test_sm70_build.py` checks that every served tile is a
-  compiled instantiation inside the reviewed template space, and that
-  `sm70_pgemm.cuh` is byte-identical to the reviewed kernel (SHA-256
-  `60a4ed9f...`).
+  compiled instantiation inside the reviewed template space, and pins
+  `sm70_pgemm.cuh`. At `8ad725c` the file was byte-identical to the reviewed
+  kernel (SHA-256 `60a4ed9f...`); since `4acbecf0` it is that kernel plus the
+  output row stride `ldy` of section 5 (SHA-256 `7d979e47...`).
 - The commit message records the GPU evidence. The served instantiations
   compiled to SASS identical to the library that passed kernel identity (6,498
   cases, 0 mismatches). Captured-graph identity against the previous package
@@ -378,8 +460,8 @@ required changes. The other cleared it with gate-only required changes, applied
 before any GPU run (`8ad725c`). The author did not review its own change.
 
 **Not in this tree.** A later commit on the same fork branch (`7ffb3cf`) adds
-a 256-row prefill capacity with deterministic chunking. It is not in the release
-tree, which runs 128-token prefill chunks.
+a 256-row prefill capacity with deterministic chunking. It is not in this tree,
+which reaches 512-token prefill chunks by a different route (section 5).
 
 No end-to-end measurement of this change alone is recorded.
 
@@ -615,7 +697,9 @@ of 166 MiB each returned to the cache (line 59). The 131,584 figure is the
 benchmark's `--kv-cache-limit concurrency` cap, not the memory limit
 ([BENCHMARK.md](BENCHMARK.md#what-was-run)). Four prompts of 22.4k to 30.2k
 tokens (110,022 in total) stay resident together (line 65); the old pool could
-not hold them.
+not hold them. The 512-token prefill graphs of section 5 take some of that
+memory back: with them the pool at 31G is 124,928 tokens, limited by memory
+below the cap.
 
 **Review history.** The kernels were reviewed by two independent reviewers,
 before the first GPU run and again for each delta. Round 1 was cleared by one
@@ -628,3 +712,100 @@ was independently cleared for GPU testing by Astra (`gpt-6-astra`) on
 committed column and the caller's per-request length checks. See the public
 review record above. The integrator's earlier design-principle trailers remain
 self-reviews, distinct from this independent clearance.
+
+## 5. 512-token prefill: exact fusions and the G128 split plan
+
+Commit `4acbecf0`; kernels `ignition/components/sm70_prefill_attention.cu`,
+`sm70_pgemm.cuh`, `sm70_prefill.cu` and `sm70_dense.cu`.
+
+**Problem.** Prefill is where a V100 spends its time on long prompts (section
+2), and the release tree ran it in 128-token chunks. In the prefill lab,
+256- and 512-token chunks were 9.5-12 % faster, but greedy output then
+differed from the release after 24 to 54 tokens. The cause was the prefill
+attention plan: `sol11s_split_plan(M, context)` picks the number of KV splits
+(1 to 8) from the chunk's row count M, so a 512-row chunk merged its
+online-softmax partials in a different order than four 128-row chunks. For a
+prompt of about 580 tokens, for example, M = 512 used 1 split where M = 128
+used 2. Separately, each 128-row chunk did work that could be removed without
+changing a bit.
+
+**Change.**
+
+- **G128 split plan.** The plan kernel also stores, for each 128-row group g of
+  a chunk, the split plan that a standalone 128-row chunk at context + 128g
+  would use (plan words 8 to 15; the plan grows from 8 to 16 words). A query
+  tile, 16 rows that never straddle a group, uses its group's span and split
+  count and ends its key range where that standalone chunk would. The combine
+  step merges that group's split count in the unchanged fixed order. For chunks
+  of at most 128 rows the group plan is the chunk plan, so 128-token packages
+  are unaffected.
+- **R1, in-place member outputs and single-pass rows.** Fused pgemm member
+  projections write their column slice of the parent output in place, through
+  an output row stride `ldy`, so the member-output copies are gone. BF16 dense
+  row projections (the GDN b/a projections and the MTP fc) run in one
+  multi-row launch instead of one launch per row.
+- **R2, SwiGLU in the down-projection producer.** In prefill graphs the
+  NVFP4 down projection reads the gate/up output and applies the BF16 SwiGLU
+  in its producer, bit for bit equal to the compiled pair it replaces.
+- **R3, channel-blocked dense rows.** Multi-row dense variants process a chunk
+  of up to 512 rows in one launch, with weights streamed once per row block.
+- **Preparation.** `tools/prepare_replay.sh` passes `--chunk 512`. The package
+  holds prefill graphs at capacities 128, 256 and 512 (48 graphs, against 44
+  at capacity 128 only). `--chunk 128` selects the previous catalog.
+
+**Why a 512-token chunk computes the same bits.** Helios cuts a prefill chunk
+at the next message boundary, the next prefill-span start or the capacity,
+whichever comes first. From the same start, the 128-token catalog cuts every
+128 tokens up to the same boundary. So a 512-row chunk covers exactly the
+128-row chunks that the previous package would run, at contexts context,
+context + 128, and so on. With the G128 plan, each group's attention uses the
+same splits, key range and merge order as that 128-row chunk. The projections,
+the GDN scan, the producers and the norms are row-local or token-sequential,
+so they do not depend on the chunk size.
+
+**Residual.** K/V page scales are recomputed over every page up to the chunk
+end. When a chunk starts in the middle of a page, for example after a message
+boundary, a page that straddles a group boundary can get a different
+power-of-two scale than in the 128-token run. Power-of-two scaling is exact
+except for BF16 elements 2^33 or more below that page's maximum, so bits can
+differ only for such extreme in-page ranges. The admission status covers every
+page of the chunk, so an inadmissible later page flags the whole chunk earlier
+than the 128-token path would.
+
+**Tests.**
+
+- `tests/components/test_sm70_prefill_attention_cuda.py::test_g128_group_rows_equal_standalone_128_row_chunks`:
+  in a capacity-512 graph, for (M, context) from (512, 0) to (37, 300),
+  including unaligned contexts, every group's rows equal the host path run
+  alone on that group at context + 128g, bit for bit. The capacity-128 test of
+  the captured graph is unchanged.
+- `tests/components/test_sm70_prefill_rows_cuda.py`: the R1-R3 launches against
+  the launches they replace at 128, 256 and 512 rows, with poisoned guard rows
+  and columns.
+- `tests/components/test_sm70_build.py` pins `sm70_pgemm.cuh` at SHA-256
+  `7d979e47…`, the reviewed r4 kernel (`60a4ed9f…`) plus `ldy`.
+- The export gates of package `f21b9abb`, the identity of its coding-token
+  goldens with the previous package's, and its byte-identical accuracy output
+  (above).
+
+**Effect.** In the prefill lab (2 output tokens, 1 warmup and 1 measured
+batch, not the public protocol), one request prefilled at 991.5 tok/s at 2,048
+tokens and 865.8 tok/s at 30,720, against 807.1 and 718.9 for the previous
+package (+22.9 % and +20.4 %). The fusions alone at 128-token chunks gave 859.6
+and 760.6 tok/s. With the public protocol the gain is 23.1 %
+and 20.5 %
+([BENCHMARKS-SM70.md](../../BENCHMARKS-SM70.md#package-f21b9abb-512-token-prefill-chunks-on-server-binary-48b69ed4)).
+The cost is memory: at `--memory-limit 31G` the KV pool is 124,928 tokens,
+limited by memory, against 131,584 for the previous package (-5.1 %). Four
+30,720-token contexts (122,880 tokens) still fit; four 32,768-token contexts
+(131,072) do not. While a 512-token chunk runs, other active requests wait for
+their next decode step longer than behind a 128-token chunk.
+
+**Review history.** Argon (`gemini-4-argon`) cleared the port of R1-R3 onto
+the release tree with no required changes; on their source branch, R1-R3 had
+been cleared for GPU testing by Argon and by Astra (`gpt-6-astra`), with
+required changes from Astra for R1 (gate fixes) and R3. Argon cleared the G128
+plan with no required changes and confirmed that the straddling-page scale is
+the only remaining divergence inside the kernel. The harness change for the
+injected-status probe was cleared over three rounds, one of them with required
+changes that were applied, and Argon signed off the integrated change.

@@ -254,7 +254,7 @@ class _Harness:
         c.num_ops.fill_(len(entries))
 
     def back_pages(self, prompts):
-        """EXP-11 (harness only): the base reset() backs two KV pages and two MTP draft pages (256 tokens) per slot. A
+        """Harness only: the base reset() backs two KV pages and two MTP draft pages (256 tokens) per slot. A
         prompt longer than that (the injected-status probe extends its prompt past the prefill graph capacity, so at
         capacities 256 and 512 it needs 3 and 5 pages) would be refused by the batch row validator (error 32) and its
         attention would see M = 0. Fill only blocks the slot's KV and draft tables leave unbacked (-1), with backed pool
@@ -277,7 +277,7 @@ class _Harness:
 
     def initialize(self, prompts, *, mtp=True):
         self.reset()
-        self.back_pages(prompts)                          # EXP-11; fills only unbacked blocks
+        self.back_pages(prompts)                          # fills only unbacked blocks
         self.epoch += 1
         batch = len(prompts)
         for slot, ids in enumerate(prompts):
@@ -371,7 +371,7 @@ class _Harness:
         parts = [ids[start:start + capacity] for start in range(0, len(ids), capacity)]
         if len(parts) < 2:
             raise RuntimeError("injected-status probe needs a committed page before the poisoned chunk")
-        self.back_pages([ids])                            # EXP-11: the extended prompt may exceed two pages
+        self.back_pages([ids])                            # the extended prompt may exceed two pages
 
         def chunk(part):
             self.rows([slot], lengths=[len(part)])

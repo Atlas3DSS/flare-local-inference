@@ -1,0 +1,10 @@
+variant srpt
+48b69ed46f5183ff0b62f1906b5e80819e370408f035a3643be4db68c83d7342  <release-host>/flare/<lab>/flare-public-4528c220
+f21b9abbe3e9d5a1c033e5fccdcdd0b5317c295af52345c983ad1264534c5d0d  <release-host>/flare/<lab>/g128-release-prepare/model.safetensors
+ac7827d0da07ee4bb88b023775d3fd6d450c81b31392b361870118e51f6b7906  <release-host>/flare/<lab>/tools-public/benchmark_long.py
+a4656afb11c6f7ef4acb065324106a0da8a43adc129d95710bded4d3c5157c2b  <release-host>/flare/<lab>/tools-public/benchmark_mtp.py
+c64786794779f4df4d22d3078fdbc5b947180bcadaf6af7ff514249a18a38af1  <release-host>/flare/<lab>/tools-public/benchmark_prefill.py
+d04a9150e8b69adccc21a9cf2eb041d51cd4c4755771e0cb3f0483280d0d858d  <release-host>/flare/<lab>/tools-public/native.py
+910d3da185b067c49066ef6f2d024650285b18be6709d93cb7639c1129748993  <release-host>/flare/<lab>/tools-public/native_srpt.py
+284ceb773c9f5c1d8c565cae3da122f4f36a367228ec632d9fe98763df83487b  <release-host>/flare/<lab>/lab_prefill.py
+Sat Oct 24 02:32:52 PDT 2026

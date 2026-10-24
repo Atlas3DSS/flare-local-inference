@@ -1,0 +1,445 @@
+{
+  "note": "Fields copied from the preparation reports (prepare.json). The G128 preparation and rebuild each compared their tau measurement with a copy of the previous release package's tau.json, so prior_measurement_identity is identity with the previous package. accuracy_safetensors_sha256 is the SHA-256 of each preparation's accuracy.safetensors (54 tensors, including 9 FP32 candidate-logit tensors = 106,529,280 logits).",
+  "g128_prepare": {
+    "report": "<release-host>/flare/<lab>/g128-release-prepare/prepare.json",
+    "status": "exported",
+    "prefill_chunk": 512,
+    "prefill_capacities": [
+      128,
+      256,
+      512
+    ],
+    "graphs": 48,
+    "strict_validation": {
+      "passed": true,
+      "checks": 47,
+      "checks_passed": 47,
+      "failures": [],
+      "prefill_status_checks": 113,
+      "graph_replays": {
+        "init1-no-mtp": 2,
+        "prefill512-no-mtp": 6,
+        "resume1-no-mtp": 2,
+        "decode1": 46,
+        "init1": 22,
+        "prefill512": 108,
+        "resume1": 25,
+        "speculative1x1": 16,
+        "speculative1x2": 9,
+        "speculative1x3": 7,
+        "speculative1x4": 7,
+        "speculative1x5": 23,
+        "snapshot1": 3,
+        "restore1": 3,
+        "init4-no-mtp": 1,
+        "resume4-no-mtp": 1,
+        "decode4": 66,
+        "init4": 21,
+        "resume4": 10,
+        "speculative4x1": 16,
+        "speculative4x2": 10,
+        "speculative4x3": 9,
+        "speculative4x4": 7,
+        "speculative4x5": 11,
+        "snapshot4": 3,
+        "restore4": 3
+      },
+      "injected_status": {
+        "name": "sm70_prefill_attention_injected_status",
+        "prefill_status": 1,
+        "record_status": 3,
+        "record_error_code": 34,
+        "request_status": 3,
+        "request_error_code": 34,
+        "poisoned_layer": 3,
+        "poisoned_page": 0,
+        "prefill_chunks": 2,
+        "record_sampled_token": -1,
+        "passed": true,
+        "recovered": true
+      }
+    },
+    "long_sequence_invariance": {
+      "passed": true,
+      "comparisons": 28,
+      "comparisons_passed": 28,
+      "runs": 15,
+      "prefill_chunk_tokens": 128,
+      "output_tokens": 512,
+      "draft_depths": [
+        3,
+        4
+      ]
+    },
+    "commit_capacity_growth": {
+      "passed": true,
+      "checks": [
+        {
+          "name": "retained_B4_width4_with_destination_excluded_rejected_unchanged",
+          "passed": true
+        },
+        {
+          "name": "retained_actual_B4_width5_after_growth_vs_ordinary",
+          "passed": true
+        },
+        {
+          "name": "retained_actual_B4_width4_after_growth_vs_ordinary",
+          "passed": true
+        },
+        {
+          "name": "forced_direct_acceptance1_to5_after_growth_vs_ordinary",
+          "passed": true
+        }
+      ]
+    },
+    "consumer_identity": {
+      "passed": true,
+      "cases": [
+        {
+          "M": 1,
+          "passed": true
+        },
+        {
+          "M": 16,
+          "passed": true
+        },
+        {
+          "M": 20,
+          "passed": true
+        }
+      ]
+    },
+    "components": {
+      "status": "complete"
+    },
+    "accuracy": {
+      "status": "complete",
+      "aggregates": {
+        "short": {
+          "positions": 141,
+          "vocabulary": 248320,
+          "kld_mean": 0.0012260787284409042,
+          "kld_p99": 0.014369428186645002,
+          "kld_max": 0.02187504204974827,
+          "top1_agreement": 0.9645390070921985,
+          "top1_disagreements": 5
+        },
+        "long": {
+          "positions": 288,
+          "vocabulary": 248320,
+          "kld_mean": 0.001904966782656233,
+          "kld_p99": 0.04034446547824994,
+          "kld_max": 0.0868101554538479,
+          "top1_agreement": 0.9930555555555556,
+          "top1_disagreements": 2
+        }
+      },
+      "accuracy_safetensors_sha256": "aadec3431bbe9527c430365fcafda22f223a82da593bee0ee6a31d091b77a7db"
+    },
+    "measurement": {
+      "status": "complete",
+      "qualification_passed": true,
+      "prior_measurement_identity": true,
+      "prompt_file_sha256": "cfd9e7c0ed37ad79660cae15b6e4ebd404d1a6c4e1e206d51a57fb687b31b6de",
+      "measurement_source_sha256": "6047db4db3afb4a3200ff51cd42e75a799105813d940f77f331cc5266b511b76"
+    },
+    "package_primary_sha256": "f21b9abbe3e9d5a1c033e5fccdcdd0b5317c295af52345c983ad1264534c5d0d",
+    "fingerprint": "ef39a0be57c2916c486172fa23d44f0031879e954250765ac1a1a835977f18ab",
+    "peak_allocated_bytes": 22788212736,
+    "elapsed_seconds": 2170.9388828010124
+  },
+  "g128_rebuild": {
+    "report": "<release-host>/flare/<lab>/g128-release-rebuild/prepare.json",
+    "status": "exported",
+    "prefill_chunk": 512,
+    "prefill_capacities": [
+      128,
+      256,
+      512
+    ],
+    "graphs": 48,
+    "strict_validation": {
+      "passed": true,
+      "checks": 47,
+      "checks_passed": 47,
+      "failures": [],
+      "prefill_status_checks": 113,
+      "graph_replays": {
+        "init1-no-mtp": 2,
+        "prefill512-no-mtp": 6,
+        "resume1-no-mtp": 2,
+        "decode1": 46,
+        "init1": 22,
+        "prefill512": 108,
+        "resume1": 25,
+        "speculative1x1": 16,
+        "speculative1x2": 9,
+        "speculative1x3": 7,
+        "speculative1x4": 7,
+        "speculative1x5": 23,
+        "snapshot1": 3,
+        "restore1": 3,
+        "init4-no-mtp": 1,
+        "resume4-no-mtp": 1,
+        "decode4": 66,
+        "init4": 21,
+        "resume4": 10,
+        "speculative4x1": 16,
+        "speculative4x2": 10,
+        "speculative4x3": 9,
+        "speculative4x4": 7,
+        "speculative4x5": 11,
+        "snapshot4": 3,
+        "restore4": 3
+      },
+      "injected_status": {
+        "name": "sm70_prefill_attention_injected_status",
+        "prefill_status": 1,
+        "record_status": 3,
+        "record_error_code": 34,
+        "request_status": 3,
+        "request_error_code": 34,
+        "poisoned_layer": 3,
+        "poisoned_page": 0,
+        "prefill_chunks": 2,
+        "record_sampled_token": -1,
+        "passed": true,
+        "recovered": true
+      }
+    },
+    "long_sequence_invariance": {
+      "passed": true,
+      "comparisons": 28,
+      "comparisons_passed": 28,
+      "runs": 15,
+      "prefill_chunk_tokens": 128,
+      "output_tokens": 512,
+      "draft_depths": [
+        3,
+        4
+      ]
+    },
+    "commit_capacity_growth": {
+      "passed": true,
+      "checks": [
+        {
+          "name": "retained_B4_width4_with_destination_excluded_rejected_unchanged",
+          "passed": true
+        },
+        {
+          "name": "retained_actual_B4_width5_after_growth_vs_ordinary",
+          "passed": true
+        },
+        {
+          "name": "retained_actual_B4_width4_after_growth_vs_ordinary",
+          "passed": true
+        },
+        {
+          "name": "forced_direct_acceptance1_to5_after_growth_vs_ordinary",
+          "passed": true
+        }
+      ]
+    },
+    "consumer_identity": {
+      "passed": true,
+      "cases": [
+        {
+          "M": 1,
+          "passed": true
+        },
+        {
+          "M": 16,
+          "passed": true
+        },
+        {
+          "M": 20,
+          "passed": true
+        }
+      ]
+    },
+    "components": {
+      "status": "complete"
+    },
+    "accuracy": {
+      "status": "complete",
+      "aggregates": {
+        "short": {
+          "positions": 141,
+          "vocabulary": 248320,
+          "kld_mean": 0.0012260787284409042,
+          "kld_p99": 0.014369428186645002,
+          "kld_max": 0.02187504204974827,
+          "top1_agreement": 0.9645390070921985,
+          "top1_disagreements": 5
+        },
+        "long": {
+          "positions": 288,
+          "vocabulary": 248320,
+          "kld_mean": 0.001904966782656233,
+          "kld_p99": 0.04034446547824994,
+          "kld_max": 0.0868101554538479,
+          "top1_agreement": 0.9930555555555556,
+          "top1_disagreements": 2
+        }
+      },
+      "accuracy_safetensors_sha256": "aadec3431bbe9527c430365fcafda22f223a82da593bee0ee6a31d091b77a7db"
+    },
+    "measurement": {
+      "status": "complete",
+      "qualification_passed": true,
+      "prior_measurement_identity": true,
+      "prompt_file_sha256": "cfd9e7c0ed37ad79660cae15b6e4ebd404d1a6c4e1e206d51a57fb687b31b6de",
+      "measurement_source_sha256": "6047db4db3afb4a3200ff51cd42e75a799105813d940f77f331cc5266b511b76"
+    },
+    "package_primary_sha256": "ad848aaaaa3d0213ca37ee14a424e1beceddfad87af07e2aa4588123c18bf6fe",
+    "fingerprint": "ef39a0be57c2916c486172fa23d44f0031879e954250765ac1a1a835977f18ab",
+    "peak_allocated_bytes": 22788212736,
+    "elapsed_seconds": 1762.5666457659972
+  },
+  "previous_release_prepare": {
+    "report": "<release-host>/flare/release-preparation/prepare-api.json",
+    "status": "exported",
+    "prefill_chunk": 128,
+    "prefill_capacities": [
+      128
+    ],
+    "graphs": 44,
+    "strict_validation": {
+      "passed": true,
+      "checks": 47,
+      "checks_passed": 47,
+      "failures": [],
+      "prefill_status_checks": 123,
+      "graph_replays": {
+        "init1-no-mtp": 2,
+        "prefill128-no-mtp": 6,
+        "resume1-no-mtp": 2,
+        "decode1": 46,
+        "init1": 22,
+        "prefill128": 118,
+        "resume1": 25,
+        "speculative1x1": 16,
+        "speculative1x2": 9,
+        "speculative1x3": 7,
+        "speculative1x4": 7,
+        "speculative1x5": 23,
+        "snapshot1": 3,
+        "restore1": 3,
+        "init4-no-mtp": 1,
+        "resume4-no-mtp": 1,
+        "decode4": 66,
+        "init4": 21,
+        "resume4": 10,
+        "speculative4x1": 16,
+        "speculative4x2": 10,
+        "speculative4x3": 9,
+        "speculative4x4": 7,
+        "speculative4x5": 11,
+        "snapshot4": 3,
+        "restore4": 3
+      },
+      "injected_status": {
+        "name": "sm70_prefill_attention_injected_status",
+        "prefill_status": 1,
+        "record_status": 3,
+        "record_error_code": 34,
+        "request_status": 3,
+        "request_error_code": 34,
+        "poisoned_layer": 3,
+        "poisoned_page": 0,
+        "prefill_chunks": 2,
+        "record_sampled_token": -1,
+        "passed": true,
+        "recovered": true
+      }
+    },
+    "long_sequence_invariance": {
+      "passed": true,
+      "comparisons": 28,
+      "comparisons_passed": 28,
+      "runs": 15,
+      "prefill_chunk_tokens": 128,
+      "output_tokens": 512,
+      "draft_depths": [
+        3,
+        4
+      ]
+    },
+    "commit_capacity_growth": {
+      "passed": true,
+      "checks": [
+        {
+          "name": "retained_B4_width4_with_destination_excluded_rejected_unchanged",
+          "passed": true
+        },
+        {
+          "name": "retained_actual_B4_width5_after_growth_vs_ordinary",
+          "passed": true
+        },
+        {
+          "name": "retained_actual_B4_width4_after_growth_vs_ordinary",
+          "passed": true
+        },
+        {
+          "name": "forced_direct_acceptance1_to5_after_growth_vs_ordinary",
+          "passed": true
+        }
+      ]
+    },
+    "consumer_identity": {
+      "passed": true,
+      "cases": [
+        {
+          "M": 1,
+          "passed": true
+        },
+        {
+          "M": 16,
+          "passed": true
+        },
+        {
+          "M": 20,
+          "passed": true
+        }
+      ]
+    },
+    "components": {
+      "status": "complete"
+    },
+    "accuracy": {
+      "status": "complete",
+      "aggregates": {
+        "short": {
+          "positions": 141,
+          "vocabulary": 248320,
+          "kld_mean": 0.0012260787284409042,
+          "kld_p99": 0.014369428186645002,
+          "kld_max": 0.02187504204974827,
+          "top1_agreement": 0.9645390070921985,
+          "top1_disagreements": 5
+        },
+        "long": {
+          "positions": 288,
+          "vocabulary": 248320,
+          "kld_mean": 0.001904966782656233,
+          "kld_p99": 0.04034446547824994,
+          "kld_max": 0.0868101554538479,
+          "top1_agreement": 0.9930555555555556,
+          "top1_disagreements": 2
+        }
+      },
+      "accuracy_safetensors_sha256": "aadec3431bbe9527c430365fcafda22f223a82da593bee0ee6a31d091b77a7db"
+    },
+    "measurement": {
+      "status": "complete",
+      "qualification_passed": true,
+      "prior_measurement_identity": null,
+      "prompt_file_sha256": "cfd9e7c0ed37ad79660cae15b6e4ebd404d1a6c4e1e206d51a57fb687b31b6de",
+      "measurement_source_sha256": "6047db4db3afb4a3200ff51cd42e75a799105813d940f77f331cc5266b511b76"
+    },
+    "package_primary_sha256": "fd7c24dce58c4897a2ab5299bcd875e3e6ab1e2a1f714e5f09724bc6619a7382",
+    "fingerprint": "ef39a0be57c2916c486172fa23d44f0031879e954250765ac1a1a835977f18ab",
+    "peak_allocated_bytes": 22304001536,
+    "elapsed_seconds": 1415.8332866310084
+  }
+}

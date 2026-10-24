@@ -181,8 +181,10 @@ replaced. It checks that every SM70 library builds with `$CUDA_HOME/bin/nvcc`
 into the configured kernel cache, and that the prefill build requires an
 explicit CUTLASS directory whose transitive headers change the cache key. It
 also checks that every served pgemm tile is a compiled instantiation inside the
-reviewed template space, and that `sm70_pgemm.cuh` is byte-identical to the
-reviewed kernel (SHA-256 `60a4ed9f...`).
+reviewed template space, and pins `sm70_pgemm.cuh` at SHA-256 `7d979e47...`:
+the reviewed kernel (`60a4ed9f...`) plus the output row stride `ldy` of the
+prefill fusions
+([ARCHITECTURE.md](ARCHITECTURE.md#5-512-token-prefill-exact-fusions-and-the-g128-split-plan)).
 
 ```sh
 .venv/bin/python -m pytest -q tests/components/test_sm70_build.py

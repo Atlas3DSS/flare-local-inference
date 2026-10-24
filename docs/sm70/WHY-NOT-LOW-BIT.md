@@ -111,7 +111,10 @@ points have to be emulated, as this port does in FP32.
 
 On 2026-10-23 the fork ran the same checkpoint on llama.cpp, on the same card
 type (Tesla V100 PCIe 32 GB), with the same public prompts, prefill token IDs,
-sampling and FP32 reference as the release benchmarks. Receipts:
+sampling and FP32 reference as the release benchmarks. This port's columns are
+the previous package `fd7c24dc` on the release binary `d4ffb1fa`, which
+prefills in 128-token chunks; where the current package `f21b9abb` was measured
+with the same protocol, its figure is given beside them. Receipts:
 [a1-summary.json](receipts/measurements/a1-summary.json),
 [a1-llamacpp-kl.json](receipts/measurements/a1-llamacpp-kl.json) and
 [gguf.sha256](receipts/measurements/gguf.sha256).
@@ -141,8 +144,9 @@ request after the first token
 
 | Engine and speculation | 1 agent, short prompts | 1 agent, 28.7k-token context | 4 agents, short prompts, per agent | 4 agents, 28.7k-token context, per agent (a) |
 | --- | ---: | ---: | ---: | ---: |
-| This port, depth-4 MTP | 83.0 | 72.4 | 64.8 | 41.5 |
-| This port, speculation off (`--mtp-draft-tokens 0`) | 30.9 | 27.0 | 28.3 | 19.2 |
+| This port, depth-4 MTP, previous package | 83.0 | 72.4 | 64.8 | 41.5 |
+| This port, depth-4 MTP, package `f21b9abb` | 83.2 | 73.5 | 64.9 | 38.2 |
+| This port, speculation off (`--mtp-draft-tokens 0`), previous package | 30.9 | 27.0 | 28.3 | 19.2 |
 | llama.cpp Q4_K_M with the checkpoint's MTP head (`--spec-type draft-mtp`), best depth | 64.6 (depth 3) | 55.9 (depth 3) | 31.8 (depth 4) | 22.3 (depth 4) |
 | llama.cpp Q4_K_M, no speculation | 33.2 | 28.2 | 20.5 | 14.3 |
 | llama.cpp Q4_K_M, n-gram speculation (`ngram-simple`) | 32.8 | 28.0 | 20.8 | 13.1-14.7 |
@@ -185,12 +189,15 @@ Checks:
 
 Prefill and numerics, which speculation does not affect:
 
-| Metric | This port | llama.cpp Q4_K_M | llama.cpp Q8_0 |
-| --- | ---: | ---: | ---: |
-| TTFT, 1 request, 2,048 / 8,192 / 22,528 / 30,720 tokens (s) | 2.54 / 10.43 / 30.39 / 42.75 | 3.25 / 11.57 / 34.21 / 49.27 | not measured |
-| Effective prefill, 1 request, same lengths (tok/s) | 807 / 785 / 741 / 719 | 630 / 708 / 659 / 623 | not measured |
-| KL(build ‖ FP32 reference), mean of 3 prompt means / max, 141 positions | 0.0011 / 0.021 | 0.0088 / 0.068 | 0.0013 / 0.034 |
-| Top-1 agreement with the FP32 reference (of 141) | 135 | 137 | 136 |
+| Metric | This port, previous package | This port, package `f21b9abb` | llama.cpp Q4_K_M | llama.cpp Q8_0 |
+| --- | ---: | ---: | ---: | ---: |
+| TTFT, 1 request, 2,048 / 8,192 / 22,528 / 30,720 tokens (s) | 2.54 / 10.43 / 30.39 / 42.75 | 2.06 / 8.53 / 25.08 / 35.46 | 3.25 / 11.57 / 34.21 / 49.27 | not measured |
+| Effective prefill, 1 request, same lengths (tok/s) | 807 / 785 / 741 / 719 | 994 / 961 / 898 / 866 | 630 / 708 / 659 / 623 | not measured |
+| KL(build ‖ FP32 reference), mean of 3 prompt means / max, 141 positions | 0.0011 / 0.021 | not repeated (a) | 0.0088 / 0.068 | 0.0013 / 0.034 |
+| Top-1 agreement with the FP32 reference (of 141) | 135 | not repeated (a) | 137 | 136 |
+
+(a) The SM70 capture was not repeated on the current tree. The current
+package's export-accuracy output is byte-identical to the previous package's.
 
 Read the tables with these notes:
 
@@ -214,25 +221,29 @@ Read the tables with these notes:
 
 llama.cpp Q4_K_M ran with `-np 4 -c 131072`, 32,768 tokens per slot, in F16 and
 q8_0 KV variants, with cold requests and 256 output tokens. This port's column
-is the release long-context run.
+is the previous package's release long-context run, with the current
+package's beside it.
 
-| Four agents, one V100 PCIe 32 GB | llama.cpp Q4_K_M, F16 KV | llama.cpp Q4_K_M, q8_0 KV | This port, BF16 KV |
-| --- | ---: | ---: | ---: |
-| Peak device memory (nvidia-smi) | 24,356 MiB | 20,988 MiB | 31,282 MiB, pre-allocated (131,584-token pool at `--memory-limit 31G`) |
-| All four 32K-class contexts resident | yes | yes | yes |
-| Four cold 30,720-token prompts: first token per agent (s) | 59.8 / 107.9 / 156.7 / 200.3 | 57.4 / 105.9 / 155.1 / 199.1 | 170.2-171.0, all four together |
-| Four public 28.7k-token agent prompts, first send: first token per agent (s) | 57.8 / 102.2 / 146.8 / 186.3 | 54.7 / 99.4 / 144.3 / 184.1 | 157.96-159.80, all four together (a) |
-| Decode per agent while all four decode (tok/s) | 14.3; 13.9 after 30,720-token prompts | 13.4; 13.2 | 40.2-46.1, median 41.9 (depth-4 MTP) |
+| Four agents, one V100 PCIe 32 GB | llama.cpp Q4_K_M, F16 KV | llama.cpp Q4_K_M, q8_0 KV | This port, BF16 KV, previous package | This port, BF16 KV, package `f21b9abb` |
+| --- | ---: | ---: | ---: | ---: |
+| Peak device memory (nvidia-smi) | 24,356 MiB | 20,988 MiB | 31,282 MiB, pre-allocated (131,584-token pool at `--memory-limit 31G`) | 31,606 MiB, pre-allocated (124,928-token pool at `--memory-limit 31G`) |
+| All four 32K-class contexts resident | yes | yes | yes | four 30,720-token contexts fit; four 32,768-token contexts do not |
+| Four cold 30,720-token prompts: first token per agent (s) | 59.8 / 107.9 / 156.7 / 200.3 | 57.4 / 105.9 / 155.1 / 199.1 | 170.2-171.0, all four together | 139.7-142.4, all four together; 36.2 / 71.9 / 107.6 / 145.1 with `--prefill-srpt` |
+| Four public 28.7k-token agent prompts, first send: first token per agent (s) | 57.8 / 102.2 / 146.8 / 186.3 | 54.7 / 99.4 / 144.3 / 184.1 | 157.96-159.80, all four together (b) | 123.65 / 125.49 / 138.65 / 142.08 (b) |
+| Decode per agent while all four decode (tok/s) | 14.3; 13.9 after 30,720-token prompts | 13.4; 13.2 | 40.2-46.1, median 41.9 (depth-4 MTP) | 27.6-63.4, median 43.1 (first batch); median 38.2 over 12 requests |
 
-(a) That batch is not labelled cold: no request reports cache credit, but the
-server's reused-token counter moved during it
-([BENCHMARKS-SM70.md](../../BENCHMARKS-SM70.md)).
+(b) The previous package's batch is not labelled cold: no request reports
+cache credit, but the server's reused-token counter moved during it
+([BENCHMARKS-SM70.md](../../BENCHMARKS-SM70.md)). This package's first batch is cold; its four
+decode windows overlap only partly.
 
 - llama.cpp prefills the four requests largely one after another. The first
   agent starts decoding after about a minute and the last waits about 200 s.
-  This port interleaves the four prefills, and none of them emits a token before
-  all four have finished. Total prompt throughput for four 30,720-token prompts
-  is 608-613 tok/s on llama.cpp and 719 tok/s on this port.
+  This port's previous package interleaves the four prefills, and none of them
+  emits a token before all four have finished; with package `f21b9abb` the four
+  first tokens of the cold batch arrive from 123.65 to 142.08 s. Total prompt throughput for four 30,720-token prompts
+  is 608-613 tok/s on llama.cpp, 719 tok/s on this port's previous package and
+  863 tok/s on package `f21b9abb`.
 - The KV formats differ: F16 and BF16 store 2 bytes per element and q8_0 about
   1. On llama.cpp, q8_0 KV saves 3,368 MiB and costs 2-6 % of decode rate at
   these lengths.
@@ -337,8 +348,10 @@ on the GPU, the next in RAM and the rest on NVMe.
 
 | Engine | Model | Weights on the V100 | Cards / streams | Decode tok/s | Per card | Agreement with a reference | Source |
 | --- | --- | --- | --- | ---: | ---: | --- | --- |
-| This port, release binary, depth-4 MTP (speculative) | Qwen3.8-27B | NVIDIA NVFP4 + FP8, unchanged | 1 / 1 | 83.0 | 83.0 | KL 0.0011 vs an FP32 forward of the same checkpoint (141 positions) | [release section](../../BENCHMARKS-SM70.md) |
-| This port, release binary, depth-4 MTP (speculative) | Qwen3.8-27B | same | 1 / 4 | 64.8 per stream | 64.8 per stream | same | same |
+| This port, package `f21b9abb`, depth-4 MTP (speculative) | Qwen3.8-27B | NVIDIA NVFP4 + FP8, unchanged | 1 / 1 | 83.2 | 83.2 | export-accuracy output byte-identical to the previous package's | [BENCHMARKS-SM70.md](../../BENCHMARKS-SM70.md#package-f21b9abb-512-token-prefill-chunks-on-server-binary-48b69ed4) |
+| This port, package `f21b9abb`, depth-4 MTP (speculative) | Qwen3.8-27B | same | 1 / 4 | 64.9 per stream | 64.9 per stream | same | same |
+| This port, previous package on the release binary, depth-4 MTP (speculative) | Qwen3.8-27B | NVIDIA NVFP4 + FP8, unchanged | 1 / 1 | 83.0 | 83.0 | KL 0.0011 vs an FP32 forward of the same checkpoint (141 positions) | [previous-package section](../../BENCHMARKS-SM70.md#previous-package-fd7c24dc-on-release-binary-d4ffb1fa-128-token-prefill-chunks) |
+| This port, previous package on the release binary, depth-4 MTP (speculative) | Qwen3.8-27B | same | 1 / 4 | 64.8 per stream | 64.8 per stream | same | same |
 | llama.cpp Q4_K_M, no speculative decoding (same model, same card type) | Qwen3.8-27B | Q4_K_M requantized from the checkpoint, NVFP4 head, F16 KV | 1 / 1 | 33.2 | 33.2 | KL 0.0088 vs the same FP32 forward | [a1-summary.json](receipts/measurements/a1-summary.json) |
 | llama.cpp Q4_K_M, no speculative decoding | Qwen3.8-27B | same | 1 / 4 | 20.8 per stream | 20.8 per stream | same | same |
 | Strata | Qwen3.8-Flash-Next, 125 B | UD-IQ4_XS GGUF, int8 KV | 1 / 1 | 38-51 | 38-51 | 88.91 % top token vs Q8_0 | NVIDIA_V100.md, QUANTS.md |
@@ -397,6 +410,7 @@ Volta kernels for the parts that need them
 | pgemm prefill projections (`8ad725c`) | Register-B packed GEMM with a device live-row count; same bits as the previous kernel | 0 mismatches in captured-graph identity (commit message) |
 | S1L decode, verification and draft attention (`6b808ef`, `0aea71a`, `ca16f00`) | Bit-exact multi-row verification, and MTP draft steps on tensor cores instead of a scalar sweep | 1 x 5 round 49.5-49.6 ms vs 55.1 ms without the S1L draft (STATUS.md line 64) |
 | GDN replay-commit (`d3258bc` to `7cb1bc7`) | One committed recurrent-state row per request instead of five: 16 x 166 MiB returned to KV pages | KV pool 98,304 to 131,584 tokens at 31G, +33.9 % (line 49) |
+| 512-token prefill (`4acbecf0`) | Exact prefill fusions and a per-128-row attention split plan: larger chunks with the same tokens | prefill 23.1 % / 20.5 % faster at 2,048 / 30,720 tokens, same goldens and accuracy output; KV pool 124,928 tokens at 31G (-5.1 %) |
 | Scheduler hang fix (`e81534a`, `718a187`) | 4-agent serving with the host prefix store keeps making progress | progress tests: 4 passed, 1 ignored on `fe058dc` |
 
 ## Trade-offs and benefits
@@ -407,12 +421,14 @@ Volta kernels for the parts that need them
   weight is decoded to FP16 in registers before the FP16 multiply. On SM120 the
   tensor cores consume FP4 and FP8 directly. We have not measured SM120 speed
   for comparison.
-- **Prefill and time to first token.** Long prompts are prefill-bound. On the
-  release binary, effective prefill is 719-807 tok/s, one request at a time: a
-  30,720-token prompt waits 42.7 s for its first token alone and 170.2-171.0 s
-  when four arrive together ([BENCHMARKS-SM70.md](../../BENCHMARKS-SM70.md)).
-  The measured reason is the projection arithmetic. Prefill runs in 128-token
-  chunks, and in a profile of one release-binary prefill the projection GEMMs,
+- **Prefill and time to first token.** Long prompts are prefill-bound. With
+  package `f21b9abb`, effective prefill is 866-994 tok/s, one request at a
+  time: a 30,720-token prompt waits 35.46 s for its first token alone and
+  139.7-142.4 s when four arrive together (previous package: 719-807 tok/s,
+  42.7 s and 170.2-171.0 s; [BENCHMARKS-SM70.md](../../BENCHMARKS-SM70.md)).
+  The measured reason is the projection arithmetic. The previous package
+  prefills in 128-token chunks, and in a profile of one of its prefills on the
+  release binary the projection GEMMs,
   where every packed weight is decoded to FP16, took 63-66 % of the time. The
   GDN recurrence took about 11 %, attention 7-10 %, and the GPU was idle only
   1.4-1.9 % ([prefill-profile.json](receipts/measurements/prefill-profile.json)). On real coding-agent traces
@@ -426,7 +442,7 @@ Volta kernels for the parts that need them
   96 of them on its first-parent line.
 - **Old hardware.** The V100 is several generations old. Power per generated
   token was not measured.
-- **No end-to-end real-trace number for the release binary.** The real-trace
+- **No end-to-end real-trace number for either release binary.** The real-trace
   figure, 47.23 tok/s at best (line 68), used the 2026-10-22 release-tree
   package with a pre-release binary.
 
@@ -437,7 +453,8 @@ Volta kernels for the parts that need them
 - **Exact speculative decoding.** MTP verification at every width gives the
   same tokens as ordinary greedy decoding, alone or co-scheduled (line 62).
 - **A large lossless KV pool.** 131,584 tokens at `--memory-limit 31G` with
-  4 agents (lines 49, 65, 66). Four prompts of 22.4k to 30.2k tokens, 110,022 in
+  4 agents for the 128-token-chunk packages (lines 49, 65, 66), and 124,928
+  tokens for the current 512-token-chunk package. Four prompts of 22.4k to 30.2k tokens, 110,022 in
   total, stay resident with zero evictions or restores (line 65). On SM70 the KV
   pages hold BF16, unquantized; upstream's recipes default to FP8 KV.
 - **Concurrency.** 70.7 tok/s per agent at 4 agents and 90.4 tok/s at 1 agent on

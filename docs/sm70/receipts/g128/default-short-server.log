@@ -1,0 +1,30 @@
+[ PENDING  ] Verify package.  0.0s
+[    OK    ] Verify package.  signatures  0.1s
+[ PENDING  ] Verify stored data.  0.0s
+[    OK    ] Verify stored data.  stored-data contents  105.2s
+[ PENDING  ] Prepare model.  0.0s
+[    OK    ] Prepare model.  1 rank  0.0s
+[ PENDING  ] Initialize GPU.  0.0s
+[    OK    ] Initialize GPU.  GPU 0 · SM70  0.7s
+[ PENDING  ] Allocate model memory.  0.0s
+[    OK    ] Allocate model memory.  21.4 GiB GPU · 0.0 GiB host  0.3s
+[ PENDING  ] Load weights.  0.0s
+[    OK    ] Load weights.  20.0 GiB  166.4s
+[ PENDING  ] Prepare kernels.  0.0s
+[    OK    ] Prepare kernels.  946 kernels  1.8s
+[ PENDING  ] Prepare execution.  0.0s
+[    OK    ] Prepare execution.  concurrency 4  0.6s
+[ PENDING  ] Plan cache.  0.0s
+[    OK    ] Plan cache.  per GPU: 21.93 GiB loaded · 8.97 GiB cache budget · limit 31GiB · KV capped at 4 contexts  0.0s
+[ PENDING  ] Allocate cache.  0.0s
+[    OK    ] Allocate cache.  8.9 GiB · 124928 KV tokens · 32 shared snapshot slots · limited by memory  1.7s
+[ PENDING  ] Prepare host prefix cache.  0.0s
+[    OK    ] Prepare host prefix cache.  memory 8.0 GiB (729 pages + 12 rows, split by rank)  4.9s
+[ PENDING  ] Read model configuration.  0.0s
+[    OK    ] Read model configuration.  checkpoint  0.0s
+[ PENDING  ] Load tokenizer.  0.0s
+[    OK    ] Load tokenizer.  248320 token vocabulary  0.7s
+[ PENDING  ] Start server.  0.0s
+[    OK    ] Start server.  http://127.0.0.1:8703 · 32768 tokens/request  1.5s
+[ PENDING  ] Shut down server.  0.0s
+[    OK    ] Shut down server.  1.7s

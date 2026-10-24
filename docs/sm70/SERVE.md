@@ -109,7 +109,10 @@ Startup takes minutes. Redirected output shows one line per stage:
 The cache lines report the memory plan. For the release package at 31G with the
 benchmark's KV cap, the run log shows `21.15 GiB loaded`, a `9.76 GiB` cache
 budget and `KV capped at 4 contexts` (STATUS.md line 63), and the KV pool was
-131,584 tokens (lines 65, 66). The pool at the default `--kv-cache-limit memory`
+131,584 tokens (lines 65, 66). For the current package `f21b9abb`, with its
+512-token prefill graphs, the same flags give `21.93 GiB loaded`, a
+`8.97 GiB` cache budget and `124928 KV tokens`, `limited by memory`
+([default-short-server.log](receipts/g128/default-short-server.log)). The pool at the default `--kv-cache-limit memory`
 was not measured. Read your own `Allocate cache` line.
 
 Wait for readiness by polling `/health`, not by sleeping. Allow at least

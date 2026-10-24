@@ -1,0 +1,11 @@
+A pid 4127591  B pid 4127593  03:23:16
+A exit 0 03:25:35
+B exit 0 03:25:35
+PASSED tests/components/test_sampling_scratch.py::test_sampling_allocates_only_executed_operations[1-True-True-keys3]
+PASSED tests/components/test_sampling_scratch.py::test_qwen_sampling_catalog_fits_bounded_shared_backing
+225 passed, 2 warnings, 17 subtests passed in 134.99s (0:02:14)
+PASSED tests/cli/test_planning.py::test_compiler_budget_rejects_more_local_ranks_than_workers[model1-1-0,1-local tuning rank]
+PASSED tests/cli/test_planning.py::test_recipe_b12x_settings_name_b12x_variables
+218 passed, 2 warnings in 130.73s (0:02:10)
+unit + regression A/B: PASS (A exit 0, B exit 0)
+tests_replay exit 0

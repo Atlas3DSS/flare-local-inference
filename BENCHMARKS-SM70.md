@@ -9,9 +9,174 @@ not compare a number from one table with a number from the other.
 - **Decode-only** numbers are per-request decode rates (tokens per second while
   the request is decoding) or GPU step times. They exclude prefill and queueing.
 
-## Release binary d4ffb1fa (built from 71029458; production source unchanged through c6fdc120)
+## Package f21b9abb (512-token prefill chunks) on server binary 48b69ed4
 
-Measured on 2026-10-23 from 21:54 to 22:48 PDT in one benchmark chain on one
+Measured on 2026-10-24 from 02:32 to 03:27 PDT in two benchmark
+chains that ran at the same time on two Tesla V100 PCIe 32 GB cards: one with
+the default prefill ordering and one with `--prefill-srpt`. Each chain ran a
+prefill/TTFT leg, a short-prompt leg and a long-context leg. Receipts are in
+[docs/sm70/receipts/g128/](docs/sm70/receipts/g128/); each table names its
+file. The previous package's results of 2026-10-23 follow in their own section
+and are repeated in the tables here for comparison.
+
+- **Server binary.** SHA-256
+  `48b69ed46f5183ff0b62f1906b5e80819e370408f035a3643be4db68c83d7342`, built
+  from `4528c220`: the release Rust sources plus the opt-in prefill ordering.
+  The previous package was measured with the release binary `d4ffb1fa`.
+- **Package.** Primary SHA-256
+  `f21b9abbe3e9d5a1c033e5fccdcdd0b5317c295af52345c983ad1264534c5d0d`, prepared
+  with 512-token prefill chunks from production source identical to
+  `4acbecf0`, and qualified on 2026-10-24
+  ([validation record](docs/sm70/ARCHITECTURE.md#export-qualification-of-package-f21b9abb)).
+  Its coding-token goldens and export-accuracy logits are bit-identical to the
+  previous package's.
+- **Server flags.** The previous package's flags, unchanged; the ordering chain
+  adds `--prefill-srpt`. The KV pool is 124,928 tokens, 976 pages of 128
+  tokens, and the server reports it as `limited by memory`. The 512-token
+  prefill graphs take more device memory, so the pool stops 6,656 tokens
+  (5.1 %) below the 131,584-token `--kv-cache-limit concurrency` cap that the
+  previous package reached ([default-short-server.log](docs/sm70/receipts/g128/default-short-server.log), [default-short-native-depth4.json](docs/sm70/receipts/g128/default-short-native-depth4.json)).
+- **Hardware.** One Tesla V100 PCIe 32 GB per chain, used only by that chain.
+  Other jobs on the host could share CPU, memory and PCIe bandwidth
+  ([default-chain-identity.txt](docs/sm70/receipts/g128/default-chain-identity.txt), [srpt-chain-identity.txt](docs/sm70/receipts/g128/srpt-chain-identity.txt), [srpt-public-tool-identity.txt](docs/sm70/receipts/g128/srpt-public-tool-identity.txt)).
+- **Inputs.** The public prompts of the previous package's rows.
+
+### Prefill and time to first token (end to end), package f21b9abb
+
+The previous package's protocol: fixed prompt lengths of 2,048, 8,192, 22,528
+and 30,720 tokens at concurrency 1 and 4, 1 warmup batch and 3 measured
+repetitions per cell, and 32 output tokens per request. TTFT runs from client
+POST start to the first SSE chunk carrying output. The effective rate is the
+server's prefill tokens over the batch's first-token wall window. Pure-GPU
+prefill time is `null`, as before. Every request was uncached
+([default-prefill-summary.json](docs/sm70/receipts/g128/default-prefill-summary.json)).
+
+| Prompt tokens | Concurrency | TTFT p50 / p95 (s) | Effective prefill tok/s | Previous package: TTFT p50 / p95 (s) | Previous package: tok/s |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 2,048 | 1 | 2.06 / 2.06 | 994 | 2.54 / 2.54 | 807 |
+| 2,048 | 4 | 7.82 / 8.60 | 954 | 9.89 / 10.30 | 796 |
+| 8,192 | 1 | 8.53 / 8.64 | 961 | 10.43 / 10.44 | 785 |
+| 8,192 | 4 | 33.95 / 34.70 | 945 | 41.44 / 41.88 | 782 |
+| 22,528 | 1 | 25.08 / 25.12 | 898 | 30.39 / 30.39 | 741 |
+| 22,528 | 4 | 99.92 / 100.87 | 893 | 121.11 / 121.67 | 741 |
+| 30,720 | 1 | 35.46 / 35.50 | 866 | 42.75 / 42.75 | 719 |
+| 30,720 | 4 | 141.38 / 142.36 | 863 | 170.49 / 170.95 | 719 |
+
+At one request the effective rate is 23.1 % higher than the
+previous package's at 2,048 tokens and 20.5 % higher at
+30,720 tokens. Concurrent prefills still do not overlap. The server interleaves
+the four requests' 512-token chunks, so all four first tokens arrive within
+2.7 s of each other, at about four times the
+single-request TTFT. Greedy outputs of three short prompts (64 tokens) and one
+28.7k-token prompt (32 tokens) equal the previous package's on the release
+binary, token for token, on 4 of 4 prompts in both chains ([default-prefill-greedy.json](docs/sm70/receipts/g128/default-prefill-greedy.json), [srpt-prefill-greedy.json](docs/sm70/receipts/g128/srpt-prefill-greedy.json)).
+
+#### With `--prefill-srpt`, package f21b9abb
+
+The ordering chain ran the same protocol on the same package with
+`flare run --prefill-srpt` ([srpt-prefill-summary.json](docs/sm70/receipts/g128/srpt-prefill-summary.json)). The default columns repeat
+the table above.
+
+| Prompt tokens | Concurrency | TTFT p50 / p95 (s), `--prefill-srpt` | TTFT p50 / p95 (s), default | Effective prefill tok/s, `--prefill-srpt` / default |
+| ---: | ---: | ---: | ---: | ---: |
+| 2,048 | 1 | 2.12 / 2.13 | 2.06 / 2.06 | 964 / 994 |
+| 2,048 | 4 | 5.27 / 9.05 | 7.82 / 8.60 | 906 / 954 |
+| 8,192 | 1 | 8.53 / 8.65 | 8.53 / 8.64 | 961 / 961 |
+| 8,192 | 4 | 21.47 / 35.02 | 33.95 / 34.70 | 937 / 945 |
+| 22,528 | 1 | 25.60 / 25.66 | 25.08 / 25.12 | 880 / 898 |
+| 22,528 | 4 | 63.14 / 102.10 | 99.92 / 100.87 | 886 / 893 |
+| 30,720 | 1 | 36.18 / 36.23 | 35.46 / 35.50 | 849 / 866 |
+| 30,720 | 4 | 89.71 / 145.73 | 141.38 / 142.36 | 844 / 863 |
+
+The two chains ran at the same time on different cards. The single-request
+rows, where the option changes nothing, differ from the default chain's by up
+to 3 %. At four requests the prompts finish prefill one after another. Four
+30,720-token prompts get their first tokens at 36.2 / 71.9 / 107.6 / 145.1 s
+(mean over the 3 measured batches, by order of arrival) instead of all at
+139.7-142.4 s, and the p50 falls by
+37 %. As with the previous package, the earlier requests
+decode while the last prompt is still in prefill, so the last first token
+arrives slightly later than with round-robin: 143.74-145.88 s
+against at most 142.39 s at 30,720 tokens. At four long agents the earlier
+first tokens cost decode speed, because the early finishers decode while the
+others' 512-token prefill chunks run
+([long-context section](#long-context-native-serving-package-f21b9abb)).
+
+### Short-prompt native decode, MTP depth 4, package f21b9abb
+
+The previous package's protocol: 128 output tokens per request, concurrency 1
+then 4, 3 repetitions, on the four public `code-00` to `code-03` prompts of
+578-582 tokens. Tok/s per agent p50 is decode-only; aggregate tok/s divides
+output tokens by batch wall time and is end to end. Do not compare the two
+columns ([default-short-native-depth4.json](docs/sm70/receipts/g128/default-short-native-depth4.json), [default-short-native-depth4-requests-summary.json](docs/sm70/receipts/g128/default-short-native-depth4-requests-summary.json), [srpt-short-native-depth4.json](docs/sm70/receipts/g128/srpt-short-native-depth4.json)).
+
+| Concurrency | Chain | Tok/s per agent, p50 | Aggregate tok/s | Previous package: per agent p50 / aggregate | Repetitions |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 1 | default | 83.2 | 69.3 | 83.0 / 67.6 | 3 |
+| 4 | default | 64.9 | 220.5 | 64.8 / 220.6 | 3 |
+| 1 | `--prefill-srpt` | 83.2 | 69.3 | n/a | 3 |
+| 4 | `--prefill-srpt` | 64.7 | 220.4 | n/a | 3 |
+
+In the default chain at concurrency 4 the aggregate over the decode window is
+213.1 tok/s (previous package 212.9). Of the
+3,072 generated tokens, 2,234 were accepted MTP
+drafts, the same counts as with the previous package. 24 of 24 requests
+completed. Repeated prompts reuse their prefixes, so first-token times in this
+leg include prefix-cache credit and are not prefill measurements.
+
+### Long-context native serving, package f21b9abb
+
+The previous package's protocol: four public coding prompts of 28,654 to 28,671
+tokens (114,664 in total), 512 output tokens per request, concurrency 4 first
+and then 1, 3 repetitions. Each row is labelled cold or cache-credited by the
+same rule, and first-token times are given for cold rows only
+([default-long-native-depth4.json](docs/sm70/receipts/g128/default-long-native-depth4.json),
+[default-long-native-depth4-requests-summary.json](docs/sm70/receipts/g128/default-long-native-depth4-requests-summary.json),
+[default-long-native-chain-long-cache-labels.json](docs/sm70/receipts/g128/default-long-native-chain-long-cache-labels.json);
+the ordering chain's files start with `srpt-long-`).
+
+| Chain | Concurrency | Cold or cache-credited | First-token s (cold rows only) | Decode tok/s per agent |
+| --- | ---: | --- | ---: | ---: |
+| default | 4 | first batch: cold, 4 requests | 123.65 / 125.49 / 138.65 / 142.08 (p50 132.07) | 27.6 / 32.6 / 53.6 / 63.4 (median 43.1) |
+| default | 4 | batches 2 and 3: cache-credited, 5 of 8 requests credited | n/a | 21.8-77.1 (median 38.2) |
+| default | 1 | cold, 5 requests | 33.03-33.41 (p50 33.04) | 64.9-77.0 (median 72.9) |
+| default | 1 | cache-credited, 7 requests | n/a | 62.9-80.8 (median 74.1) |
+| `--prefill-srpt` | 4 | first batch: cold, 4 requests | 33.45 / 66.72 / 99.77 / 145.80 (p50 83.24) | 6.5 / 6.5 / 10.6 / 70.3 (median 8.5) |
+| previous package | 4 | first batch: no request credited, batch not cold | 157.96-159.80 | 40.2 / 41.1 / 42.7 / 46.1 (median 41.9) |
+| previous package | 1 | cold, 6 requests | 39.83-39.87 (p50 39.85) | 70.0-81.2 (median 72.4) |
+
+A cold 28.7k-token request reaches its first token after 33.04 s (p50),
+against 39.85 s with the previous package, consistent with the prefill table.
+In the default chain's cold four-agent batch the first tokens arrive between
+123.65 and 142.08 s (p50 132.07 s), against 157.96-159.80 s for the previous
+package's first batch, which is not labelled cold. The four decode windows
+overlap only partly: at 141.16 s, when the first request finished, two others
+were decoding and the fourth was 0.92 s from its first token.
+
+With `--prefill-srpt` the cold four-agent batch gets its first tokens one after
+another, at 33.45, 66.72, 99.77 and 145.80 s (p50 83.24 s against 132.07 s by
+default). The cost is decode speed: a request that has finished prefill decodes
+while the others' 512-token prefill chunks run, so in that batch the three
+early finishers decoded at 6.5-10.6 tok/s. Over all 12 four-agent requests the
+per-agent decode median is 21.0 tok/s with the option and 38.2 tok/s by
+default (previous package 41.5). At one agent the medians over 12 requests are
+73.5 tok/s by default and 71.1 tok/s in the ordering chain (previous package
+72.4).
+
+Over the whole default long leg the server counted 344,458 prefill tokens and
+12,288 generated tokens, of which 9,097 were accepted MTP drafts. All 24
+requests completed in each chain. The server exports no KV-page eviction
+counter; the default long leg recorded 43 prefix-cache snapshot-slot evictions
+(`flare_snapshot_evictions_total`), which are snapshot slots, not KV pages.
+Four 28.7k-token contexts fit in the 124,928-token pool; four contexts at the
+32,768-token maximum (131,072 tokens) would not, and that case was not
+measured.
+
+## Previous package fd7c24dc on release binary d4ffb1fa (128-token prefill chunks)
+
+These are the results of the previous release package, which prefills in
+128-token chunks, on the release binary. They are kept for comparison with the
+section above. Measured on 2026-10-23 from 21:54 to 22:48 PDT in one benchmark chain on one
 Tesla V100 PCIe 32 GB. Receipts are in [docs/sm70/receipts/release-binary/](docs/sm70/receipts/release-binary/); each table names its file.
 
 - **Server binary.** SHA-256
@@ -20,7 +185,7 @@ Tesla V100 PCIe 32 GB. Receipts are in [docs/sm70/receipts/release-binary/](docs
 - **Package.** Primary SHA-256
   `fd7c24dce58c4897a2ab5299bcd875e3e6ab1e2a1f714e5f09724bc6619a7382`, the release
   export qualified on 2026-10-23
-  ([validation record](docs/sm70/ARCHITECTURE.md#export-qualification-of-the-release-package)).
+  ([validation record](docs/sm70/ARCHITECTURE.md#export-qualification-of-the-previous-package-fd7c24dc)).
 - **Server flags.** `--memory-limit 31G --prefix-cache-memory 8G
   --kv-cache-limit concurrency --max-concurrency 4 --mtp-draft-tokens 4
   --no-mtp-adaptive-verification --scheduler-policy balanced`, the same for all
@@ -35,7 +200,7 @@ Tesla V100 PCIe 32 GB. Receipts are in [docs/sm70/receipts/release-binary/](docs
   sets, so these rows start a new baseline and do not compare row for row with
   the historical measurements below.
 
-### Prefill and time to first token (end to end)
+### Prefill and time to first token (end to end), previous package
 
 Fixed prompt lengths of 2,048, 8,192, 22,528 and 30,720 tokens, each at
 concurrency 1 and 4. Each cell has 1 warmup batch and 3 measured repetitions,
@@ -151,7 +316,7 @@ change these, as do the configuration keys `prefill_srpt_max_wait_chunks` and
 `prefill_srpt_aging_tokens_per_chunk`. A prompt whose prefill has started is not
 preempted.
 
-### Short-prompt native decode, MTP depth 4
+### Short-prompt native decode, MTP depth 4, previous package
 
 128 output tokens per request, concurrency 1 then 4, 3 repetitions. Tok/s per
 agent p50 is decode-only: the median request decode rate after its first token.
@@ -173,7 +338,7 @@ was 1.80 s at concurrency 1 and 1.98 s at concurrency 4; first-token p50 was
 include prefix-cache credit and are not prefill measurements. Of the 3,072
 generated tokens, 2,234 were accepted MTP drafts. All 24 requests completed.
 
-### Long-context native serving
+### Long-context native serving, previous package
 
 Four public coding prompts of 28,654 to 28,671 tokens (114,664 in total), 512
 output tokens per request, concurrency 4 first and then 1, 3 repetitions. Each
@@ -230,9 +395,10 @@ held with the fork. Read it with these limits:
 - Binaries, packages, memory limits, prefix-cache sizes and KV pools differ
   between runs; each best run names its own.
 - The internal short-context protocol uses four prompts of 1,128 to 1,658
-  tokens. The release run above used the public prompts of 578 to 582 tokens.
-  The release's 83.0 tok/s against the best recorded 90.4 tok/s is therefore not
-  a like-for-like comparison and is not a regression claim.
+  tokens. The release runs above, for both packages, used the public prompts of
+  578 to 582 tokens. Their 83.2 tok/s (package `f21b9abb`) and 83.0 tok/s
+  (previous package) against the best recorded 90.4 tok/s are therefore not
+  like-for-like comparisons and are not regression claims.
 - Decode-only, round-time and end-to-end figures are kept in separate tables.
 
 ### Decode-only, short context (internal prompts, MTP depth 4, 128 output tokens)
@@ -270,7 +436,7 @@ Helios commits, on the fork's historical prompt sets (STATUS.md line 63;
 another pre-release binary (note d). Rows for other packages or dates, such as
 `model-32k-replay` and the 2026-10-21 baseline, are older context and name
 their package. None of these are this release's numbers;
-the release-binary section above gives those.
+the package `f21b9abb` section above gives those.
 
 Every row names its hardware, memory limit (`flare run --memory-limit`),
 package, concurrency, date and the line of the fork's run log (`STATUS.md`) that
@@ -286,7 +452,8 @@ prepared for a 32,768-token context, with MTP draft depth 4 (verification width
 | Measurement | Value | Hardware | Memory limit | Package | Concurrency | Date | Source |
 | --- | ---: | --- | --- | --- | --- | --- | --- |
 | Generated tokens per second, end to end | 47.23 tok/s | V100 PCIe 32 GB | 31G (d) | `model-32k-tonight-a`, run `best24`, binary `2f9128e4`, MTP depth 3 (d) | 4 (d) | 2026-10-22 | STATUS.md line 68 (23:35) |
-| Release binary `d4ffb1fa` | not measured | V100 PCIe 32 GB | 31G | release export | 4 | n/a | none |
+| Server binary `48b69ed4`, package `f21b9abb` | not measured | V100 PCIe 32 GB | 31G | release export | 4 | n/a | none |
+| Release binary `d4ffb1fa`, previous package `fd7c24dc` | not measured | V100 PCIe 32 GB | 31G | release export | 4 | n/a | none |
 
 (d) The run log names only the run tag `best24`. Its run report, compiled in
 the [measurement history](#measurement-history-2026-10-20-to-2026-10-23), gives
@@ -294,7 +461,7 @@ the package `model-32k-tonight-a`, a binary `2f9128e4` built before the release
 binary, MTP depth 3, `--memory-limit 31G`, a 32G prefix cache and 4 agents.
 Earlier versions of this page called `best24` a different package; it is a run
 of the 2026-10-22 release-tree package. No real-trace end-to-end run of the
-release binary `d4ffb1fa` exists.
+release binary `d4ffb1fa` or of the server binary `48b69ed4` exists.
 
 ### End-to-end, fixed short prompts (not real traces)
 

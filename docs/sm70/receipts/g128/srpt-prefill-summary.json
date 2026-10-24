@@ -1,0 +1,1705 @@
+{
+ "status": "complete",
+ "input_set": "public-exact-prefill-v1-new-baseline",
+ "options": {
+  "base_url": "http://127.0.0.1:8711",
+  "model": "checkpoint",
+  "tokenizer": "<release-host>/flare/checkpoint/tokenizer.json",
+  "output": "<release-host>/flare/<lab>/g128-receipts/srpt/prefill/prefill.json",
+  "run_id": "prefill-lab-g128-srpt-prefill-public",
+  "exclusive_endpoint": true,
+  "warmups": 1,
+  "repetitions": 3,
+  "output_tokens": 32,
+  "timeout": 1800.0
+ },
+ "tokenizer_sha256": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3",
+ "transport_ttft_basis": "client POST start to first SSE chunk carrying output; includes queueing, transport and first sampling",
+ "observation_basis": "first observed output = first SSE chunk whose choices[0].text is non-empty or whose continuous usage shows completion_tokens >= 1; output-token counts from per-chunk usage",
+ "request_contract": "/v1/completions token-ID prompts; no token observation extensions",
+ "summary": [
+  {
+   "prompt_tokens": 2048,
+   "concurrency": 1,
+   "measured_batches": 3,
+   "successful_requests": 3,
+   "failed_batches": 0,
+   "transport_ttft_seconds": {
+    "p50": 2.1247932070109528,
+    "p95": 2.127931308106054
+   },
+   "effective_prefill_tokens_per_second_median": 963.8585031439453,
+   "prefill_rate_basis": "successful server prefill-token counter delta / batch first-token wall window; includes queueing, prefill, first-token generation and transport; not pure GPU prefill",
+   "pure_gpu_prefill_tokens_per_second": null,
+   "median_request_decode_tokens_per_second": 69.12299541755277,
+   "decode_rate_unavailable_requests": 0
+  },
+  {
+   "prompt_tokens": 2048,
+   "concurrency": 4,
+   "measured_batches": 3,
+   "successful_requests": 12,
+   "failed_batches": 0,
+   "transport_ttft_seconds": {
+    "p50": 5.266596948509687,
+    "p95": 9.050409822943038
+   },
+   "effective_prefill_tokens_per_second_median": 906.3944966117282,
+   "prefill_rate_basis": "successful server prefill-token counter delta / batch first-token wall window; includes queueing, prefill, first-token generation and transport; not pure GPU prefill",
+   "pure_gpu_prefill_tokens_per_second": null,
+   "median_request_decode_tokens_per_second": 17.87650027417329,
+   "decode_rate_unavailable_requests": 0
+  },
+  {
+   "prompt_tokens": 8192,
+   "concurrency": 1,
+   "measured_batches": 3,
+   "successful_requests": 3,
+   "failed_batches": 0,
+   "transport_ttft_seconds": {
+    "p50": 8.528407198027708,
+    "p95": 8.649273220897886
+   },
+   "effective_prefill_tokens_per_second_median": 960.5545103304278,
+   "prefill_rate_basis": "successful server prefill-token counter delta / batch first-token wall window; includes queueing, prefill, first-token generation and transport; not pure GPU prefill",
+   "pure_gpu_prefill_tokens_per_second": null,
+   "median_request_decode_tokens_per_second": 83.77716312305554,
+   "decode_rate_unavailable_requests": 0
+  },
+  {
+   "prompt_tokens": 8192,
+   "concurrency": 4,
+   "measured_batches": 3,
+   "successful_requests": 12,
+   "failed_batches": 0,
+   "transport_ttft_seconds": {
+    "p50": 21.47431894100737,
+    "p95": 35.01787004870566
+   },
+   "effective_prefill_tokens_per_second_median": 936.790226658382,
+   "prefill_rate_basis": "successful server prefill-token counter delta / batch first-token wall window; includes queueing, prefill, first-token generation and transport; not pure GPU prefill",
+   "pure_gpu_prefill_tokens_per_second": null,
+   "median_request_decode_tokens_per_second": 11.408210956803742,
+   "decode_rate_unavailable_requests": 0
+  },
+  {
+   "prompt_tokens": 22528,
+   "concurrency": 1,
+   "measured_batches": 3,
+   "successful_requests": 3,
+   "failed_batches": 0,
+   "transport_ttft_seconds": {
+    "p50": 25.597486368002137,
+    "p95": 25.663411769404775
+   },
+   "effective_prefill_tokens_per_second_median": 880.0864145848666,
+   "prefill_rate_basis": "successful server prefill-token counter delta / batch first-token wall window; includes queueing, prefill, first-token generation and transport; not pure GPU prefill",
+   "pure_gpu_prefill_tokens_per_second": null,
+   "median_request_decode_tokens_per_second": 67.49258269050611,
+   "decode_rate_unavailable_requests": 0
+  },
+  {
+   "prompt_tokens": 22528,
+   "concurrency": 4,
+   "measured_batches": 3,
+   "successful_requests": 12,
+   "failed_batches": 0,
+   "transport_ttft_seconds": {
+    "p50": 63.13750035001431,
+    "p95": 102.09507632491295
+   },
+   "effective_prefill_tokens_per_second_median": 885.5159113167603,
+   "prefill_rate_basis": "successful server prefill-token counter delta / batch first-token wall window; includes queueing, prefill, first-token generation and transport; not pure GPU prefill",
+   "pure_gpu_prefill_tokens_per_second": null,
+   "median_request_decode_tokens_per_second": 10.707905222305111,
+   "decode_rate_unavailable_requests": 0
+  },
+  {
+   "prompt_tokens": 30720,
+   "concurrency": 1,
+   "measured_batches": 3,
+   "successful_requests": 3,
+   "failed_batches": 0,
+   "transport_ttft_seconds": {
+    "p50": 36.178322686988395,
+    "p95": 36.226075670006686
+   },
+   "effective_prefill_tokens_per_second_median": 849.1272595964906,
+   "prefill_rate_basis": "successful server prefill-token counter delta / batch first-token wall window; includes queueing, prefill, first-token generation and transport; not pure GPU prefill",
+   "pure_gpu_prefill_tokens_per_second": null,
+   "median_request_decode_tokens_per_second": 62.75545099489437,
+   "decode_rate_unavailable_requests": 0
+  },
+  {
+   "prompt_tokens": 30720,
+   "concurrency": 4,
+   "measured_batches": 3,
+   "successful_requests": 12,
+   "failed_batches": 0,
+   "transport_ttft_seconds": {
+    "p50": 89.70577036999748,
+    "p95": 145.72877524379874
+   },
+   "effective_prefill_tokens_per_second_median": 843.9385625106597,
+   "prefill_rate_basis": "successful server prefill-token counter delta / batch first-token wall window; includes queueing, prefill, first-token generation and transport; not pure GPU prefill",
+   "pure_gpu_prefill_tokens_per_second": null,
+   "median_request_decode_tokens_per_second": 9.921504496259015,
+   "decode_rate_unavailable_requests": 0
+  }
+ ],
+ "pure_gpu_prefill_available": false,
+ "batches": [
+  {
+   "status": "complete",
+   "phase": "warmup",
+   "prompt_length": 2048,
+   "concurrency": 1,
+   "repetition": 0,
+   "output_tokens": 32,
+   "metric_deltas": {
+    "prefill_tokens": 2048,
+    "generated_tokens": 32,
+    "completed": 1,
+    "failed": 0,
+    "reused_tokens": 0
+   },
+   "request_metric_deltas": {
+    "flare_requests_admitted_total": 1,
+    "flare_requests_cancelled_total": 0
+   },
+   "first_token_wall_window_seconds": 2.1289940550050233,
+   "effective_prefill_tokens_per_second": 961.9566551561685,
+   "prefill_rate_basis": "successful server prefill-token counter delta / batch first-token wall window; includes queueing, prefill, first-token generation and transport; not pure GPU prefill",
+   "pure_gpu_prefill_tokens_per_second": null,
+   "pure_gpu_prefill_unavailable_reason": "native release exposes prefill token counters but no isolated prefill GPU duration",
+   "requests_summary": [
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/warmup/2048/1/0/0",
+     "status": "complete",
+     "requested_prompt_tokens": 2048,
+     "transport_ttft_seconds": 2.1289940550050233,
+     "elapsed_seconds": 2.479035021009622,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    }
+   ]
+  },
+  {
+   "status": "complete",
+   "phase": "measured",
+   "prompt_length": 2048,
+   "concurrency": 1,
+   "repetition": 0,
+   "output_tokens": 32,
+   "metric_deltas": {
+    "prefill_tokens": 2048,
+    "generated_tokens": 32,
+    "completed": 1,
+    "failed": 0,
+    "reused_tokens": 0
+   },
+   "request_metric_deltas": {
+    "flare_requests_admitted_total": 1,
+    "flare_requests_cancelled_total": 0
+   },
+   "first_token_wall_window_seconds": 2.1216697189956903,
+   "effective_prefill_tokens_per_second": 965.277480120439,
+   "prefill_rate_basis": "successful server prefill-token counter delta / batch first-token wall window; includes queueing, prefill, first-token generation and transport; not pure GPU prefill",
+   "pure_gpu_prefill_tokens_per_second": null,
+   "pure_gpu_prefill_unavailable_reason": "native release exposes prefill token counters but no isolated prefill GPU duration",
+   "requests_summary": [
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/2048/1/0/0",
+     "status": "complete",
+     "requested_prompt_tokens": 2048,
+     "transport_ttft_seconds": 2.1216697189956903,
+     "elapsed_seconds": 2.4704907679988537,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    }
+   ]
+  },
+  {
+   "status": "complete",
+   "phase": "measured",
+   "prompt_length": 2048,
+   "concurrency": 1,
+   "repetition": 1,
+   "output_tokens": 32,
+   "metric_deltas": {
+    "prefill_tokens": 2048,
+    "generated_tokens": 32,
+    "completed": 1,
+    "failed": 0,
+    "reused_tokens": 0
+   },
+   "request_metric_deltas": {
+    "flare_requests_admitted_total": 1,
+    "flare_requests_cancelled_total": 0
+   },
+   "first_token_wall_window_seconds": 2.1282799860055093,
+   "effective_prefill_tokens_per_second": 962.2794056546179,
+   "prefill_rate_basis": "successful server prefill-token counter delta / batch first-token wall window; includes queueing, prefill, first-token generation and transport; not pure GPU prefill",
+   "pure_gpu_prefill_tokens_per_second": null,
+   "pure_gpu_prefill_unavailable_reason": "native release exposes prefill token counters but no isolated prefill GPU duration",
+   "requests_summary": [
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/2048/1/1/0",
+     "status": "complete",
+     "requested_prompt_tokens": 2048,
+     "transport_ttft_seconds": 2.1282799860055093,
+     "elapsed_seconds": 2.5772155450249556,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    }
+   ]
+  },
+  {
+   "status": "complete",
+   "phase": "measured",
+   "prompt_length": 2048,
+   "concurrency": 1,
+   "repetition": 2,
+   "output_tokens": 32,
+   "metric_deltas": {
+    "prefill_tokens": 2048,
+    "generated_tokens": 32,
+    "completed": 1,
+    "failed": 0,
+    "reused_tokens": 0
+   },
+   "request_metric_deltas": {
+    "flare_requests_admitted_total": 1,
+    "flare_requests_cancelled_total": 0
+   },
+   "first_token_wall_window_seconds": 2.1247932070109528,
+   "effective_prefill_tokens_per_second": 963.8585031439453,
+   "prefill_rate_basis": "successful server prefill-token counter delta / batch first-token wall window; includes queueing, prefill, first-token generation and transport; not pure GPU prefill",
+   "pure_gpu_prefill_tokens_per_second": null,
+   "pure_gpu_prefill_unavailable_reason": "native release exposes prefill token counters but no isolated prefill GPU duration",
+   "requests_summary": [
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/2048/1/2/0",
+     "status": "complete",
+     "requested_prompt_tokens": 2048,
+     "transport_ttft_seconds": 2.1247932070109528,
+     "elapsed_seconds": 2.6227635400136933,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    }
+   ]
+  },
+  {
+   "status": "complete",
+   "phase": "warmup",
+   "prompt_length": 2048,
+   "concurrency": 4,
+   "repetition": 0,
+   "output_tokens": 32,
+   "metric_deltas": {
+    "prefill_tokens": 8192,
+    "generated_tokens": 128,
+    "completed": 4,
+    "failed": 0,
+    "reused_tokens": 0
+   },
+   "request_metric_deltas": {
+    "flare_requests_admitted_total": 4,
+    "flare_requests_cancelled_total": 0
+   },
+   "first_token_wall_window_seconds": 9.060101682989625,
+   "effective_prefill_tokens_per_second": 904.1841125669164,
+   "prefill_rate_basis": "successful server prefill-token counter delta / batch first-token wall window; includes queueing, prefill, first-token generation and transport; not pure GPU prefill",
+   "pure_gpu_prefill_tokens_per_second": null,
+   "pure_gpu_prefill_unavailable_reason": "native release exposes prefill token counters but no isolated prefill GPU duration",
+   "requests_summary": [
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/warmup/2048/4/0/0",
+     "status": "complete",
+     "requested_prompt_tokens": 2048,
+     "transport_ttft_seconds": 9.059811601997353,
+     "elapsed_seconds": 9.408996179001406,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    },
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/warmup/2048/4/0/1",
+     "status": "complete",
+     "requested_prompt_tokens": 2048,
+     "transport_ttft_seconds": 4.242306431988254,
+     "elapsed_seconds": 7.005315394984791,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    },
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/warmup/2048/4/0/2",
+     "status": "complete",
+     "requested_prompt_tokens": 2048,
+     "transport_ttft_seconds": 2.1270681580062956,
+     "elapsed_seconds": 7.004879387997789,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    },
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/warmup/2048/4/0/3",
+     "status": "complete",
+     "requested_prompt_tokens": 2048,
+     "transport_ttft_seconds": 6.465409466007259,
+     "elapsed_seconds": 7.730514207010856,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    }
+   ]
+  },
+  {
+   "status": "complete",
+   "phase": "measured",
+   "prompt_length": 2048,
+   "concurrency": 4,
+   "repetition": 0,
+   "output_tokens": 32,
+   "metric_deltas": {
+    "prefill_tokens": 8192,
+    "generated_tokens": 128,
+    "completed": 4,
+    "failed": 0,
+    "reused_tokens": 0
+   },
+   "request_metric_deltas": {
+    "flare_requests_admitted_total": 4,
+    "flare_requests_cancelled_total": 0
+   },
+   "first_token_wall_window_seconds": 9.065568566002185,
+   "effective_prefill_tokens_per_second": 903.6388551206537,
+   "prefill_rate_basis": "successful server prefill-token counter delta / batch first-token wall window; includes queueing, prefill, first-token generation and transport; not pure GPU prefill",
+   "pure_gpu_prefill_tokens_per_second": null,
+   "pure_gpu_prefill_unavailable_reason": "native release exposes prefill token counters but no isolated prefill GPU duration",
+   "requests_summary": [
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/2048/4/0/0",
+     "status": "complete",
+     "requested_prompt_tokens": 2048,
+     "transport_ttft_seconds": 4.247882205003407,
+     "elapsed_seconds": 7.009008195018396,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    },
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/2048/4/0/1",
+     "status": "complete",
+     "requested_prompt_tokens": 2048,
+     "transport_ttft_seconds": 2.1297057140036486,
+     "elapsed_seconds": 7.008488164021401,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    },
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/2048/4/0/2",
+     "status": "complete",
+     "requested_prompt_tokens": 2048,
+     "transport_ttft_seconds": 6.468071715004044,
+     "elapsed_seconds": 7.734855973016238,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    },
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/2048/4/0/3",
+     "status": "complete",
+     "requested_prompt_tokens": 2048,
+     "transport_ttft_seconds": 9.065568566002185,
+     "elapsed_seconds": 9.41467078801361,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    }
+   ]
+  },
+  {
+   "status": "complete",
+   "phase": "measured",
+   "prompt_length": 2048,
+   "concurrency": 4,
+   "repetition": 1,
+   "output_tokens": 32,
+   "metric_deltas": {
+    "prefill_tokens": 8192,
+    "generated_tokens": 128,
+    "completed": 4,
+    "failed": 0,
+    "reused_tokens": 0
+   },
+   "request_metric_deltas": {
+    "flare_requests_admitted_total": 4,
+    "flare_requests_cancelled_total": 0
+   },
+   "first_token_wall_window_seconds": 9.038007214985555,
+   "effective_prefill_tokens_per_second": 906.3944966117282,
+   "prefill_rate_basis": "successful server prefill-token counter delta / batch first-token wall window; includes queueing, prefill, first-token generation and transport; not pure GPU prefill",
+   "pure_gpu_prefill_tokens_per_second": null,
+   "pure_gpu_prefill_unavailable_reason": "native release exposes prefill token counters but no isolated prefill GPU duration",
+   "requests_summary": [
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/2048/4/1/0",
+     "status": "complete",
+     "requested_prompt_tokens": 2048,
+     "transport_ttft_seconds": 2.129861336987233,
+     "elapsed_seconds": 7.274268868000945,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    },
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/2048/4/1/1",
+     "status": "complete",
+     "requested_prompt_tokens": 2048,
+     "transport_ttft_seconds": 4.218627864000155,
+     "elapsed_seconds": 7.3248533900186885,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    },
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/2048/4/1/2",
+     "status": "complete",
+     "requested_prompt_tokens": 2048,
+     "transport_ttft_seconds": 6.476442865998251,
+     "elapsed_seconds": 7.738175017002504,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    },
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/2048/4/1/3",
+     "status": "complete",
+     "requested_prompt_tokens": 2048,
+     "transport_ttft_seconds": 9.038007214985555,
+     "elapsed_seconds": 9.437363529985305,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    }
+   ]
+  },
+  {
+   "status": "complete",
+   "phase": "measured",
+   "prompt_length": 2048,
+   "concurrency": 4,
+   "repetition": 2,
+   "output_tokens": 32,
+   "metric_deltas": {
+    "prefill_tokens": 8192,
+    "generated_tokens": 128,
+    "completed": 4,
+    "failed": 0,
+    "reused_tokens": 0
+   },
+   "request_metric_deltas": {
+    "flare_requests_admitted_total": 4,
+    "flare_requests_cancelled_total": 0
+   },
+   "first_token_wall_window_seconds": 8.792993300012313,
+   "effective_prefill_tokens_per_second": 931.6508861650706,
+   "prefill_rate_basis": "successful server prefill-token counter delta / batch first-token wall window; includes queueing, prefill, first-token generation and transport; not pure GPU prefill",
+   "pure_gpu_prefill_tokens_per_second": null,
+   "pure_gpu_prefill_unavailable_reason": "native release exposes prefill token counters but no isolated prefill GPU duration",
+   "requests_summary": [
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/2048/4/2/0",
+     "status": "complete",
+     "requested_prompt_tokens": 2048,
+     "transport_ttft_seconds": 4.126894896005979,
+     "elapsed_seconds": 7.081833798991283,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    },
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/2048/4/2/1",
+     "status": "complete",
+     "requested_prompt_tokens": 2048,
+     "transport_ttft_seconds": 2.073299504991155,
+     "elapsed_seconds": 7.081355553003959,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    },
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/2048/4/2/2",
+     "status": "complete",
+     "requested_prompt_tokens": 2048,
+     "transport_ttft_seconds": 6.285311692015966,
+     "elapsed_seconds": 7.493915051018121,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    },
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/2048/4/2/3",
+     "status": "complete",
+     "requested_prompt_tokens": 2048,
+     "transport_ttft_seconds": 8.792993300012313,
+     "elapsed_seconds": 9.142106454994064,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    }
+   ]
+  },
+  {
+   "status": "complete",
+   "phase": "warmup",
+   "prompt_length": 8192,
+   "concurrency": 1,
+   "repetition": 0,
+   "output_tokens": 32,
+   "metric_deltas": {
+    "prefill_tokens": 8192,
+    "generated_tokens": 32,
+    "completed": 1,
+    "failed": 0,
+    "reused_tokens": 0
+   },
+   "request_metric_deltas": {
+    "flare_requests_admitted_total": 1,
+    "flare_requests_cancelled_total": 0
+   },
+   "first_token_wall_window_seconds": 8.540063556021778,
+   "effective_prefill_tokens_per_second": 959.2434466396505,
+   "prefill_rate_basis": "successful server prefill-token counter delta / batch first-token wall window; includes queueing, prefill, first-token generation and transport; not pure GPU prefill",
+   "pure_gpu_prefill_tokens_per_second": null,
+   "pure_gpu_prefill_unavailable_reason": "native release exposes prefill token counters but no isolated prefill GPU duration",
+   "requests_summary": [
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/warmup/8192/1/0/0",
+     "status": "complete",
+     "requested_prompt_tokens": 8192,
+     "transport_ttft_seconds": 8.540063556021778,
+     "elapsed_seconds": 8.910643226001412,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    }
+   ]
+  },
+  {
+   "status": "complete",
+   "phase": "measured",
+   "prompt_length": 8192,
+   "concurrency": 1,
+   "repetition": 0,
+   "output_tokens": 32,
+   "metric_deltas": {
+    "prefill_tokens": 8192,
+    "generated_tokens": 32,
+    "completed": 1,
+    "failed": 0,
+    "reused_tokens": 0
+   },
+   "request_metric_deltas": {
+    "flare_requests_admitted_total": 1,
+    "flare_requests_cancelled_total": 0
+   },
+   "first_token_wall_window_seconds": 8.528407198027708,
+   "effective_prefill_tokens_per_second": 960.5545103304278,
+   "prefill_rate_basis": "successful server prefill-token counter delta / batch first-token wall window; includes queueing, prefill, first-token generation and transport; not pure GPU prefill",
+   "pure_gpu_prefill_tokens_per_second": null,
+   "pure_gpu_prefill_unavailable_reason": "native release exposes prefill token counters but no isolated prefill GPU duration",
+   "requests_summary": [
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/8192/1/0/0",
+     "status": "complete",
+     "requested_prompt_tokens": 8192,
+     "transport_ttft_seconds": 8.528407198027708,
+     "elapsed_seconds": 8.899777292012004,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    }
+   ]
+  },
+  {
+   "status": "complete",
+   "phase": "measured",
+   "prompt_length": 8192,
+   "concurrency": 1,
+   "repetition": 1,
+   "output_tokens": 32,
+   "metric_deltas": {
+    "prefill_tokens": 8192,
+    "generated_tokens": 32,
+    "completed": 1,
+    "failed": 0,
+    "reused_tokens": 0
+   },
+   "request_metric_deltas": {
+    "flare_requests_admitted_total": 1,
+    "flare_requests_cancelled_total": 0
+   },
+   "first_token_wall_window_seconds": 8.662702778994571,
+   "effective_prefill_tokens_per_second": 945.663288813748,
+   "prefill_rate_basis": "successful server prefill-token counter delta / batch first-token wall window; includes queueing, prefill, first-token generation and transport; not pure GPU prefill",
+   "pure_gpu_prefill_tokens_per_second": null,
+   "pure_gpu_prefill_unavailable_reason": "native release exposes prefill token counters but no isolated prefill GPU duration",
+   "requests_summary": [
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/8192/1/1/0",
+     "status": "complete",
+     "requested_prompt_tokens": 8192,
+     "transport_ttft_seconds": 8.662702778994571,
+     "elapsed_seconds": 9.031912939011818,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    }
+   ]
+  },
+  {
+   "status": "complete",
+   "phase": "measured",
+   "prompt_length": 8192,
+   "concurrency": 1,
+   "repetition": 2,
+   "output_tokens": 32,
+   "metric_deltas": {
+    "prefill_tokens": 8192,
+    "generated_tokens": 32,
+    "completed": 1,
+    "failed": 0,
+    "reused_tokens": 0
+   },
+   "request_metric_deltas": {
+    "flare_requests_admitted_total": 1,
+    "flare_requests_cancelled_total": 0
+   },
+   "first_token_wall_window_seconds": 8.522007546009263,
+   "effective_prefill_tokens_per_second": 961.2758444266104,
+   "prefill_rate_basis": "successful server prefill-token counter delta / batch first-token wall window; includes queueing, prefill, first-token generation and transport; not pure GPU prefill",
+   "pure_gpu_prefill_tokens_per_second": null,
+   "pure_gpu_prefill_unavailable_reason": "native release exposes prefill token counters but no isolated prefill GPU duration",
+   "requests_summary": [
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/8192/1/2/0",
+     "status": "complete",
+     "requested_prompt_tokens": 8192,
+     "transport_ttft_seconds": 8.522007546009263,
+     "elapsed_seconds": 8.892692127003102,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    }
+   ]
+  },
+  {
+   "status": "complete",
+   "phase": "warmup",
+   "prompt_length": 8192,
+   "concurrency": 4,
+   "repetition": 0,
+   "output_tokens": 32,
+   "metric_deltas": {
+    "prefill_tokens": 32768,
+    "generated_tokens": 128,
+    "completed": 4,
+    "failed": 0,
+    "reused_tokens": 0
+   },
+   "request_metric_deltas": {
+    "flare_requests_admitted_total": 4,
+    "flare_requests_cancelled_total": 0
+   },
+   "first_token_wall_window_seconds": 34.83632570900954,
+   "effective_prefill_tokens_per_second": 940.6273288897795,
+   "prefill_rate_basis": "successful server prefill-token counter delta / batch first-token wall window; includes queueing, prefill, first-token generation and transport; not pure GPU prefill",
+   "pure_gpu_prefill_tokens_per_second": null,
+   "pure_gpu_prefill_unavailable_reason": "native release exposes prefill token counters but no isolated prefill GPU duration",
+   "requests_summary": [
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/warmup/8192/4/0/0",
+     "status": "complete",
+     "requested_prompt_tokens": 8192,
+     "transport_ttft_seconds": 34.83588901301846,
+     "elapsed_seconds": 35.20523799399962,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    },
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/warmup/8192/4/0/1",
+     "status": "complete",
+     "requested_prompt_tokens": 8192,
+     "transport_ttft_seconds": 8.522208165988559,
+     "elapsed_seconds": 26.456557683995925,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    },
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/warmup/8192/4/0/2",
+     "status": "complete",
+     "requested_prompt_tokens": 8192,
+     "transport_ttft_seconds": 25.654307659016922,
+     "elapsed_seconds": 26.9925214840041,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    },
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/warmup/8192/4/0/3",
+     "status": "complete",
+     "requested_prompt_tokens": 8192,
+     "transport_ttft_seconds": 17.03193557501072,
+     "elapsed_seconds": 26.469824766012607,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    }
+   ]
+  },
+  {
+   "status": "complete",
+   "phase": "measured",
+   "prompt_length": 8192,
+   "concurrency": 4,
+   "repetition": 0,
+   "output_tokens": 32,
+   "metric_deltas": {
+    "prefill_tokens": 32768,
+    "generated_tokens": 128,
+    "completed": 4,
+    "failed": 0,
+    "reused_tokens": 0
+   },
+   "request_metric_deltas": {
+    "flare_requests_admitted_total": 4,
+    "flare_requests_cancelled_total": 0
+   },
+   "first_token_wall_window_seconds": 35.06729526800336,
+   "effective_prefill_tokens_per_second": 934.4319186743404,
+   "prefill_rate_basis": "successful server prefill-token counter delta / batch first-token wall window; includes queueing, prefill, first-token generation and transport; not pure GPU prefill",
+   "pure_gpu_prefill_tokens_per_second": null,
+   "pure_gpu_prefill_unavailable_reason": "native release exposes prefill token counters but no isolated prefill GPU duration",
+   "requests_summary": [
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/8192/4/0/0",
+     "status": "complete",
+     "requested_prompt_tokens": 8192,
+     "transport_ttft_seconds": 17.193162655981723,
+     "elapsed_seconds": 26.792816265980946,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    },
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/8192/4/0/1",
+     "status": "complete",
+     "requested_prompt_tokens": 8192,
+     "transport_ttft_seconds": 35.06697613099823,
+     "elapsed_seconds": 35.43750152099528,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    },
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/8192/4/0/2",
+     "status": "complete",
+     "requested_prompt_tokens": 8192,
+     "transport_ttft_seconds": 8.531646561983507,
+     "elapsed_seconds": 26.791651657986222,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    },
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/8192/4/0/3",
+     "status": "complete",
+     "requested_prompt_tokens": 8192,
+     "transport_ttft_seconds": 26.04583156100125,
+     "elapsed_seconds": 27.57931342200027,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    }
+   ]
+  },
+  {
+   "status": "complete",
+   "phase": "measured",
+   "prompt_length": 8192,
+   "concurrency": 4,
+   "repetition": 1,
+   "output_tokens": 32,
+   "metric_deltas": {
+    "prefill_tokens": 32768,
+    "generated_tokens": 128,
+    "completed": 4,
+    "failed": 0,
+    "reused_tokens": 0
+   },
+   "request_metric_deltas": {
+    "flare_requests_admitted_total": 4,
+    "flare_requests_cancelled_total": 0
+   },
+   "first_token_wall_window_seconds": 34.84096593002323,
+   "effective_prefill_tokens_per_second": 940.5020534107261,
+   "prefill_rate_basis": "successful server prefill-token counter delta / batch first-token wall window; includes queueing, prefill, first-token generation and transport; not pure GPU prefill",
+   "pure_gpu_prefill_tokens_per_second": null,
+   "pure_gpu_prefill_unavailable_reason": "native release exposes prefill token counters but no isolated prefill GPU duration",
+   "requests_summary": [
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/8192/4/1/0",
+     "status": "complete",
+     "requested_prompt_tokens": 8192,
+     "transport_ttft_seconds": 17.05308423799579,
+     "elapsed_seconds": 26.474762066005496,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    },
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/8192/4/1/1",
+     "status": "complete",
+     "requested_prompt_tokens": 8192,
+     "transport_ttft_seconds": 8.539888717001304,
+     "elapsed_seconds": 26.47420456499094,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    },
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/8192/4/1/2",
+     "status": "complete",
+     "requested_prompt_tokens": 8192,
+     "transport_ttft_seconds": 34.83968905301299,
+     "elapsed_seconds": 35.210442682000576,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    },
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/8192/4/1/3",
+     "status": "complete",
+     "requested_prompt_tokens": 8192,
+     "transport_ttft_seconds": 25.67400423801155,
+     "elapsed_seconds": 27.262323696020758,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    }
+   ]
+  },
+  {
+   "status": "complete",
+   "phase": "measured",
+   "prompt_length": 8192,
+   "concurrency": 4,
+   "repetition": 2,
+   "output_tokens": 32,
+   "metric_deltas": {
+    "prefill_tokens": 32768,
+    "generated_tokens": 128,
+    "completed": 4,
+    "failed": 0,
+    "reused_tokens": 0
+   },
+   "request_metric_deltas": {
+    "flare_requests_admitted_total": 4,
+    "flare_requests_cancelled_total": 0
+   },
+   "first_token_wall_window_seconds": 34.97901565101347,
+   "effective_prefill_tokens_per_second": 936.790226658382,
+   "prefill_rate_basis": "successful server prefill-token counter delta / batch first-token wall window; includes queueing, prefill, first-token generation and transport; not pure GPU prefill",
+   "pure_gpu_prefill_tokens_per_second": null,
+   "pure_gpu_prefill_unavailable_reason": "native release exposes prefill token counters but no isolated prefill GPU duration",
+   "requests_summary": [
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/8192/4/2/0",
+     "status": "complete",
+     "requested_prompt_tokens": 8192,
+     "transport_ttft_seconds": 17.27463364400319,
+     "elapsed_seconds": 26.697276721999515,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    },
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/8192/4/2/1",
+     "status": "complete",
+     "requested_prompt_tokens": 8192,
+     "transport_ttft_seconds": 34.97769234501175,
+     "elapsed_seconds": 35.34838899699389,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    },
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/8192/4/2/2",
+     "status": "complete",
+     "requested_prompt_tokens": 8192,
+     "transport_ttft_seconds": 25.89641329200822,
+     "elapsed_seconds": 27.484169329021825,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    },
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/8192/4/2/3",
+     "status": "complete",
+     "requested_prompt_tokens": 8192,
+     "transport_ttft_seconds": 8.560726777010132,
+     "elapsed_seconds": 26.69791346200509,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    }
+   ]
+  },
+  {
+   "status": "complete",
+   "phase": "warmup",
+   "prompt_length": 22528,
+   "concurrency": 1,
+   "repetition": 0,
+   "output_tokens": 32,
+   "metric_deltas": {
+    "prefill_tokens": 22528,
+    "generated_tokens": 32,
+    "completed": 1,
+    "failed": 0,
+    "reused_tokens": 0
+   },
+   "request_metric_deltas": {
+    "flare_requests_admitted_total": 1,
+    "flare_requests_cancelled_total": 0
+   },
+   "first_token_wall_window_seconds": 25.163198285998078,
+   "effective_prefill_tokens_per_second": 895.2757016001253,
+   "prefill_rate_basis": "successful server prefill-token counter delta / batch first-token wall window; includes queueing, prefill, first-token generation and transport; not pure GPU prefill",
+   "pure_gpu_prefill_tokens_per_second": null,
+   "pure_gpu_prefill_unavailable_reason": "native release exposes prefill token counters but no isolated prefill GPU duration",
+   "requests_summary": [
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/warmup/22528/1/0/0",
+     "status": "complete",
+     "requested_prompt_tokens": 22528,
+     "transport_ttft_seconds": 25.163198285998078,
+     "elapsed_seconds": 25.582123990985565,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    }
+   ]
+  },
+  {
+   "status": "complete",
+   "phase": "measured",
+   "prompt_length": 22528,
+   "concurrency": 1,
+   "repetition": 0,
+   "output_tokens": 32,
+   "metric_deltas": {
+    "prefill_tokens": 22528,
+    "generated_tokens": 32,
+    "completed": 1,
+    "failed": 0,
+    "reused_tokens": 0
+   },
+   "request_metric_deltas": {
+    "flare_requests_admitted_total": 1,
+    "flare_requests_cancelled_total": 0
+   },
+   "first_token_wall_window_seconds": 25.597486368002137,
+   "effective_prefill_tokens_per_second": 880.0864145848666,
+   "prefill_rate_basis": "successful server prefill-token counter delta / batch first-token wall window; includes queueing, prefill, first-token generation and transport; not pure GPU prefill",
+   "pure_gpu_prefill_tokens_per_second": null,
+   "pure_gpu_prefill_unavailable_reason": "native release exposes prefill token counters but no isolated prefill GPU duration",
+   "requests_summary": [
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/22528/1/0/0",
+     "status": "complete",
+     "requested_prompt_tokens": 22528,
+     "transport_ttft_seconds": 25.597486368002137,
+     "elapsed_seconds": 26.05758938699728,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    }
+   ]
+  },
+  {
+   "status": "complete",
+   "phase": "measured",
+   "prompt_length": 22528,
+   "concurrency": 1,
+   "repetition": 1,
+   "output_tokens": 32,
+   "metric_deltas": {
+    "prefill_tokens": 22528,
+    "generated_tokens": 32,
+    "completed": 1,
+    "failed": 0,
+    "reused_tokens": 0
+   },
+   "request_metric_deltas": {
+    "flare_requests_admitted_total": 1,
+    "flare_requests_cancelled_total": 0
+   },
+   "first_token_wall_window_seconds": 25.670736814005068,
+   "effective_prefill_tokens_per_second": 877.5751223357757,
+   "prefill_rate_basis": "successful server prefill-token counter delta / batch first-token wall window; includes queueing, prefill, first-token generation and transport; not pure GPU prefill",
+   "pure_gpu_prefill_tokens_per_second": null,
+   "pure_gpu_prefill_unavailable_reason": "native release exposes prefill token counters but no isolated prefill GPU duration",
+   "requests_summary": [
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/22528/1/1/0",
+     "status": "complete",
+     "requested_prompt_tokens": 22528,
+     "transport_ttft_seconds": 25.670736814005068,
+     "elapsed_seconds": 26.072134323010687,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    }
+   ]
+  },
+  {
+   "status": "complete",
+   "phase": "measured",
+   "prompt_length": 22528,
+   "concurrency": 1,
+   "repetition": 2,
+   "output_tokens": 32,
+   "metric_deltas": {
+    "prefill_tokens": 22528,
+    "generated_tokens": 32,
+    "completed": 1,
+    "failed": 0,
+    "reused_tokens": 0
+   },
+   "request_metric_deltas": {
+    "flare_requests_admitted_total": 1,
+    "flare_requests_cancelled_total": 0
+   },
+   "first_token_wall_window_seconds": 25.082076618011342,
+   "effective_prefill_tokens_per_second": 898.1712456704136,
+   "prefill_rate_basis": "successful server prefill-token counter delta / batch first-token wall window; includes queueing, prefill, first-token generation and transport; not pure GPU prefill",
+   "pure_gpu_prefill_tokens_per_second": null,
+   "pure_gpu_prefill_unavailable_reason": "native release exposes prefill token counters but no isolated prefill GPU duration",
+   "requests_summary": [
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/22528/1/2/0",
+     "status": "complete",
+     "requested_prompt_tokens": 22528,
+     "transport_ttft_seconds": 25.082076618011342,
+     "elapsed_seconds": 25.54226704701432,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    }
+   ]
+  },
+  {
+   "status": "complete",
+   "phase": "warmup",
+   "prompt_length": 22528,
+   "concurrency": 4,
+   "repetition": 0,
+   "output_tokens": 32,
+   "metric_deltas": {
+    "prefill_tokens": 90112,
+    "generated_tokens": 128,
+    "completed": 4,
+    "failed": 0,
+    "reused_tokens": 0
+   },
+   "request_metric_deltas": {
+    "flare_requests_admitted_total": 4,
+    "flare_requests_cancelled_total": 0
+   },
+   "first_token_wall_window_seconds": 101.0700754460122,
+   "effective_prefill_tokens_per_second": 891.5794274650009,
+   "prefill_rate_basis": "successful server prefill-token counter delta / batch first-token wall window; includes queueing, prefill, first-token generation and transport; not pure GPU prefill",
+   "pure_gpu_prefill_tokens_per_second": null,
+   "pure_gpu_prefill_unavailable_reason": "native release exposes prefill token counters but no isolated prefill GPU duration",
+   "requests_summary": [
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/warmup/22528/4/0/0",
+     "status": "complete",
+     "requested_prompt_tokens": 22528,
+     "transport_ttft_seconds": 50.1630136470194,
+     "elapsed_seconds": 76.19759940699441,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    },
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/warmup/22528/4/0/1",
+     "status": "complete",
+     "requested_prompt_tokens": 22528,
+     "transport_ttft_seconds": 25.06767319998471,
+     "elapsed_seconds": 76.13839585398091,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    },
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/warmup/22528/4/0/2",
+     "status": "complete",
+     "requested_prompt_tokens": 22528,
+     "transport_ttft_seconds": 75.37699590297416,
+     "elapsed_seconds": 76.91773588399519,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    },
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/warmup/22528/4/0/3",
+     "status": "complete",
+     "requested_prompt_tokens": 22528,
+     "transport_ttft_seconds": 101.0700754460122,
+     "elapsed_seconds": 101.48915834500804,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    }
+   ]
+  },
+  {
+   "status": "complete",
+   "phase": "measured",
+   "prompt_length": 22528,
+   "concurrency": 4,
+   "repetition": 0,
+   "output_tokens": 32,
+   "metric_deltas": {
+    "prefill_tokens": 90112,
+    "generated_tokens": 128,
+    "completed": 4,
+    "failed": 0,
+    "reused_tokens": 0
+   },
+   "request_metric_deltas": {
+    "flare_requests_admitted_total": 4,
+    "flare_requests_cancelled_total": 0
+   },
+   "first_token_wall_window_seconds": 102.50238430401077,
+   "effective_prefill_tokens_per_second": 879.1210137389364,
+   "prefill_rate_basis": "successful server prefill-token counter delta / batch first-token wall window; includes queueing, prefill, first-token generation and transport; not pure GPU prefill",
+   "pure_gpu_prefill_tokens_per_second": null,
+   "pure_gpu_prefill_unavailable_reason": "native release exposes prefill token counters but no isolated prefill GPU duration",
+   "requests_summary": [
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/22528/4/0/0",
+     "status": "complete",
+     "requested_prompt_tokens": 22528,
+     "transport_ttft_seconds": 25.065563802985707,
+     "elapsed_seconds": 77.58050154597731,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    },
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/22528/4/0/1",
+     "status": "complete",
+     "requested_prompt_tokens": 22528,
+     "transport_ttft_seconds": 76.81972094098455,
+     "elapsed_seconds": 78.35402463600622,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    },
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/22528/4/0/2",
+     "status": "complete",
+     "requested_prompt_tokens": 22528,
+     "transport_ttft_seconds": 50.821356394008035,
+     "elapsed_seconds": 77.58024636999471,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    },
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/22528/4/0/3",
+     "status": "complete",
+     "requested_prompt_tokens": 22528,
+     "transport_ttft_seconds": 102.50238430401077,
+     "elapsed_seconds": 102.9212458890106,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    }
+   ]
+  },
+  {
+   "status": "complete",
+   "phase": "measured",
+   "prompt_length": 22528,
+   "concurrency": 4,
+   "repetition": 1,
+   "output_tokens": 32,
+   "metric_deltas": {
+    "prefill_tokens": 90112,
+    "generated_tokens": 128,
+    "completed": 4,
+    "failed": 0,
+    "reused_tokens": 0
+   },
+   "request_metric_deltas": {
+    "flare_requests_admitted_total": 4,
+    "flare_requests_cancelled_total": 0
+   },
+   "first_token_wall_window_seconds": 101.12289061199408,
+   "effective_prefill_tokens_per_second": 891.1137671663028,
+   "prefill_rate_basis": "successful server prefill-token counter delta / batch first-token wall window; includes queueing, prefill, first-token generation and transport; not pure GPU prefill",
+   "pure_gpu_prefill_tokens_per_second": null,
+   "pure_gpu_prefill_unavailable_reason": "native release exposes prefill token counters but no isolated prefill GPU duration",
+   "requests_summary": [
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/22528/4/1/0",
+     "status": "complete",
+     "requested_prompt_tokens": 22528,
+     "transport_ttft_seconds": 25.06493166499422,
+     "elapsed_seconds": 76.21464100398589,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    },
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/22528/4/1/1",
+     "status": "complete",
+     "requested_prompt_tokens": 22528,
+     "transport_ttft_seconds": 50.1526893270202,
+     "elapsed_seconds": 76.27376870100852,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    },
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/22528/4/1/2",
+     "status": "complete",
+     "requested_prompt_tokens": 22528,
+     "transport_ttft_seconds": 101.12219537000055,
+     "elapsed_seconds": 101.5230242620164,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    },
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/22528/4/1/3",
+     "status": "complete",
+     "requested_prompt_tokens": 22528,
+     "transport_ttft_seconds": 75.45364430602058,
+     "elapsed_seconds": 76.9788353620097,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    }
+   ]
+  },
+  {
+   "status": "complete",
+   "phase": "measured",
+   "prompt_length": 22528,
+   "concurrency": 4,
+   "repetition": 2,
+   "output_tokens": 32,
+   "metric_deltas": {
+    "prefill_tokens": 90112,
+    "generated_tokens": 128,
+    "completed": 4,
+    "failed": 0,
+    "reused_tokens": 0
+   },
+   "request_metric_deltas": {
+    "flare_requests_admitted_total": 4,
+    "flare_requests_cancelled_total": 0
+   },
+   "first_token_wall_window_seconds": 101.7621466180135,
+   "effective_prefill_tokens_per_second": 885.5159113167603,
+   "prefill_rate_basis": "successful server prefill-token counter delta / batch first-token wall window; includes queueing, prefill, first-token generation and transport; not pure GPU prefill",
+   "pure_gpu_prefill_tokens_per_second": null,
+   "pure_gpu_prefill_unavailable_reason": "native release exposes prefill token counters but no isolated prefill GPU duration",
+   "requests_summary": [
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/22528/4/2/0",
+     "status": "complete",
+     "requested_prompt_tokens": 22528,
+     "transport_ttft_seconds": 101.76182434201473,
+     "elapsed_seconds": 102.16251725298935,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    },
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/22528/4/2/1",
+     "status": "complete",
+     "requested_prompt_tokens": 22528,
+     "transport_ttft_seconds": 75.88565782798105,
+     "elapsed_seconds": 77.35913381600403,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    },
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/22528/4/2/2",
+     "status": "complete",
+     "requested_prompt_tokens": 22528,
+     "transport_ttft_seconds": 25.73412492897478,
+     "elapsed_seconds": 76.70995846198639,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    },
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/22528/4/2/3",
+     "status": "complete",
+     "requested_prompt_tokens": 22528,
+     "transport_ttft_seconds": 50.756055239005946,
+     "elapsed_seconds": 76.76759301699349,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    }
+   ]
+  },
+  {
+   "status": "complete",
+   "phase": "warmup",
+   "prompt_length": 30720,
+   "concurrency": 1,
+   "repetition": 0,
+   "output_tokens": 32,
+   "metric_deltas": {
+    "prefill_tokens": 30720,
+    "generated_tokens": 32,
+    "completed": 1,
+    "failed": 0,
+    "reused_tokens": 0
+   },
+   "request_metric_deltas": {
+    "flare_requests_admitted_total": 1,
+    "flare_requests_cancelled_total": 0
+   },
+   "first_token_wall_window_seconds": 35.52533491002396,
+   "effective_prefill_tokens_per_second": 864.7349863922587,
+   "prefill_rate_basis": "successful server prefill-token counter delta / batch first-token wall window; includes queueing, prefill, first-token generation and transport; not pure GPU prefill",
+   "pure_gpu_prefill_tokens_per_second": null,
+   "pure_gpu_prefill_unavailable_reason": "native release exposes prefill token counters but no isolated prefill GPU duration",
+   "requests_summary": [
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/warmup/30720/1/0/0",
+     "status": "complete",
+     "requested_prompt_tokens": 30720,
+     "transport_ttft_seconds": 35.52533491002396,
+     "elapsed_seconds": 36.01999266500934,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    }
+   ]
+  },
+  {
+   "status": "complete",
+   "phase": "measured",
+   "prompt_length": 30720,
+   "concurrency": 1,
+   "repetition": 0,
+   "output_tokens": 32,
+   "metric_deltas": {
+    "prefill_tokens": 30720,
+    "generated_tokens": 32,
+    "completed": 1,
+    "failed": 0,
+    "reused_tokens": 0
+   },
+   "request_metric_deltas": {
+    "flare_requests_admitted_total": 1,
+    "flare_requests_cancelled_total": 0
+   },
+   "first_token_wall_window_seconds": 36.178322686988395,
+   "effective_prefill_tokens_per_second": 849.1272595964906,
+   "prefill_rate_basis": "successful server prefill-token counter delta / batch first-token wall window; includes queueing, prefill, first-token generation and transport; not pure GPU prefill",
+   "pure_gpu_prefill_tokens_per_second": null,
+   "pure_gpu_prefill_unavailable_reason": "native release exposes prefill token counters but no isolated prefill GPU duration",
+   "requests_summary": [
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/30720/1/0/0",
+     "status": "complete",
+     "requested_prompt_tokens": 30720,
+     "transport_ttft_seconds": 36.178322686988395,
+     "elapsed_seconds": 36.67303299799096,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    }
+   ]
+  },
+  {
+   "status": "complete",
+   "phase": "measured",
+   "prompt_length": 30720,
+   "concurrency": 1,
+   "repetition": 1,
+   "output_tokens": 32,
+   "metric_deltas": {
+    "prefill_tokens": 30720,
+    "generated_tokens": 32,
+    "completed": 1,
+    "failed": 0,
+    "reused_tokens": 0
+   },
+   "request_metric_deltas": {
+    "flare_requests_admitted_total": 1,
+    "flare_requests_cancelled_total": 0
+   },
+   "first_token_wall_window_seconds": 36.23138155700872,
+   "effective_prefill_tokens_per_second": 847.8837593223774,
+   "prefill_rate_basis": "successful server prefill-token counter delta / batch first-token wall window; includes queueing, prefill, first-token generation and transport; not pure GPU prefill",
+   "pure_gpu_prefill_tokens_per_second": null,
+   "pure_gpu_prefill_unavailable_reason": "native release exposes prefill token counters but no isolated prefill GPU duration",
+   "requests_summary": [
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/30720/1/1/0",
+     "status": "complete",
+     "requested_prompt_tokens": 30720,
+     "transport_ttft_seconds": 36.23138155700872,
+     "elapsed_seconds": 36.72525362999295,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    }
+   ]
+  },
+  {
+   "status": "complete",
+   "phase": "measured",
+   "prompt_length": 30720,
+   "concurrency": 1,
+   "repetition": 2,
+   "output_tokens": 32,
+   "metric_deltas": {
+    "prefill_tokens": 30720,
+    "generated_tokens": 32,
+    "completed": 1,
+    "failed": 0,
+    "reused_tokens": 0
+   },
+   "request_metric_deltas": {
+    "flare_requests_admitted_total": 1,
+    "flare_requests_cancelled_total": 0
+   },
+   "first_token_wall_window_seconds": 35.460965549980756,
+   "effective_prefill_tokens_per_second": 866.3046683458587,
+   "prefill_rate_basis": "successful server prefill-token counter delta / batch first-token wall window; includes queueing, prefill, first-token generation and transport; not pure GPU prefill",
+   "pure_gpu_prefill_tokens_per_second": null,
+   "pure_gpu_prefill_unavailable_reason": "native release exposes prefill token counters but no isolated prefill GPU duration",
+   "requests_summary": [
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/30720/1/2/0",
+     "status": "complete",
+     "requested_prompt_tokens": 30720,
+     "transport_ttft_seconds": 35.460965549980756,
+     "elapsed_seconds": 35.956672453001374,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    }
+   ]
+  },
+  {
+   "status": "complete",
+   "phase": "warmup",
+   "prompt_length": 30720,
+   "concurrency": 4,
+   "repetition": 0,
+   "output_tokens": 32,
+   "metric_deltas": {
+    "prefill_tokens": 122880,
+    "generated_tokens": 128,
+    "completed": 4,
+    "failed": 0,
+    "reused_tokens": 0
+   },
+   "request_metric_deltas": {
+    "flare_requests_admitted_total": 4,
+    "flare_requests_cancelled_total": 0
+   },
+   "first_token_wall_window_seconds": 142.46491108098417,
+   "effective_prefill_tokens_per_second": 862.5281767111684,
+   "prefill_rate_basis": "successful server prefill-token counter delta / batch first-token wall window; includes queueing, prefill, first-token generation and transport; not pure GPU prefill",
+   "pure_gpu_prefill_tokens_per_second": null,
+   "pure_gpu_prefill_unavailable_reason": "native release exposes prefill token counters but no isolated prefill GPU duration",
+   "requests_summary": [
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/warmup/30720/4/0/0",
+     "status": "complete",
+     "requested_prompt_tokens": 30720,
+     "transport_ttft_seconds": 142.46458069598884,
+     "elapsed_seconds": 142.92347162900842,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    },
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/warmup/30720/4/0/1",
+     "status": "complete",
+     "requested_prompt_tokens": 30720,
+     "transport_ttft_seconds": 70.84186318400316,
+     "elapsed_seconds": 107.19749629299622,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    },
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/warmup/30720/4/0/2",
+     "status": "complete",
+     "requested_prompt_tokens": 30720,
+     "transport_ttft_seconds": 35.40775347102317,
+     "elapsed_seconds": 107.13770267600194,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    },
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/warmup/30720/4/0/3",
+     "status": "complete",
+     "requested_prompt_tokens": 30720,
+     "transport_ttft_seconds": 106.3492416900117,
+     "elapsed_seconds": 107.75047610598267,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    }
+   ]
+  },
+  {
+   "status": "complete",
+   "phase": "measured",
+   "prompt_length": 30720,
+   "concurrency": 4,
+   "repetition": 0,
+   "output_tokens": 32,
+   "metric_deltas": {
+    "prefill_tokens": 122880,
+    "generated_tokens": 128,
+    "completed": 4,
+    "failed": 0,
+    "reused_tokens": 0
+   },
+   "request_metric_deltas": {
+    "flare_requests_admitted_total": 4,
+    "flare_requests_cancelled_total": 0
+   },
+   "first_token_wall_window_seconds": 145.60301597599755,
+   "effective_prefill_tokens_per_second": 843.9385625106597,
+   "prefill_rate_basis": "successful server prefill-token counter delta / batch first-token wall window; includes queueing, prefill, first-token generation and transport; not pure GPU prefill",
+   "pure_gpu_prefill_tokens_per_second": null,
+   "pure_gpu_prefill_unavailable_reason": "native release exposes prefill token counters but no isolated prefill GPU duration",
+   "requests_summary": [
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/30720/4/0/0",
+     "status": "complete",
+     "requested_prompt_tokens": 30720,
+     "transport_ttft_seconds": 145.60269423300633,
+     "elapsed_seconds": 146.06289329900756,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    },
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/30720/4/0/1",
+     "status": "complete",
+     "requested_prompt_tokens": 30720,
+     "transport_ttft_seconds": 71.66662680101581,
+     "elapsed_seconds": 108.82279219900374,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    },
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/30720/4/0/2",
+     "status": "complete",
+     "requested_prompt_tokens": 30720,
+     "transport_ttft_seconds": 108.00344959399081,
+     "elapsed_seconds": 109.63669604301685,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    },
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/30720/4/0/3",
+     "status": "complete",
+     "requested_prompt_tokens": 30720,
+     "transport_ttft_seconds": 35.432287245988846,
+     "elapsed_seconds": 108.76295243599452,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    }
+   ]
+  },
+  {
+   "status": "complete",
+   "phase": "measured",
+   "prompt_length": 30720,
+   "concurrency": 4,
+   "repetition": 1,
+   "output_tokens": 32,
+   "metric_deltas": {
+    "prefill_tokens": 122880,
+    "generated_tokens": 128,
+    "completed": 4,
+    "failed": 0,
+    "reused_tokens": 0
+   },
+   "request_metric_deltas": {
+    "flare_requests_admitted_total": 4,
+    "flare_requests_cancelled_total": 0
+   },
+   "first_token_wall_window_seconds": 143.7399724490242,
+   "effective_prefill_tokens_per_second": 854.877024855268,
+   "prefill_rate_basis": "successful server prefill-token counter delta / batch first-token wall window; includes queueing, prefill, first-token generation and transport; not pure GPU prefill",
+   "pure_gpu_prefill_tokens_per_second": null,
+   "pure_gpu_prefill_unavailable_reason": "native release exposes prefill token counters but no isolated prefill GPU duration",
+   "requests_summary": [
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/30720/4/1/0",
+     "status": "complete",
+     "requested_prompt_tokens": 30720,
+     "transport_ttft_seconds": 106.38859823299572,
+     "elapsed_seconds": 107.98689911997644,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    },
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/30720/4/1/1",
+     "status": "complete",
+     "requested_prompt_tokens": 30720,
+     "transport_ttft_seconds": 70.87581066202256,
+     "elapsed_seconds": 107.20744660601486,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    },
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/30720/4/1/2",
+     "status": "complete",
+     "requested_prompt_tokens": 30720,
+     "transport_ttft_seconds": 143.73932481900556,
+     "elapsed_seconds": 144.19964327997877,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    },
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/30720/4/1/3",
+     "status": "complete",
+     "requested_prompt_tokens": 30720,
+     "transport_ttft_seconds": 35.43363278300967,
+     "elapsed_seconds": 107.1492320660036,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    }
+   ]
+  },
+  {
+   "status": "complete",
+   "phase": "measured",
+   "prompt_length": 30720,
+   "concurrency": 4,
+   "repetition": 2,
+   "output_tokens": 32,
+   "metric_deltas": {
+    "prefill_tokens": 122880,
+    "generated_tokens": 128,
+    "completed": 4,
+    "failed": 0,
+    "reused_tokens": 0
+   },
+   "request_metric_deltas": {
+    "flare_requests_admitted_total": 4,
+    "flare_requests_cancelled_total": 0
+   },
+   "first_token_wall_window_seconds": 145.88287425698945,
+   "effective_prefill_tokens_per_second": 842.3195705860082,
+   "prefill_rate_basis": "successful server prefill-token counter delta / batch first-token wall window; includes queueing, prefill, first-token generation and transport; not pure GPU prefill",
+   "pure_gpu_prefill_tokens_per_second": null,
+   "pure_gpu_prefill_unavailable_reason": "native release exposes prefill token counters but no isolated prefill GPU duration",
+   "requests_summary": [
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/30720/4/2/0",
+     "status": "complete",
+     "requested_prompt_tokens": 30720,
+     "transport_ttft_seconds": 37.65371831401717,
+     "elapsed_seconds": 109.34360959299374,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    },
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/30720/4/2/1",
+     "status": "complete",
+     "requested_prompt_tokens": 30720,
+     "transport_ttft_seconds": 73.02294250699924,
+     "elapsed_seconds": 109.40553052202449,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    },
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/30720/4/2/2",
+     "status": "complete",
+     "requested_prompt_tokens": 30720,
+     "transport_ttft_seconds": 108.52159622102045,
+     "elapsed_seconds": 110.12782001000596,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    },
+    {
+     "case_id": "prefill-lab-g128-srpt-prefill-public/measured/30720/4/2/3",
+     "status": "complete",
+     "requested_prompt_tokens": 30720,
+     "transport_ttft_seconds": 145.88287425698945,
+     "elapsed_seconds": 146.34378297699732,
+     "output_tokens": 32,
+     "cached_tokens": 0
+    }
+   ]
+  }
+ ]
+}
