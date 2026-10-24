@@ -321,6 +321,15 @@ impl Bootstrap {
                     Some(Value::Bool(value)) => *value,
                     Some(_) => return Err("pipelined_speculation must be a boolean".into()),
                 },
+                prefill_srpt: prefill_srpt(object.get("prefill_srpt"))?,
+                prefill_srpt_max_wait_chunks: match object.get("prefill_srpt_max_wait_chunks") {
+                    None => crate::scheduler::PolicyConfig::default().prefill_srpt_max_wait_chunks,
+                    Some(value) => value.as_u64().ok_or("prefill_srpt_max_wait_chunks must be a non-negative integer")?,
+                },
+                prefill_srpt_aging_tokens_per_chunk: match object.get("prefill_srpt_aging_tokens_per_chunk") {
+                    None => crate::scheduler::PolicyConfig::default().prefill_srpt_aging_tokens_per_chunk,
+                    Some(value) => value.as_u64().ok_or("prefill_srpt_aging_tokens_per_chunk must be a non-negative integer")?,
+                },
                 ..match object.get("scheduler_policy") {
                     None => crate::scheduler::PolicyConfig::default(),
                     Some(Value::String(value)) if value == "balanced" => crate::scheduler::PolicyConfig::default(),
@@ -633,5 +642,29 @@ mod tests {
                 .contains("invalid prepared frontend settings"),
             "{error}"
         );
+    }
+}
+
+/// The `prefill_srpt` server option (opt-in, default off; `flare run --prefill-srpt` sets it): a JSON boolean.
+fn prefill_srpt(value: Option<&Value>) -> Result<bool> {
+    match value {
+        None => Ok(false),
+        Some(Value::Bool(value)) => Ok(*value),
+        Some(_) => Err("prefill_srpt must be a boolean".into()),
+    }
+}
+
+#[cfg(test)]
+mod prefill_srpt_option_tests {
+    use super::prefill_srpt;
+    use serde_json::Value;
+
+    #[test]
+    fn prefill_srpt_is_a_boolean_option_and_off_by_default() {
+        assert!(!prefill_srpt(None).unwrap());
+        assert!(prefill_srpt(Some(&Value::Bool(true))).unwrap());
+        assert!(!prefill_srpt(Some(&Value::Bool(false))).unwrap());
+        assert!(prefill_srpt(Some(&Value::String("true".into()))).is_err());
+        assert!(prefill_srpt(Some(&serde_json::json!(1))).is_err());
     }
 }

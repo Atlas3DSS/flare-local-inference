@@ -270,6 +270,9 @@ impl OrbitPush {
             api_key_file: None,
             scheduler_policy: "balanced".into(),
             mtp_pipeline: false,
+            prefill_srpt: false,
+            prefill_srpt_max_wait_chunks: None,
+            prefill_srpt_aging_tokens_per_chunk: None,
             unclamped_sampling: false,
             serving: self.serving.clone(),
         }
@@ -416,6 +419,9 @@ impl OrbitRun {
                 .clone()
                 .unwrap_or_else(|| "balanced".into()),
             mtp_pipeline: false,
+            prefill_srpt: false,
+            prefill_srpt_max_wait_chunks: None,
+            prefill_srpt_aging_tokens_per_chunk: None,
             unclamped_sampling: false,
             serving: self.serving.clone(),
         }
@@ -491,6 +497,20 @@ pub struct Run {
     /// execution; one local rank, device MTP proposals, no grammar or custom stops.
     #[arg(long, help_heading = "Speculation options")]
     pub mtp_pipeline: bool,
+
+    /// Serve concurrent prompts shortest-remaining-prompt first, one after another, instead of interleaving their
+    /// prefill chunks [default: off]. Outputs and prefill arithmetic are unchanged.
+    #[arg(long, help_heading = "Serving options")]
+    pub prefill_srpt: bool,
+
+    /// With --prefill-srpt: serve a prompt in arrival order once it has waited this many other prompts' prefill
+    /// chunks; 0 removes the bound [default: 256].
+    #[arg(long, value_name = "CHUNKS", help_heading = "Serving options")]
+    pub prefill_srpt_max_wait_chunks: Option<u64>,
+
+    /// With --prefill-srpt: remaining-token credit per other prompt's prefill chunk waited [default: 32].
+    #[arg(long, value_name = "TOKENS", help_heading = "Serving options")]
+    pub prefill_srpt_aging_tokens_per_chunk: Option<u64>,
 
     /// Validation only: accept request sampling values outside the package's model-author
     /// ranges, e.g. top_k 1 for greedy token-for-token comparisons. Not for serving.
@@ -906,6 +926,17 @@ mod tests {
                 .is_err()
             );
         }
+    }
+
+    #[test]
+    fn prefill_srpt_flags_parse_and_default_off() {
+        let args = run(&["flare", "run", "model.safetensors"]);
+        assert!(!args.prefill_srpt);
+        assert_eq!((args.prefill_srpt_max_wait_chunks, args.prefill_srpt_aging_tokens_per_chunk), (None, None));
+        let args = run(&["flare", "run", "model.safetensors", "--prefill-srpt", "--prefill-srpt-max-wait-chunks", "64",
+                         "--prefill-srpt-aging-tokens-per-chunk", "8"]);
+        assert!(args.prefill_srpt);
+        assert_eq!((args.prefill_srpt_max_wait_chunks, args.prefill_srpt_aging_tokens_per_chunk), (Some(64), Some(8)));
     }
 
     #[test]

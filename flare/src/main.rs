@@ -190,6 +190,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     config["bind"] = bind.to_string().into();
     config["scheduler_policy"] = args.scheduler_policy.into();
     config["pipelined_speculation"] = args.mtp_pipeline.into();
+    // Opt-in SRPT prefill ordering; without the flags the server configuration's keys (default off) apply.
+    if args.prefill_srpt {
+        config["prefill_srpt"] = true.into();
+    }
+    if let Some(chunks) = args.prefill_srpt_max_wait_chunks {
+        config["prefill_srpt_max_wait_chunks"] = chunks.into();
+    }
+    if let Some(tokens) = args.prefill_srpt_aging_tokens_per_chunk {
+        config["prefill_srpt_aging_tokens_per_chunk"] = tokens.into();
+    }
     config["unclamped_sampling"] = args.unclamped_sampling.into();
     if let Some(name) = args.served_model_name {
         config["served_names"] = serde_json::json!([name]);

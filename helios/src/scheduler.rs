@@ -549,6 +549,10 @@ pub struct RequestScheduler {
     submitted: Fence,
     now_ns: u64,
     policy: PolicyConfig,
+    /// Prefill chunks committed so far (SRPT aging clock).
+    prefill_chunks_scheduled: u64,
+    /// The request whose prompt is mid-prefill (SRPT non-preemption).
+    active_prefill: Option<RequestHandle>,
     candidates: std::cell::RefCell<Vec<policy::Candidate>>,
     stats: SchedulerStats,
     speculative_widths: Vec<usize>,
@@ -628,6 +632,8 @@ impl RequestScheduler {
             submitted: Fence(0),
             now_ns: 0,
             policy: PolicyConfig::default(),
+            prefill_chunks_scheduled: 0,
+            active_prefill: None,
             candidates: policy::scratch(),
             stats: SchedulerStats::default(),
             speculative_widths: Vec::new(),
@@ -1914,6 +1920,16 @@ impl RequestScheduler {
             }
         }
         self.submitted = fence;
+        // SRPT bookkeeping (read only when PolicyConfig::prefill_srpt is on).
+        for (row, lane) in step.lanes.iter().enumerate() {
+            if step.lane_kind(row) == GraphKind::Prefill {
+                self.prefill_chunks_scheduled += 1;
+                let request = self.request_mut(lane.request)?;
+                request.accounting.served_prefill_chunks += 1;
+                let unfinished = lane.start_position + (lane.tokens as u64) < request.prompt_tokens as u64;
+                self.active_prefill = unfinished.then_some(lane.request);
+            }
+        }
         self.refresh.commit(origin, fence, step);
         self.costs.record_attempt(key);
         if let PlanOrigin::RefreshStart(target) = origin {

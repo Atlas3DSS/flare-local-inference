@@ -19,6 +19,17 @@ pub struct PolicyConfig {
     /// positions, pending tokens and acceptance, so the next round needs no host
     /// feedback; the host then hides graph submission behind the running round.
     pub pipelined_speculation: bool,
+    /// Opt-in shortest-remaining-prompt-first prefill (default off: prefill chunks follow the token-service price,
+    /// which interleaves concurrent prompts chunk by chunk). When on, each one-request prefill chunk goes to the
+    /// first prompt in `srpt_key` order: the prompt already mid-prefill (no mid-prompt preemption), then prompts that
+    /// waited `prefill_srpt_max_wait_chunks` other chunks (FIFO), then effective remaining prompt tokens with linear
+    /// aging, then arrival and slot. The step keeps the value of the best-priced prefill lane, so prefill-versus-decode
+    /// choices are unchanged; prompt chunk cuts, graphs and arithmetic are unchanged.
+    pub prefill_srpt: bool,
+    /// SRPT starvation bound: a prompt that waited this many other prompts' prefill chunks is served FIFO (0 = no cap).
+    pub prefill_srpt_max_wait_chunks: u64,
+    /// SRPT aging: remaining-token credit per other prompt's prefill chunk waited.
+    pub prefill_srpt_aging_tokens_per_chunk: u64,
 }
 
 impl Default for PolicyConfig {
@@ -32,6 +43,9 @@ impl Default for PolicyConfig {
             adaptation_ms: 100.0,
             estimate_ttl_ns: 30_000_000_000,
             pipelined_speculation: false,
+            prefill_srpt: false,
+            prefill_srpt_max_wait_chunks: 256,
+            prefill_srpt_aging_tokens_per_chunk: 32,
         }
     }
 }
@@ -63,6 +77,10 @@ pub struct RequestAccounting {
     pub published_deliveries: u64,
     pub committed_prefill_tokens: u64,
     pub committed_output_tokens: u64,
+    /// Scheduler prefill-chunk count when the request was admitted (SRPT aging).
+    pub arrival_prefill_chunk: u64,
+    /// Prefill chunks scheduled for this request (SRPT aging).
+    pub served_prefill_chunks: u64,
     pub(super) pending_publication_fence: Option<Fence>,
     pub(super) service: service::ServiceAccounting,
 }
@@ -179,8 +197,38 @@ impl RequestScheduler {
         RequestAccounting {
             arrival_ns: self.now_ns,
             last_progress_ns: self.now_ns,
+            arrival_prefill_chunk: self.prefill_chunks_scheduled,
             ..Default::default()
         }
+    }
+
+    /// SRPT order of a prompt in its prefill phase (smaller first); see `PolicyConfig::prefill_srpt`.
+    pub(super) fn srpt_key(&self, slot: usize, r: &LiveRequest) -> (bool, bool, u64, u64, usize) {
+        let remaining = (r.prompt_tokens as u64).saturating_sub(r.consumed_tokens);
+        let waited = self
+            .prefill_chunks_scheduled
+            .saturating_sub(r.accounting.arrival_prefill_chunk)
+            .saturating_sub(r.accounting.served_prefill_chunks);
+        let aged_out = self.policy.prefill_srpt_max_wait_chunks > 0
+            && waited >= self.policy.prefill_srpt_max_wait_chunks;
+        let effective = if aged_out {
+            0
+        } else {
+            remaining.saturating_sub(waited.saturating_mul(self.policy.prefill_srpt_aging_tokens_per_chunk))
+        };
+        let leader = self.active_prefill == Some(r.handle) && r.phase == RequestPhase::Prefill;
+        (!leader, !aged_out, effective, r.accounting.arrival_ns, slot)
+    }
+
+    /// The first prompt with prompt tokens left in SRPT order, in flight or not.
+    pub(super) fn srpt_first(&self) -> Option<usize> {
+        self.slots
+            .iter()
+            .enumerate()
+            .filter_map(|(s, e)| e.request.as_ref().map(|r| (s, r)))
+            .filter(|(_, r)| r.phase == RequestPhase::Prefill && r.consumed_tokens < r.prompt_tokens as u64)
+            .min_by_key(|&(s, r)| self.srpt_key(s, r))
+            .map(|(s, _)| s)
     }
     fn request_kind(&self, request: &LiveRequest) -> Option<GraphKind> {
         Some(match request.phase {
@@ -776,12 +824,31 @@ impl RequestScheduler {
         if count == 0 {
             return;
         }
-        let selected = best_cohort::<REQUEST_LANES>(&offers[..count], batch);
-        let expected = offers[..count]
-            .iter()
-            .filter(|(s, _)| selected & (1 << s) != 0)
-            .map(|(_, v)| v)
-            .sum();
+        let (selected, expected) = if kind == GraphKind::Prefill && batch == 1 && self.policy.prefill_srpt {
+            let offered = |slot: usize| offers[..count].iter().any(|(s, _)| *s == slot);
+            let slot = match self.srpt_first() {
+                Some(first) if offered(first) => first,
+                // The first prompt's chunk is in flight: its next chunk waits for that feedback, and no other
+                // prompt's chunk is offered meanwhile (prompts finish one after another).
+                Some(first) if self.slots[first].request.as_ref().is_some_and(|r| r.pending > 0) => return,
+                // Not offered for another reason (e.g. another capacity serves it): the best offered prompt in
+                // SRPT order runs, so prefill never stalls on an absent leader.
+                _ => offers[..count]
+                    .iter()
+                    .map(|(s, _)| *s)
+                    .min_by_key(|&s| self.srpt_key(s, self.slots[s].request.as_ref().unwrap()))
+                    .unwrap(),
+            };
+            (1u64 << slot, offers[..count].iter().map(|(_, v)| *v).fold(0.0f64, f64::max))
+        } else {
+            let selected = best_cohort::<REQUEST_LANES>(&offers[..count], batch);
+            let expected = offers[..count]
+                .iter()
+                .filter(|(s, _)| selected & (1 << s) != 0)
+                .map(|(_, v)| v)
+                .sum::<f64>();
+            (selected, expected)
+        };
         let feedback = !self.costs.is_fresh(cost::Key {
             kind, batch, tokens: capacity, prefill: 0, packed: 0,
         })
@@ -942,7 +1009,15 @@ impl RequestScheduler {
                             duration_ns,
                             values[slot],
                         );
-                        if prompt.is_none_or(|(_, best)| value > best) {
+                        let better = match prompt {
+                            None => true,
+                            Some((other, _)) if self.policy.prefill_srpt => {
+                                self.srpt_key(slot, r)
+                                    < self.srpt_key(other, self.slots[other].request.as_ref().unwrap())
+                            }
+                            Some((_, best)) => value > best,
+                        };
+                        if better {
                             prompt = Some((slot, value));
                         }
                     }
@@ -1195,3 +1270,7 @@ pub(super) fn bits(mut mask: u64) -> impl Iterator<Item = usize> {
 pub(super) fn scratch() -> std::cell::RefCell<Vec<Candidate>> {
     std::cell::RefCell::new(Vec::new())
 }
+
+#[cfg(test)]
+#[path = "prefill_srpt_tests.rs"]
+mod prefill_srpt_tests;
