@@ -11,15 +11,25 @@ not compare a number from one table with a number from the other.
 
 ## Release binary d4ffb1fa (built from 71029458; production source unchanged through c6fdc120)
 
-pending: results land here when the chain completes.
+Measured on 2026-10-23 from 21:54 to 22:48 PDT in one benchmark chain on one
+Tesla V100 PCIe 32 GB. Receipts are in [docs/sm70/receipts/release-binary/](docs/sm70/receipts/release-binary/); each table names its file.
 
 - **Server binary.** SHA-256
   `d4ffb1fa3453bf37f2017a7b58d09559010881311b2d9afcdfb33b4011caa667`, built from
   `71029458`; production source is unchanged through `c6fdc120`.
-- **Package.** The release export qualified on 2026-10-23
+- **Package.** Primary SHA-256
+  `fd7c24dce58c4897a2ab5299bcd875e3e6ab1e2a1f714e5f09724bc6619a7382`, the release
+  export qualified on 2026-10-23
   ([validation record](docs/sm70/ARCHITECTURE.md#export-qualification-of-the-release-package)).
-  Its package SHA-256 and the server flags are recorded with the results.
-- **Hardware.** One Tesla V100 PCIe 32 GB.
+- **Server flags.** `--memory-limit 31G --prefix-cache-memory 8G
+  --kv-cache-limit concurrency --max-concurrency 4 --mtp-draft-tokens 4
+  --no-mtp-adaptive-verification --scheduler-policy balanced`, the same for all
+  three legs. The KV pool is 131,584 tokens, 1,028 pages of 128 tokens
+  ([chain/native-chain-manifest.json](docs/sm70/receipts/release-binary/chain/native-chain-manifest.json),
+  [short/native-depth4.json](docs/sm70/receipts/release-binary/short/native-depth4.json)).
+- **Hardware.** One Tesla V100 PCIe 32 GB, used only by the chain. Other jobs on
+  the host could share CPU, memory and PCIe bandwidth
+  ([chain/native-chain-run.json](docs/sm70/receipts/release-binary/chain/native-chain-run.json)).
 - **Inputs.** Newly authored public prompts, generated as described in
   [BENCHMARK.md](docs/sm70/BENCHMARK.md). They are not the historical prompt
   sets, so these rows start a new baseline and do not compare row for row with
@@ -34,48 +44,157 @@ SSE chunk carrying output. The effective prefill rate is the server's prefill
 tokens divided by the batch's first-token wall window, which includes queueing,
 transport and first sampling. Pure-GPU prefill duration is `null` by design: the
 release exposes no isolated prefill GPU-time counter
-([BENCHMARK.md](docs/sm70/BENCHMARK.md#fixed-length-prefill-and-ttft)).
+([BENCHMARK.md](docs/sm70/BENCHMARK.md#fixed-length-prefill-and-ttft)). Every
+request was uncached: no cached tokens in usage, and no reused tokens in the
+server counters
+([prefill/prefill-summary.json](docs/sm70/receipts/release-binary/prefill/prefill-summary.json)).
 
 | Prompt tokens | Concurrency | TTFT p50 / p95 (s) | Effective prefill tok/s (first-token wall window) | Pure-GPU prefill (null) | Repetitions |
 | ---: | ---: | ---: | ---: | --- | ---: |
+| 2,048 | 1 | 2.54 / 2.54 | 807 | null | 3 |
+| 2,048 | 4 | 9.89 / 10.30 | 796 | null | 3 |
+| 8,192 | 1 | 10.43 / 10.44 | 785 | null | 3 |
+| 8,192 | 4 | 41.44 / 41.88 | 782 | null | 3 |
+| 22,528 | 1 | 30.39 / 30.39 | 741 | null | 3 |
+| 22,528 | 4 | 121.11 / 121.67 | 741 | null | 3 |
+| 30,720 | 1 | 42.75 / 42.75 | 719 | null | 3 |
+| 30,720 | 4 | 170.49 / 170.95 | 719 | null | 3 |
+
+At concurrency 4 the rate is the aggregate over the four requests. Concurrent
+prefills do not overlap: prefill graphs run one request at a time, so four
+requests prefill no faster in total than one. The server interleaves their
+chunks, so all four first tokens arrive within 0.9 s of each other, at about
+four times the single-request TTFT (170.2-171.0 s against 42.7 s at 30,720
+tokens). The effective rate falls from 807 to 719 tok/s as the prompt grows from
+2,048 to 30,720 tokens.
 
 ### Short-prompt native decode, MTP depth 4
 
 128 output tokens per request, concurrency 1 then 4, 3 repetitions. Tok/s per
 agent p50 is decode-only: the median request decode rate after its first token.
 Aggregate tok/s divides output tokens by batch wall time, including prefill and
-HTTP, so it is an end-to-end figure. Do not compare the two columns.
+HTTP, so it is an end-to-end figure. Do not compare the two columns. Prompts are
+the four public `code-00` to `code-03` prompts of 578-582 tokens
+([short/native-depth4.json](docs/sm70/receipts/release-binary/short/native-depth4.json),
+[short/native-depth4-requests-summary.json](docs/sm70/receipts/release-binary/short/native-depth4-requests-summary.json)).
 
 | Concurrency | Output tokens | Tok/s per agent, p50 | Aggregate tok/s | Repetitions |
 | ---: | ---: | ---: | ---: | ---: |
+| 1 | 128 | 83.0 | 67.6 | 3 |
+| 4 | 128 | 64.8 | 220.6 | 3 |
+
+At concurrency 4 the aggregate over the decode window (tokens after each first
+token, earliest first to latest last token) is 212.9 tok/s. Request latency p50
+was 1.80 s at concurrency 1 and 1.98 s at concurrency 4; first-token p50 was
+12 ms and 18 ms. Repeated prompts reuse their prefixes, so those first tokens
+include prefix-cache credit and are not prefill measurements. Of the 3,072
+generated tokens, 2,234 were accepted MTP drafts. All 24 requests completed.
 
 ### Long-context native serving
 
-Four public coding prompts of about 28.7k tokens each, 512 output tokens per
-request, concurrency 4 first and then 1, 3 repetitions. Each row is labelled
-cold or cache-credited. A row is cold only when its requests completed, their
-usage and stream events carry no prefix-cache credit, and the server's
-reused-token counter did not move for the batch. First-token times are given for
-cold rows only; decode rates are given for every row.
+Four public coding prompts of 28,654 to 28,671 tokens (114,664 in total), 512
+output tokens per request, concurrency 4 first and then 1, 3 repetitions. Each
+row is labelled cold or cache-credited. A row is cold only when its requests
+completed, their usage and stream events carry no prefix-cache credit, and the
+server's reused-token counter did not move for the batch. First-token times are
+given for cold rows only; decode rates are given for every row
+([long/native-depth4.json](docs/sm70/receipts/release-binary/long/native-depth4.json),
+[long/native-depth4-requests-summary.json](docs/sm70/receipts/release-binary/long/native-depth4-requests-summary.json),
+[long/native-chain-long-cache-labels.json](docs/sm70/receipts/release-binary/long/native-chain-long-cache-labels.json)).
 
 | Concurrency | Prompt tokens | Output tokens | Cold or cache-credited | First-token s (cold rows only) | Decode tok/s per agent | KV tokens resident | Evictions |
 | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: |
+| 4 | 28,654-28,671 | 512 | first batch: no request credited, batch not cold (a) | 157.96-159.80 (a) | 40.2 / 41.1 / 42.7 / 46.1 (median 41.9) | four contexts, 114,664 prompt tokens (b) | not exported (c) |
+| 4 | 28,654-28,671 | 512 | batches 2 and 3: cache-credited, 5 of 8 requests credited | n/a | 25.0-76.8 (median 39.3) | four contexts (b) | not exported (c) |
+| 1 | 28,654-28,671 | 512 | cold, 6 requests | 39.83-39.87 | 70.0-81.2 (median 72.4) | one context | not exported (c) |
+| 1 | 28,654-28,671 | 512 | cache-credited, 6 requests | n/a | 62.7-79.4 (median 71.5) | one context | not exported (c) |
+
+(a) In the first four-agent batch no request reports cached tokens or reused
+prompt tokens, but the server's reused-token counter rose by 28,664 during the
+batch, so the chain's labels mark it not cold. Its first-token times are given
+because they are the only four-agent long-context times without request-level
+cache credit; read them with that caveat. All four first tokens arrived between
+157.96 and 159.80 s. The server interleaves the concurrent prefills, and none of
+the four emits a token before all four have finished prefill. Its four decode
+rates sum to 170 tok/s; the receipt's aggregate over the decode window is
+140.5 tok/s.
+
+(b) In that batch the four requests decoded at the same time (from 159.80 s to
+at least 170.17 s), so four 28.7k-token contexts were resident simultaneously
+within the 131,584-token pool.
+
+(c) The server exports no KV-page eviction counter. The long leg recorded 52
+prefix-cache snapshot-slot evictions (`flare_snapshot_evictions_total`); those
+are snapshot slots, not KV pages.
+
+Over the whole long leg the server counted 373,063 prefill tokens, 12,288
+generated tokens, of which 9,093 were accepted MTP drafts, and 344,346 tokens
+reused from the prefix cache, 28,664 of them during the first batch. All 24
+requests completed. Over all 12 requests at each concurrency, the per-agent
+decode median is 41.5 tok/s at 4 and 72.4 tok/s at 1. A cold single request
+reaches its first token after 39.8 s at 28.7k tokens, consistent with the
+prefill table.
+
+## Measurement history (2026-10-20 to 2026-10-23)
+
+The best run is one point of a distribution. This section gives the
+distribution of every completed run of each protocol, compiled on 2026-10-23
+from the fork's run reports, with the best run marked. The per-run sources are
+held with the fork. Read it with these limits:
+
+- The runs used six different Tesla V100 32 GB cards in one host, one card per
+  run.
+- Binaries, packages, memory limits, prefix-cache sizes and KV pools differ
+  between runs; each best run names its own.
+- The internal short-context protocol uses four prompts of 1,128 to 1,658
+  tokens. The release run above used the public prompts of 578 to 582 tokens.
+  The release's 83.0 tok/s against the best recorded 90.4 tok/s is therefore not
+  a like-for-like comparison and is not a regression claim.
+- Decode-only, round-time and end-to-end figures are kept in separate tables.
+
+### Decode-only, short context (internal prompts, MTP depth 4, 128 output tokens)
+
+| Concurrency | Metric | Runs | Min | Median | Mean | Best | Best run |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: | --- |
+| 1 | Median decode per request | 11 | 80.1 | 87.6 | 87.2 | 90.4 | 2026-10-22 19:57 PDT, binary `2c792073`, package `model-32k-tonight-a` |
+| 4 | Median decode per agent | 11 | 36.1 | 64.3 | 59.3 | 70.7 | same run |
+| 4 | Median decode per agent, runs on the final 131,584-token KV pool | 3 | 67.7 | 70.5 | 69.6 | 70.7 | same run |
+
+### Decode-only, long context (16.6k-18.6k-token prompts, MTP depth 4, 512 output tokens)
+
+| Concurrency | Metric | Runs | Min | Median | Mean | Best | Best run |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: | --- |
+| 4 | Median decode per agent (tok/s) | 8 | 38.4 | 44.0 | 43.1 | 46.0 | 2026-10-22 09:41 PDT, binary `2c792073`, an earlier 32k package (98,304-token KV pool) |
+| 1 | GPU time per 1 x 5 speculative round (ms, lower is better) | 8 | 49.5 | 52.8 | 53.1 | 49.5 | 2026-10-22 19:19 PDT, binary `2c792073`, package `model-32k-tonight-a` |
+
+### End to end, real coding-agent traces (4 agents, MTP depth 3)
+
+Generated tokens over wall time in a 20-minute replay of the fork's real
+coding-agent traces, including prefill, tool turns and every request. The traces
+are not public.
+
+| Scope | Runs | Min | Median | Mean | Best | Best run |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| All runs | 23 | 27.0 | 43.4 | 41.2 | 47.23 | 2026-10-22 19:08 PDT, run `best24`: package `model-32k-tonight-a`, binary `2f9128e4`, `--memory-limit 31G`, 32G prefix cache |
+| Runs not flagged as confounded, test, stall or regression | 16 | 35.1 | 43.7 | 43.4 | 47.23 | same run |
 
 ## Historical measurements (older binary 2c792073, 2026-10-22)
 
-The serving rows for package `model-32k-tonight-a` were measured with the older
-`flare` binary `2c792073`, built before this branch's Helios commits, on the
-fork's historical prompt sets (STATUS.md line 63;
-[BENCHMARK.md](docs/sm70/BENCHMARK.md#what-was-run)). Rows for other packages or
-dates, such as `best24`, `model-32k-replay` and the 2026-10-21 baseline, are
-older context and name their package. None of these are this release's numbers.
-They remain as context until the release-binary section above is complete.
+The decode-only and fixed-prompt rows for package `model-32k-tonight-a` were
+measured with the older `flare` binary `2c792073`, built before this branch's
+Helios commits, on the fork's historical prompt sets (STATUS.md line 63;
+[BENCHMARK.md](docs/sm70/BENCHMARK.md#what-was-run)). The real-trace row used
+another pre-release binary (note d). Rows for other packages or dates, such as
+`model-32k-replay` and the 2026-10-21 baseline, are older context and name
+their package. None of these are this release's numbers;
+the release-binary section above gives those.
 
 Every row names its hardware, memory limit (`flare run --memory-limit`),
 package, concurrency, date and the line of the fork's run log (`STATUS.md`) that
 records it. That log is held with the fork; quoted fragments are listed under
-[Sources](#sources). All runs used Qwen3.8-27B NVFP4 (`qwen3.8-27b`) with MTP
-draft depth 4 (verification width 5), TP1, prepared for a 32,768-token context.
+[Sources](#sources). All runs used Qwen3.8-27B NVFP4 (`qwen3.8-27b`), TP1,
+prepared for a 32,768-token context, with MTP draft depth 4 (verification width
+5) except the real-trace row, which ran depth 3.
 
 `model-32k-tonight-a` is the package of the 2026-10-22 release tree (`0e4c81f`).
 
@@ -83,13 +202,16 @@ draft depth 4 (verification width 5), TP1, prepared for a 32,768-token context.
 
 | Measurement | Value | Hardware | Memory limit | Package | Concurrency | Date | Source |
 | --- | ---: | --- | --- | --- | --- | --- | --- |
-| Generated tokens per second, end to end | 47.23 tok/s | V100 PCIe 32 GB | not stated in the source line | `best24`, a different package, **not** the release tree | not stated in the source line | 2026-10-22 | STATUS.md line 68 (23:35) |
-| Release package | not measured | V100 PCIe 32 GB | 31G | `model-32k-tonight-a` | 4 | n/a | none in the cited sources |
+| Generated tokens per second, end to end | 47.23 tok/s | V100 PCIe 32 GB | 31G (d) | `model-32k-tonight-a`, run `best24`, binary `2f9128e4`, MTP depth 3 (d) | 4 (d) | 2026-10-22 | STATUS.md line 68 (23:35) |
+| Release binary `d4ffb1fa` | not measured | V100 PCIe 32 GB | 31G | release export | 4 | n/a | none |
 
-No real-trace end-to-end measurement of the release package appears in the
-cited sources. The `best24` row is listed only because it is the real-trace
-figure the run log reports for the fleet at that time. It does not describe
-this release.
+(d) The run log names only the run tag `best24`. Its run report, compiled in
+the [measurement history](#measurement-history-2026-10-20-to-2026-10-23), gives
+the package `model-32k-tonight-a`, a binary `2f9128e4` built before the release
+binary, MTP depth 3, `--memory-limit 31G`, a 32G prefix cache and 4 agents.
+Earlier versions of this page called `best24` a different package; it is a run
+of the 2026-10-22 release-tree package. No real-trace end-to-end run of the
+release binary `d4ffb1fa` exists.
 
 ### End-to-end, fixed short prompts (not real traces)
 

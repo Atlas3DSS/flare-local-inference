@@ -1,0 +1,20 @@
+{"stage": "wait", "mode": "wait", "start": 1792817663.3408022, "end": null, "status": "started", "time": 1792817663.3416214, "pid": 3146510}
+{"stage": "wait-qualification", "mode": "wait", "start": 1792817664.105599, "end": null, "status": "started", "time": 1792817664.105602, "pid": 3146510}
+{"stage": "wait-qualification", "mode": "wait", "start": 1792817664.105599, "end": 1792817664.5439937, "status": "complete", "time": 1792817664.543995, "pid": 3146510}
+{"stage": "launch-admission", "mode": "wait", "start": 1792817664.7905915, "end": null, "status": "started", "time": 1792817664.7905962, "pid": 3146510}
+{"stage": "launch-admission", "mode": "wait", "start": 1792817664.7905915, "end": 1792817664.9826248, "status": "complete", "time": 1792817664.982626, "pid": 3146510}
+{"stage": "leased-run", "mode": "wait", "start": 1792817665.2742505, "end": null, "status": "started", "time": 1792817665.2742534, "pid": 3146510}
+{"stage": "run", "mode": "run", "start": 1792817667.545916, "end": null, "status": "started", "time": 1792817667.5476382, "pid": 3146729}
+{"stage": "admission", "mode": "run", "start": 1792817669.1188207, "end": null, "status": "started", "time": 1792817669.1188228, "pid": 3146729}
+{"stage": "admission", "mode": "run", "start": 1792817669.1188207, "end": 1792817670.3240678, "status": "complete", "time": 1792817670.3240714, "pid": 3146729}
+{"stage": "prefill", "mode": "run", "start": 1792817670.5721211, "end": null, "status": "started", "time": 1792817670.572125, "pid": 3146729}
+{"stage": "prefill", "mode": "run", "start": 1792817670.5721211, "end": 1792819679.6427958, "status": "complete", "time": 1792819679.6427977, "pid": 3146729}
+{"stage": "short", "mode": "run", "start": 1792819679.9407878, "end": null, "status": "started", "time": 1792819679.9407914, "pid": 3146729}
+{"stage": "short", "mode": "run", "start": 1792819679.9407878, "end": 1792819930.368764, "status": "complete", "time": 1792819930.368767, "pid": 3146729}
+{"stage": "long", "mode": "run", "start": 1792819930.396746, "end": null, "status": "started", "time": 1792819930.3967485, "pid": 3146729}
+{"stage": "long", "mode": "run", "start": 1792819930.396746, "end": 1792820874.6182833, "status": "complete", "time": 1792820874.61831, "pid": 3146729}
+{"stage": "long-cache-labels", "mode": "run", "start": 1792820874.650732, "end": null, "status": "started", "time": 1792820874.6507354, "pid": 3146729}
+{"stage": "long-cache-labels", "mode": "run", "start": 1792820874.650732, "end": 1792820875.4459348, "status": "complete", "time": 1792820875.445937, "pid": 3146729}
+{"stage": "run", "mode": "run", "start": 1792817667.545916, "end": 1792820875.9909205, "status": "complete", "receipt": "<release-host>/flare/release-preparation/native-chain-run.json", "time": 1792820876.0175314, "pid": 3146729}
+{"stage": "leased-run", "mode": "wait", "start": 1792817665.2742505, "end": 1792820877.7948513, "status": "complete", "time": 1792820877.7948728, "pid": 3146510}
+{"stage": "wait", "mode": "wait", "start": 1792817663.3408022, "end": 1792820878.36333, "status": "complete", "receipt": "<release-host>/flare/<run-inputs>/release-native-wait.json", "time": 1792820878.3923118, "pid": 3146510}

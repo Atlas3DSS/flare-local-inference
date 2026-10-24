@@ -1,0 +1,346 @@
+{
+  "status": "complete",
+  "mode": "run",
+  "start": 1792817667.545916,
+  "gpu_uuid": "GPU-f2b6541e-8121-c7fd-8a73-78d4b1743d3e",
+  "invocation_id": "b05b0ad53ddf47abb713cc57d8f743f4",
+  "script_sha256": "41f2ea4228bfee969d8ccbe70791a8349392a481cdc6860dceffdac45a360c01",
+  "children": [
+    {
+      "command": [
+        "<release-host>/flare/venv/bin/python",
+        "<release-host>/flare/<run-inputs>/release_native_chain.py",
+        "client",
+        "benchmark_prefill.py",
+        "--base-url",
+        "http://127.0.0.1:8384",
+        "--model",
+        "checkpoint",
+        "--tokenizer",
+        "<release-host>/flare/checkpoint/tokenizer.json",
+        "--output",
+        "<release-host>/flare/release-preparation/prefill.json",
+        "--run-id",
+        "sm70-public-release-c6fdc120",
+        "--exclusive-endpoint",
+        "--warmups",
+        "1",
+        "--repetitions",
+        "3",
+        "--output-tokens",
+        "32"
+      ],
+      "log": "<release-host>/flare/release-preparation/native-chain-prefill-client.log",
+      "started": 1792817922.4908826,
+      "pid": 3156501,
+      "returncode": 0,
+      "ended": 1792819675.4627287
+    },
+    {
+      "command": [
+        "<release-host>/flare/venv/bin/python",
+        "<release-host>/flare/<run-inputs>/release_native_chain.py",
+        "client",
+        "native.py",
+        "--mode",
+        "native",
+        "--depths",
+        "4",
+        "--package",
+        "<release-host>/flare/release-preparation/model.safetensors",
+        "--executable",
+        "<release-host>/flare/src-release/flare-release",
+        "--publisher-keys",
+        "<release-host>/flare/release-signing/development-publisher.json",
+        "--trust-store",
+        "<release-host>/flare/release-signing/trust.toml",
+        "--gpu-uuid",
+        "GPU-f2b6541e-8121-c7fd-8a73-78d4b1743d3e",
+        "--tokens",
+        "128",
+        "--repetitions",
+        "3",
+        "--memory-limit",
+        "31G",
+        "--prefix-cache",
+        "8G",
+        "--scheduler-policy",
+        "balanced",
+        "--qualification",
+        "<release-host>/flare/release-preparation/prepare-api.json",
+        "--concurrencies",
+        "1",
+        "4",
+        "--port",
+        "8389",
+        "--output-dir",
+        "<release-host>/flare/src-release",
+        "--ready-timeout",
+        "1800",
+        "--client",
+        "<release-host>/flare/<run-inputs>/release_native_chain.py",
+        "--prompts",
+        "<release-host>/flare/<run-inputs>/release-prompts.jsonl"
+      ],
+      "log": "<release-host>/flare/release-preparation/native-chain-short-driver.log",
+      "started": 1792819680.2013135,
+      "pid": 3310282,
+      "returncode": 0,
+      "ended": 1792819930.3665206
+    },
+    {
+      "command": [
+        "<release-host>/flare/venv/bin/python",
+        "<release-host>/flare/<run-inputs>/release_native_chain.py",
+        "client",
+        "native.py",
+        "--mode",
+        "native",
+        "--depths",
+        "4",
+        "--package",
+        "<release-host>/flare/release-preparation/model.safetensors",
+        "--executable",
+        "<release-host>/flare/src-release/flare-release",
+        "--publisher-keys",
+        "<release-host>/flare/release-signing/development-publisher.json",
+        "--trust-store",
+        "<release-host>/flare/release-signing/trust.toml",
+        "--gpu-uuid",
+        "GPU-f2b6541e-8121-c7fd-8a73-78d4b1743d3e",
+        "--tokens",
+        "512",
+        "--repetitions",
+        "3",
+        "--memory-limit",
+        "31G",
+        "--prefix-cache",
+        "8G",
+        "--scheduler-policy",
+        "balanced",
+        "--qualification",
+        "<release-host>/flare/release-preparation/prepare-api.json",
+        "--concurrencies",
+        "4",
+        "1",
+        "--port",
+        "8399",
+        "--output-dir",
+        "<release-host>/flare/release-preparation",
+        "--ready-timeout",
+        "1800",
+        "--client",
+        "<release-host>/flare/<run-inputs>/release_native_chain.py",
+        "--prompts",
+        "<release-host>/flare/<run-inputs>/release-long-prompts.jsonl",
+        "--prompt-ids",
+        "long-00",
+        "long-01",
+        "long-02",
+        "long-03"
+      ],
+      "log": "<release-host>/flare/release-preparation/native-chain-long-driver.log",
+      "started": 1792819930.497494,
+      "pid": 3322136,
+      "returncode": 0,
+      "ended": 1792820874.613535
+    }
+  ],
+  "work_budget_seconds": 10620,
+  "cleanup_budget_seconds": 180,
+  "cpu_affinity": [
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    59,
+    60,
+    61,
+    62,
+    63,
+    64,
+    65
+  ],
+  "cpu_set": "15-21,59-65",
+  "observed_host_state": {
+    "observed": 1792817669.5049133,
+    "loadavg": "46.43 22.35 9.98 45/1311 3146835",
+    "mem_available_bytes": 166254800896,
+    "systemctl_returncode": 0,
+    "active_flare_user_units": [
+      "flare-release-native-chain.service"
+    ]
+  },
+  "gpu_exclusive": true,
+  "other_endpoint_traffic": "excluded; separate private ports",
+  "performance_context": "Other host jobs may share CPU, memory and PCIe bandwidth; see observed_host_state. These are new public-input measurements.",
+  "source_commit": "c6fdc120d53d22f6c8eba2946f3e1a902976665e",
+  "binary_sha256": "d4ffb1fa3453bf37f2017a7b58d09559010881311b2d9afcdfb33b4011caa667",
+  "source_identity": "archived src-release tree (not git); pinned c6fdc120 tool hashes verified",
+  "package_primary_sha256": "fd7c24dce58c4897a2ab5299bcd875e3e6ab1e2a1f714e5f09724bc6619a7382",
+  "signer_fingerprint": "ef39a0be57c2916c486172fa23d44f0031879e954250765ac1a1a835977f18ab",
+  "qualification_sha256": "cf7a01db61c4a3d6970d794629b40c690c4422a8a4e0df9762623a93642f3a95",
+  "final_tests_sha256": "57b8b88a6ace704a40e391838b1c58720fbb1c7ba5d0eeb3e2cf041c88a1498d",
+  "prepare_tests_sha256": "fb69c67bd311919697f4ecc7b3e29556f3e52e9dddc40db4427708c38b5a5c55",
+  "tools_sha256": {
+    "native.py": "32f1d6de9eda1f0891ff1366d3fd0778b75f45c84dfa6735fa94e9e4ba4aacfa",
+    "benchmark_prefill.py": "c64786794779f4df4d22d3078fdbc5b947180bcadaf6af7ff514249a18a38af1",
+    "benchmark_mtp.py": "a4656afb11c6f7ef4acb065324106a0da8a43adc129d95710bded4d3c5157c2b",
+    "benchmark_long.py": "0f3ee504a3b9b90af4d04d7f43fbad790bcfca48cdb0c0045bda34a2b0d2fcc6"
+  },
+  "prefill": {
+    "command": [
+      "<release-host>/flare/src-release/flare-release",
+      "run",
+      "<release-host>/flare/release-preparation/model.safetensors",
+      "--publisher-keys",
+      "<release-host>/flare/release-signing/development-publisher.json",
+      "--trust-store",
+      "<release-host>/flare/release-signing/trust.toml",
+      "--verify-weights",
+      "--gpus",
+      "0",
+      "--prefix-cache-memory",
+      "8G",
+      "--embedding-table-storage",
+      "ram",
+      "--memory-limit",
+      "31G",
+      "--scheduler-policy",
+      "balanced",
+      "--kv-cache-limit",
+      "concurrency",
+      "--max-concurrency",
+      "4",
+      "--mtp-draft-tokens",
+      "4",
+      "--no-mtp-adaptive-verification",
+      "--host",
+      "127.0.0.1",
+      "--port",
+      "8384",
+      "--dangerously-approve-key",
+      "ef39a0be57c2916c486172fa23d44f0031879e954250765ac1a1a835977f18ab",
+      "--dangerously-accept-publisher",
+      "local-development"
+    ],
+    "actual_port": 8384,
+    "server_pid": 3146940,
+    "models": {
+      "object": "list",
+      "data": [
+        {
+          "id": "checkpoint",
+          "object": "model",
+          "created": 1792817921,
+          "owned_by": "local",
+          "root": "checkpoint",
+          "parent": null,
+          "max_model_len": 32768,
+          "permission": [
+            {
+              "id": "modelperm-1792817921-0",
+              "object": "model_permission",
+              "created": 1792817921,
+              "allow_create_engine": false,
+              "allow_sampling": true,
+              "allow_logprobs": true,
+              "allow_search_indices": false,
+              "allow_view": true,
+              "allow_fine_tuning": false,
+              "organization": "*",
+              "group": null,
+              "is_blocking": false
+            }
+          ],
+          "flare": {
+            "vocab_size": 248320,
+            "max_top_logprobs": 20,
+            "max_concurrency": 4,
+            "prefill_chunk_size": 128,
+            "default_max_tokens": 32768,
+            "sampling_defaults": {
+              "seed": 0,
+              "temperature": 1.0,
+              "top_p": 0.949999988079071,
+              "min_p": 0.0,
+              "repetition_penalty": 1.0,
+              "presence_penalty": 0.0,
+              "frequency_penalty": 0.0,
+              "top_k": 20
+            },
+            "sampling_ranges": {
+              "temperature": {
+                "min": 0.699999988079071,
+                "max": 1.0
+              },
+              "top_k": null,
+              "top_p": {
+                "min": 0.800000011920929,
+                "max": 0.949999988079071
+              },
+              "min_p": null,
+              "repetition_penalty": null,
+              "presence_penalty": {
+                "min": 0.0,
+                "max": 2.0
+              },
+              "frequency_penalty": null
+            },
+            "max_images_per_prompt": 0,
+            "max_image_tokens_per_prompt": 0,
+            "max_image_tokens_per_image": 0,
+            "max_image_pixels": 0,
+            "max_image_bytes": 0,
+            "input_modalities": [
+              "text"
+            ],
+            "output_modalities": [
+              "text"
+            ]
+          }
+        }
+      ]
+    },
+    "status": "measured",
+    "metrics_after_errors": [],
+    "cleanup": {
+      "returncode": 0,
+      "forced_kill": false
+    }
+  },
+  "short": {
+    "report": "<release-host>/flare/src-release/native-depth4.json",
+    "sha256": "4fd139d39be8b008fe4904cfa15cc059ebf952b48c7da4d4f6f17c2d6f083ed8",
+    "actual_port": 8390
+  },
+  "long": {
+    "report": "<release-host>/flare/release-preparation/native-depth4.json",
+    "sha256": "1afde63876bb664c115c83b44b1b8f4ac6a0a4893be66e0c9009448932674942",
+    "actual_port": 8400,
+    "cache_labels": {
+      "path": "<release-host>/flare/release-preparation/native-chain-long-cache-labels.json",
+      "sha256": "fbcf6c188374b89330fa21fca50d6c825de3436758749a517aa7c7970c518b4d"
+    }
+  },
+  "observed_host_state_end": {
+    "observed": 1792820875.4756885,
+    "loadavg": "4.81 5.17 6.74 4/1196 3365202",
+    "mem_available_bytes": 165984305152,
+    "systemctl_returncode": 0,
+    "active_flare_user_units": [
+      "flare-release-native-chain.service"
+    ]
+  },
+  "cleanup": {
+    "forced_kill": false,
+    "remaining_owned_pids": []
+  },
+  "minimum_mem_available": 145365004288,
+  "watchdog_failure": null,
+  "end": 1792820875.9909205,
+  "returncode": 0
+}
