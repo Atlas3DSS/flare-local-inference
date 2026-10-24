@@ -36,31 +36,73 @@ upstream. Read this before you rely on the port.
   package (STATUS.md line 68).
 - **Serving binary.** The published serving numbers were measured with a `flare`
   binary built before this branch's Helios commits
-  ([BENCHMARK.md](BENCHMARK.md#what-was-run)). A binary built from this tree has
-  not been benchmarked in the cited sources.
-- **GPU unit tests on the release tree.** The CUDA test groups last ran on the
-  replay-commit branch before its rebase; on the release tree only the CPU suites
-  were run (STATUS.md lines 46, 60, 61).
-- **Export gate and benchmark harnesses.** The helpers are now public under
-  `tools/`, with newly authored public inputs. Historical private traces remain
-  unpublished. The tools and inputs still require fresh GPU qualification;
-  their publication does not reproduce or validate the historical results
+  ([BENCHMARK.md](BENCHMARK.md#what-was-run)). The fresh server binary has SHA-256
+  `d4ffb1fa3453bf37f2017a7b58d09559010881311b2d9afcdfb33b4011caa667`, built
+  from `71029458`; production source is unchanged through `c6fdc120`. Native
+  serving, TTFT/prefill and long-context benchmarks on that binary are running
+  now. Until their results land in [BENCHMARKS-SM70.md](../../BENCHMARKS-SM70.md),
+  no serving number in these documents was measured on it.
+- **Release-tree component evidence.** The public GPU runner at `b4987de5`
+  (production source unchanged through `c6fdc120`) passed A: 223 tests plus
+  17 subtests; B: 218 tests, with zero failures, exemptions or skips
+  ([tests-A.log](receipts/tests-A.log), [tests-B.log](receipts/tests-B.log),
+  [release-tests-FINAL.json](receipts/release-tests-FINAL.json)).
+  Maximum-context attention, dynamic draft metadata and generic GDN admission
+  tests passed. The separate CPU package suite passed 88 tests with 9
+  intentional GPU skips; the signed shared-memory native fixture separately
+  passed on V100. These component tests are separate from the full-model
+  export gates and the native serving measurements.
+- **Export qualification is complete; serving qualification is not.** The
+  release export passed every gate on 2026-10-23: strict 47/47, long-sequence
+  invariance, commit-capacity growth, consumer identity, components and
+  measurement qualification
+  ([release-tests-PREPAREAPI.json](receipts/release-tests-PREPAREAPI.json)). An
+  independent rebuild on a separate GPU reproduced its coding-token/tau goldens
+  and measurement (`prior_measurement_identity: true`,
+  [release-tests-REBUILD.json](receipts/release-tests-REBUILD.json)). These
+  gates run retained CUDA graphs, not the native server
+  ([validation record](ARCHITECTURE.md#export-qualification-of-the-release-package)).
+  The new public inputs do not reproduce or validate the historical results
   ([VALIDATE.md](VALIDATE.md#gate-2-preparation-with-every-export-gate)).
+- **SM70 and SM120 outputs differ slightly.** A measured comparison of
+  ordinary graphs on 3 public prompts found small, non-zero full-vocabulary KL
+  (mean 0.0015 to 0.0024 per prompt), and one of the three independent greedy
+  continuations parts after 9 tokens. It is not a hardware-only comparison,
+  covers neither MTP nor native serving, and asserts no acceptance threshold
+  ([comparison](ARCHITECTURE.md#sm70-and-sm120-comparison-ordinary-graphs)).
+- **What is public and what is not.** Public in this tree: the export and gate
+  harness (`tools/prepare_replay.py`, `prepare_replay.sh`, `validate_replay.py`,
+  `validate_candidate.py`, `tests_replay.sh`), the measurement helpers
+  (`measure_mtp.py`, `measure_components.py`, `check_consumers.py`,
+  `accuracy.py`), the native benchmark clients (`native.py`,
+  `benchmark_prefill.py`, `benchmark_mtp.py`, `benchmark_long.py`), the
+  architecture comparison (`compare_architectures.py`), public prompt
+  generation (`generate_prompts.py`) and the FP32 reference generators
+  (`reference_model.py`, `john_reference.py`), documented in
+  [EXPORT.md](EXPORT.md), [VALIDATE.md](VALIDATE.md) and
+  [BENCHMARK.md](BENCHMARK.md), plus the run receipts in [receipts/](receipts/).
+  References and tau goldens are generated locally by these tools, not
+  shipped. Not public: signing keys, raw run logs beyond those receipts, the
+  historical lab traces and prompt sets, and the lab's job orchestration.
 - **Adaptive verification.** `--mtp-adaptive-verification` makes sampled outputs
   depend on which requests share a batch. Serve with fixed width when outputs must
   not depend on co-scheduled requests ([SERVE.md](SERVE.md#fixed-width-verification)).
 - **Long prompts are prefill-bound.** With four prompts of 22.4k to 30.2k tokens
-  at 4 agents, TTFT p50 was 90.7 s (STATUS.md line 65).
+  at 4 agents, TTFT p50 was 90.7 s on the older binary `2c792073` (STATUS.md
+  line 65). Release-binary prefill and TTFT are being measured now.
 - **Default KV limit.** All measurements used `--kv-cache-limit concurrency`.
   The KV pool at the default `memory` setting was not measured.
 - **Flags not measured on the release package:** `--mtp-draft-tokens 3` (the
   production setting; the tables use 4), `--scheduler-policy agent`,
   `--mtp-pipeline`, `--prefix-cache-memory 16G` (the benchmarks used 8G) and the
   host prefix store's disk tier.
-- **Review records.** Two changes in the tree record less than two independent
-  reviews: the MTP draft-attention routing `0aea71a` records none, and the GDN
-  capacity-check change `7cb1bc7` was not independently reviewed. The hang fix
-  records one review ([ARCHITECTURE.md](ARCHITECTURE.md)).
+- **Review scope.** Independent Astra (`gpt-6-astra`) review on 2026-10-23
+  cleared the MTP draft-attention routing `0aea71a` and GDN capacity check
+  `7cb1bc7` for GPU testing on unchanged implementation blobs. The public
+  [review record](ARCHITECTURE.md#public-release-review-and-current-validation)
+  closes their missing independent-review records. It does not approve final
+  release, performance claims or cross-architecture exactness. The hang fix
+  retains its separately recorded single independent review.
 - **Upstream test inherited broken.** The Helios integration test
   `helios/tests/deepseek_requests.rs` does not compile with
   `--features runtime-package,server`. The fork does not touch it; the error is

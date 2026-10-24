@@ -1,0 +1,53 @@
+{
+  "format": "flare-ordinary-cross-architecture-v1",
+  "status": "complete",
+  "architecture": "sm70",
+  "compute_capability": [
+    7,
+    0
+  ],
+  "gpu_uuid": "GPU-30ab07ae-8f44-df0e-ce62-9b6b088f1d00",
+  "checkpoint_files_sha256": {
+    "config.json": "71fa01bb64de20971045cd82a82c0ebb25a54e1b0a3f09ef23cf5479e9c54df8",
+    "model-00001-of-00003.safetensors": "7d0fd155118901373eb0fd13ed3aae68f95be747bc205be72ebc41739c25ee80",
+    "model-00002-of-00003.safetensors": "98a7e9486baa860c792c9463a770cb9d017696bdd17606300a5b9334149f4c27",
+    "model-00003-of-00003.safetensors": "0506ad35dc21469708e7813bd76c592cef08bd0317b4a1fe899745ebe2435271",
+    "model.safetensors.index.json": "7aa103a2582b7d26631988de33dea19e8a308ee9c239e8e14feb374af30905e2",
+    "tokenizer.json": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3",
+    "tokenizer_config.json": "e5d078b00e6c1223b32444db8c1001dc71d86ceef8ee706b5bf084c3a43a1f9c"
+  },
+  "source_sha256": "40e9a520957a4b1cdec8bebed711e10edb45626bffb0f8b21b1e957e9e9ba9fc",
+  "reference_sha256": "30dd669b1baf6a1ec517b635c083b275dd72417ca07521bf33cecdd954f02a3f",
+  "reference_report_sha256": "277f47825bac44feba200dfab6ab555d637b66a30d31c2bfdfa2f0f09afcc5a3",
+  "vocabulary": 248320,
+  "mode": "ordinary",
+  "mtp": false,
+  "prepared_mtp": true,
+  "prepared_draft_tokens": 4,
+  "prepared_speculative_widths": [
+    1,
+    2,
+    3,
+    4,
+    5
+  ],
+  "context": 128,
+  "prefill_chunk_size": 128,
+  "max_active": 1,
+  "arithmetic": {
+    "continuation_dtype": "float32",
+    "kv_element_bytes": 2,
+    "note": "native recipe choices preserved; not forced to match architectures",
+    "tf32": false
+  },
+  "runtime": {
+    "torch": "2.14.1+cu126",
+    "cuda": "12.6",
+    "device_name": "Tesla V100-PCIE-32GB"
+  },
+  "candidate_report": "sm70.json",
+  "candidate_report_sha256": "1565f0571852150b9b786ff6517a9658997065dc0cb34cc916f565732f4ed48e",
+  "artifact": "sm70.safetensors",
+  "artifact_sha256": "868461ae3b04e8b09a2242f537c5239bcff3f654724b88ebb3b43a29588a8799",
+  "scope": "ordinary non-MTP retained Flare graphs; host argmax; native serving not tested"
+}

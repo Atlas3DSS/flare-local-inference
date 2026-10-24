@@ -15,8 +15,8 @@ root.
 | Component | Requirement | Recorded in the fork's runs |
 | --- | --- | --- |
 | GPU | Tesla V100 32 GB, compute capability 7.0 | Tesla V100-PCIE-32GB (commit `a6712de`) |
-| NVIDIA driver | A driver that supports CUDA 12.9. R580 is the last driver branch that supports Volta. | 580 server branch. The exact version was not recorded with the runs. |
-| CUDA toolkit (`nvcc`, CUPTI) | 12.x with `sm_70` support. CUDA 13 cannot compile for `sm_70`. | 12.9 (commit `b5bea16`: "CUDA 12.9 and Torch cu126") |
+| NVIDIA driver | A driver that supports CUDA 12.9. R580 is the last driver branch that supports Volta. | Fresh V100 validation: 580.178.04. The historical runs did not record the exact version. |
+| CUDA toolkit (`nvcc`, CUPTI) | 12.x with `sm_70` support. CUDA 13 cannot compile for `sm_70`. | Fresh V100 validation: `nvcc` 12.9.86. Historical runs recorded CUDA 12.9 (`b5bea16`). |
 | Python | 3.12 (`pyproject.toml`: `>=3.12,<3.13`) | 3.12.3 |
 | PyTorch | 2.14.1 built for CUDA 12.6 (`+cu126`) | 2.14.1+cu126 |
 | Triton | the version that PyTorch 2.14.1 installs | 3.8.0 |
@@ -204,7 +204,10 @@ CUDA_VISIBLE_DEVICES=0 FLARE_RUN_CUDA_TESTS=1 .venv/bin/python -m pytest -q -rA 
 Without `FLARE_RUN_CUDA_TESTS=1`, the CUDA tests are skipped, not failed. A
 skipped CUDA test proves nothing. No CUDA test builds the prefill projection
 library, which needs CUTLASS; preparation compiles it first. [VALIDATE.md](VALIDATE.md#gate-1-unit-and-regression-tests)
-lists the full test groups and their known failures.
+lists the full test groups and gate commands. The public runner at `b4987de5`
+passed both GPU groups with no failures, exemptions or skips
+([tests-A.log](receipts/tests-A.log), [tests-B.log](receipts/tests-B.log)); see the
+[current validation record](ARCHITECTURE.md#public-release-review-and-current-validation).
 
 **3. Inspect a compiled library.** After a test run or a preparation, every
 library in the kernel cache should contain `sm_70` code only:

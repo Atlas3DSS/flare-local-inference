@@ -5,7 +5,143 @@ changes in the release tree on top of the SM70 base port. Each change section
 gives the problem, the change, the tests that guard it, and its review history.
 Commit messages hold the detailed validation records; they are cited by hash.
 Performance and timing figures here are historical observations for those
-commits and packages. Fresh validation of the current public checkout is pending.
+commits and packages. Fresh component, export-qualification, rebuild and
+SM70/SM120 comparison results for the release tree are recorded below, with
+receipts under [receipts/](receipts/). Native serving and TTFT measurements on
+the release binary are still running.
+
+## Public release review and current validation
+
+On 2026-10-23, an independent reviewer, Astra (`gpt-6-astra`), reviewed the
+integrated MTP attention routing (`0aea71a`) and generic GDN replay-capacity
+change (`7cb1bc7`) at source commit
+`1dc36936eab1ff8bf1d678f559d4c39152852505`. The verdict was **cleared for GPU
+testing**, with no required production-source changes. This reviewed the current
+Sol-21 r2 attention integration, its callers and replay kernels, including
+packed/ragged rows, inactive writes, page addressing, synchronization, the
+history-capacity bound and numerical contracts. It was not release approval,
+a performance endorsement, or a cross-architecture bit-identity claim.
+
+The 11 principal implementation files reviewed remain byte-identical through
+`c6fdc120`. Principal Git blob identities are:
+
+| File | Reviewed Git blob |
+| --- | --- |
+| `ignition/recipes/qwen38_dense/mtp.py` | `e113c13aaa28180d744ca27d93c919940b83d521` |
+| `ignition/components/gated_delta.py` | `52886580b6053d28ac2e073448fe13f3cb953f08` |
+| `ignition/components/sm70_gdn.py` | `476d5fec66a6fae08ebb9a6a4f7fe64ca77b2b04` |
+| `ignition/components/sm70_decode_attention.cu` | `08c986d7a3758d94428150f300d7df42573651a9` |
+
+The public GPU runner at `b4987de5` subsequently passed group A with **223 tests
+and 17 subtests**, and group B with **218 tests**, with no failures, exemptions
+or skips ([tests-A.log](receipts/tests-A.log), [tests-B.log](receipts/tests-B.log);
+runner exit status in [release-tests-FINAL.json](receipts/release-tests-FINAL.json)).
+Production source is unchanged from `b4987de5` through `c6fdc120`, which changes
+only the comparison tool, its validator and their CPU tests. The groups include
+the added maximum-context attention, changing draft metadata and generic GDN
+admission coverage described below. The CPU package
+suite separately passed **88 tests**, with **9 intentional GPU skips**; those
+skips are not GPU evidence. The signed shared-memory native fixture also passed
+separately on an actual V100.
+
+### Export qualification of the release package
+
+The release export ran `tools/prepare_replay.sh` with every export gate at
+source `b4987de5`, on one Tesla V100 PCIe 32 GB, and completed on 2026-10-23
+with return code 0 and no recorded failure
+([release-tests-PREPAREAPI.json](receipts/release-tests-PREPAREAPI.json)). Its
+preparation report (`prepare-api.json`) has status `exported` and records:
+
+| Gate | Result |
+| --- | --- |
+| Strict checks | 47/47 passed, no failures |
+| Long-sequence invariance | passed: 28 comparisons over 15 runs, no failures |
+| Commit-capacity growth | passed (4 checks) |
+| Consumer identity | passed (M = 1, 16 and 20) |
+| Components | complete |
+| MTP measurement (coding-token/tau goldens) | complete; measurement qualification passed |
+
+The receipt records the command, GPU, CPU set, timing and exit status; the gate
+results above are fields of that run's preparation report. Export qualification
+is not native serving qualification: these gates run retained CUDA graphs, and
+the report records `native_runtime_tested: false`.
+
+### Independent rebuild
+
+A second export ran as a separate job on a different V100 at `c6fdc120`, with
+the same prompts and references, against a copy of the primary export's
+`tau.json`. It completed with return code 0
+([release-tests-REBUILD.json](receipts/release-tests-REBUILD.json)). Its report
+has status `exported`, the same gates passed, the measurement is complete with
+`qualification_passed: true`, and `measurement.prior_measurement_identity` is
+`true`. The preparation harness sets that flag only after the rebuild reproduces
+the primary export's per-run coding-token IDs and tau summary for the same
+prompt file. The `prompt_file_sha256` and `measurement_source_sha256` digests of
+the two reports match. The two packages differ in bytes, as expected, because
+each export is signed independently. The rebuild criterion is golden and
+measurement identity, not package-byte equality.
+
+### Still running
+
+Native serving, TTFT/prefill and long-context benchmarks on the release binary
+(SHA-256 prefix `d4ffb1fa`) are running. Their tables are in
+[BENCHMARKS-SM70.md](../../BENCHMARKS-SM70.md) and stay empty until the
+benchmark chain completes. Until then these results do not establish final
+release qualification.
+
+## SM70 and SM120 comparison (ordinary graphs)
+
+On 2026-10-23, [tools/compare_architectures.py](../../tools/compare_architectures.py)
+captured the ordinary (non-MTP) retained Flare graphs on one Tesla V100 PCIe
+32 GB (SM70) and on one NVIDIA RTX PRO 6000 Blackwell Workstation Edition
+(SM120). Its CPU `compare` step then measured the captures against each other
+([sm70-vs-sm120-comparison.json](receipts/sm70-vs-sm120-comparison.json)). Both
+captures used the same checkpoint files, source and public FP32 short reference;
+their SHA-256 digests match in [sm70.capture.json](receipts/sm70.capture.json)
+and [sm120.capture.json](receipts/sm120.capture.json).
+
+The tool computes full-vocabulary KL in FP64 on the CPU, on the same
+teacher-forced prefixes: 3 public prompts x 47 positions. It reports
+independent greedy continuations of 16 tokens per prompt separately; after their
+first divergence these have different contexts, and no KL is computed on them.
+
+| Prompt | KL(SM70 ‖ SM120) mean | KL p99 | KL max | Top-1 agreement (disagreements of 47) | Independent greedy common prefix (of 16 tokens) | Greedy positional agreement |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `reference-public-00` | 0.0015 | 0.0059 | 0.0059 | 1.000 (0) | 16 | 1.0 |
+| `reference-public-01` | 0.0024 | 0.0152 | 0.0156 | 0.979 (1) | 9 | 0.56 |
+| `reference-public-02` | 0.0018 | 0.0098 | 0.0100 | 0.979 (1) | 16 | 1.0 |
+
+The reverse direction, KL(SM120 ‖ SM70), is recorded in the same receipt.
+
+The measured divergence is small and non-zero. On one of the three prompts the
+independent greedy continuations part after 9 tokens. The tool reports
+measurements only; its `numerical_pass` field is `null`. Its interpretation,
+verbatim:
+
+> No cross-architecture exactness guarantee or acceptance threshold is asserted.
+> Teacher forcing follows the same public FP32 reference continuation after
+> divergence. SM70 prepares an MTP-capable depth-four catalog; SM120 prepares an
+> ordinary catalog. Only ordinary graphs are measured; catalog, state geometry
+> and recipe arithmetic differ.
+
+The receipt also records `hardware_only_comparison: false`,
+`native_runtime_tested: false` and `mtp_tested: false`. Each architecture kept
+its own recipe arithmetic; the captures note "native recipe choices preserved;
+not forced to match architectures":
+
+| | SM70 | SM120 |
+| --- | --- | --- |
+| GPU | Tesla V100-PCIE-32GB | NVIDIA RTX PRO 6000 Blackwell Workstation Edition |
+| Runtime | Torch 2.14.1+cu126, CUDA 12.6 | Torch 2.14.1+cu130, CUDA 13.0 |
+| Prepared catalog | MTP-capable, draft depth 4 (widths 1 to 5); ordinary graphs selected | ordinary |
+| Continuation | FP32 | BF16 |
+| KV cache | BF16 (2 bytes per element) | FP8 (1 byte per element) |
+| TF32 | off | off |
+| Context, prefill chunk, active requests | 128, 128, 1 | 128, 128, 1 |
+
+This compares the two recipes as each architecture prepares them; it is not a
+hardware-only experiment. It does not cover MTP, native serving or longer
+contexts, and it does not show that SM70 and SM120 emit the same tokens.
 
 ## Why Volta needs its own path
 
@@ -223,9 +359,17 @@ without the S1L draft attention (STATUS.md line 64).
 
 - `tests/components/test_sm70_decode_attention_cuda.py` (V100) covers
   four-agent packing, captured-graph replay identity, padded rows, an FP64
-  reference, and the refusal of a 34,816-token page table at preparation.
+  reference, and the refusal of a 34,816-token page table at preparation. Added
+  coverage passed at the admitted 32,768-token endpoint and boundary tails,
+  with changing metadata and poisoned inaccessible cache positions.
 - `tests/recipes/test_qwen38_dense_mtp.py` covers the draft attention's
-  admission and its four-agent packing.
+  admission and its four-agent packing. Captured batch-one/four tests now pass
+  changing page maps, middle-inactive and empty batches, and shrink/grow replay.
+  The batch-four regrowth case measured CPU/GPU differences only in newly
+  computed K/V values (maximum absolute errors 0.015625/0.0078125). The test uses
+  its existing numerical tolerance for that independent CPU reference, while
+  retaining exact writer bytes, untouched cache bytes and captured/eager whole
+  state. No runtime byte-invariance gate was relaxed.
 - The strict gates `forced_prefix_*` and `sm70_decode_attention_nonfinite_probe`
   cover the row contract and non-finite handling.
 
@@ -233,7 +377,8 @@ without the S1L draft attention (STATUS.md line 64).
 
 - Row-contract kernel (`6b808ef`): one review chain is recorded in the commit
   message.
-- Draft-attention routing (`0aea71a`): the commit message records no review.
+- Draft-attention routing (`0aea71a`): independently cleared for GPU testing by
+  Astra (`gpt-6-astra`) on 2026-10-23; see the public review record above.
 - r2 (`ca16f00`): the kernel and the integration were each reviewed by two
   independent reviewers. The integration was cleared with gate-only required
   changes, applied before the package run.
@@ -350,7 +495,10 @@ product equals the value, so `value - sum` is exactly zero (`95b953f`).
   `test_replay_commit_captures_without_allocation_and_skips_zero_counts`; and
   `test_replay_rejections`, including the three alignment rejections;
 - `test_fp_fusion_pattern_cases`, which pins eight caught and six ignored
-  instruction forms.
+  instruction forms;
+- generic `PreparedGDN` admission at widths 1/4/5, including rejection of
+  excess history capacity, multiple replay columns and invalid non-replay
+  capacity. These added constructor checks passed in the public runner.
 
 The export gates add the `forced_prefix_*` checks, which restore the committed
 rows before each accepted count and drive the replay commit, and the
@@ -384,5 +532,8 @@ reviewer, and by the other with required changes: bitwise comparisons,
 signed-zero and cancellation fixtures, and an int64 operand index (`95b953f`).
 The layout fix and the test changes went through rounds 2 and 3, with required
 changes applied in `6a54f65` and `f1d9117`. The capacity-check change `7cb1bc7`
-was not independently reviewed (STATUS.md lines 44, 45, 59). The integrator's
-commits record a self-review against the design principles in their trailers.
+was independently cleared for GPU testing by Astra (`gpt-6-astra`) on
+2026-10-23, including the bound `tokens <= sequences * (drafts + 1)` for one
+committed column and the caller's per-request length checks. See the public
+review record above. The integrator's earlier design-principle trailers remain
+self-reviews, distinct from this independent clearance.

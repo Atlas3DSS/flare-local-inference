@@ -1,0 +1,21 @@
+{
+  "source_commit": "b4987de5255eafb21cdd9c89a98b0448c13f6fbc",
+  "command": [
+    "bash",
+    "tools/tests_replay.sh",
+    "<release-host>/flare/venv/bin/python",
+    "<release-host>/flare/src-release",
+    "<release-host>/flare/release-test-cache-FINAL",
+    "0-21,44-65",
+    "22-42,66-86",
+    "42"
+  ],
+  "uuid": "GPU-8747fa38-17e6-3fb3-f9da-4ebb5ac128a1",
+  "start": 1792812457.9419804,
+  "cpu_set": "0-42,44-86",
+  "invocation": "cf42c89425a0448981527f9338c64e36",
+  "minimum_mem_available": 171411140608,
+  "returncode": 0,
+  "failure": null,
+  "end": 1792812585.9794455
+}
