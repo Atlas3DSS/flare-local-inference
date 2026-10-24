@@ -1,11 +1,9 @@
 # Flare on SM70 (Tesla V100 PCIe 32 GB)
 
-> Figures below are from the 2026-10-22 binary 2c792073; release-binary measurements are in [BENCHMARKS-SM70.md](BENCHMARKS-SM70.md#release-binary-d4ffb1fa-built-from-71029458-production-source-unchanged-through-c6fdc120) (release section) and will replace these once complete.
-
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/sm70/img/hero-dark.svg">
   <source media="(prefers-color-scheme: light)" srcset="docs/sm70/img/hero-light.svg">
-  <img alt="Decode-only, Qwen3.8-27B NVFP4 on one Tesla V100 PCIe 32 GB, memory limit 31G, package model-32k-tonight-a, 2026-10-22: median decode 90.4 tok/s at 1 agent and 70.7 tok/s per agent at 4 agents." src="docs/sm70/img/hero-light.svg">
+  <img alt="Decode-only, Qwen3.8-27B NVFP4 on one Tesla V100 PCIe 32 GB, release binary d4ffb1fa, memory limit 31G, public prompts of 578 to 582 tokens, 2026-10-23: median decode 83.0 tok/s at 1 agent and 64.8 tok/s per agent at 4 agents. Best recorded: 90.4 tok/s at 1 agent and 70.7 per agent at 4 on 2026-10-22, older binary 2c792073, internal prompts." src="docs/sm70/img/hero-light.svg">
 </picture>
 
 This fork adds an SM70 (Volta) execution path to
@@ -25,14 +23,13 @@ OpenAI-compatible API. It also documents how to keep speculative decoding
 bit-exact on a GPU without BF16 tensor cores. For any other model, GPU, more
 than 4 concurrent requests or contexts above 32,768 tokens, use upstream Flare.
 
-**Historical baseline.** The results below refer to release tree `0e4c81f` and
-its named packages, measured on 2026-10-22. Later fixes and public harness
-changes do not inherit those results. For the current public checkout, export
-qualification, an independent rebuild and an SM70/SM120 comparison are complete
-([validation record](docs/sm70/ARCHITECTURE.md#public-release-review-and-current-validation));
-its native serving and TTFT benchmarks are running. On top of the SM70 base
-port, that release carried four changes, explained in
-[ARCHITECTURE.md](docs/sm70/ARCHITECTURE.md):
+**This release.** The current public checkout has passed export
+qualification, an independent rebuild and an SM70/SM120 comparison
+([validation record](docs/sm70/ARCHITECTURE.md#public-release-review-and-current-validation)),
+and its release binary `d4ffb1fa` was benchmarked on 2026-10-23 (below). The
+earlier 2026-10-22 results of release tree `0e4c81f` and its packages are kept,
+labelled historical. On top of the SM70 base port, the release carries four
+changes, explained in [ARCHITECTURE.md](docs/sm70/ARCHITECTURE.md):
 
 - the scheduler hang fix (`e81534a`, `718a187`);
 - prefill projections on the pgemm kernel (`8ad725c`);
@@ -45,95 +42,155 @@ port, that release carried four changes, explained in
 
 ## Measured results
 
-All rows: Qwen3.8-27B NVFP4, one Tesla V100 PCIe 32 GB, TP1. Unless a row names
-another package, the package is `model-32k-tonight-a`, prepared from `0e4c81f`
-for a 32,768-token context, 4 agents and MTP draft depth 4, and the server ran
-at `--memory-limit 31G`, `--max-concurrency 4` and `--mtp-draft-tokens 4` with
-fixed-width verification.
-Each source is a line of the fork's run log (`STATUS.md`). The quoted fragments
-are in [BENCHMARK.md](docs/sm70/BENCHMARK.md#sources), which also explains how
-to reproduce each row. The full historical tables are in
-[BENCHMARKS-SM70.md](BENCHMARKS-SM70.md#historical-measurements-older-binary-2c792073-2026-10-22).
+All rows: Qwen3.8-27B NVFP4 on one Tesla V100 PCIe 32 GB, TP1, release binary
+`d4ffb1fa`, release export package (primary SHA-256 prefix `fd7c24dc`),
+`--memory-limit 31G`, 8G prefix cache, `--max-concurrency 4`,
+`--mtp-draft-tokens 4` with fixed-width verification, measured on 2026-10-23 on
+newly authored public prompts. The full tables, the receipts and the
+[measurement history](BENCHMARKS-SM70.md#measurement-history-2026-10-20-to-2026-10-23) are in
+[BENCHMARKS-SM70.md](BENCHMARKS-SM70.md#release-binary-d4ffb1fa-built-from-71029458-production-source-unchanged-through-c6fdc120).
 
-The two tables measure different things. Do not compare a number from one table
-with a number from the other.
+Prefill, decode-only and end-to-end figures measure different things. Do not
+compare a number from one table with a number from another.
 
-### End to end, real coding-agent traces
+### Prefill and time to first token
 
-End-to-end numbers include prefill, scheduling and every request in the
-workload.
+Uncached token-ID prompts, 32 output tokens, 1 warmup and 3 measured batches per
+row. TTFT runs from the request to the first streamed output and includes
+queueing and transport. The rate is effective prefill over the first-token wall
+window, not pure GPU time.
 
-| Measurement | Value | Hardware | Memory limit | Concurrency | Package | Date | Source |
-| --- | ---: | --- | --- | --- | --- | --- | --- |
-| Generated tokens per second, end to end | 47.23 tok/s | V100 PCIe 32 GB | not stated in the source line | not stated in the source line | `best24`, a different package, **not** the release | 2026-10-22 | STATUS.md line 68 |
-| Release package | not measured | V100 PCIe 32 GB | 31G | 4 | `model-32k-tonight-a` | n/a | none |
+| Prompt tokens | TTFT p50, 1 request | Effective prefill, 1 request | TTFT p50, 4 concurrent requests | Effective prefill, 4 concurrent (aggregate) |
+| ---: | ---: | ---: | ---: | ---: |
+| 2,048 | 2.54 s | 807 tok/s | 9.89 s | 796 tok/s |
+| 8,192 | 10.43 s | 785 tok/s | 41.44 s | 782 tok/s |
+| 22,528 | 30.39 s | 741 tok/s | 121.11 s | 741 tok/s |
+| 30,720 | 42.75 s | 719 tok/s | 170.49 s | 719 tok/s |
+
+Concurrent prefills do not overlap. Four requests prefill no faster in total
+than one, and the server interleaves them, so all four first tokens arrive
+together at about four times the single-request TTFT.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/sm70/img/prefill-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="docs/sm70/img/prefill-light.svg">
+  <img alt="Time to first token against prompt length, release binary d4ffb1fa, one Tesla V100 PCIe 32 GB, 2026-10-23: 2.54, 10.43, 30.39 and 42.75 s for one request at 2,048, 8,192, 22,528 and 30,720 tokens (807, 785, 741 and 719 tok/s); 9.89, 41.44, 121.11 and 170.49 s for four concurrent requests (796, 782, 741 and 719 tok/s aggregate)." src="docs/sm70/img/prefill-light.svg">
+</picture>
+
+### Decode-only
+
+Per-request decode rates after the first token. They exclude prefill and
+queueing.
+
+| Workload | Concurrency | Value |
+| --- | ---: | ---: |
+| Public short prompts (578-582 tokens), median decode | 1 | 83.0 tok/s |
+| Public short prompts, median decode per agent | 4 | 64.8 tok/s |
+| Four 28.7k-token prompts, cold requests, median decode | 1 | 72.4 tok/s (70.0-81.2) |
+| Four 28.7k-token prompts, first batch, decode per agent | 4 | 40.2 / 41.1 / 42.7 / 46.1 tok/s (median 41.9) |
+
+Of the 3,072 tokens generated on the short prompts, 2,234 were accepted MTP
+drafts. With four agents at 28.7k tokens, the four decode rates sum to
+170 tok/s.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/sm70/img/long-decode-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="docs/sm70/img/long-decode-light.svg">
+  <img alt="Decode-only at 28.7k tokens of context, release binary d4ffb1fa, 2026-10-23: one agent, cold requests, median 72.4 tok/s (70.0 to 81.2); four agents in the first batch, per agent 40.2, 41.1, 42.7 and 46.1 tok/s (median 41.9)." src="docs/sm70/img/long-decode-light.svg">
+</picture>
+
+The best recorded short-prompt decode is 90.4 tok/s at 1 agent and 70.7 per
+agent at 4, on 2026-10-22 with the older binary `2c792073` and the internal
+1.1k-1.7k-token prompts. It is the best of 11 runs (median 87.6), measured on
+different prompts, so 83.0 against 90.4 is not a like-for-like comparison
+([measurement history](BENCHMARKS-SM70.md#measurement-history-2026-10-20-to-2026-10-23)).
+
+### End to end
+
+End-to-end figures include prefill, scheduling and every request.
+
+| Workload | Concurrency | Value |
+| --- | ---: | ---: |
+| Public short prompts, output over batch wall time | 4 | 220.6 tok/s |
+| Four 28.7k-token prompts, first token in the first batch (a) | 4 | 157.96-159.80 s |
+| One cold 28.7k-token prompt, first token | 1 | 39.8 s |
+| Real coding-agent traces, release binary | 4 | not measured |
+
+(a) No request in that batch reports prefix-cache credit, but the server's
+reused-token counter moved during it, so the batch is not labelled cold. None of
+the four emits a token before all four have finished prefill.
+
+On real coding-agent traces the best recorded run reached 47.23 generated tok/s
+with 4 agents (the best of 23 runs, median 43.4). That run, `best24`, used the
+2026-10-22 release-tree package `model-32k-tonight-a` with a pre-release binary
+`2f9128e4` and MTP depth 3. On real traces one card is prefill-bound: an earlier
+analysis put prefill at about 85 % of busy time (STATUS.md line 37).
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/sm70/img/e2e-dark.svg">
   <source media="(prefers-color-scheme: light)" srcset="docs/sm70/img/e2e-light.svg">
-  <img alt="End to end on real coding-agent traces, Tesla V100 PCIe 32 GB, 2026-10-22: 47.23 generated tok/s on package best24, a different package from the release. The release package was not measured on real traces. Prefill was about 85 % of busy time in an earlier real-trace analysis." src="docs/sm70/img/e2e-light.svg">
-</picture>
-
-**Caveat.** The release package has no real-trace end-to-end measurement. The
-47.23 tok/s row describes a different package and is listed only because it is
-the real-trace figure the run log reports for the same day. On real coding-agent
-traces one card is prefill-bound: an earlier analysis put prefill at about 85 %
-of busy time (STATUS.md line 37). End-to-end runs on fixed prompts, which are
-not real traces, are in [BENCHMARKS-SM70.md](BENCHMARKS-SM70.md): 238.0 tok/s
-aggregate output on short prompts at 4 agents (line 66), and a TTFT p50 of
-90.7 s for four 22.4k to 30.2k-token prompts at 4 agents (line 65).
-
-### Decode-only
-
-Decode-only numbers are per-request decode rates or GPU step times. They exclude
-prefill and queueing.
-
-| Workload | Value | Hardware | Memory limit | Concurrency | Package | Date | Source |
-| --- | ---: | --- | --- | --- | --- | --- | --- |
-| Short prompts, median decode | 90.4 tok/s | V100 PCIe 32 GB | 31G (a) | 1 | `model-32k-tonight-a` | 2026-10-22 | STATUS.md line 66 |
-| Short prompts, median decode per agent | 70.7 tok/s | V100 PCIe 32 GB | 31G (a) | 4 | `model-32k-tonight-a` | 2026-10-22 | STATUS.md line 66 |
-| 4 prompts of 16.6k-18.6k tokens, median decode | 82.6 tok/s | V100 PCIe 32 GB | 31G (a) | 1 | `model-32k-tonight-a` | 2026-10-22 | STATUS.md line 64 |
-| 4 prompts of 16.6k-18.6k tokens, median decode per agent | 42.6 tok/s | V100 PCIe 32 GB | 31G (a) | 4 | `model-32k-tonight-a` | 2026-10-22 | STATUS.md line 64 |
-| 4 prompts of 16.6k-18.6k tokens, GPU step per 1 x 5 round | 49.5-49.6 ms | V100 PCIe 32 GB | 31G (a) | 1 | `model-32k-tonight-a` | 2026-10-22 | STATUS.md line 64 |
-| 4 prompts of 22.4k-30.2k tokens, median decode | 82.2 tok/s | V100 PCIe 32 GB | 31G | 1 | `model-32k-tonight-a` | 2026-10-22 | STATUS.md line 65 |
-| 4 prompts of 22.4k-30.2k tokens, median decode per agent | 37.2 tok/s | V100 PCIe 32 GB | 31G | 4 | `model-32k-tonight-a` | 2026-10-22 | STATUS.md line 65 |
-
-(a) Lines 64 and 66 do not restate the memory limit. The script that ran every
-leg sets `--memory-limit 31G`, and both lines report the same 131,584-token KV
-pool as the 31G run on line 65.
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/sm70/img/latency-dark.svg">
-  <source media="(prefers-color-scheme: light)" srcset="docs/sm70/img/latency-light.svg">
-  <img alt="Decode-only GPU step per 1 x 5 speculative round, 1 agent, four 16.6k to 18.6k-token prompts: replay-commit with pre-S1L draft 55.1 ms, S1L draft without replay-commit 50.4 ms, release (replay-commit + S1L) 49.5 ms." src="docs/sm70/img/latency-light.svg">
+  <img alt="End to end on real coding-agent traces, 4 agents, MTP depth 3: best 47.23 generated tok/s (run best24, package model-32k-tonight-a, pre-release binary 2f9128e4, 2026-10-22), median 43.4 over 23 runs. The release binary d4ffb1fa was not measured on real traces." src="docs/sm70/img/e2e-light.svg">
 </picture>
 
 ### Capacity
 
-| Measurement | Value | Hardware | Memory limit | Concurrency | Package | Date | Source |
-| --- | ---: | --- | --- | --- | --- | --- | --- |
-| KV pool, BF16 (b), at the 31G run's cache cap (`--kv-cache-limit concurrency`) | 131,584 tokens | V100 PCIe 32 GB | 31G | 4 | `model-32k-tonight-a` | 2026-10-22 | STATUS.md lines 65, 66 |
-| KV pool before replay-commit | 98,304 tokens | V100 PCIe 32 GB | 31G | 4 | baseline package of 2026-10-21 | 2026-10-21 | as cited on STATUS.md line 49 |
-| Four prompts of 22.4k-30.2k tokens (110,022 in total) | all resident, no eviction or restore | V100 PCIe 32 GB | 31G | 4 | `model-32k-tonight-a` | 2026-10-22 | STATUS.md line 65 |
+| Measurement | Value | Source |
+| --- | ---: | --- |
+| KV pool, BF16 (b), at the runs' cache cap (`--kv-cache-limit concurrency`) | 131,584 tokens | release run, `short/native-depth4.json` |
+| Four 28.7k-token contexts resident simultaneously (decoding together) | 114,664 prompt tokens | release run, `long/native-depth4-requests-summary.json` |
+| KV pool before replay-commit, 2026-10-21 | 98,304 tokens | as cited on STATUS.md line 49 |
 
 (b) On SM70, BF16 is a 2-byte storage format. Volta has no native BF16
 arithmetic or BF16 tensor-core instructions, so the kernels convert BF16 KV
 values to FP16 or FP32 in registers before computing
 ([ARCHITECTURE.md](docs/sm70/ARCHITECTURE.md#why-volta-needs-its-own-path)).
 
+The server exports no KV-page eviction counter, so these figures make no
+eviction claim; the 52 evictions it counted in the long-context leg are
+prefix-cache snapshot slots.
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/sm70/img/kv-pool-dark.svg">
   <source media="(prefers-color-scheme: light)" srcset="docs/sm70/img/kv-pool-light.svg">
-  <img alt="BF16 KV pool at memory limit 31G with 4 agents: 98,304 tokens before replay-commit, limited by memory, and 131,584 tokens with it, the runs' --kv-cache-limit concurrency cap: +33,280 tokens (+33.9 %). Four prompts of 22.4k to 30.2k tokens (110,022 prompt tokens) stay resident with zero evictions." src="docs/sm70/img/kv-pool-light.svg">
+  <img alt="BF16 KV pool at memory limit 31G with 4 agents: 98,304 tokens before replay-commit (2026-10-21, limited by memory) and 131,584 tokens with it, the --kv-cache-limit concurrency cap of the runs: +33,280 tokens (+33.9 %). In the release run, four 28.7k-token prompts (114,664 prompt tokens) decoded together inside the cap." src="docs/sm70/img/kv-pool-light.svg">
 </picture>
 
 The graphics illustrate the cited numbers. The tables and their sources are the
 authoritative text.
 
-These runs used a `flare` binary (`2c792073`) built before this branch's Helios
-commits, and a benchmark harness that is not in this repository. See
-[BENCHMARK.md](docs/sm70/BENCHMARK.md#what-was-run) before comparing your own
-numbers.
+### Historical measurements (older binary 2c792073, 2026-10-22)
+
+These figures were measured with an older `flare` binary (`2c792073`), built
+before this branch's Helios commits, on the fork's internal prompt sets and a
+benchmark harness that is not in this repository
+([BENCHMARK.md](docs/sm70/BENCHMARK.md#what-was-run)). They are not this
+release's numbers. Package `model-32k-tonight-a`, prepared from `0e4c81f`; each
+source is a line of the fork's run log (`STATUS.md`), quoted in
+[BENCHMARK.md](docs/sm70/BENCHMARK.md#sources). The full tables are in
+[BENCHMARKS-SM70.md](BENCHMARKS-SM70.md#historical-measurements-older-binary-2c792073-2026-10-22).
+
+| Workload | Value | Memory limit | Concurrency | Date | Source |
+| --- | ---: | --- | --- | --- | --- |
+| Short prompts, median decode | 90.4 tok/s | 31G (c) | 1 | 2026-10-22 | STATUS.md line 66 |
+| Short prompts, median decode per agent | 70.7 tok/s | 31G (c) | 4 | 2026-10-22 | STATUS.md line 66 |
+| 4 prompts of 16.6k-18.6k tokens, median decode | 82.6 tok/s | 31G (c) | 1 | 2026-10-22 | STATUS.md line 64 |
+| 4 prompts of 16.6k-18.6k tokens, median decode per agent | 42.6 tok/s | 31G (c) | 4 | 2026-10-22 | STATUS.md line 64 |
+| 4 prompts of 16.6k-18.6k tokens, GPU step per 1 x 5 round | 49.5-49.6 ms | 31G (c) | 1 | 2026-10-22 | STATUS.md line 64 |
+| 4 prompts of 22.4k-30.2k tokens, median decode | 82.2 tok/s | 31G | 1 | 2026-10-22 | STATUS.md line 65 |
+| 4 prompts of 22.4k-30.2k tokens, median decode per agent | 37.2 tok/s | 31G | 4 | 2026-10-22 | STATUS.md line 65 |
+| 4 prompts of 22.4k-30.2k tokens, TTFT p50 (end to end) | 90.7 s | 31G | 4 | 2026-10-22 | STATUS.md line 65 |
+
+All rows except the TTFT row are decode-only.
+
+(c) Lines 64 and 66 do not restate the memory limit. The script that ran every
+leg sets `--memory-limit 31G`, and both lines report the same 131,584-token KV
+pool as the 31G run on line 65.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/sm70/img/latency-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="docs/sm70/img/latency-light.svg">
+  <img alt="Historical, older binary 2c792073, decode-only GPU step per 1 x 5 speculative round, 1 agent, four 16.6k to 18.6k-token prompts: replay-commit with pre-S1L draft 55.1 ms, S1L draft without replay-commit 50.4 ms, replay-commit with S1L (package model-32k-tonight-a) 49.5 ms." src="docs/sm70/img/latency-light.svg">
+</picture>
 
 ## Trade-offs and benefits
 
@@ -146,20 +203,20 @@ accumulate in FP32. [WHY-NOT-LOW-BIT.md](docs/sm70/WHY-NOT-LOW-BIT.md) has the
 detail and the sources.
 
 - **Given up:** extra decode work per weight compared with native FP4/FP8 tensor
-  cores; prefill-bound long prompts (TTFT p50 90.7 s for four 22.4k-30.2k
-  prompts at 4 agents on the older binary, STATUS.md line 65; release-binary
-  prefill and TTFT are being measured now); one recipe, TP1, at most 4 requests of
+  cores; prefill at 720-810 tok/s, one request at a time, so long prompts are
+  prefill-bound (a 30,720-token prompt waits 42.7 s for its first token, and
+  four arriving together wait 170-171 s each); one recipe, TP1, at most 4 requests of
   32,768 tokens; subsequent upstream work to assess and port (136 commits as of
   `e19549a`, beyond 680 whose content the history audit identifies in the
   squashed base; see [history accounting](docs/sm70/LIMITATIONS.md#upstream-divergence));
-  old cards, with power not measured; no real-trace end-to-end number for the release.
+  old cards, with power not measured; no real-trace end-to-end run of the release binary.
 - **Gained:** no requantization, calibration or retraining; speculative
   decoding that emits exactly the ordinary greedy tokens (strict 47/47,
   invariance 28/28, line 62); an unquantized BF16 KV pool that reached the
   runs' 131,584-token `--kv-cache-limit` cap at 31G and holds four
-  22-30k-token agents with zero evictions (lines 49, 65);
-  70.7 tok/s per agent at 4 agents, decode-only (line 66); prefix caching; 32 GB
-  cards at used-market prices.
+  28.7k-token contexts at once; 64.8 tok/s per agent at 4 agents and 83.0 tok/s
+  at 1, decode-only, on the release binary; prefix caching; 32 GB cards at
+  used-market prices.
 
 **What makes it useful** is the combination: upstream's NVFP4 package on
 hardware without FP4 instructions, with its outputs measured against an
@@ -194,10 +251,11 @@ on a 27B model. Strata's V100 support is a community-tested build with the
 compile-time experimental flag `STRATA_EXPERIMENTAL_SM60`, outside its
 supported cards; only that build contains its sm_70 tensor-core prompt
 attention and chunked GDN path
-([sources](docs/sm70/WHY-NOT-LOW-BIT.md#strata-and-project-maya)). Prefill and
-TTFT are not yet compared with either engine:
-release-binary prefill is being measured now at fixed prompt lengths of 2,048
-to 30,720 tokens ([BENCHMARKS-SM70.md](BENCHMARKS-SM70.md#release-binary-d4ffb1fa-built-from-71029458-production-source-unchanged-through-c6fdc120)).
+([sources](docs/sm70/WHY-NOT-LOW-BIT.md#strata-and-project-maya)). This port's
+prefill is now measured: 719-807 tok/s effective at 2,048 to 30,720 tokens, one
+request at a time ([BENCHMARKS-SM70.md](BENCHMARKS-SM70.md#release-binary-d4ffb1fa-built-from-71029458-production-source-unchanged-through-c6fdc120)). It
+has not been compared with either engine on the same model, so these figures do
+not rank prefill across engines.
 The KL figures are not on one scale: ours compares the port with
 the same 4-bit checkpoint, theirs compare a quantization with a higher-precision
 release. Details:
@@ -258,7 +316,7 @@ explains what that means.
 | [ARCHITECTURE.md](docs/sm70/ARCHITECTURE.md) | Why Volta needs its own path, and the four changes: hang fix, pgemm, S1L attention, GDN replay-commit |
 | [LIMITATIONS.md](docs/sm70/LIMITATIONS.md) | What does not work or was not tested, upstream divergence, reporting issues |
 | [WHY-NOT-LOW-BIT.md](docs/sm70/WHY-NOT-LOW-BIT.md) | This port against the usual low-bit routes on V100-class cards: trade-offs, benefits, sources |
-| [BENCHMARKS-SM70.md](BENCHMARKS-SM70.md) | Release-binary tables (filled when the benchmark chain completes) and the historical measurements, each with its source |
+| [BENCHMARKS-SM70.md](BENCHMARKS-SM70.md) | Release-binary tables with receipts, the measurement history, and the historical measurements, each with its source |
 
 For everything that is not SM70-specific, the upstream documents apply:
 [model preparation and serving](docs/model-preparation.md),
