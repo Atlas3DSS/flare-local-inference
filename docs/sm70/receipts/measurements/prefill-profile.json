@@ -1,0 +1,247 @@
+{
+ "format": "measurement-job3-summary-v1",
+ "binary_sha256": "d4ffb1fa3453bf37f2017a7b58d09559010881311b2d9afcdfb33b4011caa667",
+ "package": "release-preparation/model.safetensors (sha256 fd7c24dc...)",
+ "card": "<card> GPU-30ab07ae-8f44-df0e-ce62-9b6b088f1d00",
+ "server_flags": "run PKG --verify-weights --gpus 0 --prefix-cache-memory 8G --embedding-table-storage ram --memory-limit 31G --scheduler-policy balanced --kv-cache-limit concurrency --max-concurrency 4 --mtp-draft-tokens 4 --no-mtp-adaptive-verification --host 127.0.0.1 --port 8484 (chain native-mode flags; key already trusted)",
+ "request": "POST /v1/completions {model, prompt: token ids (tools/benchmark_prefill.exact_prompt, run id meas-20261023-job3), max_tokens: 1, stream: false}",
+ "unprofiled_ttft_s": {
+  "30720-warmup": 42.784033202013234,
+  "30720-measured": 42.797648649982875,
+  "8192-warmup": 10.45719769099378,
+  "8192-measured": 10.435530120012118
+ },
+ "unprofiled_prefill_rate": {
+  "30720": {
+   "effective_tok_s": 717.7964437074814,
+   "first_quarter_tok_s": 779.471227375419,
+   "last_quarter_tok_s": 664.3990739799123,
+   "nvidia_smi_util_mean": 99.17224880382776,
+   "nvidia_smi_zero_util_fraction": 0.004784688995215311
+  }
+ },
+ "profile_8192_complete": {
+  "source": "attempt 5, nsys node trace, first request on a fresh server",
+  "window_s": 10.697371704,
+  "client_latency_s": 10.697364704974461,
+  "seconds": {
+   "gemm_pgemm_projections": 7.0088943850000005,
+   "attention_qsa_core": 0.721563072,
+   "gdn_recurrent_core": 1.203576628,
+   "dequant_quantize_convert": 0.685532519,
+   "memcpy_memset": 0.14236906,
+   "other_norm_residual_per_chunk_tail_head": 0.7836372899999999,
+   "gpu_idle": 0.151822334
+  },
+  "share_of_window": {
+   "gemm_pgemm_projections": 0.6551977980141803,
+   "attention_qsa_core": 0.06745236979380557,
+   "gdn_recurrent_core": 0.1125114337711528,
+   "dequant_quantize_convert": 0.06408420105133518,
+   "memcpy_memset": 0.013308788732354214,
+   "other_norm_residual_per_chunk_tail_head": 0.07325512393918027,
+   "gpu_idle": 0.014192489351681596
+  },
+  "share_sum": 1.0,
+  "detail_families_s": {
+   "gemm_mlp": 4.719677917,
+   "gemm_gdn_projection": 1.73585119,
+   "gdn_core": 1.203576628,
+   "attention_core": 0.721563072,
+   "quantize_convert": 0.685532519,
+   "gemm_qsa_projection": 0.553365278,
+   "per_chunk_tail": 0.453970269,
+   "norm_residual_other": 0.320637534,
+   "memcpy": 0.142192037,
+   "head_sampling_tail": 0.009029487,
+   "memset": 0.000177023
+  },
+  "layer_role_s": {
+   "gdn:gemm_mlp": 3.539713143,
+   "gdn:gemm_gdn_projection": 1.73585119,
+   "gdn:gdn_core": 1.203576628,
+   "qsa:gemm_mlp": 1.179964774,
+   "qsa:attention_core": 0.721563072,
+   "qsa:gemm_qsa_projection": 0.553365278,
+   "gdn:quantize_convert": 0.512163585,
+   "chunk:per_chunk_tail": 0.453970269,
+   "gdn:norm_residual_other": 0.240512212,
+   "qsa:quantize_convert": 0.173368934,
+   "qsa:norm_residual_other": 0.080125322,
+   "tail:head_sampling_tail": 0.009029487
+  },
+  "layer_counts": {
+   "gdn": 3072,
+   "qsa": 1024
+  },
+  "chunks": 64,
+  "idle_fraction": 0.014192489351681594,
+  "busy_fraction_per_second": [
+   0.9676,
+   0.9872,
+   0.9878,
+   0.9878,
+   0.9878,
+   0.988,
+   0.988,
+   0.9878,
+   0.9873,
+   0.9885,
+   0.9863
+  ],
+  "largest_gaps_ms": [
+   0.465916,
+   0.396732,
+   0.378844,
+   0.376284,
+   0.376029
+  ]
+ },
+ "profile_30720_partial": {
+  "source": "attempt 4, nsys node trace, positions 0-16,128 (126 of 240 chunks) before the profiler-associated fault",
+  "window_s": 21.829874464,
+  "client_latency_s": 21.829868657980114,
+  "seconds": {
+   "gemm_pgemm_projections": 13.785686105,
+   "attention_qsa_core": 2.092740576,
+   "gdn_recurrent_core": 2.368153148,
+   "dequant_quantize_convert": 1.349212008,
+   "memcpy_memset": 0.27980438900000004,
+   "other_norm_residual_per_chunk_tail_head": 1.532867375,
+   "gpu_idle": 0.421510222
+  },
+  "share_of_window": {
+   "gemm_pgemm_projections": 0.6315055145064713,
+   "attention_qsa_core": 0.09586590062398996,
+   "gdn_recurrent_core": 0.10848221559429304,
+   "dequant_quantize_convert": 0.06180576119322204,
+   "memcpy_memset": 0.01281749876580509,
+   "other_norm_residual_per_chunk_tail_head": 0.07021879019633742,
+   "gpu_idle": 0.019308870634832068
+  },
+  "share_sum": 1.0,
+  "detail_families_s": {
+   "gemm_mlp": 9.282586482,
+   "gemm_gdn_projection": 3.414660606,
+   "gdn_core": 2.368153148,
+   "attention_core": 2.092740576,
+   "quantize_convert": 1.349212008,
+   "gemm_qsa_projection": 1.088439017,
+   "per_chunk_tail": 0.899526568,
+   "norm_residual_other": 0.630627901,
+   "memcpy": 0.279454662,
+   "head_sampling_tail": 0.002712906,
+   "memset": 0.000349727
+  },
+  "layer_role_s": {
+   "gdn:gemm_mlp": 6.961734463,
+   "gdn:gemm_gdn_projection": 3.414660606,
+   "gdn:gdn_core": 2.368153148,
+   "qsa:gemm_mlp": 2.320852019,
+   "qsa:attention_core": 2.092740576,
+   "qsa:gemm_qsa_projection": 1.088439017,
+   "gdn:quantize_convert": 1.007887204,
+   "chunk:per_chunk_tail": 0.899526568,
+   "gdn:norm_residual_other": 0.472807531,
+   "qsa:quantize_convert": 0.341324804,
+   "qsa:norm_residual_other": 0.15782037,
+   "tail:head_sampling_tail": 0.002712906
+  },
+  "layer_counts": {
+   "gdn": 6048,
+   "qsa": 2016
+  },
+  "chunks": 126,
+  "idle_fraction": 0.019308870634832068,
+  "busy_fraction_per_second": [
+   0.9494,
+   0.9863,
+   0.9873,
+   0.9866,
+   0.9872,
+   0.9869,
+   0.987,
+   0.9873,
+   0.9878,
+   0.9865,
+   0.9879,
+   0.9881,
+   0.9873,
+   0.9886,
+   0.9882,
+   0.9884,
+   0.9888,
+   0.9883,
+   0.9884,
+   0.9892,
+   0.9887,
+   0.8483
+  ],
+  "largest_gaps_ms": [
+   0.655226,
+   0.532923,
+   0.531547,
+   0.521691,
+   0.509211
+  ]
+ },
+ "extrapolation_30720": {
+  "label": "EXTRAPOLATED beyond traced chunks; traced under nsys (+~2.5 % overhead at 8192)",
+  "per_chunk_model": {
+   "attention_kernel": {
+    "intercept_ms": 1.820784425032258,
+    "slope_ms_per_chunk": 0.16239848963440862
+   },
+   "gemm_mixer_projection": {
+    "intercept_ms": 35.74892791458065,
+    "slope_ms_per_chunk": -0.0005742936282642166
+   },
+   "gemm_mlp": {
+    "intercept_ms": 73.68908958451613,
+    "slope_ms_per_chunk": -0.0012795555637480907
+   },
+   "other_non_gemm": {
+    "intercept_ms": 34.98914167651613,
+    "slope_ms_per_chunk": 0.009816900245775733
+   },
+   "quantize_convert": {
+    "intercept_ms": 10.729507769677419,
+    "slope_ms_per_chunk": -2.3346058371736426e-05
+   },
+   "wall_ms": {
+    "intercept_ms": 161.38899402864516,
+    "slope_ms_per_chunk": 0.1689462178310292
+   }
+  },
+  "predicted_total_s": 43.61670139126875,
+  "unprofiled_s": 42.797648649982875,
+  "error": 0.019137797685672635,
+  "predicted_share": {
+   "attention_kernel": 0.11690511018268365,
+   "gemm_mixer_projection": 0.19650115459330483,
+   "gemm_mlp": 0.40498383910304914,
+   "other_non_gemm": 0.19915544780001382,
+   "quantize_convert": 0.059074964776389016
+  },
+  "check_8192": {
+   "predicted_s": 10.707456489980645,
+   "unprofiled_s": 10.435530120012118
+  }
+ },
+ "memory": {
+  "device_memory_used_peak_mib": 31282,
+  "server_allocation": "model 20.7 GiB GPU, cache 9.4 GiB = 131,584 KV tokens + 32 shared snapshot slots, host prefix cache 8 GiB",
+  "kv_tokens_in_pages_for_30720": 30976,
+  "allocator_reserved_allocated": "not exposed by the release server metrics (no per-allocator counters); nvidia-smi process total only"
+ },
+ "prefill_chunk": {
+  "tokens": 128,
+  "evidence": "MLP GEMM grid 2 x 64-row M tiles per launch; 240 chunks for 30,720 tokens (126 traced = 16,128 tokens); server page_tokens 128; lm_head + sampling run once per chunk"
+ },
+ "profiler_findings": [
+  "nsys 2025.1.3 reports driver CUDA 13.0 unsupported and falls back to 12.9 trace libraries",
+  "node-level CUDA graph trace (--cuda-graph-trace=node, with or without --cuda-event-trace=false) faults the server with CUDA 719 after ~127 cumulative 128-token chunks since start (attempts 2, 4, 5: 3/3); plain (attempt 3) and graph-level (attempt 6) runs: 0 faults across 30,720 + 8,192 x2",
+  "graph-level trace records only 70 of the prefill graph executions (prefill chunks use device graph launch, which graph-level trace does not span), so it cannot give an idle fraction"
+ ],
+ "reconciliation": "categorised kernel time - overlap + idle == request window exactly (by construction); window == client latency to < 1e-6; profiled window is +2.5 % over the unprofiled TTFT at 8,192 and the 30,720 extrapolation is +1.9 % over unprofiled"
+}

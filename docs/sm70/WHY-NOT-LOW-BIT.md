@@ -368,9 +368,13 @@ Volta kernels for the parts that need them
 - **Prefill and time to first token.** Long prompts are prefill-bound. On the
   release binary, effective prefill is 719-807 tok/s, one request at a time: a
   30,720-token prompt waits 42.7 s for its first token alone and 170.2-171.0 s
-  when four arrive together ([BENCHMARKS-SM70.md](../../BENCHMARKS-SM70.md)). On
-  real coding-agent traces prefill took about 85 % of busy time (STATUS.md
-  line 37).
+  when four arrive together ([BENCHMARKS-SM70.md](../../BENCHMARKS-SM70.md)).
+  The measured reason is the projection arithmetic. Prefill runs in 128-token
+  chunks, and in a profile of one release-binary prefill the projection GEMMs,
+  where every packed weight is decoded to FP16, took 63-66 % of the time. The
+  GDN recurrence took about 11 %, attention 7-10 %, and the GPU was idle only
+  1.4-1.9 % ([prefill-profile.json](receipts/measurements/prefill-profile.json)). On real coding-agent traces
+  prefill took about 85 % of busy time (STATUS.md line 37).
 - **Scope.** One recipe, one card per process (TP1), at most 4 concurrent
   requests and 32,768 tokens each. NVFP4 is weight-only; quantized activations
   are not used. Other recipes, tensor parallelism, Windows and the shared changes

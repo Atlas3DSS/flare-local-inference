@@ -94,7 +94,20 @@ upstream. Read this before you rely on the port.
   not overlap: a 30,720-token prompt waits 42.7 s for its first token alone, and
   170.2-171.0 s when four arrive together
   ([release section](../../BENCHMARKS-SM70.md#release-binary-d4ffb1fa-built-from-71029458-production-source-unchanged-through-c6fdc120)).
-  There is no isolated GPU prefill timer, so these are wall-time rates.
+  There is no isolated GPU prefill timer, so these are wall-time rates. A
+  profile of one release-binary prefill shows where the time goes. Prefill runs
+  in 128-token chunks, 240 of them for a 30,720-token prompt. The projection
+  GEMMs take 63-66 % of the time (the NVFP4 MLP alone 44 % at 8,192 tokens), the
+  GDN recurrence about 11 % and attention 7-10 %. Attention grows with context,
+  to about 12 % extrapolated over a whole 30,720-token prompt. The GPU is idle
+  only 1.4-1.9 % of the time, so the cost is in the kernels, not in gaps between
+  them ([prefill-profile.json](receipts/measurements/prefill-profile.json)).
+- **Profiling issue under investigation.** Node-level CUDA-graph tracing with
+  Nsight Systems (`nsys --cuda-graph-trace=node`) made the server fail with CUDA
+  error 719 (`unspecified launch failure`) after about 127 cumulative 128-token
+  prefill chunks, in 3 of 3 attempts. Unprofiled runs and graph-level tracing
+  completed every request. The cause is not established; a compute-sanitizer
+  run is the next check ([prefill-profile.json](receipts/measurements/prefill-profile.json)).
 - **Default KV limit.** All measurements used `--kv-cache-limit concurrency`.
   The KV pool at the default `memory` setting was not measured.
 - **Flags not measured on the release package:** `--mtp-draft-tokens 3` (the

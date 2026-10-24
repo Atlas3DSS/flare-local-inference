@@ -1,0 +1,834 @@
+{
+ "format": "measurement-prefill-trace-v1",
+ "trace": "a4-prefill.sqlite",
+ "session_start_unix_ns": 1792818839538641677,
+ "rules": "measurement JOB3: break one prefill request window of an nsys sqlite export into kernel families (CPU only).\n\nThe release package names every kernel `_f<N>` (no symbol names), so families are assigned STRUCTURALLY from the\ntrace itself, with the rules printed into the output:\n  * layers are delimited by the per-layer output projection GEMM; a layer containing the prompt-attention kernel\n    signature is a QSA full-attention layer, a layer containing the GDN token-group kernel is a GDN layer;\n  * projection GEMMs = the tensor-core GEMM signatures (>=90 registers/thread, 0 < dynamic shared memory < 64 KiB,\n    128/256-thread blocks, <= 8 M-tiles), split into MLP (gate/up/down) and mixer projections (GDN in_proj_qkv/z, out_proj; QSA q/k/v/o);\n  * quantize/convert = activation-quantize and post-GEMM convert/scale kernels (grid = elements / block);\n  * attention core / GDN core = remaining kernels inside QSA / GDN mixer blocks; other = norms, residual, sampling.\nWall-clock reconciliation: window = client send -> client receive; busy = union of kernel + memcpy + memset\nintervals inside the window; idle = window - busy; sum(categories) - overlap + idle == window by construction;\nthe report also states busy+idle versus the client-measured latency.",
+ "requests": [
+  {
+   "phase": "warmup",
+   "prompt_tokens": 30720,
+   "client_latency_s": 21.829868657980114,
+   "window_s": 21.829874464,
+   "gpu_first_to_last_s": 21.673916306,
+   "lead_in_s": 0.037783603,
+   "tail_s": 0.118174555,
+   "busy_s": 21.408364242,
+   "idle_s": 0.421510222,
+   "idle_fraction": 0.019308870634832068,
+   "kernel_overlap_s": 9.9359e-05,
+   "reconciliation": {
+    "categories_minus_overlap_plus_idle_s": 21.829874464,
+    "vs_window_error": 0.0,
+    "window_vs_client_latency_error": 2.6596678048222074e-07
+   },
+   "families_s": {
+    "gemm_mlp": 9.282586482,
+    "gemm_gdn_projection": 3.414660606,
+    "gdn_core": 2.368153148,
+    "attention_core": 2.092740576,
+    "quantize_convert": 1.349212008,
+    "gemm_qsa_projection": 1.088439017,
+    "per_chunk_tail": 0.899526568,
+    "norm_residual_other": 0.630627901,
+    "memcpy": 0.279454662,
+    "head_sampling_tail": 0.002712906,
+    "memset": 0.000349727
+   },
+   "families_share_of_window": {
+    "gemm_mlp": 0.42522399738523753,
+    "gemm_gdn_projection": 0.15642144949716372,
+    "gdn_core": 0.10848221559429302,
+    "attention_core": 0.09586590062398996,
+    "quantize_convert": 0.06180576119322204,
+    "gemm_qsa_projection": 0.049860067624070054,
+    "per_chunk_tail": 0.041206218088126155,
+    "norm_residual_other": 0.028888297183750584,
+    "memcpy": 0.012801478197268299,
+    "head_sampling_tail": 0.0001242749244606925,
+    "memset": 1.6020568536788448e-05
+   },
+   "layer_role_s": {
+    "gdn:gemm_mlp": 6.961734463,
+    "gdn:gemm_gdn_projection": 3.414660606,
+    "gdn:gdn_core": 2.368153148,
+    "qsa:gemm_mlp": 2.320852019,
+    "qsa:attention_core": 2.092740576,
+    "qsa:gemm_qsa_projection": 1.088439017,
+    "gdn:quantize_convert": 1.007887204,
+    "chunk:per_chunk_tail": 0.899526568,
+    "gdn:norm_residual_other": 0.472807531,
+    "qsa:quantize_convert": 0.341324804,
+    "qsa:norm_residual_other": 0.15782037,
+    "tail:head_sampling_tail": 0.002712906
+   },
+   "layer_counts": {
+    "gdn": 6048,
+    "qsa": 2016
+   },
+   "layers_total": 8064,
+   "chunks_inferred": 126,
+   "mlp_gemm_launches": 16128,
+   "kernels": 344089,
+   "memcpys": 40193,
+   "memsets": 378,
+   "largest_gaps_ms": [
+    0.655226,
+    0.532923,
+    0.531547,
+    0.521691,
+    0.509211,
+    0.491612,
+    0.489915,
+    0.488476,
+    0.486812,
+    0.484316
+   ],
+   "busy_fraction_per_second": [
+    0.9494,
+    0.9863,
+    0.9873,
+    0.9866,
+    0.9872,
+    0.9869,
+    0.987,
+    0.9873,
+    0.9878,
+    0.9865,
+    0.9879,
+    0.9881,
+    0.9873,
+    0.9886,
+    0.9882,
+    0.9884,
+    0.9888,
+    0.9883,
+    0.9884,
+    0.9892,
+    0.9887,
+    0.8483
+   ],
+   "top_signatures": [
+    {
+     "family": "gemm_mlp",
+     "name": "_f24",
+     "grid": [
+      2,
+      34,
+      1
+     ],
+     "block": [
+      256,
+      1
+     ],
+     "regs": 247,
+     "dsm": 18432,
+     "count": 16126,
+     "total_s": 6.413575902,
+     "mean_us": 397.7164766216049
+    },
+    {
+     "family": "gemm_mlp",
+     "name": "_f23",
+     "grid": [
+      4,
+      20,
+      2
+     ],
+     "block": [
+      128,
+      1
+     ],
+     "regs": 160,
+     "dsm": 5120,
+     "count": 8063,
+     "total_s": 2.868381145,
+     "mean_us": 355.7461422547439
+    },
+    {
+     "family": "attention_core",
+     "name": "_f9",
+     "grid": [
+      8,
+      4,
+      8
+     ],
+     "block": [
+      384,
+      1
+     ],
+     "regs": 168,
+     "dsm": 97664,
+     "count": 2016,
+     "total_s": 1.507525283,
+     "mean_us": 747.780398313492
+    },
+    {
+     "family": "gemm_gdn_projection",
+     "name": "_f28",
+     "grid": [
+      3,
+      80,
+      1
+     ],
+     "block": [
+      128,
+      1
+     ],
+     "regs": 168,
+     "dsm": 13824,
+     "count": 6047,
+     "total_s": 1.429595977,
+     "mean_us": 236.41408582768315
+    },
+    {
+     "family": "gemm_gdn_projection",
+     "name": "_f29",
+     "grid": [
+      4,
+      48,
+      1
+     ],
+     "block": [
+      128,
+      1
+     ],
+     "regs": 126,
+     "dsm": 9216,
+     "count": 6047,
+     "total_s": 1.023227354,
+     "mean_us": 169.21239523730776
+    },
+    {
+     "family": "gdn_core",
+     "name": "_f1",
+     "grid": [
+      8,
+      48,
+      1
+     ],
+     "block": [
+      128,
+      1
+     ],
+     "regs": 76,
+     "dsm": 0,
+     "count": 6047,
+     "total_s": 1.0160236,
+     "mean_us": 168.02110137258143
+    },
+    {
+     "family": "gemm_gdn_projection",
+     "name": "_f29",
+     "grid": [
+      4,
+      40,
+      1
+     ],
+     "block": [
+      128,
+      1
+     ],
+     "regs": 126,
+     "dsm": 9216,
+     "count": 6047,
+     "total_s": 0.96153622,
+     "mean_us": 159.01045477096082
+    },
+    {
+     "family": "gemm_qsa_projection",
+     "name": "_f27",
+     "grid": [
+      4,
+      48,
+      1
+     ],
+     "block": [
+      128,
+      1
+     ],
+     "regs": 168,
+     "dsm": 5120,
+     "count": 2016,
+     "total_s": 0.579053384,
+     "mean_us": 287.22886111111114
+    },
+    {
+     "family": "gdn_core",
+     "name": "_f6",
+     "grid": [
+      24,
+      20,
+      1
+     ],
+     "block": [
+      128,
+      1
+     ],
+     "regs": 30,
+     "dsm": 0,
+     "count": 36282,
+     "total_s": 0.538947319,
+     "mean_us": 14.854399399151093
+    },
+    {
+     "family": "per_chunk_tail",
+     "name": "_f4",
+     "grid": [
+      1280,
+      5,
+      1
+     ],
+     "block": [
+      128,
+      1
+     ],
+     "regs": 64,
+     "dsm": 0,
+     "count": 750,
+     "total_s": 0.53782927,
+     "mean_us": 717.1056933333333
+    },
+    {
+     "family": "quantize_convert",
+     "name": "_f69",
+     "grid": [
+      128,
+      1,
+      1
+     ],
+     "block": [
+      256,
+      1
+     ],
+     "regs": 31,
+     "dsm": 0,
+     "count": 16126,
+     "total_s": 0.494600036,
+     "mean_us": 30.670968374054322
+    },
+    {
+     "family": "quantize_convert",
+     "name": "_f269",
+     "grid": [
+      8704,
+      1,
+      1
+     ],
+     "block": [
+      128,
+      1
+     ],
+     "regs": 16,
+     "dsm": 0,
+     "count": 16126,
+     "total_s": 0.444242528,
+     "mean_us": 27.548215800570507
+    },
+    {
+     "family": "norm_residual_other",
+     "name": "_f1",
+     "grid": [
+      2176,
+      1,
+      1
+     ],
+     "block": [
+      128,
+      1
+     ],
+     "regs": 32,
+     "dsm": 0,
+     "count": 8063,
+     "total_s": 0.337419801,
+     "mean_us": 41.84792273347389
+    },
+    {
+     "family": "gemm_qsa_projection",
+     "name": "_f29",
+     "grid": [
+      4,
+      40,
+      1
+     ],
+     "block": [
+      128,
+      1
+     ],
+     "regs": 126,
+     "dsm": 9216,
+     "count": 2016,
+     "total_s": 0.320269331,
+     "mean_us": 158.8637554563492
+    },
+    {
+     "family": "gemm_qsa_projection",
+     "name": "_f26",
+     "grid": [
+      6,
+      8,
+      4
+     ],
+     "block": [
+      128,
+      1
+     ],
+     "regs": 96,
+     "dsm": 6912,
+     "count": 4032,
+     "total_s": 0.189116302,
+     "mean_us": 46.90384474206349
+    },
+    {
+     "family": "per_chunk_tail",
+     "name": "_f2",
+     "grid": [
+      1024,
+      5,
+      1
+     ],
+     "block": [
+      128,
+      1
+     ],
+     "regs": 64,
+     "dsm": 0,
+     "count": 1500,
+     "total_s": 0.133684935,
+     "mean_us": 89.12329
+    },
+    {
+     "family": "gdn_core",
+     "name": "_f0",
+     "grid": [
+      2048,
+      1,
+      1
+     ],
+     "block": [
+      128,
+      1
+     ],
+     "regs": 21,
+     "dsm": 0,
+     "count": 6047,
+     "total_s": 0.128955175,
+     "mean_us": 21.325479576649577
+    },
+    {
+     "family": "norm_residual_other",
+     "name": "_f251",
+     "grid": [
+      8,
+      1,
+      1
+     ],
+     "block": [
+      32,
+      16
+     ],
+     "regs": 32,
+     "dsm": 0,
+     "count": 8064,
+     "total_s": 0.123959859,
+     "mean_us": 15.372006324404762
+    },
+    {
+     "family": "per_chunk_tail",
+     "name": "_f54",
+     "grid": [
+      1940,
+      1,
+      1
+     ],
+     "block": [
+      128,
+      1
+     ],
+     "regs": 100,
+     "dsm": 0,
+     "count": 125,
+     "total_s": 0.117950636,
+     "mean_us": 943.605088
+    },
+    {
+     "family": "gdn_core",
+     "name": "_f1",
+     "grid": [
+      8,
+      80,
+      1
+     ],
+     "block": [
+      128,
+      1
+     ],
+     "regs": 32,
+     "dsm": 0,
+     "count": 6047,
+     "total_s": 0.117238929,
+     "mean_us": 19.38794923102365
+    },
+    {
+     "family": "attention_core",
+     "name": "_f3",
+     "grid": [
+      256,
+      4,
+      1
+     ],
+     "block": [
+      256,
+      1
+     ],
+     "regs": 31,
+     "dsm": 0,
+     "count": 2016,
+     "total_s": 0.107894664,
+     "mean_us": 53.519178571428576
+    },
+    {
+     "family": "quantize_convert",
+     "name": "_f68",
+     "grid": [
+      3072,
+      1,
+      1
+     ],
+     "block": [
+      256,
+      1
+     ],
+     "regs": 16,
+     "dsm": 0,
+     "count": 8064,
+     "total_s": 0.107661485,
+     "mean_us": 13.350878596230158
+    },
+    {
+     "family": "gdn_core",
+     "name": "_f1",
+     "grid": [
+      128,
+      48,
+      1
+     ],
+     "block": [
+      128,
+      1
+     ],
+     "regs": 18,
+     "dsm": 16,
+     "count": 6047,
+     "total_s": 0.103385537,
+     "mean_us": 17.096996361832314
+    },
+    {
+     "family": "quantize_convert",
+     "name": "_f269",
+     "grid": [
+      5120,
+      1,
+      1
+     ],
+     "block": [
+      128,
+      1
+     ],
+     "regs": 16,
+     "dsm": 0,
+     "count": 6048,
+     "total_s": 0.096848864,
+     "mean_us": 16.01337037037037
+    },
+    {
+     "family": "gdn_core",
+     "name": "_f251",
+     "grid": [
+      8,
+      1,
+      1
+     ],
+     "block": [
+      32,
+      16
+     ],
+     "regs": 32,
+     "dsm": 0,
+     "count": 6172,
+     "total_s": 0.094187969,
+     "mean_us": 15.260526409591705
+    },
+    {
+     "family": "quantize_convert",
+     "name": "_f68",
+     "grid": [
+      2560,
+      1,
+      1
+     ],
+     "block": [
+      256,
+      1
+     ],
+     "regs": 16,
+     "dsm": 0,
+     "count": 8064,
+     "total_s": 0.091773591,
+     "mean_us": 11.380653645833334
+    },
+    {
+     "family": "norm_residual_other",
+     "name": "_f0",
+     "grid": [
+      640,
+      1,
+      1
+     ],
+     "block": [
+      128,
+      1
+     ],
+     "regs": 28,
+     "dsm": 0,
+     "count": 7937,
+     "total_s": 0.091011518,
+     "mean_us": 11.466740330099533
+    },
+    {
+     "family": "attention_core",
+     "name": "_f0",
+     "grid": [
+      128,
+      24,
+      1
+     ],
+     "block": [
+      256,
+      1
+     ],
+     "regs": 32,
+     "dsm": 0,
+     "count": 2016,
+     "total_s": 0.089265418,
+     "mean_us": 44.27848115079365
+    },
+    {
+     "family": "gdn_core",
+     "name": "_f34",
+     "grid": [
+      2560,
+      1,
+      1
+     ],
+     "block": [
+      256,
+      1
+     ],
+     "regs": 32,
+     "dsm": 0,
+     "count": 6047,
+     "total_s": 0.080527406,
+     "mean_us": 13.316918471969572
+    },
+    {
+     "family": "gdn_core",
+     "name": "_f6",
+     "grid": [
+      24,
+      8,
+      1
+     ],
+     "block": [
+      128,
+      1
+     ],
+     "regs": 30,
+     "dsm": 0,
+     "count": 6047,
+     "total_s": 0.075983708,
+     "mean_us": 12.565521415577972
+    },
+    {
+     "family": "gdn_core",
+     "name": "_f0",
+     "grid": [
+      640,
+      1,
+      1
+     ],
+     "block": [
+      128,
+      1
+     ],
+     "regs": 28,
+     "dsm": 0,
+     "count": 5922,
+     "total_s": 0.070478376,
+     "mean_us": 11.901110435663627
+    },
+    {
+     "family": "quantize_convert",
+     "name": "_f269",
+     "grid": [
+      3072,
+      1,
+      1
+     ],
+     "block": [
+      128,
+      1
+     ],
+     "regs": 16,
+     "dsm": 0,
+     "count": 6048,
+     "total_s": 0.055483297,
+     "mean_us": 9.173825562169311
+    },
+    {
+     "family": "gdn_core",
+     "name": "_f5",
+     "grid": [
+      128,
+      1,
+      1
+     ],
+     "block": [
+      512,
+      1
+     ],
+     "regs": 30,
+     "dsm": 0,
+     "count": 6047,
+     "total_s": 0.050092661,
+     "mean_us": 8.283886389945428
+    },
+    {
+     "family": "attention_core",
+     "name": "_f0",
+     "grid": [
+      1536,
+      1,
+      1
+     ],
+     "block": [
+      256,
+      1
+     ],
+     "regs": 16,
+     "dsm": 0,
+     "count": 4032,
+     "total_s": 0.04268752,
+     "mean_us": 10.587182539682539
+    },
+    {
+     "family": "norm_residual_other",
+     "name": "_f1",
+     "grid": [
+      1280,
+      1,
+      1
+     ],
+     "block": [
+      256,
+      1
+     ],
+     "regs": 16,
+     "dsm": 0,
+     "count": 8064,
+     "total_s": 0.041492001,
+     "mean_us": 5.145337425595239
+    },
+    {
+     "family": "quantize_convert",
+     "name": "_f269",
+     "grid": [
+      6144,
+      1,
+      1
+     ],
+     "block": [
+      128,
+      1
+     ],
+     "regs": 16,
+     "dsm": 0,
+     "count": 2016,
+     "total_s": 0.040768705,
+     "mean_us": 20.222571924603173
+    },
+    {
+     "family": "attention_core",
+     "name": "_f0",
+     "grid": [
+      1536,
+      1,
+      1
+     ],
+     "block": [
+      128,
+      1
+     ],
+     "regs": 20,
+     "dsm": 0,
+     "count": 2016,
+     "total_s": 0.037251666,
+     "mean_us": 18.478008928571427
+    },
+    {
+     "family": "norm_residual_other",
+     "name": "_f0",
+     "grid": [
+      640,
+      1,
+      1
+     ],
+     "block": [
+      128,
+      1
+     ],
+     "regs": 21,
+     "dsm": 0,
+     "count": 8063,
+     "total_s": 0.036347254,
+     "mean_us": 4.507906982512712
+    },
+    {
+     "family": "per_chunk_tail",
+     "name": "_f4",
+     "grid": [
+      1280,
+      2,
+      1
+     ],
+     "block": [
+      128,
+      1
+     ],
+     "regs": 64,
+     "dsm": 0,
+     "count": 125,
+     "total_s": 0.035970872,
+     "mean_us": 287.766976
+    },
+    {
+     "family": "gdn_core",
+     "name": "_f0",
+     "grid": [
+      80,
+      1,
+      1
+     ],
+     "block": [
+      128,
+      1
+     ],
+     "regs": 18,
+     "dsm": 0,
+     "count": 6047,
+     "total_s": 0.034200573,
+     "mean_us": 5.65579179758558
+    }
+   ]
+  }
+ ]
+}
