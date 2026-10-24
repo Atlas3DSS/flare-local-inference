@@ -7,8 +7,9 @@ Commit messages hold the detailed validation records; they are cited by hash.
 Performance and timing figures here are historical observations for those
 commits and packages. Fresh component, export-qualification, rebuild and
 SM70/SM120 comparison results for the release tree are recorded below, with
-receipts under [receipts/](receipts/). Native serving and TTFT measurements on
-the release binary are still running.
+receipts under [receipts/](receipts/). Native serving, prefill/TTFT and
+long-context results for the release binary are in
+[BENCHMARKS-SM70.md](../../BENCHMARKS-SM70.md).
 
 ## Public release review and current validation
 
@@ -81,13 +82,18 @@ the two reports match. The two packages differ in bytes, as expected, because
 each export is signed independently. The rebuild criterion is golden and
 measurement identity, not package-byte equality.
 
-### Still running
+### Native serving on the release binary
 
-Native serving, TTFT/prefill and long-context benchmarks on the release binary
-(SHA-256 prefix `d4ffb1fa`) are running. Their tables are in
-[BENCHMARKS-SM70.md](../../BENCHMARKS-SM70.md) and stay empty until the
-benchmark chain completes. Until then these results do not establish final
-release qualification.
+The release binary (SHA-256 prefix `d4ffb1fa`) served the qualified package on
+2026-10-23 in one benchmark chain. All 24 short-prompt and 24 long-context
+requests completed, and every prefill batch completed
+([release section](../../BENCHMARKS-SM70.md#release-binary-d4ffb1fa-built-from-71029458-production-source-unchanged-through-c6fdc120),
+receipts under [receipts/release-binary/](receipts/release-binary/)). Short
+public prompts decoded at a median 83.0 tok/s at 1 agent and 64.8 tok/s per agent
+at 4. Four 28.7k-token contexts decoded together within the 131,584-token pool
+at 40.2-46.1 tok/s per agent. Effective prefill ran at 719-807 tok/s, one
+request at a time. These are benchmark completions on new public inputs, not a
+further qualification gate.
 
 ## SM70 and SM120 comparison (ordinary graphs)
 

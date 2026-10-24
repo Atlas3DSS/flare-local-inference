@@ -205,10 +205,12 @@ pool of the package before replay-commit, so that package could not hold them.
 
 ### End to end on real traces
 
-The 47.23 tok/s figure came from the fork's replay of real coding-agent traces,
-on a different package (`best24`), not the release (STATUS.md line 68). Neither
-the traces nor the replay tool is in this repository; the traces are not public. The run log gives no memory limit or concurrency for that
-figure. To measure end to end on your own traces, replay recorded agent
+The 47.23 tok/s figure came from the fork's replay of real coding-agent traces
+(STATUS.md line 68). `best24` is the run tag. Its run report gives the
+2026-10-22 release-tree package `model-32k-tonight-a`, a pre-release binary
+`2f9128e4`, MTP depth 3, `--memory-limit 31G`, a 32G prefix cache and 4 agents;
+the release binary `d4ffb1fa` was not run on traces. Neither the traces nor the
+replay tool is in this repository; the traces are not public. To measure end to end on your own traces, replay recorded agent
 conversations against the server with their real tool-call delays. Report
 generated tokens over wall time, with the number of agents, the memory limit,
 the package and the date.

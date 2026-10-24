@@ -265,10 +265,12 @@ Volta kernels for the parts that need them
   weight is decoded to FP16 in registers before the FP16 multiply. On SM120 the
   tensor cores consume FP4 and FP8 directly. We have not measured SM120 speed
   for comparison.
-- **Prefill and time to first token.** Long prompts are prefill-bound. Four
-  prompts of 22.4k to 30.2k tokens at 4 agents had a TTFT p50 of 90.7 s
-  (STATUS.md line 65). On real coding-agent traces prefill took about 85 % of
-  busy time (line 37).
+- **Prefill and time to first token.** Long prompts are prefill-bound. On the
+  release binary, effective prefill is 719-807 tok/s, one request at a time: a
+  30,720-token prompt waits 42.7 s for its first token alone and 170.2-171.0 s
+  when four arrive together ([BENCHMARKS-SM70.md](../../BENCHMARKS-SM70.md)). On
+  real coding-agent traces prefill took about 85 % of busy time (STATUS.md
+  line 37).
 - **Scope.** One recipe, one card per process (TP1), at most 4 concurrent
   requests and 32,768 tokens each. NVFP4 is weight-only; quantized activations
   are not used. Other recipes, tensor parallelism, Windows and the shared changes
@@ -278,8 +280,9 @@ Volta kernels for the parts that need them
   96 of them on its first-parent line.
 - **Old hardware.** The V100 is several generations old. Power per generated
   token was not measured.
-- **No end-to-end real-trace number for the release.** The only real-trace
-  figure, 47.23 tok/s, is for a different package (line 68).
+- **No end-to-end real-trace number for the release binary.** The real-trace
+  figure, 47.23 tok/s at best (line 68), used the 2026-10-22 release-tree
+  package with a pre-release binary.
 
 **What we gain:**
 

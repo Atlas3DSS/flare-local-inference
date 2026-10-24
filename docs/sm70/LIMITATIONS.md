@@ -31,17 +31,19 @@ upstream. Read this before you rely on the port.
   were run only on SM70: the `qwen38_dense` recipe declaration (MTP on by
   default with 3 draft tokens, at most 4, and concurrency capped at 4) and the
   Helios scheduler changes.
-- **Real traces.** The release package has no real-trace end-to-end
-  measurement. The only real-trace figure in the run log is for a different
-  package (STATUS.md line 68).
+- **Real traces.** The release binary `d4ffb1fa` has no real-trace end-to-end
+  measurement. The real-trace figures in the run log (best 47.23 tok/s, run
+  `best24`) used the 2026-10-22 release-tree package with a pre-release binary,
+  `2f9128e4` ([measurement history](../../BENCHMARKS-SM70.md#measurement-history-2026-10-20-to-2026-10-23)).
 - **Serving binary.** The published serving numbers were measured with a `flare`
   binary built before this branch's Helios commits
   ([BENCHMARK.md](BENCHMARK.md#what-was-run)). The fresh server binary has SHA-256
   `d4ffb1fa3453bf37f2017a7b58d09559010881311b2d9afcdfb33b4011caa667`, built
-  from `71029458`; production source is unchanged through `c6fdc120`. Native
-  serving, TTFT/prefill and long-context benchmarks on that binary are running
-  now. Until their results land in [BENCHMARKS-SM70.md](../../BENCHMARKS-SM70.md),
-  no serving number in these documents was measured on it.
+  from `71029458`; production source is unchanged through `c6fdc120`. Its
+  native serving, prefill/TTFT and long-context benchmarks completed on
+  2026-10-23 on newly authored public prompts
+  ([release section](../../BENCHMARKS-SM70.md#release-binary-d4ffb1fa-built-from-71029458-production-source-unchanged-through-c6fdc120)).
+  Figures labelled historical come from older binaries and internal prompts.
 - **Release-tree component evidence.** The public GPU runner at `b4987de5`
   (production source unchanged through `c6fdc120`) passed A: 223 tests plus
   17 subtests; B: 218 tests, with zero failures, exemptions or skips
@@ -87,9 +89,12 @@ upstream. Read this before you rely on the port.
 - **Adaptive verification.** `--mtp-adaptive-verification` makes sampled outputs
   depend on which requests share a batch. Serve with fixed width when outputs must
   not depend on co-scheduled requests ([SERVE.md](SERVE.md#fixed-width-verification)).
-- **Long prompts are prefill-bound.** With four prompts of 22.4k to 30.2k tokens
-  at 4 agents, TTFT p50 was 90.7 s on the older binary `2c792073` (STATUS.md
-  line 65). Release-binary prefill and TTFT are being measured now.
+- **Long prompts are prefill-bound.** On the release binary, effective
+  prefill is 719-807 tok/s at 2,048 to 30,720 tokens, and concurrent prefills do
+  not overlap: a 30,720-token prompt waits 42.7 s for its first token alone, and
+  170.2-171.0 s when four arrive together
+  ([release section](../../BENCHMARKS-SM70.md#release-binary-d4ffb1fa-built-from-71029458-production-source-unchanged-through-c6fdc120)).
+  There is no isolated GPU prefill timer, so these are wall-time rates.
 - **Default KV limit.** All measurements used `--kv-cache-limit concurrency`.
   The KV pool at the default `memory` setting was not measured.
 - **Flags not measured on the release package:** `--mtp-draft-tokens 3` (the
