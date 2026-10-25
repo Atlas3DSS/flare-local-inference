@@ -12,11 +12,16 @@ FRONTEND = c.frontend(tools=p.QWEN_CODER, wrapping_newlines=1, terminal_markers=
         required_start="<|im_start|>system\n", required_marker="<|im_end|>"))
 
 
-def prepare(signatures, buffers, pool, *, vocabulary):
+def prepare(signatures, buffers, pool, *, vocabulary, steering=None):
     inputs = {kind: c.text_inputs(kind) for kind in {s.kind for s in signatures.values()}}
     inputs["decode"].pop("token_ids", None)
     if "speculative" in inputs:
         inputs["speculative"].pop("token_ids", None)
+    if steering is not None:
+        for kind in ("init", "restore"):
+            inputs[kind].update({name: c.binding(name, source, p.REQUEST_ROW) for name, source in (
+                ("steering_addends", p.STEERING_ADDENDS), ("steering_phases", p.STEERING_PHASES),
+                ("steering_prompt_tokens", p.STEERING_PROMPT_TOKENS))})
     continuation = c.state_view("state_pool", pool.layout.row_bytes)
     pending = c.state_view("request_pending_token", 8)
     regions = [c.history_region(buffers, f"cache.{name}", tensor, p.PAGED_KEY_VALUE)
@@ -25,7 +30,7 @@ def prepare(signatures, buffers, pool, *, vocabulary):
     cursor = (dict(state=c.state_view("state_pool", pool.layout.row_bytes,
         offset=consumed.offset, nbytes=consumed.nbytes), lag_tokens=1)
         if "draft_page_tables" in buffers else None)
-    return c.model_contract(vocabulary=vocabulary, page_tokens=PAGE_TOKENS,
+    contract = c.model_contract(vocabulary=vocabulary, page_tokens=PAGE_TOKENS,
         page_tables=[dict(buffer="page_tables", page_offset=0),
             *([dict(buffer="draft_page_tables", page_offset=1)] if cursor is not None else [])],
         regions=[dict(kind=p.CONTINUATION_STATE, storage=continuation, tokens_per_record=1, window_tokens=0),
@@ -35,3 +40,10 @@ def prepare(signatures, buffers, pool, *, vocabulary):
         graphs=c.graph_contracts(signatures, inputs, continuation=continuation, pending=pending,
                                 cursor=cursor, rows=1),
         frontend=FRONTEND)
+    if steering is not None:
+        contract["steering"] = steering.contract()
+        for graph in contract["graphs"]:
+            if graph["kind"] in (p.PREFILL, p.DECODE, p.SPECULATIVE):
+                graph["state"].extend(dict(view=c.state_view(name, tensor[0].numel() * tensor.element_size()),
+                                           access=p.READ) for name, tensor in steering.buffers().items())
+    return contract

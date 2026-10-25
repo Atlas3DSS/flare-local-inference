@@ -2263,6 +2263,7 @@ mod tests {
                 max_new_tokens: 16,
                 prompt: vec![7],
                 data: PromptData {
+                    steering: Default::default(),
                     positions: vec![[0; 3]],
                     vision_token_indices: vec![-1],
                     ..Default::default()
@@ -2506,6 +2507,7 @@ mod tests {
                 tokens: vec![7],
                 message_boundaries: vec![],
                 data: PromptData {
+                    steering: Default::default(),
                     positions: vec![[0; 3]],
                     vision_token_indices: vec![-1],
                     ..Default::default()
@@ -2841,6 +2843,7 @@ mod tests {
                 max_new_tokens: 10,
                 prompt: vec![0],
                 data: PromptData {
+                    steering: Default::default(),
                     positions: vec![[0; 3]],
                     vision_token_indices: vec![-1],
                     ..Default::default()

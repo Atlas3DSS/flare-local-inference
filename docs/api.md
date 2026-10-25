@@ -52,6 +52,79 @@ The additional `flare` object reports prepared and selected serving metadata:
 Generation requests always use the loaded model, regardless of the request's
 `model` string. Returned generation objects identify the loaded model.
 
+## Additive activation steering
+
+A package prepared by `tools/prepare_replay.py --steering-max-sites N` declares
+request-local additive sites. The default `N=0` prepares the existing model
+without intervention inputs. SM70 Qwen dense declares `layers.<index>.mlp_out`
+and `layers.<index>.residual`, each with the model hidden width (5120 for the
+pinned 27B checkpoint), and `layers.<index>.mlp_input` with the intermediate
+neuron width (17408). The 64-layer checkpoint therefore declares 192 sites.
+
+Before sending an intervention, check `GET /v1/models`: `flare.steering` must
+contain `protocol: "additive-bf16-sites-v1"`, `max_sites`, and `sites`, an array
+of `{name, width}`. It also declares `phases` and
+`phase_boundary: "original_prompt_token_count"`. Unsupported packages advertise
+null. `flare.prepared_identity` is the loaded prepared-model identity, a
+64-character hexadecimal digest; it is not an HF revision or the package-file
+hash. Bind it to a verified preparation report when selecting steering vectors.
+An older server may ignore unknown request fields, so the capability check is
+required by clients using this extension.
+
+Chat and raw Completion requests may include `steering`:
+
+```python
+extra_body = {"steering": {
+    "phase": "all",
+    "sites": [{"site": "layers.12.mlp_out", "vector": vector}],
+}}
+```
+
+`vector` contains exactly the site's declared number of finite FP32 values.
+Site names must be unique and the count must fit `max_sites`. Missing or empty
+sites are neutral. Nonempty requests against unsupported packages are rejected
+with HTTP 400, including zero-valued vectors. On a supported package, all-zero
+vectors reduce to the neutral program and retain the original activation bits.
+
+`mlp_input` adds to the BF16-rounded SwiGLU product, after activation and gating,
+immediately before the quantized down projection consumes it. A vector with one
+nonzero coordinate directly edits that intermediate neuron's activation at this
+boundary. `mlp_out` adds to the rounded down-projection output before the residual
+addition. `residual` adds after the layer's rounded residual addition. Changed
+coordinates are rounded to BF16 and held in FP32 storage. Down-column output
+injection and pre-down neuron injection are distinct interventions: input
+quantization and rounding can prevent their equivalence.
+
+Steering-enabled preparation and offline activation capture materialize the
+SwiGLU product, disabling only the fused SwiGLU producer. Default preparation
+without either option retains that fusion. This hook specifies the exact native intervention location; it does not
+establish numerical equivalence of different model backends or quantizers.
+Addends occupy one persistent `[request_slots, sum(site.width)]` FP32 buffer in
+catalog order, without padding intermediate and hidden sites to a common width.
+`SteeringBuffers.site_addends(index)` exposes a physical-row view for offline
+diagnostics. Addends, phases, and prompt cutoffs upload only on init/restore;
+prefill, decode, and target verification graphs read the persistent buffers.
+
+The default phase is `all`. `prefill` applies to consumed positions below the
+original prompt token count; `decode` applies at or beyond it. This boundary is
+independent of graph shape, chunking, prefix hits, and readmission. The first
+response token is sampled from the prompt-tail forward. Programs are immutable
+within a request and included in prefix-cache identity. Target MTP verification
+uses the same intervention; the draft model remains unchanged, which can affect
+acceptance rate. Resume sampling uses the already-computed final hidden vector.
+
+Offline calibration can set `PreparationConfig(capture_activations=True,
+retain_graphs=True)`. Retained prefill owners expose
+`decoder.activation_capture.residual_last`, `pre_mlp_last` (both
+`[layers, hidden]`), `mlp_input_last` (`[layers, intermediate]`, the rounded
+SwiGLU product after optional neuron steering), `residual_l2`
+(`[layers, capacity]`), and `positions`
+(`[capacity]`). The last vectors describe the final live token in the replayed
+chunk; padded positions/norms are `-1`/zero. These buffers are shared by serial
+prefill variants and overwritten on replay. Copy observations after replay
+completes. `tools/prepare_replay.py --capture-activations` is diagnostic only and
+cannot export or measure a package. There is no activation-output HTTP transport.
+
 ## Generation log probabilities
 
 Logprobs describe the raw next-token distribution over the complete vocabulary:

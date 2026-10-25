@@ -97,6 +97,7 @@ pub(crate) fn prepare_input(
         tokens,
         token_expansions,
         data: PromptData {
+            steering: Default::default(),
             positions,
             vision_token_indices,
             spans: Vec::new(),

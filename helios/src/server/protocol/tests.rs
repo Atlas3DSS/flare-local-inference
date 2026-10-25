@@ -1484,3 +1484,17 @@ fn generation_logprob_controls_have_endpoint_specific_types_and_limits() {
     assert_eq!(request.options.logprobs.unwrap().top,20);
     assert!(request.options.sampling.temperature.is_none());
 }
+
+#[test]
+fn additive_steering_decodes_in_chat_and_completions() {
+    for (protocol, mut body) in [
+        (Protocol::Chat, json!({"messages":[{"role":"user","content":"Hello"}]})),
+        (Protocol::Completions, json!({"prompt":"Hello"})),
+    ] {
+        body["steering"] = json!({"phase":"decode","sites":[{"site":"layers.0.mlp_out","vector":[1.0,0.0]}]});
+        let parsed = request(protocol, body.clone());
+        assert_eq!(parsed.options.steering.unwrap().phase, crate::model::steering::SteeringPhase::Decode);
+        body["steering"]["phase"] = json!("sometimes");
+        assert!(decode(protocol, body, false).is_err());
+    }
+}

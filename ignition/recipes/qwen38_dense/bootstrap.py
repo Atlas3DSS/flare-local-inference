@@ -51,12 +51,25 @@ class PreparationConfig:
     retain_graphs: bool = False
     kernel_cache: Path | None = None
     cutlass_include: Path | None = None
+    capture_activations: bool = False
+    steering_max_sites: int = 0
     mtp: bool = False
+    # None preserves the historical MTP-dependent target arithmetic. True can
+    # prepare those same target projections/decode kernels without draft work.
+    row_invariant: bool | None = None
     speculative_widths: tuple[int, ...] = (1, 2, 3, 4)
     speculative_fixed_width: int | None = None
     preparation_pages: int | None = None
 
     def __post_init__(self):
+        if self.row_invariant is not None and type(self.row_invariant) is not bool:
+            raise ValueError("row-invariant target arithmetic must be bool or None")
+        if self.mtp and self.row_invariant is False:
+            raise ValueError("MTP requires row-invariant target arithmetic")
+        if type(self.steering_max_sites) is not int or not 0 <= self.steering_max_sites <= 256:
+            raise ValueError("steering max sites must be an integer in [0,256]")
+        if self.capture_activations and not self.retain_graphs:
+            raise ValueError("activation capture requires retained diagnostic graphs")
         request_capacity(self.max_active)
         if not PAGE_TOKENS <= self.context <= 262144 or self.context % PAGE_TOKENS:
             raise ValueError("Qwen dense context must be 128-aligned in [128,262144]")
@@ -79,6 +92,10 @@ class PreparationConfig:
     def draft_tokens(self):
         return self.speculative_widths[-1] - 1 if self.mtp else 0
 
+    @property
+    def target_row_invariant(self):
+        return self.mtp if self.row_invariant is None else self.row_invariant
+
 
 @torch.no_grad()
 def prepare(snapshot, config, *, progress=None, package_storage):
@@ -87,7 +104,7 @@ def prepare(snapshot, config, *, progress=None, package_storage):
     snapshot = Path(snapshot).resolve()
     device = torch.device("cuda", config.device)
     torch.cuda.set_device(device)
-    if config.mtp and torch.cuda.get_device_capability(device) == (7, 0):
+    if config.target_row_invariant and torch.cuda.get_device_capability(device) == (7, 0):
         from ignition.components.sm70_prefill import _cutlass_headers
 
         _cutlass_headers(config.cutlass_include)
@@ -95,7 +112,7 @@ def prepare(snapshot, config, *, progress=None, package_storage):
         manifest = inspect_indexed_checkpoint(snapshot)
     transient = contextlib.ExitStack()
     transient.enter_context(package_storage.transient())
-    weights = ModelWeights.load(manifest, device, progress=progress, row_invariant=config.mtp,
+    weights = ModelWeights.load(manifest, device, progress=progress, row_invariant=config.target_row_invariant,
         package_storage=package_storage, kernel_cache=config.kernel_cache)
     mtp_weights = None
     if config.mtp:
@@ -104,12 +121,14 @@ def prepare(snapshot, config, *, progress=None, package_storage):
             embedding_weight=weights.tree.embed_tokens.weight, lm_head_weight=weights.head, progress=progress,
             package_storage=package_storage, kernel_cache=config.kernel_cache)
     release_unused()
-    if config.mtp:
+    if config.target_row_invariant:
         # Repacking leaves large dead checkpoint/inverse buffers in the private
         # pool. End that allocation scope before backing recurrent/KV state.
         transient.close()
         transient.enter_context(package_storage.transient())
     from ignition.components.sm70_projection import is_sm70
+    if config.capture_activations and not is_sm70(device):
+        raise ValueError("activation capture is prepared only by the SM70 dense recipe")
     dtype, element_bytes = (torch.float32, 2) if is_sm70(device) else (torch.bfloat16, 1)
     layout = continuation_layout(weights.config, dtype=dtype, element_bytes=element_bytes,
                                  draft_tokens=config.draft_tokens)
@@ -137,15 +156,29 @@ def prepare(snapshot, config, *, progress=None, package_storage):
         requests = DeviceRequestState.allocate(device, vocab_size=vocabulary, capacity=slots)
         inputs = BatchInputs.allocate(max(config.prefill_chunk_size, decode_tokens), blocks, device, capacity=slots)
         admission = AdmissionBuffers.allocate(device, vocab_size=vocabulary, capacity=slots)
+        steering = None
+        if config.steering_max_sites:
+            if not is_sm70(device):
+                raise ValueError("additive steering is prepared only by the SM70 dense recipe")
+            from ignition.components.steering import SteeringBuffers
+            steering = SteeringBuffers.allocate(len(weights.config.layers), weights.config.hidden, slots,
+                config.steering_max_sites, device, intermediate=weights.config.text["intermediate_size"])
         commands = StateCommands.allocate(device, capacity=slots)
         frame = torch.zeros(1, dtype=torch.int32, device=device)
         sequence = torch.zeros(1, dtype=torch.int64, device=device)
         completion = CompletionOutputs.allocate((2, slots, 24 if config.mtp else 8), device=device)
         coordinator = None
-        identity = hashlib.sha256(json.dumps({
+        identity_config = {
             "config": weights.config.text, "headers": [s.header_sha256 for s in manifest.shards],
-            "contract": "qwen38-dense.graph-inputs.v2", "draft_tokens": config.draft_tokens},
-            sort_keys=True).encode()).hexdigest()
+            "contract": "qwen38-dense.graph-inputs.v2", "draft_tokens": config.draft_tokens}
+        if config.target_row_invariant != config.mtp:
+            # Keep existing default identities stable; distinguish the new
+            # ordinary-only target arithmetic from legacy ordinary preparation.
+            identity_config["target_row_invariant"] = config.target_row_invariant
+        identity = hashlib.sha256(json.dumps(identity_config, sort_keys=True).encode()).hexdigest()
+        if steering is not None:
+            identity = hashlib.sha256((identity + json.dumps(steering.contract(), sort_keys=True)
+                + "additive-bf16-sites-v1").encode()).hexdigest()
         session = RecordedPreparationSession(
             compile_workers=config.compile_workers, tuning_replica=config.tuning_replica,
             device=device, checkpoint=identity,
@@ -159,18 +192,25 @@ def prepare(snapshot, config, *, progress=None, package_storage):
         session.register_scratch(arena)
         prefill_storage = Scratch.allocate(config.prefill_chunk_size, 1, weights.config, device)
         decode_storage = Scratch.allocate(decode_tokens, decode_tokens, weights.config, device)
+        activation_capture = None
+        if config.capture_activations:
+            from ignition.components.activation_capture import ActivationCapture
+            activation_capture = ActivationCapture.allocate(len(weights.config.layers), config.prefill_chunk_size,
+                weights.config.hidden, device, intermediate=weights.config.text["intermediate_size"])
         buffers = dict(inputs.buffers(), **commands.buffers(),
             **{name: getattr(admission, name) for name in admission.__dataclass_fields__},
             state_pool=pool.backing, memory_capacity=pool.memory_capacity,
             request_pending_token=requests.pending_token,
             sampling_grammar_mask=requests.grammar_mask, frame_index=frame,
             submission_sequence=sequence, **completion.buffers())
+        if steering is not None:
+            buffers.update(steering.buffers())
         speculation = None
         if config.mtp:
             from .speculative import SpeculativePreparation
             speculation = SpeculativePreparation(weights, mtp_weights, pool, requests, inputs, decode_storage,
                 width=config.draft_tokens + 1, session=session, workspace=arena,
-                completion=completion, frame=frame, sequence=sequence)
+                completion=completion, frame=frame, sequence=sequence, steering=steering)
             buffers["draft_page_tables"] = speculation.draft_tables
     forwards, signatures, metadata = {}, {}, {}
     prefill_sizes, batch_sizes = prefill_capacities(config.prefill_chunk_size), batch_capacities(config.max_active)
@@ -195,8 +235,11 @@ def prepare(snapshot, config, *, progress=None, package_storage):
                     scratch = (prefill_storage if mode == "prefill" else decode_storage).rows(capacity, rows)
                     decoder = PreparedDecoder(weights, scratch, m, pool, mode=mode,
                         vocabulary_runtime=None, coordinator=coordinator, session=session, name=name, workspace=arena,
-                        row_invariant=config.mtp and mode == "decode",
-                        prefill_errors=(requests, inputs.row_slot_ids) if mode == "prefill" else None)
+                        row_invariant=config.target_row_invariant and mode == "decode",
+                        prefill_errors=(requests, inputs.row_slot_ids) if mode == "prefill" else None,
+                        steering=None if steering is None else steering.bind(inputs, requests, m),
+                        activation_capture=activation_capture.rows(capacity)
+                            if activation_capture is not None and mode == "prefill" else None)
                     batch = PreparedBatch(inputs, requests, m, mode=mode, shard=weights.shard, pool=pool)
                     forward = PreparedGeneration(decoder, batch, completion, frame, sequence, runtime=None,
                         coordinator=coordinator, session=session, name=name + ".generation", workspace=arena)
@@ -210,7 +253,7 @@ def prepare(snapshot, config, *, progress=None, package_storage):
                 name = f"resume{capacity}" + suffix
                 forward = PreparedResume(weights, requests, pool, inputs, completion, frame, sequence,
                     rows=capacity, runtime=None, vocabulary_runtime=None, coordinator=coordinator,
-                    session=session, name=name, activation_mode="auto", workspace=arena, row_invariant=config.mtp)
+                    session=session, name=name, activation_mode="auto", workspace=arena, row_invariant=config.target_row_invariant)
                 add(name, forward, "resume", capacity, 1, (*row_inputs, "sampling_grammar_mask"), enabled)
                 for mode in ("init", "restore", "snapshot"):
                     name = f"{mode}{capacity}" + suffix
@@ -223,6 +266,8 @@ def prepare(snapshot, config, *, progress=None, package_storage):
                         runtime=None, coordinator=coordinator, session=session, name=name, capacity=capacity,
                         admission_buffers=admission, draft_state=enabled, **options)
                     fields = row_inputs if mode == "snapshot" else ("request_state_rows", *admission.__dataclass_fields__)
+                    if mode != "snapshot" and steering is not None:
+                        fields = (*fields, *steering.buffers())
                     add(name, forward, mode, capacity, 1,
                         (*fields, "page_tables", *commands.buffers(), *(("draft_page_tables",) if enabled else ())), enabled)
         if speculation is not None:
@@ -280,7 +325,7 @@ def prepare(snapshot, config, *, progress=None, package_storage):
         prefill_chunk_size=config.prefill_chunk_size, pages=pages, state_rows=state_rows, snapshots=snapshots,
         page_tokens=PAGE_TOKENS, frontend=prepare_frontend(snapshot, eos_token_ids=eos_ids),
         sampling_defaults=RECIPE.sampling_defaults.as_dict(), assets=assets,
-        model_contract=prepare_contract(signatures, buffers, pool, vocabulary=vocabulary))
+        model_contract=prepare_contract(signatures, buffers, pool, vocabulary=vocabulary, steering=steering))
     if speculation is not None:
         server_config.update(speculative_widths=config.speculative_widths,
             speculative_token_capacity=decode_tokens, speculative_proposal_source="mtp",
@@ -301,7 +346,8 @@ def prepare(snapshot, config, *, progress=None, package_storage):
     return PreparedModel(device=config.device, graphs=graphs, buffers=buffers, signatures=signatures,
         max_active=config.max_active, session=session, server_config=server_config, memory_report=memory,
         export_zero_ranges=(*storage_ranges([prefill_storage, decode_storage, arena.tensor, metadata,
+                                             None if steering is None else steering.buffers(),
                                              None if speculation is None else speculation.replay_operands]),
                             *completion.zero_ranges()),
-        resources=(weights, mtp_weights, speculation, pool, requests, inputs, admission, commands, arena, forwards, prefill_storage,
+        resources=(weights, mtp_weights, speculation, steering, pool, requests, inputs, admission, commands, arena, forwards, prefill_storage,
                    decode_storage, metadata, compiled, stream, graph_pool, session, coordinator))

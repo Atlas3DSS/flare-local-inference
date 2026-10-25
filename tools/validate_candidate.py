@@ -189,10 +189,12 @@ def _pool_storage_addresses(pool):
             for tensor in (pool.backing, pool.reserved_backing, *pool.pages.values())}
 
 
-def _assert_pool_cleared(pool):
+def _assert_pool_cleared(pool, *, chunk_bytes=8 << 20):
     """Check only physical preparation rows/pages, never reserved virtual tails."""
     import torch
 
+    if type(chunk_bytes) is not int or chunk_bytes < 1:
+        raise ValueError("pool validation chunk size must be positive")
     rows, pages = pool.memory_capacity.cpu().tolist()
     if not 0 < rows <= pool.backing.shape[0] or any(
             not 0 < pages <= tensor.shape[0] for tensor in pool.pages.values()):
@@ -202,8 +204,15 @@ def _assert_pool_cleared(pool):
     for name, tensor in values:
         if tensor.dtype != torch.uint8:
             raise TypeError(f"pool backing {name} must expose raw bytes")
-        if bool(torch.count_nonzero(tensor)):
-            raise RuntimeError(f"qualification requires exact zero preparation pool bytes: {name}")
+        if not tensor.is_contiguous():
+            raise ValueError(f"pool backing {name} must be contiguous; do not materialize reserved storage")
+        # CUDA count_nonzero may promote its reduction input. Never submit the
+        # whole GiB-scale pool and accidentally allocate a pool-sized temporary.
+        # view/narrow alias only the physically backed prefix established above.
+        flat = tensor.view(-1)
+        for start in range(0, flat.numel(), chunk_bytes):
+            if bool(torch.count_nonzero(flat.narrow(0, start, min(chunk_bytes, flat.numel() - start)))):
+                raise RuntimeError(f"qualification requires exact zero preparation pool bytes: {name}")
 
 
 def _snapshot_mutable(prepared, generation, maintenances):

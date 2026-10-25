@@ -47,6 +47,20 @@ def test_maximum_verification_width_admits_four_draft_tokens():
     assert prepared.draft_tokens == 4
 
 
+def test_target_row_invariant_arithmetic_can_be_prepared_without_mtp():
+    assert PreparationConfig().target_row_invariant is False
+    assert PreparationConfig(mtp=True).target_row_invariant is True
+    ordinary = PreparationConfig(max_active=1, mtp=False, row_invariant=True,
+                                 retain_graphs=True, capture_activations=True, steering_max_sites=64)
+    assert ordinary.target_row_invariant is True
+    assert ordinary.mtp is False and ordinary.draft_tokens == 0
+    with pytest.raises(ValueError, match="MTP requires"):
+        PreparationConfig(mtp=True, row_invariant=False)
+    for value in (0, 1, "true"):
+        with pytest.raises(ValueError, match="bool or None"):
+            PreparationConfig(row_invariant=value)
+
+
 def test_native_contract_requires_all_state_columns_and_trailing_draft_pages():
     model = config()
     layout = continuation_layout(model, dtype=torch.float32, element_bytes=2, draft_tokens=3)
@@ -72,3 +86,36 @@ def test_native_contract_requires_all_state_columns_and_trailing_draft_pages():
             assert graph['draft_cursor'] is None
     assert RECIPE.max_draft_tokens == 4
     assert RECIPE.verification_rows == 0 and RECIPE.live_rows(4, RECIPE.speculation) == 1 + 4
+
+
+def test_steering_catalog_declares_admission_inputs_and_forward_state():
+    from ignition.components.steering import SteeringBuffers
+    model = config()
+    layout = continuation_layout(model, dtype=torch.float32, element_bytes=2, draft_tokens=0)
+    pool = SimpleNamespace(layout=layout, pages={})
+    steering = SteeringBuffers.allocate(64, 4, 4, 2, "cpu", intermediate=7)
+    fields = ('request_state_rows', 'row_slot_ids', 'row_generations', 'live_rows')
+    signatures = {kind: GraphSignature(kind, 4 if kind != 'prefill' else 1,
+        128 if kind == 'prefill' else 1,
+        (*fields, *steering.buffers()) if kind in ('init', 'restore') else fields)
+        for kind in ('init', 'restore', 'prefill', 'decode', 'resume', 'snapshot')}
+    contract = prepare(signatures, steering.buffers(), pool, vocabulary=248320, steering=steering)
+    assert contract['steering'] == steering.contract()
+    for graph in contract['graphs']:
+        sources = {binding['source'] for binding in graph['inputs']}
+        if graph['kind'] in (p.INIT, p.RESTORE):
+            assert {p.STEERING_ADDENDS, p.STEERING_PHASES, p.STEERING_PROMPT_TOKENS} <= sources
+        else:
+            assert not {p.STEERING_ADDENDS, p.STEERING_PHASES, p.STEERING_PROMPT_TOKENS} & sources
+        reads = {state['view']['buffer'] for state in graph['state'] if state['access'] == p.READ}
+        if graph['kind'] in (p.PREFILL, p.DECODE):
+            assert set(steering.buffers()) <= reads
+        else:
+            assert not set(steering.buffers()) & reads
+    from google.protobuf.json_format import ParseDict
+    decoded = ParseDict(contract, p.ModelContract())
+    restored = p.ModelContract.FromString(decoded.SerializeToString())
+    assert restored.steering.max_sites == 2
+    assert restored.steering.sites[0].name == 'layers.0.mlp_out'
+    assert restored.steering.sites[2].name == 'layers.0.mlp_input'
+    assert restored.steering.sites[2].width == 7

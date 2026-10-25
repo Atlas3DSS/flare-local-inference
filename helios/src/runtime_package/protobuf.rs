@@ -318,6 +318,17 @@ mod tests {
     use prost::Message;
 
     #[test]
+    fn old_serialized_model_contract_has_no_steering() {
+        use prost::Message;
+        // Existing version-one semantic metadata predates field eight.
+        let old = wire::ModelContract::decode(&b"\x08\x01\x10\x20\x18\x20"[..]).unwrap();
+        assert_eq!(old.version, 1);
+        assert_eq!(old.vocabulary, 32);
+        assert!(old.steering.is_none());
+        assert!(wire::ModelContract::decode(old.encode_to_vec().as_slice()).unwrap().steering.is_none());
+    }
+
+    #[test]
     fn packed_rows_preserve_absent_field_semantics_and_honor_explicit_bounds() {
         // Serialized verification metadata predating the separate physical-row field.
         let bytes = b"\x12\x0cverification\x20\x08\x28\x06";

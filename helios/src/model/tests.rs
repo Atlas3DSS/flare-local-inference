@@ -37,7 +37,7 @@ pub(super) fn config() -> ModelConfig {
 
 #[test]
 fn admission_histogram_seed_and_partial_page_uploads_preserve_native_semantics() {
-    let config = config();
+    let config = steering_config();
     let mut scheduler = RequestScheduler::new(
         config.identity,
         config.limits,
@@ -69,6 +69,7 @@ fn admission_histogram_seed_and_partial_page_uploads_preserve_native_semantics()
         max_new_tokens: 4,
         prompt: vec![7; 65],
         data: PromptData {
+            steering: Default::default(),
             positions: (0..65).map(|p| [p; 3]).collect(),
             vision_token_indices: vec![-1; 65],
             ..Default::default()
@@ -83,6 +84,7 @@ fn admission_histogram_seed_and_partial_page_uploads_preserve_native_semantics()
     crate::model::pack_inputs(&mut inputs, &config, &scheduler, &step, &admissions).unwrap();
     assert_state_bindings(&inputs, &scheduler, &step);
     let uploads = inputs.uploads();
+    assert_eq!(uploads.iter().filter(|u| u.buffer.starts_with("steering_")).count(), 3);
     let seed = uploads
         .iter()
         .find(|u| u.buffer == "admission_seed_bits")
@@ -134,6 +136,7 @@ fn admission_histogram_seed_and_partial_page_uploads_preserve_native_semantics()
     scheduler.commit(&step, Fence(2)).unwrap();
     crate::model::pack_inputs(&mut inputs, &config, &scheduler, &step, &admissions).unwrap();
     assert_state_bindings(&inputs, &scheduler, &step);
+    assert!(!inputs.uploads().iter().any(|u| u.buffer.starts_with("steering_")));
     assert_eq!(
         inputs
             .uploads()
@@ -163,6 +166,7 @@ fn admission_histogram_seed_and_partial_page_uploads_preserve_native_semantics()
     crate::model::pack_inputs(&mut inputs, &config, &scheduler, &step, &admissions).unwrap();
     assert_state_bindings(&inputs, &scheduler, &step);
     assert!(!inputs.uploads().iter().any(|u| u.buffer == "page_tables"));
+    assert!(!inputs.uploads().iter().any(|u| u.buffer.starts_with("steering_")));
     assert!(
         !inputs
             .uploads()
@@ -205,6 +209,7 @@ fn large_prefill_uploads_preserve_token_position_and_image_indices_without_tail_
         sampling: SamplingParameters::default(),
         max_new_tokens: 4,
         data: PromptData {
+            steering: Default::default(),
             positions: prompt.iter().map(|&token| [token as i64; 3]).collect(),
             vision_token_indices: prompt
                 .iter()
@@ -513,6 +518,7 @@ fn packing_follows_value_bindings_after_buffers_and_model_are_renamed() {
         max_new_tokens: 4,
         prompt: vec![7; 65],
         data: PromptData {
+            steering: Default::default(),
             positions: (0..65).map(|p| [p; 3]).collect(),
             ..Default::default()
         },
@@ -668,6 +674,7 @@ fn copy_staging_uses_physical_slots_stochastic_defaults_and_bonus_mask() {
         max_new_tokens: 16,
         prompt: vec![7; 65],
         data: PromptData {
+            steering: Default::default(),
             positions: (0..65).map(|p| [p; 3]).collect(),
             vision_token_indices: vec![-1; 65],
             ..Default::default()
@@ -867,6 +874,7 @@ fn mixed_native_uploads_pack_prompt_after_the_decode_extent_and_sample_only_elig
                 max_new_tokens: 16,
                 prompt,
                 data: PromptData {
+                    steering: Default::default(),
                     positions: (0..count).map(|p| [p as i64; 3]).collect(),
                     vision_token_indices: vec![-1; count],
                     ..Default::default()
@@ -1073,6 +1081,7 @@ fn state_transfer_and_resume_upload_fixture() {
             max_new_tokens: 2,
             prompt,
             data: PromptData {
+                steering: Default::default(),
                 positions: (0..64).map(|i| [i, i + 1, i + 2]).collect(),
                 vision_token_indices: vec![-1; 64],
                 ..Default::default()
@@ -1540,6 +1549,7 @@ fn prefill_compacts_execution_feature_indices_and_preserves_admission_metadata()
         max_new_tokens: 1,
         prompt: vec![7; 4],
         data: PromptData {
+            steering: Default::default(),
             positions: vec![[0; 3]; 4],
             vision_token_indices: canonical.clone(),
             ..Default::default()
@@ -1585,4 +1595,92 @@ fn prefill_compacts_execution_feature_indices_and_preserves_admission_metadata()
             .vision_token_indices,
         canonical
     );
+}
+
+fn steering_config() -> ModelConfig {
+    let mut config = config();
+    config.contract.steering = Some(SteeringContract { max_sites: 2, sites: vec![
+        SteeringSite { name: "layers.0.mlp_out".into(), width: 2 },
+        SteeringSite { name: "layers.0.residual".into(), width: 2 },
+        SteeringSite { name: "layers.0.mlp_input".into(), width: 3 },
+    ] });
+    for graph in &mut config.contract.graphs {
+        for (buffer, source, bytes) in [
+            ("steering_addends", ValueSource::SteeringAddends, 28),
+            ("steering_phases", ValueSource::SteeringPhases, 12),
+            ("steering_prompt_tokens", ValueSource::SteeringPromptTokens, 8),
+        ] {
+            if matches!(graph.kind, GraphOperation::Init | GraphOperation::Restore) {
+                graph.inputs.push(ValueBinding { buffer: buffer.into(), source,
+                    indexing: InputIndexing::RequestRow, value_offset: 0, padding: 0, tensor: String::new() });
+            }
+            if matches!(graph.kind, GraphOperation::Prefill | GraphOperation::Decode | GraphOperation::Speculative) {
+                graph.state.push(StateAccess { view: StateView { buffer: buffer.into(), offset: 0,
+                    stride: bytes, nbytes: bytes }, access: StateAccessKind::Read });
+            }
+        }
+    }
+    config
+}
+
+#[test]
+fn steering_admission_packs_physical_slots_and_clears_neutral_rows() {
+    let config = steering_config();
+    let manifest = manifest(&config);
+    let mut inputs = Inputs::new(&config, &manifest).unwrap();
+    let mut scheduler = RequestScheduler::new(config.identity, config.limits, scheduler_capabilities(&config)).unwrap();
+    scheduler.measured_graph_durations(&manifest.graphs).unwrap();
+    let mut admissions: [Option<Admission>; 4] = std::array::from_fn(|_| None);
+    for _ in 0..2 {
+        let handle = scheduler.admit(RequestSpec { message_boundaries: vec![], prompt: vec![7; 65],
+            conditioning: vec![], max_new_tokens: 4, grammar_constrained: false,
+            host_stops: false, growable_output: false }).unwrap();
+        let steering = if handle.slot == 0 {
+            steering::SteeringData { vectors: vec![(1, vec![1.25, -2.5]), (2, vec![-0.5, 0.0, 8.0])], phase: 2,
+                prompt_tokens: 65, identity: Some([8; 32]) }
+        } else { Default::default() };
+        admissions[handle.slot as usize] = Some(Admission { handle, sampling: Default::default(),
+            max_new_tokens: 4, prompt: vec![7; 65], data: PromptData { steering,
+                positions: (0..65).map(|p| [p; 3]).collect(), vision_token_indices: vec![-1; 65],
+                ..Default::default() }, grammar_mask: None, ignore_eos: false });
+    }
+    let plan = scheduler.plan().unwrap();
+    scheduler.commit(&plan, Fence(1)).unwrap();
+    let mut step = (*plan).clone();
+    step.lanes.reverse();
+    pack_inputs(&mut inputs, &config, &scheduler, &step, &admissions).unwrap();
+    for upload in inputs.uploads().iter().filter(|u| u.buffer == "steering_addends") {
+        let values: Vec<_> = upload.bytes.chunks_exact(4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect();
+        assert_eq!(values, if upload.offset == 0 { vec![0.0, 0.0, 1.25, -2.5, -0.5, 0.0, 8.0] } else { vec![0.0; 7] });
+    }
+    assert_eq!(inputs.uploads().iter().find(|u| u.buffer == "steering_phases" && u.offset == 0).unwrap().bytes,
+               &[0, 0, 0, 0, 2, 0, 0, 0, 2, 0, 0, 0]);
+    admissions[0].as_mut().unwrap().data.steering = Default::default();
+    pack_inputs(&mut inputs, &config, &scheduler, &step, &admissions).unwrap();
+    assert!(inputs.uploads().iter().filter(|u| u.buffer.starts_with("steering_")).all(|u| u.bytes.iter().all(|b| *b == 0)));
+}
+
+#[test]
+fn steering_contract_rejects_missing_forward_reads_or_admission_inputs() {
+    let mut config = steering_config();
+    let manifest = manifest(&config);
+    assert!(Inputs::new(&config, &manifest).is_ok());
+    config.contract.graphs.iter_mut().find(|g| g.kind == GraphOperation::Decode).unwrap()
+        .state.retain(|a| a.view.buffer != "steering_addends");
+    assert!(Inputs::new(&config, &manifest).is_err());
+    let mut config = steering_config();
+    config.contract.graphs.iter_mut().find(|g| g.kind == GraphOperation::Restore).unwrap()
+        .inputs.retain(|b| b.source != ValueSource::SteeringPhases);
+    assert!(Inputs::new(&config, &manifest).is_err());
+}
+
+#[cfg(any(feature = "frontend", feature = "runtime-package"))]
+#[test]
+fn old_contract_without_steering_remains_loadable() {
+    let mut config = config();
+    let mut old = serde_json::to_value(&config.contract).unwrap();
+    old.as_object_mut().unwrap().remove("steering");
+    config.contract = serde_json::from_value(old).unwrap();
+    assert!(config.contract.steering.is_none());
+    assert!(Inputs::new(&config, &manifest(&config)).is_ok());
 }

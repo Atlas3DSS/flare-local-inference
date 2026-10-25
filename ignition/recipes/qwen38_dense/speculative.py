@@ -158,8 +158,9 @@ class DenseMaintenance(PreparedMaintenance):
 
 class SpeculativePreparation:
     def __init__(self, weights, mtp_weights, pool, requests, inputs, scratch, *, width,
-                 session, workspace, completion, frame, sequence):
+                 session, workspace, completion, frame, sequence, steering=None):
         self.weights, self.mtp_weights, self.pool = weights, mtp_weights, pool
+        self.steering = steering
         self.requests, self.inputs, self.scratch = requests, inputs, scratch
         self.width, self.session, self.workspace = width, session, workspace
         self.completion, self.frame, self.sequence = completion, frame, sequence
@@ -258,7 +259,8 @@ class PreparedRound:
         self.decoder = PreparedDecoder(o.weights, o.scratch.rows(b * w, b * w), self.metadata,
             o.pool, mode="decode", delta=self.delta, vocabulary_runtime=None, coordinator=None,
             session=o.session, name=name + ".target", workspace=o.workspace, row_invariant=True,
-            replay=self.replay_operands)
+            replay=self.replay_operands,
+            steering=None if o.steering is None else o.steering.bind(o.inputs, o.requests, self.metadata))
         self.before = torch.zeros(b, dtype=torch.int64, device=device)
         self.active = torch.zeros(b, dtype=torch.bool, device=device)
         self.previous = torch.zeros((b, o.weights.config.hidden), dtype=torch.float32, device=device)

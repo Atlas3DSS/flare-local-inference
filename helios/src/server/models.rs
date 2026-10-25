@@ -69,6 +69,14 @@ impl ModelCatalog {
                 "is_blocking": false,
             }],
             "flare": {
+                "prepared_identity": model.identity.iter().map(|byte| format!("{byte:02x}")).collect::<String>(),
+                "steering": model.contract.steering.as_ref().map(|steering| json!({
+                    "protocol": "additive-bf16-sites-v1",
+                    "max_sites": steering.max_sites,
+                    "sites": steering.sites,
+                    "phases": ["all", "prefill", "decode"],
+                    "phase_boundary": "original_prompt_token_count",
+                })),
                 "vocab_size": model.contract.vocabulary,
                 "max_top_logprobs": model.max_top_logprobs,
                 "max_concurrency": model.limits.max_active,
@@ -179,6 +187,16 @@ mod tests {
     fn metadata_reports_effective_limits_and_prepared_modalities() {
         let mut model = config();
         let text = ModelCatalog::new(&model, &[]).card;
+        assert_eq!(text["flare"]["prepared_identity"], "00".repeat(32));
+        assert!(text["flare"]["steering"].is_null());
+        model.contract.steering = Some(crate::model::contract::SteeringContract { max_sites: 1,
+            sites: vec![crate::model::contract::SteeringSite { name: "layers.0.mlp_out".into(), width: 4 }] });
+        let steering = ModelCatalog::new(&model, &[]).card;
+        assert_eq!(steering["flare"]["steering"]["protocol"], "additive-bf16-sites-v1");
+        assert_eq!(steering["flare"]["steering"]["max_sites"], 1);
+        assert_eq!(steering["flare"]["steering"]["sites"], json!([{"name":"layers.0.mlp_out","width":4}]));
+        assert_eq!(steering["flare"]["steering"]["phase_boundary"], "original_prompt_token_count");
+        model.contract.steering = None;
         assert_eq!(text["max_model_len"], 8192);
         assert_eq!(text["flare"]["max_concurrency"], 3);
         assert_eq!(text["flare"]["prefill_chunk_size"], 512);

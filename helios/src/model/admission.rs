@@ -63,12 +63,14 @@ pub struct Admission {
 impl Admission {
     pub fn validate(&self, config: &ModelConfig) -> Result<()> {
         self.sampling.validate()?;
+        self.data.steering.validate(config.contract.steering.as_ref())?;
         if self.handle.slot as usize >= config.limits.max_active
             || self.handle.generation == 0
             || self.handle.generation > i64::MAX as u64
             || self.sampling.top_k > config.contract.vocabulary as i32
             || self.max_new_tokens == 0
             || self.max_new_tokens > i32::MAX as u32
+            || self.data.steering.prompt_tokens > self.prompt.len()
             || self.prompt.is_empty()
             || self
                 .prompt
@@ -121,6 +123,13 @@ impl Admission {
 #[cfg(feature = "server")]
 pub fn validate_prompt(config: &ModelConfig, prompt: &crate::server::Prompt) -> Result<()> {
     prompt.sampling.validate()?;
+    prompt.data.steering.validate(config.contract.steering.as_ref())?;
+    let steering_events = if let Some(identity) = prompt.data.steering.identity {
+        if prompt.conditioning.first() != Some(&crate::cache::ConditioningEvent { position: 0, identity }) {
+            return Err("steering request is missing its cache conditioning identity".into());
+        }
+        1
+    } else { 0 };
     if prompt
         .tokens
         .len()
@@ -137,7 +146,8 @@ pub fn validate_prompt(config: &ModelConfig, prompt: &crate::server::Prompt) -> 
             ),
         ));
     }
-    if prompt.tokens.is_empty()
+    if prompt.data.steering.prompt_tokens > prompt.tokens.len()
+        || prompt.tokens.is_empty()
         || prompt.message_boundaries.first() == Some(&0)
         || prompt.message_boundaries.last().is_some_and(|boundary| *boundary >= prompt.tokens.len())
         || prompt.message_boundaries.windows(2).any(|pair| pair[0] >= pair[1])
@@ -149,7 +159,7 @@ pub fn validate_prompt(config: &ModelConfig, prompt: &crate::server::Prompt) -> 
         || prompt.max_new_tokens == 0
         || prompt.max_new_tokens > i32::MAX as u32
         || (!config.contract.vision.enabled()
-            && (!prompt.conditioned_inputs.is_empty() || !prompt.conditioning.is_empty()))
+            && (!prompt.conditioned_inputs.is_empty() || prompt.conditioning.len() != steering_events))
     {
         return Err("prompt, output limit, or inputs violate the prepared model contract".into());
     }

@@ -51,6 +51,7 @@ contract_enum!(ValueSource {
     GrammarEnabled = 30, CopyTokenIds = 31, CopyTokenCount = 32,
     CopyConsumedTokens = 33, CopyGeneration = 34, CopyGrammarMask = 35,
     CopyGrammarCount = 36, ImageTensor = 37, ImageFeatureSlot = 38,
+    SteeringAddends = 39, SteeringPhases = 40, SteeringPromptTokens = 41,
 });
 contract_enum!(InputIndexing { Scalar = 1, SubmissionRow = 2, RequestRow = 3, PackedToken = 4, ActiveRow = 5 });
 contract_enum!(StateAccessKind { Read = 1, Write = 2, ReadWrite = 3 });
@@ -97,6 +98,41 @@ pub struct PreparedContract {
     pub cache: CacheContract,
     pub graphs: Vec<GraphContract>,
     pub frontend: FrontendContract,
+    #[cfg_attr(any(feature = "frontend", feature = "runtime-package"), serde(default))]
+    pub steering: Option<SteeringContract>,
+}
+
+#[derive(Clone, Debug)]
+#[cfg_attr(any(feature = "frontend", feature = "runtime-package"), derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(any(feature = "frontend", feature = "runtime-package"), serde(deny_unknown_fields))]
+pub struct SteeringSite {
+    pub name: String,
+    pub width: usize,
+}
+
+#[derive(Clone, Debug)]
+#[cfg_attr(any(feature = "frontend", feature = "runtime-package"), derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(any(feature = "frontend", feature = "runtime-package"), serde(deny_unknown_fields))]
+pub struct SteeringContract {
+    pub sites: Vec<SteeringSite>,
+    pub max_sites: usize,
+}
+
+impl SteeringContract {
+    pub fn width(&self) -> usize {
+        self.sites.iter().map(|s| s.width).sum()
+    }
+
+    fn validate(&self) -> Result<()> {
+        let mut names = std::collections::HashSet::new();
+        if self.max_sites == 0 || self.max_sites > self.sites.len() || self.sites.len() > 256
+            || self.sites.iter().any(|s| s.name.is_empty() || s.name.len() > 128
+                || !names.insert(&s.name) || s.width == 0 || s.width > 65536)
+        {
+            return Err("invalid prepared activation site catalog".into());
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -339,6 +375,9 @@ impl PreparedContract {
     }
 
     pub fn validate(&self, manifest: &ExecutionManifest) -> Result<()> {
+        if let Some(steering) = &self.steering {
+            steering.validate()?;
+        }
         if self.version != 1
             || self.vocabulary == 0
             || self.input_vocabulary < self.vocabulary
@@ -403,6 +442,37 @@ impl PreparedContract {
         }
         for descriptor in &manifest.graphs {
             let graph = self.graph(&descriptor.name)?;
+            let steering_inputs = [ValueSource::SteeringAddends, ValueSource::SteeringPhases,
+                                   ValueSource::SteeringPromptTokens];
+            for source in steering_inputs {
+                let count = graph.inputs.iter().filter(|b| b.source == source).count();
+                let admission = matches!(descriptor.kind, GraphKind::Init | GraphKind::Restore);
+                if count != usize::from(self.steering.is_some() && admission) {
+                    return Err("steering inputs require one binding per admission and restore graph".into());
+                }
+                if let Some(catalog) = &self.steering {
+                    let producer = self.graphs.iter().flat_map(|g| &g.inputs)
+                        .find(|b| b.source == source).ok_or("steering lacks an admission producer")?;
+                    if graph.inputs.iter().any(|b| b.source == source && b.buffer != producer.buffer) {
+                        return Err("steering admission graphs must share persistent storage".into());
+                    }
+                    if matches!(descriptor.kind, GraphKind::Prefill | GraphKind::Decode
+                        | GraphKind::Speculative | GraphKind::Mixed | GraphKind::Verification)
+                    {
+                        let bytes = match source {
+                            ValueSource::SteeringAddends => 4 * catalog.width(),
+                            ValueSource::SteeringPhases => 4 * catalog.sites.len(),
+                            _ => 8,
+                        };
+                        if !graph.state.iter().any(|a| a.access != StateAccessKind::Write
+                            && a.view.buffer == producer.buffer && a.view.offset == 0
+                            && a.view.stride == bytes && a.view.nbytes == bytes)
+                        {
+                            return Err("model forward must read the declared steering request storage".into());
+                        }
+                    }
+                }
+            }
             if graph.kind != descriptor.kind.try_into()? {
                 return Err("semantic graph operation differs from its execution catalog".into());
             }

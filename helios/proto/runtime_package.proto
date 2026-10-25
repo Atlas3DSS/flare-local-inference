@@ -113,6 +113,15 @@ message ModelContract {
   CacheContract cache = 5;
   repeated GraphContract graphs = 6;
   FrontendContract frontend = 7;
+  SteeringContract steering = 8;
+}
+message SteeringSite {
+  string name = 1;
+  uint64 width = 2;
+}
+message SteeringContract {
+  repeated SteeringSite sites = 1;
+  uint64 max_sites = 2;
 }
 message VisionCapacity {
   // Zero inherits prepared execution concurrency when max_images is nonzero.
@@ -185,6 +194,9 @@ enum ValueSource {
   COPY_GRAMMAR_COUNT = 36;
   IMAGE_TENSOR = 37;
   IMAGE_FEATURE_SLOT = 38;
+  STEERING_ADDENDS = 39;
+  STEERING_PHASES = 40;
+  STEERING_PROMPT_TOKENS = 41;
 }
 enum InputIndexing {
   INDEXING_UNSPECIFIED = 0;

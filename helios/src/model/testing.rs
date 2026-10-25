@@ -205,6 +205,7 @@ pub fn metadata() -> PreparedContract {
         }
     }
     PreparedContract {
+        steering: None,
         version: 1,
         vocabulary: 248320,
         input_vocabulary: 248320,
@@ -241,6 +242,8 @@ pub fn manifest(config: &ModelConfig) -> ExecutionManifest {
             use ValueSource::*;
             let width = match b.source {
                 SamplingParameters => 6,
+                SteeringAddends => config.contract.steering.as_ref().unwrap().width(),
+                SteeringPhases => config.contract.steering.as_ref().unwrap().sites.len(),
                 EosTokenIds | LiveStateRows => 8,
                 PromptHistogram => config.contract.vocabulary,
                 GrammarMask => config.contract.vocabulary.div_ceil(32),
@@ -268,7 +271,8 @@ pub fn manifest(config: &ModelConfig) -> ExecutionManifest {
                 }
             };
             let dtype = match b.source {
-                SamplingParameters => Dtype::Float32,
+                SamplingParameters | SteeringAddends => Dtype::Float32,
+                SteeringPhases => Dtype::Int32,
                 RequestSlot if b.buffer == "row_slot_ids" || b.buffer == "admission_slots" => {
                     Dtype::Int32
                 }

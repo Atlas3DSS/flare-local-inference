@@ -160,6 +160,7 @@ impl Fixture {
             tokens,
             limit,
             PromptData {
+                steering: Default::default(),
                 positions: (0..length).map(|n| [n as i64; 3]).collect(),
                 vision_token_indices: vec![-1; length],
                 ..Default::default()
@@ -1668,6 +1669,7 @@ fn a_greedy_readmission_that_re_derives_another_token_prefills_the_delivered_one
     exercise_text_preemption(
         metadata,
         |n| PromptData {
+            steering: Default::default(),
             positions: (0..n).map(|p| [p as i64; 3]).collect(),
             vision_token_indices: vec![-1; n],
             ..Default::default()
@@ -1688,6 +1690,7 @@ fn text_preemption_restores_or_recomputes_every_attention_contract() {
                 exercise_text_preemption(
                     metadata.clone(),
                     |n| PromptData {
+                        steering: Default::default(),
                         positions: (0..n).map(|p| [p as i64; 3]).collect(),
                         vision_token_indices: vec![-1; n],
                         ..Default::default()

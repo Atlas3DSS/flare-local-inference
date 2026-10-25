@@ -84,6 +84,7 @@ pub fn prepare_image_inputs(
                 tokens: rendered.token_ids.clone(),
                 token_expansions: vec![],
                 data: PromptData {
+                    steering: Default::default(),
                     positions: if config.contract.frontend.position_dimensions == 3 {
                         (0..rendered.token_ids.len())
                             .map(|p| [p as i64; 3])

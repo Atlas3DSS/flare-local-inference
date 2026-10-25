@@ -374,6 +374,9 @@ fn tool(v: &Value, protocol: Protocol, namespace: Option<&str>) -> Result<Tool> 
 }
 fn options(body: &Value, protocol: Protocol) -> Result<Options> {
     let mut options = Options::default();
+    options.steering = body.get("steering").filter(|v| !v.is_null()).map(|v|
+        serde_json::from_value(v.clone()).map_err(|e| crate::Error::from(format!("invalid steering: {e}"))))
+        .transpose()?;
     options.sampling = serde_json::from_value(body.clone())
         .map_err(|e| format!("invalid sampling options: {e}"))?;
     let limit = match protocol {

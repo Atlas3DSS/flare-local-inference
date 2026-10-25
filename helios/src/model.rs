@@ -3,6 +3,7 @@
 pub mod admission;
 pub mod catalog;
 pub mod contract;
+pub mod steering;
 pub(crate) mod inputs;
 mod packing;
 #[cfg(feature = "server")]
@@ -289,6 +290,7 @@ impl ModelConfig {
 
 #[derive(Clone, Debug, Default)]
 pub struct PromptData {
+    pub steering: steering::SteeringData,
     pub positions: Vec<[i64; 3]>,
     pub vision_token_indices: Vec<i32>,
     pub spans: Vec<std::ops::Range<usize>>,

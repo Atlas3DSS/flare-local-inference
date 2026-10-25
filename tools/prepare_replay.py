@@ -67,6 +67,10 @@ def build_parser():
     parser.add_argument('--context', type=int, default=32768)
     parser.add_argument('--concurrency', type=int, default=4)
     parser.add_argument('--chunk', type=int, default=128)
+    parser.add_argument('--capture-activations', action='store_true',
+        help='retain per-layer prefill observations for diagnostics; cannot export or measure')
+    parser.add_argument('--steering-max-sites', type=int, default=0,
+        help='prepare additive mlp_out/residual inputs with this per-request site limit; zero disables')
     parser.add_argument('--compile-workers', type=int, required=True)
     parser.add_argument('--compiler-context-mib', type=int, default=400,
         help='measured SM70 metadata-only forward compiler context budget')
@@ -109,7 +113,7 @@ def main():
     except ValueError as error: parser.error(str(error))
     if args.legacy_dense and args.output:
         parser.error('legacy dense A/B is diagnostic and cannot export')
-    if (args.diagnostic_uncompiled or args.diagnose_rows or args.diagnose_long) and (
+    if (args.diagnostic_uncompiled or args.diagnose_rows or args.diagnose_long or args.capture_activations) and (
             args.output or args.measure or args.measure_components):
         parser.error('arithmetic diagnostic modes cannot export or produce performance measurements')
     if args.diagnose_long_widths and not args.diagnose_long:
@@ -156,7 +160,8 @@ def main():
         config = PreparationConfig(context=args.context, max_active=args.concurrency,
             prefill_chunk_size=args.chunk, compile_workers=args.compile_workers,
             snapshot_budget_bytes=172 << 20, headroom_bytes=lease_headroom,
-            preparation_pages=args.pages,
+            preparation_pages=args.pages, steering_max_sites=args.steering_max_sites,
+            capture_activations=args.capture_activations,
             compile_decoder=not args.diagnostic_uncompiled,
             mtp=True, speculative_widths=tuple(range(1, args.depth + 2)),
             retain_graphs=True, kernel_cache=args.kernel_cache, cutlass_include=args.cutlass_include)
@@ -167,6 +172,8 @@ def main():
                 prepared = prepare(args.checkpoint, config, progress=progress, package_storage=storage)
         from ignition.components.sm70_projection_tc import ADMISSIONS
         result.update(status='prepared', memory=prepared.memory_report, projection_admissions=ADMISSIONS,
+            prepared_identity=prepared.server_config['identity'],
+            steering=prepared.server_config['model_contract'].get('steering'),
             preparation_free_bytes=torch.cuda.mem_get_info()[0], preparation_total_bytes=torch.cuda.mem_get_info()[1],
             default_draft='checkpoint-selected; no checkpoint overlay applied by this harness')
         with prepared:

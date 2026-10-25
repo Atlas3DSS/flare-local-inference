@@ -114,6 +114,7 @@ pub struct LogprobOptions {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Options {
+    pub steering: Option<crate::model::steering::SteeringRequest>,
     pub sampling: Sampling,
     pub logprobs: Option<LogprobOptions>,
     pub effort: Option<Effort>,

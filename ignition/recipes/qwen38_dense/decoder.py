@@ -69,13 +69,16 @@ class RecurrentAttention(torch.nn.Module):
 class SM70DecoderLayer(torch.nn.Module):
     """Canonical Qwen layer arithmetic with BF16 values stored as FP32."""
 
-    def __init__(self, layer, norms=None, swiglu=False):
+    def __init__(self, layer, norms=None, swiglu=False, steering=None, layer_index=0, capture=None):
         super().__init__()
+        if swiglu and (steering is not None or capture is not None):
+            raise ValueError("pre-down steering and capture require the explicit SwiGLU product")
         self.layer = layer
         self.norms = norms
         # astra-21 (SM70 prefill graphs): the down projection reads the gate|up output and applies the BF16 SwiGLU in
         # its producer (input_transform="swiglu_bf16"), bit-identical to the pointwise path below.
         self.swiglu = swiglu
+        self.steering, self.layer_index, self.capture = steering, layer_index, capture
 
     def forward(self, hidden_states, position_embeddings):
         layer = self.layer
@@ -93,8 +96,11 @@ class SM70DecoderLayer(torch.nn.Module):
         norm = layer.post_attention_layernorm
         hidden_states = (self.norms[1](hidden_states) if self.norms is not None
                          else rms_norm(hidden_states, norm.weight, norm.eps))
+        if self.capture is not None:
+            self.capture.record_pre_mlp(hidden_states, self.layer_index)
         if self.swiglu:
-            return round_bf16(residual + round_bf16(layer.mlp.down_proj(layer.mlp.gate_up_proj(hidden_states))))
+            output = round_bf16(layer.mlp.down_proj(layer.mlp.gate_up_proj(hidden_states)))
+            return self.finish(residual, output)
         if hasattr(layer.mlp, 'gate_up_proj'):
             gate, up = layer.mlp.gate_up_proj(hidden_states).chunk(2, dim=-1)
             gate, up = round_bf16(gate), round_bf16(up)
@@ -103,8 +109,22 @@ class SM70DecoderLayer(torch.nn.Module):
             up = round_bf16(layer.mlp.up_proj(hidden_states))
         activated = round_bf16(layer.mlp.act_fn(gate))
         product = round_bf16(activated * up)
+        if self.steering is not None:
+            product = self.steering(product, 3 * self.layer_index + 2)
+        if self.capture is not None:
+            self.capture.record_mlp_input(product, self.layer_index)
         hidden_states = round_bf16(layer.mlp.down_proj(product))
-        return round_bf16(residual + hidden_states)
+        return self.finish(residual, hidden_states)
+
+    def finish(self, residual, output):
+        if self.steering is not None:
+            output = self.steering(output, 3 * self.layer_index)
+        hidden = round_bf16(residual + output)
+        if self.steering is not None:
+            hidden = self.steering(hidden, 3 * self.layer_index + 1)
+        if self.capture is not None:
+            self.capture.record_residual(hidden, self.layer_index)
+        return hidden
 
 
 class FullAttention(torch.nn.Module):
@@ -239,7 +259,7 @@ class PreparedDecoder:
 
     def __init__(self, weights, scratch, metadata, pool, *, mode, vocabulary_runtime,
                  coordinator, session, name, workspace, delta=None, feedback_output=None, row_invariant=False,
-                 prefill_errors=None, replay=None):
+                 prefill_errors=None, replay=None, steering=None, activation_capture=None):
         self.weights, self.scratch, self.metadata, self.pool = weights, scratch, metadata, pool
         if replay is not None and (delta is None or mode != "decode"):
             raise ValueError("replay-commit operand storage belongs to an SM70 verification decoder with external delta metadata")
@@ -276,6 +296,9 @@ class PreparedDecoder:
         self.external_delta = delta is not None
         self.feedback_output = feedback_output
         config, source = weights.config, scratch.activations
+        self.activation_capture = activation_capture
+        if activation_capture is not None and (not self.sm70 or mode != "prefill"):
+            raise ValueError("activation capture requires an SM70 prefill decoder")
         attention_buffers = {}
         fused_projections = "layers.0.mlp.gate_up_proj" in weights.projections
         # SM70 prefill graphs: every quantized projection reads the device live-row count; padded rows are +0.0.
@@ -291,7 +314,9 @@ class PreparedDecoder:
                 dtype=source.dtype, device=source.device)
         # astra-21: SM70 prefill graphs fuse the SwiGLU into the down projection's producer (sm70_prefill.cu
         # atlas_produce_swiglu); its source is the gate|up parent output and no FP32 product buffer exists.
-        swiglu = self.sm70 and mode == "prefill" and fused_projections
+        # A prepared neuron site must remain visible before down-projection input quantization.
+        swiglu = (self.sm70 and mode == "prefill" and fused_projections
+                  and steering is None and activation_capture is None)
         mlp_input = None if swiglu else torch.zeros_like(mlp_buffers["gate_proj"])
         norm_buffers = [torch.zeros_like(source) for _ in range(2)] if self.sm70 and row_invariant else None
         self.layers, ordinal = [], 0
@@ -328,7 +353,8 @@ class PreparedDecoder:
                     session=session, name=name + "." + prefix + field) for norm, output, field in zip(
                         (layer.input_layernorm, layer.post_attention_layernorm), norm_buffers,
                         ("input_norm", "post_attention_norm"), strict=True))
-            self.layers.append(SM70DecoderLayer(layer, norms, swiglu=swiglu) if self.sm70 else layer)
+            self.layers.append(SM70DecoderLayer(layer, norms, swiglu=swiglu, steering=steering,
+                                               layer_index=index, capture=self.activation_capture) if self.sm70 else layer)
         rotary = config.text["rope_parameters"]
         dim = int(config.text["head_dim"] * rotary["partial_rotary_factor"])
         self.inverse_frequency = 1.0 / (rotary["rope_theta"] ** (
@@ -380,6 +406,8 @@ class PreparedDecoder:
         if self.decode_agents is not None:
             self.decode_agents.pack(m.lengths, m.starts, m.query_start_loc, m.page_table)
         hidden = self.embedding()
+        if self.activation_capture is not None:
+            self.activation_capture.begin(m)
         for layer in self.layers:
             hidden = layer(hidden, position_embeddings=position_embeddings)
         if self.prefill_status is not None:

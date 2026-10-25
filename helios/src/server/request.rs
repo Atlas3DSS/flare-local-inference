@@ -262,10 +262,16 @@ pub(super) fn prepare_inference_cached(
     let crate::model::PreparedInput {
         tokens,
         token_expansions,
-        data,
-        conditioning,
+        mut data,
+        mut conditioning,
         conditioned_inputs,
     } = crate::model::prepare_image_inputs(config, frontend, processor, &rendered, images)?;
+    if let Some(steering) = &opts.steering {
+        data.steering = steering.prepare(config.contract.steering.as_ref(), tokens.len())?;
+        if let Some(identity) = data.steering.identity {
+            conditioning.insert(0, crate::cache::ConditioningEvent { position: 0, identity });
+        }
+    }
     for boundary in &mut message_boundaries {
         let original = *boundary;
         *boundary += token_expansions.iter()

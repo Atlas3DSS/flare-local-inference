@@ -101,7 +101,8 @@ impl Inputs {
                             LiveRows | PrefillRow => binding.indexing == Scalar,
                             ImageFeatureSlot => binding.indexing == Scalar && elements == 1
                                 && matches!(graph.kind, GraphKind::Vision | GraphKind::Prefill | GraphKind::Mixed),
-                            PageTable | LiveStateRows => binding.indexing == RequestRow,
+                            PageTable | LiveStateRows | SteeringAddends | SteeringPhases | SteeringPromptTokens
+                                => binding.indexing == RequestRow,
                             PromptToken
                             | PromptAndPendingToken
                             | PromptPosition
@@ -125,7 +126,8 @@ impl Inputs {
                         {
                             return Err("row input cannot cover the prepared request slots".into());
                         }
-                        if matches!(binding.source, SamplingParameters | ImageTensor | PageTable)
+                        if matches!(binding.source, SamplingParameters | ImageTensor | PageTable
+                            | SteeringAddends | SteeringPhases | SteeringPromptTokens)
                             && binding.value_offset != 0
                         {
                             return Err("value offset requires an integer value source".into());
@@ -154,6 +156,10 @@ impl Inputs {
                         }
                         let expected_width = match binding.source {
                             ValueSource::SamplingParameters => 6,
+                            ValueSource::SteeringAddends => config.contract.steering.as_ref()
+                                .ok_or("steering input has no site catalog")?.width(),
+                            ValueSource::SteeringPhases => config.contract.steering.as_ref()
+                                .ok_or("steering input has no site catalog")?.sites.len(),
                             ValueSource::EosTokenIds | ValueSource::LiveStateRows => 8,
                             ValueSource::PromptHistogram => config.contract.vocabulary,
                             ValueSource::GrammarMask => config.contract.vocabulary.div_ceil(32),
@@ -169,17 +175,18 @@ impl Inputs {
                         };
                         if width == 0
                             || width != expected_width
-                            || (binding.source == ValueSource::PageTable
+                            || (matches!(binding.source, ValueSource::PageTable | ValueSource::SteeringPhases)
                                 && buffer.dtype != Dtype::Int32)
                             || (matches!(
                                 binding.source,
                                 ValueSource::SamplingSeed
                                     | ValueSource::RequestGeneration
                                     | ValueSource::CopyGeneration
+                                    | ValueSource::SteeringPromptTokens
                             ) && buffer.dtype != Dtype::Int64)
-                            || (binding.source == ValueSource::SamplingParameters
+                            || (matches!(binding.source, ValueSource::SamplingParameters | ValueSource::SteeringAddends)
                                 && buffer.dtype != Dtype::Float32)
-                            || (binding.source != ValueSource::SamplingParameters
+                            || (!matches!(binding.source, ValueSource::SamplingParameters | ValueSource::SteeringAddends)
                                 && binding.source != ValueSource::ImageTensor
                                 && !matches!(buffer.dtype, Dtype::Int32 | Dtype::Int64))
                             || (binding.indexing != InputIndexing::Scalar
@@ -214,7 +221,8 @@ impl Inputs {
         let maximum = graphs
             .iter()
             .flat_map(|g| &g.inputs)
-            .filter(|b| b.binding.source != ValueSource::ImageTensor)
+            // These sources write bytes directly and never use integer staging scratch.
+            .filter(|b| !matches!(b.binding.source, ValueSource::ImageTensor | ValueSource::SteeringAddends))
             .map(|b| b.elements)
             .max()
             .unwrap_or(0);
@@ -408,6 +416,16 @@ impl Inputs {
                     InputIndexing::Scalar => unreachable!(),
                 };
                 token_offset += lane.tokens;
+                if binding.source == ValueSource::SteeringAddends {
+                    let catalog = frame.config.contract.steering.as_ref().ok_or("missing steering catalog")?;
+                    let vectors = &admission.data.steering.vectors;
+                    self.staging.put(&binding.buffer, destination * 4,
+                        catalog.sites.iter().enumerate().flat_map(|(index, site)| {
+                            let vector = vectors.iter().find(|(id, _)| *id == index).map(|(_, v)| v);
+                            (0..site.width).flat_map(move |column| vector.map_or(0.0, |v| v[column]).to_le_bytes())
+                        }));
+                    continue;
+                }
                 if binding.source == ValueSource::SamplingParameters {
                     self.staging.put(
                         &binding.buffer,
@@ -463,6 +481,13 @@ impl Inputs {
                 use ValueSource::*;
                 match binding.source {
                     Constant => values.resize(input.width, 0),
+                    SteeringPhases => {
+                        values.resize(input.width, 0);
+                        for (site, _) in &admission.data.steering.vectors {
+                            values[*site] = i64::from(admission.data.steering.phase);
+                        }
+                    }
+                    SteeringPromptTokens => values.push(admission.data.steering.prompt_tokens as i64),
                     RequestSlot => values.push(slot as i64),
                     RequestGeneration => values.push(lane.request.generation as i64),
                     QueryLength => values.push(lane.tokens as i64),

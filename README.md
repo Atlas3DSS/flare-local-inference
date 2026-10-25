@@ -5,8 +5,16 @@ This lets you run the Qwen3.8-27B model on one 32 GB Tesla V100: about
 once, with contexts of up to 32,768 tokens. It is meant for people who have
 V100 cards and want a current 27B coding model running locally. It is an
 Apache-2.0 fork of [NVIDIA Flare](https://github.com/NVIDIA/flare-local-inference)
-that adds a V100 path; everything else is upstream, whose README is kept as
+that adds a V100 path and native request steering with offline activation observations. The upstream README is kept as
 [README-UPSTREAM.md](README-UPSTREAM.md).
+
+An experimental [native steering and activation-capture interface](STEERING.md)
+is also available for this checkpoint. It supports signed edits at the actual
+MLP neuron input, output-column comparisons, and residual directions, with
+request-local buffers and cache isolation. [Character Creation](https://github.com/Atlas3DSS/Character-Creation)
+provides the persona explorer, calibration, Big Five experiments and sweep tools.
+These controls are opt-in and require a newly prepared package; the performance
+measurements below describe the original unsteered release.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/sm70/img/comparison-dark.svg">
