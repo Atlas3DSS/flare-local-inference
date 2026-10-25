@@ -6,7 +6,7 @@ The current implementation targets the existing `qwen38_dense` SM70 recipe for `
 
 ## Status
 
-The implementation builds and its native CPU tests pass. The compiled/captured steering component has passed GPU checks on six V100s, including signed vectors, zero/off bit equality, phase boundaries and physical request-slot isolation. Whole-model calibration, production preparation gates, native serving and behavioral sweeps remain pending and require separate result artifacts. Do not treat a component test as proof of a useful persona, or assume the original throughput benchmarks include steering overhead.
+The implementation builds and its native CPU tests pass. The compiled/captured steering component has passed GPU checks on six V100s, including signed vectors, zero/off bit equality, phase boundaries and physical request-slot isolation. Character Creation completed 132 whole-model discovery captures on all six cards; its [calibration report](https://github.com/Atlas3DSS/Character-Creation/blob/main/reports/persona_calibration.json) records signed tests at one interior layer and zero checks across the catalog. A retained-graph worker passed prefill and ordinary-generation smoke checks. Production export gates, native serving/cache ownership, speculative execution and behavioral persona validation require separate results. Do not treat component or calibration checks as proof of a useful persona, or assume the original throughput benchmarks include steering overhead.
 
 ## Three distinct sites
 
