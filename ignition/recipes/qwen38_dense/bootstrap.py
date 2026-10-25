@@ -239,7 +239,7 @@ def prepare(snapshot, config, *, progress=None, package_storage):
                         prefill_errors=(requests, inputs.row_slot_ids) if mode == "prefill" else None,
                         steering=None if steering is None else steering.bind(inputs, requests, m),
                         activation_capture=activation_capture.rows(capacity)
-                            if activation_capture is not None and mode == "prefill" else None)
+                            if activation_capture is not None and (mode == "prefill" or (mode == "decode" and capacity == 1)) else None)
                     batch = PreparedBatch(inputs, requests, m, mode=mode, shard=weights.shard, pool=pool)
                     forward = PreparedGeneration(decoder, batch, completion, frame, sequence, runtime=None,
                         coordinator=coordinator, session=session, name=name + ".generation", workspace=arena)

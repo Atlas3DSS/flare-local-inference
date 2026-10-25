@@ -297,8 +297,8 @@ class PreparedDecoder:
         self.feedback_output = feedback_output
         config, source = weights.config, scratch.activations
         self.activation_capture = activation_capture
-        if activation_capture is not None and (not self.sm70 or mode != "prefill"):
-            raise ValueError("activation capture requires an SM70 prefill decoder")
+        if activation_capture is not None and (not self.sm70 or mode not in ("prefill", "decode")):
+            raise ValueError("activation capture requires an SM70 prefill or decode decoder")
         attention_buffers = {}
         fused_projections = "layers.0.mlp.gate_up_proj" in weights.projections
         # SM70 prefill graphs: every quantized projection reads the device live-row count; padded rows are +0.0.
@@ -345,7 +345,7 @@ class PreparedDecoder:
                 output = mlp_buffers[field]
                 setattr(layer.mlp, field, Projection(QuantizedProjection(inputs, weight, output,
                     activation_mode="auto", session=session, workspace=workspace, name=name + "." + prefix + field, row_invariant=row_invariant,
-                    live_count=live_count, input_transform=transform)))
+                    live_count=live_count, **({"input_transform": transform} if transform is not None else {}))))
             norms = None
             if norm_buffers is not None:
                 from ignition.components.sm70_norm import PreparedRMSNorm

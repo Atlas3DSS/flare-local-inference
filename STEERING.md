@@ -75,13 +75,23 @@ Programs remain immutable for a request. Their canonical hash participates in pr
 
 ## Offline observations
 
-`PreparationConfig(capture_activations=True, retain_graphs=True, ...)` exposes shared diagnostic buffers on ordinary prefill owners at `owner.decoder.activation_capture`:
+`PreparationConfig(capture_activations=True, retain_graphs=True, ...)` exposes shared diagnostic buffers on ordinary prefill and B1 decode owners at `owner.decoder.activation_capture`:
 
 - `residual_last`: final valid token’s output from each layer.
 - `pre_mlp_last`: final valid token’s normalized MLP input.
 - `mlp_input_last`: actual rounded SwiGLU product after any neuron edit and before down projection.
-- `residual_l2`: per-layer norms for the current prefill chunk.
+- `residual_l2`: per-layer norms for the current consumed-token chunk (or B1 decode token).
 - `positions`: valid absolute token positions, with padding marked `-1`.
+
+The selected-token extension also provides:
+
+- token_indices: fixed [layers, 32] int64 selection slots, staged between requests.
+- token_enabled: matching boolean mask; disabled and padded observations are zero.
+- token_values: [layers, chunk_tokens, 32] selected rounded SwiGLU values.
+
+Prefill and B1 decode views share selection and output storage. A sampled token has no activation until consumed by a later replay. The Character Creation diagnostic adapter bounds requests to 64 selected neurons overall and offers live polling plus saved playback; this does not change the production server's HTTP streaming contract. Its empirical lens reads raw final-prompt logits and compares full-vocabulary distributions before sampling filters. Static weight lenses and weight-path indexing live in the linked app repository.
+
+Requalify original calibration equality, neutral/zero traces, chunk/decode token alignment and endpoint identities when updating a deployment; old source hashes are not valid bindings for the new runtime.
 
 Read/copy these buffers after each replay and before the next one overwrites them. A generation with steering enabled observes the steered activations; collect calibration with all steering disabled. Diagnostic capture is not the serving package and cannot be combined with the harness’s export/measurement mode. The native serving loop contains no Python hooks or callbacks.
 
@@ -92,3 +102,5 @@ Read/copy these buffers after each replay and before the next one overwrites the
 - **Lyra (@_lyraaaa_):** primary methodological inspiration for fine-grained neuron interventions, signed relative-dose normalization, read/write distinctions and comparative rollouts. Reviewed [neuron-explorer](https://github.com/lyramakesmusic/neuron-explorer) revision `f79b2196e29aacbad89684938baac8d97b172fd1`. This is attribution, not a claim of collaboration or endorsement; Lyra’s code is not vendored.
 - **RhizoNymph/vLLM:** [request steering design](https://github.com/RhizoNymph/vllm/blob/feat/integration/docs/design/steering_runtime.md), a reference for request ownership, graph-safe staging and cache identity.
 - **heterodoxin / AbliteratedOutTheBox:** [Strata branch](https://github.com/heterodoxin/AbliteratedOutTheBox/tree/strata), a reference for native residual interventions; its experimental results are not substituted for validation here.
+
+On 2026-10-25 the selected-token diagnostic path passed six-V100 checks on the pinned Qwen3.8-27B checkpoint: original calibration equivalence per worker; exact capture-off/on/zero token and captured-plane equality; correct multi-chunk prefill and B1 consumed-token alignment; unchanged first-next-token logits for decode-only steering; and six simultaneous paired prompt arms with live partial events. Character Creation retains the artifact hashes and request audits. These checks cover the retained diagnostic graphs, not production prefix-cache reuse or speculative/MTP execution.
